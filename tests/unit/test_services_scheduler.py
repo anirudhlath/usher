@@ -29,7 +29,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -41,7 +43,7 @@ from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.domain.ids import new_id
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.ports.search import SearchMode, SearchSurface
 from usher.services.scheduler import (
     RETENTION_PERIOD,
@@ -82,6 +84,7 @@ class _Fake(ScheduledJob):
         period: timedelta = _HOUR,
         last: datetime | None = None,
         fails: bool = False,
+        declines: bool = False,
         last_done_fails: bool = False,
         blocks: asyncio.Event | None = None,
     ) -> None:
@@ -89,6 +92,7 @@ class _Fake(ScheduledJob):
         self._period = period
         self._last = last
         self._fails = fails
+        self._declines = declines
         self._last_done_fails = last_done_fails
         self._blocks = blocks
         self.runs = 0
@@ -113,7 +117,7 @@ class _Fake(ScheduledJob):
             raise RuntimeError("the artefact could not be read")
         return self._last
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         started = asyncio.get_running_loop().time()
         self.runs += 1
         try:
@@ -126,6 +130,7 @@ class _Fake(ScheduledJob):
                 await asyncio.sleep(0.01)
             if self._fails:
                 raise ZeroDivisionError("the scheduled job blew up")
+            return JobOutcome.DECLINED if self._declines else JobOutcome.DONE
         finally:
             self.windows.append((started, asyncio.get_running_loop().time()))
 
@@ -200,6 +205,28 @@ def spans() -> Iterator[InMemorySpanExporter]:
     trace.set_tracer_provider(provider)
     yield exporter
     exporter.clear()
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A real `MeterProvider` for this case alone; `tests/conftest.py`'s
+    `reset_otel_meter_provider` is what makes "for this case alone" true."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _instruments(reader: InMemoryMetricReader) -> set[str]:
+    """Every instrument that has recorded a point."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return set()
+    return {
+        metric.name
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
 
 
 @pytest.fixture
@@ -788,7 +815,7 @@ class _NaiveLastDone(ScheduledJob):
     async def last_done(self) -> datetime | None:
         return _NOW.replace(tzinfo=None) - timedelta(hours=2)
 
-    async def run(self) -> None:  # pragma: no cover - never reached
+    async def run(self) -> JobOutcome:  # pragma: no cover - never reached
         raise AssertionError("a job whose reading could not be compared must not be run")
 
 
@@ -944,6 +971,43 @@ async def test_a_run_that_succeeds_clears_the_backoff() -> None:
     assert job.runs == 4, "a clean run did not reset the doubling"
 
 
+async def test_a_declined_run_is_not_work_and_is_spaced_out_like_a_failure(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """A job that refuses did not try, and the loop has to be able to tell.
+
+    With `run()` answering nothing, a refusal was indistinguishable from a
+    completed run: it was timed into `usher.scheduler.job.duration` beside
+    walks measured in hours, counted in `tick()`'s total, and left due on the
+    very next tick -- so a deployment configured for the wrong embedding model
+    logged the same refusal every five minutes forever.
+
+    It is not a failure either. Nothing broke, so
+    `usher.scheduler.job.failures` stays empty and the spacing is all the two
+    outcomes share.
+
+    The control is the second half: an assertion that an instrument recorded
+    nothing is satisfied by an instrument nobody wired.
+    """
+    clock = _Clock()
+    refuses = _Fake("refuses", period=_HOUR, last=clock.now - timedelta(hours=2), declines=True)
+    scheduler = _scheduler(refuses, clock=clock)
+
+    assert await _tick(scheduler) == 0, "a refusal was counted as work"
+    assert refuses.runs == 1
+    assert await _tick(scheduler) == 0
+    assert refuses.runs == 1, "a declined job was offered again on the very next tick"
+    assert not {one for one in _instruments(meter_reader) if one.startswith("usher.scheduler.")}, (
+        "a refusal is neither a duration nor a failure"
+    )
+
+    worked = _Fake("worked", period=_HOUR, last=clock.now - timedelta(hours=2))
+    assert await _tick(_scheduler(worked, clock=clock)) == 1
+    assert "usher.scheduler.job.duration" in _instruments(meter_reader), (
+        "the premise: this reader sees the scheduler's own histogram"
+    )
+
+
 async def test_a_backed_off_job_is_not_asked_when_it_was_last_done() -> None:
     """The backoff is checked **before** the artefact read, so a job this
     process has already decided not to offer costs no query at all.
@@ -970,10 +1034,11 @@ async def test_a_cancelled_job_is_re_raised_rather_than_swallowed() -> None:
     started = asyncio.Event()
 
     class _Cancels(_Fake):
-        async def run(self) -> None:
+        async def run(self) -> JobOutcome:
             self.runs += 1
             started.set()
             await asyncio.sleep(3600)
+            raise AssertionError("unreachable: the case cancels this run")
 
     job = _Cancels("cancels", last=None)
     scheduler = _scheduler(job)

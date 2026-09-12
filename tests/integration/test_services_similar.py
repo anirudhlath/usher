@@ -40,6 +40,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.repository import NeighborSeed, ScoredNeighbor, TitleEmbeddingUpsert
+from usher.ports.scheduler import JobOutcome
 from usher.services.similar import NeighborRebuildJob, SimilarityService
 
 # The blend these arranged rows claim to have been computed under. A literal,
@@ -776,10 +777,10 @@ async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     beside it, because a message naming only one is not actionable.
 
     **`last_done()` is unchanged**, so nothing is recorded as done and the
-    refusal is not mistaken for a completion. It refuses without raising:
-    a raise would be counted on `usher.scheduler.job.failures` and would set
-    the retry backoff doubling, and neither describes a deployment that is
-    simply configured for the wrong model.
+    refusal is not mistaken for a completion. It answers `DECLINED` rather
+    than raising: a raise would be counted on `usher.scheduler.job.failures`,
+    which describes a job that tried and broke rather than a deployment
+    configured for the wrong model.
 
     The positive control is the second half: the identical arrangement with the
     configured model *matching* writes rows. Without it a guard that refused
@@ -805,7 +806,7 @@ async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     )
     before = await mismatched.computed_at()
 
-    await _rebuild_job(mismatched).run()
+    assert await _rebuild_job(mismatched).run() is JobOutcome.DECLINED
 
     written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
     assert written == 0, "the guard logged and then rebuilt anyway"
@@ -816,7 +817,7 @@ async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     assert _MODEL in refusals[0]
 
     # The control: same rows, same job, a service that agrees with the table.
-    await _rebuild_job(_service(session)).run()
+    assert await _rebuild_job(_service(session)).run() is JobOutcome.DONE
 
     agreed = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
     assert agreed == len(ids) * (len(ids) - 1), (

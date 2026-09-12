@@ -34,7 +34,7 @@ from asgi_lifespan import LifespanManager
 from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
 from usher.config import Settings
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.services.scheduler import Scheduler
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
@@ -71,10 +71,11 @@ class _OneShot(ScheduledJob):
     async def last_done(self) -> datetime | None:
         return self._done
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         self.runs += 1
         self._done = datetime.now(UTC)
         self.ran.set()
+        return JobOutcome.DONE
 
 
 def _settings(postgres_url: str, *, scheduler: bool) -> Settings:

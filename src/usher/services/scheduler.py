@@ -87,7 +87,7 @@ from opentelemetry.context import Context
 from opentelemetry.trace import Link
 
 from usher.ports.repository import SearchQueryRepository
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 
 _tracer = trace.get_tracer("usher.scheduler")
 _meter = metrics.get_meter("usher.scheduler")
@@ -396,7 +396,15 @@ class Scheduler:
         return overdue >= timedelta(0)
 
     async def _run(self, job: ScheduledJob) -> bool:
-        """One job, inside its own root span. Returns whether it completed.
+        """One job, inside its own root span. Returns whether it did the work.
+
+        **A `JobOutcome.DECLINED` is not work and not a failure**, so it is
+        left out of `usher.scheduler.job.duration` and off
+        `usher.scheduler.job.failures` -- a job that refused because the
+        deployment is misconfigured would otherwise report a run of
+        milliseconds into a histogram of hours. The caller backs it off, which
+        is what stops the refusal being logged on every tick until an operator
+        acts.
 
         **A root span with a `Link`, never a child**, and `context=Context()`
         -- an empty context -- is what makes "root" structural rather than a
@@ -415,11 +423,12 @@ class Scheduler:
         ambient = trace.get_current_span().get_span_context()
         links = [Link(ambient)] if ambient.is_valid else []
         started = time.perf_counter()
+        outcome: JobOutcome | None = None
         try:
             with _tracer.start_as_current_span(
                 f"scheduler.{job.name}", context=Context(), links=links
             ):
-                await job.run()
+                outcome = await job.run()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -434,8 +443,18 @@ class Scheduler:
         finally:
             # In a `finally` so a failed run is still timed: a batch that
             # raised after three hours is exactly the one an operator wants
-            # the duration of.
-            _job_duration.record(time.perf_counter() - started, {"job": job.name})
+            # the duration of. A refusal is the one thing that is not timed --
+            # it did nothing, and its milliseconds would sit in a histogram of
+            # hours.
+            if outcome is not JobOutcome.DECLINED:
+                _job_duration.record(time.perf_counter() - started, {"job": job.name})
+        if outcome is JobOutcome.DECLINED:
+            logger.info(
+                "the scheduled job {job} declined to run, so it is spaced out rather than "
+                "offered again on the next tick",
+                job=job.name,
+            )
+            return False
         return True
 
     # -- the retry backoff -----------------------------------------------
@@ -659,7 +678,7 @@ class SearchQueryRetention(ScheduledJob):
             return now
         return min(oldest + self._window, now)
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         """Delete everything past the cutoff, `batch` rows and one
         transaction at a time.
 
@@ -727,6 +746,10 @@ class SearchQueryRetention(ScheduledJob):
             removed=removed,
             cutoff=cutoff.isoformat(),
         )
+        # Never declined: a prune of an already-clean table is a no-op the
+        # scheduler should still count, because the invariant it maintains now
+        # holds at `now` and `last_done()` says so.
+        return JobOutcome.DONE
 
 
 __all__ = [

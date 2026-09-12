@@ -28,7 +28,7 @@ import pytest
 
 from usher.cli import build_parser, main
 from usher.config import Settings
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.services.scheduler import Scheduler
 
 
@@ -136,8 +136,9 @@ class _Recent(ScheduledJob):
     async def last_done(self) -> datetime | None:
         return datetime.now(UTC) - timedelta(hours=1)
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         self.runs += 1
+        return JobOutcome.DONE
 
 
 def test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed(

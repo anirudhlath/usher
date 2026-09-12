@@ -89,7 +89,7 @@ from usher.ports.repository import (
     TitleNeighborRepository,
     TitleRepository,
 )
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 
 _tracer = trace.get_tracer("usher.similar")
 
@@ -768,24 +768,16 @@ class NeighborRebuildJob(ScheduledJob):
         async with self._scope() as similar:
             return await similar.computed_at()
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         """Refuse a mixed table, else walk it with `resume=True`.
 
-        **The refusal returns rather than raising, and that is a decision.** A
-        raise would be counted on `usher.scheduler.job.failures` and would set
-        `Scheduler._back_off` doubling -- both of which describe a job that
-        tried and broke. This one did not try: the deployment is misconfigured
-        and no amount of retrying at any interval fixes it. So it logs both
-        strings at `ERROR` and returns, and `last_done()` is untouched, so
-        nothing is recorded as done.
-
-        ⚠️ **The cost, stated rather than hidden: it logs once per tick for as
-        long as the mismatch lasts** -- at the 300 s default that is a line
-        every five minutes. Not deduplicated, unlike the scheduler's own
-        "nothing is registered" line, and the difference is that an empty
-        registry is a *legal* state while a rebuild blocked by a
-        misconfiguration is one an operator has to act on. A line an operator
-        mutes is a real risk here and it is the lesser one.
+        **The refusal is `JobOutcome.DECLINED` rather than a raise or a bare
+        return.** A raise would describe a job that tried and broke; a bare
+        return was indistinguishable from a completed walk, so the refusal was
+        timed into `usher.scheduler.job.duration`, counted as work and offered
+        again on the very next tick -- a line every five minutes for as long
+        as the misconfiguration lasted. Declining leaves `last_done()`
+        untouched and lets the loop space the job out instead.
 
         **`resume=True`, which is what makes a registration converge.** A run
         cancelled by `Scheduler.stop()` or a process restart leaves a prefix of
@@ -807,13 +799,14 @@ class NeighborRebuildJob(ScheduledJob):
                     configured=similar.embedding_model,
                     stored=", ".join(foreign),
                 )
-                return
+                return JobOutcome.DECLINED
             report = await similar.rebuild(resume=True)
         logger.info(
             "rebuilt {seeds} seeds and wrote {rows} neighbour rows",
             seeds=report.seeds,
             rows=report.rows,
         )
+        return JobOutcome.DONE
 
 
 __all__ = [

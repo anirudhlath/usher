@@ -40,6 +40,20 @@ nothing here that would want to.
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
+from enum import Enum
+
+
+class JobOutcome(Enum):
+    """What one `ScheduledJob.run()` amounted to.
+
+    `DECLINED` is a run that never started: the deployment is in a state no
+    retry fixes, so the scheduler counts it as neither work nor failure and
+    keeps it out of `usher.scheduler.job.duration`, which is a histogram over
+    runs that did something.
+    """
+
+    DONE = "done"
+    DECLINED = "declined"
 
 
 class ScheduledJob(ABC):
@@ -148,20 +162,18 @@ class ScheduledJob(ABC):
         """
 
     @abstractmethod
-    async def run(self) -> None:
-        """Do the work, once. Returns nothing.
+    async def run(self) -> JobOutcome:
+        """Do the work, once.
 
-        **Must be safe to cancel at any `await`.** `Scheduler.stop()` cancels
+        Answers `DONE`, or `DECLINED` for work this deployment's state makes
+        pointless to attempt -- a decline is spaced out the way a failure is,
+        so a refusal lasting until an operator acts is not logged every tick.
+
+        **Must be safe to cancel at any `await`**: `Scheduler.stop()` cancels
         the loop task, so an in-flight run is cancelled wherever it happens to
-        be suspended; the neighbour rebuild survives that because each page
-        deletes and re-inserts its own seeds' rows inside one transaction, so
-        the cancelled page rolls back and a later run redoes it.
-
-        **Must be safe to run twice**, for the same reason and one more: the
-        scheduler holds no lock, `USHER_SCHEDULER_ENABLED` is per process, and
-        an operator who turns it on in two places gets two runners. That is
-        survivable rather than prevented (ADR-0046, decision 3) and it is
-        survivable only because the work is idempotent.
+        be suspended. **And safe to run twice**: the scheduler holds no lock,
+        `USHER_SCHEDULER_ENABLED` is per process, and an operator who turns it
+        on in two places gets two runners (ADR-0046, decision 3).
 
         A raise is logged with `name` and counted on
         `usher.scheduler.job.failures`; it stops neither the tick nor the
@@ -170,4 +182,4 @@ class ScheduledJob(ABC):
         """
 
 
-__all__ = ["ScheduledJob"]
+__all__ = ["JobOutcome", "ScheduledJob"]
