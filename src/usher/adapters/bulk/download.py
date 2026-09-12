@@ -36,7 +36,6 @@ bytes, by `_CHUNK_BYTES` and by resume.
 import gzip
 import io
 import zipfile
-import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +43,12 @@ from pathlib import Path
 import httpx
 
 from usher.adapters.http import failure_detail, retry_after_seconds
-from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
+from usher.ports.errors import (
+    DAMAGED_GZIP,
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+)
 
 # 1 MiB: large enough that the per-chunk overhead is irrelevant against a
 # 214 MiB file, small enough that a killed process loses at most a megabyte
@@ -248,7 +252,7 @@ class CachedDatasetFile:
                     if index < skip:
                         continue
                     yield line.rstrip("\n")
-        except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+        except DAMAGED_GZIP as exc:
             raise PortDataMalformed(
                 f"{self.path} is not a valid gzip file", detail=str(self.path)
             ) from exc
@@ -320,10 +324,11 @@ class CachedDatasetFile:
                         if index < skip:
                             continue
                         yield line.rstrip("\n")
-        except (zipfile.BadZipFile, EOFError, zlib.error) as exc:
-            # `zlib.error` belongs here as much as `BadZipFile`: a member
-            # whose deflate stream is corrupt fails during *iteration*, not
-            # at open, and that is the same class of upstream damage.
+        except (zipfile.BadZipFile, *DAMAGED_GZIP) as exc:
+            # `DAMAGED_GZIP` belongs here as much as `BadZipFile`: a member
+            # whose deflate stream is corrupt fails during *iteration* rather
+            # than at open, and deflate damage is the same damage whichever
+            # container carries it.
             raise PortDataMalformed(
                 f"{self.path} is not a valid zip file", detail=str(self.path)
             ) from exc

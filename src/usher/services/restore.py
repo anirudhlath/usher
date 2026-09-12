@@ -83,14 +83,13 @@ import base64
 import gzip
 import json
 import uuid
-import zlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from usher.domain.enums import TitleKind
-from usher.ports.errors import RepositoryConflict
+from usher.ports.errors import DAMAGED_GZIP, RepositoryConflict
 from usher.ports.repository import (
     EpisodeReference,
     RestoreRefusal,
@@ -329,13 +328,11 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
     **Read with `gzip` and `json` and nothing else**, so this parses the file
     an operator can `zcat`, and every way it can be damaged arrives here.
 
-    ⚠️ **`EOFError` is in the caught set and is not an `OSError`**, which is
-    the one that would otherwise have escaped as a stack. `gzip.BadGzipFile`
-    is an `OSError` subclass and `zlib.error` is not; a file truncated mid
-    member raises a bare `EOFError` from `GzipFile.read`, and *a truncated
-    artifact* is exactly the condition refusal 1 is named for. Deciding this
-    by reading the class hierarchy is how `SQLAlchemyError` got into
-    `OPERATOR_ERRORS`; these three were checked against the classes they are.
+    Damage to the gzip itself is `DAMAGED_GZIP`'s set, shared with the dataset
+    cache so neither reader can catch a subset of it. `UnicodeDecodeError`
+    joins it only here, because this file is decoded strictly: the artifact is
+    the household's own history and a byte that is not UTF-8 in it is damage,
+    where a replacement character in one row of a 12.7M-line dump is not.
 
     ⚠️ **The line number comes from the enumeration and never from
     `JSONDecodeError.lineno`.** Each line is decompressed and parsed on its
@@ -355,7 +352,7 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
                         f"{source} line {position} is not JSON, so the artifact is "
                         "truncated or damaged"
                     ) from exc
-    except (gzip.BadGzipFile, EOFError, zlib.error, UnicodeDecodeError) as exc:
+    except (*DAMAGED_GZIP, UnicodeDecodeError) as exc:
         raise RestoreRefused(
             f"{source} is not a readable backup artifact: {type(exc).__name__}: {exc}"
         ) from exc
