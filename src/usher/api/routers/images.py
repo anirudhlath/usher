@@ -89,7 +89,7 @@ that reaches an upstream has them (`api/errors.py`).
 | the CDN timed out, refused, or answered 408 or 5xx | 503 | `source_unavailable`, `Retry-After` |
 | the CDN answered something else unusable | 503 | `source_unavailable`, **no** `Retry-After` |
 | `w` is not a positive integer | 422 | `validation_failed` |
-| the CDN answered **429** | 503 | `source_unavailable`, the upstream's `Retry-After` |
+| the CDN answered **429** | 503 | `source_unavailable`, `Retry-After` |
 | the CDN answered **401/403** | 503 | `source_unavailable`, **no** `Retry-After` |
 
 **Rows two and four are both `PortDataMalformed` and they are not the same
@@ -141,7 +141,8 @@ transient upstream failure there is, and a 401/403 against a CDN that needs no
 credential means something in front of it refused -- the captive-portal
 population wearing a status -- which is an upstream fault either way.
 `Retry-After` is what separates them, exactly as it separates rows three and
-four: the rate limit carries the upstream's own hint, the refusal carries none.
+four: the rate limit carries the upstream's own hint when it sent one and this
+project's default when it did not, and the refusal carries none.
 """
 
 import uuid

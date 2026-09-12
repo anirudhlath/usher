@@ -113,11 +113,13 @@ measurable. They ship *here* because this milestone gets one revision: a reader
 task in another group authoring its own DDL would be a second head, and a
 pre-allocated chain is a serial spine across every group holding a link in it
 (`db-and-sql.md`, *"Allocate a revision id per merge, never per author"*).
-**Nothing in `src/` reads them and nothing does now**: their consumer is
-the cost-anomaly alert's own SQL, which
-`tests/integration/test_cost_anomaly_query.py` runs against a real plan. The
-port's surface is pinned as an exact set by `tests/unit/test_ports.py`'s
-parametrised entry.
+**Nothing in `src/` reads them and nothing does now**: both consumers are
+SQL living in Grafana. `ix_llm_calls_at` serves the cost-anomaly alert, whose
+committed statement `tests/integration/test_cost_anomaly_query.py` runs against
+a real plan; `ix_llm_calls_generation_id` serves dashboard 5's `llm_calls` join
+onto `curated_rows`, which nothing in this repository executes. The port's
+surface is pinned as an exact set by `tests/unit/test_ports.py`'s parametrised
+entry.
 
 ## `downgrade()` mirrors `upgrade()` statement for statement
 

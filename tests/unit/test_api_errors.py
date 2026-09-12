@@ -244,8 +244,8 @@ async def test_the_port_error_handler_is_on_the_app_rather_than_on_one_route() -
     `get_image`, which answers those cases identically and leaves the next
     route's 429 outside the envelope exactly as before.
 
-    🔴 **`PortUnavailable` is deliberately absent and is the control.** A
-    handler registered on `UsherPortError` would sweep it up too, and
+    **`PortUnavailable` is deliberately absent and is the control.** A handler
+    registered on `UsherPortError` would sweep it up too, and
     `api/routers/rows.py` records why that is wrong: the thing that route
     cannot reach is Postgres, so a 503 there claims one endpoint is degraded
     in a deployment where every one is.

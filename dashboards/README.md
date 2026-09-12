@@ -1762,10 +1762,10 @@ table holds (measured 2026-09-11, PostgreSQL 17.10):
 
 At 300 rows the planner already picks the index — on a margin of **1.07**, which
 is a tie-break wearing a measurement's clothes. At 1,000 it is still under the
-2.0 `A_DECISIVE_MARGIN`
-calls decided. The case seeds 4,000. ⚠️ The whole-plan ratio understates the
-index because both plans carry the same ~42 of CTE-scan cost for the calendar
-and the aggregate; the scan node alone reads `9.01` against `166.16`, **18.4x**.
+2.0 `A_DECISIVE_MARGIN` calls decided. The case seeds 4,000. ⚠️ The whole-plan
+ratio understates the index because both plans carry the same ~42 of CTE-scan
+cost for the calendar and the aggregate; the scan node alone reads `9.01`
+against `166.16`, **18.4x**.
 `Index Cond: (at >= ((date_trunc('day', (now() AT TIME ZONE 'UTC')) - '7 days'
 ::interval) AT TIME ZONE 'UTC'))`, with nothing left over to `Filter`.
 

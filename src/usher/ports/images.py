@@ -7,18 +7,11 @@ addressed by.
 `PortDataMalformed`, exactly the split `adapters/http.py` already holds for
 TMDb and the LLM endpoint.
 
-🔴 **This paragraph said "a rate limit … is `PortUnavailable`, and any other
-4xx is `PortDataMalformed`" until 2026-08-20, and both halves were false.**
+**A rate limit and a refused credential are neither of the types named here.**
 `port_error_for` answers a 429 with `PortRateLimited` and a 401/403 with
-`PortAuthFailed` -- two families that are neither of the types named here, and
-"any other 4xx" silently swallowed the second of them. The correction below on
-`ImageFetcher` is the same fact stated where an implementer reads it; **it was
-added on 2026-08-20 while this sentence was left standing 380 lines above it**,
-which is the failure `.claude/rules/ports-and-error-taxonomy.md` records as its
-own worked example -- a corrected census filed underneath the stale one it
-corrects. Both now say the same thing, and what it costs
-`GET /images/{image_id}`, which catches neither family, is in ADR-0030's image
-amendment and in PRD 09's carried debt.
+`PortAuthFailed`, so "any other 4xx is `PortDataMalformed`" would swallow the
+second of them. Neither is a route's to catch: `api/errors.py` answers both as
+`503 source_unavailable` for every route at once.
 `ImageBlobStore` is a disk: it fails when a filesystem fails, it has a fake
 with no filesystem at all for unit cases, and its real arm runs against
 `tmp_path`. Collapsing them into one "cache" port would put both taxonomies
@@ -400,9 +393,8 @@ class ImageFetcher(ABC):
     splits them: `PortUnavailable` for a 5xx, a 408, a timeout or an
     unreachable host -- **not** for a 429, which `port_error_for` answers with
     `PortRateLimited`, nor for a 401/403, which it answers with
-    `PortAuthFailed`; this sentence claimed the 429 until 2026-08-20 and
-    ADR-0030's image amendment records what that costs
-    `GET /images/{image_id}`, which catches neither. `PortDataMalformed` for
+    `PortAuthFailed`; those two are answered by `api/errors.py`'s handler
+    rather than by any route's `except`. `PortDataMalformed` for
     any other 4xx, for an answer that
     is not artwork at all, and for a body past the configured ceiling; and
     `MediaTypeNotServable` — a *subclass* of the last, so nothing has to catch

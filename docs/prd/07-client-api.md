@@ -1517,10 +1517,11 @@ above — is the same `404`**, because the provider answered correctly and a
 client owes it the same fallback it renders for a title with no logo. A CDN
 that did not answer is `503 source_unavailable` with `Retry-After`; a CDN that
 answered something else unusable is the same code without it. A CDN that asked
-to be backed off is the same code with the **upstream's own** `Retry-After`,
-and a CDN that refused this server's credentials is the same code with none —
-those two are answered by an exception handler on the app rather than by this
-route, so every route that can reach an upstream gets them.
+to be backed off is the same code with a `Retry-After` — the **upstream's own**
+hint when it sent one, a short default when it did not — and a CDN that refused
+this server's credentials is the same code with none. Those two are answered by
+an exception handler on the app rather than by this route, so every route that
+can reach an upstream gets them.
 [08](08-operations.md)'s degradation table carries all six with the reason the
 fourth is not a 502:
 [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s

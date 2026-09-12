@@ -548,12 +548,11 @@ async def test_a_rate_limited_upstream_is_the_envelope_like_every_other_failure(
 ) -> None:
     """`PortRateLimited` -- the upstream asked to be backed off.
 
-    🔴 **This arm answered a bare `500 text/plain` until the polish
-    milestone**, because `port_error_for` answers a 429 with an exception that
-    subclasses neither `PortUnavailable` nor `PortDataMalformed`, so it reached
-    no `except` in this route and left through Starlette. The repair is an
-    exception handler on the app rather than a fourth arm here: a per-route
-    ladder is exactly what leaves the next route's 429 outside the envelope.
+    The wrong implementation this kills is a route-level `except`: this
+    exception subclasses neither `PortUnavailable` nor `PortDataMalformed`, so
+    a ladder that catches those leaves it to Starlette as a bare
+    `500 text/plain`. The answer is a handler on the app, because the next
+    route's 429 has to inherit it rather than remember it.
 
     `Retry-After` carries the **upstream's own hint** when it gave one, which
     is the whole of what `PortRateLimited.retry_after` is for -- a fixed
@@ -601,7 +600,7 @@ async def test_a_rate_limit_with_no_hint_still_names_a_wait(
 async def test_an_upstream_that_refused_this_servers_credentials_is_the_envelope_too(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`PortAuthFailed` -- the other arm that left as a bare `500 text/plain`.
+    """`PortAuthFailed` -- the other family no route's `except` ladder catches.
 
     **No `Retry-After`, and that absence is the contract.** The image CDN needs
     no credential, so a 401 or 403 means something in front of it refused;
