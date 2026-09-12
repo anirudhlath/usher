@@ -302,7 +302,9 @@ def _drive_run(
     answered 200 by `_run_stub`.
     """
     monkeypatch.setattr(
-        _QUIET, "_load_snapshot", lambda: {"cpu_busy": 0.0, "processes": {"pytest": 0}}
+        _QUIET,
+        "_load_snapshot",
+        lambda: {"loadavg": [0.0, 0.0, 0.0], "processes": {"pytest": 0}, "cpu_busy": 0.0},
     )
     monkeypatch.setattr(_QUIET, "_CPU_SETTLE_SECONDS", 0.0)
     stub = transport if transport is not None else _run_stub(sent)

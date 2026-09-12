@@ -453,7 +453,12 @@ def quiet_opening(*, settle: bool = False) -> QuietOpening:
     opening = QuietOpening(
         cpu_busy=float(before["cpu_busy"]), foreign=int(before["processes"]["pytest"])
     )
-    print(f"quiet: opening cpu busy {opening.cpu_busy}, foreign pytest {opening.foreign}")
+    # loadavg is context and not a gate -- a run of continuous querying raises
+    # its own one-minute average -- but it is recorded rather than dropped.
+    print(
+        f"quiet: opening cpu busy {opening.cpu_busy}, "
+        f"foreign pytest {opening.foreign}, load {before['loadavg']}"
+    )
     return opening
 
 
@@ -475,7 +480,10 @@ def quiet_closing(opening: QuietOpening) -> bool:
     drift = round(closing - opening.cpu_busy, 4)
     print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
     if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
-        print(f"QUIET CHECK FAILED ({foreign} foreign pytest) -- discard this run and repeat it")
+        print(
+            f"QUIET CHECK FAILED (drift {drift}, {foreign} foreign pytest) "
+            "-- discard this run and repeat it"
+        )
         return False
     return True
 
