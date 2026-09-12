@@ -47,10 +47,28 @@ plan exists to end.
 **`ruff`** gains `"D"` in `[tool.ruff.lint] select` — pydocstyle structure, no
 custom code. Currently `["E","F","I","UP","B","SIM","RUF","S"]`.
 
-**`.claude/hooks/guard-prose.sh`**, a fourth hook, `PreToolUse` on `Edit|Write`,
-enforcing the caps and the forbidden register. It is a **ratchet**: an edit that
-leaves a file over a cap is refused only if it made the file worse. Without
-that, the hook refuses the 317 files stage 2 exists to fix.
+**`.claude/hooks/guard-prose.sh`** -- built. A fourth hook, `PreToolUse` on
+`Edit|Write`, delegating to `.claude/hooks/guard_prose.py`. It is a **ratchet**:
+violations are keyed by content rather than by line, and only one the edit
+introduces is refused. Without that, the hook refuses the 317 files stage 2
+exists to fix.
+
+**`D` is added at the *end* of stage 2, not the start.** Enabled against the
+tree as it stands it reports 6,856 violations and the gate goes red for the
+whole cleanup. The distribution is the worklist stage 2 has to drive down:
+
+| rule | count | what |
+|---|---|---|
+| D205 | 4,457 | no blank line between summary and description -- i.e. no summary line |
+| D209 | 2,032 | closing quotes not on their own line (auto-fixable) |
+| D415 | 289 | first line does not end in a period |
+| D301 | 44 | backslash without a raw string |
+| D403 | 17 | first word not capitalised |
+| D210 | 16 | surrounding whitespace |
+| D202 | 1 | blank line after docstring |
+
+`D1xx` (missing docstring) stays off: the convention is about writing less
+prose, not about requiring a docstring on every private helper.
 
 ## Stage 1 — the `/simplify` findings
 
