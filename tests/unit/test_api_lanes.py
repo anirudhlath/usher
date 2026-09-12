@@ -70,7 +70,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from tests.unit.rows import Library
 from usher.api.lanes import LaneSupervisor
-from usher.composition import Pipeline
+from usher.composition import Pipeline, SourceRegistry
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -1543,6 +1543,43 @@ async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     assert fakes.queue.requeue_ages == [pytest.approx(DEFAULT_LEASE_SECONDS)], (
         "the lane recovered at an age that would take a live worker's claims: "
         f"{fakes.queue.requeue_ages}"
+    )
+
+
+async def test_a_cancel_in_the_idle_sleep_still_closes_the_worker_lanes_registry(
+    fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry holds one connection pool per adapter it built, and
+    `stop()` lands its cancel in the idle sleep nearly every time: a pass over
+    an empty queue is milliseconds and the sleep after it is the shipped five
+    seconds.
+
+    The close therefore has to be a `finally` around the whole loop rather
+    than an arm around the pass. It was the latter until both worker roots
+    were folded into one loop, with the sleep *outside* that `try` -- so an
+    ordinary shutdown, which is exactly a cancel arriving while the queue is
+    empty, was the one path that leaked every adapter.
+    """
+    closed: list[str] = []
+
+    class _Registry(SourceRegistry):
+        async def aclose(self) -> None:
+            closed.append("aclose")
+            await super().aclose()
+
+    monkeypatch.setattr("usher.api.lanes.SourceRegistry", _Registry)
+    # The shipped idle floor, deliberately not dialled down: a fast sleep is
+    # what would let the cancel land in the pass instead.
+    supervisor = _supervisor(fakes)
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 1, bound=2.0)
+    assert fakes.queue.claims >= 1, "the premise: the lane ran a pass and is now sleeping"
+
+    await supervisor.stop()
+
+    assert closed == ["aclose"], (
+        "the worker lane was cancelled in its idle sleep and never closed its registry, "
+        "so every adapter it had built kept its connection pool for the life of the process"
     )
 
 

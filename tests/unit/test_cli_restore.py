@@ -106,11 +106,11 @@ def test_restore_dispatches_to_restore_and_not_to_the_server(
 
     calls = dispatched(monkeypatch, arm="_restore", argv=["restore", str(ARTIFACT), "--dry-run"])
 
-    # **Both arguments, not a call count.** An arm that reached `_restore` and
-    # dropped `--dry-run` would commit an artifact an operator asked to be
-    # shown, which is the single most damaging thing this command can do and
-    # is invisible to a spy that only counts.
-    assert [(kwargs["artifact"], kwargs["dry_run"]) for _, kwargs in calls] == [(ARTIFACT, True)]
+    # **The whole keyword shape, not a call count.** An arm that reached
+    # `_restore` and dropped `--dry-run` would commit an artifact an operator
+    # asked to be shown, which is the single most damaging thing this command
+    # can do and is invisible to a spy that only counts.
+    assert calls == [{"artifact": ARTIFACT, "dry_run": True, "skip_unresolvable": False}]
 
 
 def test_a_missing_artifact_is_one_line_and_exit_one(

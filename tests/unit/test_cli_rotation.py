@@ -337,7 +337,7 @@ def test_rotate_secret_dispatches_to_rotate_and_not_to_the_server(
 
     calls = dispatched(monkeypatch, arm="_rotate", argv=["rotate-secret", "--new-key-env", VAR])
 
-    assert [kwargs["new_key_env"] for _, kwargs in calls] == [VAR]
+    assert calls == [{"new_key_env": VAR}]
     assert NEW_KEY not in repr(calls)
 
 

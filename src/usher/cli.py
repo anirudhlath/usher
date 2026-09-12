@@ -729,12 +729,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
             user_id=user_id,
         )
 
-        # The running total of what this process has taken back from workers
-        # that stopped heartbeating, kept for the same reason the server keeps
-        # it in `/health/ready`'s body: `recover()` returns it, and a caller
-        # that discards it leaves a lost worker's claims traceable only through
-        # a WARNING. This command has no readiness route, so the total goes in
-        # the pass line it already prints rather than growing a surface.
+        # What this process has taken back from workers that stopped
+        # heartbeating. `recover()` returns it, and a caller that discards it
+        # leaves a lost worker's claims traceable only through a WARNING; this
+        # command has no readiness route, so the total goes in the pass line it
+        # already prints rather than growing a surface.
         recovered = 0
         # `None` is *nothing printed yet*, which is the state that makes the
         # startup line unconditional. An `int | None` on `LaneReport` means
@@ -780,13 +779,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
             failure="the worker pass failed; the daemon continues: {error}",
         )
         if once:
-            # ⚠️ **`--once` is deliberately outside the daemon's guard**, which
-            # is why it calls the unguarded pass. A cron entry and `docker
-            # compose exec usher python -m usher work --once` read the *exit
-            # code*, and a guard around this form would answer a crashed pass
-            # with `0` -- so the thing that exists to notice would be the last
-            # to. The daemon has no exit code to report with and its survival
-            # is the property instead.
+            # ⚠️ **`--once` is outside the daemon's guard**, which is why it
+            # calls the unguarded pass. A cron entry reads the *exit code*, and
+            # a guard here would answer a crashed pass with `0` -- so the thing
+            # that exists to notice would be the last to. The daemon has no
+            # exit code and its survival is the property instead.
             _report(await loop.pass_once())
         else:
             await loop.run(after=_report)

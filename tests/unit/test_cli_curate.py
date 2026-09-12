@@ -119,7 +119,7 @@ def test_curate_dispatches_to_curate_and_not_to_the_server(
 
     # The shape as well as the call: `usher curate` takes no flags, so an arm
     # that grew a keyword is a flag the parser is not offering.
-    assert [kwargs for _, kwargs in calls] == [{}]
+    assert calls == [{}]
 
 
 def test_the_report_prints_the_pool_it_chose_from_and_not_the_rows_it_kept(

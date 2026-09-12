@@ -95,11 +95,11 @@ def test_backup_dispatches_to_backup_and_not_to_the_server(
         monkeypatch, arm="_backup", argv=["backup", "--output", "/srv/usher/backups/x.jsonl.gz"]
     )
 
-    # The argument as well as the call: an arm that reached `_backup` and
-    # dropped `--output` would write to the default name in whatever
-    # directory the operator happened to be in, and a call-count spy cannot
-    # see that.
-    assert [kwargs["output"] for _, kwargs in calls] == [Path("/srv/usher/backups/x.jsonl.gz")]
+    # The whole keyword shape, not one key: an arm that reached `_backup` and
+    # dropped `--output` would write to the default name in whatever directory
+    # the operator happened to be in, and one that grew a keyword is a flag the
+    # parser is not offering.
+    assert calls == [{"output": Path("/srv/usher/backups/x.jsonl.gz")}]
 
 
 def test_a_missing_directory_is_one_line_and_exit_one(

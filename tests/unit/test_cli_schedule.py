@@ -68,7 +68,7 @@ def test_schedule_dispatches_to_the_scheduler_and_not_to_the_server(
     once = dispatched(monkeypatch, arm="_schedule", argv=["schedule", "--once"])
     daemon = dispatched(monkeypatch, arm="_schedule", argv=["schedule"])
 
-    assert [kwargs["once"] for _, kwargs in once + daemon] == [True, False]
+    assert once + daemon == [{"once": True}, {"once": False}]
 
 
 def test_one_tick_over_an_empty_registry_says_so_and_exits(

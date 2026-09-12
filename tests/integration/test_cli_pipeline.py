@@ -437,7 +437,7 @@ class _JustBooted:
     def monotonic(self) -> float:
         return self._uptime
 
-    def perf_counter(self) -> float:  # pragma: no cover -- `_suggest`'s, not `_work`'s
+    def perf_counter(self) -> float:
         return self._uptime
 
 
@@ -448,8 +448,8 @@ async def test_work_recovers_on_its_first_pass_on_a_host_that_just_booted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """🔴 **`usher work --once` from a cron inside the first 150 s of host
-    uptime used to recover nothing at all**, while `_measure`'s own comment
-    claimed it recovers "before the first claim".
+    uptime used to recover nothing at all**, while `WorkerLoop.pass_once`'s
+    own docstring claims it recovers "before the claim".
 
     `time.monotonic()` on Linux is seconds since boot, and the throttle's
     origin was `0.0`, so `now - origin >= lease / 2` was false for half a

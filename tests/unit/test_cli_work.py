@@ -24,14 +24,14 @@ def _settings() -> Settings:
 
 
 class _Worker:
-    """A `JobWorker` reduced to the two calls `_measure` makes of it.
+    """A `JobWorker` reduced to the two calls `WorkerLoop.pass_once` makes.
 
     `run_once` raises **every** time on purpose. A stub that raised once and
     then succeeded would prove the daemon survived *and* would need the rest
-    of `_measure` -- the gauge refresh, and so a `Pipeline` over a real
-    session -- to run. Raising every pass keeps the failure at the first
-    `await` and still separates the two outcomes this file is about: a daemon
-    that died called this once.
+    of the pass -- `_refresh`, and so a `Pipeline` over a real session -- to
+    run. Raising every pass keeps the failure at the first `await` and still
+    separates the two outcomes this file is about: a daemon that died called
+    this once.
     """
 
     def __init__(self, failure: BaseException) -> None:
