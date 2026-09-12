@@ -52,13 +52,19 @@ module extracts, and D10's dashboard JSON copies the same block. A second
 transcription is a second thing to keep in step.
 """
 
+import json
 import pathlib
 import re
+from typing import Any
 
 import pytest
 
 _ROOT = pathlib.Path(__file__).parents[2]
 _PRD = _ROOT / "docs" / "prd" / "10-telemetry-and-dashboards.md"
+# The *second* transcription of the compliance block. The PRD is the source and
+# this file is the deployed copy, which is why they are graded against each
+# other rather than either being graded alone.
+_DASHBOARD_FIVE = _ROOT / "dashboards" / "05-cost-and-compliance.json"
 
 _DASHBOARD_HEADING = re.compile(r"^### (?P<number>\d+) — (?P<title>.+)$", re.MULTILINE)
 
@@ -590,6 +596,110 @@ def test_the_panel_sql_never_names_the_column_or_the_table_adr_0016_refused() ->
         f"the panel's own SQL reads a table no migration creates:\n{joined}"
     )
     assert "fetched_at" in joined, "the positive control: the SQL reads no timestamp at all"
+
+
+def _dashboard_five_panels() -> list[dict[str, Any]]:
+    """Every panel of the committed compliance dashboard, rows flattened."""
+    dashboard = json.loads(_DASHBOARD_FIVE.read_text(encoding="utf-8"))
+    found: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = list(dashboard.get("panels") or [])
+    while pending:
+        panel = pending.pop()
+        pending.extend(panel.get("panels") or [])
+        found.append(panel)
+    return found
+
+
+def committed_compliance_sql() -> list[str]:
+    """The committed targets that read the TMDb payload cache, as SQL.
+
+    Selected by what they *query* -- `raw_payloads` filtered to `'tmdb'` --
+    rather than by panel title, because a title is prose and this is the block
+    TMDb's retention term is enforced by.
+    """
+    found: list[str] = []
+    for panel in _dashboard_five_panels():
+        for target in panel.get("targets") or []:
+            sql = str(target.get("rawSql", ""))
+            if "raw_payloads" in sql and "'tmdb'" in sql:
+                found.append(sql)
+    return found
+
+
+# `interval '6 months'`, whatever the term. Captured rather than matched so the
+# *set of terms the dashboard reads* is what gets asserted.
+_INTERVAL = re.compile(r"interval\s+'(?P<term>[^']+)'")
+
+
+def test_the_committed_compliance_panels_read_the_term_the_prd_states() -> None:
+    """🔴 The retention half of TMDb's licence has exactly one enforcement in
+    this repository, and it is the committed JSON rather than the PRD.
+
+    `tests/unit/test_no_third_party_data.py` enforces the redistribution half
+    mechanically; **nothing enforces retention**, which the panel's own
+    description says in bold ("the one panel here whose failure is a licence
+    breach"). Every other check in this module grades PRD 10's ```sql fence,
+    and the dashboard is a *second transcription* of that block -- so a ceiling
+    doubled on one committed target renders perfectly, reports zero breaches
+    for six months longer than the term allows, and passes every case above,
+    because the other two targets still carry the six-month string the PRD is
+    scanned for. A survivor here is a compliance number that reads as
+    enforcement.
+
+    **The set of terms, not a substring of any one target.** The two
+    transcriptions differ on purpose -- the PRD writes bare `fetched_at` and
+    the dashboard writes `raw_payloads.fetched_at`, because
+    `test_dashboards.py` grades every committed `table.column` against
+    `Base.metadata` -- so a byte comparison would pin the spelling rather than
+    the term, and would fail on the next qualification change instead of on
+    the next ceiling change.
+    """
+    statements = committed_compliance_sql()
+
+    assert len(statements) == 3, (
+        f"the committed dashboard reads the TMDb cache in {len(statements)} targets, not "
+        "the three PRD 10 spells out -- zero means this scan globs nothing and every "
+        "assertion below is vacuous, and any other number means the transcription has "
+        "diverged from the block test_raw_payload_cache_age.py executes"
+    )
+
+    ceilingless = [statement for statement in statements if not _INTERVAL.search(statement)]
+    assert ceilingless == [], (
+        f"these committed targets read the TMDb cache against no interval at all, so they "
+        f"answer a question with no ceiling in it: {ceilingless}"
+    )
+
+    committed = {
+        match["term"] for statement in statements for match in _INTERVAL.finditer(statement)
+    }
+    stated = {
+        match["term"]
+        for statement in compliance_panel_sql()
+        for match in _INTERVAL.finditer(statement)
+    }
+
+    assert committed == {"6 months"}, (
+        f"the committed compliance panels read {sorted(committed)} -- TMDb's term is no "
+        "more than six months, and a widened ceiling is a licence breach this dashboard "
+        "would then report as zero"
+    )
+    assert committed == stated, (
+        f"the dashboard reads {sorted(committed)} and PRD 10's block states "
+        f"{sorted(stated)}; the two transcriptions of one ceiling have drifted apart and "
+        "only one of them is deployed"
+    )
+
+
+def test_the_committed_compliance_scan_is_falsifiable() -> None:
+    """The scan above is a substring selection over JSON, and a selection that
+    matched nothing would make every assertion in it pass on an empty set --
+    except the count, which is why the count is asserted first. This is the
+    other half: the term extractor answers what a widened ceiling looks like,
+    proved on a statement rather than on the committed file."""
+    widened = "SELECT count(*) FROM raw_payloads WHERE fetched_at < now() - interval '12 months'"
+
+    assert [match["term"] for match in _INTERVAL.finditer(widened)] == ["12 months"]
+    assert _INTERVAL.search("SELECT count(*) FROM raw_payloads") is None
 
 
 def test_the_single_number_version_is_recorded_as_a_rejected_design() -> None:

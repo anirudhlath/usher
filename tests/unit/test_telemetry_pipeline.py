@@ -63,6 +63,7 @@ from usher.services.home import HomeService
 from usher.services.ingest import IngestService
 from usher.services.jobs import _links_for
 from usher.services.matching import MatchService
+from usher.services.visibility import VisibilityService
 from usher.telemetry import (
     QueueSnapshot,
     _observe_parked,
@@ -295,6 +296,86 @@ async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_la
     assert {str(attributes["outcome"]) for attributes in by_trigger.values()} == {"enriched"}, (
         "the two drives disagree on `outcome`, so the difference this case measures is "
         "not the one it names"
+    )
+
+
+async def test_the_rung_the_visible_lane_promotes_at_is_recorded_as_a_demand_enrichment(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """🔴 The boundary the `trigger` label is drawn on, exercised at the rung
+    the largest population actually arrives at.
+
+    The case above drives `DEMAND` (100) and `BACKFILL` (20), which classify
+    the same whether `_trigger_for` is spelled `>=` or `>`. `VISIBLE` (80) is
+    the threshold itself and no case reached it, so `priority >= VISIBLE` →
+    `priority > VISIBLE` was a behavioural mutation the whole suite missed --
+    and it is not a small one. `services/visibility.py` enqueues **every
+    unfinished title on every browse, search, suggest and home response** at
+    `VISIBLE`; `services/titles.py` and three routers enqueue at `DEMAND` one
+    title at a time. So `>` moves the plural lane -- the larger population by
+    orders of magnitude -- onto `background`, and `trigger` is the label
+    `dashboards/alerts/usher.yml`'s *"Enrichment SLA missed"* scopes on with
+    `{trigger="demand"}`. The alert keeps firing, keeps looking healthy, and
+    silently measures single-title opens only.
+
+    **The rung is read out of the queue rather than written down here.** A
+    case asserting `_trigger_for(JobPriority.VISIBLE) == "demand"` pins a
+    constant against itself: if the promotion lane moved to `NEW` tomorrow the
+    case would still pass and still say nothing about the shipped population.
+    Taking the priority off the `JobRequest` the visibility service actually
+    enqueued makes the two halves one claim -- *the rung a screen promotes at
+    is the rung the histogram calls demand* -- which is the claim the alert
+    depends on.
+    """
+    queue = FakeJobQueue()
+    titles = FakeTitleRepository()
+    title = Title(
+        kind=TitleKind.MOVIE,
+        name="Zodiac",
+        sort_name="Zodiac",
+        year=2007,
+        tmdb_id=90001949,
+        # A skeleton, which is what a browse page is mostly made of: 1,139,982
+        # of 1,273,313 titles when `services/visibility.py` was written.
+        enrichment_state=EnrichmentState.SKELETON,
+    )
+    await titles.add(title)
+
+    promoted = await VisibilityService(queue=queue, titles=titles).seen([title])
+
+    assert promoted == 1, "the visibility lane promoted nothing, so there is no rung to read"
+    enqueued = queue.jobs_of(JobKind.ENRICH)
+    assert len(enqueued) == 1, f"expected one enrich job off one unfinished title: {enqueued}"
+    rung = enqueued[0].priority
+    assert rung == JobPriority.VISIBLE, (
+        f"the screen lane enqueues at {rung}, not `VISIBLE` -- this case's premise has "
+        "moved and the label boundary it measures is no longer the one that matters"
+    )
+
+    provider = FakeMetadataProvider()
+    provider.seed(
+        ProviderRef(provider="tmdb", value=str(title.tmdb_id), kind=TitleKind.MOVIE),
+        {**_MOVIE_PAYLOAD, "id": title.tmdb_id, "title": title.name},
+    )
+    service = EnrichService(
+        titles=titles,
+        episodes=FakeEpisodeRepository(),
+        payloads=FakeRawPayloadStore(),
+        provider=provider,
+        commit=_no_commit,
+        events=FakeEventPublisher(),
+        queue=FakeJobQueue(),
+    )
+    await service.enrich(title.id, priority=rung)
+
+    points = _recorded(meter_reader).get("usher.enrichment.latency", [])
+    assert len(points) == 1, f"expected one latency point off one enrichment: {points}"
+    attributes = points[0][0]
+    assert str(attributes.get("trigger")) == "demand", (
+        f"an enrichment at the rung a screen promotes at was recorded as "
+        f"{attributes.get('trigger')!r}; the boundary is `>=` and not `>`, and every "
+        "browse-driven enrichment has just left the population "
+        '`{trigger="demand"}` selects'
     )
 
 
