@@ -113,8 +113,8 @@ independently by three agents each, the third by two; they lead the list.
     validated against the mapping it came from. A property.
 14. ✅ `scripts/measure_source_lane.py:430` — `_overlap_table` dead, two fields
     unread, a bare `_ = _CPU_SETTLE_SECONDS` discard.
-15. `services/scheduler.py:628,166` — test-only accessors; two parallel backoff
-    dicts that must be cleared together.
+15. ✅ `services/scheduler.py:628,166` — test-only accessors; two parallel
+    backoff dicts that must be cleared together.
 16. `ports/repository/search_query.py:95` — `surface` derivable from `tier`.
 17. `ports/repository/_references.py:12` — paragraph repeated verbatim at `:38`.
 18. ✅ `scripts/measure_source_latency.py:804` — three injected seams with no
@@ -124,8 +124,9 @@ independently by three agents each, the third by two; they lead the list.
 
 19. `api/routers/search.py:364` — a `users` SELECT per keystroke, paid on the
     short-`q` arm and when analytics is off.
-20. `db/models/search.py` — no index on `title_neighbors.computed_at`; the
+20. ✅ `db/models/search.py` — no index on `title_neighbors.computed_at`; the
     scheduler full-scans 3.3M rows ~288×/day to learn a job is not due.
+    Landed as `m10d`; not applied to any database.
 21. `db/repositories/title.py:140`, `episode.py:192` — the natural-key ladder
     runs all three joins unconditionally; lazy `COALESCE` SubPlans instead.
 22. `services/search.py:1595` — two transactions and two WAL flushes per
@@ -135,7 +136,11 @@ independently by three agents each, the third by two; they lead the list.
     of inline vector heap.
 25. `services/backup.py:254` — the carried set materialised whole, then gzipped
     synchronously on the event loop.
-26. `services/similar.py:768` — two scopes per due tick.
+26. ⛔ `services/similar.py:768` — two scopes per due tick. **Not taken.**
+    The two are `last_done()`'s and `run()`'s, which are separate `ScheduledJob`
+    calls at separate moments; one would do only by holding a session open
+    across the due comparison. Item 31's backoff is what cuts how often the
+    pair is paid.
 27. `db/backup_identity.py:292` — the reference list deduplicated twice.
 
 ### Altitude
@@ -148,15 +153,16 @@ independently by three agents each, the third by two; they lead the list.
     analytics feature is inert. Buffer or enqueue in `SearchAnalytics`.
 30. `services/reconcile.py:164` — the sync failure *kind* is a magic prefix on a
     free-text column read back by substring. An `error_code` column.
-31. `services/similar.py:800` — `ScheduledJob` has no "declined" outcome, so a
-    refusal counts as work, pollutes the duration histogram and never backs off.
+31. ✅ `services/similar.py:800` — `ScheduledJob` has no "declined" outcome, so
+    a refusal counts as work, pollutes the duration histogram and never backs
+    off.
 32. ✅ `domain/title.py:111` — `allow_inf_nan=False` on one field; belongs on
     `DomainModel.model_config`, which closes three more.
 33. `api/routers/images.py:284` — the port-error mapping is a per-route ladder,
     so `PortRateLimited` and `PortAuthFailed` escape as bare `500 text/plain`.
 34. ✅ `composition.py:1029,1066` — two scope factories differing only in whether
     they commit, stated only in prose.
-35. `services/scheduler.py:732` — the retention drain's termination is
+35. ✅ `services/scheduler.py:732` — the retention drain's termination is
     guaranteed by a `Settings` validator two layers away.
 
 Items 29, 30, 31 and 33 change behaviour and are outside `/simplify`'s remit.

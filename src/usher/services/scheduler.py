@@ -78,6 +78,7 @@ import asyncio
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from loguru import logger
@@ -86,7 +87,7 @@ from opentelemetry.context import Context
 from opentelemetry.trace import Link
 
 from usher.ports.repository import SearchQueryRepository
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 
 _tracer = trace.get_tracer("usher.scheduler")
 _meter = metrics.get_meter("usher.scheduler")
@@ -114,6 +115,19 @@ _MAX_BACKOFF_DOUBLINGS = 20
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _Backoff:
+    """A job's failure streak and the instant it may next be offered.
+
+    One record rather than two maps keyed alike, because the two halves are
+    only ever written together and clearing one without the other would
+    either space a healthy job out or retry a stuck one at the tick rate.
+    """
+
+    failures: int
+    retry_after: datetime
 
 
 class Scheduler:
@@ -147,24 +161,12 @@ class Scheduler:
         # reader runs on the metric reader's background thread and a rebind is
         # atomic where an in-place update is not.
         self._due: Mapping[str, float] = {}
-        # 🔴 **The retry backoff, and it is the one piece of state this
-        # component holds.** ADR-0046's *"the scheduler stores nothing"* is
-        # about a **durable** last-run timestamp -- a second copy of a fact the
-        # artefact already carries, which drifts the first time an operator
-        # runs the command by hand. These two are neither: they are facts about
-        # *this process's* attempts, no artefact carries them, and losing them
-        # on a restart is correct rather than a defect.
-        #
-        # Without them the loop has a hole its own acceptance criterion cannot
-        # see. *"A failing job does not stop the loop"* is satisfied by a loop
-        # that also never progresses: with no stored state a **failed** run is
-        # indistinguishable from one never run, so a job that raises leaves
-        # `last_done()` exactly where it was, is due again on the very next
-        # tick, and retries forever at the tick rate with nothing between
-        # attempts. At the 300 s default that is 288 attempts a day against a
-        # database that is, by hypothesis, already unhappy.
-        self._consecutive_failures: dict[str, int] = {}
-        self._retry_after: dict[str, datetime] = {}
+        # The one piece of state this component holds, and it is about *this
+        # process's* attempts rather than a durable last-run timestamp, which
+        # ADR-0046 refuses. Without it a failed run is indistinguishable from
+        # one never run, so a job that raises is due again on the very next
+        # tick and retries at the tick rate forever.
+        self._backoff: dict[str, _Backoff] = {}
 
     # -- the registry ----------------------------------------------------
 
@@ -288,11 +290,12 @@ class Scheduler:
 
     async def tick(self) -> int:
         """Walk the registry once and run whatever is due. Returns how many
-        ran to completion.
+        did the work, which is **not** how many were due.
 
-        A job that raised is **not** counted: the number answers *"how much
-        work happened"*, and counting a failure as work is what makes a
-        `--once` line from a cron read as healthy on a night nothing ran.
+        Two results are excluded: a job that raised, and one that answered
+        `JobOutcome.DECLINED`. The number says *"how much work happened"*, and
+        counting either as work is what makes a `--once` line from a cron read
+        as healthy on a night nothing ran.
         """
         if not self._jobs:
             if not self._said_empty:
@@ -310,8 +313,7 @@ class Scheduler:
             if not await self._due_now(job):
                 continue
             if await self._run(job):
-                self._consecutive_failures.pop(job.name, None)
-                self._retry_after.pop(job.name, None)
+                self._backoff.pop(job.name, None)
                 ran += 1
             else:
                 self._back_off(job)
@@ -362,8 +364,8 @@ class Scheduler:
         logged exception are what say the job is in that state.
         """
         now = self._now()
-        retry_after = self._retry_after.get(job.name)
-        if retry_after is not None and now < retry_after:
+        held = self._backoff.get(job.name)
+        if held is not None and now < held.retry_after:
             return False
         try:
             last = await job.last_done()
@@ -395,7 +397,10 @@ class Scheduler:
         return overdue >= timedelta(0)
 
     async def _run(self, job: ScheduledJob) -> bool:
-        """One job, inside its own root span. Returns whether it completed.
+        """One job, inside its own root span. Returns whether it did the work.
+
+        **A `JobOutcome.DECLINED` is neither timed nor counted as a failure**
+        -- `JobOutcome` carries why -- and the caller spaces it out.
 
         **A root span with a `Link`, never a child**, and `context=Context()`
         -- an empty context -- is what makes "root" structural rather than a
@@ -414,11 +419,12 @@ class Scheduler:
         ambient = trace.get_current_span().get_span_context()
         links = [Link(ambient)] if ambient.is_valid else []
         started = time.perf_counter()
+        outcome: JobOutcome | None = None
         try:
             with _tracer.start_as_current_span(
                 f"scheduler.{job.name}", context=Context(), links=links
             ):
-                await job.run()
+                outcome = await job.run()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -433,8 +439,17 @@ class Scheduler:
         finally:
             # In a `finally` so a failed run is still timed: a batch that
             # raised after three hours is exactly the one an operator wants
-            # the duration of.
-            _job_duration.record(time.perf_counter() - started, {"job": job.name})
+            # the duration of. A refusal is the one thing not timed at all --
+            # see `JobOutcome`.
+            if outcome is not JobOutcome.DECLINED:
+                _job_duration.record(time.perf_counter() - started, {"job": job.name})
+        if outcome is JobOutcome.DECLINED:
+            logger.info(
+                "the scheduled job {job} declined to run, so it is spaced out rather than "
+                "offered again on the next tick",
+                job=job.name,
+            )
+            return False
         return True
 
     # -- the retry backoff -----------------------------------------------
@@ -442,6 +457,10 @@ class Scheduler:
     def _back_off(self, job: ScheduledJob) -> None:
         """Do not offer this job again for a doubling number of ticks,
         **capped at its own period**.
+
+        **The spacing for a failed run and for a `JobOutcome.DECLINED` alike**
+        -- both are a job that did not do its work, and the cap below is what
+        keeps either from being re-offered at the tick rate.
 
         The cap is what makes this safe rather than a second schedule: a job
         that keeps failing settles to being retried no more often than the
@@ -469,11 +488,11 @@ class Scheduler:
         has no evidence about anything -- and means an operator driving the
         scheduler that way gets the retry rate of their own cron.
         """
-        failures = self._consecutive_failures.get(job.name, 0) + 1
-        self._consecutive_failures[job.name] = failures
+        held = self._backoff.get(job.name)
+        failures = (held.failures if held is not None else 0) + 1
         doublings = min(failures - 1, _MAX_BACKOFF_DOUBLINGS)
         delay = min(self._tick_seconds * (2**doublings), job.period.total_seconds())
-        self._retry_after[job.name] = self._now() + timedelta(seconds=delay)
+        self._backoff[job.name] = _Backoff(failures, self._now() + timedelta(seconds=delay))
 
     # -- the gauge's snapshot --------------------------------------------
 
@@ -612,6 +631,12 @@ class SearchQueryRetention(ScheduledJob):
         period: timedelta,
         now: Callable[[], datetime] = _utc_now,
     ) -> None:
+        # The drain's terminator is a chunk shorter than the limit, so a limit
+        # below 1 never produces one. Refused here rather than left to
+        # `Settings.search_query_retention_batch`'s `ge=1`, which is two layers
+        # away and is not reached by a job built any other way.
+        if batch < 1:
+            raise ValueError(f"a retention batch of {batch} deletes nothing and never drains")
         self._scope = scope
         self._window = window
         self._batch = batch
@@ -624,27 +649,6 @@ class SearchQueryRetention(ScheduledJob):
     @property
     def period(self) -> timedelta:
         return self._period
-
-    @property
-    def window(self) -> timedelta:
-        """How long a `search_queries` row is kept --
-        `USHER_SEARCH_QUERY_RETENTION_DAYS`.
-
-        Read-only and exposed for the same reason `period` is: these two are
-        the registration's declared configuration, and a composition root
-        wiring the *days* where a `timedelta` is wanted, or swapping this with
-        `batch` (two adjacent keyword arguments), is a defect nothing else can
-        observe. `tests/unit/test_services_scheduler.py::
-        test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set`
-        reads both here rather than reaching into private attributes.
-        """
-        return self._window
-
-    @property
-    def batch(self) -> int:
-        """How many rows one transaction may delete --
-        `USHER_SEARCH_QUERY_RETENTION_BATCH`. Exposed for `window`'s reason."""
-        return self._batch
 
     async def last_done(self) -> datetime | None:
         """`min(min(at) + window, now)` -- see the class docstring.
@@ -673,7 +677,7 @@ class SearchQueryRetention(ScheduledJob):
             return now
         return min(oldest + self._window, now)
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         """Delete everything past the cutoff, `batch` rows and one
         transaction at a time.
 
@@ -715,10 +719,9 @@ class SearchQueryRetention(ScheduledJob):
         the two failures are one defect and the case that owns it is
         `test_the_prune_commits_each_chunk_where_a_composition_root_wired_it`.
 
-        ⚠️ **`batch` must be at least 1 or the same loop never ends**, for the
-        adjacent reason: at `batch = 0` a chunk deletes nothing and `0 < 0` is
-        false. `Settings.search_query_retention_batch` is `ge=1` and carries
-        the measurement.
+        The other half of the terminator is that `batch` is at least 1, which
+        `__init__` refuses to accept otherwise: at `batch = 0` a chunk deletes
+        nothing and `0 < 0` is false.
 
         The count is logged rather than counted on an instrument: this runs
         once a day, and *"a filter is invisible without a counter"* is
@@ -733,6 +736,8 @@ class SearchQueryRetention(ScheduledJob):
             async with self._scope() as queries:
                 deleted = await queries.prune(before=cutoff, limit=self._batch)
             removed += deleted
+            # A short chunk is an exhausted predicate, and `__init__`'s floor
+            # on `batch` is what keeps one reachable.
             if deleted < self._batch:
                 break
         logger.info(
@@ -740,6 +745,10 @@ class SearchQueryRetention(ScheduledJob):
             removed=removed,
             cutoff=cutoff.isoformat(),
         )
+        # Never declined: a prune of an already-clean table is a no-op the
+        # scheduler should still count, because the invariant it maintains now
+        # holds at `now` and `last_done()` says so.
+        return JobOutcome.DONE
 
 
 __all__ = [

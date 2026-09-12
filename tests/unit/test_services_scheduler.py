@@ -29,7 +29,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -41,7 +43,7 @@ from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.domain.ids import new_id
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.ports.search import SearchMode, SearchSurface
 from usher.services.scheduler import (
     RETENTION_PERIOD,
@@ -82,6 +84,7 @@ class _Fake(ScheduledJob):
         period: timedelta = _HOUR,
         last: datetime | None = None,
         fails: bool = False,
+        declines: bool = False,
         last_done_fails: bool = False,
         blocks: asyncio.Event | None = None,
     ) -> None:
@@ -89,6 +92,7 @@ class _Fake(ScheduledJob):
         self._period = period
         self._last = last
         self._fails = fails
+        self._declines = declines
         self._last_done_fails = last_done_fails
         self._blocks = blocks
         self.runs = 0
@@ -113,7 +117,7 @@ class _Fake(ScheduledJob):
             raise RuntimeError("the artefact could not be read")
         return self._last
 
-    async def run(self) -> None:
+    async def run(self) -> JobOutcome:
         started = asyncio.get_running_loop().time()
         self.runs += 1
         try:
@@ -126,6 +130,7 @@ class _Fake(ScheduledJob):
                 await asyncio.sleep(0.01)
             if self._fails:
                 raise ZeroDivisionError("the scheduled job blew up")
+            return JobOutcome.DECLINED if self._declines else JobOutcome.DONE
         finally:
             self.windows.append((started, asyncio.get_running_loop().time()))
 
@@ -200,6 +205,28 @@ def spans() -> Iterator[InMemorySpanExporter]:
     trace.set_tracer_provider(provider)
     yield exporter
     exporter.clear()
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A real `MeterProvider` for this case alone; `tests/conftest.py`'s
+    `reset_otel_meter_provider` is what makes "for this case alone" true."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _instruments(reader: InMemoryMetricReader) -> set[str]:
+    """Every instrument that has recorded a point."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return set()
+    return {
+        metric.name
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
 
 
 @pytest.fixture
@@ -342,51 +369,61 @@ def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None
     assert scheduler.jobs == ()
 
 
-def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set() -> None:
+async def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The two settings reach the job, and the period comes from neither.
 
     The wrong implementations this kills: a registration that hard-codes 90
     days beside a setting an operator can change, which is the failure a
-    setting exists to prevent; one that passes the *days* where a `timedelta`
-    is wanted, which is a factor of 86,400 and reads as correct at a glance;
-    one that wires the batch into the window or the window into the batch --
-    two adjacent keyword arguments, so the names are all that stop a swap; and
-    one that reads the *period* off the retention window, which is precisely
-    the design ADR-0046 shipped with and `ScheduledJob.last_done` refuses.
+    setting exists to prevent; one that ignores the chunk size and drains the
+    whole table in a single transaction; and one that reads the *period* off
+    the retention window, which is the design ADR-0046 shipped with and
+    `ScheduledJob.last_done` refuses.
 
-    Read off the job's own declared configuration rather than its private
-    attributes: `period`, `window` and `batch` are properties for this reason.
-    Non-default values on both settings, because 90 and 10,000 are what a
-    registration ignoring them would also produce.
+    **Read off what the job does, not off accessors it would otherwise have
+    no reason to carry.** The window is the arithmetic in `last_done()` --
+    `min(at) + window` -- and the chunk size is observable as the number of
+    scopes a drain opens, which is `tests/unit/test_services_scheduler.py::
+    test_the_prune_drains_in_chunks_and_opens_a_scope_for_each`'s own idiom:
+    seven expired rows at a batch of three are chunks of 3, 3, 1, where the
+    shipped default of 10,000 would be one.
 
-    🔴 **The period is pinned to the literal and not to the constant**, the
-    way the job's *name* already is one case above. `job.period ==
-    RETENTION_PERIOD` compares the registration against the same symbol the
-    composition root passes it, so it is a statement about the wiring and
-    about nothing else -- measured 2026-09-07, moving `RETENTION_PERIOD` from
-    `timedelta(days=1)` to `timedelta(days=30)` left this whole file green.
-    **A day is a published number**: `.env.example`,
-    `web/src/features/operator/Config.settings.ts`, PRD 08 and PRD 10 all
-    state it in prose an operator reads, and a constant that moves under them
-    is the same silent drift a renamed metric label is. Both assertions are
-    kept -- the literal for the value, the symbol for the wiring.
+    The period is pinned to the literal as well as to the constant: a day is
+    what `.env.example`, `Config.settings.ts`, PRD 08 and PRD 10 all state in
+    prose no other test reads.
     """
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    oldest = _NOW - timedelta(days=300)
+    for minute in range(7):
+        await repository.record(_row(at=oldest + timedelta(minutes=minute), user_id=user_id))
+    scope = _RecordingScope(repository)
+    monkeypatch.setattr(
+        "usher.composition.search_query_scope",
+        lambda sessions: scope,
+    )
+
     scheduler = build_scheduler(
         _settings(search_query_retention_days=7, search_query_retention_batch=3),
         sessions=_no_sessions(),
     )
 
     job = next(one for one in scheduler.jobs if isinstance(one, SearchQueryRetention))
-    assert job.window == timedelta(days=7)
-    assert job.batch == 3
+    assert await job.last_done() == oldest + timedelta(days=7), (
+        "the reading is min(at) + the window an operator set, capped at now"
+    )
+    opened_by_the_reading = scope.opened
+
+    await _drain(job)
+
+    assert scope.opened - opened_by_the_reading == 3, "3 + 3 + 1 at the batch an operator set"
+    assert not repository.rows, "the premise: every row was past the seven-day cutoff"
     assert timedelta(days=1) == RETENTION_PERIOD, (
         "the retention job offers itself once a day, and .env.example, Config.settings.ts, "
         "PRD 08 and PRD 10 all say so in prose no test reads"
     )
     assert job.period == RETENTION_PERIOD
-    assert job.period != job.window, (
-        "the period is the job's own and must not be read off the retention window"
-    )
 
 
 def test_the_rebuild_registration_carries_the_period_an_operator_set() -> None:
@@ -603,6 +640,25 @@ async def test_the_prune_drains_in_chunks_and_opens_a_scope_for_each() -> None:
     assert sorted((clock.now - record.at).days for record in repository.rows.values()) == [1, 80]
 
 
+def test_a_chunk_size_below_one_is_refused_where_the_job_is_built() -> None:
+    """A batch of zero deletes nothing per chunk and `0 < 0` is false, so the
+    drain never ends.
+
+    What stopped that today was `Settings.search_query_retention_batch`'s
+    `ge=1`, two layers from the loop it protects and reachable only through
+    the composition root -- a job built any other way looped forever and the
+    symptom was a lane that never returned. The refusal belongs where the
+    number arrives.
+    """
+    with pytest.raises(ValueError, match="batch"):
+        SearchQueryRetention(
+            _scope_over(FakeSearchQueryRepository()),
+            window=timedelta(days=90),
+            batch=0,
+            period=RETENTION_PERIOD,
+        )
+
+
 async def test_the_cutoff_is_taken_once_and_not_per_chunk() -> None:
     """A boundary recomputed inside its own loop moves under it.
 
@@ -760,7 +816,7 @@ class _NaiveLastDone(ScheduledJob):
     async def last_done(self) -> datetime | None:
         return _NOW.replace(tzinfo=None) - timedelta(hours=2)
 
-    async def run(self) -> None:  # pragma: no cover - never reached
+    async def run(self) -> JobOutcome:  # pragma: no cover - never reached
         raise AssertionError("a job whose reading could not be compared must not be run")
 
 
@@ -916,6 +972,37 @@ async def test_a_run_that_succeeds_clears_the_backoff() -> None:
     assert job.runs == 4, "a clean run did not reset the doubling"
 
 
+async def test_a_declined_run_is_not_work_and_is_spaced_out_like_a_failure(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """A job that refuses did not try, and the loop has to be able to tell.
+
+    `JobOutcome` carries what a decline costs and what it buys; this is the
+    loop's half of it -- out of `tick()`'s total, on neither instrument, and
+    not offered again on the very next tick.
+
+    The control is the second half: an assertion that an instrument recorded
+    nothing is satisfied by an instrument nobody wired.
+    """
+    clock = _Clock()
+    refuses = _Fake("refuses", period=_HOUR, last=clock.now - timedelta(hours=2), declines=True)
+    scheduler = _scheduler(refuses, clock=clock)
+
+    assert await _tick(scheduler) == 0, "a refusal was counted as work"
+    assert refuses.runs == 1
+    assert await _tick(scheduler) == 0
+    assert refuses.runs == 1, "a declined job was offered again on the very next tick"
+    assert not {one for one in _instruments(meter_reader) if one.startswith("usher.scheduler.")}, (
+        "a refusal is neither a duration nor a failure"
+    )
+
+    worked = _Fake("worked", period=_HOUR, last=clock.now - timedelta(hours=2))
+    assert await _tick(_scheduler(worked, clock=clock)) == 1
+    assert "usher.scheduler.job.duration" in _instruments(meter_reader), (
+        "the premise: this reader sees the scheduler's own histogram"
+    )
+
+
 async def test_a_backed_off_job_is_not_asked_when_it_was_last_done() -> None:
     """The backoff is checked **before** the artefact read, so a job this
     process has already decided not to offer costs no query at all.
@@ -942,10 +1029,11 @@ async def test_a_cancelled_job_is_re_raised_rather_than_swallowed() -> None:
     started = asyncio.Event()
 
     class _Cancels(_Fake):
-        async def run(self) -> None:
+        async def run(self) -> JobOutcome:
             self.runs += 1
             started.set()
             await asyncio.sleep(3600)
+            raise AssertionError("unreachable: the case cancels this run")
 
     job = _Cancels("cancels", last=None)
     scheduler = _scheduler(job)
