@@ -308,11 +308,12 @@ async def test_one_step_back_and_forward_restores_each_artefact(
     `run_alembic` is called with an explicit `direction=` for the bare revision
     id: left to infer, a bare id runs `upgrade`, which against a database
     already past it is a silent no-op and the assertions then describe a schema
-    nobody moved.
+    nobody moved. The stop is `m10c` rather than `head` so that `-1` keeps
+    meaning "below the revision these five artefacts belong to".
     """
     admin, scratch, url = await scratch_database(postgres_url, "cycle1")
     try:
-        await asyncio.to_thread(run_alembic, url, "head")
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="up"))
 
         async def present() -> bool:
             if artefact in ("surface", "tier"):
@@ -357,7 +358,7 @@ async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check
     """
     admin, scratch, url = await scratch_database(postgres_url, "relabel")
     try:
-        await asyncio.to_thread(run_alembic, url, "head")
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="up"))
         engine = build_engine(url)
         user_id, suggest_id, search_id = new_id(), new_id(), new_id()
         try:
