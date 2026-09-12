@@ -490,13 +490,13 @@ def _sync_failed(runs: Sequence[SyncRun]) -> str:
     and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
     failure here an operator has a command for; a read timeout is not, and an
     escape hatch offered for every failure is one people learn to paste
-    without reading. The token is matched rather than the refusal's English,
-    because that sentence is built from three numbers in `ports/ingest.py` and
-    is a standing candidate for rewording.
+    without reading. `error_code` is what is matched rather than the refusal's
+    English, because that sentence is built from three numbers in
+    `ports/ingest.py` and is a standing candidate for rewording.
     """
     lanes = ", ".join(f"{one.kind.value}" for one in runs)
     line = f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
-    if any(RETRACTION_ERROR_CODE in (one.error or "") for one in runs):
+    if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
         line += (
             "\nthe availability sweep refused: if the removal was intended, "
             "re-run with `usher sync --allow-full-retraction`"

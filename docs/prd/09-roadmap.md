@@ -1007,20 +1007,22 @@ suspicion.
   ⚠️ **Re-measured 2026-09-07 at `cb5ac06`, migration head `m10c`, and
   cross-checked against a running database for the first time. The five verdicts
   stand; three of the *figures* under them moved, and the moves have two causes
-  rather than one — four columns added across `m10a`, `m10b` and `m10c`, and
-  `m10a`'s rating rename redirecting a COPY writer off a column.**
-  `uv run python scripts/audit_bounded_columns.py --summary` prints **83**
-  bounded columns (`VARCHAR 28, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`),
+  rather than one — five columns added across `m10a`, `m10b`, `m10c` and
+  `m10d`, and `m10a`'s rating rename redirecting a COPY writer off a column.**
+  `uv run python scripts/audit_bounded_columns.py --summary` prints **84**
+  bounded columns (`VARCHAR 29, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`),
   **7** CHECK-only value bounds, and under the adopted `path` reading
-  `safe 18, translated 33, exposed-copy 31, exposed-sqlalchemy 1`. The chain
+  `safe 18, translated 34, exposed-copy 31, exposed-sqlalchemy 1`. The chain
   from F8's own head is `m09f` **79** → `m10a` **80** (`titles.imdb_num_votes`)
   → `m10b` **81** (`sync_runs.position`) → `m10c` **83**
-  (`search_queries.surface`/`tier`), each printed by `--at`. `--at m08b` still
+  (`search_queries.surface`/`tier`) → `m10d` **84** (`sync_runs.error_code`),
+  each printed by `--at`. `--at m08b` still
   prints `VARCHAR 22, INTEGER 44, NUMERIC 1` = **67**, so the one figure this
   table reproduces reproduces a second time, three migrations later.
   🔴 **`--check` exits 0 and `tests/unit/test_bounded_column_ledger.py` is
-  green throughout: the generator was carried through `m10a`, `m10b` and `m10c`,
-  and this prose was not.** A drift guard that compares the script against its
+  green throughout: the generator was carried through `m10a`, `m10b`, `m10c`
+  and `m10d`, and this prose went one landing stale before `m10d` brought it
+  back.** A drift guard that compares the script against its
   own published constants cannot see the document drifting away from both — the
   last unclosed corner of ADR-0044's *"a ledger that agrees with itself is not a
   ledger that is right"*.

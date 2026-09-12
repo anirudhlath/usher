@@ -101,5 +101,11 @@ class SyncRun(DomainModel):
     items_retracted: int = Field(default=0, ge=0)
 
     error: str | None = None
+    #: Which *kind* of failure this was, for a reader that cannot parse
+    #: English. `None` for every failure an operator has no command for, which
+    #: is most of them; `ReconcileService` owns the two members. `error` is the
+    #: sentence a human reads and may be reworded in any release, so nothing
+    #: may classify a run by it.
+    error_code: str | None = None
     started_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: AwareDatetime | None = None

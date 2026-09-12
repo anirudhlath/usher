@@ -486,8 +486,8 @@ late. [08](08-operations.md) has the operator-facing version.
 ⚠️ **A truncation that records `FAILED` *is* honest, and that is what bounds
 the other half** (M10 S6). `USHER_PUSH_GAP_MAX_ITEMS` stops a gap-closing delta
 that *does* have a cursor after that many items and records the run `FAILED`
-with a `gap_delta_ceiling:` token, so no cursor advances and nothing the walk
-never reached is skipped — everything it *did* see is already committed by
+with `error_code = 'gap_delta_ceiling'`, so no cursor advances and nothing the
+walk never reached is skipped — everything it *did* see is already committed by
 `_flush`, and the rest is what `usher sync --kind full` closes. The two are one
 hazard answered on two axes: `USHER_PUSH_GAP_CLOSE` decides whether a walk with
 no cursor happens at all, `USHER_PUSH_GAP_MAX_ITEMS` bounds how large one with

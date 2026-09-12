@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    String,
     Text,
     UniqueConstraint,
     func,
@@ -78,6 +79,10 @@ class SyncRunRow(Base):
     items_retracted: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     error: Mapped[str | None] = mapped_column(Text)
+    # Bounded where `error` is not, because this one is a closed vocabulary a
+    # dashboard keys on rather than a sentence: `ReconcileService` owns both
+    # members and neither is near 32 characters.
+    error_code: Mapped[str | None] = mapped_column(String(32))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -157,39 +157,39 @@ _ITEM_LANES: tuple[SyncRunKind, ...] = (SyncRunKind.FULL, SyncRunKind.DELTA)
 # in **items**, in this service's own loop, where `run.items_seen` already
 # lives.
 #
-# An operator reads the sentence. A dashboard, an alert rule, or the next
+# An operator reads `sync_runs.error`. A dashboard, an alert rule, or the next
 # reader of this file has to be able to tell the two apart **without parsing
-# English**, so the bounded walk's message begins with this and nothing else
-# in the project uses it.
+# English**, so the kind goes in `sync_runs.error_code` and nothing else in
+# the project uses this value.
 CEILING_ERROR_CODE = "gap_delta_ceiling"
 
 # The same device for the *other* failure an operator has a command for, and
 # added for the same reason one token over (M10 S9).
 #
 # ADR-0015's refusal is the one sync failure with an escape hatch --
-# `usher sync --allow-full-retraction`. Everything else in this column is a
-# transport fault, a broken upstream or a bounded walk, and offering that flag
-# for all of them is how an operator learns to paste it without reading. So the
-# CLI has to tell one failure from the rest, and **matching on the refusal's own
-# English is what this constant exists to avoid**: the sentence is built in
-# `ports/ingest.py` from three numbers and is a standing candidate for rewording.
-#
-# It is a prefix on what `sync_runs.error` stores rather than a new column,
-# because S9 makes no schema change and because the row is already the surface
-# `usher sync-status` and `GET /admin/sync` both read.
+# `usher sync --allow-full-retraction`. Everything else is a transport fault, a
+# broken upstream or a bounded walk, and offering that flag for all of them is
+# how an operator learns to paste it without reading. So the CLI has to tell one
+# failure from the rest, and **matching on the refusal's own English is what
+# this constant exists to avoid**: the sentence is built in `ports/ingest.py`
+# from three numbers and is a standing candidate for rewording.
 RETRACTION_ERROR_CODE = "availability_ceiling"
 
 
-def _recorded_error(exc: UsherPortError) -> str:
-    """What `sync_runs.error` holds for a failure this service absorbed.
+def _recorded_failure(exc: UsherPortError) -> tuple[str, str | None]:
+    """The sentence and the kind `sync_runs` holds for a failure this service
+    absorbed.
 
-    One function rather than a branch at the call site, for the reason
-    `_failed` beside it gives: the two are one rule and a rule spelled twice is
-    a rule one deletion is invisible in.
+    Returned together so the two cannot be written apart: a `str(exc)` with no
+    code beside it is a refusal the CLI stops offering its flag for, and the
+    only reader that can tell which failure this is is the `isinstance` here.
+    `None` is the honest answer for every other port error -- there is no
+    command to offer, and a catch-all member is how one starts being offered
+    for all of them.
     """
     if isinstance(exc, AvailabilitySweepRefused):
-        return f"{RETRACTION_ERROR_CODE}: {exc}"
-    return str(exc)
+        return str(exc), RETRACTION_ERROR_CODE
+    return str(exc), None
 
 
 class _Progress:
@@ -298,7 +298,11 @@ class ReconcileService:
                     # happen. Same argument as `CEILING_ERROR_CODE`, one
                     # instrument over.
                     span.set_attribute("usher.sync.truncated", True)
-                    run = self._failed(progress.run, self._ceiling_error(progress.run))
+                    run = self._failed(
+                        progress.run,
+                        self._ceiling_error(progress.run),
+                        code=CEILING_ERROR_CODE,
+                    )
                     logger.warning(
                         "{kind} sync of {source} stopped after {seen} items, its "
                         "USHER_PUSH_GAP_MAX_ITEMS ceiling. The run is recorded FAILED so it "
@@ -328,7 +332,8 @@ class ReconcileService:
                 # str(exc), never the exception object and never a payload --
                 # PRD 08's credentials-never-logged rule, and `error` is a
                 # Text column an operator reads.
-                run = self._failed(progress.run, _recorded_error(exc))
+                error, code = _recorded_failure(exc)
+                run = self._failed(progress.run, error, code=code)
                 span.set_attribute("usher.failed", True)
                 logger.error(
                     "{kind} sync of {source} failed after {seen} items: {error}",
@@ -348,7 +353,7 @@ class ReconcileService:
         return run
 
     @staticmethod
-    def _failed(run: SyncRun, error: str) -> SyncRun:
+    def _failed(run: SyncRun, error: str, *, code: str | None) -> SyncRun:
         """The one spelling of a terminal failure row.
 
         One function rather than the two identical `evolve` calls the two
@@ -358,15 +363,20 @@ class ReconcileService:
         `latest_completed_cursor` skips this run and the next walk of this
         lane resumes from wherever it resumed from.
         """
-        return run.evolve(status=SyncRunStatus.FAILED, error=error, finished_at=datetime.now(UTC))
+        return run.evolve(
+            status=SyncRunStatus.FAILED,
+            error=error,
+            error_code=code,
+            finished_at=datetime.now(UTC),
+        )
 
     @staticmethod
     def _ceiling_error(run: SyncRun) -> str:
         """What `sync_runs.error` holds after a bounded walk.
 
-        `CEILING_ERROR_CODE` first and a sentence after it: the token is
-        what a machine reads, the sentence is what an operator reads, and
-        neither is recoverable from the other.
+        The sentence only. `CEILING_ERROR_CODE` goes in `error_code` beside
+        it: the column is what a machine reads, this is what an operator
+        reads, and neither is recoverable from the other.
 
         **It takes no `max_items`, and that is the honest shape rather than
         an omission.** The count and the ceiling are the same number by
@@ -376,9 +386,9 @@ class ReconcileService:
         is named by the setting an operator would change.
         """
         return (
-            f"{CEILING_ERROR_CODE}: stopped after {run.items_seen} items, this walk's "
-            f"USHER_PUSH_GAP_MAX_ITEMS ceiling. Nothing seen was lost and no cursor moved; "
-            f"run `usher sync --kind full` for this source to close the rest"
+            f"stopped after {run.items_seen} items, this walk's USHER_PUSH_GAP_MAX_ITEMS "
+            f"ceiling. Nothing seen was lost and no cursor moved; run "
+            f"`usher sync --kind full` for this source to close the rest"
         )
 
     async def cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:

@@ -633,19 +633,16 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m10c` and the `-1` half is re-pointed at its five artefacts**
-    -- `search_queries.surface`, `search_queries.tier`,
-    `ix_search_queries_at`, `ix_llm_calls_at` and
-    `ix_llm_calls_generation_id`, each asserted absent one step below head,
-    because a creating head's `downgrade()` is what removes them. **Five
-    assertions and not one**, for `m08a`'s reason: a `downgrade()` that drops
-    four and forgets the fifth passes a check naming only the first, and here
-    the fifth would be an index on a table that still exists. That is the
-    **thirteenth** landing in a row to break and re-point this block (`ffa`,
+    **Head is `m10d` and the `-1` half is re-pointed at its one artefact** --
+    `sync_runs.error_code`, asserted absent one step below head, because a
+    creating head's `downgrade()` is what removes it. **One artefact, one
+    assertion**: the column carries no constraint and no index, so there is
+    nothing that could be dropped independently of it. That is the
+    **fourteenth** landing in a row to break and re-point this block (`ffa`,
     `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`,
-    `m10a`, `m10b`, `m10c`). ⚠️ Read that number against the *seven* this
-    docstring claimed until 2026-08-25: five landings re-pointed the block and
-    left the prose alone, so the jump is a gap in the record rather than a
+    `m10a`, `m10b`, `m10c`, `m10d`). ⚠️ Read that number against the *seven*
+    this docstring claimed until 2026-08-25: five landings re-pointed the block
+    and left the prose alone, so the jump is a gap in the record rather than a
     burst of migrations. `.claude/rules/db-and-sql.md` carries the same count
     and the same caveat.
 
@@ -679,9 +676,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     below, where revision ids do not drift -- displaced *because they had
     teeth*, on the first run with the new head present. `m09a`'s five moved
     when `m09c` landed; `m10a`'s seven moved when `m10b` did; `m10b`'s one
-    moved when `m10c` did, and it failed exactly as predicted --
-    `AssertionError: position should not exist below m10b`, run and watched
-    before it was touched.
+    moved when `m10c` did, and `m10c`'s five when `m10d` did.
 
     That is the general case rather than this migration's luck, and it is
     worth stating because the opposite was written here first and was wrong:
@@ -692,8 +687,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Thirteen landings, thirteen loud breaks --
-    the same thirteen the paragraph above counts, which is the point of
+    `blend_fingerprint` is present. Fourteen landings, fourteen loud breaks --
+    the same fourteen the paragraph above counts, which is the point of
     stating the number in both places -- which only works if both are
     maintained.
     Both said *seven* until 2026-08-25, five landings after they stopped
@@ -736,12 +731,13 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
         # M9 Task C2 for `m09c`, T4R for `m09d`, then `m09e`, `m09f` and
-        # `m10a` in turn, issue #41's Task 1 for `m10b`, and M10's J1 for
-        # `m10c` — thirteen. (The three before `m10b` had been going
-        # unrecorded here: the list said `m09d` while the count below said
-        # twelve, so it read as a jump rather than as the omission it was.)
-        # It is cheaper than a step count, which keeps passing for the wrong
-        # reason instead of failing for the right one.
+        # `m10a` in turn, issue #41's Task 1 for `m10b`, M10's J1 for `m10c`
+        # and the polish milestone's 1F for `m10d` — fourteen. (The three
+        # before `m10b` had been going unrecorded here: the list said `m09d`
+        # while the count below said twelve, so it read as a jump rather than
+        # as the omission it was.) It is cheaper than a step count, which
+        # keeps passing for the wrong reason instead of failing for the right
+        # one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
         # creates a constraint and renames a column, so its artefacts are
@@ -762,32 +758,41 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        # **`m10c`'s five artefacts, re-pointed here the moment it became
-        # head** — the thirteenth landing in a row to do this. `m10c`
-        # *creates*, so every assertion is negative: one step below head none
-        # of the five exists, and only `m10c.upgrade()` makes them.
+        # **`m10d`'s one artefact, re-pointed here the moment it became head**
+        # — the fourteenth landing in a row to do this. `m10d` *creates*, so
+        # the assertion is negative: one step below head the column does not
+        # exist, and only `m10d.upgrade()` makes it.
         #
-        # Note this block reads `search_queries` and `llm_calls`, and the one
-        # it replaced read `sync_runs`. The tables follow the head, not the
-        # block.
+        # **One artefact, one assertion**, which is `m10b`'s shape rather than
+        # `m10c`'s: `error_code` carries no CHECK and no index, so there is
+        # nothing a `downgrade()` could drop the column and forget. Its
+        # backfill is not an artefact either — a column-adding revision's
+        # inverse is dropping the column, and the rows it read are gone with
+        # it.
+        at_m10c_columns = await _column_set(url, "sync_runs")
+        assert "error_code" not in at_m10c_columns, "error_code should not exist below m10d"
+        # The premise, for the reason the `m09a` stop below records: an empty
+        # column set satisfies the absence above, so without this the block
+        # would pass at any depth at which `sync_runs` had ceased to exist.
+        assert at_m10c_columns, "the premise: `sync_runs` still exists at `m10c`"
+
+        # **A named stop at `m10b`, holding `m10c`'s five.** Displaced from the
+        # `-1` half the moment `m10d` became head, and displaced *because they
+        # had teeth*: `-1`-from-`m10d` lands on `m10c`'s applied state, where
+        # all five are present and every `not in` below is false.
         #
         # **Five artefacts, five assertions**, and here that rule is
-        # load-bearing in a way it was not for `m10b`: `m10c` touches two
-        # tables and neither is dropped by anything below it, so a
+        # load-bearing in a way it is not for a one-column head: `m10c` touches
+        # two tables and neither is dropped by anything below it, so a
         # `downgrade()` that dropped the two columns and forgot the three
         # indexes leaves all three behind on live tables and satisfies a check
-        # naming only `surface`. Contrast `m08a`, whose `drop_index` really was
-        # redundant because a `drop_table` followed it — the redundancy test is
-        # *can this artefact fail independently*, and all five here can.
-        # The two columns are invisible to `_index_set` and the three indexes
-        # to `_column_set`, which is `m09c`'s per-artefact-kind rule as well.
+        # naming only `surface`. The two columns are invisible to `_index_set`
+        # and the three indexes to `_column_set`, which is `m09c`'s
+        # per-artefact-kind rule as well.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="down"))
         at_m10b_columns = await _column_set(url, "search_queries")
         assert "surface" not in at_m10b_columns, "surface should not exist below m10c"
         assert "tier" not in at_m10b_columns, "tier should not exist below m10c"
-        # The premise, for the reason the `m09a` stop below records: an empty
-        # column set satisfies both absences above, so without this the block
-        # would pass at any depth at which `search_queries` had ceased to
-        # exist.
         assert at_m10b_columns, "the premise: `search_queries` still exists at `m10b`"
         at_m10b_indexes = await _index_set(url)
         assert "ix_search_queries_at" not in at_m10b_indexes

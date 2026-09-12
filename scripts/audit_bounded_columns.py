@@ -2343,10 +2343,16 @@ BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 #: cheap case, and it is worth having one in the record**: the two entries
 #: above are both a bucket moving *because of a scan or a redirect*, which
 #: makes them look like the normal shape when they are the interesting one.
+#:
+#: **`m10d` is the same cheap case, one more time.** `sync_runs.error_code
+#: VARCHAR(32)` is bounded by declared width and its only writer is
+#: `sync.py:add`/`save`, already translating on the SQLSTATE class -- so it
+#: lands **translated** on every reading with nothing to repair. The bounded
+#: total goes 83 -> 84.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
-    "closure": {"safe": 20, "translated": 32, "exposed-copy": 30, "exposed-sqlalchemy": 1},
-    "path": {"safe": 18, "translated": 33, "exposed-copy": 31, "exposed-sqlalchemy": 1},
-    "pydantic": {"safe": 14, "translated": 33, "exposed-copy": 34, "exposed-sqlalchemy": 2},
+    "closure": {"safe": 20, "translated": 33, "exposed-copy": 30, "exposed-sqlalchemy": 1},
+    "path": {"safe": 18, "translated": 34, "exposed-copy": 31, "exposed-sqlalchemy": 1},
+    "pydantic": {"safe": 14, "translated": 34, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
 #: Same, at M8's head, which is what the roadmap's corrections are scored
