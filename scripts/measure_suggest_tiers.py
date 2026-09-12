@@ -432,6 +432,54 @@ def _load_snapshot() -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class QuietOpening:
+    """The idle-moment reading a run's closing sample is judged against."""
+
+    cpu_busy: float
+    foreign: int
+
+
+def quiet_opening(*, settle: bool = False) -> QuietOpening:
+    """Sample the box before the run, and print what was read.
+
+    `settle` is for a caller that has just started a container: the opening
+    sample has to be taken under the same condition as the closing one, and a
+    container start leaves the box in its own wake for several seconds.
+    """
+    if settle:
+        time.sleep(_CPU_SETTLE_SECONDS)
+    before = _load_snapshot()
+    opening = QuietOpening(
+        cpu_busy=float(before["cpu_busy"]), foreign=int(before["processes"]["pytest"])
+    )
+    print(f"quiet: opening cpu busy {opening.cpu_busy}, foreign pytest {opening.foreign}")
+    return opening
+
+
+def quiet_closing(opening: QuietOpening) -> bool:
+    """Whether the box was the same box throughout. `False` discards the run.
+
+    Settles first, or the closing sample is taken in this run's own wake and
+    reads as contention nobody else caused.
+
+    Two-sided, because a box that got *quieter* mid-run was also not the same
+    box throughout: a sibling finishing halfway through means the first half
+    was contended, which corrupts a percentile as much as one starting halfway
+    through does.
+    """
+    time.sleep(_CPU_SETTLE_SECONDS)
+    after = _load_snapshot()
+    closing = float(after["cpu_busy"])
+    foreign = max(opening.foreign, int(after["processes"]["pytest"]))
+    drift = round(closing - opening.cpu_busy, 4)
+    print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
+    if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
+        print(f"QUIET CHECK FAILED ({foreign} foreign pytest) -- discard this run and repeat it")
+        return False
+    return True
+
+
 async def _scalar(session: AsyncSession, statement: str, **parameters: Any) -> Any:
     return (await session.execute(text(statement), parameters)).scalar()
 

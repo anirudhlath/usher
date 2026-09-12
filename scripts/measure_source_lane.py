@@ -465,16 +465,9 @@ async def _run(
     live server is where its `TypeError` was found, after 98 requests. The
     rehearsal is now free and it runs before every live invocation.
     """
-    from scripts.measure_suggest_tiers import (
-        _CPU_DRIFT_LIMIT,
-        _CPU_SETTLE_SECONDS,
-        _load_snapshot,
-    )
+    from scripts.measure_suggest_tiers import quiet_closing, quiet_opening
 
-    before = _load_snapshot()
-    opening = float(before["cpu_busy"])
-    foreign = int(before["processes"]["pytest"])
-    print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}")
+    opening = quiet_opening()
 
     if args.budget == 0:
         print("DRY RUN (--budget 0): no request issued, no database")
@@ -679,14 +672,8 @@ async def _run(
             f"peak {overlap_of(arm_c).peak}, IoU {overlap_of(arm_c).iou:.3f}"
         )
 
-    after = _load_snapshot()
-    closing = float(after["cpu_busy"])
-    drift = round(closing - opening, 3)
-    print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
-    if abs(drift) > _CPU_DRIFT_LIMIT:
-        print("QUIET-CHECK FAILED: this run is discarded per the bar")
+    if not quiet_closing(opening):
         return 1
-    _ = _CPU_SETTLE_SECONDS
     return 1 if failure else 0
 
 

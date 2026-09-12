@@ -851,20 +851,13 @@ async def _run(
     of this file. There is no shared ledger across the group -- each arm
     declares its own and each is trusted -- so a second arm passes its own.
     """
-    # The import is inside the function on purpose: `_run` reads these three
-    # names at *call* time, so a test can `monkeypatch.setattr` the module and
-    # be seen. A module-level import would bind them once at import and the
-    # monkeypatch would be a silent no-op.
-    from scripts.measure_suggest_tiers import (
-        _CPU_DRIFT_LIMIT,
-        _CPU_SETTLE_SECONDS,
-        _load_snapshot,
-    )
+    # The import is inside the function on purpose: `_run` reads these names at
+    # *call* time, so a test can `monkeypatch.setattr` the module and be seen.
+    # A module-level import would bind them once at import and the monkeypatch
+    # would be a silent no-op.
+    from scripts.measure_suggest_tiers import quiet_closing, quiet_opening
 
-    before = _load_snapshot()
-    opening = float(before["cpu_busy"])
-    foreign = int(before["processes"]["pytest"])
-    print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}")
+    opening = quiet_opening()
 
     if args.budget == 0:
         # **Before the exporter and before the database.** A dry run that spun
@@ -1045,22 +1038,13 @@ async def _run(
                     f"against a wall-clock median of {by_op[op].median:.4f}"
                 )
 
-    time.sleep(_CPU_SETTLE_SECONDS)
-    after = _load_snapshot()
-    closing = float(after["cpu_busy"])
-    foreign = max(foreign, int(after["processes"]["pytest"]))
-    drift = round(closing - opening, 4)
-    print(f"\nquiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
-    # ⚠️ **This is a local-CPU guard on a network-bound measurement**, imported
-    # wholesale from a harness whose work was local Postgres queries. For 2.5
-    # minutes this process is idle-blocked on a socket, so the thing that could
-    # actually invalidate the run -- contention on the path to the household
-    # server, or on the server itself -- is not sampled at all. A TCP-connect
-    # RTT sample to the same host before and after costs no Emby request and is
-    # the right addition; recorded rather than done, and it belongs with S7's
-    # concurrency arm.
-    if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
-        print("QUIET CHECK FAILED -- discard this run and repeat it")
+    # ⚠️ **A local-CPU guard on a network-bound measurement.** For most of a
+    # run this process is idle-blocked on a socket, so the thing that could
+    # actually invalidate it -- contention on the path to the household server,
+    # or on the server itself -- is not sampled at all. A TCP-connect RTT
+    # sample to the same host before and after costs no Emby request and is
+    # the right addition.
+    if not quiet_closing(opening):
         return 1
     return 1 if failure is not None else 0
 
