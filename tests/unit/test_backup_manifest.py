@@ -163,51 +163,68 @@ def test_tables_of_answers_one_class_in_manifest_order() -> None:
 
 
 def test_a_valid_entry_constructs() -> None:
-    """The positive control for the four refusals below: without it, "the
+    """The positive control for the three refusals below: without it, "the
     constructor raises" is also what a constructor that raises on everything
     produces.
     """
-    entry = BackupEntry(kind=BackupClass.PRECIOUS, restore=RestoreRule.WHOLE, reason="a reason")
+    entry = BackupEntry(kind=BackupClass.PRECIOUS, reason="a reason")
     assert entry.rebuild_commands == ()
 
 
 def test_an_entry_with_no_reason_is_refused() -> None:
     with pytest.raises(ValueError, match="reason"):
-        BackupEntry(kind=BackupClass.PRECIOUS, restore=RestoreRule.WHOLE, reason="   ")
-
-
-def test_an_entry_whose_restore_rule_contradicts_its_class_is_refused() -> None:
-    with pytest.raises(ValueError, match="restores as"):
-        BackupEntry(kind=BackupClass.PRECIOUS, restore=RestoreRule.NEVER, reason="carried")
+        BackupEntry(kind=BackupClass.PRECIOUS, reason="   ")
 
 
 @pytest.mark.parametrize(
-    ("kind", "restore", "columns"),
+    ("kind", "rule"),
     [
-        (BackupClass.PARTIAL, RestoreRule.MERGE, ()),
-        (BackupClass.PRECIOUS, RestoreRule.WHOLE, ("title_id",)),
+        (BackupClass.PRECIOUS, RestoreRule.WHOLE),
+        (BackupClass.PARTIAL, RestoreRule.MERGE),
+        (BackupClass.REBUILDABLE, RestoreRule.NEVER),
+        (BackupClass.SCHEMA, RestoreRule.NEVER),
+    ],
+)
+def test_the_restore_rule_follows_from_the_class(kind: BackupClass, rule: RestoreRule) -> None:
+    """Every class, because a derived property that is right for three of four
+    is a mapping with a hole in it rather than a rule.
+    """
+    entry = BackupEntry(
+        kind=kind,
+        reason="r",
+        columns=("title_id",) if kind is BackupClass.PARTIAL else (),
+        rebuilt_by="sync" if kind is BackupClass.REBUILDABLE else "",
+    )
+    assert entry.restore is rule
+
+
+@pytest.mark.parametrize(
+    ("kind", "columns"),
+    [
+        (BackupClass.PARTIAL, ()),
+        (BackupClass.PRECIOUS, ("title_id",)),
     ],
 )
 def test_columns_are_named_iff_the_entry_is_partial(
-    kind: BackupClass, restore: RestoreRule, columns: tuple[str, ...]
+    kind: BackupClass, columns: tuple[str, ...]
 ) -> None:
     """Both directions. A `PARTIAL` entry naming nothing is a restore that
     merges nothing; a `PRECIOUS` entry naming columns is an argument for
     narrowing it, made in a field nothing reads.
     """
     with pytest.raises(ValueError, match="columns"):
-        BackupEntry(kind=kind, restore=restore, reason="r", columns=columns)
+        BackupEntry(kind=kind, reason="r", columns=columns)
 
 
 @pytest.mark.parametrize(
-    ("kind", "restore", "rebuilt_by"),
+    ("kind", "rebuilt_by"),
     [
-        (BackupClass.REBUILDABLE, RestoreRule.NEVER, "  "),
-        (BackupClass.PRECIOUS, RestoreRule.WHOLE, "sync"),
+        (BackupClass.REBUILDABLE, "  "),
+        (BackupClass.PRECIOUS, "sync"),
     ],
 )
 def test_a_rebuild_command_is_named_iff_the_entry_is_rebuildable(
-    kind: BackupClass, restore: RestoreRule, rebuilt_by: str
+    kind: BackupClass, rebuilt_by: str
 ) -> None:
     with pytest.raises(ValueError, match="rebuild command"):
-        BackupEntry(kind=kind, restore=restore, reason="r", rebuilt_by=rebuilt_by)
+        BackupEntry(kind=kind, reason="r", rebuilt_by=rebuilt_by)

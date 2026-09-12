@@ -157,9 +157,9 @@ class UnresolvedRule(StrEnum):
     """Write the column `NULL` and count it. The column already permits it."""
 
 
-#: Per table, because the answer differs per table on purpose and K4 must
-#: read one field rather than re-derive the argument at each call site --
-#: `BackupEntry.restore` next door is the same decision for the same reason.
+#: Per table, because the answer differs per table on purpose and is not a
+#: function of anything K1 already records: K4 reads one field rather than
+#: re-deriving the argument at each call site.
 #:
 #: `watch_states`: a watch state whose title is missing is a real loss and
 #: the operator must see it. It is also recoverable -- enrich the title,

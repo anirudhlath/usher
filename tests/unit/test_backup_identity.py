@@ -286,9 +286,8 @@ def test_the_reference_a_title_is_carried_as_names_every_key_the_row_has() -> No
 
 
 def test_the_unresolved_rules_are_the_ones_this_group_argued_for() -> None:
-    """Stored per table rather than derived at read time, so K4 reads one
-    field -- `BackupEntry.restore` next door is the same call for the same
-    reason.
+    """Stored per table rather than derived, because the answer is a function
+    of the table and of nothing K1 already records.
 
     They differ on purpose. A `watch_states` row whose title is missing is a
     real loss and the operator must see it, and it is recoverable: enrich the
