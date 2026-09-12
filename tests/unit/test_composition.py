@@ -25,12 +25,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Annotated, Any, cast
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
-from fastapi import Depends
+from fastapi import Depends, Request
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -59,7 +60,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.api.app import create_app
-from usher.api.deps import get_source_adapter_factory, get_source_gates
+from usher.api.deps import get_search_service, get_source_adapter_factory, get_source_gates
 from usher.composition import (
     Pipeline,
     SourceGateRegistry,
@@ -74,6 +75,7 @@ from usher.composition import (
     embedder,
     llm_client,
     metadata_provider,
+    nothing,
     run_bootstrap,
     unit_of_work,
     worker_concurrency,
@@ -1476,44 +1478,41 @@ async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> 
         await engine.dispose()
 
 
-async def test_both_search_roots_write_search_queries_over_this_sessions_commit() -> None:
-    """PRD 10's `search_queries`, wired on the two roots that build a
-    `SearchService`, and the *commit* is the half that has to be this
-    session's.
+async def test_only_the_root_with_no_commit_boundary_commits_the_analytics_row() -> None:
+    """PRD 10's `search_queries`, wired on the three roots that build a
+    `SearchService`, and the *commit* is the half that decides the shape.
 
-    Three wirings, three ways for the analytics to go missing, and each is
-    silent:
+    Three ways for the row to go missing and every one of them is silent: no
+    analytics at all, a repository over another session, or a commit belonging
+    to some other session -- a search writes nothing else, so nothing carries
+    the row.
 
-    - **No analytics at all.** Every search answers correctly, both histograms
-      record, and the table PRD 10 turns ADR-0002's Meilisearch gate into a
-      live measurement with stays empty forever. There is no error and no log
-      line, which is why this is a wiring assertion rather than a behavioural
-      one.
-    - **A repository over another session**, so the row never reaches the
-      transaction the search commits.
-    - **A commit that is not this session's**, which leaves the row to be
-      rolled back when the read closes -- and a search writes nothing else, so
-      there is no second write to carry it. `cli._session_for` disposes its
-      engine without committing, so on that root the loss is total.
-
-    **Both roots, because `build_pipeline` delegating to `build_search_service`
-    is a fact about today's code rather than a guarantee.** `usher search`
-    reaches this through `build_pipeline` and `api/deps.get_search_service`
-    reaches it directly; a `build_pipeline` that re-assembled a `SearchService`
-    of its own would return a working one and record nothing.
+    `usher search` reaches this directly and through `build_pipeline`, and
+    neither of those roots ever commits, so the service does. The request root
+    has `get_session` and passes `nothing`: a row that committed itself would
+    end the request's transaction and leave the demand promotion after it in a
+    second one, which is two WAL flushes per keystroke.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     try:
         session = AsyncSession(engine)
-        direct = build_search_service(session, _settings())
-        through_the_pipeline = build_pipeline(session, _settings()).search
-
-        for service in (direct, through_the_pipeline):
+        for service in (
+            build_search_service(session, _settings()),
+            build_pipeline(session, _settings()).search,
+        ):
             analytics = service._analytics
             assert analytics is not None
             assert isinstance(analytics.queries, PostgresSearchQueryRepository)
             assert analytics.queries._session is session
             assert analytics.commit == session.commit
+
+        request = cast(
+            "Request", SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(embedder=None)))
+        )
+        requested = get_search_service(request, session, _settings())._analytics
+        assert requested is not None
+        assert requested.queries._session is session  # type: ignore[attr-defined]
+        assert requested.commit is nothing
     finally:
         await engine.dispose()
 

@@ -978,14 +978,12 @@ class SearchService:
         lose one -- `api/analytics.py` is the same decision for the outcome
         half, one layer out.
 
-        **The commit is here rather than left to the caller**, and the reason
-        is `cli._session_for`: it yields a session and disposes the engine
-        **without ever committing**, so on the CLI path the row would be rolled
-        back and the search would be recorded nowhere with nothing to say so.
-        `api/deps.get_session` commits again when the handler returns and that
-        second commit is a no-op over an already-committed transaction; what it
-        costs on the route is that any read *after* this point begins a new
-        transaction, which is why this is the last thing `search` does.
+        **The commit is the caller's to supply**, because the roots differ:
+        `cli._session_for` yields a session and disposes the engine without
+        ever committing, so a row left to it is recorded nowhere with nothing
+        to say so, while `api/deps.get_session` commits when the handler
+        returns and hands the service `nothing` -- a request is one transaction
+        and one WAL flush rather than two.
 
         **The query text reaches no log line.** PRD 08's rule is written about
         credentials (`docs/prd/08-operations.md:165`) and this extends it by
@@ -1179,10 +1177,9 @@ class SearchService:
 
         **The write is outside the measured window and after the hydration**,
         for `search`'s reason: an INSERT inside it would be counted as suggest
-        latency by the very row recording it. It is also the last thing this
-        method does, because the commit ends the caller's transaction. The two
-        `record` calls are on the near side of it and share its one clock read,
-        so the row and the histogram are the same interval.
+        latency by the very row recording it. The two `record` calls are on the
+        near side of it and share its one clock read, so the row and the
+        histogram are the same interval.
 
         **A short `prefix` is refused before the measurement and therefore
         before the row and before either histogram point.** The route's own

@@ -23,6 +23,7 @@ from usher.composition import (
     adapter_factory,
     build_image_proxy_service,
     build_search_service,
+    nothing,
 )
 from usher.config import Settings
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
@@ -1246,23 +1247,13 @@ def get_search_service(
     household would be a per-request object cached per session, and the two
     would disagree the first time a request carried an identity.
 
-    **`search_queries` is written from here too, and the commit inside the
-    service is not a duplicate of `get_session`'s.** `build_search_service`
-    hands `SearchService` a `SearchAnalytics` over this session and this
-    session's `commit`, so `GET /search` writes PRD 10's analytics row and
-    makes it durable before the handler returns (F2). The reason the service
-    commits rather than leaning on `get_session` is the *other* root:
+    **`search_queries` is written from here too, and this root does not commit
+    it.** `get_session` already commits when the handler returns, so the row
+    lands in the same transaction as everything else the request did. The
+    commit inside `SearchService` exists for the *other* root --
     `cli._session_for` yields a session and disposes its engine without ever
-    committing, so a row left for the caller would be lost on `usher search`
-    and nothing would say so.
-
-    **What it costs on this root is one property, stated rather than
-    discovered**: the commit ends the request's transaction, so any read after
-    the search begins a new one. `GET /search` has none -- the write is the
-    last thing `SearchService.search` does and the route returns the DTO -- and
-    a route that grew a second read after it would be reading in a second
-    transaction. `get_reconcile_service` and `get_similarity_service` already
-    take the same `session.commit` for the same reason.
+    committing -- so this one passes `nothing` and keeps a request to one
+    transaction and one WAL flush.
 
     **`GET /search/suggest` shares this dependency and can write through it
     too, since M10's J2** -- one row per answered keystroke, `surface =
@@ -1307,7 +1298,11 @@ def get_search_service(
     # `Any`, so without a name carrying the port type nothing downstream of
     # this line is checked at all.
     model: Embedder | None = request.app.state.embedder
-    return build_search_service(session, settings, embedder=model)
+    # `commit=nothing`: `get_session` commits when the handler returns, so a
+    # row that committed itself would end this request's transaction and leave
+    # everything after it -- the demand promotion both search routes do -- in a
+    # second one, for two WAL flushes per request where one will do.
+    return build_search_service(session, settings, embedder=model, commit=nothing)
 
 
 SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]
