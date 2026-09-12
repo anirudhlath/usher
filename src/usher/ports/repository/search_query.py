@@ -275,16 +275,12 @@ class SearchQueryRepository(ABC):
         `SearchQueryRetention.last_done()` -- the artefact reading ADR-0046's
         no-state design makes every registration owe -- so the alternative to
         it is a scheduler table, which is the thing that record exists to
-        refuse. ⚠️ **The neighbouring constraint this paragraph used to name --
-        `test_the_cost_ledger_has_no_read_method` -- retired in M10's D3**,
-        which gave `LLMCallRepository` the windowed `list_since` that
-        `ix_llm_calls_at` was shipped for. It says nothing about this port:
-        `llm_calls` gained a read because a caller in `src/` needed one, and
-        `search_queries` still has none. What is left of that constraint is
-        `tests/unit/test_ports.py`'s parametrised entry, pinning
-        `LLMCallRepository`'s abstract set as an exact set -- and **this port
-        is not on that list**, so the paragraph above is the whole of what
-        stands between `oldest()` and a second read beside it.
+        refuse. The neighbouring constraint this paragraph names --
+        `LLMCallRepository` carrying an append and no read -- now lives in
+        `tests/unit/test_ports.py`'s parametrised entry, pinning that port's
+        abstract set exactly. **This port is not on that list**, so the
+        paragraph above is the whole of what stands between `oldest()` and a
+        second read beside it.
 
         ⚠️ **Aware, always, and the port says so because nothing else can.**
         `Scheduler._due_now` subtracts this from `datetime.now(UTC)`, and a

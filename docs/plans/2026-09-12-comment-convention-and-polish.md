@@ -107,7 +107,7 @@ independently by three agents each, the third by two; they lead the list.
     parallel maps and rebuilds it; `_apply` is typed `Any` to dodge the import.
 11. ✅ `scripts/audit_bounded_columns.py:1942` — seven reading-independent scans
     re-run per pair; ~3× off a 23.5 s guard by hoisting them.
-12. `ports/repository/llm_call.py:173` — `list_since` has no caller in `src/`,
+12. ✅ `ports/repository/llm_call.py:173` — `list_since` has no caller in `src/`,
     and ships `SELECT *` unbounded.
 13. `db/backup_manifest.py:212` — `BackupEntry.restore` is derived state
     validated against the mapping it came from. A property.
@@ -116,8 +116,13 @@ independently by three agents each, the third by two; they lead the list.
 15. ✅ `services/scheduler.py:628,166` — test-only accessors; two parallel
     backoff dicts that must be cleared together.
 16. `ports/repository/search_query.py:95` — `surface` derivable from `tier`.
+<<<<<<< HEAD
 17. `ports/repository/_references.py:12` — paragraph repeated verbatim at `:38`.
 18. ✅ `scripts/measure_source_latency.py:804` — three injected seams with no
+=======
+17. ✅ `ports/repository/_references.py:12` — paragraph repeated verbatim at `:38`.
+18. `scripts/measure_source_latency.py:804` — three injected seams with no
+>>>>>>> polish/1f-repos
     caller; the reuse they were built for declined them.
 
 ### Efficiency
@@ -126,8 +131,12 @@ independently by three agents each, the third by two; they lead the list.
     short-`q` arm and when analytics is off.
 20. ✅ `db/models/search.py` — no index on `title_neighbors.computed_at`; the
     scheduler full-scans 3.3M rows ~288×/day to learn a job is not due.
+<<<<<<< HEAD
     Landed as `m10d`; not applied to any database.
 21. `db/repositories/title.py:140`, `episode.py:192` — the natural-key ladder
+=======
+21. ✅ `db/repositories/title.py:140`, `episode.py:192` — the natural-key ladder
+>>>>>>> polish/1f-repos
     runs all three joins unconditionally; lazy `COALESCE` SubPlans instead.
 22. `services/search.py:1595` — two transactions and two WAL flushes per
     keystroke.
@@ -151,14 +160,14 @@ independently by three agents each, the third by two; they lead the list.
 29. `config.py:751` — `USHER_SEARCH_SUGGEST_ANALYTICS` is a knob over a
     synchronous write on the request path, shipped `false`, so the milestone's
     analytics feature is inert. Buffer or enqueue in `SearchAnalytics`.
-30. `services/reconcile.py:164` — the sync failure *kind* is a magic prefix on a
+30. ✅ `services/reconcile.py:164` — the sync failure *kind* is a magic prefix on a
     free-text column read back by substring. An `error_code` column.
 31. ✅ `services/similar.py:800` — `ScheduledJob` has no "declined" outcome, so
     a refusal counts as work, pollutes the duration histogram and never backs
     off.
 32. ✅ `domain/title.py:111` — `allow_inf_nan=False` on one field; belongs on
     `DomainModel.model_config`, which closes three more.
-33. `api/routers/images.py:284` — the port-error mapping is a per-route ladder,
+33. ✅ `api/routers/images.py:284` — the port-error mapping is a per-route ladder,
     so `PortRateLimited` and `PortAuthFailed` escape as bare `500 text/plain`.
 34. ✅ `composition.py:1029,1066` — two scope factories differing only in whether
     they commit, stated only in prose.

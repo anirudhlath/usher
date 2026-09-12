@@ -702,8 +702,7 @@ def test_the_service_holds_no_repository_it_could_read_a_household_from() -> Non
 
 
 def test_the_ledger_row_carries_the_id_type_the_table_is_keyed_on() -> None:
-    """`llm_calls.id` is a UUIDv7 minted by `new_id()`. The ledger's only read
-    is `list_since`, which windows and orders on `at` and never touches `id`,
-    so nothing downstream would notice a second row keyed differently until an
-    insert conflicted."""
+    """`llm_calls.id` is a UUIDv7 minted by `new_id()`. The port has no read
+    and the dashboards group on `at`, so nothing downstream would notice a
+    second row keyed differently until an insert conflicted."""
     assert LLMCall.model_fields["id"].annotation is uuid.UUID

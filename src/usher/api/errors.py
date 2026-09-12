@@ -1,9 +1,10 @@
 """Exception handlers that hold across every route, present and future.
 
-Two handlers live here. The first is a security control rather than a
-formatting choice, and the second wraps PRD 07's RFC 9457 envelope around
-it -- *around*, not over: the envelope composes with the stripping, and
-nothing below may undo it.
+Three handlers live here. The first is a security control rather than a
+formatting choice, the second wraps PRD 07's RFC 9457 envelope around it --
+*around*, not over: the envelope composes with the stripping, and nothing
+below may undo it -- and the third puts the two port failures no route can
+answer usefully inside the same envelope.
 
 **A 422 may not echo the request body.** FastAPI's default
 `request_validation_exception_handler` answers with
@@ -68,9 +69,11 @@ drift this module already exists to prevent.
 """
 
 from collections.abc import Mapping, MutableMapping
+from math import ceil
 from typing import Any, Final
 
 from fastapi import HTTPException, Request
+from fastapi import status as http_status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -78,6 +81,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode, ProblemResponse
+from usher.ports.errors import PortAuthFailed, PortRateLimited
 
 # The key pydantic puts the offending value under. Named once so the
 # stripping below reads as what it is.
@@ -296,3 +300,69 @@ async def http_error_as_a_problem_document(request: Request, exc: Exception) -> 
         detail=str(exc.detail),
         headers=exc.headers,
     )
+
+
+#: How long a client is asked to wait after a transient upstream failure that
+#: gave no hint of its own. Short, because the failure it follows is an
+#: upstream that did not answer and the client is a screen with a hole in it --
+#: not a rate limit this service has any measurement of.
+RETRY_AFTER_SECONDS: Final = 5
+
+#: Fixed sentences, never interpolated from the exception. A port error's
+#: message may carry a URL, a host or a provider path; these ride to a client
+#: that has no business with any of them.
+_RATE_LIMITED_DETAIL: Final = "an upstream asked this server to slow down"
+_AUTH_FAILED_DETAIL: Final = "an upstream refused this server's credentials"
+
+
+def _retry_after(exc: PortRateLimited) -> int:
+    """The upstream's own hint in whole seconds, or this module's default.
+
+    A fixed number would tell a client to come back before the window the
+    upstream named has closed, which is how a proxy earns a longer ban. RFC
+    9110's `delay-seconds` is an integer and a sub-second hint still has to
+    mean *wait*, so it rounds up rather than to zero.
+    """
+    hint = exc.retry_after
+    return RETRY_AFTER_SECONDS if hint is None else max(1, ceil(hint))
+
+
+async def port_error_as_a_problem_document(request: Request, exc: Exception) -> Response:
+    """`PortRateLimited` and `PortAuthFailed` as the envelope, on every route.
+
+    **Registered for those two exactly, and not for `UsherPortError`.** What a
+    route should answer for an unreachable *upstream* is the route's own
+    decision: `api/routers/rows.py` deliberately lets `PortUnavailable` become
+    a 500, because the thing it could not reach is Postgres and a 503 there
+    would claim one endpoint is degraded in a deployment where every one is.
+    These two have no second reading -- nothing in Usher rate-limits or
+    authenticates against its own database -- so the answer is the same
+    wherever they are raised, which is what makes a handler the right home for
+    them and a per-route `except` the wrong one.
+
+    **No new `ProblemCode`.** ADR-0030's vocabulary already gives
+    `source_unavailable` to a transient upstream at 503, and both of these are
+    that: a 429 is the most transient failure there is, and a credential the
+    upstream refused is a 503 without a `Retry-After` for the reason
+    `PortDataMalformed` is one in `api/routers/images.py` -- asking again
+    produces the same answer.
+    """
+    if isinstance(exc, PortRateLimited):
+        problem = ProblemException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            code=ProblemCode.SOURCE_UNAVAILABLE,
+            detail=_RATE_LIMITED_DETAIL,
+            headers={"Retry-After": str(_retry_after(exc))},
+        )
+    elif isinstance(exc, PortAuthFailed):
+        problem = ProblemException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            code=ProblemCode.SOURCE_UNAVAILABLE,
+            detail=_AUTH_FAILED_DETAIL,
+        )
+    else:
+        # Same obligation as the two handlers above: an error path must not
+        # raise a second exception. Unreachable while the registration matches
+        # the branches, which is what this arm exists to survive.
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    return await http_error_as_a_problem_document(request, problem)

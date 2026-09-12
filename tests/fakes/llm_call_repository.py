@@ -72,10 +72,6 @@ there, against a *correct* implementation. Every value in
 fake's doing rather than the column's.
 """
 
-from collections.abc import Sequence
-
-from pydantic import AwareDatetime
-
 from usher.domain.curation import LLMCall
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import LLMCallRepository
@@ -83,13 +79,8 @@ from usher.ports.repository import LLMCallRepository
 
 class FakeLLMCallRepository(LLMCallRepository):
     def __init__(self) -> None:
-        #: Every recorded call, in the order it was recorded -- the table, not
-        #: a screen. **Insertion order, never `at` order**, which is what makes
-        #: `list_since`'s sort below observable on this arm at all: a fake that
-        #: kept this list sorted would answer the ordering case correctly with
-        #: the `sorted()` deleted, and the contract's one guard against an
-        #: unordered read would be structural here and load-bearing only
-        #: against Postgres.
+        #: Every recorded call, in the order it was recorded -- the table,
+        #: not a screen. The port has no read, so nothing here sorts.
         self.calls: list[LLMCall] = []
 
     async def record(self, call: LLMCall) -> None:
@@ -106,25 +97,3 @@ class FakeLLMCallRepository(LLMCallRepository):
         # which is exactly what `test_two_calls_for_one_generation_are_two_
         # rows` exists to make false.
         self.calls.append(call)
-
-    async def list_since(
-        self, since: AwareDatetime, *, until: AwareDatetime | None = None
-    ) -> Sequence[LLMCall]:
-        # Half-open on purpose, matching the port and the SQL: `>= since` and
-        # `< until`, so a call landing exactly on a window edge belongs to one
-        # window rather than to both. Written as two explicit comparisons
-        # rather than as a chained `since <= call.at < until`, because the
-        # `until is None` arm has no upper bound to chain to and the chained
-        # spelling would need the same branch anyway.
-        #
-        # No `ok` filter and no `purpose` filter -- the read is exactly as wide
-        # as the write, which is what keeps the failures in the spend.
-        found = [
-            call for call in self.calls if call.at >= since and (until is None or call.at < until)
-        ]
-        # `key=` on `at` alone, and the sort is stable, so two calls sharing a
-        # timestamp come back in the order they were recorded. Postgres makes
-        # no such promise for a tie, and the contract deliberately seeds no
-        # tie: an assertion that depended on one would pass here and be a coin
-        # flip there.
-        return sorted(found, key=lambda call: call.at)

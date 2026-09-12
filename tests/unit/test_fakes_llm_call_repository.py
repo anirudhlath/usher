@@ -24,8 +24,8 @@ from usher.domain.curation import LLMCall
 class FakeLLMCallLedger(LLMCallLedger):
     """Reads the fake's own list.
 
-    Bypasses nothing, because there is nothing to bypass: `record()` is still
-    the only writer either arm has, and M10's `list_since` is a read. It is an
+    Bypasses nothing, because there is nothing to bypass: `record()` is the
+    only writer either arm has, and the port has no read at all. It is an
     `LLMCallLedger` rather than a direct reach into `repository.calls` so that
     the *same* observation is made on both arms -- the contract asserts through
     this interface and cannot accidentally learn something only one

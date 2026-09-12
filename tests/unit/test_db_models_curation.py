@@ -252,15 +252,11 @@ def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None
     per generation per household per night — a write cost bounded by the
     curation cadence.
 
-    **And they have a reader as of M10**: `LLMCallRepository.list_since` is
-    `WHERE at >= :since ORDER BY at`, which is `ix_llm_calls_at`'s own query,
-    so the refusal is discharged rather than only priced.
-    `test_the_cost_ledger_has_no_read_method` -- which asserted the absence and
-    named its own deletion as the exit condition -- retired in the commit that
-    added the read; `tests/unit/test_ports.py`'s parametrised entry now pins
-    `{"record", "list_since"}`. The index shipped one revision ahead of the
-    reader because M10 gets one migration and a reader task authoring its own
-    DDL would be a second head.
+    **And their reader is Grafana rather than `src/`**: the cost-anomaly
+    alert's own `WHERE at >= :since` is what `ix_llm_calls_at` serves, which
+    `tests/integration/test_cost_anomaly_query.py` asserts against a real
+    plan. The port carries an append and no read, pinned as an exact set by
+    `tests/unit/test_ports.py`'s parametrised entry.
 
     A whole-set comparison, not "the two named ones are present": what this
     guards is a *third* index added on the strength of a sentence, and such an

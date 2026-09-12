@@ -77,10 +77,10 @@ image it holds.
 
 ## Failure
 
-Five *intended* answers, each a problem document from **ADR-0030**'s closed
-vocabulary rather than FastAPI's default `{"detail": ...}` shape -- **and a
-sixth this route does not intend and has not stopped**, measured 2026-08-20 and
-recorded in the last row rather than left out of the table:
+Seven answers, each a problem document from **ADR-0030**'s closed vocabulary
+rather than FastAPI's default `{"detail": ...}` shape. The last two are not
+this route's: an exception handler on the app answers them, so every route
+that reaches an upstream has them (`api/errors.py`).
 
 | condition | status | code |
 |---|---|---|
@@ -89,15 +89,8 @@ recorded in the last row rather than left out of the table:
 | the CDN timed out, refused, or answered 408 or 5xx | 503 | `source_unavailable`, `Retry-After` |
 | the CDN answered something else unusable | 503 | `source_unavailable`, **no** `Retry-After` |
 | `w` is not a positive integer | 422 | `validation_failed` |
-| 🔴 the CDN answered **429**, or **401/403** | **500** | **none -- `text/plain`** |
-
-🔴 **This heading read *"Five answers and no sixth"* until 2026-08-20, 48 lines
-above the ⚠️ paragraph that measures the sixth.** The count of *answers* was
-never five: `PortRateLimited` and `PortAuthFailed` reach no `except` in
-`get_image`, so Starlette answers a bare 500 and this module's whole premise --
-that every failure here is an RFC 9457 document -- is false on two arms. The
-row is in the table because a defect kept in prose beneath a table that
-contradicts it is how a reader comes away with the table.
+| the CDN answered **429** | 503 | `source_unavailable`, `Retry-After` |
+| the CDN answered **401/403** | 503 | `source_unavailable`, **no** `Retry-After` |
 
 **Rows two and four are both `PortDataMalformed` and they are not the same
 event**, which is the whole of what C4's `MediaTypeNotServable` subclass buys
@@ -136,34 +129,20 @@ neither is setting the other's alarm rate, which is the frequency half of the
 test `.claude/rules/ports-and-error-taxonomy.md` states. ADR-0030 carries the
 sample, the populations it could not reach, and the named event that reopens it.
 
-⚠️ **Two upstream failures reach neither arm below, and this is a live gap
-rather than a design.** `port_error_for` answers a 429 with `PortRateLimited`
-and a 401/403 with `PortAuthFailed`, and **neither subclasses
-`PortUnavailable`**, so both escape `get_image` and Starlette answers a bare
-`500 text/plain` -- outside the envelope this module exists to keep. Measured
-2026-08-20 through a real `create_app()`, with `PortUnavailable`'s `503
-application/problem+json` as the control, and independently in review by
-driving the real `ProviderCdnImageFetcher` over an `httpx.MockTransport` so the
-whole chain ran. Never observed live (0 in F3's 250-request run; 130,750
-requests to two upstreams have never produced a 429 at all). **Owned by PRD
-09's carried debt**, which is where a finding gets a schedule rather than only
-a neighbour.
+**The last two rows are deliberately not an `except` here.** `port_error_for`
+answers a 429 with `PortRateLimited` and a 401/403 with `PortAuthFailed`, and
+**neither subclasses `PortUnavailable`**, so a ladder is exactly the shape that
+let both escape as a bare `500 text/plain` for a milestone. A route's `except`
+list encodes an assumption about what its adapter can raise that nothing type
+checks; the handler cannot be forgotten by the next route.
 
-**Why F3 measured it and did not fix it, stated precisely because the obvious
-reason is the weaker one.** It is *not* that the repair is hard or forks the
-vocabulary: the 429 half needs no vocabulary decision at all -- `PortRateLimited`
-is unambiguously transient and `503 source_unavailable` with a `Retry-After`
-already exists one arm below for exactly that. The reason is that **F3's
-pre-registered bar fixed the declining deliverable as "exactly this and nothing
-more" before the first request**, and shipping a behaviour change inside it
-would have been editing the bar after seeing the run -- the one thing a
-pre-registration exists to forbid. **The gap was pre-registered, not
-discovered**: the bar's own classification table gave `escapes_the_route` its
-own bucket, with the note *"the route catches none of these"*, before any
-socket opened. The 401/403 half does still carry a real question (the CDN needs
-no credential, so one means something in front of it refused -- the
-captive-portal population wearing a status), and that question belongs to
-whoever takes the debt.
+**Both are `source_unavailable` and no member was minted.** A 429 is the most
+transient upstream failure there is, and a 401/403 against a CDN that needs no
+credential means something in front of it refused -- the captive-portal
+population wearing a status -- which is an upstream fault either way.
+`Retry-After` is what separates them, exactly as it separates rows three and
+four: the rate limit carries the upstream's own hint when it sent one and this
+project's default when it did not, and the refusal carries none.
 """
 
 import uuid
@@ -176,7 +155,7 @@ from fastapi.responses import Response
 from usher.api.caching import conditional_bytes_response
 from usher.api.deps import ImageProxyServiceDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
-from usher.api.errors import ProblemException
+from usher.api.errors import RETRY_AFTER_SECONDS, ProblemException
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.images import (
     SUPPORTED_MEDIA_TYPES,
@@ -192,14 +171,6 @@ router = APIRouter(tags=["images"])
 #: change under a client is the id -- which `uq_images_owner_provider_path`
 #: is what stops changing, and which is why `immutable` ships beside it.
 _MAX_AGE: Final = timedelta(days=365)
-
-#: How long a client should wait before re-asking after a transient upstream
-#: failure. Short, because the failure it follows is a CDN that did not answer
-#: and the client is a screen with a hole in it -- not a rate limit this
-#: service has any measurement of. `ProviderCdnImageFetcher` deliberately runs
-#: with no throttle for that reason (ADR-0032: the image CDN publishes no rate
-#: limit), so a longer number here would be invented rather than measured.
-_RETRY_AFTER_SECONDS: Final = 5
 
 #: What `/openapi.json` says a 200 carries, derived from the store's own closed
 #: map rather than restated. `dto/health.py`'s standard -- a typed response
@@ -286,16 +257,14 @@ async def get_image(
         # construction, so the client is told to come back -- and the header
         # saying so is what separates this arm from the one below.
         #
-        # **Not a 429**, and this comment said otherwise until 2026-08-20.
-        # `port_error_for` answers 429 with `PortRateLimited` and 401/403 with
-        # `PortAuthFailed`; neither subclasses `PortUnavailable`, so neither is
-        # caught here or anywhere below, and both leave as a bare 500. The
-        # module docstring carries the measurement and why F3 did not fix it.
+        # **Not a 429 and not a 401/403.** Neither `PortRateLimited` nor
+        # `PortAuthFailed` subclasses `PortUnavailable`, so neither reaches
+        # this arm; `api/errors.py`'s handler answers both, for every route.
         raise ProblemException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code=ProblemCode.SOURCE_UNAVAILABLE,
             detail="the provider image CDN did not answer this request",
-            headers={"Retry-After": str(_RETRY_AFTER_SECONDS)},
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from exc
     except MediaTypeNotServable as exc:
         # **Before its parent arm, and the order is the point.** This is the

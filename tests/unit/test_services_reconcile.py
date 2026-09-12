@@ -65,6 +65,7 @@ from usher.services.reconcile import (
     CEILING_ERROR_CODE,
     RETRACTION_ERROR_CODE,
     ReconcileService,
+    _recorded_failure,
 )
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
@@ -621,7 +622,7 @@ async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
     )
 
     assert run.status is SyncRunStatus.FAILED
-    assert (run.error or "").startswith(CEILING_ERROR_CODE), (
+    assert run.error_code == CEILING_ERROR_CODE, (
         "the premise: this run failed on its ceiling and not on a refused sweep, which is "
         f"the arithmetic that makes the retraction assertions below able to fail: {run.error}"
     )
@@ -677,18 +678,17 @@ async def test_a_walk_stopped_at_the_gap_ceiling_tells_the_operator_what_to_run(
 
 async def test_the_gap_ceilings_error_is_distinguishable_from_the_dead_mans_switch() -> None:
     """Two different things end a walk early and both land in the same
-    `sync_runs.error` column, meaning opposite things.
+    `sync_runs` row, meaning opposite things.
 
     `MAX_PAGES` is `EmbyAdapter`'s dead-man's switch against a server that
     ignores `StartIndex`; exhausting it raises `PortDataMalformed` and is a
     broken upstream to investigate. The gap ceiling is Usher stopping on
     purpose and is closed by one command. An operator reads the sentence; an
     alert rule, a dashboard or a later reader has to be able to tell them
-    apart **without parsing English**, which is what `CEILING_ERROR_CODE`
-    being the first token of one and appearing in neither the other nor the
-    adapter is for.
+    apart **without parsing English**, which is what `error_code` carrying
+    `CEILING_ERROR_CODE` on one and nothing on the other is for.
 
-    Both strings are produced rather than transcribed: the dead-man's switch
+    Both failures are produced rather than transcribed: the dead-man's switch
     comes out of the **real** `EmbyAdapter` over a handler that never ends,
     so a reworded message in `adapters/emby/adapter.py` cannot silently make
     this case's premise stale.
@@ -723,13 +723,16 @@ async def test_the_gap_ceilings_error_is_distinguishable_from_the_dead_mans_swit
     # `str(exc)`, because that is exactly what `reconcile` writes into the
     # column -- not `repr`, not the class name.
     dead_mans_switch = str(caught.value)
+    # The service's own classifier, driven with the real exception rather than
+    # with a transcription of its message -- the other arm is the run above,
+    # recorded end to end.
+    recorded, code = _recorded_failure(caught.value)
 
-    def is_a_gap_ceiling(error: str) -> bool:
-        """The whole classifier, and it is one line on purpose."""
-        return error.startswith(CEILING_ERROR_CODE)
-
-    assert is_a_gap_ceiling(ceiling_error), ceiling_error
-    assert not is_a_gap_ceiling(dead_mans_switch), dead_mans_switch
+    assert bounded.error_code == CEILING_ERROR_CODE
+    assert code is None, f"a broken upstream is not a ceiling: {code}"
+    assert recorded == dead_mans_switch, (
+        "the premise: what would be stored really is the adapter's own message"
+    )
     assert CEILING_ERROR_CODE not in dead_mans_switch
     # ...and the other direction, so "distinguishable" is not carried by one
     # token that a later edit could paste into both. `StartIndex` is the
@@ -902,6 +905,83 @@ async def test_a_failed_walk_still_reported_the_batches_it_did_finish(
     assert [event.data["items_seen"] for event in progress] == [2]
 
 
+async def test_a_bounded_walk_records_its_kind_in_a_column_rather_than_as_a_prefix() -> None:
+    """The failure *kind* is `sync_runs.error_code`; `error` is prose only.
+
+    The wrong implementation this kills is the one that shipped: the token
+    written as the first word of a free-text column and read back with
+    `startswith`. A column an operator can reword is not a column an alert may
+    parse, and the two codes differ from each other only by a substring match
+    that any reworded sentence can break.
+    """
+    fixture = _Fixture(batch_size=3)
+    for index in range(10):
+        fixture.adapter.seed(_item(f"m{index}"), LATER)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    run = await fixture.service.reconcile(
+        fixture.source, SyncRunKind.DELTA, fixture.adapter, max_items=4
+    )
+
+    assert run.status is SyncRunStatus.FAILED
+    assert run.error_code == CEILING_ERROR_CODE
+    assert CEILING_ERROR_CODE not in (run.error or ""), (
+        f"the kind is the column, so the sentence must not carry it too: {run.error}"
+    )
+    assert "usher sync --kind full" in (run.error or ""), (
+        "the premise: this is still the bounded walk's own message, so the absence above "
+        "is about the prefix rather than about an empty column"
+    )
+
+
+async def test_a_refused_sweep_records_its_kind_in_a_column_rather_than_as_a_prefix() -> None:
+    """The refusal's half of the same rule, and the one an operator has a
+    command for.
+
+    `ports/ingest.py` builds this sentence from three numbers and is a standing
+    candidate for rewording, which is exactly why the CLI must not read it: the
+    kind is `error_code` and the numbers stay prose.
+    """
+    fixture = _Fixture()
+    for index in range(4):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    for index in range(4):
+        fixture.adapter.forget(f"m{index}")
+
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert run.status is SyncRunStatus.FAILED
+    assert run.error_code == RETRACTION_ERROR_CODE
+    assert RETRACTION_ERROR_CODE not in (run.error or ""), (
+        f"the kind is the column, so the sentence must not carry it too: {run.error}"
+    )
+    assert "4 of 4" in (run.error or ""), (
+        "the premise: the refusal's own numbers survive, so the absence above is about "
+        "the prefix rather than about a run that failed for some other reason"
+    )
+    assert run.items_retracted == 0
+
+
+async def test_a_transport_failure_carries_no_error_code() -> None:
+    """`error_code` is null for every failure an operator has no command for.
+
+    The wrong implementation this kills is a column filled with a catch-all
+    member: `--allow-full-retraction` is offered on exactly one kind, and a
+    third code meaning "something else" is how it starts being offered on all
+    of them.
+    """
+    fixture = _Fixture()
+    fixture.adapter.seed(_item("m0"), T0)
+    fixture.adapter.go_offline()
+
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+
+    assert run.status is SyncRunStatus.FAILED
+    assert run.error, "the premise: the run really did record a failure"
+    assert run.error_code is None
+
+
 def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts() -> None:
     """These strings leave the process, so no in-repo reader can guard them.
 
@@ -915,13 +995,13 @@ def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts
     value was pinned by anything, and S9 inherited the hole by copying the
     precedent.
 
-    **They are not internal names.** Both are prefixes on `sync_runs.error`, a
-    durable column that `usher sync-status` prints and `GET /admin/sync`
-    serves, and `CEILING_ERROR_CODE`'s own comment states the purpose: *"a
-    dashboard, an alert rule, or the next reader of this file has to be able to
-    tell the two apart without parsing English"*. A consumer keying on one is
-    outside this repository by construction, exactly like a metric name in PRD
-    10's catalogue -- which is pinned by literal for the same reason.
+    **They are not internal names.** Both are values of `sync_runs.error_code`,
+    a durable column that outlives this process, and `CEILING_ERROR_CODE`'s own
+    comment states the purpose: *"a dashboard, an alert rule, or the next
+    reader of this file has to be able to tell the two apart without parsing
+    English"*. A consumer keying on one is outside this repository by
+    construction, exactly like a metric name in PRD 10's catalogue -- which is
+    pinned by literal for the same reason.
 
     So the literal is the assertion, and this is the one place in the project
     where changing one of these strings is supposed to be inconvenient: a
@@ -930,13 +1010,10 @@ def test_the_two_error_codes_are_pinned_by_value_because_they_are_wire_artefacts
 
     They must also be **distinct**, which is the whole point of having two: a
     bounded walk and a refused sweep both land in this column and an operator
-    acts on them differently.
+    acts on them differently. Compared by equality, not by prefix -- the kind
+    is its own column now, so there is no sentence for one value to shadow the
+    other in.
     """
     assert CEILING_ERROR_CODE == "gap_delta_ceiling"
     assert RETRACTION_ERROR_CODE == "availability_ceiling"
     assert CEILING_ERROR_CODE != RETRACTION_ERROR_CODE
-    # Neither may be a prefix of the other: both are matched with `startswith`
-    # or `in` against the same column, so an overlap would make one answer for
-    # the other on the surface an operator reads.
-    assert not CEILING_ERROR_CODE.startswith(RETRACTION_ERROR_CODE)
-    assert not RETRACTION_ERROR_CODE.startswith(CEILING_ERROR_CODE)

@@ -318,28 +318,28 @@ async def test_a_refused_sweep_records_the_token_the_cli_matches_on(
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """`sync_runs.error` begins with `RETRACTION_ERROR_CODE`, and the CLI reads it.
+    """`sync_runs.error_code` holds `RETRACTION_ERROR_CODE`, and the CLI reads it.
 
     **Two halves of one agreement, and this is the half a literal in the other
     would hide.** `cli._sync_failed` names `--allow-full-retraction` only when
-    a failed run's `error` carries this token, because that flag resolves a
-    refusal and nothing else in this column -- an escape hatch offered for
-    every read timeout is one an operator learns to paste without reading. If
-    the service stopped writing the prefix, the CLI would silently stop
-    offering the flag on the one failure it fixes, and
-    `tests/unit/test_cli_errors.py` would stay green because it composes its
-    own row. So the token is asserted here, against a **real** refusal raised
-    by real Postgres, and imported there rather than spelled twice.
+    a failed run carries this code, because that flag resolves a refusal and
+    nothing else -- an escape hatch offered for every read timeout is one an
+    operator learns to paste without reading. If the service stopped writing
+    the column, the CLI would silently stop offering the flag on the one
+    failure it fixes, and `tests/unit/test_cli_errors.py` would stay green
+    because it composes its own row. So the code is asserted here, against a
+    **real** refusal raised by real Postgres and read back through the
+    repository, and imported there rather than spelled twice.
 
     The negative arm is the point of the second assertion: a transport failure
-    must **not** carry it. Without that, `_recorded_error` returning the prefix
+    must **not** carry it. Without that, `_recorded_failure` returning the code
     unconditionally passes -- and the flag would be advertised for every
-    failure, which is the defect the token exists to prevent rather than a
+    failure, which is the defect the column exists to prevent rather than a
     weaker version of it.
 
-    The prefix and not a new column, because ADR-0015's row is already what
-    `usher sync-status` and `GET /admin/sync` read, and S9 makes no schema
-    change.
+    A column and not a prefix on `error`: that sentence is built in
+    `ports/ingest.py` from three numbers and PRD 08 lets it be reworded in any
+    release, so a classifier reading it is one wording away from silent.
     """
     for index in range(10):
         adapter.items[f"m{index}"] = _item(f"m{index}")
@@ -352,8 +352,11 @@ async def test_a_refused_sweep_records_the_token_the_cli_matches_on(
     refused = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
 
     assert refused.status is SyncRunStatus.FAILED
-    assert (refused.error or "").startswith(f"{RETRACTION_ERROR_CODE}:"), (
-        f"the CLI matches this prefix and nothing else: {refused.error!r}"
+    assert refused.error_code == RETRACTION_ERROR_CODE, (
+        f"the CLI matches this column and nothing else: {refused.error_code!r}"
+    )
+    assert RETRACTION_ERROR_CODE not in (refused.error or ""), (
+        f"the kind is the column, so the sentence must not carry it too: {refused.error!r}"
     )
 
     # The negative arm, on the same source and the same service: a walk that
@@ -361,7 +364,7 @@ async def test_a_refused_sweep_records_the_token_the_cli_matches_on(
     adapter.fail_after = 0
     transport = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
     assert transport.status is SyncRunStatus.FAILED, "the premise: this walk failed too"
-    assert RETRACTION_ERROR_CODE not in (transport.error or ""), (
+    assert transport.error_code is None, (
         "a transport failure must not advertise a flag that cannot fix it"
     )
 
@@ -548,7 +551,7 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
 
     # -- arm 2: and it is recorded as a failure, with a named reason -------
     assert truncated.status is SyncRunStatus.FAILED
-    assert (truncated.error or "").startswith(CEILING_ERROR_CODE), truncated.error
+    assert truncated.error_code == CEILING_ERROR_CODE, truncated.error
     stored_run = await runs.get(truncated.id)
     assert stored_run is not None
     assert stored_run.status is SyncRunStatus.FAILED, (

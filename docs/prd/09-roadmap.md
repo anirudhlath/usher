@@ -1007,21 +1007,24 @@ suspicion.
   ⚠️ **Re-measured 2026-09-07 at `cb5ac06`, migration head `m10c`, and
   cross-checked against a running database for the first time. The five verdicts
   stand; three of the *figures* under them moved, and the moves have two causes
-  rather than one — four columns added across `m10a`, `m10b` and `m10c`, and
-  `m10a`'s rating rename redirecting a COPY writer off a column.**
-  `uv run python scripts/audit_bounded_columns.py --summary` prints **83**
-  bounded columns (`VARCHAR 28, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`),
+  rather than one — five columns added across `m10a`, `m10b`, `m10c` and
+  `m10f`, and `m10a`'s rating rename redirecting a COPY writer off a column.**
+  `uv run python scripts/audit_bounded_columns.py --summary` prints **84**
+  bounded columns (`VARCHAR 29, INTEGER 50, NUMERIC 1, BIGINT 1, HALFVEC 3`),
   **7** CHECK-only value bounds, and under the adopted `path` reading
-  `safe 18, translated 33, exposed-copy 31, exposed-sqlalchemy 1`. The chain
+  `safe 18, translated 34, exposed-copy 31, exposed-sqlalchemy 1`. The chain
   from F8's own head is `m09f` **79** → `m10a` **80** (`titles.imdb_num_votes`)
   → `m10b` **81** (`sync_runs.position`) → `m10c` **83**
-  (`search_queries.surface`/`tier`), each printed by `--at`. `--at m08b` still
+  (`search_queries.surface`/`tier`) → `m10f` **84** (`sync_runs.error_code`;
+  `m10d` and `m10e` add indexes and no column, so neither moves the census),
+  each printed by `--at`. `--at m08b` still
   prints `VARCHAR 22, INTEGER 44, NUMERIC 1` = **67**, so the one figure this
   table reproduces reproduces a second time, three migrations later.
-  🔴 **`--check` exits 0 and `tests/unit/test_bounded_column_ledger.py` is
-  green throughout: the generator was carried through `m10a`, `m10b` and `m10c`,
-  and this prose was not.** A drift guard that compares the script against its
-  own published constants cannot see the document drifting away from both — the
+  **`--check` exits 0 and `tests/unit/test_bounded_column_ledger.py` is green
+  throughout: the generator is carried through `m10a`, `m10b`, `m10c` and
+  `m10f`, and this prose with it.** A drift guard that compares the script
+  against its own published constants cannot see the document drifting away
+  from both — the
   last unclosed corner of ADR-0044's *"a ledger that agrees with itself is not a
   ledger that is right"*.
 
@@ -1260,8 +1263,15 @@ suspicion.
   by an observation, and the honest closing note names which of the two the
   reader is getting** — is in
   `.claude/rules/ports-and-error-taxonomy.md`.
-- 🔴 **`GET /images/{image_id}` catches two of the four families
-  `port_error_for` returns, so a CDN 429 or 401/403 leaves the RFC 9457 envelope
+- ✅ **Closed by the polish milestone's 1F: `PortRateLimited` and
+  `PortAuthFailed` are answered by an exception handler registered on the app
+  (`api/errors.py`), so every route gets the envelope rather than the route that
+  happened to raise.** Both are `503 source_unavailable`, the rate limit
+  carrying the upstream's own `Retry-After` and the refused credential carrying
+  none; no `ProblemCode` was minted. The finding, left standing because its
+  transferable half is not about images:
+  🔴 **`GET /images/{image_id}` caught two of the four families
+  `port_error_for` returns, so a CDN 429 or 401/403 left the RFC 9457 envelope
   as a bare `500 text/plain`** — found by M10's F3 on 2026-08-20 while measuring
   something else, and confirmed independently in review. `port_error_for` answers
   429 with `PortRateLimited` and 401/403 with `PortAuthFailed`; **neither

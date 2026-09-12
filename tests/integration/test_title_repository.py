@@ -1344,7 +1344,7 @@ class TestPostgresTitleRepositoryNaturalKeys(TitleRepositoryNaturalKeyContract):
     """`resolve_natural_keys` against real Postgres.
 
     The half with teeth: `WITH ORDINALITY` over four parallel arrays, three
-    `LEFT JOIN`s whose precedence is a `COALESCE`, and `p.kind` compared
+    subquery rungs whose precedence is a `COALESCE`, and `p.kind` compared
     against a `VARCHAR(16)` column -- all of which the fake reproduces with a
     Python scan and could reproduce wrongly. The statement count is one case
     further down and is Postgres-only by construction.

@@ -38,7 +38,12 @@ from usher.api.deps import get_image_proxy_service
 from usher.config import Settings
 from usher.domain.enums import ImageKind
 from usher.domain.image import Image
-from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+)
 from usher.ports.images import (
     IMAGE_LADDER,
     SUPPORTED_MEDIA_TYPES,
@@ -512,13 +517,10 @@ async def test_an_upstream_that_did_not_answer_is_a_503_that_says_come_back(
 ) -> None:
     """`PortUnavailable` -- a timeout, a refused connection, a 408 or a 5xx.
 
-    **Not a 429**, which this docstring claimed until 2026-08-20:
-    `port_error_for` answers 429 with `PortRateLimited` and 401/403 with
-    `PortAuthFailed`, neither of which subclasses `PortUnavailable`, so neither
-    reaches this arm or any other and both leave `GET /images/{id}` as a bare
-    500. Measured through a real `create_app()` on 2026-08-20 with this case's
-    own exception as the control; recorded in ADR-0030's image amendment and in
-    `api/routers/images.py`, and deliberately unfixed by M10's F3.
+    **Not a 429 and not a 401/403.** Neither `PortRateLimited` nor
+    `PortAuthFailed` subclasses `PortUnavailable`, so neither reaches this arm;
+    `api/errors.py`'s app-wide handler answers both, and the three cases below
+    are what hold that apart from this one.
 
     Transient by construction, so the answer carries `Retry-After`. Every
     field of the envelope is asserted rather than only the status: a bare
@@ -538,6 +540,87 @@ async def test_an_upstream_that_did_not_answer_is_a_503_that_says_come_back(
     assert body["status"] == 503
     assert body["type"] == "https://usher.dev/errors/source-unavailable"
     assert body["instance"] == f"/images/{seeded}"
+    assert store.puts == 0
+
+
+async def test_a_rate_limited_upstream_is_the_envelope_like_every_other_failure(
+    images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
+) -> None:
+    """`PortRateLimited` -- the upstream asked to be backed off.
+
+    The wrong implementation this kills is a route-level `except`: this
+    exception subclasses neither `PortUnavailable` nor `PortDataMalformed`, so
+    a ladder that catches those leaves it to Starlette as a bare
+    `500 text/plain`. The answer is a handler on the app, because the next
+    route's 429 has to inherit it rather than remember it.
+
+    `Retry-After` carries the **upstream's own hint** when it gave one, which
+    is the whole of what `PortRateLimited.retry_after` is for -- a fixed
+    number here would tell a client to come back before the window it was
+    given has closed.
+
+    No new `ProblemCode`: ADR-0030's vocabulary already carries
+    `source_unavailable` at 503 for a transient upstream, and a rate limit is
+    the most transient thing in it.
+    """
+    fetcher = FakeImageFetcher(answers=[PortRateLimited(retry_after=30)])
+    async with serving(ImageProxyService(images=images, fetcher=fetcher, store=store)) as client:
+        response = await client.get(f"/images/{seeded}", params={"w": 780})
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.headers["retry-after"] == "30"
+    body = response.json()
+    assert body["code"] == "source_unavailable"
+    assert body["status"] == 503
+    assert body["type"] == "https://usher.dev/errors/source-unavailable"
+    assert body["instance"] == f"/images/{seeded}"
+    assert store.puts == 0
+
+
+async def test_a_rate_limit_with_no_hint_still_names_a_wait(
+    images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
+) -> None:
+    """`retry_after` is `None` when the upstream sent no `Retry-After`, and a
+    503 without one is a client guessing.
+
+    The pair to the case above rather than a duplicate: together they say the
+    header is *derived* from the hint rather than either always the default or
+    always the upstream's, and only one of the two can catch each mistake.
+    """
+    fetcher = FakeImageFetcher(answers=[PortRateLimited()])
+    async with serving(ImageProxyService(images=images, fetcher=fetcher, store=store)) as client:
+        response = await client.get(f"/images/{seeded}", params={"w": 780})
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "5"
+    assert response.json()["code"] == "source_unavailable"
+
+
+async def test_an_upstream_that_refused_this_servers_credentials_is_the_envelope_too(
+    images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
+) -> None:
+    """`PortAuthFailed` -- the other family no route's `except` ladder catches.
+
+    **No `Retry-After`, and that absence is the contract.** The image CDN needs
+    no credential, so a 401 or 403 means something in front of it refused;
+    asking again with the same credential produces the same answer, exactly as
+    for the malformed arm one case up. `Retry-After`'s presence is what tells a
+    retry that may work from one that never will.
+
+    `detail` names no provider, no host and no path: it is written here rather
+    than interpolated from an exception whose message may carry one.
+    """
+    fetcher = FakeImageFetcher(answers=[PortAuthFailed("401 from the CDN at cdn.invalid")])
+    async with serving(ImageProxyService(images=images, fetcher=fetcher, store=store)) as client:
+        response = await client.get(f"/images/{seeded}", params={"w": 780})
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert "retry-after" not in response.headers
+    body = response.json()
+    assert body["code"] == "source_unavailable"
+    assert "cdn.invalid" not in body["detail"]
     assert store.puts == 0
 
 

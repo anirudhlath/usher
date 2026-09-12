@@ -729,12 +729,19 @@ def test_a_malformed_upstream_payload_keeps_its_traceback(
 # was handed, so the body has to run.
 
 
-def _run(kind: SyncRunKind, status: SyncRunStatus, *, error: str | None = None) -> SyncRun:
+def _run(
+    kind: SyncRunKind,
+    status: SyncRunStatus,
+    *,
+    error: str | None = None,
+    error_code: str | None = None,
+) -> SyncRun:
     return SyncRun(
         source_id=new_id(),
         kind=kind,
         status=status,
         error=error,
+        error_code=error_code,
         finished_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
 
@@ -852,20 +859,25 @@ def test_a_refused_sweep_is_reported_at_the_boundary_the_operator_actually_watch
     runs completing must exit **0**, or "raises SystemExit" is satisfied by a
     command that fails unconditionally.
     """
-    # Built the way `ReconcileService._recorded_error` builds it, from the same
-    # constant, because this case and the service are two halves of one
-    # agreement: the CLI matches a token the service has to have written. A
+    # The code comes from the same constant `ReconcileService._recorded_failure`
+    # writes, because this case and the service are two halves of one
+    # agreement: the CLI matches a column the service has to have filled. A
     # literal here would let either side drift and leave both suites green --
     # `test_a_refused_sweep_records_the_token_the_cli_matches_on` in
     # `tests/integration/test_services_reconcile.py` is the other half, and it
-    # drives a real refusal through real Postgres rather than composing a string.
+    # drives a real refusal through real Postgres rather than composing a row.
     refusal = (
-        f"{RETRACTION_ERROR_CODE}: refusing to mark 60 of 180 items unavailable "
-        "in one run (33% exceeds the 25% ceiling); nothing was retracted"
+        "refusing to mark 60 of 180 items unavailable in one run "
+        "(33% exceeds the 25% ceiling); nothing was retracted"
     )
     _sync_against(
         monkeypatch,
-        walk=_run(SyncRunKind.FULL, SyncRunStatus.FAILED, error=refusal),
+        walk=_run(
+            SyncRunKind.FULL,
+            SyncRunStatus.FAILED,
+            error=refusal,
+            error_code=RETRACTION_ERROR_CODE,
+        ),
         watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
     )
 
@@ -883,6 +895,72 @@ def test_a_refused_sweep_is_reported_at_the_boundary_the_operator_actually_watch
         "the refusal is the one sync failure with an escape hatch, and nothing "
         "else in the output names it"
     )
+
+
+def test_the_escape_hatch_is_offered_on_the_column_rather_than_on_the_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal's kind is `error_code`, so a reworded sentence cannot hide it.
+
+    The wrong implementation this kills is the one that shipped: `in
+    (one.error or "")`. `ports/ingest.py` builds that sentence from three
+    numbers and PRD 08 lets it be reworded in any release, so a match on it
+    silently stops offering `--allow-full-retraction` on the one failure that
+    has one. The message here deliberately carries no token at all.
+    """
+    _sync_against(
+        monkeypatch,
+        walk=_run(
+            SyncRunKind.FULL,
+            SyncRunStatus.FAILED,
+            error="refusing to mark 60 of 180 items unavailable in one run",
+            error_code=RETRACTION_ERROR_CODE,
+        ),
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    output = capsys.readouterr()
+    combined = output.out + output.err + str(exit_info.value)
+
+    assert RETRACTION_ERROR_CODE not in (combined.replace("--allow-full-retraction", "")), (
+        "the premise: nothing the command printed carries the token, so a reader of the "
+        "message alone could not have classified this run"
+    )
+    assert "--allow-full-retraction" in combined, (
+        "the refusal is the one sync failure with an escape hatch, and the column is what names it"
+    )
+
+
+def test_a_transport_failure_is_not_offered_the_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The control for the case above: an escape hatch offered for every
+    failure is one people learn to paste without reading.
+
+    `error_code` is null for a read timeout, and a message that happens to
+    mention a ceiling must not be enough to earn the flag.
+    """
+    _sync_against(
+        monkeypatch,
+        walk=_run(
+            SyncRunKind.FULL,
+            SyncRunStatus.FAILED,
+            error=f"{RETRACTION_ERROR_CODE}: read timed out after 30s",
+        ),
+        watch=_run(SyncRunKind.WATCH_STATE, SyncRunStatus.COMPLETED),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    output = capsys.readouterr()
+    combined = output.out + output.err + str(exit_info.value)
+
+    assert "read timed out" in combined, "the premise: the failure really was reported"
+    assert "--allow-full-retraction" not in combined
 
 
 def test_a_sync_whose_runs_all_completed_still_exits_zero(

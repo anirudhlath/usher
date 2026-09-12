@@ -1,10 +1,8 @@
 """`llm_calls` — one row per *attempted* completion, whether or not it worked.
 
-Implements `LLMCallRepository` (`usher.ports.repository`). Two statements and
-no scope -- an insert per attempted completion, and one windowed read over
-`at` for the cost-anomaly evaluation. Still the smallest repository in the
-package, and most of the decisions in it are about what it declines to do:
-there is no filter on `ok`, none on `purpose` or `model`, and no `limit`.
+Implements `LLMCallRepository` (`usher.ports.repository`). One statement and
+no scope: an insert per attempted completion, and no read at all -- every
+consumer of these rows is SQL in Grafana rather than code here.
 
 **Not in `curation.py`, and that module says why in its own docstring**: the
 two tables share a migration because one service writes both in one
@@ -18,10 +16,7 @@ what makes PRD 10's "cost per curated row" a join rather than a correlation on
 timestamps.
 """
 
-from collections.abc import Sequence
-
-from pydantic import AwareDatetime
-from sqlalchemy import DateTime, Numeric, RowMapping, bindparam, text
+from sqlalchemy import DateTime, Numeric, bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,13 +27,8 @@ from usher.domain.curation import LLMCall, LLMPurpose
 from usher.ports.repository import LLMCallRepository
 
 # **Eleven columns named explicitly, never `INSERT INTO llm_calls VALUES
-# (...)`.** Positional values would still be correct today and would silently
-# shift the moment a column is added -- the failure `m08a`'s docstring made
-# foreseeable when it said this table gains readers in M10. `_LIST_SINCE`
-# below is that reader, and it is `SELECT *` into an `extra="forbid"` model
-# for the mirrored reason: a column added to the table without a field on
-# `LLMCall` raises on the read rather than being silently dropped, so the two
-# statements fail in opposite directions on the same drift.
+# (...)`.** Positional values would still be correct today and would shift
+# silently the moment a column is added.
 #
 # One row per statement. `record()` has no batch form and the port says why:
 # every named call site records exactly once -- one completion per generation,
@@ -97,56 +87,6 @@ _INSERT_CALL = text(
 # which is what moved the predicate out of this module and into that one.
 
 
-# **The reader `m08a` deferred and `m10c` shipped the index for.**
-# `SELECT *` rather than eleven names, which is the opposite choice from the
-# `INSERT` above and is this schema's house shape for a read: the row is
-# validated into an `extra="forbid"` model built 1:1 with the table, so a
-# column added to `llm_calls` and not to `LLMCall` raises here instead of
-# being quietly dropped from a cost total.
-#
-# **`at >= :since` is the whole reason `ix_llm_calls_at` exists** -- `m08a`
-# wrote the index out beside this predicate by name ("both `WHERE at >=
-# :since`"), and `test_the_windowed_read_is_served_by_the_time_index` asserts
-# the planner actually chooses it, at a seeded size quoted in that case.
-#
-# **`COALESCE` rather than `(:until IS NULL OR at < :until)`**, and the
-# difference is the plan, not the taste: an `OR` over the ordering column
-# cannot become an index condition, so the unbounded call would fall back to
-# filtering every row the lower bound returned. `COALESCE(:until,
-# 'infinity')` is one comparison the planner can push into the same index
-# scan. `CAST(... AS timestamptz)` and never `::timestamptz`, for the reason
-# the `INSERT`'s comment gives one screen up: SQLAlchemy's bind-parameter
-# regex reads a name followed by `::` as a cast and skips the bind.
-#
-# Half-open, `[since, until)` -- the port's docstring carries the argument. A
-# closed upper bound bills a call landing exactly on midnight to two adjacent
-# days, and a nightly curation run at a fixed hour is what produces those
-# rows.
-#
-# **`ORDER BY at` is declared and is not free to delete.** `llm_calls.id` is a
-# UUIDv7, so id order agrees with `at` order on every fixture that records its
-# rows in the order it wants them back -- the contract's ordering case mints
-# in reverse for exactly that reason.
-#: The statement as text, so `test_the_windowed_read_is_served_by_the_time_index`
-#: can `EXPLAIN` **this** string rather than a transcription of it. A plan
-#: assertion against a hand-copied lookalike measures the copy, and the copy is
-#: what stops tracking the original -- `_LIST_FOR_USER` one module over is
-#: exported for the same reason.
-_LIST_SINCE_SQL = (
-    "SELECT * FROM llm_calls "
-    "WHERE at >= :since AND at < COALESCE(:until, CAST('infinity' AS timestamptz)) "
-    "ORDER BY at"
-)
-
-_LIST_SINCE = text(_LIST_SINCE_SQL).bindparams(
-    # Typed for `_INSERT_CALL`'s reason: a `text()` construct carries no type
-    # information of its own, and an untyped `NULL` on `:until` leaves asyncpg
-    # unable to resolve the `COALESCE`'s type.
-    bindparam("since", type_=DateTime(timezone=True)),
-    bindparam("until", type_=DateTime(timezone=True)),
-)
-
-
 class PostgresLLMCallRepository(LLMCallRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -167,34 +107,6 @@ class PostgresLLMCallRepository(LLMCallRepository):
             self._session, "an llm call violates the ledger's own bounds"
         ):
             await self._session.execute(_INSERT_CALL, _parameters(call))
-
-    async def list_since(
-        self, since: AwareDatetime, *, until: AwareDatetime | None = None
-    ) -> Sequence[LLMCall]:
-        # No `refusals_as_conflict` here and nothing to translate: a `SELECT`
-        # with two typed bounds has no constraint to violate and no value the
-        # column can refuse, so the only failures reachable are transport ones
-        # -- which the port promises to leave alone rather than dress as a
-        # conflict (`test_a_failure_that_is_not_the_rows_fault_is_not_reported_
-        # as_one` is the case that holds the write to the same rule).
-        rows = (
-            (await self._session.execute(_LIST_SINCE, {"since": since, "until": until}))
-            .mappings()
-            .all()
-        )
-        return [_to_domain(row) for row in rows]
-
-
-def _to_domain(row: RowMapping) -> LLMCall:
-    """One stored ledger entry, whole.
-
-    `dict(row)` with no filtering and no name list, unlike
-    `curation._to_domain` -- that one deletes a window label its statement
-    adds, and this statement adds nothing to the table's own columns. So every
-    column `llm_calls` gains reaches an `extra="forbid"` model and raises,
-    which is the drift the `SELECT *` exists to make loud.
-    """
-    return LLMCall.model_validate(dict(row))
 
 
 def _parameters(call: LLMCall) -> dict[str, object]:

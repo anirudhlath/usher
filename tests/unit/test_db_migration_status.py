@@ -15,14 +15,14 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     fails loudly here instead of silently changing what "the" expected head
     means.
     """
-    assert code_head_revision() == "m10e"
+    assert code_head_revision() == "m10f"
 
 
 #: The chain three documents spell out, in the order they spell it: every
 #: revision from `ffa` -- the landing that created
 #: `test_migrations.py`'s `-1` block -- to head inclusive. A literal for
 #: `test_code_head_revision_matches_the_head_migration_on_disk`'s reason, so
-#: the fifteenth landing is a loud red here rather than a silent
+#: the seventeenth landing is a loud red here rather than a silent
 #: disagreement with the prose.
 _REPOINTING_CHAIN = (
     "ffa",
@@ -40,12 +40,20 @@ _REPOINTING_CHAIN = (
     "m10c",
     "m10d",
     "m10e",
+    "m10f",
 )
 
 #: The English cardinal `.claude/rules/db-and-sql.md` and
 #: `tests/integration/test_migrations.py` both write out. Keyed by count so
 #: the next landing changes one literal and the word follows it.
-_CARDINALS = {12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen"}
+_CARDINALS = {
+    12: "twelve",
+    13: "thirteen",
+    14: "fourteen",
+    15: "fifteen",
+    16: "sixteen",
+    17: "seventeen",
+}
 
 #: The two documents that state the count in prose. Neither is checked by
 #: anything else: `db-and-sql.md` is a rules file and the other is a

@@ -113,15 +113,13 @@ measurable. They ship *here* because this milestone gets one revision: a reader
 task in another group authoring its own DDL would be a second head, and a
 pre-allocated chain is a serial spine across every group holding a link in it
 (`db-and-sql.md`, *"Allocate a revision id per merge, never per author"*).
-**Nothing in this revision reads them**, and
-`test_the_cost_ledger_has_no_read_method` was still true after it. ⚠️ **That
-case no longer exists**: M10's D3 added `LLMCallRepository.list_since` --
-`WHERE at >= :since ORDER BY at`, which is `ix_llm_calls_at`'s own query -- and
-deleted the guard in the same commit, on the exit condition the guard set for
-itself. The surface is now pinned by `tests/unit/test_ports.py`'s parametrised
-entry at `{"record", "list_since"}`. This paragraph is left standing because it
-is what was true at this revision; the pointer is here so the name does not
-dangle.
+**Nothing in `src/` reads them and nothing does now**: both consumers are
+SQL living in Grafana. `ix_llm_calls_at` serves the cost-anomaly alert, whose
+committed statement `tests/integration/test_cost_anomaly_query.py` runs against
+a real plan; `ix_llm_calls_generation_id` serves dashboard 5's `llm_calls` join
+onto `curated_rows`, which nothing in this repository executes. The port's
+surface is pinned as an exact set by `tests/unit/test_ports.py`'s parametrised
+entry.
 
 ## `downgrade()` mirrors `upgrade()` statement for statement
 

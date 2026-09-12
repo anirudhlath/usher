@@ -38,9 +38,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from usher.api.app import create_app
 from usher.api.errors import (
     http_error_as_a_problem_document,
+    port_error_as_a_problem_document,
     validation_error_without_the_request_body,
 )
 from usher.config import Settings
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortRateLimited,
+    PortUnavailable,
+    UsherPortError,
+)
 
 PASSWORD = "gannet-flint-oleander-42"
 
@@ -226,3 +233,47 @@ async def test_a_status_with_no_code_in_the_vocabulary_is_left_alone() -> None:
     assert response.status_code == 403
     assert response.headers["content-type"] == "application/json"
     assert response.json() == {"detail": "nope"}
+
+
+async def test_the_port_error_handler_is_on_the_app_rather_than_on_one_route() -> None:
+    """ "Every route gets it" is the whole of the repair, so it is asserted on
+    the registration rather than through the one route that happens to raise.
+
+    `tests/unit/test_api_images.py` drives the behaviour end to end; what that
+    cannot see is a handler re-implemented as a fourth `except` in
+    `get_image`, which answers those cases identically and leaves the next
+    route's 429 outside the envelope exactly as before.
+
+    **`PortUnavailable` is deliberately absent and is the control.** A handler
+    registered on `UsherPortError` would sweep it up too, and
+    `api/routers/rows.py` records why that is wrong: the thing that route
+    cannot reach is Postgres, so a 503 there claims one endpoint is degraded
+    in a deployment where every one is.
+    """
+    app = create_app(
+        Settings(
+            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+
+    assert app.exception_handlers.get(PortRateLimited) is port_error_as_a_problem_document
+    assert app.exception_handlers.get(PortAuthFailed) is port_error_as_a_problem_document
+    assert PortUnavailable not in app.exception_handlers
+    assert UsherPortError not in app.exception_handlers
+
+
+async def test_the_port_error_handler_degrades_rather_than_raising_a_second_time() -> None:
+    """The degeneracy every handler in this module carries: registered for
+    something it does not branch on, it answers a plain 500 rather than
+    falling off the end and returning `None`, which ASGI reports as a lost
+    response rather than as the original failure."""
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/x", "headers": [], "query_string": b""}
+    )
+
+    response = await port_error_as_a_problem_document(request, ValueError("nope"))
+
+    assert response.status_code == 500

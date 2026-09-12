@@ -302,8 +302,14 @@ async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
 async def test_one_step_back_and_forward_restores_each_artefact(
     postgres_url: str, artefact: str
 ) -> None:
-    """`-1` then back up, parametrised so a `downgrade()`/`upgrade()` pair that
-    forgets one of the five fails naming *that* one rather than the first.
+    """Down to `m10b` then back up, parametrised so a
+    `downgrade()`/`upgrade()` pair that forgets one of the five fails naming
+    *that* one rather than the first.
+
+    **A named stop rather than `-1`**, which is what this read while `m10c` was
+    head: `-1` follows the chain, so the moment a later revision lands it
+    exercises that one's `downgrade()` and every assertion here becomes a
+    statement about a schema `m10c` never touched.
 
     `run_alembic` is called with an explicit `direction=` for the bare revision
     id: left to infer, a bare id runs `upgrade`, which against a database
@@ -321,7 +327,7 @@ async def test_one_step_back_and_forward_restores_each_artefact(
             return artefact in await index_set(url)
 
         assert await present(), f"the premise: {artefact} exists at head"
-        await asyncio.to_thread(run_alembic, url, "-1")
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="down"))
         assert not await present(), f"{artefact} outlived `m10c.downgrade()`"
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="up"))
         assert await present(), f"{artefact} did not come back"
@@ -404,7 +410,9 @@ async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check
             assert await read(suggest_id) == ("suggest", "prefix")
             assert await read(search_id) == ("search", None)
 
-            await asyncio.to_thread(run_alembic, url, "-1")
+            # `m10b` by name rather than `-1`: this cycle is about `m10c`'s
+            # two columns, and `-1` would exercise whichever revision is head.
+            await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="down"))
             await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="up"))
 
             # The row survives -- this is a relabelling, not a deletion, which
