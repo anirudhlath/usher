@@ -1126,10 +1126,10 @@ suspicion.
   ⚠️ **Every column this paragraph names was renamed by `m10a` and both of its
   test citations went with them, re-measured 2026-09-07.** `Title.popularity` is
   `Title.tmdb_popularity`; `community_rating` is `tmdb_vote_average`, joined by
-  `imdb_average_rating` carrying the same `ge=0, le=10`, so the accident is
-  load-bearing twice and the case is parametrised over both —
-  `test_a_rating_refuses_a_non_finite_value`, not the singular
-  `test_community_rating_…` name this bullet carried.
+  `imdb_average_rating` carrying the same `ge=0, le=10`, and the case is
+  parametrised over both — `test_a_rating_refuses_a_non_finite_value`, not the
+  singular `test_community_rating_…` name this bullet carried. The ceiling no
+  longer stands in for the flag either way; `DomainModel` carries it now.
   ⚠️ **`titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are
   the same `Field(ge=0)`-against-`integer` shape and are deliberately *not*
   closed**, with `test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold`

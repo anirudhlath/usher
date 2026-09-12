@@ -19,6 +19,10 @@ class DomainModel(BaseModel):
     `tmdb_id=`) must fail loudly at construction, not be silently dropped —
     this is the same standard `usher.config.Settings` already holds.
 
+    ``allow_inf_nan=False``: `inf` and `NaN` survive every range check a
+    field can carry, and a `NaN` stored in a vector or a score propagates
+    silently into every comparison made against it.
+
     Note on hashability: a model with a `dict[...]` field is unhashable
     even though it is frozen — Python cannot hash a dict, and pydantic's
     generated `__hash__` hashes every field's value. `Title` carries

@@ -303,12 +303,9 @@ def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
 
 @pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
 def test_a_rating_refuses_a_non_finite_value(field: str) -> None:
-    """`DomainModel`'s `allow_inf_nan=False` is what refuses these, not the
-    `le=10` — the ceiling is pinned by
+    """`DomainModel`'s `allow_inf_nan=False` refuses these, not the `le=10` —
+    the ceiling is pinned by
     `test_a_rating_rejects_values_outside_the_zero_to_ten_scale` instead.
-
-    Parametrised over both because each carries its own `ge=0, le=10` and a case
-    naming one would leave the other free to lose its ceiling unobserved.
     """
     for value in (json.loads("1e400"), float("nan")):
         with pytest.raises(ValidationError):
