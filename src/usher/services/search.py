@@ -88,7 +88,6 @@ from usher.ports.search import (
     SearchIndex,
     SearchMode,
     SearchRequest,
-    SearchSurface,
     SuggestIndex,
     SuggestTier,
 )
@@ -1000,11 +999,6 @@ class SearchService:
                 mode=mode,
                 result_count=results,
                 latency_ms=_ms(elapsed),
-                # Stated rather than defaulted. `SearchQueryRecord.surface`
-                # carries no default at all, so this line is what a writer
-                # that forgot cannot omit -- the same refusal `m10c` makes
-                # about `server_default`, one layer up.
-                surface=SearchSurface.SEARCH,
             ),
         )
 
@@ -1075,7 +1069,6 @@ class SearchService:
                 mode=SearchMode.FULL_TEXT,
                 result_count=results,
                 latency_ms=_ms(elapsed),
-                surface=SearchSurface.SUGGEST,
                 tier=tier,
             ),
         )

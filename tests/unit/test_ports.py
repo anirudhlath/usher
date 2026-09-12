@@ -636,64 +636,30 @@ def test_complete_title_repository_implementation_instantiates() -> None:
     assert isinstance(FakeTitleRepository(), TitleRepository)
 
 
-# --- SearchQueryRecord's surface/tier invariant -----------------------------
+# --- SearchQueryRecord's surface -------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("surface", "tier"),
+    ("tier", "surface"),
     [
-        (SearchSurface.SEARCH, SuggestTier.PREFIX),
-        (SearchSurface.SEARCH, SuggestTier.FUZZY),
-        (SearchSurface.SUGGEST, None),
+        (None, SearchSurface.SEARCH),
+        (SuggestTier.PREFIX, SearchSurface.SUGGEST),
+        (SuggestTier.FUZZY, SearchSurface.SUGGEST),
     ],
 )
-def test_a_row_may_not_claim_a_surface_and_a_tier_that_do_not_go_together(
-    surface: SearchSurface, tier: SuggestTier | None
+def test_the_surface_a_row_claims_is_the_one_its_tier_implies(
+    tier: SuggestTier | None, surface: SearchSurface
 ) -> None:
-    """`surface == SEARCH` implies `tier is None`; `surface == SUGGEST` implies
-    `tier is not None`. **Both directions, in one parametrisation**, because a
-    validator that refuses only one of them passes a test that only tries one.
+    """A search row names no tier and a suggest row names the index that
+    answered, so `surface` is derived rather than stored beside `tier`.
 
-    **Asserted here rather than as a CHECK constraint**, because this schema's
-    constraints are Pydantic's -- `enum_column`'s own docstring says *"Pydantic
-    owns membership validation, not the database"* -- and because the wrong
-    combinations are caller-assembly mistakes rather than storage faults: a
-    `search` row carrying a tier claims an index the search lanes do not have,
-    and a `suggest` row without one silently drops the half ADR-0031 exists to
-    measure. `search_queries.tier` is nullable on both, so neither is
-    refusable by the column.
+    That is what makes the two combinations that are not states -- a search row
+    with a tier, a suggest row without one -- unconstructible rather than
+    refused at runtime. Exhaustive over `SuggestTier | None`, so a third member
+    added to the enum and not to this list is a missing case rather than a
+    silent one.
 
-    Fails: `__post_init__` deleted; either arm of it deleted, which is what the
-    two `SEARCH` rows and the one `SUGGEST` row exist to separate.
-    """
-    with pytest.raises(ValueError, match="tier"):
-        SearchQueryRecord(
-            id=new_id(),
-            at=datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
-            user_id=new_id(),
-            query="the quiet vacuum",
-            mode=SearchMode.FULL_TEXT,
-            result_count=1,
-            latency_ms=1,
-            surface=surface,
-            tier=tier,
-        )
-
-
-@pytest.mark.parametrize(
-    ("surface", "tier"),
-    [(SearchSurface.SEARCH, None), *((SearchSurface.SUGGEST, one) for one in SuggestTier)],
-)
-def test_the_combinations_that_are_states_are_accepted(
-    surface: SearchSurface, tier: SuggestTier | None
-) -> None:
-    """The control the case above needs: a validator refusing *everything*
-    satisfies every `pytest.raises` written about it, and this is the
-    enumeration that says the three legal shapes are still constructible.
-
-    Together the two parametrisations partition `SearchSurface x
-    (SuggestTier | None)` exactly -- 3 refused, 3 accepted, over 2 x 3 -- so
-    neither can be satisfied by a rule about something else.
+    Fails: `surface` back as a field; either arm of the derivation inverted.
     """
     record = SearchQueryRecord(
         id=new_id(),
@@ -703,7 +669,6 @@ def test_the_combinations_that_are_states_are_accepted(
         mode=SearchMode.FULL_TEXT,
         result_count=1,
         latency_ms=1,
-        surface=surface,
         tier=tier,
     )
     assert (record.surface, record.tier) == (surface, tier)

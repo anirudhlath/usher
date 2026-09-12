@@ -22,67 +22,21 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class SearchQueryRecord:
-    """One answered request, exactly as `SearchService` already knows it the
-    moment it answers -- the retrieval half of `search_queries`' eleven columns
-    (`docs/prd/10-telemetry-and-dashboards.md`'s two-halves table).
+    """One answered request, as `SearchService` knows it the moment it answers.
 
-    **`clicked_title_id` and `played` are deliberately not fields here.**
-    Neither is knowable at the instant a search answers -- a click and a play
-    are things a client does *afterwards* -- and a constructor that could be
-    handed them and then have to leave them unset is a constructor somebody
-    eventually fills in with a guess. They are written later, by
-    `SearchQueryRepository.record_outcome`, keyed by `id`.
+    `clicked_title_id` and `played` are not fields: neither is knowable when a
+    search answers, and `SearchQueryRepository.record_outcome` writes them
+    later, keyed by `id`. `id` is minted by the caller (`usher.domain.ids`), so
+    a caller needing it before the row is durable already has one.
 
-    Not `usher.domain.search.SearchAnswer` and not a domain model at all --
-    `domain/` imports nothing and this carries a `SearchMode`, which is a port
-    type (`usher.ports.search`). `SearchAnswer`'s own docstring makes the
-    identical argument for the identical reason
-    (`usher/services/search.py:245`: *"Lives here rather than in
-    `usher.domain.search` because it carries a `SearchMode`, which is a port
-    type, and `domain/` imports nothing"*). A port DTO beside the port it
-    belongs to, the shape `StoredTaste`, `NeighborSeed` and
-    `TitleEmbeddingUpsert` already have.
+    `tier` names the `SuggestIndex` that answered a keystroke and is `None` on
+    a search, which is what `surface` reads off it -- the two cannot disagree
+    because there is only one of them. `mode` on a suggest row is
+    `FULL_TEXT`: both tiers are btree/GIN reads with no embed and no fusion,
+    so every mode-split panel filters on `surface`.
 
-    **No pydantic bounds on `result_count` or `latency_ms`, unlike a domain
-    model.** Both are plain `int`, so nothing here stops a caller from handing
-    `record()` a `latency_ms` the `search_queries.latency_ms` `integer` column
-    cannot hold -- the repository is where that gets refused, and refuses it
-    as `RepositoryConflict` rather than letting a raw driver exception cross
-    the port boundary. See `SearchQueryRepository.record`.
-
-    `id` is minted by the caller (`usher.domain.ids.new_id`), following
-    `LLMCall.id` and every other UUIDv7 primary key in this schema -- the
-    repository does not choose it, so a caller that needs the id before the
-    row is durable (`record_outcome` is keyed by it) already has one.
-
-    **`surface` is required and is deliberately not defaulted to `SEARCH`.**
-    A default here is the *"supply a plausible wrong value to a writer that
-    forgot"* failure `m09d`'s own migration comment names, one layer up from
-    the database: `m10c` lands the column `NOT NULL` with no `server_default`
-    for exactly that reason, and a dataclass default would put the hazard back
-    where no migration can see it. Every writer states which surface it is.
-
-    **`mode` on a `SUGGEST` row is `SearchMode.FULL_TEXT`**, and the choice is
-    stated here beside `surface` because `mode` is the column every dashboard 1
-    and 4 panel groups by. Both suggest tiers are btree/GIN reads with no embed
-    and no fusion, which is what that member already means; a suggest row
-    landing under `FUSED` would attribute a keystroke to a lane that has never
-    run. The consequence travels with it and is recorded in PRD 10 rather than
-    discovered from a skewed panel: **every mode-split panel now has to filter
-    on `surface`**, which is a `WHERE surface = 'search'` those panels did not
-    previously need. Keeping the two vocabularies in two columns is the whole
-    of amendment 2 -- a fourth `SearchMode` member was the alternative and was
-    declined, because `SearchMode` is `GET /search`'s `?mode=`.
-
-    **The invariant, and both directions of it.** `surface == SEARCH` implies
-    `tier is None`; `surface == SUGGEST` implies `tier is not None`. It is
-    checked here rather than by a CHECK constraint, because this schema's
-    constraints are Pydantic's (`db/base.py`'s `enum_column`: *"Pydantic owns
-    membership validation, not the database"*) -- and it is checked in **both**
-    directions, because a validator that refuses only one of them passes a test
-    that only tries one. A `search` row with a tier would claim an index the
-    search lanes do not have; a `suggest` row without one is the half ADR-0031
-    actually wants measured, silently absent.
+    `result_count` and `latency_ms` are plain `int`s with no bounds; the
+    repository refuses a value the column cannot hold, as `RepositoryConflict`.
     """
 
     id: uuid.UUID
@@ -92,25 +46,12 @@ class SearchQueryRecord:
     mode: SearchMode
     result_count: int
     latency_ms: int
-    surface: SearchSurface
-    #: `None` on a `search` row and never on a `suggest` one -- see the
-    #: invariant above. Last and defaulted because it is the one field of the
-    #: nine here that is genuinely *absent* rather than unknown; `surface`
-    #: above it is required precisely so this default cannot be reached by a
-    #: writer that forgot which surface it was.
     tier: SuggestTier | None = None
 
-    def __post_init__(self) -> None:
-        if self.surface is SearchSurface.SEARCH and self.tier is not None:
-            raise ValueError(
-                f"a {SearchSurface.SEARCH.value} row carries no tier, and this one names "
-                f"{self.tier.value}: no search lane is a SuggestIndex"
-            )
-        if self.surface is SearchSurface.SUGGEST and self.tier is None:
-            raise ValueError(
-                f"a {SearchSurface.SUGGEST.value} row must name the tier that answered; "
-                "which of the two indexes ran is what ADR-0031 exists to measure"
-            )
+    @property
+    def surface(self) -> SearchSurface:
+        """Which box asked -- `search_queries.surface`."""
+        return SearchSurface.SEARCH if self.tier is None else SearchSurface.SUGGEST
 
 
 class SearchQueryRepository(ABC):

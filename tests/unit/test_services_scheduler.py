@@ -42,7 +42,7 @@ from usher.db.base import build_engine, build_session_factory
 from usher.domain.ids import new_id
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
 from usher.ports.scheduler import ScheduledJob
-from usher.ports.search import SearchMode, SearchSurface
+from usher.ports.search import SearchMode
 from usher.services.scheduler import (
     RETENTION_PERIOD,
     Scheduler,
@@ -188,7 +188,6 @@ def _row(*, at: datetime, user_id: uuid.UUID) -> SearchQueryRecord:
         mode=SearchMode.FULL_TEXT,
         result_count=1,
         latency_ms=1,
-        surface=SearchSurface.SEARCH,
     )
 
 
