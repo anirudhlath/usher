@@ -59,6 +59,7 @@ from usher.api.deps import (
     get_watch_state_repository,
     get_watch_state_sync_service,
 )
+from usher.composition import nothing
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.users import DEFAULT_USER_NAME
@@ -423,11 +424,11 @@ async def test_the_search_service_the_graph_resolves_writes_search_queries_over_
     feature missing.
 
     Three things, and the third is the one only a request can see: the pair is
-    present, the repository is over **this request's** session, and the commit
-    is that session's own bound method rather than some other callable. A row
-    written through a repository on another session never reaches the
-    transaction the request commits, and a commit that is not this session's
-    leaves the row to be rolled back when the request closes.
+    present, the repository is over **this request's** session, and the
+    analytics commits nothing of its own. A row written through a repository on
+    another session never reaches the transaction the request commits. The
+    commit is `nothing` because `get_session` already commits the request, and
+    a second one there is a second WAL flush per keystroke.
 
     Reaching private attributes is deliberate and is the narrower of the two
     options, exactly as in the tiers case above: the alternative is a public
@@ -451,7 +452,7 @@ async def test_the_search_service_the_graph_resolves_writes_search_queries_over_
         seen["wired"] = analytics is not None
         if analytics is not None:
             seen["this session"] = analytics.queries._session is session  # type: ignore[attr-defined]
-            seen["this session's commit"] = analytics.commit == session.commit
+            seen["commits nothing of its own"] = analytics.commit is nothing
         return seen
 
     app.get("/_probe/search_queries")(route)
@@ -461,4 +462,4 @@ async def test_the_search_service_the_graph_resolves_writes_search_queries_over_
             response = await client.get("/_probe/search_queries")
 
     assert response.status_code == 200, response.text
-    assert seen == {"wired": True, "this session": True, "this session's commit": True}
+    assert seen == {"wired": True, "this session": True, "commits nothing of its own": True}
