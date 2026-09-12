@@ -95,22 +95,27 @@ tables are precious changes with the schema, and `schema_revision` is
 already the stamp for that.
 """
 
+import asyncio
 import base64
 import errno
 import gzip
+import io
 import json
 import os
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
+from itertools import chain
 from pathlib import Path
-from typing import Any, Final
+from typing import IO, Any, Final
 
 from pydantic import AwareDatetime
 
 from usher import __version__
+from usher.atomic import write_atomically
 from usher.ports.repository import BackupRepository, EpisodeReference, TitleReference
 
 __all__ = [
@@ -233,12 +238,15 @@ class BackupService:
         night's copy on a failed run is the wrong default, and a cron entry
         or CLAUDE.md's own documented invocation reaches it.
 
-        **The guarantee is against a failed run, not against a power cut.**
-        `os.replace` is atomic with respect to *readers* -- a concurrent
-        `zcat` sees the old artifact or the new one, never a partial -- and
-        nothing here `fsync`s, so a machine that loses power mid-write can
-        still leave either file unflushed. Stated rather than implied,
-        because "atomic" is a word that invites the stronger reading.
+        **Both guarantees are `usher.atomic`'s**, which is where the argument
+        for the scratch sibling and the `fsync` lives.
+
+        **The compression runs in a thread.** gzip over an artifact this size
+        is seconds of CPU, and a service that spends them on the event loop
+        stalls every other request in the process -- `usher backup` is a CLI
+        today and this module is written to be the route a later milestone
+        gives it. The lines are handed over as a generator, so the encoded
+        body is never a second copy of the carried set in memory.
 
         Raises `OSError` -- a directory that does not exist, a full disk, a
         path that is not writable -- and does not catch it. That family is
@@ -266,33 +274,15 @@ class BackupService:
             # `set(header["rows"])` against the tables actually present.
             "rows": {table: len(rows) for table, rows in carried.items() if rows},
         }
-        # A sibling rather than `tempfile.gettempdir()`: `os.replace` is
-        # atomic only within one filesystem, and `/tmp` on the host this
-        # project runs on is a different mount (and tmpfs, so a large
-        # artifact would be written to RAM on the way to disk). Dot-prefixed
-        # and PID-suffixed so a run that dies without its `finally` leaves
-        # something obviously not-an-artifact, and so two runs aimed at one
-        # destination cannot scribble on each other's scratch.
-        scratch = path.with_name(f".{path.name}.{os.getpid()}.partial")
-        try:
-            # `wt` with an explicit encoding and newline: JSON Lines is
-            # defined as UTF-8 with `\n` separators, and leaving either to
-            # the platform would make an artifact written on one host
-            # unreadable as lines on another.
-            with gzip.open(scratch, "wt", encoding="utf-8", newline="\n") as handle:
-                handle.write(_line(header))
-                for table, rows in carried.items():
-                    for row in rows:
-                        handle.write(_line({"table": table, "row": _encode(dict(row.row))}))
-            os.replace(scratch, path)
-        except BaseException:
-            # `BaseException`, not `Exception`: a `KeyboardInterrupt` during
-            # a backup is the *expected* way an operator stops one, and it
-            # must not be the one path that leaves the scratch file behind.
-            # `missing_ok` because the failure may be `gzip.open` itself,
-            # which creates nothing.
-            scratch.unlink(missing_ok=True)
-            raise
+        lines = chain(
+            (_line(header),),
+            (
+                _line({"table": table, "row": _encode(dict(carried_row.row))})
+                for table, rows in carried.items()
+                for carried_row in rows
+            ),
+        )
+        await asyncio.to_thread(write_atomically, path, partial(_compress, lines=lines))
         return BackupReport(
             path=path,
             schema_revision=revision,
@@ -305,7 +295,8 @@ class BackupService:
 def _refuse_a_missing_directory(path: Path) -> None:
     """The one destination mistake worth catching *before* the read.
 
-    **This is not the refusal; `gzip.open` is.** A path that is not writable,
+    **This is not the refusal; opening the scratch file is.** A path that is
+    not writable,
     a full disk, a read-only mount and a name that is already a directory all
     still surface where they always did, one statement after the whole
     carried set has been read -- and they have to, because none of them is
@@ -330,6 +321,20 @@ def _refuse_a_missing_directory(path: Path) -> None:
     parent = path.parent
     if not parent.is_dir():
         raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(parent))
+
+
+def _compress(handle: IO[bytes], *, lines: Iterable[str]) -> None:
+    """The body of the artifact, gzipped into an open file.
+
+    An explicit encoding and newline: JSON Lines is defined as UTF-8 with
+    `\n` separators, and leaving either to the platform would make an
+    artifact written on one host unreadable as lines on another.
+    """
+    with (
+        gzip.GzipFile(fileobj=handle, mode="wb") as compressed,
+        io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as text,
+    ):
+        text.writelines(lines)
 
 
 def _line(obj: Mapping[str, Any]) -> str:

@@ -20,7 +20,8 @@ neither is in `tests/integration/`.
 
 import gzip
 import json
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -414,6 +415,34 @@ _FAILS_MID_WRITE: Mapping[str, Sequence[Mapping[str, object]]] = {
     "users": [{"name": "one"}],
     "watch_states": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": object()}],
 }
+
+
+async def test_the_compression_does_not_run_on_the_event_loop(tmp_path: Path) -> None:
+    """gzip over the carried set is seconds of CPU, and a service that spends
+    them on the loop stalls every other coroutine in the process -- which is
+    the difference between a CLI command and the route a later milestone makes
+    this. Asserted on the thread the encoding actually runs in, because
+    *"`to_thread` was called"* is satisfied by a call that awaits nothing.
+    """
+    encoded_on: list[int] = []
+
+    class _WatchedRow(Mapping[str, object]):
+        """A row the encoder has to read, which is what it reads it *in*."""
+
+        def __getitem__(self, key: str) -> object:
+            encoded_on.append(threading.get_ident())
+            return "one"
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(("name",))
+
+        def __len__(self) -> int:
+            return 1
+
+    await _service({"users": [_WatchedRow()]}).write(tmp_path / "x.jsonl.gz")
+
+    assert encoded_on, "the row was never encoded"
+    assert threading.get_ident() not in encoded_on, "the artifact was compressed on the loop"
 
 
 async def test_a_failure_part_way_through_the_write_leaves_no_artifact_behind(

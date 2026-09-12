@@ -776,7 +776,7 @@ async def test_the_bytes_land_under_the_cache_root_and_nowhere_else(tmp_path: Pa
 
 async def test_a_write_is_a_rename_and_never_an_in_place_append(tmp_path: Path) -> None:
     """The scratch file lives beside the final one — so the move is a rename
-    within one filesystem — and nothing with a `.part` suffix survives a
+    within one filesystem — and nothing with a `.partial` suffix survives a
     completed write."""
     root = tmp_path / "images"
     store = DiskImageBlobStore(root)
@@ -785,12 +785,12 @@ async def test_a_write_is_a_rename_and_never_an_in_place_append(tmp_path: Path) 
 
     files = [path for path in root.rglob("*") if path.is_file()]
     assert len(files) == 1
-    assert not files[0].name.endswith(".part")
+    assert not files[0].name.endswith(".partial")
     assert files[0].read_bytes() == b"ab"
 
 
 async def test_a_failed_write_leaves_no_scratch_file(tmp_path: Path) -> None:
-    """A `.part` left behind is not merely litter: nothing ever cleans it up,
+    """A `.partial` left behind is not merely litter: nothing ever cleans it up,
     so a flapping upstream fills the mount with fragments no request will ever
     read."""
     root = tmp_path / "images"
@@ -855,7 +855,7 @@ async def test_two_concurrent_writers_do_not_share_a_scratch_file(tmp_path: Path
         if waiting == 2:
             arrived.set()
         await arrived.wait()
-        observed.append(frozenset(p.name for p in root.rglob("*.part") if p.is_file()))
+        observed.append(frozenset(p.name for p in root.rglob("*.partial") if p.is_file()))
         yield b"-tail"
 
     await asyncio.gather(
@@ -870,7 +870,7 @@ async def test_two_concurrent_writers_do_not_share_a_scratch_file(tmp_path: Path
     assert read is not None
     assert read.data in (b"first-tail", b"second-tail")
     assert [path for path in root.rglob("*") if path.is_file()] != []
-    assert [path for path in root.rglob("*.part") if path.is_file()] == []
+    assert [path for path in root.rglob("*.partial") if path.is_file()] == []
 
 
 async def test_a_media_type_change_upstream_does_not_leave_the_old_entry_winning(
