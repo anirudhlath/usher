@@ -466,7 +466,7 @@ def test_the_queue_gauges_report_nothing_before_anything_has_read_the_table(
     empty `QueueSnapshot` -- passes against a guard that fabricates a zero,
     because an empty snapshot reports nothing either way.
     """
-    monkeypatch.setattr("usher.telemetry._queue_reader", None)
+    monkeypatch.setattr("usher.telemetry._queue._read", None)
     assert list(_observe_queued(CallbackOptions())) == []
     assert list(_observe_parked(CallbackOptions())) == []
 

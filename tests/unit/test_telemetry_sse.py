@@ -94,5 +94,5 @@ def test_no_reader_reports_no_observation_rather_than_a_zero(
     recorded for the queue gauges: the branch is unreachable through
     `register_sse_gauge`, which assigns the reader *before* it creates the
     instrument."""
-    monkeypatch.setattr("usher.telemetry._sse_reader", None)
+    monkeypatch.setattr("usher.telemetry._sse._read", None)
     assert list(_observe_sse_connections(CallbackOptions())) == []

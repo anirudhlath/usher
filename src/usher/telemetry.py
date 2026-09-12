@@ -302,6 +302,25 @@ def configure_metrics(settings: Settings) -> None:
         metrics.set_meter_provider(provider)
 
 
+class _ReaderSlot[T]:
+    """A replaceable reader behind an observable instrument.
+
+    The SDK keeps only the first instrument registered under a name, so a second
+    registration replaces the reader rather than the instrument. An unset reader
+    observes nothing: on every series here a fabricated zero is indistinguishable
+    from a real reading, and is the value an alert would act on.
+    """
+
+    def __init__(self) -> None:
+        self._read: Callable[[], T] | None = None
+
+    def set(self, read: Callable[[], T]) -> None:
+        self._read = read
+
+    def observe(self, build: Callable[[T], Iterable[Observation]]) -> Iterable[Observation]:
+        return [] if self._read is None else list(build(self._read()))
+
+
 @dataclass(frozen=True, slots=True)
 class QueueSnapshot:
     """One reading of the `jobs` table, by kind.
@@ -318,52 +337,18 @@ class QueueSnapshot:
 
 QueueReader = Callable[[], QueueSnapshot]
 
-# Set by `register_queue_gauges`, read by the two callbacks below. A module
-# global rather than a closure captured at instrument-creation time, and that
-# is load-bearing: the SDK keeps only the *first* observable gauge registered
-# under a given name (verified directly -- a second
-# `create_observable_gauge("usher.jobs.queued", callbacks=[other])` against
-# the same provider is silently discarded and the first callback keeps
-# reporting). A composition root that registered twice, or a second test in
-# the same process, would otherwise be reading a queue that no longer exists.
-_queue_reader: QueueReader | None = None
+_queue: _ReaderSlot[QueueSnapshot] = _ReaderSlot()
 
 
 def register_queue_gauges(read: QueueReader) -> None:
-    """PRD 10's `usher.jobs.queued` / `usher.jobs.parked`.
+    """PRD 10's `usher.jobs.queued` / `usher.jobs.parked`, by kind.
 
-    Observable rather than recorded: the queue's depth is a fact about the
-    `jobs` table, not an event stream, and a counter incremented on enqueue
-    and decremented on complete drifts the moment anything -- a parked job,
-    a requeue, a crash, a `DELETE` from `complete` -- changes a row without
-    going through both.
-
-    **`read` is synchronous and returns the caller's most recent full
-    re-read of the table, not a query.** The plan asked for a callback that
-    "opens its own short-lived session"; that is not implementable here.
-    OTel invokes an observable callback from the metric reader's own
-    *background thread*, and every database call in this project is a
-    coroutine on asyncpg -- so a callback that queried would have to bounce
-    a coroutine onto the application's event loop
-    (`run_coroutine_threadsafe`) and block the exporter thread on it, which
-    deadlocks whenever the loop is itself blocked. What removes the drift
-    the plan was worried about is that `read` returns a *complete* re-read
-    (`SELECT status, kind, count(*) ... GROUP BY`) rather than a running
-    total, so the value is only ever stale, never wrong. `usher work`
-    refreshes it after every pass over the queue.
-
-    Safe to call repeatedly, and the *reader* is what makes it so rather
-    than a guard on the instruments: a duplicate
-    `create_observable_gauge(...)` against a provider that already has one
-    is silently discarded by the SDK (verified directly), so a
-    re-registration that only created a second instrument would leave the
-    first, now-dead reader reporting forever. Creating them unconditionally
-    is what lets a *new* `MeterProvider` -- one per test in this suite --
-    get instruments of its own instead of orphans bound to a provider that
-    has been thrown away.
+    `read` is synchronous and returns the caller's most recent full re-read of
+    the `jobs` table, never a query: OTel invokes the callback from the metric
+    reader's background thread, where awaiting asyncpg would deadlock. Safe to
+    call repeatedly.
     """
-    global _queue_reader
-    _queue_reader = read
+    _queue.set(read)
     meter = metrics.get_meter("usher.jobs")
     meter.create_observable_gauge(
         "usher.jobs.queued",
@@ -380,26 +365,15 @@ def register_queue_gauges(read: QueueReader) -> None:
 
 
 def _observe_queued(options: CallbackOptions) -> Iterable[Observation]:
-    return _observations(lambda snapshot: snapshot.queued)
+    return _queue.observe(lambda snapshot: _by_kind(snapshot.queued))
 
 
 def _observe_parked(options: CallbackOptions) -> Iterable[Observation]:
-    return _observations(lambda snapshot: snapshot.parked)
+    return _queue.observe(lambda snapshot: _by_kind(snapshot.parked))
 
 
-def _observations(
-    select: Callable[[QueueSnapshot], Mapping[str, int]],
-) -> Iterable[Observation]:
-    """No reader means no observation, never a zero.
-
-    A gauge that reported 0 before anything had read the table would be
-    indistinguishable from an empty queue, and PRD 10's "ingest stalled"
-    alert fires on depth rising rather than on depth being reported -- so a
-    fabricated zero is the one value that makes the alert quietly wrong.
-    """
-    if _queue_reader is None:
-        return []
-    return [Observation(count, {"kind": kind}) for kind, count in select(_queue_reader()).items()]
+def _by_kind(counts: Mapping[str, int]) -> Iterable[Observation]:
+    return [Observation(count, {"kind": kind}) for kind, count in counts.items()]
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,35 +398,18 @@ class PushSnapshot:
 
 PushReader = Callable[[], Mapping[str, PushSnapshot]]
 
-# A module global, replaced rather than captured -- the SDK keeps only the
-# first observable instrument registered under a name and silently discards
-# the rest, so a second `create_app()` in one process would otherwise leave
-# the first, now-dead reader reporting forever. Same shape, same reason, as
-# `_queue_reader` above.
-_push_reader: PushReader | None = None
+_push: _ReaderSlot[Mapping[str, PushSnapshot]] = _ReaderSlot()
 
 
 def register_push_gauges(read: PushReader) -> None:
     """PRD 10's `usher.source.push.connected` / `usher.source.push.reconnects`.
 
-    Observable, and this is the one place in this project where that is
-    unambiguously safe: the value is an in-memory integer on a `PushHealth`
-    ledger, so there is no coroutine to bounce onto the event loop from the
-    metric reader's background thread and no exporter thread to block on it.
-    `register_queue_gauges` explains at length why the queue's equivalent
-    cannot be live; nothing in that argument applies here, and the shape is
-    kept identical anyway so a reader meets one pattern rather than two.
-
-    **Two instrument *types*, because PRD 10 documents two.** `connected` is
-    a gauge -- 1 or 0, now. `reconnects` is a counter, and an *asynchronous*
-    counter is precisely the instrument for a cumulative total read out of a
-    ledger rather than incremented at the event. Registering it as a gauge
-    would put a different instrument type on the wire under a documented
-    name, which is the same class of failure as a near-miss name: the panel
-    is there, the series is wrong, and nothing says so.
+    `connected` is a gauge; `reconnects` is an asynchronous counter, because a
+    cumulative total read out of a ledger is what that instrument is for.
+    Reporting it as a gauge would put the wrong instrument type on the wire
+    under a documented name.
     """
-    global _push_reader
-    _push_reader = read
+    _push.set(read)
     meter = metrics.get_meter("usher.push")
     meter.create_observable_gauge(
         "usher.source.push.connected",
@@ -469,54 +426,31 @@ def register_push_gauges(read: PushReader) -> None:
 
 
 def _observe_push_connected(options: CallbackOptions) -> Iterable[Observation]:
-    return _push_observations(lambda snapshot: 1 if snapshot.delivering else 0)
+    return _push.observe(lambda lanes: _by_source(lanes, lambda one: 1 if one.delivering else 0))
 
 
 def _observe_push_reconnects(options: CallbackOptions) -> Iterable[Observation]:
-    return _push_observations(lambda snapshot: snapshot.reconnects)
+    return _push.observe(lambda lanes: _by_source(lanes, lambda one: one.reconnects))
 
 
-def _push_observations(select: Callable[[PushSnapshot], int]) -> Iterable[Observation]:
-    """No reader means no observation, never a zero.
-
-    A fabricated zero on `usher.source.push.connected` is indistinguishable
-    from a source whose channel is down, and PRD 10's "Push down" alert
-    fires on exactly that value for fifteen minutes -- so a process that
-    reported 0 from start-up until the first lane registered would page
-    somebody about a source that was never configured. Same argument
-    `_observations` already makes for the queue gauges.
-    """
-    if _push_reader is None:
-        return []
-    return [
-        Observation(select(snapshot), {"source": source})
-        for source, snapshot in _push_reader().items()
-    ]
+def _by_source(
+    lanes: Mapping[str, PushSnapshot], select: Callable[[PushSnapshot], int]
+) -> Iterable[Observation]:
+    return [Observation(select(one), {"source": source}) for source, one in lanes.items()]
 
 
 SseReader = Callable[[], int]
 
-# Module global, replaced rather than captured, for the reason `_queue_reader`
-# and `_push_reader` above both state: the SDK keeps only the *first*
-# observable instrument registered under a name and silently discards the
-# rest, so a second `create_app()` in one process would otherwise leave the
-# first, now-dead reader reporting forever.
-_sse_reader: SseReader | None = None
+_sse: _ReaderSlot[int] = _ReaderSlot()
 
 
 def register_sse_gauge(read: SseReader) -> None:
     """PRD 10's `usher.sse.connections`.
 
-    **The one observable callback in this project that really is a live
-    read.** `register_queue_gauges` explains at length why the queue's
-    equivalent cannot be -- OTel invokes the callback from the metric
-    reader's background thread and every database call here is a coroutine on
-    asyncpg -- and none of that applies to `len()` on an in-memory set. So
-    this reader is the bus itself, not a snapshot somebody remembered to
-    refresh.
+    The one live read among these: `len()` on an in-memory set is safe to call
+    from the metric reader's background thread.
     """
-    global _sse_reader
-    _sse_reader = read
+    _sse.set(read)
     metrics.get_meter("usher.api").create_observable_gauge(
         "usher.sse.connections",
         callbacks=[_observe_sse_connections],
@@ -526,55 +460,22 @@ def register_sse_gauge(read: SseReader) -> None:
 
 
 def _observe_sse_connections(options: CallbackOptions) -> Iterable[Observation]:
-    """No reader means no observation, never a zero.
-
-    Same argument `_push_observations` makes: a fabricated zero is
-    indistinguishable from a real one, and a process that reported 0 open
-    connections from start-up until the first `create_app` finished would be
-    reporting a fact it does not have.
-    """
-    return [] if _sse_reader is None else [Observation(_sse_reader())]
+    return _sse.observe(lambda open_connections: [Observation(open_connections)])
 
 
 SchedulerReader = Callable[[], Mapping[str, float]]
 
-# Module global, replaced rather than captured, for the reason `_queue_reader`,
-# `_push_reader` and `_sse_reader` above all state: the SDK keeps only the
-# *first* observable instrument registered under a name and silently discards
-# the rest, so a second registration in one process -- a second `create_app()`,
-# or a second test -- would otherwise leave the first, now-dead reader
-# reporting forever.
-_scheduler_reader: SchedulerReader | None = None
+_scheduler: _ReaderSlot[Mapping[str, float]] = _ReaderSlot()
 
 
 def register_scheduler_gauges(read: SchedulerReader) -> None:
-    """PRD 10's `usher.scheduler.job.due` (ADR-0046, M10's J4).
+    """PRD 10's `usher.scheduler.job.due`, per job.
 
-    Seconds since a job's `last_done()` minus its period, per job. **Negative
-    means not due**, so one series answers *"how overdue"* and *"how long
-    left"* without a second instrument -- and the sign is the whole of the
-    reading, because a scheduler with no jobs overdue is the healthy state.
-
-    ⚠️ **`read` is synchronous and hands back a snapshot the scheduler's own
-    loop refreshed, never a query**, and that is not a style preference.
-    `register_queue_gauges` carries the whole argument: OTel invokes an
-    observable callback from the metric reader's *background thread*, every
-    `last_done()` on the shipped registrations is a coroutine on asyncpg, and a
-    callback that queried would have to bounce a coroutine onto the event loop
-    and block the exporter thread on it -- a deadlock whenever the loop is
-    itself blocked. `usher.services.scheduler.Scheduler.read` is the snapshot,
-    taken once per job per tick from the same read the due decision used, so
-    the gauge and the decision cannot disagree.
-
-    A job with no reading has **no entry** -- never run, or a `last_done()`
-    that raised. `Scheduler.read`'s docstring says why a fabricated `0.0` is
-    the one value that would make this series wrong rather than absent.
-
-    Safe to call repeatedly, and the *reader* is what makes it so rather than a
-    guard on the instrument, for `register_queue_gauges`' reason.
+    Seconds since a job's `last_done()` minus its period; negative means not yet
+    due. A job with no reading has no entry rather than a zero, which would read
+    as "exactly due".
     """
-    global _scheduler_reader
-    _scheduler_reader = read
+    _scheduler.set(read)
     metrics.get_meter("usher.scheduler").create_observable_gauge(
         "usher.scheduler.job.due",
         callbacks=[_observe_job_due],
@@ -584,16 +485,9 @@ def register_scheduler_gauges(read: SchedulerReader) -> None:
 
 
 def _observe_job_due(options: CallbackOptions) -> Iterable[Observation]:
-    """No reader means no observation, never a zero.
-
-    A process with the scheduler switched off has no opinion about how overdue
-    anything is, and `0` on this series reads as *"exactly due"* -- which is
-    the one value an alert on it would act on. Same argument `_observations`,
-    `_push_observations` and `_observe_sse_connections` already make.
-    """
-    if _scheduler_reader is None:
-        return []
-    return [Observation(due, {"job": job}) for job, due in _scheduler_reader().items()]
+    return _scheduler.observe(
+        lambda readings: [Observation(due, {"job": job}) for job, due in readings.items()]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,43 +538,18 @@ class SearchSnapshot:
 
 SearchReader = Callable[[], SearchSnapshot]
 
-# Module global, replaced rather than captured, for the reason `_queue_reader`,
-# `_push_reader` and `_sse_reader` above all state: the SDK keeps only the
-# *first* observable instrument registered under a name and silently discards
-# the rest, so a second registration in one process would leave the first,
-# now-dead reader reporting forever.
-_search_reader: SearchReader | None = None
+_search: _ReaderSlot[SearchSnapshot] = _ReaderSlot()
 
 
 def register_search_gauges(read: SearchReader) -> None:
-    """PRD 10's `usher.search.embeddings.stale`, plus its companion.
+    """PRD 10's `usher.search.embeddings.stale`, its refused companion, and
+    `usher.similarity.neighbors.stale`.
 
-    Observable rather than recorded, for `register_queue_gauges`' reason: the
-    backlog is a fact about a table, not an event stream, and a counter
-    incremented at enqueue drifts the moment anything changes a row without
-    going through it -- which here is *every enrichment*, since a new overview
-    changes the fingerprint and makes a current row stale without touching the
-    queue at all.
-
-    **`read` is synchronous and returns the caller's most recent full re-read,
-    never a query.** OTel invokes an observable callback from the metric
-    reader's own background thread and every database call in this project is
-    a coroutine on asyncpg, so a callback that queried would have to bounce a
-    coroutine onto the event loop with `run_coroutine_threadsafe` and block
-    the exporter thread on it -- a deadlock whenever the loop is itself
-    blocked. `composition.SearchGauges` is the held snapshot; the worker lane
-    and `usher work` refresh it once per pass, `usher index` after its own
-    sweep. The refresh is two `count(*)`s over a predicate that is a
-    *predicate* rather than a cursor precisely so counting it stays cheap --
-    both are driven off `ix_titles_enrichment_state`, whose population is the
-    enriched tier (2k-10k rows) rather than the 1.27M-row catalog.
-
-    Safe to call repeatedly, and the *reader* is what makes it so rather than
-    a guard on the instruments -- see `register_queue_gauges` for the whole
-    argument, which applies here unchanged.
+    `read` returns the caller's most recent full re-read, never a query, for
+    `register_queue_gauges`' reason. The third instrument takes a different
+    meter because `usher index --backfill` does not drain it.
     """
-    global _search_reader
-    _search_reader = read
+    _search.set(read)
     meter = metrics.get_meter("usher.search")
     meter.create_observable_gauge(
         "usher.search.embeddings.stale",
@@ -708,30 +577,15 @@ def register_search_gauges(read: SearchReader) -> None:
 
 
 def _observe_embeddings_stale(options: CallbackOptions) -> Iterable[Observation]:
-    return _search_observations(lambda snapshot: snapshot.stale)
+    return _search.observe(lambda snapshot: [Observation(snapshot.stale)])
 
 
 def _observe_embeddings_refused(options: CallbackOptions) -> Iterable[Observation]:
-    return _search_observations(lambda snapshot: snapshot.refused)
+    return _search.observe(lambda snapshot: [Observation(snapshot.refused)])
 
 
 def _observe_neighbors_stale(options: CallbackOptions) -> Iterable[Observation]:
-    return _search_observations(lambda snapshot: snapshot.neighbors_stale)
-
-
-def _search_observations(select: Callable[[SearchSnapshot], int]) -> Iterable[Observation]:
-    """No reader means no observation, never a zero.
-
-    A gauge reporting 0 before anything has read the table is
-    indistinguishable from a drained backlog, and "the backfill has drained"
-    is the only claim this series exists to support -- it is the one
-    observable answer to the milestone's own headline failure, an index that
-    does not raise but answers out of date. Same argument `_observations` and
-    `_push_observations` already make for their own series.
-    """
-    if _search_reader is None:
-        return []
-    return [Observation(select(_search_reader()))]
+    return _search.observe(lambda snapshot: [Observation(snapshot.neighbors_stale)])
 
 
 def configure_telemetry(settings: Settings) -> None:

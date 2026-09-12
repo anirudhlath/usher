@@ -301,6 +301,6 @@ def test_no_reader_reports_no_observation_rather_than_a_zero(
     -- registering a reader that answers with an empty mapping -- passes
     against a guard that fabricates a zero.
     """
-    monkeypatch.setattr("usher.telemetry._push_reader", None)
+    monkeypatch.setattr("usher.telemetry._push._read", None)
     assert list(_observe_push_connected(CallbackOptions())) == []
     assert list(_observe_push_reconnects(CallbackOptions())) == []

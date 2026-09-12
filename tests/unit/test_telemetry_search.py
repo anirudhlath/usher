@@ -784,7 +784,7 @@ def test_no_reader_reports_no_observation_rather_than_a_zero(
     through `register_search_gauges`, which assigns the reader *before* it
     creates the instruments.
     """
-    monkeypatch.setattr("usher.telemetry._search_reader", None)
+    monkeypatch.setattr("usher.telemetry._search._read", None)
     assert list(_observe_embeddings_stale(None)) == []  # type: ignore[arg-type]
     assert list(_observe_embeddings_refused(None)) == []  # type: ignore[arg-type]
 

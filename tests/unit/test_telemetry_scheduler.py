@@ -16,7 +16,7 @@ def test_an_unregistered_scheduler_reader_observes_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No reader means no observation. Zero would read as "exactly due"."""
-    monkeypatch.setattr("usher.telemetry._scheduler_reader", None)
+    monkeypatch.setattr("usher.telemetry._scheduler._read", None)
 
     assert list(telemetry._observe_job_due(CallbackOptions())) == []
 
