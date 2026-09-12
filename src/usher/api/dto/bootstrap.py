@@ -1,29 +1,4 @@
-"""Wire shapes for `/admin/bootstrap` (PRD 07's Admin table, PRD 04).
-
-What is deliberately absent from `BootstrapTriggerResponse` is the whole
-design: no percentage, no estimate, no "already running" flag, and no
-`ImportRun`. `JobQueue.enqueue` returns a row count that cannot tell a fresh
-row from a promotion of one already in flight (`usher.domain.jobs.JobKind`
-carries the measured table), so every one of those would be a number this
-route cannot honestly produce. Progress belongs to `GET
-/admin/bootstrap/status`, which reads the durable `import_runs` checkpoint,
-and to the `bootstrap.progress` event.
-
-`BootstrapStatusResponse` is the other half and it is a **projection of
-`services.bootstrap.BootstrapReport`**, not a second assembly of the same
-four reads. That is what `/openapi.json` gains over the `{"type": "object"}`
-a hand-built dict would have described, and it is why the vocabulary verdict
-crosses the wire as a `VocabularyState` member rather than as the sentence
-`usher bootstrap-status` prints: a client that has to regex English to tell
-*"never loaded"* from *"loaded from the wrong release"* is a client this
-route has failed.
-
-Importing a `services/` value object here is the shape `api/dto/events.py`
-already uses for `SentEvent`. `api/dto/` may reach `services/`; a **router**
-may not reach `usher.composition`, which is the eighth import contract and is
-untouched — `api/deps.py` builds the report and the router names only its
-own `Annotated` alias.
-"""
+"""Wire shapes for `/admin/bootstrap` (PRD 07's Admin table, PRD 04)."""
 
 from datetime import datetime
 

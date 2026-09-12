@@ -324,31 +324,31 @@ def test_adr_0046s_arithmetic_over_its_own_stated_inputs_holds() -> None:
 
 
 def test_the_walk_reads_the_same_length_in_every_document_that_prices_it() -> None:
-    """One walk, four documents, and until this case nothing tied them.
+    """One walk, three documents, and until this case nothing tied them.
 
     ADR-0046 measures the rebuild's own duration; PRD 08's `### Scheduled
-    work` prices `USHER_SCHEDULER_ENABLED`'s default against it; PRD 09's M10
-    row prices the same default against it again; and
-    `usher.ports.scheduler.ScheduledJob.last_done` states the obligation it
-    puts on a registration's `period`. **A figure restated in four places is
-    the shape this repository keeps getting wrong** — the 148/136 percentages
-    one subsystem over, `PortRateLimited`'s raise-site census, the twelve
-    landings in `test_migrations.py` — and the failure is always the same: one
-    site is re-measured and the others are not, so a reader's answer depends on
-    which document they opened.
+    work` prices `USHER_SCHEDULER_ENABLED`'s default against it; and PRD 09's
+    M10 row prices the same default against it again. **A figure restated in
+    several places is the shape this repository keeps getting wrong** -- the
+    148/136 percentages one subsystem over, `PortRateLimited`'s raise-site
+    census, the twelve landings in `test_migrations.py` -- and the failure is
+    always the same: one site is re-measured and the others are not, so a
+    reader's answer depends on which document they opened.
 
-    The port's spelling is `3 h 34 m 44 s` rather than `3.58 h`, so this also
-    checks the two forms are the same span. That is deliberate: the sweep that
-    hunts `3.58` does not find `34 m 44 s`, which is exactly how the old
-    `3.33 h / 91.7 ms/seed` figure survived in four places under a sweep that
-    hunted the hours.
+    **`usher.ports.scheduler` was a fourth site and deliberately is not one
+    now.** It spelled the same span as `3 h 20 m 33 s` and bounded a period at
+    `3.34 h`, both of which this case converted and compared; M10's docstring
+    convention bars a measurement from `src/`, so the port states the
+    *obligation* a registration's `period` owes its own artefact and the
+    figure lives only where it can be re-measured. An arm reading a file the
+    convention forbids the number to be in fails on the convention rather than
+    on a drifted figure, which is the opposite of what this case is for.
     """
     adr = _matched(
         r"= ([\d,]+) s = ([\d.]+) hours over ([\d,]+) seeds",
         _prose(_ADR_0046),
         "ADR-0046's completed walk",
     )
-    span_seconds = int(adr.group(1).replace(",", ""))
     hours = float(adr.group(2))
     seeds = int(adr.group(3).replace(",", ""))
 
@@ -369,24 +369,4 @@ def test_the_walk_reads_the_same_length_in_every_document_that_prices_it() -> No
     )
     assert float(roadmap.group(1)) == hours, (
         f"PRD 09's M10 row prices the walk at {roadmap.group(1)} hours"
-    )
-
-    port = _prose(pathlib.Path(__file__).parents[2] / "src" / "usher" / "ports" / "scheduler.py")
-    spelled_out = _matched(
-        r"(\d+) h (\d+) m (\d+) s", port, "`ScheduledJob.last_done`'s walk duration"
-    )
-    stated = (
-        int(spelled_out.group(1)) * 3600
-        + int(spelled_out.group(2)) * 60
-        + int(spelled_out.group(3))
-    )
-    assert stated == span_seconds, (
-        f"the port spells the walk {spelled_out.group(0)} = {stated:,} s, and "
-        f"ADR-0046 measured {span_seconds:,} s"
-    )
-    decimal = _matched(
-        r"at or under ([\d.]+) h", port, "`ScheduledJob.last_done`'s back-to-back bound"
-    )
-    assert float(decimal.group(1)) == hours, (
-        f"the port bounds a period at {decimal.group(1)} h against ADR-0046's {hours}"
     )

@@ -1,84 +1,4 @@
-"""`MetadataProvider` over TMDb's v3 API.
-
-**TMDb's movie/TV divergence runs through its API as well as its payloads,
-and this module is where it stops.** Three separate things diverge, and only
-the first is visible in a response body:
-
-1. **Field names** (`title`/`name`, `release_date`/`first_air_date`, …) —
-   `usher.adapters.tmdb.mapping` handles those and tabulates them.
-2. **Endpoints.** `/movie/{id}` against `/tv/{id}`; `/search/movie` against
-   `/search/tv`; `/movie/changes` against `/tv/changes`; and a series' episodes
-   live behind `/tv/{id}/season/{n}`, which has no movie counterpart at all.
-3. **`append_to_response` vocabularies.** `release_dates` is a movie-only
-   namespace and `content_ratings` is a TV-only one. **Verified live
-   2026-08-01: asking either half for the other's namespace is answered
-   `200` with the key simply absent** — not an error, not even a warning.
-   So one shared append list is the worst of the three: half the catalog
-   loses its `content_rating` (or its certification) silently, on a
-   response that looks entirely successful. An unknown namespace
-   (`zzz_not_a_namespace`) behaves the same way.
-
-All three were read from TMDb's published reference on 2026-07-31 and
-confirmed against the live API on 2026-08-01;
-`tests/fixtures/tmdb/README.md` lists the pages.
-
-**A series costs one request, seasons and episodes included.** TMDb's series
-detail lists its seasons and carries no episodes, so this used to be `1+N` —
-one detail request plus one `GET /tv/{id}/season/{n}` per season. It is not:
-`append_to_response` takes `season/N` alongside the namespaces, verified live
-2026-08-01, and one request carrying the six namespaces plus
-`season/0…season/13` returned Game of Thrones' entire hierarchy, all 373
-episodes across 9 seasons. At 32,409 series and a median of 9 listed seasons
-that is ~324k requests against ~32k, i.e. **~10x** — the median coming from
-30 popular-skewed series, so the larger figure is an upper bound on that
-measurement rather than a prediction.
-
-Three measured facts hold the shape up, and it rests on all three. The 20-item
-ceiling is **enforced** (21 items is a 400, `status_code: 27`), so six
-namespaces leave exactly fourteen season slots and the window is blind for
-`season/0…season/13`. A season number the series does not have is **silently
-omitted** rather than an error, which is what makes a blind window legal. And
-an appended block is identical to the season route's own response **but for a
-missing top-level `id`**, which the series' `seasons[]` summary already
-carries byte-identically — so merging the block over the summary, exactly as
-the `1+N` spelling did, loses nothing.
-
-TMDb permits any integer season number, so the blind window is reconciled
-against the `seasons[]` summary in the *same* response and any listed number
-it missed is fetched by a follow-up. That follow-up spends no slot on a
-namespace, so it gets all twenty. **Identity with the `1+N` output is the
-contract and the request count is only the benefit**:
-`mapping.seasons_and_episodes`, `EnrichService._store_hierarchy` and
-`DeriveService` all read `raw_payloads` rows written months earlier, so a
-divergence here is invisible until a derivation much later returns nothing.
-`to_result` stays a pure function of one document and `raw_payloads` caches
-everything M7 and M9 re-derive `Person`/`Credit`/`Collection`/`Image` from
-with no second network call (ADR-0016).
-
-**One thing the `1+N` shape had and this one cannot: a missing season used to
-be loud.** That spelling argued, and this docstring said, that a season whose
-own request fails should take the whole fetch with it — "a catalog that says
-a show has seven seasons when it has eight is wrong with no signal anywhere,
-and a parked job is at least visible". `append_to_response` has no way to say
-that. A season number the series does not have and a season TMDb declines to
-serve are **the same 200 with the key absent**, so the fetch cannot tell them
-apart and a listed season whose block never arrives now yields its `Season`
-row with no episodes instead of parking the job. Deliberate, and the cost is
-bounded rather than nil: the reconcile still spends one follow-up on it, so
-the case is at least *paid for* even though it is not reported. It is also a
-case the live run never met — 320 listed seasons across 30 series, zero
-absent, which is guess 8 and is still unverified rather than confirmed.
-
-**`search` scopes to one id space when it can.** `/search/multi` labels its
-results but supports neither `primary_release_year` nor `first_air_date_year`,
-so it cannot filter by year at all — which is why an unscoped search here is
-two requests rather than one multi. ADR-0017 is why the port carries an
-optional `kind` for the caller that knows.
-
-**And it retries without the year when the year found nothing**, because
-TMDb's year filter is exact while the match ladder's is ±1. See
-`_search_one`, which carries the measurement.
-"""
+"""`MetadataProvider` over TMDb's v3 API."""
 
 import datetime as dt
 import uuid
@@ -156,27 +76,7 @@ def _season_item(number: int) -> str:
 
 
 def _append_for(kind: TitleKind) -> str:
-    """The `append_to_response` list for one id space.
-
-    A series' list is the six TV namespaces plus the blind season window --
-    exactly the 20-item ceiling, and assembled here rather than stored as a
-    constant so `SERIES_APPEND_TO_RESPONSE` stays the plain namespace list
-    that PRD 03's request table names.
-
-    **The consequence, stated because it is a real loss and the first
-    explanation given for it was wrong.** `scripts/capture_tmdb_fixture.py
-    --kind series` sends `SERIES_APPEND_TO_RESPONSE` alone, so it no longer
-    reproduces the first request this provider issues -- it used to match it
-    byte for byte, and a shape diff that drifts from the shipped request is
-    worth less than one that does not. Left alone deliberately: the season
-    blocks are popped before `fetch` returns, so capturing them would record
-    shapes nothing ever reads, and `season.json` already records the season
-    shape from its own route. It is *not* true that the namespace-only
-    capture is "exactly the shape `raw_payloads` holds" -- `raw_payloads`'
-    `seasons[]` entries carry merged episode data that no bare
-    `SERIES_APPEND_TO_RESPONSE` response has ever contained, which was
-    equally true of the `1+N` path this replaced.
-    """
+    """The `append_to_response` list for one id space."""
     if kind is not TitleKind.SERIES:
         return MOVIE_APPEND_TO_RESPONSE
     return ",".join(
@@ -329,28 +229,7 @@ class TmdbMetadataProvider(MetadataProvider):
     async def _search_one(
         self, name: str, year: int | None, kind: TitleKind
     ) -> list[MetadataCandidate]:
-        """One id space, with the year retried away if it found nothing.
-
-        **TMDb's year filter is exact and the caller's rule is not**, and
-        without this the tighter of the two silently wins. Measured live
-        2026-08-01 over 320 IMDb names: all 294 candidates TMDb returned
-        carried *exactly* the year asked for, so
-        `usher.services.matching._confident`'s own
-        `abs(candidate.year - item.year) <= 1` never fired once -- tier 4 ran
-        at +/-0 while tier 3, the identical rule against the local catalog,
-        runs at +/-1. 26 of the 320 came back completely empty and re-asking
-        those without the year resolved **13** confidently, every one a
-        title whose TMDb date is one year off IMDb's (Danny Phantom 2003 vs
-        2004, Toast of London 2012 vs 2013, and eleven more).
-
-        A *fallback* rather than dropping the filter, because dropping it was
-        measured too and is worse: of 133 names that already resolved, 6
-        stopped resolving without the year, since "exactly one survivor"
-        across every year at once is a harder test than within one. So the
-        second request only happens when the first found nothing -- it can
-        add matches and cannot remove any, and costs one extra request on
-        the ~8% of probes that come back empty rather than on all of them.
-        """
+        """One id space, with the year retried away if it found nothing."""
         params = {"query": name, "include_adult": "false"}
         if year is None:
             return search_candidates(await self._client.get(_SEARCH_PATH[kind], params), kind)
@@ -394,27 +273,8 @@ class TmdbMetadataProvider(MetadataProvider):
         return ref.kind, tmdb_id
 
     async def _compose_seasons(self, payload: dict[str, Any], tmdb_id: int) -> None:
-        """Merge each season's block into the detail payload's `seasons`
-        entry, in place, fetching only what the blind window missed.
-
-        `dict.update` rather than a nested key: a season block carries the
-        same field names as the summary entry (`air_date`, `name`,
-        `overview`, `poster_path`, `season_number`, `vote_average`) plus
-        `_id`, `networks` and `episodes`, so merging is lossless and leaves
-        one shape for the mapper to read rather than two. The block is merged
-        **over** the summary, which is what the `1+N` spelling did with the
-        season route's own response -- and the block's one omission relative
-        to that response, the top-level `id`, is the field the summary
-        supplies, measured byte-identical live.
-
-        **The reconcile against `seasons[]` is what makes the blind window
-        safe.** TMDb permits any integer season number and the window assumes
-        small ones; deleting this loop is silent under-fetching rather than an
-        error, because an unlisted number is omitted without complaint. The
-        follow-up carries no namespaces, so it gets all twenty slots -- and it
-        is bounded at one attempt per fetch: a listed season whose block does
-        not arrive even then keeps its `Season` row (that rule is
-        `mapping.seasons_and_episodes`') and is not asked for a third time.
+        """Merge each season's block into the detail payload's `seasons` entry, in place,
+        fetching only what the blind window missed.
         """
         blocks = _take_appended_seasons(payload)
         seasons = payload.get("seasons")

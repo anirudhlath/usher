@@ -1,29 +1,4 @@
-"""Request and response shapes for the admin source routes.
-
-`api/dto/` types are distinct from `domain/` models (PRD 07): the wire
-contract is versioned independently. Here the split earns its keep
-immediately -- `SourceResponse` deliberately omits `credentials_ref`, which
-`Source` carries and no client has any use for, and `SourceCreateRequest`
-carries a `username` and `password` that no response type does.
-
-**The credential is write-only, structurally.** It appears on the request
-model and on no response model, so PRD 08's "credentials are never returned
-by any API, including admin" is a property of the type graph rather than of
-whoever wrote the handler -- there is no response type with a field to put
-one in. PRD 08 names *both* halves ("the stored username and password"), so
-`SourceResponse` omits the username too, not just the password.
-
-Holding the password as `SecretStr` closes the second half: `repr()` and
-`str()` of one are `'**********'`, so a parsed request that reaches a log
-line, a traceback frame summary, or an exception message renders redacted.
-It also puts `"writeOnly": true` on the field in `/openapi.json` (verified
-directly), which is the machine-readable form of the same rule -- a
-generated client marks it send-only rather than inferring that from the
-absence of a response field.
-It does *not* close the request-echo path -- a pydantic validation error
-carries the raw, unparsed body in its `input` field, which never reaches a
-`SecretStr` at all. `usher.api.errors` is what closes that one.
-"""
+"""Request and response shapes for the admin source routes."""
 
 import uuid
 

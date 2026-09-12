@@ -1,5 +1,5 @@
-"""`usher.api.caching` -- the conditional-GET helper, and its one adopter,
-`GET /home`.
+"""`usher.api.caching` -- the conditional-GET helper, over `GET /home`, the
+adopter whose TTL these cases are written against.
 
 **The real composer, over the repository fakes**, following the same
 correction M5 made for `test_api_home.py`: the router, the DTO and the
@@ -13,7 +13,9 @@ because this file's cases are about headers and status codes, not about row
 ordering.
 """
 
+import ast
 import inspect
+import pathlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -435,15 +437,51 @@ async def test_get_events_still_streams_and_carries_no_etag() -> None:
             assert "etag" not in response.headers
 
 
-def test_the_module_docstring_states_the_two_adoption_conditions_and_names_the_route_that_fails_one() -> (  # noqa: E501
-    None
-):
-    """`src/usher/api/caching.py`'s module docstring states the two
-    conditions a route must meet to adopt the helper, and names
-    `GET /titles/{id}` as the route that fails the first one and why."""
-    doc = inspect.getdoc(caching)
-    assert doc is not None
-    assert "no side effect" in doc
-    assert "private" in doc
-    assert "GET /titles/{id}" in doc
-    assert "enrich" in doc
+def test_the_conditional_get_helper_is_adopted_by_exactly_two_routers() -> None:
+    """**Two conditions a route must meet to adopt this, and `GET /titles/{id}`
+    meets only the second**: no side effect a short-circuit could skip, and a
+    `private` response.
+
+    Opening a title promotes its `enrich` job and attributes PRD 10's click
+    (`test_api_titles.py::test_opening_a_stub_promotes_its_enrichment` and
+    `::test_opening_a_result_from_a_search_records_the_click_against_that_row`
+    are the two writes), so a conditional check moved ahead of that handler --
+    the natural place to put one, for speed -- stops both for exactly the
+    clients that send `If-None-Match` on every request. `GET /search` fails the
+    second condition: no TTL to quote, and a per-query ETag.
+
+    Adoption is asserted as a **set** over the router package rather than as a
+    sentence in the helper's docstring, which is how this was checked until
+    M10: a substring guard is satisfied by prose and says nothing about which
+    routers import the helper. An eleventh router adopting it is a red rather
+    than a discovery -- the argument above is what has to be made again, per
+    route.
+    """
+    routers = pathlib.Path(inspect.getfile(caching)).parent / "routers"
+    modules = sorted(path.stem for path in routers.glob("*.py") if path.stem != "__init__")
+    assert len(modules) >= 10, f"the premise: the router scan found {modules}"
+
+    adopters: set[str] = set()
+    for name in modules:
+        tree = ast.parse((routers / f"{name}.py").read_text(encoding="utf-8"))
+        # `ast.Import` as well as `ast.ImportFrom`: `import usher.api.caching`
+        # is invisible to an ImportFrom-only scan, which is the spelling a
+        # scan written against today's two adopters would miss.
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+        if "usher.api.caching" in imported:
+            adopters.add(name)
+
+    assert adopters == {"home", "images"}, (
+        "a router adopted the conditional-GET helper, or stopped: each one owes "
+        "the no-side-effect and `private` arguments this case's docstring makes "
+        f"for the two that hold -- {sorted(adopters)}"
+    )
+    assert "titles" not in adopters, (
+        "`GET /titles/{id}` promotes an enrichment and attributes a search click, "
+        "so a 304 short-circuit ahead of its handler would silently stop both"
+    )

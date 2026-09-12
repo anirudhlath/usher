@@ -1,49 +1,4 @@
-"""The typo-tolerance gate's 2,993 cases, regenerated from the live catalog.
-
-**Adopted verbatim from `scripts/measure_suggest_tiers.py`, which adopted it
-from ADR-0002's gate.** Nothing here is re-chosen, because a re-chosen
-constant makes E1's numbers incomparable with the 2026-08-03 run and with
-ADR-0031 -- and the whole reason E1 measures suggest first is that those
-numbers exist.
-
-Movies only, `imdb_num_votes >= 500`, names not unique in the catalog excluded
-at sampling time, five equal draws of 150 over `char_length(name)` bands, four
-typo classes at a uniformly random position, `random.Random(20260803)`.
-
-**The threshold is the gate's and the column is not, and that is a change of
-population rather than a rename.** The gate wrote `vote_count` when only the
-IMDb bulk import filled it; TMDb enrichment acquired the same column and by
-2026-08-19 the predicate selected 8,523 unique-named movies against the gate's
-48,549. ADR-0040 split the column by source, and this frame now reads the
-IMDb one -- single-source, catalog-wide, unmovable by any TMDb crawl. Whether
-that reproduces the gate's five pools is measured in `GATE_POOLS`, not assumed
-here.
-**2,993 rather than 3,000 because seven two-character names admit no
-deletion.**
-
-**And the source's own stated limitation, lifted verbatim rather than
-paraphrased.** The reassuring half of that header -- the frame is verified,
-the five pool sizes reproduce to the row -- travelled into this port on its
-first commit and this half did not, in the one module whose whole thesis is
-comparability with a recorded run. Without it a reader concludes E1's cases
-*are* the gate's cases:
-
-    What is *not* claimed: that the 750 sampled names are the same 750. The
-    gate's draw order was not recorded, only its procedure and its pool
-    sizes, so a different-but-equivalent draw is possible and every number
-    here carries that caveat.
-
-The generator is split in two on purpose. `build_typo_cases` is pure -- pools
-in, cases out -- so it is unit-tested against a hand-built pool with no
-database. `read_pools` and `read_frame` are the catalog reads.
-
-**Owed by whichever task builds the runner: `GATE_CASES` as a runtime guard.**
-`scripts/measure_suggest_tiers.py` prints `typo cases regenerated: N (gate:
-2993)` beside every run and warns when the two disagree, which is how an
-operator learns the catalog moved under them rather than reading a quietly
-smaller number as if it were the gate's. The port carries the constant and
-not the guard, because there is no runner here yet to print it from.
-"""
+"""The typo-tolerance gate's 2,993 cases, regenerated from the live catalog."""
 
 import random
 import uuid
@@ -68,27 +23,9 @@ GATE_BANDS: tuple[tuple[str, int, int], ...] = (
 )
 GATE_DRAW_PER_BAND = 150
 # `MappingProxyType` rather than a bare dict, because `Mapping[str, int]` is
-# documentation and this is the constant the whole comparability story rests
-# on: `GATE_POOLS["2-4"] = 433` on a plain dict is one line, silent, and
-# process-wide, and it moves the number `check_frame` refuses against.
-#
-# **Re-measured 2026-08-19 against the restored catalog, and the delta is
-# recorded rather than absorbed.** ADR-0002's gate recorded
-# 432 / 2,532 / 7,178 / 20,520 / 17,887 = 48,549 against `vote_count`, which by
-# then had acquired a second writer; the same predicate on `imdb_num_votes`
-# answers 48,639 -- **+90, or +0.19%**. That near-reproduction is the evidence
-# the diagnosis was complete: no other column tried came within 40,000 of it,
-# and the contaminated one answered 8,523.
-#
-# **The residual +90 is a different IMDb snapshot, not a different frame.** The
-# gate ran against the dump cached on 2026-08-03; this ran against
-# `"3a2f2e8cf3a6e045bcaa6bb213fe143a-2"`, generated 2026-08-18. Eight days of
-# vote accumulation moves titles across the `>= 500` threshold in both
-# directions, which is why four bands fall and one rises. So these are the
-# *observed* frame and no longer literally the gate's, and a run comparing E1's
-# numbers with the 2026-08-03 ones carries that caveat -- alongside the one
-# this module's docstring already carries, that the 750 drawn names were never
-# the gate's own 750 either.
+# documentation and this is the constant the whole comparability story rests on:
+# `GATE_POOLS["2-4"] = 433` on a plain dict is one line, silent, and process-wide, and
+# it moves the number `check_frame` refuses against.
 GATE_POOLS: Mapping[str, int] = MappingProxyType(
     {
         "2-4": 428,
@@ -106,31 +43,7 @@ GATE_SHARED_LOWER_NAMES = 81_088
 GATE_CASES = 2_991
 TYPO_CLASSES: tuple[str, ...] = ("substitution", "deletion", "transposition", "doubled")
 
-# One statement, two readers. `read_pools` selects from it and `read_frame`
-# counts it, so the two can never disagree about *the predicate* -- spelled
-# twice they would answer identically today and drift the first time either was
-# edited.
-#
-# **What it does not buy is that the checked frame is the drawn frame.** They
-# are two statements and under READ COMMITTED each takes its own snapshot, so a
-# write landing between them makes the count a count of a population the draw
-# never saw. Closing that is the caller's job and costs one repeatable-read
-# transaction spanning both reads; nothing here can do it, because neither
-# function opens the session it is handed.
-# **The threshold is ADR-0002's and the column is not.** The gate was written
-# against `titles.vote_count` when only the IMDb bulk import wrote it; TMDb
-# enrichment later wrote the same column with a figure ~38x smaller (paired:
-# median TMDb 15 against median IMDb 576 over the same 130,647 enriched rows),
-# so by 2026-08-19 `vote_count >= 500` selected **8,523** unique-named movies
-# where the gate recorded 48,549, and `check_frame` refused.
-#
-# `imdb_num_votes` is single-source, catalog-wide, and no TMDb crawl can move
-# it -- so this restores ADR-0002's frame semantics rather than re-choosing
-# them. Whether it restores the *pools* is an open question this module does
-# not get to assume: `GATE_POOLS` below is re-measured against the restored
-# catalog, and if it does not reproduce, the observed frame becomes canonical
-# and the delta is recorded with its cause. A number is never edited to make a
-# run green. ADR-0040.
+# One statement, two readers.
 _ELIGIBLE = """
     SELECT t.id, t.name FROM titles t
     WHERE t.kind = 'movie' AND t.imdb_num_votes >= 500

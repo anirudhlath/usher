@@ -1,34 +1,4 @@
-"""`collections`, and the writer `titles.collection_id` has never had.
-
-Implements `CollectionRepository`. Two of its four statements are worth
-reading before changing anything.
-
-**`attach_titles` writes `titles`, which is the most expensive table in this
-schema to touch.** `titles.search_document` is `GENERATED ALWAYS AS ... STORED`
--- measured at 4.06x on the bootstrap write path -- and it carries a GIN
-index. So an `UPDATE` that assigns unconditionally recomputes a tsvector and
-touches a GIN index per movie per derivation pass, producing a dead row
-version for each, for a value that did not change.
-`AND t.collection_id IS DISTINCT FROM d.collection_id` is what turns a no-op
-pass into zero rows written, and returning the *changed* count is what makes
-that observable rather than merely intended. This repository has recorded the
-same finding once already, in a `DO UPDATE` with no `WHERE`.
-
-`search_document` is never named in any statement here, and that is not
-incidental: naming a generated column in an `INSERT` column list or an
-`UPDATE ... SET` is an **error**, not an ignored value. None of this goes
-through the ORM either, so `update()`'s mutation loop and `DERIVED_COLUMNS`
-are not in the path.
-
-**`AND t.kind = 'movie'` is in the statement and not in the caller.**
-`belongs_to_collection` is a field of `/movie/{id}` with no `/tv/{id}`
-counterpart, so a series carrying a collection id is a defect -- the fourth
-wrong implementation `CollectionRepositoryContract` kills. It lives here
-because it is a property of the data source rather than of any one call site,
-and `titles` deliberately carries no
-`CHECK (collection_id IS NULL OR kind = 'movie')` (see
-db/models/collection.py for why), so this clause is what enforces it.
-"""
+"""`collections`, and the writer `titles.collection_id` has never had."""
 
 import uuid
 from collections.abc import Sequence
@@ -55,13 +25,9 @@ CREATE TEMP TABLE stg_collections (
 
 _COLLECTIONS_COLUMNS = ("ordinal", "id", "tmdb_id", "name")
 
-# Required rather than defensive, and for a sharper reason than `people`'s: a
-# batch names one franchise once per member film, so a two-film collection is
-# already a duplicate before anything unusual has happened.
-#
-# The `anonymous` arm mirrors people's, for the same reason: the unique index
-# is partial, so a collection with a NULL tmdb_id has no conflict target at
-# all and routing it through the ON CONFLICT arm would work by accident.
+# Required rather than defensive, and for a sharper reason than `people`'s: a batch
+# names one franchise once per member film, so a two-film collection is already a
+# duplicate before anything unusual has happened.
 _UPSERT_COLLECTIONS = """
 WITH deduped AS (
     SELECT DISTINCT ON (tmdb_id) * FROM stg_collections
@@ -91,13 +57,7 @@ FROM unnest(CAST(:tmdb_ids AS integer[])) AS q(tmdb_id)
 JOIN collections c ON c.tmdb_id = q.tmdb_id
 """
 
-# Set-based, one statement for the whole batch. No staging table: a
-# derivation page carries at most one link per movie and the pairs travel as
-# two arrays, so there is nothing for a COPY to buy.
-#
-# `IS DISTINCT FROM` rather than `<>`: the stored value is NULL on a first
-# attach, and `NULL <> :x` is NULL, so `<>` writes nothing at all on exactly
-# the pass that matters.
+# Set-based, one statement for the whole batch.
 _ATTACH_TITLES = """
 UPDATE titles t
 SET collection_id = d.collection_id
@@ -108,20 +68,7 @@ WHERE t.id = d.title_id
   AND t.collection_id IS DISTINCT FROM d.collection_id
 """
 
-# FranchiseProvider's whole question, in one statement rather than one per
-# collection. `ix_titles_collection_id` is the driving index and is the one
-# PRD 02 had deferred to M9.
-#
-# `mi.episode_id IS NULL` is part of the predicate rather than implied:
-# media_items holds 999,827 episode rows on the one measured deployment and a
-# join on title_id alone reads the wrong population. Collections hold only
-# movies so no episode can match today -- which is exactly why the clause has
-# to be written down, since its absence is otherwise indistinguishable from
-# having forgotten it.
-#
-# `array_agg(...) FILTER (...)` returns NULL rather than an empty array when
-# nothing matches, so it is COALESCEd to '{}' -- a NULL here would arrive as
-# `None` where the port promises a frozenset.
+# FranchiseProvider's whole question, in one statement rather than one per collection.
 _LIST_OWNED = """
 WITH members AS (
     SELECT t.collection_id, t.id AS title_id, t.release_date, t.year
@@ -154,34 +101,8 @@ LIMIT :limit
 """
 
 
-# `GET /collections/{id}`, and it is `_LIST_OWNED` with three deliberate
-# differences rather than the same statement with a parameter.
-#
-# 1. **No `HAVING`.** There is no `min_owned` here at all: that floor is a
-#    statement about what belongs on a *screen*, and asking for a franchise by
-#    id is a different request. Re-applying it 404s the franchise a household
-#    has barely started.
-# 2. **`LEFT JOIN members`, so a collection with no movie members still
-#    answers a row.** The port promises `None` only for a collection the
-#    catalog does not hold; an inner join would make "owned none of it" and
-#    "no such franchise" the same answer, which the route turns into two
-#    different status codes. `array_agg(...) FILTER (WHERE ... IS NOT NULL)`
-#    plus `COALESCE(..., '{}')` is what keeps the empty case an empty array
-#    rather than `{NULL}`.
-# 3. **`AND t.kind = 'movie'` is written here too.** `attach_titles` filters it
-#    on the way in, and `titles` deliberately carries no
-#    `CHECK (collection_id IS NULL OR kind = 'movie')` (see
-#    db/models/collection.py), so a series carrying a collection id is storable
-#    by anything else that writes the column. A reader that trusted the writer
-#    would put a television show on a franchise page.
-#
-# `mi.episode_id IS NULL` is spelled out for `_LIST_OWNED`'s reason, restated
-# because this is a second copy of the same predicate rather than a share of
-# it: media_items holds 999,827 episode rows on the one measured deployment,
-# collections hold only movies so no episode can match today, and that is
-# exactly why its absence has to be distinguishable from having forgotten it.
-#
-# `ix_titles_collection_id` is the driving index.
+# `GET /collections/{id}`, and it is `_LIST_OWNED` with three deliberate differences
+# rather than the same statement with a parameter.
 _GET_COLLECTION = """
 WITH members AS (
     SELECT t.id AS title_id, t.release_date, t.year
@@ -281,18 +202,11 @@ class PostgresCollectionRepository(CollectionRepository):
                         },
                     )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0044).** The
-            # statement binds two caller-supplied `uuid[]`s and computes nothing, so class 22 here
-            # can only be about a value this call handed in -- and `titles` carries four columns
-            # narrower than the fields feeding them, which is what the ledger scores this table on.
-            # SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any classified
-            # subclass, so a column refusing a *value* arrives as a bare `DBAPIError` that `except
-            # IntegrityError` does not catch and the driver's own exception crossed this port
-            # boundary untranslated -- the one thing ADR-0009 forbids. `db/repositories/_errors.py`
-            # holds the two measured shapes and the only copy of the predicate. Everything that is
-            # *not* a row refusal -- a dropped connection, a statement timeout, an undefined table
-            # -- still propagates, because a caller that cannot tell those apart retries the one
-            # thing a retry cannot fix.
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
+            # (ADR-0044).** The statement binds two caller-supplied `uuid[]`s and
+            # computes nothing, so class 22 here can only be about a value this call
+            # handed in -- and `titles` carries four columns narrower than the fields
+            # feeding them, which is what the ledger scores this table on.
             if not is_row_refusal(exc):
                 raise
             # A `collection_id` naming no collection. A `title_id` naming no
@@ -302,12 +216,8 @@ class PostgresCollectionRepository(CollectionRepository):
             raise RepositoryConflict(
                 "a collection link conflicts with the catalog", constraint=constraint_name(exc)
             ) from exc
-        # rowcount is what the WHERE matched, and `IS DISTINCT FROM` is in the
-        # WHERE -- so this is *changed*, never *touched*.
-        #
-        # The cast is what `bulk.py:_rowcount` records: `rowcount` lives on
-        # `CursorResult`, not on the `Result[Any]` that `session.execute` is
-        # annotated to return, so mypy rejects the direct read.
+        # rowcount is what the WHERE matched, and `IS DISTINCT FROM` is in the WHERE --
+        # so this is *changed*, never *touched*.
         return cast(CursorResult[Any], result).rowcount
 
     async def count(self) -> int:

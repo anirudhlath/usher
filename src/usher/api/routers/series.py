@@ -1,33 +1,5 @@
-"""The series hierarchy -- PRD 07's three rows that `GET /titles/{id}` has
-carried as an absence since M5.
-
-`api/dto/title.py` names the season/episode hierarchy as one of four fields
-*"deferred to the milestone that fills it rather than shipped empty"*, and
-assigns it to **`GET /series/{id}/seasons`**. This module is that route, and
-the title detail deliberately does not grow a `seasons` key alongside it: a
-series has a median of 9 seasons and the one measured pathological show has
-20,000 episodes, so inlining the tree makes the length of a title response a
-property of the show. It stays two links a client follows.
-
-**Two bounded reads, and the one this module may not use.**
-`EpisodeRepository.list_for_title` answers both questions at once and returns
-the entire tree with them -- 20,001 rows / 22.901 ms / 402 buffers for that
-same series, measured. It exists for enrichment's change detection and the
-CLI's report, where the whole tree *is* the answer. A route takes
-`list_seasons` (few rows, unpaged, one statement) and `list_season_episodes`
-(one keyset page, one statement) instead, so no response here is unbounded and
-neither route reads once per episode.
-
-**`404` means the id does not exist; an empty collection is a `200`.** A movie
-has no seasons and that is a fact about the title, not a missing resource --
-and since M9's T1 a season whose `append_to_response` block never arrived
-leaves a real `Season` row with no episodes, so an empty page is a state the
-catalog genuinely holds rather than a defect
-(`.claude/rules/tmdb-and-enrichment.md`). Both routes therefore resolve
-*existence* separately from *contents*, and one case per route asserts the two
-answers are distinguishable. The code is V1's generic `not_found` in every
-case: RFC 9457's `instance` already carries the path, so a per-resource code
-would be a second spelling of it (ADR-0030).
+"""The series hierarchy -- PRD 07's three rows that `GET /titles/{id}` has carried as
+an absence since M5.
 """
 
 import uuid
@@ -64,12 +36,9 @@ _EPISODE_PAGE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     **_SERIES_FAILURES,
 }
 
-#: A season of the one measured library's largest show is a few dozen
-#: episodes, so the default renders most seasons in one request; the ceiling
-#: is what stops a client asking for a 20,000-row page by widening a query
-#: parameter. Both are module constants rather than `Settings` fields -- this
-#: group adds no configuration, and a page size an operator can tune is a
-#: contract clients cannot rely on.
+# : A season of the one measured library's largest show is a few dozen : episodes, so
+# the default renders most seasons in one request; the ceiling : is what stops a client
+# asking for a 20,000-row page by widening a query : parameter.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 

@@ -6,32 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class DomainModel(BaseModel):
-    """Base for every Usher domain model.
-
-    ``frozen=True``: instances are immutable once constructed. The write
-    path is `.evolve()`, never `model_copy(update=...)` — the latter skips
-    validation entirely and can hand back an instance with a wrong-typed or
-    out-of-range field that serializes fine and only fails much later, on
-    the way back in. See `evolve` below.
-
-    ``extra="forbid"``: adapters hand-map dozens of provider fields onto
-    these models by keyword. A typo'd field name (`tmbd_id=` for
-    `tmdb_id=`) must fail loudly at construction, not be silently dropped —
-    this is the same standard `usher.config.Settings` already holds.
-
-    ``allow_inf_nan=False``: `inf` and `NaN` survive every range check a
-    field can carry, and a `NaN` stored in a vector or a score propagates
-    silently into every comparison made against it.
-
-    Note on hashability: a model with a `dict[...]` field is unhashable
-    even though it is frozen — Python cannot hash a dict, and pydantic's
-    generated `__hash__` hashes every field's value. `Title` carries
-    `field_provenance: dict[str, str]` and is therefore the one domain
-    model in this set that is *not* hashable; the other four carry no dict
-    or list field and are. This asymmetry is intentional — see
-    `Title`'s own docstring — and its failure mode is a loud, immediate
-    `TypeError` from `hash()`, not silent corruption.
-    """
+    """Base for every Usher domain model."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 

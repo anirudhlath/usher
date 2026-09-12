@@ -1,7 +1,4 @@
-"""The taste profile: a stored centroid plus the library genres it is read against.
-
-Implemented by `usher.db.repositories.taste.PostgresTasteRepository`.
-"""
+"""The taste profile: a stored centroid plus the library genres it is read against."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -19,33 +16,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class StoredTaste:
-    """One user's cached centroid, and the evidence for its currency.
-
-    Not `Centroid` (`usher.domain.taste`), and the divergence is the whole
-    point of having both. `Centroid` refuses to exist over nothing —
-    `vector` is `min_length=1` and `title_count` is `ge=1` — because a vector
-    averaged over no titles is a point equidistant from everything, which is a
-    row that is noise wearing a reason. This is the *storage* shape, and it
-    must be able to hold exactly the state `Centroid` refuses: a **written
-    refusal**, `centroid=None` with a `title_count` below the minimum.
-
-    That distinction is load-bearing rather than tidy. `title_embeddings`
-    writes a NULL vector for a document its composer refused, so the row stops
-    matching the stale predicate and is re-claimed *once* when its input moves.
-    Without the equivalent here, a four-title household is recomputed on every
-    read of every home screen forever, and the fifth title does not re-claim
-    the centroid once — it re-claims it always.
-
-    **`source_watermark` is nullable, against the plan's `NOT NULL`, and the
-    reason is the household whose history is empty.** It holds
-    `max(watch_states.updated_at)` as of computation, and that aggregate is
-    `NULL` over an empty history. With a `NOT NULL` column there is no value to
-    write, so the refusal for a household that has watched nothing cannot be
-    stored at all — and `stored IS DISTINCT FROM NULL` is then true forever, so
-    that household is the *one* recomputed on every read. Nullable makes
-    `NULL IS DISTINCT FROM NULL` false, the refusal readable, and the first
-    watch state that lands the thing that re-claims it.
-    """
+    """One user's cached centroid, and the evidence for its currency."""
 
     user_id: uuid.UUID
     centroid: tuple[float, ...] | None
@@ -105,32 +76,7 @@ class TasteRepository(ABC):
 
     @abstractmethod
     async def library_genre_counts(self) -> LibraryGenres:
-        """How the **owned** library is composed by genre.
-
-        Task 23's baseline, and the choice of population is the decision.
-        *Not* the household's own watched distribution -- normalising by the
-        quantity being measured makes every lift exactly 1.0 by construction,
-        so the provider would propose nothing on every household forever.
-        *Not* the whole 1.27M-row catalog either: a household cannot watch what
-        it does not own, so a household that owns nothing but horror and
-        watches nothing but horror has emitted **zero** bits of taste
-        information -- the library made that choice. Against a global baseline
-        it reads as an overwhelming horror affinity and the row says *"you
-        watch a lot more Horror than your library would suggest"* to somebody
-        whose library suggested exactly that. Word for word false.
-
-        The owned library is the household's actual **choice set**, which makes
-        affinity *lift over opportunity*.
-
-        "Owned" is `owned_title_ids`' definition and not
-        `list_recently_added`'s: a title's own row (`episode_id IS NULL`),
-        with **no** availability filter, because a copy the nightly sweep
-        retracted is still a copy you have. The two statements diverge
-        deliberately and each says so.
-
-        Household-wide, so no `user_id`: availability is not per-user. It is
-        also not per-source -- a title owned twice is owned once.
-        """
+        """How the **owned** library is composed by genre."""
 
     @abstractmethod
     async def get(self, user_id: uuid.UUID, *, model_name: str) -> StoredTaste | None:
@@ -152,48 +98,8 @@ class TasteRepository(ABC):
 
     @abstractmethod
     async def latest(self, user_id: uuid.UUID) -> StoredTaste | None:
-        """The stored row for this household, **whatever model wrote it** —
-        read-only, and no staleness predicate.
-
-        This is the read that lets a process which cannot *compute* a centroid
-        still *serve* one. `TasteService.centroid` refuses without an embedder
-        and says why: `model_name` is the key the stored row is invalidated on
-        and a deployment with no model has no honest value for it. Every
-        request is such a process — `create_app`'s lifespan builds an embedder
-        only under `worker_enabled` — so a ranking term routed through
-        `centroid()` is structurally inert on the shipped route, which is the
-        `GenreAffinityProvider` failure PRD 06 has already corrected once.
-
-        **No `model_name` argument, for the same sentence's reason.** A caller
-        with no embedder cannot supply one, and requiring it would make this
-        method unreachable from the only place it is for. The stored row
-        carries its own `model_name`, so the filter moves to the *other* side:
-        the caller scopes its vector read by what the centroid was computed
-        under. Comparing a centroid from one checkpoint against vectors stored
-        under another is the ST-vs-fastembed divergence — max pairwise-similarity
-        delta 1.41e-03, **6x the halfvec quantisation error** — arriving as a
-        confident cosine rather than as an error.
-
-        **Deliberately not `get()` with the argument dropped.** `get` evaluates
-        `STALE_TASTE`, whose whole question is *"should I recompute?"*, and a
-        caller that cannot recompute has no use for the answer: applying it
-        here would withhold the term from exactly the households that watch
-        things, because the watch state that moves the watermark is also what
-        produced the centroid worth serving. The row's `computed_at` and
-        `source_watermark` travel with it, so a caller that wants to judge age
-        can. `get()` and `centroid()` are untouched by this method's existence.
-
-        **Read-only, and that is a boundary rather than a naming choice.** It
-        is what stops a request path minting a `user_taste` row under a model
-        it does not have — `centroid()` writes its refusals, and a request
-        writing one would stamp the deployment's *absent* model onto the
-        household's cache.
-
-        **A returned row may carry `centroid=None`.** That is the written
-        refusal `StoredTaste`'s docstring exists to make representable, and it
-        is answered rather than raised: to a ranking caller it means "no term",
-        which is the same answer as no row at all and is deliberately not
-        distinguished here.
+        """The stored row for this household, **whatever model wrote it** — read-only, and
+        no staleness predicate.
         """
 
     @abstractmethod

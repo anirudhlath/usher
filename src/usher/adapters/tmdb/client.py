@@ -1,50 +1,4 @@
-"""One throttled, authenticated HTTP session against TMDb's v3 API.
-
-**The rate limit is a real constraint, not a courtesy.** TMDb's own
-documentation says its limits "sit somewhere in the 40 requests per second
-range" and to "respect the `429` if you receive one" — it publishes no exact
-number and no `Retry-After` guarantee. So this client throttles itself with a
-token bucket rather than discovering the ceiling by hitting it, and treats a
-`Retry-After` header as a hint that may not arrive
-(`usher.adapters.http.retry_after_seconds`, shared with the Emby adapter).
-The clock is injected, so the throttle is testable without sleeping. This
-module is one row of the closed outbound table in
-`tests/unit/test_outbound_call_sites.py` — which also owns
-`tmdb/provider.py`'s six call sites, because they all go out through the one
-client built here and therefore through this bucket.
-
-**Two authentication forms, and the choice is a credential-exposure
-decision rather than a preference.** TMDb v3 accepts either an `api_key`
-query parameter or an `Authorization: Bearer` header carrying a v4 "API Read
-Access Token"; its documentation states the bearer token works across both
-API versions and that "both authentication methods provide the same level of
-access". A query-parameter credential lands in every request URL, and
-`HTTPXClientInstrumentor` (wired in `configure_tracing`) records the full URL
-as a span attribute — so the v3 form writes the key into telemetry on every
-request. This client therefore sends a bearer header whenever the configured
-secret is JWT-shaped, and falls back to the query parameter for a classic v3
-key, which has no header form at all. An operator who pastes their read
-access token instead of their API key closes the exposure with no code
-change.
-
-**The status ladder below the 404 is `usher.adapters.http.port_error_for`**,
-shared with the LLM adapter rather than written twice — the two had the same
-four branches in the same order, and the M4-against-TMDb measurements that
-justify them are recorded there. The 404 arm stays here because it is a real
-divergence: it is a TMDb-specific meaning (a merged-away id), not a different
-opinion about the 4xx range.
-
-**No exception message may carry a URL**, for the same reason.
-`EmbySession` interpolates the httpx exception into its own `PortUnavailable`
-message and says why that is safe there — an Emby URL carries no credential.
-A TMDb v3 URL does, so this client reports the exception's *type* and the
-path it was given, never the exception's own text and never the URL.
-
-The `httpx.AsyncClient` is injected and owned by whoever built it (the
-composition root), exactly as `usher.adapters.bulk.download.CachedDatasetFile`
-does — so this class has no `aclose`, and closing a shared client from here
-would break whatever else is using it.
-"""
+"""One throttled, authenticated HTTP session against TMDb's v3 API."""
 
 import asyncio
 import time
@@ -72,12 +26,7 @@ TMDB_ATTRIBUTION = (
 
 _tracer = trace.get_tracer("usher.metadata.tmdb")
 _meter = metrics.get_meter("usher.metadata.tmdb")
-# PRD 10's dashboard 3: "TMDb requests/sec against the ~40 ceiling with 429
-# count". Two instruments, not one, and the histogram alone was not enough:
-# a rate is a `rate(counter[1m])` and a 429 count is a counter increment,
-# while a histogram's `_count` series is a *sampled* aggregation whose
-# temporality and reset semantics differ from a counter's. PRD 10 names
-# `usher.provider.requests` for exactly this and it had no emitter.
+# PRD 10's dashboard 3: "TMDb requests/sec against the ~40 ceiling with 429 count".
 _request_duration = _meter.create_histogram(
     "usher.metadata.request.duration", unit="s", description="Wall time per TMDb request"
 )
@@ -185,12 +134,9 @@ class TmdbClient:
                 status = str(response.status_code)
                 return self._decode(response, path)
         finally:
-            # Both in the `finally`, so a transport failure -- which never
-            # reaches a status line at all and is labelled `error` -- is
-            # counted rather than silently absent. PRD 10's "provider
-            # degraded" alert fires on a 429-or-5xx *rate*, and a denominator
-            # that omits the failures makes that rate read low exactly when
-            # the upstream is worst.
+            # Both in the `finally`, so a transport failure -- which never reaches a
+            # status line at all and is labelled `error` -- is counted rather than
+            # silently absent.
             _request_duration.record(self._clock() - started, {"status": status})
             # The literal, not `provider.PROVIDER_NAME`: `provider.py`
             # imports this module, so reaching back for its constant is a
@@ -215,16 +161,8 @@ class TmdbClient:
 
     def _decode(self, response: httpx.Response, path: str) -> dict[str, Any]:
         if response.status_code == 404:
-            # **The one arm that is genuinely TMDb's and not the shared
-            # ladder's**, so it sits above the shared call rather than inside
-            # it. `port_error_for` would already answer `PortDataMalformed`
-            # here -- the family is the same -- but with the generic "rejected
-            # the request with HTTP 404" sentence, and this status has a
-            # specific meaning worth naming: TMDb answers 404 for an id it has
-            # merged away, and the catalog holds 291,737 TMDb ids from a bulk
-            # export that ages. Retrying cannot turn any of them into an
-            # answer, so `JobWorker` parks on the first attempt rather than
-            # spending five rate-limited ones first.
+            # **The one arm that is genuinely TMDb's and not the shared ladder's**, so
+            # it sits above the shared call rather than inside it.
             raise PortDataMalformed("TMDb has no entity at this reference", detail=path)
         # The rest of the ladder is `OpenAICompatibleClient`'s ladder, and the
         # rationale for each branch lives with it in `usher.adapters.http`.

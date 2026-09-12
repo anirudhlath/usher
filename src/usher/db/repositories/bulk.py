@@ -1,77 +1,4 @@
-"""Bulk loading into the catalog, bypassing the ORM entirely.
-
-Implements `BulkCatalogRepository` (`usher.ports.repository`). Every write
-here is `COPY` into an `UNLOGGED` staging table followed by exactly one
-`INSERT ... SELECT ... ON CONFLICT` (or `UPDATE ... FROM`), which is what the
-port's docstring reserves this path for.
-
-Three Postgres facts this file is built around, each verified directly
-against `pgvector/pgvector:pg17` on 2026-07-30:
-
-1. **`ON CONFLICT` must repeat a partial index's predicate.** `ON CONFLICT
-   (imdb_id) DO UPDATE` against `ix_titles_imdb_id` (unique *where imdb_id
-   IS NOT NULL*) fails with `InvalidColumnReferenceError: there is no unique
-   or exclusion constraint matching the ON CONFLICT spec`. Repeating it --
-   `ON CONFLICT (imdb_id) WHERE imdb_id IS NOT NULL DO UPDATE` -- works.
-2. **One statement may not hit the same conflict target twice.** A staging
-   batch containing two rows with the same `imdb_id` raises
-   `CardinalityViolationError: ON CONFLICT DO UPDATE command cannot affect
-   row a second time`. Every staging read below is therefore `SELECT
-   DISTINCT ON (<conflict target>) ... ORDER BY <conflict target>, id`,
-   which also makes the winner deterministic rather than whichever row the
-   planner reached first. This is not defensive: IMDb's own dumps and
-   Wikidata's crosswalk both contain such duplicates (569 TMDb ids claimed
-   by more than one IMDb id, measured).
-3. **`xmax = 0` in `RETURNING` distinguishes an insert from an update.**
-   Rowcount alone reports their sum, so a re-import would be
-   indistinguishable from a first run. Verified: the same batch reports
-   `(inserted=2, updated=0)` then `(inserted=0, updated=2)`.
-
-`asyncpg`'s binary `COPY` is strictly typed -- a `str` where the column is
-`integer` raises `TypeError: 'str' object cannot be interpreted as an
-integer` client-side, before a byte reaches Postgres (verified). Conversion
-therefore happens in the adapter that parses the dataset, not here, and a
-malformed record is `PortDataMalformed` rather than a `TypeError` surfacing
-from inside a `COPY`. CHECK constraints also fire during `COPY`
-(`CheckViolationError`, verified), so a bad value aborts its whole batch
-rather than being quietly stored.
-
-The `COPY` mechanics themselves now live in `usher.db.staging`, so M4's
-`media_items` and `watch_states` writes take the identical path rather than
-re-deriving the three traps above per repository -- which is how one of them
-gets missed. This module docstring stays the canonical statement of them;
-`staging.py` points back here.
-
-Every statement here enumerates its columns by hand, which is what keeps
-`titles.search_document` (a `GENERATED ALWAYS AS ... STORED` column, added by
-migration fa2b6c1e9d30) out of them. That is not incidental: naming a
-generated column in an `INSERT` column list is an *error*, not an ignored
-value. The generated column is also the one index artefact on `titles` that
-`bulk_load_window` cannot suspend -- it is computed on every write, measured
-at 4.06x on this module's own `INSERT ... SELECT` shape, and accepted.
-
-`titles.credit_names` joins that list for a different reason: it is an
-ordinary column, so naming it in an `INSERT` here would be accepted rather
-than rejected -- and would write an array disagreeing with `credits`. Its
-`server_default` of `'{}'` is what lets every `INSERT` here go on omitting
-it, and the omission is load-bearing rather than tidy: `usher_array_text`
-is STRICT, so a NULL in that column nulls the whole `search_document` and
-the title leaves every full-text index in silence.
-
-**This paragraph used to end "the only correct writer is the statement that
-also writes that table (`DeriveService`)", and M9's T6 made that false.**
-There are now two writers and they partition the catalog rather than
-sharing it. `CreditRepository.replace_for_titles` writes the column beside
-`credits` in one statement, for every title TMDb enrichment has reached;
-`fill_credit_names` below writes it for every title that is still
-`enrichment_state = 'skeleton'`, from IMDb's `title.principals` joined to
-`name.basics`, with **no `people` row and no `credits` row** -- T3 measured
-that entity design at 2.702 GB against a 2.0 GB ceiling and it was refused.
-The predicate is what keeps the old sentence's *invariant* true even though
-its claim is not: a skeleton has no `raw_payloads`, so it has no `credits`
-for an array to disagree with. Still true, and now for two writers rather
-than one: no `INSERT` in this module names the column.
-"""
+"""Bulk loading into the catalog, bypassing the ORM entirely."""
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -105,61 +32,22 @@ from usher.ports.repository import (
     GenomeWriteResult,
 )
 
-# The `kind` this module writes, and it is bound to the enum rather than
-# spelled `'alias'` twice: the DELETE's scope and the INSERT's value have to
-# agree, and a literal in each is two places to change. Same reason and same
-# spelling as `db/repositories/people.py`'s `_PERSON_NAME_KIND`, which is the
-# other writer of this table. `.value` because `enum_column`'s storage
-# identifier is the member's value; binding the member sends "CAST" and
-# matches nothing.
+# The `kind` this module writes, and it is bound to the enum rather than spelled
+# `'alias'` twice: the DELETE's scope and the INSERT's value have to agree, and a
+# literal in each is two places to change.
 _ALIAS_NAME_KIND = SearchNameKind.ALIAS.value
 
-# Dropped for the duration of a bulk-load window and rebuilt after, but only
-# into an empty `titles` -- see `bulk_load_window`. The two btrees are plain,
-# non-unique, over high-cardinality values, so they are pure write cost
-# during a load and rebuild faster from a full table than they maintain
-# incrementally: measured 2026-07-30 against the live IMDb dump (1,271,138
-# retained titles), 35.8 s suspended against 40.2 s kept (11.0% faster), with
-# the rebuilt pair ~24% smaller (97 MB vs 127 MB).
-#
-# The three *unique* partial indexes (ix_titles_imdb_id,
-# ix_titles_tmdb_id_kind, ix_titles_tvdb_id) are deliberately absent from
-# this list: every upsert below names one of them in `ON CONFLICT`, so
-# dropping one does not slow the load down, it breaks it.
-#
-# **M6's two GIN indexes join, and the reasoning is an inference rather than
-# a measurement.** A GIN index is more expensive to maintain incrementally
-# than a btree, so the btree result above should understate the saving -- but
-# nothing has measured a GIN rebuild at 1.27M rows, and the milestone smoke
-# run is where that number comes from. What is *not* inferred is that
-# suspending them does nothing for the dominant term: `titles.search_document`
-# is a stored generated column, computed on every write, measured at 4.06x on
-# this module's own `INSERT ... SELECT` shape, and there is no mechanism to
-# suspend it.
-#
-# **Every string here must reproduce the index its migration created**,
-# because this dict is executed verbatim and an entry that drops
-# `WITH (fastupdate = off)` or `gin_trgm_ops` rebuilds a *different* index --
-# one indistinguishable from the right one until somebody searches, and only
-# ever after a first bootstrap. Pinned by
-# `tests/integration/test_bulk_repository.py::
-# test_every_suspendable_index_rebuilds_to_what_the_migration_built`, which
-# is also the only check covering `fastupdate = off` at all: `compare_metadata`
-# is blind to index storage options (measured).
+# Dropped for the duration of a bulk-load window and rebuilt after, but only into an
+# empty `titles` -- see `bulk_load_window`.
 _SUSPENDABLE_INDEXES: dict[str, str] = {
     "ix_titles_sort_name": "CREATE INDEX ix_titles_sort_name ON titles (sort_name)",
     "ix_titles_name_lower_year": (
         "CREATE INDEX ix_titles_name_lower_year ON titles (lower(name), year)"
     ),
-    # **M9's tier-1 prefix index, and it is not the entry above.** That one
-    # carries the *default* opclass and cannot answer `LIKE 'pre%'` under this
-    # database's collation (measured -- `Seq Scan` even with
-    # `enable_seqscan = off`); this one carries `text_pattern_ops` and is the
-    # whole of the two-tier suggest's first tier. The two differ by one token,
-    # which is exactly the drift this dict's round-trip case exists for: an
-    # entry that loses `text_pattern_ops` rebuilds an index that is not an
-    # error and simply stops serving type-ahead, after a first bootstrap and
-    # only after one.
+    # **M9's tier-1 prefix index, and it is not the entry above.** That one carries the
+    # *default* opclass and cannot answer `LIKE 'pre%'` under this database's collation
+    # (measured -- `Seq Scan` even with `enable_seqscan = off`); this one carries
+    # `text_pattern_ops` and is the whole of the two-tier suggest's first tier.
     "ix_titles_name_lower_prefix": (
         "CREATE INDEX ix_titles_name_lower_prefix ON titles (lower(name) text_pattern_ops)"
     ),
@@ -172,12 +60,7 @@ _SUSPENDABLE_INDEXES: dict[str, str] = {
     ),
 }
 
-# The crosswalk's stored pairs, flattened into (imdb_id, tmdb_id, kind)
-# triples. A module-level constant interpolated into two statements below,
-# never anything a caller supplies -- which is why those two f-string SQL
-# calls carry a ruff S608 suppression. Nothing user-controlled reaches SQL in
-# this file: every value crosses the boundary as a COPY record or as a bound
-# parameter.
+# The crosswalk's stored pairs, flattened into (imdb_id, tmdb_id, kind) triples.
 _CROSSWALK_PAIRS = """
     SELECT imdb_id, tmdb_movie_id AS tmdb_id, 'movie' AS kind
     FROM id_crosswalk WHERE tmdb_movie_id IS NOT NULL
@@ -187,63 +70,15 @@ _CROSSWALK_PAIRS = """
 """
 
 
-# `CREATE TEMP TABLE ... ON COMMIT DROP` is a correctness precondition and not
-# a style rule -- `usher.db.staging` records all three measured failure modes
-# of a shared `public` name, and `tests/unit/test_staging_ddl.py` scans `src/`
-# for both halves of this spelling.
-#
-# **`relevance real[]`, and which of three spellings this is was measured
-# rather than chosen.** `halfvec` had never crossed asyncpg's binary `COPY` in
-# this repository, and that path needs a codec for every column type. Tried in
-# the stated order of preference against a scratch `pgvector/pgvector:pg17`
-# (pgvector 0.8.6):
-#
-# 1. **Stage as `real[]` and cast -- this, and it works.** `pg_cast` carries
-#    `real[] -> halfvec` (alongside `double precision[]`, `integer[]`,
-#    `numeric[]`, `vector` and `sparsevec`), and asyncpg has a native
-#    `float4[]` codec, so nothing is registered and nothing new touches the
-#    shared staging path. Round-trip verified lane for lane.
-# 2. Stage as `text` and cast from the literal form. Also works, and is
-#    **1.7x faster to stage** -- median 25.5 ms against 43.2 ms over 7 runs of
-#    250 rows -- which is the opposite of what the wire size suggests, because
-#    asyncpg's binary array encoder walks 250 x 1,128 Python floats while a
-#    pre-built string is one memcpy. Not taken: preference order aside, the
-#    difference is ~1.2 s across a whole 16,376-row import, against a 350 MB
-#    download and an 18.4M-row parse. Recorded because the smaller payload
-#    being the slower one is genuinely surprising.
-# 3. Registering pgvector's asyncpg codec on the connection. Not needed, and
-#    it would have been the first place in this repository to touch the raw
-#    connection's type system -- `usher.db.staging` is shared by every bulk
-#    writer in the deployment, so a codec registered for one caller's benefit
-#    is a global change made from a local place.
-#
-# **`tmdb_id bigint`, against `titles.tmdb_id integer`, and the mismatch is
-# the point (ADR-0044, F9).** This column is written to nothing: it is
-# MovieLens's own `tmdb_id`, carried through the staging table for a join
-# that is never made -- the destination statement matches on `imdb_id`. So a
-# value above 2**31 has no destination column to overflow, and the only thing
-# `integer` here bought was `builtins.OverflowError` out of
-# `copy_records_to_table` -- no SQLSTATE, not a `DBAPIError`, nothing
-# `is_row_refusal` can inspect -- **taking the whole 10,000-row batch with
-# it**. Staged as `bigint`, such a row stages, joins nothing and is counted
-# as `unmatched`, which is a better answer rather than merely a better
-# exception. There is no destination statement to translate and no `except`
-# to design, which is what makes this and `stg_akas.ordering` **the only two
-# columns in ADR-0044's scope that a DDL edit finishes on its own** -- the
-# other twenty needed a translation at a writing site.
+# `CREATE TEMP TABLE ...
 _GENOME_STAGING_DDL = """
 CREATE TEMP TABLE stg_genome (
     imdb_id text, tmdb_id bigint, relevance real[]
 ) ON COMMIT DROP
 """
 
-# One bound-parameter `INSERT`, executemany'd over 1,128 records, and neither
-# half of that is incidental. **Bound values, not an interpolated `VALUES`
-# list**, so the only thing SQLSTATE class 22 can be about is a value a caller
-# handed in -- which is the precondition `_errors.is_row_refusal` documents
-# for its own claim. **Not `usher.db.staging`**, because a `COPY` refuses an
-# out-of-range integer as a bare `builtins.OverflowError` with no SQLSTATE at
-# all, and 1,128 rows have nothing to gain from one.
+# One bound-parameter `INSERT`, executemany'd over 1,128 records, and neither half of
+# that is incidental.
 _INSERT_GENOME_TAG = text(
     "INSERT INTO genome_tags (tag_id, tag, genome_revision) "
     "VALUES (:tag_id, :tag, :genome_revision)"
@@ -274,87 +109,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
 
     @asynccontextmanager
     async def _bulk_load_window(self) -> AsyncIterator[None]:
-        """Suspends the two non-unique btrees on `titles`, but **only into an
-        empty table**.
-
-        The empty-table condition is what keeps ADR-0005's "a source can be
-        connected and browsed while it is still going" literally true. On a
-        first bootstrap there is nothing to browse, so dropping the two
-        ordering indexes costs nothing; on a re-import the catalog is live,
-        and a browse ordered by name would fall back to a sequential scan for
-        the whole window. The write cost of keeping them is accepted there.
-
-        `DROP INDEX`/`CREATE INDEX` are not run inside the caller's batch
-        transaction: they get their own, committed immediately, because the
-        window spans hundreds of batch transactions. `CREATE INDEX` (not
-        `CONCURRENTLY`) takes a `SHARE` lock on `titles`, which blocks
-        concurrent *writes* but not reads for the rebuild. Nothing else
-        writes to `titles` during a bootstrap in this milestone; a milestone
-        that runs a source sync concurrently must sequence the two.
-
-        **This calls `self._session.commit()` -- on the caller's own shared
-        session, not a private one -- which is the port's one documented
-        exception to "these flush and return counts; they never commit"
-        (`BulkCatalogRepository`'s docstring). That commit is not scoped to
-        the DROP INDEX statements alone: it commits every other change
-        already pending on this session, exactly as any `session.commit()`
-        call would. Confirmed directly, against a real (non-rolled-back)
-        Postgres session: staging an unrelated, unflushed-by-the-caller row
-        on this session and then entering this context manager on an empty
-        catalog leaves that row genuinely committed and visible from a
-        separate connection afterward, even though the caller never called
-        `commit()` itself. There are two call sites below (after the DROP,
-        after the rebuild), both gated by the same empty-catalog condition
-        (`suspended` non-empty) -- mutation-tested individually: removing
-        either one alone still leaks the caller's pending work through the
-        other, so both matter and neither is redundant to remove on its
-        own.**
-
-        Two ways to avoid committing the caller's session were tried and
-        rejected, both verified directly rather than assumed:
-
-        - **A second connection**, so the DDL's own commit never touches the
-          caller's session. Mechanically this works for the DDL itself, but
-          it deadlocks in practice: if the caller's session already holds so
-          much as a read lock on `titles` (e.g. a prior, still-open
-          `SELECT` on the same session -- and `count_titles()` above is
-          itself exactly that kind of read, whichever session runs it), a
-          second connection's `DROP INDEX` blocks waiting for that lock to
-          release, while the caller's session cannot release it because the
-          caller's own coroutine is suspended *awaiting this call to
-          return*. Postgres's deadlock detector never fires -- the caller's
-          session is not waiting on any database lock, so there is no cycle
-          in Postgres's own lock graph, only in the application's control
-          flow above it. Reproduced directly: a second connection's `DROP
-          INDEX` blocked for the full length of a 3-second timeout against a
-          first connection's merely-open, uncommitted `SELECT` on `titles`.
-          A silent, indefinite hang on every bootstrap that happens to run
-          this after any other read of `titles` on the same session is a
-          worse failure mode than the commit this would have avoided.
-        - **`CREATE INDEX CONCURRENTLY`**, so no exclusive lock and no forced
-          commit boundary around the rebuild. Rejected on a harder
-          constraint, not a style preference: Postgres refuses to run it at
-          all inside a transaction block -- confirmed directly,
-          `asyncpg.exceptions.ActiveSQLTransactionError: CREATE INDEX
-          CONCURRENTLY cannot run inside a transaction block` -- so it needs
-          an autocommit connection regardless, which is the second-connection
-          option above with its deadlock risk, plus its own separate hazard
-          if it fails partway (an `INVALID` index left behind, needing
-          manual cleanup on an otherwise-unattended bootstrap).
-
-        Given both alternatives are either no safer or actively worse, the
-        commit stays, and the precondition moved to `bulk_load_window`'s own
-        docstring on the port: **a caller must have no uncommitted work on
-        this session it is not prepared to have committed before entering
-        this context manager.** In practice that means whatever service
-        drives a bulk import should give this repository a session of its
-        own, not one shared with unrelated work -- see
-        `tests/integration/test_bulk_repository.py::
-        test_bulk_load_window_commits_the_callers_own_pending_work` for the
-        regression test that pins this, built against a session bound
-        directly to the engine rather than this suite's usual rolled-back
-        fixture connection, because that fixture's `rollback_only` join mode
-        is exactly what makes a real commit here structurally unobservable.
+        """Suspends the two non-unique btrees on `titles`, but **only into an empty
+        table**.
         """
         suspended: list[str] = []
         if await self.count_titles() == 0:
@@ -389,40 +145,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         await stage_records(self._session, ddl=ddl, table=table, columns=columns, records=records)
 
     async def _rowcount(self, sql: str, *, refused: str) -> int:
-        """`rowcount` lives on `CursorResult`, not the `Result[Any]`
-        `AsyncSession.execute` is typed as returning -- mypy strict rejects
-        `result.rowcount` without this narrowing (verified: `"Result[Any]" has
-        no attribute "rowcount"`). Every statement passed here is a DML
-        statement, which always yields a `CursorResult` at runtime.
-
-        **`refused` has no default, and that is the point of it being here.**
-        Every destination statement in this module is an `INSERT ... SELECT` or
-        an `UPDATE ... FROM` over a staging table holding the caller's own
-        values, and four of the columns they write (`titles.imdb_id`,
-        `id_crosswalk.imdb_id`, `titles.tmdb_id`, `titles.tvdb_id`) are
-        narrower than the field feeding them. Those refuse as SQLSTATE class 22
-        on a plain `sqlalchemy.exc.DBAPIError` that `except IntegrityError`
-        does not catch, so a *missing* translation is invisible until an
-        operator reads a driver traceback. A required keyword makes the
-        omission a type error at the call site instead. See `_errors.py` for
-        the two measured shapes and ADR-0044 for the per-column ledger.
-
-        ⚠️ **F9 shipped this translation copied out into all five callers, for
-        a stated reason that was false**, and the note is kept because the
-        reasoning is the reusable part. The claim was that
-        `scripts/audit_bounded_columns.py` reads each writing method's own body,
-        so a shared helper would make every caller look untranslated -- true of
-        the scan as it stood, and not a fact about this code. `_executing_
-        functions` in that same file *already* followed this exact call edge
-        to answer "does `apply_ratings` write?" (it is in the executing set
-        **only** because this method calls `execute`), so the instrument was
-        refusing to traverse for one question an edge it traverses for
-        another. The scan now resolves translation across the same edges, with
-        the closure deliberately narrower: a caller is credited only if
-        **every** refusal point it has is covered, so delegating one statement
-        here and running another outside a wrapper still reads `none`.
-        **When a generated artefact is the check, fix the instrument rather
-        than shaping the code to its blind spot.**
+        """`rowcount` lives on `CursorResult`, not the `Result[Any]` `AsyncSession.execute`
+        is typed as returning -- mypy strict rejects `result.rowcount` without this
+        narrowing (verified: `"Result[Any]" has no attribute "rowcount"`).
         """
         async with refusals_as_conflict(self._session, refused):
             result = await self._session.execute(text(sql))
@@ -454,18 +179,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             [(row.imdb_id, row.tmdb_id, list(row.relevance)) for row in rows],
         )
         # **The destination statement, and the `CAST` in it, is why this
-        # `refusals_as_conflict` needed question (3) of ADR-0044 answered
-        # before it could be applied.** `_errors.py:66-75` bounds "class 22
-        # means the row" to *a parameterised statement with no server-side
-        # expressions*, and this is not that statement -- so the test is
-        # whether any expression here can raise class 22 about something the
-        # caller did **not** hand in. It cannot: the only cast is over
-        # `s.relevance`, staged verbatim from `GenomeVector.relevance`, there
-        # is no arithmetic, no regex and no literal cast anywhere in the CTE,
-        # and the joins and `count(*)`s cannot raise class 22 at all. A
-        # width other than `GENOME_TAG_COUNT` reaches this as
-        # `asyncpg.exceptions.DataError` "expected 1128 dimensions, not N",
-        # SQLSTATE `22000` -- measured through this method, F9.
+        # `refusals_as_conflict` needed question (3) of ADR-0044 answered before it
+        # could be applied.** `_errors.py:66-75` bounds "class 22 means the row" to *a
+        # parameterised statement with no server-side expressions*, and this is not that
+        # statement -- so the test is whether any expression here can raise class 22
         async with refusals_as_conflict(
             self._session, "a genome vector violates genome_scores' own bounds"
         ):
@@ -506,57 +223,22 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         )
 
     async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
-        # Before the DELETE and before the SAVEPOINT, `replace_for_user`'s
-        # placement and for its stated reason: on *this* implementation the
-        # ordering is not observable, because the SAVEPOINT rolls the delete
-        # back with the raise, and it is here so a call that cannot mean
-        # anything never reaches Postgres and so the fake -- which has no
-        # transaction and really would empty the vocabulary -- has one rule to
-        # mirror rather than two.
-        #
-        # It is also the *ceiling on `tag_id`*: nothing else bounds the value
-        # this method binds into an `integer` column. See the module docstring
-        # on `db/models/taste.py` for why that bound lives here.
+        # Before the DELETE and before the SAVEPOINT, `replace_for_user`'s placement and
+        # for its stated reason: on *this* implementation the ordering is not
+        # observable, because the SAVEPOINT rolls the delete back with the raise, and it
+        # is here so a call that cannot mean anything never reaches Postgres and so the
+        # fake -- which has no transaction and really would empty the vocabulary -- has
         _refuse_partial_vocabulary(tags, revision)
         records = [
             {"tag_id": tag.tag_id, "tag": tag.tag, "genome_revision": revision} for tag in tags
         ]
-        # What this table can refuse: the three CHECKs, and `pk_genome_tags` for
-        # a duplicate lane that `_refuse_partial_vocabulary` has already ruled
-        # out.
-        #
-        # `ck_genome_tags_tag_id_in_vocabulary` is the one that matters: it is
-        # what refuses a vocabulary longer than the 1,128 lanes
-        # `genome_scores.relevance` declares, and it does so as an
-        # `IntegrityError` carrying its own name rather than as asyncpg's
-        # unnamed encoder `DataError`, which is why the column is `integer`
-        # rather than `smallint`.
-        #
-        # **`is_row_refusal` is therefore wider than anything reachable here
-        # today, measured rather than assumed**: when this method carried its
-        # own `except`, narrowing it to `IntegrityError` survived all 2,819 unit
-        # and all 57 relevant integration cases, because every refusal this
-        # table can produce behind that precondition *is* a CHECK violation.
-        # The measurement is why the wide predicate needs a defence and not an
-        # argument for narrowing the shared one, which now answers for three
-        # tables: the `curated_rows."position"` and `llm_calls.cost_usd`
-        # findings in `_errors.py` are both a column that refuses a *value*,
-        # and neither is an `IntegrityError`.
+        # What this table can refuse: the three CHECKs, and `pk_genome_tags` for a
+        # duplicate lane that `_refuse_partial_vocabulary` has already ruled out.
         async with refusals_as_conflict(
             self._session, "a genome tag vocabulary violates the column's own bounds"
         ):
-            # DELETE then INSERT, never `ON CONFLICT DO UPDATE`, and this is the
-            # one behaviour separating this method from `upsert_genome_vectors`
-            # above. An upsert over a release with fewer tags leaves the
-            # previous one's tail behind, still carrying the previous revision,
-            # and the result is indistinguishable from a complete vocabulary
-            # that happens to be mixed. A vector table is legitimately
-            # half-migrated; a vocabulary is not.
-            #
-            # **No `stage_records`, deliberately.** 1,128 rows do not need a
-            # `COPY`, and the `COPY` path is where an out-of-range integer
-            # raises a bare `builtins.OverflowError` with no SQLSTATE for
-            # `is_row_refusal` to inspect -- see `db/repositories/_errors.py`.
+            # DELETE then INSERT, never `ON CONFLICT DO UPDATE`, and this is the one
+            # behaviour separating this method from `upsert_genome_vectors` above.
             await self._session.execute(text("DELETE FROM genome_tags"))
             await self._session.execute(_INSERT_GENOME_TAG, records)
         return len(records)
@@ -622,39 +304,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 for row in rows
             ],
         )
-        # sort_name = name: `Title.sort_name` has an explicit
-        # no-normalisation contract (its own docstring), so inventing one
-        # here -- article stripping, casefolding -- would be an adapter-side
-        # convention the domain model deliberately refused.
-        #
-        # `row.kind.value`, not `row.kind`: asyncpg's binary COPY writes what
-        # it is given, and enum_column stores each member's `.value`. A bare
-        # StrEnum member would serialise as its str value here anyway, but
-        # naming `.value` keeps it true if TitleKind ever stops being a
-        # StrEnum.
-        #
-        # `list(row.genres)`: a tuple is accepted by asyncpg for a text[]
-        # column (verified), but ARRAY(Text) always reads back as a list, and
-        # writing the same type both ways is one less asymmetry to remember.
-        #
-        # The DO UPDATE list is exactly the fields IMDb supplies. It omits
-        # enrichment_state, enrichment_error, enriched_at, field_provenance,
-        # overview, tagline, tmdb_popularity, tmdb_vote_average,
-        # tmdb_vote_count, imdb_average_rating, imdb_num_votes,
-        # collection_id, and created_at, so a re-import refreshes IMDb's
-        # facts without downgrading an enriched title back to a skeleton.
-        #
-        # The trailing `WHERE ... IS DISTINCT FROM` makes an unchanged replay
-        # write nothing at all, so the set_updated_at trigger does not fire
-        # across a million untouched rows on a daily re-import.
-        # `stg_titles.imdb_id` is `text` and `titles.imdb_id` is
-        # `varchar(16)`, so an over-long identifier -- which
-        # `ports.bulk.ImdbTitle` accepts, its `imdb_id` being a bare `str`
-        # against `domain.Title`'s anchored `pattern` -- is refused **here**
-        # rather than in the COPY, as `22001` on a bare `DBAPIError`.
-        # Measured through this method, F9:
-        # `asyncpg.exceptions.StringDataRightTruncationError: value too long
-        # for type character varying(16)`.
+        # sort_name = name: `Title.sort_name` has an explicit no-normalisation contract
+        # (its own docstring), so inventing one here -- article stripping, casefolding
+        # -- would be an adapter-side convention the domain model deliberately refused.
         return await self._write_result(
             """
             WITH deduped AS (
@@ -705,21 +357,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             ("imdb_id", "imdb_average_rating", "imdb_num_votes"),
             [(row.imdb_id, row.average_rating, row.num_votes) for row in rows],
         )
-        # UPDATE ... FROM, never an upsert: title.ratings.tsv.gz covers
-        # titleTypes this milestone drops, and a rating with no title is not
-        # a catalog entry. The IS DISTINCT FROM guard keeps a no-op re-import
-        # from firing the set_updated_at trigger on a million unchanged rows.
-        #
-        # **The two columns named here are IMDb's own, and that is ADR-0040.**
-        # This statement used to write `community_rating`/`vote_count`, which
-        # `adapters/tmdb/mapping.py` also writes -- so whichever ran last won,
-        # with nothing recording the winner. The gap is ~38x, over one
-        # identified population counted both ways: of the frozen tier's
-        # 130,647 enriched rows, median TMDb `vote_count` 15 against a median
-        # frozen IMDb `numVotes` of 576 (`.claude/rules/tmdb-and-enrichment.md`,
-        # group S3). Before-and-after over one frozen set of ids rather than
-        # two columns read off one row -- no row could hold both until `m10a`
-        # and this statement's redirect, which is the entire defect.
+        # UPDATE ...
         return await self._rowcount(
             """
             UPDATE titles t
@@ -746,45 +384,14 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             """,
             "stg_credit_names",
             ("imdb_id", "names", "ordinal"),
-            # `ordinal` is the row's position in the batch, and it exists
-            # solely to give `DISTINCT ON` a deterministic winner --
-            # `upsert_titles` gets one from the UUIDv7 it mints per staged
-            # row, and this statement mints nothing. Ascending, so first-seen
-            # wins, which is the rule that method already establishes.
-            #
-            # `list(row.names)`: asyncpg's array encoder wants a list, and
-            # `text[]` always reads back as one.
+            # `ordinal` is the row's position in the batch, and it exists solely to give
+            # `DISTINCT ON` a deterministic winner -- `upsert_titles` gets one from the
+            # UUIDv7 it mints per staged row, and this statement mints nothing.
             [(row.imdb_id, list(row.names), index) for index, row in enumerate(rows)],
         )
-        # **`enrichment_state = 'skeleton'` is the precedence predicate, and
-        # it is chosen rather than `credit_names = '{}'`.** Three properties
-        # follow from it, and the third is why it is not merely a cheaper
-        # spelling of the same thing:
-        #
-        # 1. It is exactly the complement of
-        #    `db/repositories/search.py:180`'s `_POPULATION`
-        #    (`t.enrichment_state <> 'skeleton'`), so **this write cannot
-        #    stale a single embedding** -- not as a measurement that came out
-        #    at zero, but by construction. `title_embeddings` holds no row
-        #    for a title this statement can touch.
-        # 2. `credits` is written only by `DeriveService`, which walks
-        #    `raw_payloads`, which only an enriched title has -- so a title
-        #    this statement writes has no `credits` rows for its array to
-        #    disagree with. That is what keeps
-        #    `CreditRepository.replace_for_titles`' invariant intact across a
-        #    second writer it knows nothing about.
-        # 3. A title TMDb enriched and derived **no cast for** has an empty
-        #    `credit_names` that is still TMDb's answer. A `credit_names =
-        #    '{}'` guard would overwrite it from a source whose `credits`
-        #    rows say otherwise; this one does not.
-        #
-        # The `IS DISTINCT FROM` guard makes a replay write nothing at all:
-        # `titles` carries two GIN indexes and a stored generated column, so
-        # a dead row version per title per pass is not free at 1.19M rows.
-        # `credit_names` is NOT NULL, so `<>` would agree today -- it is
-        # spelled this way because it is the same guard `upsert_titles` uses
-        # and because the column's nullability is not this statement's to
-        # depend on.
+        # **`enrichment_state = 'skeleton'` is the precedence predicate, and it is
+        # chosen rather than `credit_names = '{}'`.** Three properties follow from it,
+        # and the third is why it is not merely a cheaper spelling of the same thing: 1.
         async with refusals_as_conflict(
             self._session, "a credit-names batch violates the catalog's own bounds"
         ):
@@ -824,15 +431,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         # comparable. Duplicates are removed because `unmatched` counts scoped
         # ids, and a caller naming one title twice must not count it twice.
         scope = list(dict.fromkeys(imdb_ids))
-        # Before the DELETE, and naming the offender. A row whose title the
-        # scope does not hold would be inserted under a title no later scope
-        # deletes -- it survives every re-import and every upstream withdrawal,
-        # which is the one row shape a re-derivation cannot repair.
-        #
-        # **Postgres cannot demonstrate the "before" here and the fake can**,
-        # because the SAVEPOINT below would roll the delete back with the
-        # raise either way. It is spelled first because that is where the
-        # check belongs, and `tests/unit` is the arm that can see it.
+        # Before the DELETE, and naming the offender.
         stray = sorted({row.imdb_id for row in rows} - set(scope))
         if stray:
             raise ValueError(f"title.akas rows name titles outside the replacement scope: {stray}")
@@ -847,48 +446,27 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             """,
             "stg_akas",
             ("id", "imdb_id", "ordering", "name", "region", "language"),
-            # `ordering` is staged as `bigint` against a column that does not
-            # exist: it is IMDb's own `ordering` field, used for `DISTINCT ON`
-            # and `ORDER BY` in the destination statement and written nowhere.
-            # ADR-0044's F9 scope, same one-change argument as
-            # `stg_genome.tmdb_id` above -- `integer` here could only turn a
-            # malformed dump row into a bare `builtins.OverflowError` out of
-            # the COPY, aborting the batch, in exchange for bounding a value
-            # nothing stores.
-            #
-            # A UUIDv7 per staged row, exactly as `upsert_titles` mints one --
-            # this table's `id` has no server default and `gen_random_uuid()`
-            # is a v4, which would put a bulk-loaded alias outside the identity
-            # convention every other row in this schema follows. Most of them
-            # are discarded: 75.5% of retained akas rows never become a row.
+            # `ordering` is staged as `bigint` against a column that does not exist: it
+            # is IMDb's own `ordering` field, used for `DISTINCT ON` and `ORDER BY` in
+            # the destination statement and written nowhere.
             [
                 (new_id(), row.imdb_id, row.ordering, row.name, row.region, row.language)
                 for row in rows
             ],
         )
-        # `refusals_as_conflict` rather than this module's older bare
-        # `except IntegrityError`, and the reason is a measurement rather than
-        # a preference: `ck_title_search_names_name_within_btree_bound` is a
-        # column bound narrower than the field feeding it, which is exactly the
-        # shape `db/repositories/_errors.py` records as reaching SQLAlchemy as
-        # a bare `DBAPIError`. **33 rows of the pinned dump exceed it**, and
-        # the refusal is per *call*, so one of them takes a ten-thousand-row
-        # batch with it -- which is why `parse_akas_row` filters on
-        # `AKAS_NAME_MAX_CHARS` upstream and why that constant is bound to
-        # `SEARCH_NAME_MAX_CHARS` rather than spelled again.
+        # `refusals_as_conflict` rather than this module's older bare `except
+        # IntegrityError`, and the reason is a measurement rather than a preference:
+        # `ck_title_search_names_name_within_btree_bound` is a column bound narrower
+        # than the field feeding it, which is exactly the shape
+        # `db/repositories/_errors.py` records as reaching SQLAlchemy as a bare
         async with refusals_as_conflict(
             self._session, "an alias violates title_search_names' own bounds"
         ):
-            # **Scoped by `kind` as well as by title, and both halves are
-            # load-bearing.** The title scope is what lets a title whose akas
-            # all disappeared upstream lose its stale rows; the `kind` scope is
-            # about the *second writer* -- `CreditRepository.replace_for_titles`
-            # lands `person` rows in this same table, and a delete on title
-            # alone makes the two mutually destructive, whichever runs second
-            # erasing the other's rows with nothing raised and nothing logged.
-            #
-            # Served by `ix_title_search_names_title_id`, which `m09a` created
-            # for the `ON DELETE CASCADE` lookup.
+            # **Scoped by `kind` as well as by title, and both halves are load-
+            # bearing.** The title scope is what lets a title whose akas all disappeared
+            # upstream lose its stale rows; the `kind` scope is about the *second
+            # writer* -- `CreditRepository.replace_for_titles` lands `person` rows in
+            # this same table, and a delete on title alone makes the two mutually
             await self._session.execute(
                 text("""
                     DELETE FROM title_search_names
@@ -900,24 +478,11 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 """),
                 {"kind": _ALIAS_NAME_KIND, "imdb_ids": scope},
             )
-            # `lower()` on both sides of the canonical comparison, because
-            # that is the function `ix_titles_name_lower_prefix` is built over:
-            # an alias differing from the title's own name only in case is the
-            # same entry to every reader of this table, so keeping it is the
-            # one-row-per-title duplication M6's boundary call 3 refused.
-            # `IS NOT DISTINCT FROM`, not `=`, because `original_name` is
-            # nullable and `NULL = x` is NULL -- an `OR` over it would make
-            # `canonical` three-valued and `NOT canonical` would drop the row
-            # rather than keep it, silently, for every title with no original
-            # title.
-            #
-            # `DISTINCT ON (title_id, folded) ... ORDER BY ..., ordering, id`:
-            # one name legitimately appears for several regions (9.7% of what
-            # survives the filter above), and the loser's `region` *and*
-            # `language` go with it, so the winner has to be deterministic.
-            # `ordering` is the only per-title sequence `title.akas` supplies;
-            # `id` is the tie-break and ascends with arrival order, since the
-            # ids were minted in a comprehension over `rows`.
+            # `lower()` on both sides of the canonical comparison, because that is the
+            # function `ix_titles_name_lower_prefix` is built over: an alias differing
+            # from the title's own name only in case is the same entry to every reader
+            # of this table, so keeping it is the one-row-per-title duplication M6's
+            # boundary call 3 refused.
             result = await self._session.execute(
                 text("""
                     WITH scope AS (
@@ -1014,16 +579,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 for row in rows
             ],
         )
-        # COALESCE on the target side, not `excluded` alone: the three SPARQL
-        # joins each fill one column and run as three separate passes, so a
-        # P4983 batch must not blank the tmdb_movie_id a P4947 batch already
-        # stored for the same IMDb id.
-        # `stg_crosswalk.imdb_id text` -> `id_crosswalk.imdb_id varchar(16)`
-        # is ADR-0044's own worked example of the candidate fix, and it is the
-        # one that refuted it: the refusal already landed on this statement
-        # and this method had no `except` at all, so it crossed the port
-        # boundary raw. Measured, F9:
-        # `asyncpg.exceptions.StringDataRightTruncationError`, `22001`.
+        # COALESCE on the target side, not `excluded` alone: the three SPARQL joins each
+        # fill one column and run as three separate passes, so a P4983 batch must not
+        # blank the tmdb_movie_id a P4947 batch already stored for the same IMDb id.
         return await self._rowcount(
             """
             INSERT INTO id_crosswalk (
@@ -1047,16 +605,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         )
 
     async def link_crosswalk(self) -> CrosswalkLinkResult:
-        # DISTINCT ON (x.tmdb_id, x.kind): 569 TMDb ids are claimed by more
-        # than one IMDb id (measured), and without this the UPDATE would hit
-        # ix_titles_tmdb_id_kind. `NOT EXISTS` covers the other direction --
-        # a TMDb id some *other* title already holds. Together they mean this
-        # statement can never raise a unique violation, which is why
-        # `conflicted` is a count rather than an exception.
-        #
-        # `t.tmdb_id IS NULL` is what makes this idempotent and
-        # non-destructive at once: a replay finds nothing to do, and a value
-        # a later, better-informed enrichment wrote is never overwritten.
+        # DISTINCT ON (x.tmdb_id, x.kind): 569 TMDb ids are claimed by more than one
+        # IMDb id (measured), and without this the UPDATE would hit
+        # ix_titles_tmdb_id_kind.
         linked = await self._rowcount(
             f"""
             WITH candidate AS (

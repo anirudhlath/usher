@@ -102,88 +102,24 @@ class MediaItemRow(Base):
 
     # `added_at` is no longer deferred -- M7's Recently Added row reads it and
     # `ix_media_items_recently_added` below serves it -- and neither is
-    # `titles.collection_id`, which got its index in fd7c3a5b9e12 alongside
-    # the foreign key whose referential action needs it. What remains
-    # deferred is `last_seen_at`/`available` on their own: the one statement
-    # that filters on them is the availability sweep, and `ix_media_items_
-    # sweep` already covers it as `(source_id, available, last_seen_at)`.
+    # `titles.collection_id`, which got its index in fd7c3a5b9e12 alongside the foreign
+    # key whose referential action needs it.
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="uq_media_items_source_external"),
         Index("ix_media_items_title_id", "title_id"),
-        # Same argument as ix_media_items_title_id, for the FK M4 added: an
-        # episode DELETE makes Postgres find every referencing row here to
-        # SET NULL it, and uq_media_items_source_external leads with
-        # source_id so it cannot serve that lookup. Without this index the
-        # check is a seq scan of media_items -- 999,827 episode rows at the
-        # one measured deployment -- once per episode deleted, and
-        # episodes.title_id is ON DELETE CASCADE, so deleting one series
-        # fires it once per episode of that series.
+        # Same argument as ix_media_items_title_id, for the FK M4 added: an episode
+        # DELETE makes Postgres find every referencing row here to SET NULL it, and
+        # uq_media_items_source_external leads with source_id so it cannot serve that
+        # lookup.
         Index("ix_media_items_episode_id", "episode_id"),
         Index(
             "ix_media_items_unmatched",
             "source_id",
             postgresql_where=text("title_id IS NULL"),
         ),
-        # The availability sweep's `UPDATE`, and the claim is deliberately
-        # that narrow. Measured against pgvector/pgvector:pg17 at 1,126,674
-        # rows on one source with 200 stale -- the realistic nightly shape --
-        # by `scripts/measure_ingest.py --scale 1126674`:
-        #
-        # - `UPDATE ... WHERE source_id = :x AND available AND last_seen_at <
-        #   :since` goes from `Seq Scan` (`Rows Removed by Filter:
-        #   1,126,474`, 173 ms) to `Index Scan using ix_media_items_sweep`
-        #   with an `Index Cond` on all three columns, 102 ms.
-        # - `mark_unseen_unavailable`'s *guard* -- `count(*)` plus a
-        #   `count(*) FILTER (...)` over the source -- is a `Parallel Seq
-        #   Scan` either way (87 ms with, 86 ms without). ADR-0015's ceiling
-        #   is a fraction, so the total is unavoidable and a source that *is*
-        #   the whole table gives `source_id` no selectivity to work with.
-        #   This index does not help that statement and is not claimed to.
-        #
-        # Column order is (equality, equality, range), which is what lets the
-        # `UPDATE` seek straight to the stale tail rather than filter the
-        # whole source.
+        # The availability sweep's `UPDATE`, and the claim is deliberately that narrow.
         Index("ix_media_items_sweep", "source_id", "available", "last_seen_at"),
-        # Recently Added (M7). Partial on both halves of the query's own
-        # predicate, because at 1.1M rows the unmatched review queue and every
-        # retracted file are dead weight for this one read -- and the partial
-        # form is what makes the index 24 MB instead of covering the table.
-        #
-        # `DESC NULLS LAST` matches the statement's ordering, and an item a
-        # source cannot date is excluded from the row by three-valued logic
-        # rather than by a predicate, so it has no business in the index
-        # either.
-        #
-        # **The sweep pays for the `available` half, and that was measured
-        # rather than assumed.** `mark_unseen_unavailable`'s whole job is to
-        # set `available = false`, so every row it retracts leaves this index.
-        # At 1,119,097 rows with 200 stale the sweep's UPDATE is 2.560 ms with
-        # this index present and 2.675 ms without: no cost above noise. Had it
-        # moved materially, the non-partial `(added_at DESC NULLS LAST)` --
-        # larger, less selective here, untouched by the sweep -- was the
-        # alternative.
-        #
-        # What it buys, measured the same way: _RECENTLY_ADDED over a 30-day
-        # window goes 47.639 -> 38.260 ms, which understates it, because the
-        # unindexed plan spends two extra parallel workers to get there. With
-        # `max_parallel_workers_per_gather = 0`, which is the state of a box
-        # already serving concurrent home screens, the same statement is
-        # 171.0 ms without and 16.5 ms with.
-        #
-        # The index bounds the scan and cannot supply the order: `DISTINCT ON
-        # (title_id)` forces its own ORDER BY to lead with `title_id`, which
-        # discards the `added_at` ordering, so no LIMIT is pushed down and the
-        # win decays as the window widens (0.7 ms at one day, 92.4 ms at
-        # ninety).
-        #
-        # `compare_metadata` is blind to a partial predicate specifically --
-        # measured: dropping `postgresql_where` from the migration while
-        # leaving it here keeps `test_migration_matches_the_orm_metadata`
-        # green. (It is *not* blind to the null ordering, which is the half
-        # of that assumption that turned out wrong.) So this clause has
-        # exactly one guard, and it is
-        # `test_the_row_read_indexes_carry_the_clauses_that_make_them_work`,
-        # asserting on `pg_indexes.indexdef`.
+        # Recently Added (M7).
         Index(
             "ix_media_items_recently_added",
             text("added_at DESC NULLS LAST"),
@@ -207,38 +143,7 @@ class MediaItemRow(Base):
 
 
 class SourceCredentialRow(Base):
-    """Encrypted source credentials, addressed by the opaque
-    `Source.credentials_ref`.
-
-    A separate table rather than two more columns on `sources`, so a plain
-    `SELECT * FROM sources` -- what every admin read, every debugging
-    session, and every glance at a `pg_dump` does -- cannot return a
-    ciphertext at all. PRD 08's "credentials are never returned by any API,
-    including admin" becomes a property of the schema rather than of
-    whoever wrote the serializer.
-
-    `source_id` is a foreign key with `ON DELETE CASCADE` even though the
-    primary key is `ref`: deleting a source is two writes (drop the
-    credential, drop the source), and a crash between them would otherwise
-    leave an encrypted orphan with nothing left to attribute it to.
-
-    No `set_updated_at` trigger, unlike titles/sources/media_items: this
-    table's writers are few and every one of them sets `updated_at` itself.
-    The three existing triggers exist because their tables are also written
-    by bulk `COPY` and raw SQL paths that bypass the ORM; nothing bulk-loads
-    credentials.
-
-    ⚠️ **There are two writers as of M10's K7, and this said "exactly one"
-    until then.** `PostgresCredentialStore.put` sets the stamp on both
-    branches of its upsert, and `PostgresCredentialRotationStore.
-    write_ciphertext` sets it on the one `UPDATE` it issues. Absent a trigger
-    that is a rule each new writer has to be told, so the count is stated here
-    rather than the singular implied — a third writer that forgets it would
-    make the column mean *"when the credential last changed"* on some rows and
-    *"when it was last written"* on others, with nothing to tell them apart.
-    `tests/integration/test_rotation.py::test_the_write_moves_updated_at` is
-    what fails when a writer forgets.
-    """
+    """Encrypted source credentials, addressed by the opaque `Source.credentials_ref`."""
 
     __tablename__ = "source_credentials"
 

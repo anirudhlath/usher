@@ -1,11 +1,4 @@
-"""What a search and a "more like this" hand back, once ranked.
-
-`domain/` imports nothing -- not `ports/`, which imports *it*. So these carry
-no `SearchMode`, no `SearchHit` and no engine vocabulary: they are what a row
-renders and what a CLI prints. The service-side envelope that *does* carry a
-`SearchMode` lives in `services/search.py`, beside the service, exactly as
-`TitleDetail` lives beside `TitleReadService`.
-"""
+"""What a search and a "more like this" hand back, once ranked."""
 
 import uuid
 

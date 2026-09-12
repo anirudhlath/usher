@@ -1,37 +1,4 @@
-"""Response shape for `POST /titles/{id}/play` and `POST /episodes/{id}/play`.
-
-**Every field is named, and that is a security control rather than a style.**
-Nothing in this module calls `dataclasses.asdict`, `astuple`, `vars`,
-`__dict__`, `json.dumps` over a port DTO, or a pydantic `TypeAdapter` dump of
-`StreamTarget`. ADR-0012 (`docs/prd/decisions/0012-playback-urls-carry-a-
-source-token.md`) measured all six of those returning
-`StreamTarget.url` **in full** -- they are
-field-access paths, and `StreamTarget.__repr__`'s redaction closes none of
-them. The service one layer down has already substituted a ticket for every
-url (`usher.services.playback`), so a bulk dump would publish a ticket rather
-than a token today; it would publish the token the day a target reaches here
-unsubstituted, and a bulk dump is precisely the spelling that would not notice.
-Naming ten fields is the cost of the failure being a `TypeError` instead.
-
-**`source` is per target, not per response**, which is where the shipped shape
-diverges from PRD 07's original example. `PlaybackTarget` carries the
-attribution because a household with two copies of one film has two sources
-and one list of targets ranked across both -- a response-level `source` object
-could only be right for a household with one. The PRD's `## Playback` section
-carries the corrected example.
-
-**Every model here ends in `Response`, including the nested ones.** That is the
-convention the whole of `api/dto/` keeps (`WatchStateResponse`,
-`AvailabilityResponse`, `RowCardResponse` are all nested), and it is
-load-bearing rather than cosmetic: `tests/unit/test_api_dto.py` discovers
-response models by `name.endswith("Response")` and asserts none of them
-declares a credential-shaped field or a `SecretStr`. `PlayTargetResponse` is
-the model in this package that renders a value derived from a
-credential-bearing URL, so it is exactly the model that scan should cover --
-the same argument `ProblemResponse`'s own docstring makes for its name. The D4
-plan spelled these `PlayTarget`/`PlaySource`; under those names they would be
-the only models in `api/dto/` the scan cannot see.
-"""
+"""Response shape for `POST /titles/{id}/play` and `POST /episodes/{id}/play`."""
 
 import uuid
 from typing import Self

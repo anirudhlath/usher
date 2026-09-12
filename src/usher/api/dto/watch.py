@@ -1,20 +1,4 @@
-"""PRD 07's four watch actions: the request body, and the state they answer with.
-
-**The response model is `api/dto/title.py`'s `WatchStateResponse`, reused
-rather than re-declared.** `GET /titles/{id}` already renders a household's
-progress under that name, and a second model with the same four fields is a
-second wire shape for one concept -- two places for a client to learn what
-`played` means, and two places for them to drift. The rendering lives here
-because group D does not edit that module; the model stays where its first
-reader is.
-
-**The `null` convention does not reach these routes and that is deliberate.**
-`WatchStateResponse` is `null` on a detail screen for a title the household
-has never touched, because `{position_seconds: 0, played: false}` is a real
-state that a client has to be able to tell from "never opened". A write route
-has no such case: it has just created or updated the row, so there is always a
-state to render.
-"""
+"""PRD 07's four watch actions: the request body, and the state they answer with."""
 
 from pydantic import BaseModel, Field
 

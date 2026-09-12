@@ -1,10 +1,4 @@
-"""core schema
-
-Revision ID: a8a0e10ff464
-Revises:
-Create Date: 2026-07-29 13:11:04.355484
-
-"""
+"""core schema"""
 
 from collections.abc import Sequence
 
@@ -330,17 +324,8 @@ def upgrade() -> None:
     )
     # ### end Alembic commands ###
 
-    # Hand-written: autogenerate cannot see triggers/functions, they aren't
-    # part of SQLAlchemy Table metadata. `onupdate=func.now()` on each
-    # model's updated_at column (title.py/source.py/watch.py) is a
-    # SQLAlchemy-Core-only feature -- it has no effect on raw SQL, COPY, or
-    # `ON CONFLICT DO UPDATE`, and M2/M4's bulk ingest is ON CONFLICT DO
-    # UPDATE by definition. A BEFORE UPDATE trigger is what actually
-    # guarantees updated_at reflects every write, regardless of how it was
-    # made. media_items.last_seen_at intentionally has no trigger: it means
-    # "last confirmed present on the source", which must only change when
-    # sync code says so, not on every incidental UPDATE (e.g. one that only
-    # flips `available`).
+    # Hand-written: autogenerate cannot see triggers/functions, they aren't part of
+    # SQLAlchemy Table metadata.
     op.execute("""
         CREATE FUNCTION set_updated_at() RETURNS trigger
         LANGUAGE plpgsql AS $$

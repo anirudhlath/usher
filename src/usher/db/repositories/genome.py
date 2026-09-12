@@ -1,51 +1,5 @@
-"""Reads over `genome_scores` and `genome_tags` — the MovieLens tag-genome
-vectors, and the vocabulary that names their lanes.
-
-Implements `GenomeRepository`. Read-only: the writers are
-`BulkCatalogRepository.upsert_genome_vectors` and `.replace_genome_tags`,
-because writing the first is a staged, `COPY`-scale, set-based join from
-`imdb_id` to `titles.id` and the second belongs beside it, in the same
-bootstrap phase and the same transaction.
-
-**The vocabulary read is the whole table, deliberately, and the `WHERE` clause
-it does not have is the point.** `SELECT … WHERE genome_revision = :revision`
-answers zero rows for two states that call for different operator actions --
-nothing loaded, and the wrong release loaded -- and cannot name the release it
-found. Reading all 1,128 rows (~30 kB, one primary-key-ordered scan) is what
-lets `vocabulary` return `None` for the first and raise for the second with
-both tokens in the message.
-
-**Two rows are fetched by two equality predicates ORed together, not by
-`title_id IN (:left, :right)`, and that is deliberate.** A self-pair is a
-legitimate call — it is what a caller does when it has not yet excluded the
-seed from its own candidate list — and `IN` plus a `len(rows) == 2` check
-finds one row for it and reports the vector as missing.
-`GenomeRepositoryContract` has the case.
-
-**`CAST(:x AS uuid)`, never `:x::uuid`.** SQLAlchemy's `text()`
-bind-parameter regex treats a name immediately followed by `::` as a
-Postgres cast and skips the bind entirely, so the literal string
-`:left::uuid` reaches asyncpg, which answers `PostgresSyntaxError: syntax
-error at or near ":"`. The same regex scans `--` comments, so a comment here
-must not quote a colon-prefixed parameter spelling either.
-
-**A bare `text()` hands `halfvec` back as a *string*, and `.columns()` is
-what fixes it.** asyncpg has no codec for a pgvector type, so it returns the
-extension's text output form -- `'[0.1,0.2,...]'` -- and SQLAlchemy has no
-column type to attach a result processor to, because a `text()` construct
-carries no type information at all. `tuple(record.relevance)` on that string
-yields 2,256 one-character strings and raises nothing until something tries
-arithmetic on them -- a wrong value of the right shape, which is this
-milestone's headline failure at the driver boundary. Declaring the result
-columns with `.columns(...)` gives SQLAlchemy the `HALFVEC` type, whose
-result processor parses that form.
-
-**It parses it into a plain `list[float]`, not into a `HalfVector`** --
-verified against pgvector 0.8.6's own SQLAlchemy type, whose
-`result_processor` calls `HalfVector._from_db` and returns a list when numpy
-is absent. So there is no `.to_list()` to call, and code written for one is
-an `AttributeError` at the first read. Recorded because the obvious
-expectation is the other one.
+"""Reads over `genome_scores` and `genome_tags` — the MovieLens tag-genome vectors, and
+the vocabulary that names their lanes.
 """
 
 import uuid
@@ -80,12 +34,8 @@ _GET_PAIR = text(
     "WHERE title_id = CAST(:left AS uuid) OR title_id = CAST(:right AS uuid)"
 ).columns(*_COLUMNS)
 
-# `ORDER BY tag_id`, and it is not decoration: the answer is positional, so
-# the read order *is* the lane order. Postgres promises no order without it,
-# and a heap that happens to be in insertion order -- which every fixture and
-# every real load produces, because `replace_genome_tags` inserts ascending --
-# makes its absence invisible. `tests/contract/genome_repository_contract.py`
-# seeds descending for exactly that reason.
+# `ORDER BY tag_id`, and it is not decoration: the answer is positional, so the read
+# order *is* the lane order.
 _VOCABULARY = text("SELECT tag_id, tag, genome_revision FROM genome_tags ORDER BY tag_id")
 
 
@@ -137,17 +87,7 @@ class PostgresGenomeRepository(GenomeRepository):
             return None
         stored = {row_revision for _, _, row_revision in rows}
         if stored != {revision}:
-            # The whole reason this table carries a third column. Unlike
-            # `get_pair` above, the honest answer here is not "not comparable"
-            # -- it is that a wrong answer is available, plausible, and about
-            # to be rendered as prose. `PortDataMalformed` because retrying
-            # cannot help and `JobWorker` parks it; the fix is
-            # `usher bootstrap --phase movielens`, the same one the sibling
-            # condition takes. Both tokens in the message, because "the
-            # vocabulary is wrong" without naming what is stored is not
-            # something an operator can act on. A `stored` of more than one is
-            # rendered too: `replace_genome_tags` cannot produce it, so it
-            # means somebody wrote this table by hand.
+            # The whole reason this table carries a third column.
             raise PortDataMalformed(
                 f"the stored genome vocabulary was loaded from release "
                 f"{'/'.join(sorted(stored))} and cannot name the lanes of a vector from "
@@ -155,12 +95,8 @@ class PostgresGenomeRepository(GenomeRepository):
                 detail=revision,
             )
         if [tag_id for tag_id, _, _ in rows] != list(range(1, len(rows) + 1)):
-            # Built by index, `GenomeVector`'s rule at the other end of the
-            # same pairing: a gap does not drop one name, it shifts every
-            # later one. `replace_genome_tags` refuses to write one and
-            # `pk_genome_tags` refuses a duplicate, so reaching this takes a
-            # hand-written `DELETE` -- which is exactly the operator action
-            # that would otherwise silently rename 1,127 lanes.
+            # Built by index, `GenomeVector`'s rule at the other end of the same
+            # pairing: a gap does not drop one name, it shifts every later one.
             raise PortDataMalformed(
                 f"the stored genome vocabulary is not contiguous 1...{len(rows)}; a gap "
                 "moves every later lane's name",

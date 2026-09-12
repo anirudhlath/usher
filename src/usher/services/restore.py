@@ -1,83 +1,4 @@
-"""One file in, one transaction, and four refusals before anything is written.
-
-`usher restore` reads the gzip JSON Lines artifact `usher backup` writes and
-merges it into **this** database. This module owns the *file* -- how a header
-is read, how a reference is spelled back out of JSON, what makes a file
-unreadable -- exactly as `usher.services.backup` owns writing it. Which
-tables exist, what a natural key resolves to and how each table merges are
-`usher.db`'s, reached through `RestoreRepository`, because
-`pyproject.toml`'s third import contract forbids this layer naming either.
-
-## Restore's normal path is not an empty database
-
-`docs/specs/2026-08-13-m10-hardening-design.md` says so and it is worth
-repeating here, because the wrong reading produces a command that cannot
-work. `watch_states.title_id` is `ON DELETE RESTRICT` (ADR-0010; re-read off
-`pg_constraint` 2026-08-25 -- `fk_watch_states_title_id_titles` is `r`), so
-into an empty catalog the load-bearing table's every row fails its foreign
-key. What `docs/prd/08-operations.md` promises is *"a short restore plus a
-background rebuild"*: `usher bootstrap`, `usher sync` and `usher work`
-rebuild the catalog, and **restore lands the precious rows on top of it**.
-Every merge rule in `db/repositories/backup.py` is written for that order.
-
-## One transaction for the whole file, which is what makes the refusal real
-
-`commit` and `rollback` are injected -- `services/genres.py` and
-`services/index.py`'s precedent, and the reason is the same import contract
--- and `cli.py::_session_for` supplies both from one session over one
-engine. Every write goes through it and exactly one commit happens, at the
-end, after the last row of the last table. That is what makes *"refuses
-rather than half-applies"* a property of the code rather than a promise:
-**an unresolved reference in the last row rolls back the first.**
-
-A commit moved inside the per-table loop fails **six** cases, and the
-distribution is the interesting half: three of them are integration cases
-reading committed state from a second engine, and **three are unit cases with
-no database at all** -- because the transaction boundary is observable twice,
-once as *"what did a second session see"* and once as *"how many times was
-`commit` called"*, and the second needs nothing but a recording callable.
-(This paragraph said *"fails the one case that reads committed state from a
-second session"* until a review counted them against this commit's own sweep
-ledger, which had the six written down. A docstring and a ledger disagreeing
-inside one commit is the same defect as a stale citation, arriving through
-the author rather than through time.)
-
-⚠️ **So the failure mode of a very large artifact is memory, and the bound
-is stated rather than discovered.** The whole file is parsed into memory
-before anything is written, and every row it holds stays in one open
-transaction until the end. The precious set is small by construction --
-K1's classification is what keeps it that way, and it is 14,259 rows on the
-deployment this project measures -- and `--dry-run` is the escape hatch that
-matters at a terminal: it resolves everything, reports the identical three
-counts, commits nothing, and does not hold a transaction open while an
-operator reads it.
-
-## The four refusals, in order, all before any write
-
-1. **Unreadable or truncated.** Not gzip, ends mid-member, a line that is
-   not JSON, a row that is not an object, or a row whose key set is not the
-   one its table carries. All one `RestoreRefused`, all one line at a
-   terminal, all exit 1.
-2. **Schema mismatch.** The header's `schema_revision` against the
-   *database's*, and the message names both -- the shape
-   `api/routers/health.py::_check_migrations` already logs. ⚠️ Against the
-   **database's** revision and not `code_head_revision()`: a restore run
-   from a container whose code is ahead of the database is already a broken
-   deployment, and `/health/ready` is the thing that says so. What restore
-   has to know is whether the artifact's columns are *this database's*
-   columns.
-3. **Unknown table.** A `table` key `usher.db.backup_manifest` does not
-   classify, which is what an artifact from a later schema looks like.
-4. **Unresolved references.** K2's refusals, collected across the whole file
-   and reported **together**. A restore that stopped at the first missing
-   title would tell an operator to enrich one title; a restore that reports
-   41 of them tells them the catalog is not finished, which is a different
-   instruction.
-
-Only the fourth is a *report*. The first three raise, because there is
-nothing to report about: no row was attempted, so three counts of zero would
-be a table of nothing under a headline.
-"""
+"""One file in, one transaction, and four refusals before anything is written."""
 
 import base64
 import gzip
@@ -232,28 +153,7 @@ class RestoreService:
         dry_run: bool = False,
         skip_unresolvable: bool = False,
     ) -> RestoreReport:
-        """Apply one artifact, or refuse it whole.
-
-        The order below is the order the refusals are declared in, and it is
-        load-bearing rather than tidy: parsing is what makes a `table` key
-        readable at all, the stamp is what makes a column set trustworthy, and
-        the table check is what stops a row reaching a merge rule that does not
-        exist. Every one of them happens before the first write.
-
-        Raises `RestoreRefused` for the first three and `OSError` for a file
-        that is not there or not readable -- the family
-        `cli.OPERATOR_ERRORS` has carried since M7 and the one `usher backup`
-        already relies on.
-
-        **`skip_unresolvable` defaults to `False` and the default is the
-        command's headline guarantee.** With it unset the behaviour is
-        byte-for-byte what it was: a title or episode reference this catalog
-        cannot resolve refuses the whole file. With it set those rows are
-        dropped and counted, and everything else -- a household the target does
-        not hold, a source name collision, a credential whose source is absent
-        -- still refuses. See `RestoreRepository.apply` for why that line is
-        where it is.
-        """
+        """Apply one artifact, or refuse it whole."""
         header, rows = _read(source)
         revision = await self._repository.schema_revision()
         _refuse_a_schema_mismatch(header, revision)
@@ -267,14 +167,7 @@ class RestoreService:
                 continue
             outcomes[table] = await self._apply(table, batch, skip_unresolvable=skip_unresolvable)
 
-        # The single decision, after the last table rather than inside the
-        # loop. `--dry-run` takes the identical path and lands here with
-        # everything resolved, which is what makes its report the same report.
-        #
-        # ⚠️ **`unresolved` is deliberately not a reason to withhold the
-        # commit.** A row dropped under `--skip-unresolvable` is one the
-        # operator asked to drop; treating it as a refusal would make the flag
-        # a slower way of doing nothing.
+        # The single decision, after the last table rather than inside the loop.
         committed = not any(outcome.refused for outcome in outcomes.values()) and not dry_run
         if committed:
             await self._commit()
@@ -367,42 +260,8 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
 def _refuse_a_short_body(
     source: Path, header: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
 ) -> None:
-    """The header's per-table counts against the body's, which is the
-    truncation check two files had claimed for a milestone.
-
-    🔴 **`services/backup.py` and `ports/repository/backup.py` both described
-    this check in the present tense and it did not exist.** *"A count that can
-    disagree with the body is worse than no count at all, because K4 reads it
-    as a truncation check"*, and *"which is what lets K4 read a short table as
-    a truncated file rather than as a race"* -- K4 read exactly one header key,
-    `schema_revision`, and K5's drill proved it: an artifact whose header
-    claimed `media_items: 10819` over a body holding **10,515** restored with
-    **0 refusals and exit 0**, on 2026-08-25. Two false sentences in `src/`
-    describing a check nobody wrote, from the same origin as the two
-    `code_head_revision()` sentences corrected the round before -- so this is
-    built rather than deleted, and the sentences are now true.
-
-    **What it catches is the failure the format makes easy.** The artifact is
-    gzip'd JSON Lines *so that an operator can read and edit it*, which is
-    design property 3 of the writer and the escape `docs/runbooks/restore.md`
-    used to prescribe -- and every hand-edit that drops a line leaves a header
-    saying how many there should have been. A truncated download and a
-    `head -n` do the same. Without this check the restore quietly applies a
-    subset and reports success, which is the one outcome the whole command is
-    built to prevent.
-
-    **Zero-row tables are absent from both sides by construction.** The writer
-    omits a table that contributed no row (*"a `llm_calls: 0` in the header of
-    an artifact whose body has no `llm_calls` line is a self-check that agrees
-    with itself"*), and a table with no body lines contributes no counted
-    entry, so the two maps are compared whole rather than key by key.
-
-    **A header carrying no `rows` key at all is refused rather than skipped.**
-    `manifest_version` 1 has always written it, so its absence is a damaged
-    header and not an older artifact -- and a check that silently passes when
-    its input is missing is the *"a guard that globs nothing passes exactly
-    like a guard that passes"* rule, which this repository has now paid for
-    five times.
+    """The header's per-table counts against the body's, which is the truncation check two
+    files had claimed for a milestone.
     """
     claimed = header.get("rows")
     if not isinstance(claimed, dict):

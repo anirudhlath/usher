@@ -1,31 +1,4 @@
-"""PRD 03's push lane: the fast path, and the reconnect that closes its gap.
-
-Two things live here and they are separated because only one of them is hard
-to test. `PushApplyService` turns one `SourceEvent` into catalog state and is
-an ordinary service. `PushSupervisor` owns a long-lived connection, a backoff
-schedule and a failure ceiling, and every one of those needs an injected
-clock and an injected sleep to be testable at all.
-
-**Neither of them decides whether push is healthy.** That answer comes from
-`SourceAdapter.supports_push`, which every adapter grounds in *messages
-received* rather than in a socket being open -- ADR-0004 measured a handshake
-against a nonexistent path upgrading and being held open, so the connection
-object existing is a state that must read `False`. The supervisor's job is to
-*act* on that answer: reset its failure counter on evidence of delivery, and
-after a ceiling of consecutive failures write `supports_push = false` on the
-`Source` row, which is what hands the source back to the nightly reconcile.
-
-**Nothing here re-implements the inbound merge.** A watch-state event lands
-on `WatchStateSyncService.apply_states`, the same chain a walk uses, because
-any second copy of it is a second chance to write a zero over real play
-history (ADR-0014). Item events land on `IngestService.ingest_batch` for the
-same reason.
-
-`commit` and the three unit-of-work callables are injected because
-`services/` may depend only on `domain/` and `ports/` (ADR-0009), and a
-session is neither -- the same shape `ReconcileService` and `JobWorker`
-already use.
-"""
+"""PRD 03's push lane: the fast path, and the reconnect that closes its gap."""
 
 import asyncio
 import random
@@ -92,12 +65,10 @@ class PushApplyService:
         self._watch = watch
         self._events = events
         self._commit = commit
-        # **The push lane invalidates; the nightly walk expires.** A push event
-        # *is* a change -- the same sentence PRD 07 uses to explain why this
-        # lane publishes `watchstate.updated` and the walk does not -- so the
-        # fan-out is per *event*, over a small fixed slug set, rather than per
-        # merged row. `None` for a deployment composing no screens (the CLI's
-        # own roots), where an invalidation would have no cache to reach.
+        # **The push lane invalidates; the nightly walk expires.** A push event *is* a
+        # change -- the same sentence PRD 07 uses to explain why this lane publishes
+        # `watchstate.updated` and the walk does not -- so the fan-out is per *event*,
+        # over a small fixed slug set, rather than per merged row.
         self._cache = cache
         self._max_items = max_items_per_event
 
@@ -155,14 +126,10 @@ class PushApplyService:
             states.append(state)
         if not states:
             return PushOutcome()
-        # `now()`, never the event's own timestamp or a run's instant:
-        # PRD 03's "latest `updated_at` wins" covers the whole record and
-        # `watch_states` has a `BEFORE UPDATE` trigger that stamps the write
-        # instant, so an observation stamped earlier than the row it is
-        # repairing writes nothing at all. Invisible against
-        # `FakeWatchStateRepository`, which stores `observed_at` as
-        # `updated_at` and therefore accepts what Postgres refuses --
-        # `tests/integration/test_services_push.py` is what closes it.
+        # `now()`, never the event's own timestamp or a run's instant: PRD 03's "latest
+        # `updated_at` wins" covers the whole record and `watch_states` has a `BEFORE
+        # UPDATE` trigger that stamps the write instant, so an observation stamped
+        # earlier than the row it is repairing writes nothing at all.
         observed_at = datetime.now(UTC)
         outcome = await self._watch.apply_states(
             source.id, states, user_id=user_id, observed_at=observed_at
@@ -192,19 +159,10 @@ class PushApplyService:
         """
         if self._cache is not None:
             self._cache.invalidate(user_id, WATCH_STATE_ROWS)
-        # **One event per invalidated slug, and no `title_id`.** PRD 07's
-        # payload for this event is a row slug and its client action is
-        # "refetch that row", so the slug is the whole payload -- a frame
-        # without it is an instruction with no object. The absent `title_id` is
-        # what makes this the one event the `?titles=` filter cannot express:
-        # it reaches unfiltered subscribers and no others, which is correct,
-        # because a client that sent `?titles=` is on a detail screen and a row
-        # invalidation is exactly the unrelated churn that filter exists to
-        # keep off it.
-        #
-        # Published here rather than beside the cache write inside `RowCache`,
-        # because the cache is a dict and a dict that published events would be
-        # a second publisher nobody could see from the lane that owns the bus.
+        # **One event per invalidated slug, and no `title_id`.** PRD 07's payload for
+        # this event is a row slug and its client action is "refetch that row", so the
+        # slug is the whole payload -- a frame without it is an instruction with no
+        # object.
         for slug in WATCH_STATE_ROWS:
             await self._events.publish(
                 ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": slug})
@@ -216,28 +174,7 @@ class PushApplyService:
         merged: Sequence[MergedState],
         observed_at: datetime,
     ) -> None:
-        """One `watchstate.updated` per state a merge was built for.
-
-        **Keyed by `external_id`, never zipped.** `merged` is the *matched
-        subset* of `states`, so pairing the two by position mis-pairs the
-        moment the batch holds one unmatched item and publishes item A's
-        resume position under item B's title id. That is the defect the M5
-        plan's own self-review found in its draft of this method; the fix is
-        that `apply_states` reports the pair it built rather than leaving it
-        to be recovered here. Same rule `SourceEvent.watch_states` states
-        one layer up, for the same reason.
-
-        Published only when `rows_written` was non-zero, which is the
-        repository's own count: a merge refused by "latest `updated_at`
-        wins" is the source echoing back a position a client just set, and
-        re-rendering a detail screen on every one of those is a flicker per
-        second of playback.
-
-        Slightly over-published in one direction, stated rather than hidden:
-        a batch where three of five merges landed publishes all five,
-        because `merge_from_source` returns a count and not a set. Correct
-        to fix later; wrong to fix by publishing nothing.
-        """
+        """One `watchstate.updated` per state a merge was built for."""
         by_id = {state.external_id: state for state in states}
         for entry in merged:
             state = by_id[entry.external_id]
@@ -309,18 +246,7 @@ class PushApplyService:
         return PushOutcome(ignored=len(event.external_ids))
 
 
-# The three units of work a lane needs, each opening its own session. They
-# are callables rather than services because a supervisor that held a
-# session would hold it for the life of the socket -- hours, idle in
-# transaction, with a snapshot from whenever the lane started. The
-# composition root is where each one becomes
-# `async with factory() as session: ...`, which is the same shape
-# `usher.services.handlers.SourceResolver` already uses one milestone down.
-#
-# `user_id` is bound by the composition root into the applier rather than
-# carried on the supervisor: the lane has no use for it, and an attribute
-# that is stored and never read is a parameter every later caller has to
-# guess the meaning of.
+# The three units of work a lane needs, each opening its own session.
 PushApplier = Callable[[Source, SourceAdapter, SourceEvent], Awaitable[PushOutcome]]
 GapCloser = Callable[[Source, SourceAdapter], Awaitable[None]]
 PushAvailabilityWriter = Callable[[Source, bool], Awaitable[None]]
@@ -381,25 +307,13 @@ class PushSupervisor:
         while failures < self._max_failures:
             try:
                 async with adapter.events() as events:
-                    # **After** the connection, deliberately. Anything that
-                    # changes during this walk arrives on the socket that is
-                    # already open and is buffered; the reverse order leaves
-                    # the window between the walk and the handshake silently
-                    # uncovered. `connect_websocket`'s `max_queue=256` is the
-                    # other half of the same decision.
+                    # **After** the connection, deliberately.
                     await self._gap(source, adapter, gate)
                     delivering = await self._note(source, adapter, delivering)
                     async for event in events:
                         delivering = await self._note(source, adapter, delivering)
                         if delivering:
-                            # Reset on **delivery**, never on connection. A
-                            # proxy that upgrades and then buffers connects
-                            # perfectly every time; if that reset the counter
-                            # the lane would reconnect forever and the
-                            # ceiling below would never be reached -- which
-                            # is PRD 08's failure policy quietly not
-                            # happening, on a source the reconciler has been
-                            # told it does not need to cover.
+                            # Reset on **delivery**, never on connection.
                             failures = 0
                         outcome = await self._apply(source, adapter, event)
                         if outcome.deferred_to_delta:
@@ -416,12 +330,7 @@ class PushSupervisor:
                 await self._set_push_available(source, False)
                 return
             except asyncio.CancelledError:
-                # Shutdown is not a push failure. Marking the source here
-                # would disable push on every source on every restart until a
-                # walk re-enabled it. `CancelledError` is a `BaseException` in
-                # 3.13 and the arm below would not catch it anyway -- this is
-                # what stops a later reader widening that arm to
-                # `except Exception` without noticing.
+                # Shutdown is not a push failure.
                 raise
             except UsherPortError as exc:
                 failures += 1

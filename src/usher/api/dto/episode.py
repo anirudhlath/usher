@@ -1,46 +1,5 @@
-"""The series hierarchy on the wire (PRD 07): `GET /series/{id}/seasons`,
-`GET /seasons/{id}/episodes` and `GET /episodes/{id}`.
-
-**These are the shapes the season/episode hierarchy takes, and it is still
-absent from `GET /titles/{id}`.** `api/dto/title.py`'s *"Four fields PRD 07's
-example carries are absent"* paragraph assigns the hierarchy to *"M9's
-`GET /series/{id}/seasons`"* -- this module and `api/routers/series.py` are
-that route, and the title detail deliberately does not grow a `seasons` key
-with them. A series has a median of 9 seasons and the one measured
-pathological show has 20,000 episodes, so inlining the tree would make the
-length of a title response a property of the show rather than of the request;
-it stays a link a client follows.
-
-**That paragraph is deliberately not edited here.** Four M9 tasks make it
-false in four different ways -- `credits` filled (B9), `images` filled (C7),
-`similar` becoming its own route (B8), and the hierarchy becoming these two --
-and it is rewritten **once**, by whichever of them lands last, from the tree as
-it then stands. B12 is not last: the corrected task graph adds the edge
-`C7 <- B12`, which is what makes "last" deterministic rather than a race
-between two worktrees writing the same paragraph. The check is a grep, and the
-literal it looks for is **`GET /series/{id}/seasons` in
-`api/routers/series.py`** -- that module's first paragraph carries it, and its
-route decorator carries the path itself. Nothing here needs a constant to say
-so, and a constant with no reader would be a member with no emitter.
-
-**No `tmdb_id`, no `imdb_id`, no `external_id` and no source concept.** PRD
-07's first line is *"Nothing in this surface mentions a media server"*, and
-CLAUDE.md's identity rule is that a provider id is an indexed attribute and
-never an identifier in an API contract -- every route a client calls takes an
-Usher UUIDv7.
-
-**`EpisodeResponse` carries `title_id` and `season_id`.** An episode reached
-from a search result or a Next Up card is otherwise a leaf: without them a
-client that wants the show it belongs to has to search for it by name, which
-is a different question with a different answer. They are the same two ids
-`resolve_episodes` keys on, so nothing is derived here that the row does not
-hold.
-
-**And no `watch_state`, which is group D's and additive.**
-`PUT /watch/episodes/{id}` owns that state; a `watch_state` key on
-`EpisodeResponse` would be a second read *per episode* on a paged route --
-the N+1 that `resolve_episodes` and `next_up` both exist to prevent, arriving
-through a DTO. Adding it later is an additive change to this module.
+"""The series hierarchy on the wire (PRD 07): `GET /series/{id}/seasons`, `GET
+/seasons/{id}/episodes` and `GET /episodes/{id}`.
 """
 
 import uuid

@@ -1,56 +1,4 @@
-"""The image proxy's two serve-time ports, and the ladder they are both
-addressed by.
-
-**Two ports rather than one, because the two failure modes are different.**
-`ImageFetcher` is a network: an outage, a 408 and a timeout are all
-`PortUnavailable`, and any 4xx that is not 429, 401, 403 or 408 is
-`PortDataMalformed`, exactly the split `adapters/http.py` already holds for
-TMDb and the LLM endpoint.
-
-**A rate limit and a refused credential are neither of the types named here.**
-`port_error_for` answers a 429 with `PortRateLimited` and a 401/403 with
-`PortAuthFailed`, so "any other 4xx is `PortDataMalformed`" would swallow the
-second of them. Neither is a route's to catch: `api/errors.py` answers both as
-`503 source_unavailable` for every route at once.
-`ImageBlobStore` is a disk: it fails when a filesystem fails, it has a fake
-with no filesystem at all for unit cases, and its real arm runs against
-`tmp_path`. Collapsing them into one "cache" port would put both taxonomies
-behind one method and make a fake that cannot fail plausibly.
-
-**This is the serve-time half, and the distinction is load-bearing.** M9's
-derivation writes `images` from `raw_payloads` with **no second network call**
-([ADR-0016](../../../docs/prd/decisions/0016-raw-payloads-cache-providers-not-sources.md));
-the fetch below happens on a request, against a CDN, for bytes the derivation
-never had. The two are different things that both say "image" and "provider".
-
-## The ladder
-
-[ADR-0032](../../../docs/prd/decisions/0032-the-image-proxy-clamps-to-a-ladder.md)
-decides it, measured against the live CDN on 2026-08-11: **no decoder is taken
-and none is needed**, because the provider already serves every width a client
-needs at `{base}{rung}{path}`. So `IMAGE_LADDER` is a code constant rather than
-a setting — a knob nothing reads is dead config wearing a control's name, and
-PRD 08's Configuration table is corrected to say so.
-
-**An off-ladder fetch is a failure, not a slow path.** The CDN enforces a
-*closed* fifteen-rung allowlist and answers **HTTP 400** to every other width —
-`w0`, `w100`, `w600`, `wibble` and `W500` all measured. That is why `fetch`
-refuses a width that is not a rung with a `ValueError` rather than letting it
-reach the wire: a service that passed a client's number through would turn
-`?w=513` into a 400 from somebody else's server, and clamping is what makes the
-proxy work at all rather than what makes it cheap.
-
-**`original` is on neither the ladder nor the wire.** It is the one size with
-no width bound of any kind — 173 KB to 4.7 MB measured, with no ceiling the API
-can state — so a clamp whose top entry is `original` is not a clamp. Nothing
-here can express it: the ladder is a tuple of `int`.
-
-**`fmt=` and `h=` are not here either**, and PRD 07 is corrected rather than
-implemented. Format is `Accept` negotiation, priced in ADR-0032 at 62-68% of
-JPEG and named as the additive successor; a height is a width divided by a
-constant fixed by kind, and the provider publishes exactly one height rung for
-a kind M9 does not emit.
-"""
+"""The image proxy's two serve-time ports, and the ladder they are both addressed by."""
 
 import hashlib
 from abc import ABC, abstractmethod
@@ -77,12 +25,7 @@ __all__ = [
     "is_servable_path",
 ]
 
-#: The four widths `GET /images/{id}?w=` clamps to, smallest first.
-#: ADR-0032, and every rung is one the provider publishes for at least one
-#: kind and was measured serving all three kinds M9 emits. **154** is a
-#: type-ahead thumbnail at 77 CSS px on a 2x display; **1280** is the largest
-#: card any consumer paints (a full-bleed hero at 640 CSS px, 2x) and is
-#: independently the widest backdrop the provider publishes.
+# : The four widths `GET /images/{id}?w=` clamps to, smallest first.
 IMAGE_LADDER: tuple[int, ...] = (154, 342, 780, 1280)
 
 #: What `w` absent means: the row card, which is the surface both of M9's two
@@ -90,62 +33,16 @@ IMAGE_LADDER: tuple[int, ...] = (154, 342, 780, 1280)
 #: cache entry.
 DEFAULT_IMAGE_WIDTH = 342
 
-#: The media types this proxy will cache, mapped to the extension the on-disk
-#: entry is named with.
-#:
-#: **A closed map, and the refusal it implies is deliberate.** The proxy stores
-#: exactly the bytes and the `Content-Type` it was given (ADR-0032) — it never
-#: decodes and never re-encodes — so an entry it cannot name is an entry it
-#: cannot serve back with the right header. Three entries, because those are
-#: what a sized rung answers with: `image/webp` is unreachable until the
-#: `Accept` successor is built and is here so that successor is not a change to
-#: the store.
-#:
-#: **`image/svg+xml` is absent on purpose** — see `DECLINED_MEDIA_TYPES`, which
-#: is where the reason lives, because it is a different reason from "this is not
-#: an image at all".
+# : The media types this proxy will cache, mapped to the extension the on-disk : entry
+# is named with.
 SUPPORTED_MEDIA_TYPES: Mapping[str, str] = {
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
 }
 
-#: Media types the provider really serves for artwork, at a rung, on ordinary
-#: catalog data — and that this proxy declines anyway.
-#:
-#: 🔴 **The reason this file gave until 2026-08-11 was measurably wrong, and the
-#: correction makes the refusal stronger rather than weaker.** It said the
-#: provider rasterises SVG logos at every sized rung and this proxy never
-#: requests `original`, *"so an SVG arriving here means something other than the
-#: measured CDN answered"*. Measured against three real `.svg` logos found
-#: across 51 popular and top-rated titles: `w154`, `w342`, `w500` and `original`
-#: all return **HTTP 200 `image/svg+xml`**, and a `GET` at `w342` returns
-#: **10,216 bytes of raw SVG XML, byte for byte the size of `original`**. The
-#: CDN does not rasterise and does not refuse — it **ignores the ladder
-#: entirely** for this type.
-#:
-#: Which is the real argument, and it is this ADR's own mechanism failing to
-#: bite:
-#:
-#: - **Nothing this proxy does can bound an SVG.** The clamp is the whole of
-#:   ADR-0032 and it has no effect here; four rungs would cache four identical
-#:   copies of one file, so the "four entries an image" bound is not a bound.
-#: - **It is active content served from an internet-facing origin under a
-#:   year-long `max-age`.** SVG may carry script. The three files checked
-#:   carried none, which is a fact about three files and not about the format —
-#:   and the no-decoder decision means this proxy cannot sanitise it either,
-#:   because it stores bytes verbatim and has nothing that can parse them.
-#:
-#: **And it is ordinary, not anomalous** — roughly one title in seventeen in
-#: that sample — which is why it has its own error type below. A refusal that
-#: fires on one request in seventeen must be a quiet, expected outcome; the
-#: first spelling of this made it indistinguishable from a captive portal
-#: answering HTML, and *that* would have read as an alarm on real catalog data.
-#:
-#: **A real SVG at a rung is therefore not a reason to reopen ADR-0032.** The
-#: reopening trigger is a household needing those logos *rendered*, whose answer
-#: is a rasteriser — the decoder arm 1 of that ADR's bar priced and arm 2
-#: declined.
+# : Media types the provider really serves for artwork, at a rung, on ordinary : catalog
+# data — and that this proxy declines anyway.
 DECLINED_MEDIA_TYPES: frozenset[str] = frozenset({"image/svg+xml"})
 
 #: The provider path suffixes that predict a `DECLINED_MEDIA_TYPES` answer, one
@@ -156,67 +53,8 @@ UNSERVABLE_PATH_SUFFIXES: frozenset[str] = frozenset({".svg"})
 
 
 def is_servable_path(provider_path: str) -> bool:
-    """Whether `GET /images/{id}` can ever answer for an image stored at this
-    provider path.
-
-    **C7 is the consumer**, and the decision it implements is *filter, not
-    annotate*: `GET /titles/{id}`'s `images` key is a list of references a
-    client can fetch, so an entry whose fetch will always fail is not a
-    reference — it is a broken link this API mints deliberately, and the client
-    renders a broken image with nothing anywhere reporting an error. That is the
-    same failure `ImageRepository.replace_for_titles`' delete half exists to
-    prevent one layer down, arriving through a DTO instead of through a stale
-    row.
-
-    **C6 is deliberately not a consumer.** The measured gap is logo-only — the
-    provider serves SVG for `logos` and JPEG for posters and backdrops — and
-    `RowCard.artwork` paints a poster or a backdrop, so the state this predicate
-    discriminates is unreachable there. Even if it were reachable, a card's only
-    two behaviours are "render artwork" and "render the fallback", and *"no
-    logo"* and *"a logo we will not serve"* produce the identical one. A
-    discriminator nobody branches on ages into a lie.
-
-    ⚠️ **A filter with no counter is invisible, and that is the half a consumer
-    will skip.** Once C7 drops these rows, *"this catalog has no logos"* and
-    *"this proxy dropped all of them"* look identical to an operator as well as
-    to a client. One metric, or one line in `usher derive`'s report — the choice
-    is C7's, the requirement is that *something* can say how often it fires.
-    Roughly one title in seventeen, measured.
-
-    **Why this is here rather than in a DTO.** `provider_path.endswith(".svg")`
-    written in `api/dto/` is a provider-shaped inference in exactly the layer
-    PRD 01's no-source-concept rule is about, and it would be a second
-    definition of a fact the proxy already owns. One definition means the
-    `Accept` successor and the rasteriser are each a single change here rather
-    than a hunt.
-
-    ⚠️ **It is a prediction from a filename, and the fetcher stays the
-    authority.** The link is the provider's convention — a `file_path` ending
-    `.svg` is what the CDN answers `image/svg+xml` for, at every rung
-    (measured). If that convention ever breaks, this predicate and
-    `extension_for`'s refusal disagree, and the failure is quiet in one
-    direction: a servable image filtered out of `images` looks exactly like a
-    title that has none. The pairing case is what makes the two sets move
-    together; nothing can make the *provider* keep its convention.
-
-    **The alternative considered and rejected: refuse at the write.** C3's
-    derivation could simply not store an `Image` row for an SVG logo, which
-    expresses the gap once, at the boundary that already knows about provider
-    payloads, and makes every consumer correct for free with no predicate at
-    all — and it is recoverable, because `usher derive` re-reads `raw_payloads`
-    with no network call, so a rasteriser landing later backfills the rows it
-    skipped (ADR-0016's whole point). It was genuinely open: C3 had not landed
-    when this was decided. Rejected because `images` should be a faithful record
-    of what the provider published, and a row the catalog holds but this
-    deployment cannot render is exactly the fact an operator debugging a missing
-    logo needs to find with one `SELECT`.
-
-    **It ships one task ahead of its caller, which is an exception this project
-    normally refuses** (*"a port method whose only test is its own test is a
-    liability"*). Taken deliberately: C7 had not started, the alternative was
-    C7 writing `endswith(".svg")` in a DTO and this module learning about it
-    afterwards, and the whole value of one definition is that it exists before
-    the second copy does.
+    """Whether `GET /images/{id}` can ever answer for an image stored at this provider
+    path.
     """
     return not provider_path.lower().endswith(tuple(UNSERVABLE_PATH_SUFFIXES))
 
@@ -253,29 +91,7 @@ def clamp_to_ladder(width: int | None) -> int:
 
 
 class MediaTypeNotServable(PortDataMalformed):
-    """The provider answered correctly and this proxy will not serve it.
-
-    **A subclass rather than a new member of `usher.ports.errors`, and both
-    halves of that are deliberate.** A `PortDataMalformed` is what every
-    existing `except` in `services/` and `api/` already catches, so nothing
-    forks and no caller has to learn a second name to keep working — the
-    widening `RepositoryConflict` records is the precedent for not splitting a
-    member that callers respond to identically. What the subclass buys is the
-    one caller that *should* respond differently: `GET /images/{id}` can answer
-    a declined logo as an ordinary absence, where a captive portal answering
-    HTML under a 200 is an upstream fault worth surfacing as one.
-
-    **The distinction is a measurement, not a taxonomy exercise.** Roughly one
-    title in seventeen has an SVG logo, so without this the commonest refusal
-    this proxy makes is spelled the same as its rarest and most alarming one.
-
-    Lives here rather than in `ports/errors.py` for `FilterNotSupported`'s
-    reason: it is a property of one port's contract, and a service catching
-    `UsherPortError` catches it either way.
-
-    **It carries no URL and no body** — the media type is the whole of it — for
-    the reason `adapters/images/provider.py`'s docstring gives.
-    """
+    """The provider answered correctly and this proxy will not serve it."""
 
     def __init__(self, media_type: str) -> None:
         super().__init__(
@@ -380,28 +196,7 @@ class StoredImage:
 
 
 class ImageFetcher(ABC):
-    """One GET against the provider's CDN, streamed.
-
-    **It carries no credential and cannot be given one.** PRD 07's promise is
-    that clients never see provider image URLs and never need a provider key;
-    the CDN needs none either, so an implementation that sent one would be
-    leaking a secret to buy nothing. `HTTPXClientInstrumentor` records a full
-    URL as a span attribute (`adapters/tmdb/client.py`'s own docstring is the
-    precedent), which is also why no message this port raises may carry a URL.
-
-    Errors are `usher.ports.errors`, split the way `adapters/http.py`'s ladder
-    splits them: `PortUnavailable` for a 5xx, a 408, a timeout or an
-    unreachable host -- **not** for a 429, which `port_error_for` answers with
-    `PortRateLimited`, nor for a 401/403, which it answers with
-    `PortAuthFailed`; those two are answered by `api/errors.py`'s handler
-    rather than by any route's `except`. `PortDataMalformed` for
-    any other 4xx, for an answer that
-    is not artwork at all, and for a body past the configured ceiling; and
-    `MediaTypeNotServable` — a *subclass* of the last, so nothing has to catch
-    it — for artwork the provider really serves and this proxy declines. The
-    third is the one a caller may reasonably treat as an ordinary absence, and
-    it is the one that fires on ordinary catalog data.
-    """
+    """One GET against the provider's CDN, streamed."""
 
     @abstractmethod
     def fetch(self, provider_path: str, width: int) -> AbstractAsyncContextManager[FetchedImage]:

@@ -1,12 +1,4 @@
-"""The one result type more than one aggregate's port returns.
-
-`BulkWriteResult` is returned by six ports across six modules. Homing it
-in `bulk.py` -- where it was written, next to the first port to need it --
-and importing it back the other way resolves perfectly well today, and
-makes five aggregates drag the bulk-load port into every consumer. Private
-and shared is the shape that does not; `test_ports_repository_package.py`
-is what keeps it applied.
-"""
+"""The one result type more than one aggregate's port returns."""
 
 from dataclasses import dataclass
 

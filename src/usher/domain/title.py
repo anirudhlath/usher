@@ -57,23 +57,11 @@ class Title(DomainModel):
     origin_countries: tuple[str, ...] = Field(default_factory=tuple)  # ISO 3166-1 alpha-2
     content_rating: str | None = None
 
-    # **Five fields where there were three**, because `community_rating`,
-    # `vote_count` and `popularity` each had two writers meaning different
-    # things: IMDb's `averageRating`/`numVotes` from `adapters/bulk/imdb.py`
-    # and TMDb's `vote_average`/`vote_count` from `adapters/tmdb/mapping.py`,
-    # counted over different electorates -- ~38x apart over one identified
-    # population counted both ways (the frozen tier's 130,647 enriched rows:
-    # median TMDb 15 against median frozen IMDb `numVotes` 576, S3). And the
-    # ranges *overlap* among movies (40,518 against 40,695 on the deployed
-    # catalog), so no reader could ever have told them apart by magnitude --
-    # which is the load-bearing half, whatever the typical ratio. Each column
-    # now names its source. ADR-0040.
-    #
-    # **`DomainModel` refuses `inf` and `NaN`, so these ceilings no longer
-    # carry that weight** -- `ge=0` alone never did, since `float("inf") >= 0`
-    # is `True`. What `le=10` still uniquely refuses is a finite out-of-scale
-    # value, which is what `test_domain_title.py::
-    # test_a_rating_rejects_values_outside_the_zero_to_ten_scale` pins.
+    # **Five fields where there were three**, because `community_rating`, `vote_count`
+    # and `popularity` each had two writers meaning different things: IMDb's
+    # `averageRating`/`numVotes` from `adapters/bulk/imdb.py` and TMDb's
+    # `vote_average`/`vote_count` from `adapters/tmdb/mapping.py`, counted over
+    # different electorates -- ~38x apart over one identified population counted both
     tmdb_vote_average: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
     tmdb_vote_count: int | None = Field(default=None, ge=0)
     tmdb_popularity: float | None = Field(default=None, ge=0)
@@ -94,32 +82,8 @@ class Title(DomainModel):
     updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-#: Every `Title` attribute whose **wire** name is not its own, and what that
-#: wire name is.
-#:
-#: **This exists because ADR-0040's rename escaped through `GET /events`, which
-#: is the one place a field name is data rather than a key.** The rename froze
-#: every HTTP DTO field name deliberately -- `usher-web` is deployed against
-#: them -- but `title.updated` publishes `data={"fields": [...]}` built from
-#: domain attribute names, and PRD 07 defines that payload as *"Title id +
-#: changed fields | Patch in place"*. So the first commit of the rename sent
-#: clients `tmdb_vote_average`, `tmdb_vote_count` and `tmdb_popularity`:
-#: three names that appear in **no** response body those clients can refetch,
-#: and a client patching in place by them fails silently. Measured across the
-#: two commits before this mapping existed.
-#:
-#: It lives in `domain/` and not in `api/dto/` because `services/enrich.py` is
-#: what publishes the event, and the `hexagonal layering` contract orders
-#: `usher.api > usher.services`, so a service importing the DTO layer is
-#: `lint-imports` BROKEN rather than a style question -- verified by planting
-#: exactly that import (`usher.services.enrich -> usher.api.dto.title`), inside
-#: isort's position so it could not die on ruff instead. A field's published
-#: name is a fact *about* the domain model anyway -- the API layer serialises
-#: it, it does not decide it.
-#:
-#: A `MappingProxyType` for `_ORDERS`' reason: this is the constant that
-#: decides what a deployed client is told changed, and one line mutating it at
-#: import time would be silent and process-wide.
+# : Every `Title` attribute whose **wire** name is not its own, and what that : wire
+# name is.
 WIRE_FIELD_NAMES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "tmdb_vote_average": "community_rating",

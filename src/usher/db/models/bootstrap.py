@@ -1,13 +1,4 @@
-"""Bootstrap bookkeeping tables (PRD 04, Phases 0-2).
-
-None of the three carries an `updated_at` column, and therefore none needs a
-`BEFORE UPDATE` trigger. That is deliberate: `tests/integration/
-test_migrations.py::test_migration_creates_the_updated_at_triggers` asserts
-the trigger set is exactly the three the core schema created, and every
-timestamp here has exactly one writer (the importer) that sets it
-explicitly. A trigger would add a moving part to defend a column nothing
-else touches.
-"""
+"""Bootstrap bookkeeping tables (PRD 04, Phases 0-2)."""
 
 import uuid
 from datetime import datetime

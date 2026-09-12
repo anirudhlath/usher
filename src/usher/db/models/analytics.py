@@ -1,31 +1,5 @@
 """`search_queries` — [PRD 10](../../../../docs/prd/10-telemetry-and-dashboards.md)'s
 second analytics table, shipped whole and with no writer.
-
-**Whole is the point.** PRD 10 assigns this table to M9 *whole* because a
-half-populated analytics table is worse than an empty metric: a dashboard
-reading it cannot tell a real zero from a column nobody filled. So all nine
-columns land together, and the other half of "whole" is that nothing is added
-speculatively either — `requested_mode` is wire-only, and if the analytics
-task finds it must be persisted, that is a request rather than a column
-appended here.
-
-**Eleven columns since `m10c`**, and the two it added are the *amendment* PRD
-10's own `## Analytics tables` block asked M10 to plan rather than a tenth
-column appended on a hunch: `surface` and `tier`, and nothing else — no
-`keystroke_index`, no `session_id`, no `debounced` flag. The "whole" rule
-above is what makes that list closed.
-
-**A domain record, not telemetry exhaust.** PRD 10's own framing: durable,
-queryable, exact. It is also the answer to something
-`.claude/rules/search-and-embeddings.md` lists as unsettled by ADR-0002's
-failed typo-tolerance gate — that gate measured *synthetically mutated*
-queries, and real typed ones are this table.
-
-No `set_updated_at` trigger and no `updated_at` column: a row here records
-something that already happened, which is `llm_calls`' case exactly.
-`tests/integration/test_migrations.py::test_migration_creates_the_updated_at_triggers`
-asserts that trigger set exactly, so this is mechanically required as well as
-right.
 """
 
 import uuid
@@ -91,17 +65,10 @@ class SearchQueryRow(Base):
     # dashboard reads a real `false` rather than a column nobody filled —
     # which is the failure the "whole" in PRD 10's comment is about.
     played: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    # **The tenth and eleventh columns, `m10c`, PRD 10's amendment 2.** They
-    # are two columns rather than a fourth `SearchMode` member because
-    # `SearchMode` is `GET /search`'s `?mode=` and `SearchAnswer`'s two
-    # fields, so a member no search lane can serve would become reachable on a
-    # route that would have to refuse it.
-    #
-    # `NOT NULL` with no default, `played`'s precedent one line up: every row
-    # this table held when `m10c` landed came from `GET /search` or `usher
-    # search`, so `'search'` is what the backfill states rather than what it
-    # guesses, and a surviving `server_default` would supply that same
-    # plausible value to a writer that forgot.
+    # **The tenth and eleventh columns, `m10c`, PRD 10's amendment 2.** They are two
+    # columns rather than a fourth `SearchMode` member because `SearchMode` is `GET
+    # /search`'s `?mode=` and `SearchAnswer`'s two fields, so a member no search lane
+    # can serve would become reachable on a route that would have to refuse it.
     surface: Mapped[SearchSurface] = mapped_column(
         enum_column(SearchSurface, length=8), nullable=False
     )
@@ -116,19 +83,9 @@ class SearchQueryRow(Base):
         CheckConstraint("query <> ''", name="ck_search_queries_query_not_empty"),
         CheckConstraint("result_count >= 0", name="ck_search_queries_result_count_non_negative"),
         CheckConstraint("latency_ms >= 0", name="ck_search_queries_latency_ms_non_negative"),
-        # **One index since `m10c`, and it has a reader named in PRD 10
-        # itself** — `DELETE FROM search_queries WHERE at < now() - interval
-        # '90 days'`, which that document records as a sequential scan
-        # *"until somebody adds one"*. That is what distinguishes it from
-        # `ix_titles_popularity`, whose reader was a milestone away and never
-        # arrived: this statement is already written down, verbatim, as an
-        # operator's own SQL.
-        #
-        # A btree rather than BRIN. `at` is append-only and physically
-        # correlated, which is BRIN's shape — but `record_outcome`'s `UPDATE`
-        # rewrites the heap tuple of every row that gains a click or a play,
-        # and whether those stay on their original page is a `fillfactor`
-        # question nobody here has measured.
+        # **One index since `m10c`, and it has a reader named in PRD 10 itself** —
+        # `DELETE FROM search_queries WHERE at < now() - interval '90 days'`, which that
+        # document records as a sequential scan *"until somebody adds one"*.
         Index("ix_search_queries_at", "at"),
         # The cost of `m09a`'s original decision is stated rather than hidden,
         # and is unchanged by the index above: `clicked_title_id`'s SET NULL

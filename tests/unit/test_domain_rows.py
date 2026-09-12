@@ -20,14 +20,12 @@ one concept. Two spellings of one vocabulary is a second source of truth,
 and the composer that has to read it is twenty-eight tasks away.
 """
 
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
-import usher.domain.rows
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.taste import Centroid
@@ -80,41 +78,6 @@ def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
         _card(poster_path="/a.jpg")
 
 
-def test_the_adr_0014_enumeration_is_numbered_against_itself() -> None:
-    """**The list is the count, and an ordinal read out of a plan is not.**
-
-    `usher.domain.rows`' module docstring enumerates ADR-0014's sites, and it
-    exists because the ordinals were being incremented by guesswork -- a list
-    that can only grow is a list that lies the first time something is deleted,
-    which is exactly what happened when `RowContext.taste` was removed and
-    every ordinal below it moved up.
-
-    So the numbering is checked against itself: contiguous from 1, in order,
-    with no gaps. Kills a site inserted mid-list without renumbering, and kills
-    a `10.` appended after a deletion left the list at eight.
-
-    **`artwork` is deliberately not on it**, and the reason is worth stating
-    where somebody will look for it. ADR-0014 is *absence is not zero*: a site
-    is a field where a falsy value would be read as a measurement. `artwork`
-    has no zero -- there is no UUID that means "no artwork" -- so `None` is the
-    only spelling available and nothing is standing in for anything. The
-    sharpest site on the list (`NeighborCandidate.tags`) is there precisely
-    because `0.0` is a value real data cannot produce; artwork's absence
-    produces no value at all.
-    """
-    enumeration = usher.domain.rows.__doc__ or ""
-    ordinals = [int(one) for one in re.findall(r"^(\d+)\. ", enumeration, re.MULTILINE)]
-    entries = re.split(r"^\d+\. ", enumeration, flags=re.MULTILINE)[1:]
-
-    assert ordinals, "the enumeration scan found nothing, so it proves nothing"
-    assert ordinals == list(range(1, len(ordinals) + 1)), (
-        f"the ADR-0014 enumeration is not numbered against itself: {ordinals}"
-    )
-    assert not [one for one in entries if "artwork" in one.lower()], (
-        "artwork was added to the ADR-0014 site list; it has no zero to be mistaken for"
-    )
-
-
 def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> None:
     """`watch_states.runtime_seconds` is nullable, so a progress *fraction*
     is best-effort dressed as arithmetic.
@@ -134,8 +97,7 @@ def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> No
 
 
 def test_an_unknown_runtime_stays_unknown_on_a_card() -> None:
-    """**ADR-0014, seventh site** (see the module docstring of
-    `usher.domain.rows` for the enumeration).
+    """**ADR-0014: absence is not zero.**
 
     Kills `runtime_seconds: int = 0`. A zero runtime is not "no progress" --
     it is a divisor that makes every partially-watched title read as

@@ -61,17 +61,8 @@ class JobRow(Base):
 
     __table_args__ = (
         UniqueConstraint("kind", "key", name="uq_jobs_kind_key"),
-        # The claim query, exactly: WHERE status = 'pending' AND
-        # (run_after IS NULL OR run_after <= now()) ORDER BY priority DESC,
-        # created_at. Partial on 'pending' so parked poison and in-flight
-        # claims are not indexed at all -- the whole population this index
-        # exists to order is the pending one, and at a 1.1M-item backfill
-        # the other two are noise. run_after is deliberately not a key: it
-        # is NULL for almost every job, so the ordering scan's first tuple
-        # normally qualifies, and the OR predicate a nullable column forces
-        # is not range-scannable anyway. The cost is bounded by the number
-        # of backed-off jobs, which the attempt ceiling caps by parking them
-        # out of this index entirely.
+        # The claim query, exactly: WHERE status = 'pending' AND (run_after IS NULL OR
+        # run_after <= now()) ORDER BY priority DESC, created_at.
         Index(
             "ix_jobs_claim",
             text("priority DESC"),

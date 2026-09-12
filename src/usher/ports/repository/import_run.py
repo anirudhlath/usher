@@ -1,8 +1,4 @@
-"""Import runs -- the resumable checkpoint a bulk phase records against.
-
-Implemented by
-`usher.db.repositories.import_run.PostgresImportRunRepository`.
-"""
+"""Import runs -- the resumable checkpoint a bulk phase records against."""
 
 from abc import ABC, abstractmethod
 
@@ -36,27 +32,7 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def save(self, run: ImportRun) -> None:
-        """Persist a run's progress. Flushes, never commits.
-
-        Raises `RepositoryConflict` if another row already claims this
-        run's `dataset` — two processes bootstrapping the same dataset at
-        once is an operator mistake, and it must surface as a port error
-        rather than a raw storage exception (ADR-0009).
-
-        Whether the *session* remains usable for further work after a
-        caught `RepositoryConflict` is deliberately left to the
-        implementation, not promised here — contrast `TitleRepository.add`/
-        `update`, which use a `SAVEPOINT` specifically so it does.
-        `PostgresImportRunRepository` rolls back the whole transaction
-        instead of using a SAVEPOINT (see its own module docstring): unlike
-        `TitleRepository`'s general-purpose callers, its one caller,
-        `BootstrapService`, never has other work pending on the session at
-        this point worth a SAVEPOINT's extra round trip to protect. The
-        session *does* stay usable afterward, deliberately —
-        `BootstrapService.import_dataset`'s except handler continues on
-        this same session to record the failure as a durable `ImportRun`,
-        which is exactly why the rollback is there rather than skipped.
-        """
+        """Persist a run's progress. Flushes, never commits."""
 
     @abstractmethod
     async def get(self, dataset: str) -> ImportRun | None:

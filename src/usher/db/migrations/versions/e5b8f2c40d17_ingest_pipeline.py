@@ -1,58 +1,4 @@
-"""ingest pipeline: seasons, episodes, jobs, sync_runs, raw_payloads
-
-Revision ID: e5b8f2c40d17
-Revises: d4c9b1e37a05
-Create Date: 2026-07-31
-
-Started from `--autogenerate` and then hand-finished, because autogenerate
-cannot produce three of the things in here:
-
-1. **The two `set_updated_at` triggers** on `seasons` and `episodes`.
-   Triggers are not SQLAlchemy `Table` metadata, so autogenerate never sees
-   them in either direction. They matter for exactly the reason the first
-   three do: both tables are written by `INSERT ... ON CONFLICT DO UPDATE`
-   from a staging table, and SQLAlchemy's `onupdate=` is a Core-side feature
-   with no effect on raw SQL. Note the naming: `trg_<table>_set_updated_at`,
-   matching the three the core schema created -- not `set_updated_at_<table>`.
-2. **CHECK constraint bodies on any table it is not creating from scratch.**
-   Autogenerate emits a new table's constraints verbatim from metadata (all
-   fourteen below came out correct), but it is blind to a *changed*
-   condition -- verified in M1 by loosening a bound and getting an empty
-   `pass` migration. Every one below was still read by eye against the model.
-3. **Reviewer judgement about what a new foreign key costs.** See the two
-   `ix_*_episode_id` indexes below.
-
-The two `ALTER TABLE ... ADD CONSTRAINT` statements for the dangling
-`episode_id` columns are ordered after `episodes` is created, and the
-downgrade drops them before it. `media_items` gets SET NULL, `watch_states`
-gets RESTRICT -- see
-[ADR-0010](../../../../../docs/prd/decisions/0010-watch-state-title-fk-restrict.md)
-for why those differ.
-
-Each of those FKs also gets an index on the *referencing* column, which
-autogenerate did not ask for and the plan did not have. Postgres implements
-both `SET NULL` and `RESTRICT` by looking up referencing rows by that
-column on every referenced-side DELETE, and neither existing index can
-serve it: `uq_media_items_source_external` leads with `source_id` and
-`uq_watch_states_user_episode` leads with `user_id`. Without them each
-episode deletion is a sequential scan of `media_items` (999,827 episode
-rows on the one measured deployment) and of `watch_states` -- and
-`episodes.title_id` is `ON DELETE CASCADE`, so deleting one series fires
-that once per episode of the series. This is the identical argument the
-core schema already made for `ix_watch_states_title_id`.
-
-**Reversible, but a down-then-up round trip is not automatically
-data-safe.** `downgrade()` drops `episodes` and cannot touch the two
-`episode_id` columns that were pointing into it, so coming back up finds
-links to rows that no longer exist. Verified directly against real
-Postgres: with one episode-level `watch_states` row present, the second
-`upgrade()` failed with a bare `ForeignKeyViolationError`.
-`_adopt_links_orphaned_by_an_earlier_downgrade` is what makes that
-diagnosable -- it applies each column's own `ON DELETE` rule to the
-orphans, which means `media_items` is silently cleaned and `watch_states`
-refuses with the offending ids named. That asymmetry is not incidental; it
-is ADR-0010 arriving at the one moment it actually costs something.
-"""
+"""ingest pipeline: seasons, episodes, jobs, sync_runs, raw_payloads"""
 
 from collections.abc import Sequence
 
@@ -74,29 +20,7 @@ _TRIGGERED_TABLES = ("seasons", "episodes")
 
 
 def _adopt_links_orphaned_by_an_earlier_downgrade() -> None:
-    """Deal with `episode_id` values left dangling by a previous downgrade.
-
-    `downgrade()` drops the `episodes` table but cannot touch the two
-    `episode_id` columns, so a database that has been down and is coming
-    back up can hold links to episodes that no longer exist. Adding the
-    foreign keys over them fails with a bare `ForeignKeyViolationError`
-    naming one row -- reproduced directly against real Postgres, which is
-    why this function exists. On a first upgrade it is a no-op: nothing has
-    ever written either column.
-
-    Each column is handled by *its own* delete rule, because that rule is
-    already this schema's stated answer to "the episode went away":
-
-    - `media_items.episode_id` is `ON DELETE SET NULL`, so an orphan is
-      NULLed. An unmatched MediaItem is worth keeping; it just loses the
-      link. Nothing else on the row depends on it.
-    - `watch_states.episode_id` is `ON DELETE RESTRICT`, so an orphan
-      **refuses the migration**. A WatchState *is* the thing worth keeping
-      (ADR-0010), and neither automatic option is acceptable: deleting the
-      row destroys watch history, and NULLing the column violates
-      `ck_watch_states_exactly_one_target`. Failing here, with the affected
-      ids named, is the only answer that does not lose data silently.
-    """
+    """Deal with `episode_id` values left dangling by a previous downgrade."""
     op.execute("""
         UPDATE media_items SET episode_id = NULL
         WHERE episode_id IS NOT NULL

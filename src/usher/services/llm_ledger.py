@@ -1,42 +1,5 @@
 """The `llm_calls` ledger: one home for *record on every path that attempted a
 completion, and commit what you recorded.*
-
-## Why this is a module and not a method on each spender
-
-`.claude/rules/testing-discipline.md` records the measurement this file exists
-for. The rule *"record **and** commit"* was once spelled verbatim at three
-exits of `CurationService.generate`, and **deleting the commit from one of them
-passed all 42 cases** -- the *rejected* arm, where the call succeeded, the money
-is spent, `replace_for_user` is never reached and the `llm_calls` row is the
-only record the spend happened at all. The repair was two things, and the
-second is the one that generalises: *"a rule spelled three times is a rule one
-deletion is invisible in ... N copies means N chances for one to go quiet."*
-
-That argument was then made **inside** `CurationService` and not **across** the
-two services that spend money. `QueryExpansionService` carried its own
-`_settle` / `_ledger_row` / `_record`, identical to curation's but for the
-purpose constant and the generation id -- so the count went back from one to
-two, and five invariants were each argued and pinned twice:
-
-- `ok` is **derived** from `error`, never passed beside it.
-- an error string is `str(exc) or type(exc).__name__`, **never a bare
-  `str(exc)`** -- which is `""` for an exception raised with no arguments, and
-  `LLMCall` refuses a failed call with a blank error.
-- `usage is None` is the upstream-failure path and nothing else.
-- `except UsherPortError`, **not** `except Exception`.
-- record, **then** commit, as one step.
-
-Both spenders now hold one of these. `tests/unit/test_services_llm_ledger.py`
-pins the five behaviourally and, with an `ast` walk rather than a substring
-scan, pins that neither service mints a row of its own.
-
-## What stayed different, and why it is a parameter rather than a subclass
-
-`purpose` is fixed for the life of a spender and belongs on the constructor;
-`generation_id` varies per call and belongs on `settle`. Curation passes one
-because PRD 10's dashboard 5 is `llm_calls JOIN curated_rows USING
-(generation_id)`; query expansion writes no `curated_rows` at all, so an id
-minted there would be a join key pointing at nothing.
 """
 
 import time

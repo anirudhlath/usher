@@ -1,91 +1,5 @@
-"""`Embedder` over `POST {base_url}/embeddings`, and the three checks that
-exist because the model is somebody else's process.
-
-**Why a second `Embedder` at all, which is a fact about a library rather than
-a preference.** `fastembed` 0.8.0 does not ship `BAAI/bge-m3` -- enumerated on
-2026-08-13 across all five of its model classes (`TextEmbedding`,
-`SparseTextEmbedding`, `LateInteractionTextEmbedding`, `ImageEmbedding` and
-`LateInteractionMultimodalEmbedding`), and it is in none of them. So the
-choice was not "which runtime is nicer" but "which of `bge-m3` and an
-in-process model does this deployment want", and it wants `bge-m3` served by
-the local vLLM it already runs. ADR-0022's argument for `fastembed` over
-`sentence-transformers` is untouched and `FastEmbedEmbedder` still ships: this
-adapter is a *second* runtime, selected by the `openai:` prefix on
-`Settings.embedding_model`, not a replacement.
-
-**Everything below follows from the model being remote, and each item is
-something `FastEmbedEmbedder` cannot get wrong.**
-
-- **Order is re-established, never assumed.** `fastembed` hands back an array
-  positionally; this protocol hands back objects carrying an `index`, and does
-  so precisely because arrival order is not part of the contract. Anything
-  between here and the server -- a load balancer, a batching scheduler, a
-  provider that fans a batch across workers -- is free to reorder, and
-  `Embedder.embed`'s docstring names the consequence: title *n*'s vector
-  lands on title *m*, `title_neighbors` is built from it, and no per-vector
-  assertion can see it afterwards. So the vectors are sorted by `index`, and
-  the index set is checked to be exactly `range(len(texts))` -- a count check
-  alone is satisfied by a duplicate, and a duplicate is a missing vector
-  wearing another one's number.
-- **The width is asserted.** `FastEmbedEmbedder` knows its width from the file
-  it loaded and hard-codes it; here the width is a property of whatever the
-  operator most recently told vLLM to serve, and that can change with nothing
-  in this repository changing and no error anywhere. The stored column is
-  `halfvec(EMBEDDING_DIMENSIONS)`, so without this check the failure is
-  asyncpg refusing one `index` job at a time with the expected width named by
-  neither side. This is the whole reason the constructor takes a `dimension`.
-- **The norm is asserted, not read off a model card**, and this half is
-  inherited rather than new. Normalisation is a property of the *checkpoint*
-  -- a third module after Transformer and Pooling -- and the same backbone
-  with it removed returns norms **8.99-9.46**, which makes every dot-product
-  score ~85x too large: a plausible ranking that is wrong everywhere, raising
-  nothing. Verified live against the reference endpoint on **2026-08-13**:
-  `bge-m3` through vLLM returns norm **exactly 1.0**, so `_NORM_TOLERANCE`
-  has four orders of magnitude of headroom against the failure it is for.
-  `EmbedderContract` cannot cover this, and covers it even less well here than
-  it does for `fastembed`: it runs against the model this deployment shipped
-  with, and the served model is the one thing about this adapter that can
-  change while the process lives.
-
-**Two shapes on the wire that are decided rather than defaulted.**
-`encoding_format` is deliberately **not sent**. The schema permits `float` and
-`base64` and the official client asks for `base64`, so a provider could
-reasonably make that its default and answer a `str` where this port promises
-`list[float]` -- but the reference endpoint answered floats without the field
-on 2026-08-13 (which is how the norm above was read), and a field this
-deployment has never put on the wire is a 4xx nobody has ruled out. The base64
-case is therefore a legible refusal rather than an untested request parameter,
-which is a judgement about which risk is measured and not a claim that one is
-impossible. And **`dimensions` is not sent either**: on a provider that honours
-it, it would silently truncate to whatever this deployment asked for and make
-the width check agree with itself; on one that does not, it is a 4xx on every
-request. The width is a fact to check, not a thing to request.
-
-**The credential is a header, never a URL, and never a message.**
-`HTTPXClientInstrumentor` records the full URL as a span attribute, so a
-query-parameter key is written into telemetry on every request. Nothing here
-interpolates `base_url` or the key into an exception -- not even through the
-shared helpers' `detail`, which is why `usher.adapters.http.decode_json` takes
-it as optional -- because a household may be pointed at a provider whose URL
-carries a token in a path segment. The key arrives unwrapped (the composition
-root unwraps at the point of use, per CLAUDE.md) and is re-wrapped in a
-`SecretStr` here rather than held as a bare `str`, so no `repr` of this object
-can carry it. `telemetry.configure_logging` sets `diagnose=False`, so loguru
-would not render a local today -- the wrap defends the paths that setting does
-not cover (a pytest traceback, any future sink) and costs one call.
-
-**Upstream: the endpoint named by `USHER_EMBEDDING_MODEL`'s `openai:` runtime
-prefix. Deliberately unthrottled** (M10's S3; the enumeration is
-`tests/unit/test_outbound_call_sites.py`), on `llm/openai_compatible.py`'s
-reasoning exactly: no published ceiling, no measured one, and `KIND_CONCURRENCY`
-caps `index` at **1 in flight**, so the concurrency table is the bound and a
-requests-per-second gate would be a second ceiling above a lower one.
-**Stated here rather than inherited, because this adapter is the one of the two
-that runs for hours**: a `usher index --backfill` over a 1.27M-title catalog is
-a long serialised stream of `POST /embeddings`, not one call a night, so
-"the concurrency cap makes a rate limit unreachable" is a claim worth writing
-down where somebody raising `USHER_JOB_CONCURRENCY` will read it. Raise the
-`index` cap and this decision is reopened.
+"""`Embedder` over `POST {base_url}/embeddings`, and the three checks that exist
+because the model is somebody else's process.
 """
 
 import math
@@ -113,12 +27,9 @@ _EMBEDDINGS_PATH = "/embeddings"
 # `detail` to `usher.adapters.http`.
 _ENDPOINT = "the embedding endpoint"
 
-# The same tolerance `FastEmbedEmbedder` uses, deliberately: the measured norm
-# here is exactly 1.0 so any tolerance would admit it, and a *different* number
-# would make a reader comparing the two adapters work out whether the
-# difference meant something. It is four orders of magnitude below the 8.99 a
-# missing Normalize module produces, so it cannot be passed by the failure it
-# exists to catch.
+# The same tolerance `FastEmbedEmbedder` uses, deliberately: the measured norm here is
+# exactly 1.0 so any tolerance would admit it, and a *different* number would make a
+# reader comparing the two adapters work out whether the difference meant something.
 _NORM_TOLERANCE = 1e-4
 
 
@@ -217,12 +128,8 @@ class OpenAICompatEmbedder(Embedder):
         batch = list(texts)
         vectors: list[list[float]] = []
         for start in range(0, len(batch), self._batch_size):
-            # One request per `batch_size` texts, because the bound is the
-            # *server's* input array and not this process's memory. Each chunk
-            # is checked against its own length -- the protocol's `index` is
-            # relative to the request that carried it -- and the chunks are
-            # concatenated in the order they were sent, which is the half of
-            # the port's ordering contract that survives the split.
+            # One request per `batch_size` texts, because the bound is the *server's*
+            # input array and not this process's memory.
             chunk = batch[start : start + self._batch_size]
             vectors.extend(self._vectors(await self._post(chunk), len(chunk)))
         if not self._checked:
@@ -277,30 +184,7 @@ class OpenAICompatEmbedder(Embedder):
     # ---------------------------------------------------------------- parse
 
     def _vectors(self, response: httpx.Response, expected: int) -> list[list[float]]:
-        """The response's vectors, in input order, or `PortDataMalformed`.
-
-        **Four ways the alignment can be wrong and only the first is the
-        obvious one**, which is why all four are checked rather than the count
-        alone: too few or too many objects, one `index` appearing twice, and an
-        index set that is the right size and not `range(n)` -- a one-based
-        server answers `1, 2` for two texts, and sorting *that* by index yields
-        a list of exactly the right length in exactly the wrong alignment.
-        Every one of them is the reordering `Embedder.embed` calls the most
-        damaging bug available here, and none of them is visible to any
-        assertion about a vector.
-
-        `PortDataMalformed` throughout rather than retryable: no backoff makes
-        a server answer a different shape for the same input, so `JobWorker`
-        parks the job with what was wrong.
-
-        **The index-set check earns its keep twice over, measured by planting
-        its removal**: without it the final comprehension raises a bare
-        `KeyError` for the absent position -- not a `UsherPortError`, so it
-        escapes every `except UsherPortError` in `services/` and takes the
-        worker process down instead of parking one job. Same family as
-        `OpenAICompatibleClient._content`'s note about `json.loads(None)`'s
-        `TypeError`, one adapter over.
-        """
+        """The response's vectors, in input order, or `PortDataMalformed`."""
         body = decode_json(response, what=_ENDPOINT)
         data = body.get("data")
         if not isinstance(data, list):

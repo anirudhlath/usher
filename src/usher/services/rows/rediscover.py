@@ -1,37 +1,4 @@
-"""Rediscover -- titles the household finished long ago and has not returned to.
-
-**PRD 06 says "rated highly" and `watch_states` has no rating column** -- no
-`rating`, no `favorite`, and `SourceWatchState` carries neither of the two
-fields Emby does expose. M7 does not invent the column. This row therefore
-means **"finished long ago"**, ordered so that titles finished more than once
-come first, because a rewatch is the strongest endorsement this schema can hold
-and it is the nearest thing to a rating available. `list_rediscoverable` owns
-the query; this module owns the admission.
-
-**The wrong implementations this module's cases rule out:**
-
-1. **Filters on `updated_at` rather than `last_played_at`.** The nightly walk
-   touches `updated_at` on every merged row -- up to 1,126,789 of them -- so
-   "watched more than two years ago" becomes "merged more than two years ago",
-   which is true of nothing and makes the row silently **never fire**. The
-   failure is a row that is simply always absent, which no assertion about a
-   row's *contents* can see.
-2. **Drops the `played` predicate.** A title abandoned twenty minutes in two
-   years ago is a rejection, not a fondness, and a "Rediscover" shelf built
-   from abandonments is populated, plausible and exactly backwards.
-3. **Filters on `play_count >= 2`.** The tempting spelling of "rated highly",
-   and it returns **nothing** on a freshly-walked deployment -- `played AND
-   play_count = 0` is how "history unknown" is spelled while the backfill
-   drains. As an *ordering* the same unreliable column degrades gracefully.
-   `list_rediscoverable` refuses it and this provider does not reintroduce it.
-4. **Emits whatever it found.** Two qualifying titles is a list, not a shelf,
-   and on a household three months old it is a one-card row that says
-   "Rediscover" about something watched in the spring.
-
-**A household newer than `_YEARS_AGO` gets nothing, and that is the expected
-state for most of a deployment's first two years** -- worth saying out loud so
-an operator does not read the absence as a fault.
-"""
+"""Rediscover -- titles the household finished long ago and has not returned to."""
 
 import uuid
 from collections.abc import Mapping, Sequence
@@ -51,12 +18,9 @@ _MIN_CARDS = 5
 
 _MAX_CARDS = 20
 
-# **0.35, fixed and deliberately low.** A household with a deep back catalog
-# has hundreds of qualifying titles, and any score that scaled with that count
-# would put a row about 2019 above rows about what they are doing tonight. It
-# is a curiosity row; it belongs low on the screen and the constant says so.
-# Fixed rather than computed for Continue Watching's reason: one row, nothing
-# to rank.
+# **0.35, fixed and deliberately low.** A household with a deep back catalog has
+# hundreds of qualifying titles, and any score that scaled with that count would put a
+# row about 2019 above rows about what they are doing tonight.
 REDISCOVER_SCORE = 0.35
 
 _SLUG = "rediscover"
@@ -98,12 +62,8 @@ class RediscoverRow(BaseRow):
         return self._title_ids_
 
     async def _progress(self, ctx: RowContext) -> Mapping[uuid.UUID, Progress]:
-        # Every card here is a title the household **finished**, and the badge
-        # is what stops a "Rediscover" shelf reading as a "you have not seen
-        # these" one. `position_seconds` stays at its honest zero and
-        # `runtime_seconds` at its honest `None`: `RecentWatch` carries
-        # neither, and a runtime this provider did not read is a runtime it
-        # does not know (ADR-0014).
+        # Every card here is a title the household **finished**, and the badge is what
+        # stops a "Rediscover" shelf reading as a "you have not seen these" one.
         return {title_id: Progress(played=True) for title_id in self._title_ids_}
 
 

@@ -1,34 +1,4 @@
-"""`Embedder` over `fastembed`, and the norm check that is not decorative.
-
-**A module named `fastembed` inside a package that imports `fastembed`, and
-that is safe -- verified rather than assumed.** Python 3 has no implicit
-relative imports, so `import fastembed` below resolves to the third-party
-distribution and never to this module; the sibling name would only shadow
-under Python 2 semantics. Checked directly by
-`test_the_sibling_name_does_not_shadow_the_third_party_package`, because "it
-should be fine" is how a milestone acquires a self-import that only fails on
-somebody else's machine.
-
-**Why `fastembed` and not `sentence-transformers`, which PRD 05 names.**
-Measured 2026-08-02 on this host: sentence-transformers is 59 packages,
-**2.62 GiB downloaded and 4.8 GiB installed**, against a current `usher`
-image of 332 MB -- and **~4.5 GiB of that 4.8 is GPU runtime** (`nvidia/`
-2.7 G, `torch/` 1.1 G, `triton/` 689 M) pulled unconditionally on a host that
-may never have a GPU. `fastembed` is 28 packages, **167 MiB**, no torch, and
-is *faster* on identical input (252.9 texts/s against 229.5). Agreement over
-205 documents: min cosine **0.99999619**, top-1 identical 205/205. PRD 05 is
-corrected rather than followed.
-
-**Two supply-chain facts that belong in the open.** fastembed serves an
-optimised ONNX conversion from a *third-party* repository
-(`qdrant/bge-small-en-v1.5-onnx-q`), not BAAI's own weights. And the
-ST-vs-fastembed vector difference (max pairwise-similarity delta 1.41e-03) is
-**6x the halfvec quantisation error**, so the two runtimes are not
-interchangeable without a re-embed -- which is exactly why `model_name`
-records the runtime as well as the checkpoint. Swapping the implementation
-then invalidates every stored vector through the stale predicate, with no
-migration to write.
-"""
+"""`Embedder` over `fastembed`, and the norm check that is not decorative."""
 
 import asyncio
 import math
@@ -49,15 +19,10 @@ _SEPARATOR = ":"
 # float noise and cannot be passed by the failure it exists to catch.
 _NORM_TOLERANCE = 1e-4
 
-# **`_DIMENSION = 384` was here until `m09e` and is deliberately not replaced
-# by `_DIMENSION = 1024`.** A literal was defensible while this adapter served
-# one checkpoint; the moment the storage width is a thing a deployment chooses,
-# a literal here is a *second* declaration of it that agrees with the column by
-# coincidence. `composition.embedder` now compares `Embedder.dimension` against
-# `EMBEDDING_DIMENSIONS` and narrows the deployment when they disagree, and
-# that check is worth nothing if this property answers with the number it is
-# being checked against instead of with the model's own. `TextEmbedding`
-# exposes `embedding_size`, so the honest answer is free.
+# **`_DIMENSION = 384` was here until `m09e` and is deliberately not replaced by
+# `_DIMENSION = 1024`.** A literal was defensible while this adapter served one
+# checkpoint; the moment the storage width is a thing a deployment chooses, a literal
+# here is a *second* declaration of it that agrees with the column by coincidence.
 
 
 def checkpoint_of(model_name: str) -> str:
@@ -90,12 +55,10 @@ class FastEmbedEmbedder(Embedder):
     """
 
     def __init__(self, model_name: str, *, batch_size: int = 16) -> None:
-        # Imported here rather than at module scope, the way
-        # `connect_websocket` imports `websockets`: this dependency lives
-        # behind an extra, and `usher.composition` -- which builds this -- is
-        # imported by every entry point including `usher bootstrap-status`.
-        # A deployment that runs no index lane must not pay for the import
-        # and must not fail to start without the package.
+        # Imported here rather than at module scope, the way `connect_websocket` imports
+        # `websockets`: this dependency lives behind an extra, and `usher.composition`
+        # -- which builds this -- is imported by every entry point including `usher
+        # bootstrap-status`.
         from fastembed import TextEmbedding
 
         self._model_name = model_name
@@ -149,28 +112,8 @@ class FastEmbedEmbedder(Embedder):
             )
         if not self._norm_checked:
             self._norm_checked = True
-            # **Asserted, not taken from the model card**, and the reason is
-            # mechanical rather than defensive. Normalisation is baked into
-            # this *checkpoint* as a third module (Transformer -> Pooling ->
-            # Normalize), not applied by the library:
-            # `normalize_embeddings=False` returns bit-identical vectors and
-            # norms are 1.0 to within 5.96e-08, while the same backbone with
-            # `2_Normalize` removed returns norms 8.99-9.46. So a swap that
-            # drops that module silently makes every dot-product score ~85x
-            # too large, and `EmbedderContract` cannot see it -- it runs
-            # against the model this deployment shipped with, not the one it
-            # is running now.
-            #
-            # **Before the halfvec cast, never after**: post-cast norm drift
-            # is 1.21e-04 against 1.19e-07, a 1000x change, so the same check
-            # over a stored vector fails on a healthy model.
-            #
-            # Worth stating alongside it: with the `halfvec_cosine_ops`/`<=>`
-            # index PRD 05 specifies, normalisation buys **speed, not
-            # correctness** -- `<=>` is normalisation-invariant and `<#>` is
-            # not, verified against real pgvector. This check protects the
-            # brute-force dot-product path and anything that ever moves to
-            # `<#>`.
+            # **Asserted, not taken from the model card**, and the reason is mechanical
+            # rather than defensive.
             norm = math.sqrt(sum(value * value for value in vectors[0]))
             if abs(norm - 1.0) > _NORM_TOLERANCE:
                 raise PortDataMalformed(

@@ -1,99 +1,4 @@
-"""One file and one report: gzip-compressed JSON Lines, header first.
-
-`usher backup` writes the tables `usher.db.backup_manifest` calls precious,
-plus the two operator-authored link columns of its one `PARTIAL` entry, with
-every title, episode and user reference rewritten into the natural keys
-`usher.db.backup_identity` defines. This module owns the *file*: the header,
-the JSON spelling of a reference, the compression and the name. Which tables
-and what a reference is are `usher.db`'s, reached through
-`BackupRepository`, because `pyproject.toml`'s third import contract
-forbids this layer naming either.
-
-## Why JSON Lines under gzip, and the reason is K2 rather than taste
-
-Four properties earn it, and the first is the one no Postgres-native format
-has:
-
-1. **Every reference is rewritten on the way out.** `pg_dump -t
-   watch_states` emits the raw `title_id`, and there is nowhere in a
-   custom-format archive to put a natural key. No title id survives a
-   bootstrap boundary -- `db/repositories/bulk.py` mints `new_id()` per row
-   per import -- so an artifact carrying raw ids restores watch history onto
-   whatever those ids name in the target, which for a
-   `RESTRICT` foreign key is a refused insert and for `curated_rows`' unkeyed
-   `uuid[]` would have been silence.
-2. **The format streams; ⚠️ the shipped writer does not.**
-   `usher.db.staging.raw_connection` already unwraps the live
-   `asyncpg.Connection` and asyncpg 0.31.0 carries `copy_from_query`, so a
-   table *can* be read out without materialising it — named because it is
-   the seam a later fast path would use. What ships **materialises all eight
-   tables, whole, before a byte is written**, with no bound on resident rows:
-   the rewriting has to happen in Python whatever the transport is, and
-   `write` needs the row counts before it can emit the header they go in.
-   (This paragraph said *"the shipped writer batches through the
-   repository"* until a review measured that nothing about it is a batch in
-   any sense. The choice is right at 14,259 rows and the word was wrong; the
-   bound is stated here rather than implied, because the thing that makes it
-   safe is the manifest keeping the carried set small and nothing else.)
-3. **An operator can read it.** This file is the only copy of the money
-   ledger and of a household's history. A format that needs `pg_restore` to
-   inspect is a format nobody inspects, and `zcat … | head -1` is the whole
-   of reading the header.
-4. **It survives a Postgres version change.** `pg_dump -Fc` does not restore
-   into an older server, and a restore path that fails on an operator's
-   downgrade is a restore path that fails on the day it is needed.
-
-## Two stamps in the header, and only one of them is enforced by refusal
-
-**`schema_revision`** is Alembic's head as the *database* reports it, read
-through `BackupRepository.schema_revision`, which is
-`usher.db.migrations.status.database_revision`. K4 refuses a mismatch, and
-that is the same refusal the running service already makes:
-`api/routers/health.py::_check_migrations` compares `database_revision`
-against `code_head_revision()` and answers 503, under PRD 08's own words --
-*"the app refuses to serve on a schema mismatch rather than guessing"*.
-Restore reuses both functions rather than re-reading `alembic_version`, so
-there is one definition of *"what revision is this"* in `src/`.
-
-**`generated_at`, `manifest_version` and `usher_version`** are provenance,
-not a gate.
-
-**The per-table row counts are a gate**, and since 2026-08-25 they really
-are one: they are `len()` of what was written rather than a `count(*)` taken
-beside it, so a body shorter than its header is a *truncation* rather than a
-race, and `services/restore.py::_refuse_a_short_body` refuses on it. 🔴 This
-paragraph asserted that in the present tense for a milestone before the check
-was written -- *"which is what lets K4 read a short table as a truncated file
-rather than as a race"* -- and K5's drill measured the gap: an artifact whose
-header claimed 10,819 `media_items` over a body holding 10,515 restored with
-**0 refusals and exit 0**. The affordance was real, the reader was not, and
-the sentence described behaviour that did not exist.
-
-## `usher_version` is in the header, and the plan for this task said it must
-not be
-
-🔴 The plan deferred it to a later phase on this premise: *"`pyproject.toml`
-reads `version = "0.1.0"` and nothing in `src/` consumes it ... the header
-carries a `usher_version` key **only** once Phase 3 wires `__version__`,
-because two version strings that can disagree is worse than one that is
-absent."* **Measured on 2026-08-25, the premise is false and the wiring has
-already happened.** `usher/__init__.py` reads `__version__ =
-version("usher")` from `importlib.metadata`, with a `"0.0.0+unknown"`
-fallback for an uninstalled tree, and `src/` consumes it in two places:
-`adapters/emby/session.py` sends it to a real Emby as `app_version`, and
-`api/console.py` serves it on the console's own version payload. So this
-header carries the string the rest of `src/` already uses rather than
-inventing a second one -- which is what the plan's argument actually asked
-for, and it is the reading of `pyproject.toml`, not the argument, that was
-out of date.
-
-`manifest_version` is a different number and deliberately not that one. It
-versions **the artifact's shape** -- header keys, the `{"table", "row"}`
-envelope, how a reference is spelled -- and moves when K4 would have to read
-an older file differently. It does not version K1's classification: which
-tables are precious changes with the schema, and `schema_revision` is
-already the stamp for that.
-"""
+"""One file and one report: gzip-compressed JSON Lines, header first."""
 
 import asyncio
 import base64
@@ -139,17 +44,8 @@ MANIFEST_VERSION: Final = 1
 #: what tells a human the decompressed bytes are one object per line.
 ARTIFACT_SUFFIX: Final = ".jsonl.gz"
 
-#: Printed on **every** run, and one sentence rather than a flag, because an
-#: operator who learns this at restore time learns it too late.
-#:
-#: `source_credentials` is carried as the ciphertext it is stored as --
-#: `build_cipher` is not called anywhere on this path and this service holds
-#: no key. The degradation is diagnosable rather than silent: Fernet's
-#: authentication tag makes a wrong key an `InvalidToken`, which
-#: `db/repositories/credentials.py` translates to `PortDataMalformed` naming
-#: the ref, and `GET /admin/sources/{id}/status` already renders that as
-#: *re-enter your credentials*. Declared here rather than spelled in
-#: `cli.py`, so K5's runbook quotes one string instead of paraphrasing it.
+# : Printed on **every** run, and one sentence rather than a flag, because an : operator
+# who learns this at restore time learns it too late.
 CREDENTIAL_KEY_WARNING: Final = (
     "source credentials travel as ciphertext and this file holds no key: keep "
     "USHER_SECRET_KEY with it, or the restored credentials will be undecryptable "
@@ -213,48 +109,7 @@ class BackupService:
         self._now = now
 
     async def write(self, output: Path | None = None) -> BackupReport:
-        """Write the artifact and report it.
-
-        **Everything is read before anything is opened**, and that ordering
-        is the design rather than convenience. It makes the header's counts
-        exactly what the body holds, which is what K4 reads them as. The cost
-        is holding the carried set in memory, which the port's own docstring
-        prices at 14,259 rows on the deployment this project measures.
-
-        🔴 **The destination is written through a scratch sibling and
-        `os.replace`d into place, and it took a review to get there.** This
-        docstring claimed a failed run *"leaves **no file** rather than a
-        truncated one that gzip will happily decompress up to the point it
-        stops"*. That was true of the read phase and **false of the write
-        phase**, which is the phase the sentence describes: `gzip.open(path,
-        "wt")` truncates the destination at open, and the `with` block writes
-        a valid gzip trailer on the way out of an exception. Measured -- a
-        `TypeError` on row 4 of table 2 left a 211-byte file that `zcat`
-        decompresses cleanly, with a header claiming four rows over a body
-        holding three, and a failing run against an existing
-        `nightly.jsonl.gz` **replaced the previous good artifact** with it.
-        For a file this module's own prose calls the only copy of the money
-        ledger and of a household's history, silently destroying last
-        night's copy on a failed run is the wrong default, and a cron entry
-        or CLAUDE.md's own documented invocation reaches it.
-
-        **Both guarantees are `usher.atomic`'s**, which is where the argument
-        for the scratch sibling and the `fsync` lives.
-
-        **The compression runs in a thread.** gzip over an artifact this size
-        is seconds of CPU, and a service that spends them on the event loop
-        stalls every other request in the process -- `usher backup` is a CLI
-        today and this module is written to be the route a later milestone
-        gives it. The lines are handed over as a generator, so the encoded
-        body is never a second copy of the carried set in memory.
-
-        Raises `OSError` -- a directory that does not exist, a full disk, a
-        path that is not writable -- and does not catch it. That family is
-        already in `cli.OPERATOR_ERRORS`, which is the whole of ADR-0026's
-        argument: this is the first command in this project whose ordinary
-        failure is *"the disk is full"*, and the boundary that answers it
-        with one line and exit 1 needs no new handler and gets none.
-        """
+        """Write the artifact and report it."""
         at = self._now()
         path = Path(output) if output is not None else Path(default_output_name(at))
         _refuse_a_missing_directory(path)
@@ -293,30 +148,7 @@ class BackupService:
 
 
 def _refuse_a_missing_directory(path: Path) -> None:
-    """The one destination mistake worth catching *before* the read.
-
-    **This is not the refusal; opening the scratch file is.** A path that is
-    not writable, a full disk, a read-only mount and a name that is already a
-    directory all still surface where they always did, one statement after the
-    whole carried set has been read -- and they have to, because none of them is
-    decidable in advance without racing the thing being checked.
-
-    What this catches is the one that is both common and cheap: a typo in a
-    directory name, or a `--output` under a mount point that is not there. On
-    this deployment the read it would otherwise sit behind is 14,259 rows and
-    eight round trips, and on the library PRD 08 sizes it is considerably
-    more -- so the difference is between an operator learning about a typo
-    immediately and learning about it after the command appeared to work for
-    a while. **It is also what makes the failure legible**: `usher backup:
-    FileNotFoundError: …/no-such-directory` names the path, where the same
-    run against an unreachable database names a socket, and both are `OSError`
-    at `cli.OPERATOR_ERRORS` and therefore indistinguishable in a case that
-    only asserts the family.
-
-    The error is constructed rather than provoked, with `errno.ENOENT` and
-    the standard strerror, so it is the same object `open()` would have
-    raised and `str(exc)` reads the way an operator expects.
-    """
+    """The one destination mistake worth catching *before* the read."""
     parent = path.parent
     if not parent.is_dir():
         raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(parent))
@@ -353,27 +185,7 @@ def _line(obj: Mapping[str, Any]) -> str:
 
 
 def _encode(value: object) -> Any:
-    """One carried value, as JSON.
-
-    **The reference spellings are the artifact's contract with K4** and each
-    is a nested object rather than a flattened prefix (`title_imdb_id`, …)
-    for one reason: `EpisodeReference` embeds a `TitleReference`, so a
-    flattened form needs a second, deeper prefix and stops being readable at
-    exactly the row -- an episode's watch state -- that this design exists
-    for.
-
-    **A `TitleReference` carries all four keys including the nulls.**
-    `backup_identity.keys_tried` omits a rung it cannot offer, because its
-    consumer is a sentence an operator reads; here the consumer is a parser,
-    and a key that is sometimes absent and sometimes null is two shapes for
-    one fact. The `id` rung is present on every reference and is K2's third
-    rung -- a check on the target rather than a key -- which is why it is the
-    only place a title UUID may appear in this file at all.
-
-    A type this does not know raises rather than defaulting to `str(value)`:
-    a `Decimal` silently stringified is money, and a `bytes` silently
-    stringified is `b'gAAAA…'` with the `b` and the quotes in it.
-    """
+    """One carried value, as JSON."""
     match value:
         case TitleReference():
             return {
@@ -404,23 +216,7 @@ def _encode(value: object) -> Any:
         case datetime():
             return value.isoformat()
         case Decimal():
-            # As text, exactly. `llm_calls.cost_usd` is `NUMERIC(12, 8)` and
-            # a float round-trip is how a spend ledger stops adding up --
-            # `json.dumps(Decimal)` refuses outright, which is the one thing
-            # that would have caught this if it were left to fall through.
-            #
-            # **`:f`, not `str()`, and the difference is reachable on this
-            # column.** `Decimal.__str__` switches to scientific notation
-            # once the adjusted exponent drops below -6, so the `NUMERIC(12,
-            # 8)` value Postgres hands back for two hundred-millionths of a
-            # dollar stringifies as `2E-8`. It round-trips through
-            # `Decimal()` and it is unreadable in a file whose third design
-            # property is that an operator can read it, and it is a shape a
-            # naive `float(...)` or a regex in some later reader will get
-            # wrong. `format(…, "f")` is positional and preserves the
-            # trailing zeros the scale carries: `0.00000002`, `0.00870000`.
-            # Measured 2026-08-25 -- the unit case asserts the exact string
-            # and failed on `2E-8` before this line said `:f`.
+            # As text, exactly.
             return f"{value:f}"
         case bytes():
             # `source_credentials.ciphertext`, base64'd because JSON has no

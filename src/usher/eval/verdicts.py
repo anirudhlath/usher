@@ -1,12 +1,4 @@
-"""What a run can conclude, and what that costs at the shell.
-
-**Its own module, and the reason is an import chain rather than tidiness.**
-`runner.py` imports `metrics/ir.py`, which imports `ranx` and raises
-`EvalDependencyMissing` when the extra is absent. `usher.cli` needs `Verdict`
-and `exit_code_for`, and `usher --help` must work on a deployment that never
-installed the extra -- so anything the CLI touches eagerly has to sit on this
-side of that import. Nothing here imports anything.
-"""
+"""What a run can conclude, and what that costs at the shell."""
 
 from enum import StrEnum
 

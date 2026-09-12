@@ -1,78 +1,4 @@
-"""The scheduler loop (ADR-0046). One `asyncio` task per deployment.
-
-Per tick it walks the registry, asks each job `last_done()`, and runs the ones
-whose period has elapsed **sequentially, one at a time**. Then it sleeps a
-fixed `USHER_SCHEDULER_TICK_SECONDS` and does it again.
-
-**Three things it is deliberately not**, each because the alternative has a
-measured cost somewhere in this repository:
-
-- **Not a `TaskGroup` and not `gather`.** ADR-0037's argument applies unchanged
-  and one abstraction lower: a task group cancels its siblings on the first
-  escape, which turns one poisoned job into a rebuild abandoned mid-page.
-  `JobWorker` reaches for `asyncio.wait` for that reason; this component needs
-  no primitive at all, because it runs one job at a time on purpose.
-- **Not one task per job.** That is what makes *"two hours-long jobs contending
-  for the same connection pool"* reachable with nothing bounding it. Sequential
-  within a tick is the bound, and it costs a tick's latency on the second job,
-  which against a period measured in hours is not a cost.
-- **Not a sleep-until-next-due calculation.** A due time computed from a
-  `last_done()` that another process may have moved is a cache of a fact the
-  artefact already answers -- and this component's whole design (ADR-0046) is
-  that it caches nothing. A fixed tick re-asks instead.
-
-**The tick has a measured floor and it is `Field(ge=60.0)` on the setting.**
-`config.py` carries the table; the short form is that a tick issues **one
-`last_done()` per registered job and decides on nothing else** -- 71.1 ms for
-the neighbour rebuild's reading and 0.041 ms for `SearchQueryRetention`'s
-(re-measured 2026-09-07 on `usher_j2`) -- so 60 s is 0.12% duty and 1 s would
-be 7%. ⚠️ *"And nothing else"* was this paragraph's claim until 2026-09-07 and
-overstates it by one round trip per job: `SearchQueryRetention.last_done` reads
-through a `SearchQueryScope`, which commits on a clean exit, so the read is a
-pool checkout, a `SELECT` and a `COMMIT`. See `_due_now`.
-
-**And it holds one piece of state, deliberately: a per-job retry backoff.**
-ADR-0046's *"the scheduler stores nothing"* is about a durable last-run
-timestamp, and this is not one -- it is a fact about this process's attempts,
-which no artefact carries. Without it the loop has a hole its own acceptance
-criterion cannot see: with nothing recording that a run failed, a failing job
-is due again on the very next tick and retries at the tick rate forever. See
-`_back_off`, which also states the half it does **not** fix -- a retry that
-restarts from page one does not converge however far apart the attempts are,
-and resumption belongs to the registration.
-
-**The registry shipped empty for one commit and holds two jobs now.**
-`SearchQueryRetention` below is M10's J5 and
-`usher.services.similar.NeighborRebuildJob` is J6; `composition.
-build_scheduler` registers both, retention first, so a tick that finds both
-due spends a chunk on the prune before starting a walk measured in hours. An
-empty registry remains a **legal** state rather than an unfinished one -- a
-composition root with no way to reach a database builds one -- and a tick over
-zero jobs logs **once**, not once per tick, because a line every five minutes
-forever is the shape an operator mutes and then never sees the real one.
-
-**One registration lives here and one does not, and the split is the rule
-rather than the exception.** `SearchQueryRetention` is here because it has no
-service of its own: it is thirty lines over one repository, and the argument it
-exists to carry -- what a `last_done()` may be read off -- is the argument this
-module's loop is built on. J6's belongs beside `SimilarityService`, because the
-batch, the blend fingerprint and the resume cursor its `run()` needs are all
-that module's, and importing them here would put `usher.services.similar` into
-a module whose whole claim is that it reaches nothing but `usher.ports`. **The
-rule is that a registration lives with the artefact it maintains**, and
-retention is the case where that is this file.
-
-**This module imports `usher.ports` and stdlib and nothing else from this
-project, J6's registration included**, which is what keeps it inside contracts
-1-3 without a contract of its own: `usher.services` reaching `usher.db` or
-`usher.adapters` breaks two contracts that report indirect chains by default. That is also why
-`SearchQueryScope` is a callable returning a context manager rather than a
-session factory -- `composition.UnitOfWork`'s shape, for
-`composition.UnitOfWork`'s reason. The two instruments below are
-declared against `opentelemetry` directly, the way `services/jobs.py` declares
-`usher.jobs.duration`; the observable gauge cannot be, and lives in
-`usher.telemetry` for the reason `read()` states.
-"""
+"""The scheduler loop (ADR-0046). One `asyncio` task per deployment."""
 
 import asyncio
 import time
@@ -91,12 +17,7 @@ from usher.ports.scheduler import JobOutcome, ScheduledJob
 
 _tracer = trace.get_tracer("usher.scheduler")
 _meter = metrics.get_meter("usher.scheduler")
-# Seconds, like `usher.jobs.duration`. ⚠️ PRD 10 records that every
-# seconds-unit histogram in this project is currently unreadable below five
-# seconds -- `configure_metrics` installs no `View`, so the SDK's default
-# bucket boundaries `(0.0, 5.0, 10.0, 25.0, ...)` apply. This is the one
-# histogram in the catalogue that is *not* hurt by it: both registrations that
-# will exist are measured in hours.
+# Seconds, like `usher.jobs.duration`.
 _job_duration = _meter.create_histogram(
     "usher.scheduler.job.duration", unit="s", description="Wall time of one scheduled job's run"
 )
@@ -191,30 +112,8 @@ class Scheduler:
     # -- observation -----------------------------------------------------
 
     def read(self) -> Mapping[str, float]:
-        """PRD 10's `usher.scheduler.job.due`: seconds since `last_done()`
-        minus the period, per job. Negative means not due.
-
-        **Synchronous, and a snapshot rather than a query.** OTel invokes an
-        observable callback from the metric reader's *background thread*, and
-        every `last_done()` on the shipped registrations is a coroutine on
-        asyncpg -- so a callback that queried would have to bounce a coroutine
-        onto the event loop and block the exporter thread on it, which
-        deadlocks whenever the loop is itself blocked
-        (`.claude/rules/api-telemetry-and-lanes.md`). Exactly the shape
-        `register_queue_gauges` and `register_search_gauges` already take.
-
-        Stale, never wrong: the value is the reading the last tick took, so
-        during a run the same tick started it reports the moment the job
-        became due rather than a number that keeps growing. A job inside its
-        retry backoff is skipped before the read, so its entry is frozen for
-        as long as the spacing lasts -- the failure counter is what says the
-        job is in that state, not this series.
-
-        **A job with no reading has no entry**, and there are two ways to have
-        none -- never run, and a `last_done()` that raised. A fabricated `0.0`
-        would read as *"exactly due"* in both, which is the one value that
-        makes the series wrong rather than merely absent (`_observations`' own
-        rule, in `usher.telemetry`).
+        """PRD 10's `usher.scheduler.job.due`: seconds since `last_done()` minus the
+        period, per job. Negative means not due.
         """
         return self._due
 
@@ -320,49 +219,7 @@ class Scheduler:
         return ran
 
     async def _due_now(self, job: ScheduledJob) -> bool:
-        """Ask the artefact, and fold the answer into the gauge's snapshot.
-
-        **One `last_done()` per job per tick and no second question**, which is
-        the whole of what a tick costs before any job runs -- 71.1 ms measured
-        for the neighbour rebuild's reading and 0.041 ms for retention's
-        (`config.py` carries the table). Both halves of the answer come from
-        that single read, so the gauge cannot disagree with the decision.
-
-        ⚠️ **One *call* is not one round trip, and this docstring said
-        "nothing else" until 2026-09-07.** What a registration does inside its
-        `last_done()` is its own business, and the one that ships spends two:
-        `SearchQueryRetention` reads through a `SearchQueryScope`, and
-        `composition.search_query_scope` **commits on a clean exit**, so a
-        read-only `SELECT min(at)` is a pool checkout, the `SELECT`, and a
-        `COMMIT` over a transaction that wrote nothing. It is cheap and it is
-        not free, and the scheduler cannot see it -- the commit is what makes
-        the *prune's* chunking durable (`run()`), so it is a property of the
-        scope rather than something a read could opt out of.
-
-        🔴 **The subtraction is inside the guard, and it was outside it for
-        one commit.** `await job.last_done()` was the only thing wrapped, so a
-        job answering a **timezone-naive** datetime raised `TypeError: can't
-        subtract offset-naive and offset-aware datetimes` from `now - last`,
-        which escaped `tick()` entirely: every job registered after the
-        offender was skipped on **every** tick, forever, logged by `run()` as
-        *"the scheduler's tick failed"* with **no job name in it** -- verbatim
-        the shape `LaneSupervisor._guard` exists to prevent, and under
-        `usher schedule --once` it escapes the command altogether. A naive
-        datetime is not a hypothetical: SQLAlchemy hands one back for a
-        `TIMESTAMP WITHOUT TIME ZONE` column, `ScheduledJob.last_done` states
-        *"timezone-aware"* in prose and nothing enforces it, and J5's is the
-        first real `last_done()` in the project. `job.period` is inside the
-        guard for the same reason -- it is a property an implementation
-        computes, and a raising one is the same failure one attribute over.
-        `test_a_job_whose_last_done_is_naive_is_a_failure_and_not_a_dead_tick`
-        is what pins it.
-
-        ⚠️ **A job inside its retry backoff is skipped before the read**, so
-        its gauge entry is frozen at the last reading rather than refreshed.
-        That is the price of not paying for a query about a job this process
-        has already decided not to offer, and the failure counter and the
-        logged exception are what say the job is in that state.
-        """
+        """Ask the artefact, and fold the answer into the gauge's snapshot."""
         now = self._now()
         held = self._backoff.get(job.name)
         if held is not None and now < held.retry_after:
@@ -455,38 +312,8 @@ class Scheduler:
     # -- the retry backoff -----------------------------------------------
 
     def _back_off(self, job: ScheduledJob) -> None:
-        """Do not offer this job again for a doubling number of ticks,
-        **capped at its own period**.
-
-        **The spacing for a failed run and for a `JobOutcome.DECLINED` alike**
-        -- both are a job that did not do its work, and the cap below is what
-        keeps either from being re-offered at the tick rate.
-
-        The cap is what makes this safe rather than a second schedule: a job
-        that keeps failing settles to being retried no more often than the
-        period it declared, which is exactly the schedule it would have had if
-        every attempt had succeeded. So the worst this can do is *stop* a hot
-        loop; it can never delay a job past its own period.
-
-        The first retry is one tick later -- i.e. no added delay at all -- so a
-        one-off blip costs nothing, and only a job that is genuinely stuck
-        backs off. `_MAX_BACKOFF_DOUBLINGS` bounds the exponent.
-
-        ⚠️ **What this does not fix, stated because the acceptance criterion
-        it serves cannot see the difference.** A backoff bounds the *rate* of
-        retries; it does not make a retry converge. `SimilarityService.rebuild`
-        restarts from the first page every run, so a walk that dies at 60%
-        leaves the artefact exactly as it was and the next attempt redoes the
-        60% before reaching new work -- and no amount of spacing turns that
-        into progress. **Resumption is the registration's problem, not the
-        loop's**, which is why `ScheduledJob.run` obliges an implementation to
-        be re-runnable and why the neighbour rebuild's resume is J6's task
-        rather than something this component can supply.
-
-        And it is per process. A `usher schedule --once` from a crontab starts
-        with an empty backoff every time, which is correct -- a fresh process
-        has no evidence about anything -- and means an operator driving the
-        scheduler that way gets the retry rate of their own cron.
+        """Do not offer this job again for a doubling number of ticks, **capped at its own
+        period**.
         """
         held = self._backoff.get(job.name)
         failures = (held.failures if held is not None else 0) + 1
@@ -504,44 +331,10 @@ class Scheduler:
             self._due = {key: value for key, value in self._due.items() if key != name}
 
 
-#: How long one `search_queries` prune may leave the table over-length before
-#: the scheduler offers the job again -- `SearchQueryRetention.period`, and
-#: **one definition**: `composition.build_scheduler` passes this by name so a
-#: registration reads with its period at the call site.
-#:
-#: **A day, and the arithmetic is the argument.** The period is not the
-#: retention window: with `last_done()` spelled as below, a job is due once
-#: the oldest surviving row is `window + period` old, so this number is *how
-#: much expired data may accumulate*, not how long a row is kept. A day of it
-#: is a small fraction of one chunk -- measured 2026-09-07 on `usher_j2`, a
-#: clone of the live catalog, organic `search_queries` arrivals run at **5.6
-#: rows a day** against a 10,000-row chunk -- and it means a prune lands within
-#: a day of a row expiring rather than within a tick of it. Shorter buys
-#: nothing an operator can see; longer would let the table run measurably over
-#: its stated window.
-#:
-#: ⚠️ **This docstring read *"14,978 rows in 14 d 06 h, so a day is ~1,050
-#: rows"* until 2026-09-07, and that is a burst divided by a span it did not
-#: arrive over.** Re-measured on the same clone: 14,898 of the 14,978 rows
-#: (99.5%) carry `surface = 'suggest'` and landed on a single day, 2026-08-27,
-#: from J2's own backfill; the organic remainder is 80 rows; and the span is
-#: 14 d 04 h 11 m, not 14 d 06 h. The conclusion survives and gets stronger --
-#: at single digits a day the steady-state prune is emphatically one chunk --
-#: but the burst is what a *first* run after the suggest writer is switched on
-#: looks like, not a daily rate. `config.py` carries the three databases the
-#: figure was re-derived over.
-#:
-#: **A day is also a published number.** `.env.example`,
-#: `web/src/features/operator/Config.settings.ts`, PRD 08 and PRD 10 all state
-#: it in prose an operator reads, so it is pinned to its literal in
-#: `tests/unit/test_services_scheduler.py::
-#: test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set`
-#: rather than only compared against itself.
-#:
-#: A **property of the job and not a setting**, which is the shape
-#: `ScheduledJob.period` and `cli._schedule` both already state: an operator
-#: tunes the *window* (`USHER_SEARCH_QUERY_RETENTION_DAYS`), which is the
-#: number PRD 10 prices and the one a household would ask about.
+# : How long one `search_queries` prune may leave the table over-length before : the
+# scheduler offers the job again -- `SearchQueryRetention.period`, and : **one
+# definition**: `composition.build_scheduler` passes this by name so a : registration
+# reads with its period at the call site.
 RETENTION_PERIOD = timedelta(days=1)
 
 #: `SearchQueryRetention.name`. **Stable, because it is a metric label**
@@ -551,74 +344,12 @@ RETENTION_PERIOD = timedelta(days=1)
 #: populations.
 RETENTION_JOB_NAME = "search_queries.retention"
 
-#: One `SearchQueryRepository`, in a scope that **commits on a clean exit**.
-#:
-#: A callable rather than a session factory, for `composition.UnitOfWork`'s
-#: own reason one layer up: it is what lets `usher.services` and
-#: `usher.api.lanes` reach a database without either of them importing
-#: SQLAlchemy, and what lets a unit case drive the whole component over a fake
-#: with no database at all. The commit belongs to the scope rather than to the
-#: repository because every repository in this project flushes and never
-#: commits -- and `SearchQueryRetention.run` opens **one scope per chunk**,
-#: which is how "a commit per chunk" is expressed without this module knowing
-#: what a transaction is.
+# : One `SearchQueryRepository`, in a scope that **commits on a clean exit**.
 SearchQueryScope = Callable[[], AbstractAsyncContextManager[SearchQueryRepository]]
 
 
 class SearchQueryRetention(ScheduledJob):
-    """PRD 10's 90-day `search_queries` prune, as a scheduled job (M10's J5).
-
-    The first registration ADR-0046 gets, and **the one that had to answer
-    that record's open question rather than inherit it.**
-
-    🔴 **`min(search_queries.at)` is not a `last_done()`, and this is what
-    replaced it.** ADR-0046's decision-2 table gave retention's reading as
-    `min(at)` and called it exact. It is the age of the **oldest surviving
-    row**, written by the search path rather than by this job, so after a
-    prune it sits at the window's age and stays there while rows keep ageing
-    in from the other end -- the job reads as due on every tick, forever, for
-    any period shorter than the window, and `period` decides nothing.
-    `ScheduledJob.last_done` now makes *"a reading this job's own runs move"*
-    the contract, and this class owes it.
-
-    **The artefact this job maintains is not a row; it is the table's lower
-    bound**, and that is what a completion time can be read off. A successful
-    run at instant *T* establishes *"no row is older than T - window"*, so the
-    invariant held at *T*, and it goes on holding until the oldest surviving
-    row itself falls out of the window. Hence:
-
-        last_done() = min(min(at) + window, now)
-
-    -- *"the most recent instant at which this table was known to hold nothing
-    past its cutoff"*. **This job's own runs move it and nothing else does**:
-    a prune pushes `min(at)` forward to at least `now - window`, which pushes
-    the reading to `now`; a search writing a *new* row cannot move `min(at)`
-    at all, because a new row is the newest one. That is the whole difference
-    from the reading it replaces.
-
-    The period then reads honestly against it: a job is due once the oldest
-    surviving row is `window + period` old, i.e. once a period's worth of
-    expired rows has accumulated. See `RETENTION_PERIOD`.
-
-    ⚠️ **`last_done()` never answers `None`, and that is a decision rather
-    than an accident.** `None` means *"never built, therefore due"*, which is
-    right for an artefact that has to be constructed and wrong for an
-    invariant: an **empty** `search_queries` satisfies the retention rule
-    vacuously, so answering `None` there would make an idle deployment run a
-    no-op prune on every tick forever -- the identical defect, arriving from
-    the one state the original reading handled correctly. An empty table
-    answers `now`.
-
-    **A failed run converges, unlike the other registration.** ADR-0046
-    records that a run which dies part-way is indistinguishable from one that
-    never ran, and that `Scheduler._back_off` bounds the retry *rate* rather
-    than the progress -- true, and the reason is `SimilarityService.rebuild`
-    restarting from page one. A prune does not: every committed chunk removes
-    rows permanently, so an interrupted run has made progress the next one
-    keeps, and the chunks go **oldest first** so the progress is the rows
-    furthest past the window. `run()` is therefore safe to cancel at any
-    `await` and safe to run twice, which is what `ScheduledJob.run` obliges.
-    """
+    """PRD 10's 90-day `search_queries` prune, as a scheduled job (M10's J5)."""
 
     name = RETENTION_JOB_NAME
 
@@ -678,58 +409,7 @@ class SearchQueryRetention(ScheduledJob):
         return min(oldest + self._window, now)
 
     async def run(self) -> JobOutcome:
-        """Delete everything past the cutoff, `batch` rows and one
-        transaction at a time.
-
-        **The cutoff is computed once, before the first chunk.** A boundary
-        recomputed per chunk moves under its own loop, which is a third bug
-        beside the two `now()`/`clock_timestamp()` traps
-        `.claude/rules/db-and-sql.md` already carries -- and a fixed cutoff is
-        also what makes the loop terminate against a table `GET /search` is
-        writing to throughout: a row arriving mid-run is newer than the
-        cutoff by construction and is not a row this run is looking for.
-
-        **A scope per chunk, so a commit per chunk.** A single `DELETE` over a
-        year of keystrokes would hold one transaction and one lock set for its
-        whole duration on a table every answered search writes to. It also
-        makes an interrupted run keep whatever it has already committed.
-
-        **The terminator is `deleted < batch`, and it needs no keyset.**
-        `prune` answers the rows it actually removed, so a short chunk is an
-        exhausted predicate -- and a deleted row cannot re-satisfy `at <
-        cutoff`, where `SimilarityService.rebuild`'s *"re-read what looks
-        stale, rebuild, repeat"* does not terminate against a row the
-        predicate cannot clear. That is the difference that lets this loop be
-        three lines rather than a cursor.
-
-        🔴 **And *"a deleted row cannot re-satisfy the predicate"* is a claim
-        about a committed delete, so the terminator has a precondition this
-        module cannot enforce: `SearchQueryScope` must commit each chunk.**
-        Each iteration opens a new scope and therefore a new session; an
-        *uncommitted* delete is invisible to the next one, which re-selects the
-        same rows, deletes them again, and answers the same full-length chunk
-        forever. It is the shipped wiring --
-        `composition.search_query_scope` commits on a clean exit -- but it is a
-        property of the callable a composition root passes, not of this loop.
-        Measured 2026-09-07: deleting that one `await session.commit()` turns
-        this drain into a non-terminating loop, caught by
-        `tests/integration/test_search_query_retention.py`'s `DRAIN_DEADLINE`
-        as a `TimeoutError` rather than by any assertion here. A scope that
-        did not commit would also be a prune that deleted nothing durably, so
-        the two failures are one defect and the case that owns it is
-        `test_the_prune_commits_each_chunk_where_a_composition_root_wired_it`.
-
-        The other half of the terminator is that `batch` is at least 1, which
-        `__init__` refuses to accept otherwise: at `batch = 0` a chunk deletes
-        nothing and `0 < 0` is false.
-
-        The count is logged rather than counted on an instrument: this runs
-        once a day, and *"a filter is invisible without a counter"* is
-        satisfied by something that can say how often it fired rather than by
-        a particular mechanism. A fourth metric row would move PRD 10's
-        maintained instrument count at four sites for a number an operator
-        reads once a day.
-        """
+        """Delete everything past the cutoff, `batch` rows and one transaction at a time."""
         cutoff = self._now() - self._window
         removed = 0
         while True:

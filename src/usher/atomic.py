@@ -1,8 +1,4 @@
-"""Replacing a file, rather than truncating one and hoping.
-
-Reached from both composition roots and from adapters, so it sits beside
-`usher.telemetry` rather than inside a layer.
-"""
+"""Replacing a file, rather than truncating one and hoping."""
 
 import os
 import uuid

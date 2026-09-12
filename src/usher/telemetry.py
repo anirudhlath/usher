@@ -1,8 +1,4 @@
-"""Logging and tracing setup.
-
-Telemetry is optional: with no OTLP endpoint configured no exporter object
-is constructed at all and Usher runs normally. See PRD 10 and ADR-0007.
-"""
+"""Logging and tracing setup."""
 
 import inspect
 import logging
@@ -50,63 +46,13 @@ def current_traceparent() -> str | None:
     return carrier.get("traceparent")
 
 
-#: The response header carrying the server span, and the reason it is spelled
-#: this way rather than `X-Trace-Id`.
-#:
-#: **`traceresponse` is a *withdrawn draft* name that the OpenTelemetry
-#: ecosystem shipped anyway, and reading the spec is what says so.** Checked
-#: 2026-08-19 against three documents rather than from memory:
-#:
-#: * `https://www.w3.org/TR/trace-context-2/` — the published Trace Context
-#:   Level 2 Candidate Recommendation — defines `traceparent` and `tracestate`
-#:   and **no response header at all**. The string `traceresponse` does not
-#:   occur in it.
-#: * `w3c/trace-context`'s `spec/21-http_response_header_format.md` on `main`
-#:   is now titled *Trace Context Server Timing Metric Format*: the response
-#:   binding moved onto `Server-Timing` under the metric name `trace`, e.g.
-#:   `server-timing: trace;desc=00-<trace-id>-<span-id>-<flags>`.
-#: * The **value grammar did not move with it**, and that is the half that
-#:   matters here. Verbatim from that file:
-#:
-#:       value            = version "-" version-format
-#:       version          = 2HEXDIGLC   ; version ff is forbidden
-#:       version-format   = trace-id "-" child-id "-" trace-flags
-#:       trace-id         = 32HEXDIGLC  ; All zeroes forbidden
-#:       child-id         = 16HEXDIGLC  ; All zeroes forbidden
-#:       trace-flags      = 2HEXDIGLC
-#:
-#: So the bytes below are exactly what the current spec specifies; only the
-#: field they are carried in is contested. `traceresponse` is kept because it
-#: is what `opentelemetry.instrumentation.propagators.TraceResponsePropagator`
-#: emits — i.e. what *this* stack already speaks — and because a
-#: `Server-Timing` entry is a shared, comma-joined namespace a proxy also
-#: writes to. Adding the `Server-Timing` spelling later is one more `setter.set`
-#: over the same value; nothing here would change.
+# : The response header carrying the server span, and the reason it is spelled : this
+# way rather than `X-Trace-Id`.
 TRACERESPONSE_HEADER: Final = "traceresponse"
 
 
 def traceresponse(span: trace.Span | None = None) -> str | None:
-    """The active server span as a `traceresponse` value, or `None`.
-
-    `None` — meaning **no header at all** — in exactly two situations, and the
-    distinction is the same one `current_traceparent` above draws and the same
-    one `_observations` draws for a gauge that has no reader:
-
-    * **the span is not recording.** A dropped span's id names a trace that was
-      never exported, so a link built from it opens an empty Tempo page. "This
-      response has no trace" and "this response has a trace you cannot find"
-      are different facts and only the first one is honest.
-    * **the context is invalid** — `INVALID_SPAN`'s all-zero trace id, which is
-      what `get_current_span()` answers outside any span. A header reading
-      `00-000…0-000…0-00` is syntactically well-formed, passes every regex, and
-      is a lie; the spec forbids it in as many words (*"All zeroes forbidden"*,
-      for both ids).
-
-    Takes the span rather than always reading the ambient one so the format is
-    testable against a span a test constructed, which is what separates "the
-    header matches a real span id" from "the header matches a regex" — a
-    hard-coded constant satisfies the second.
-    """
+    """The active server span as a `traceresponse` value, or `None`."""
     span = trace.get_current_span() if span is None else span
     if not span.is_recording():
         return None
@@ -184,23 +130,10 @@ def configure_logging(settings: Settings) -> None:
     )
 
     # uvicorn attaches its own handlers directly to the "uvicorn"/
-    # "uvicorn.access"/"uvicorn.error" loggers (and any other library may
-    # do the same) *before* create_app() runs -- clearing them and forcing
-    # propagate=True is what makes redirecting the root logger below
-    # actually catch everything, instead of records printing twice: once
-    # from a library's own handler, once forwarded through root.
-    #
-    # `.disabled` belongs to the same reclaim and was missing until 2026-08-10:
-    # `logging.config.fileConfig`/`dictConfig` default `disable_existing_loggers`
-    # to True and set it on every logger their own config does not name, and
-    # `Logger.handle` checks it *below* both the level check and the handler
-    # walk -- so a logger left disabled is unreachable no matter what this
-    # function does to handlers, levels or sinks. Reached here through
-    # `db/migrations/env.py`'s `fileConfig` call (alembic.ini names only root,
-    # sqlalchemy and alembic), which is why the whole test suite could not see
-    # an httpx WARNING after it migrated in-process. Snapshot the keys: a
-    # `getLogger` on a `PlaceHolder` entry can insert parent placeholders, and
-    # that would be a mutation during iteration.
+    # "uvicorn.access"/"uvicorn.error" loggers (and any other library may do the same)
+    # *before* create_app() runs -- clearing them and forcing propagate=True is what
+    # makes redirecting the root logger below actually catch everything, instead of
+    # records printing twice: once from a library's own handler, once forwarded through
     for name in list(logging.root.manager.loggerDict):
         stdlib_logger = logging.getLogger(name)
         stdlib_logger.handlers = []
@@ -208,55 +141,19 @@ def configure_logging(settings: Settings) -> None:
         stdlib_logger.disabled = False
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
-    # **`httpx` logs one INFO line per request, and the redirect above is what
-    # made it visible.** Measured 2026-08-07 on the shipped defaults
-    # (`USHER_LOG_JSON=true`, `USHER_LOG_LEVEL=INFO`, sink `sys.stdout`): a
-    # single request prints a ~900-character JSON envelope reading
-    # `httpx._client:_send_single_request - HTTP Request: POST … "HTTP/1.0
-    # 200 OK"` on **stdout**, which is where every CLI command puts its
-    # answer. `usher curate` therefore opened with a log record about its own
-    # completion before printing the report -- exactly the interleaving
-    # `_print_home_report`'s printed-not-logged rule exists to prevent, and
-    # the reason `usher search` and `usher curate` pass `report=False` to
-    # their factories in the first place. That call turns off *Usher's* line
-    # and could do nothing about this one.
-    #
-    # WARNING and above still arrive, so a real failure is not silenced. And
-    # nothing is lost that PRD 10 depends on: `configure_tracing` instruments
-    # `httpx` unconditionally, so every one of these requests is already a
-    # client span carrying method, URL and status -- this line was a second,
-    # unstructured copy of a fact the trace holds better. Verified no test or
-    # script in this repository reads it (`grep -rn "HTTP Request"` finds
-    # nothing outside `httpx` itself).
+    # **`httpx` logs one INFO line per request, and the redirect above is what made it
+    # visible.** Measured 2026-08-07 on the shipped defaults (`USHER_LOG_JSON=true`,
+    # `USHER_LOG_LEVEL=INFO`, sink `sys.stdout`): a single request prints a
+    # ~900-character JSON envelope reading `httpx._client:_send_single_request - HTTP
+    # Request: POST … "HTTP/1.0 200 OK"` on **stdout**, which is where every CLI command
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def configure_tracing(settings: Settings) -> None:
-    """Install a real SDK `TracerProvider` unconditionally and instrument
-    SQLAlchemy + httpx globally, so any span started anywhere in the
-    process — including by FastAPI's auto-instrumentation, wired in
-    `create_app` — gets a real trace/span id for `inject_trace_context` to
-    correlate, whether or not there is anywhere to export it to. Verified
-    directly: a bare `TracerProvider()` with zero span processors still
-    assigns valid, random ids to spans started through it — only the
-    actual OTLP *export* needs `settings.telemetry_enabled`, not span
-    creation. Without this, no span is ever active during request
-    handling and `inject_trace_context` never fires outside tests that
-    build their own span (confirmed directly against a plain, uninstrumented
-    request: `get_current_span().get_span_context().is_valid` was `False`).
-
-    Idempotent by construction, and this matters: `create_app()` calling
-    this is not a once-per-process event (the test suite alone calls it
-    dozens of times). `trace.set_tracer_provider()` silently refuses every
-    call after the first in a process, so unconditionally constructing a
-    new provider + processor on every call would leak a `BatchSpanProcessor`
-    daemon thread and gRPC channel each time, with no handle left to shut
-    them down — verified directly: without the `isinstance` guard below,
-    five `create_app()` calls with telemetry enabled left five orphaned
-    threads. `SQLAlchemyInstrumentor`/`HTTPXClientInstrumentor` need no
-    equivalent guard: both are process-wide singletons (verified directly)
-    with their own built-in re-instrumentation guard, so calling
-    `.instrument()` repeatedly is already a safe no-op after the first time.
+    """Install a real SDK `TracerProvider` unconditionally and instrument SQLAlchemy +
+    httpx globally, so any span started anywhere in the process — including by FastAPI's
+    auto-instrumentation, wired in `create_app` — gets a real trace/span id for
+    `inject_trace_context` to correlate, whether or not there is anywhere to export it
     """
     if not isinstance(trace.get_tracer_provider(), TracerProvider):
         provider = TracerProvider(resource=Resource.create({"service.name": settings.service_name}))
@@ -496,47 +393,15 @@ def _observe_job_due(options: CallbackOptions) -> Iterable[Observation]:
 
 @dataclass(frozen=True, slots=True)
 class SearchSnapshot:
-    """One reading of the embedding backlog.
-
-    Two numbers, because the second is what stops the first being read
-    wrongly. `stale` is titles in the embedded population whose vector is
-    missing, or was derived from different text, or from a different model --
-    the backfill's own predicate, `usher.db.repositories.search.
-    STALE_EMBEDDING`. `refused` is titles carrying a row with a **NULL**
-    embedding: the deliberate written outcome for a document the composer
-    called degenerate.
-
-    A refused title is *not* stale -- `REFUSED_EMBEDDING` is
-    `NOT (STALE_EMBEDDING) AND e.embedding IS NULL` precisely so the two
-    cannot overlap -- and without the second series an operator watching
-    `stale` settle on a nonzero floor cannot tell "the backfill is stuck"
-    from "these titles have no text to embed". One is a defect; the other is
-    the catalog.
-
-    Both default to 0, and that zero is a *held* one rather than a fabricated
-    one: `SearchGauges` reports it only after `register_search_gauges` has
-    been handed a reader, and `_search_observations` reports nothing at all
-    before that.
-    """
+    """One reading of the embedding backlog."""
 
     stale: int = 0
     refused: int = 0
-    # **A third number, and it is about a different table.** `stale`/`refused`
-    # are `title_embeddings`; this is `title_neighbors` rows whose
-    # `blend_fingerprint` is not the running one -- M7's fourth similarity
-    # signal changed what every stored score *means*, and before that column
-    # existed nothing could tell a row computed under the old blend from one
-    # computed under the new.
-    #
-    # It rides on this snapshot rather than on a fourth module global because
-    # it is refreshed by exactly the same passes, from the same session, and a
-    # separate reader would be a second thing to remember to wire.
-    #
-    # **A zero here does not mean the artefact is current**, and PRD 10's panel
-    # must not be read that way: it means no row disagrees with the running
-    # blend. A row can carry the right fingerprint and still be stale because
-    # some *other* title was embedded into its neighbourhood since, which is
-    # undecidable per row and is why `computed_at()` still exists beside this.
+    # **A third number, and it is about a different table.** `stale`/`refused` are
+    # `title_embeddings`; this is `title_neighbors` rows whose `blend_fingerprint` is
+    # not the running one -- M7's fourth similarity signal changed what every stored
+    # score *means*, and before that column existed nothing could tell a row computed
+    # under the old blend from one computed under the new.
     neighbors_stale: int = 0
 
 
@@ -598,27 +463,8 @@ def configure_telemetry(settings: Settings) -> None:
     configure_metrics(settings)
 
 
-# ---------------------------------------------------------------------------
-# The shared cache counters.
-#
-# These live here rather than beside their first caller because **three caches
-# now record through them** -- the row cache and the screen cache in
-# `services/rows/cache.py`, and group C's image proxy in `services/images.py`
-# -- and a fourth would make it four. Two `create_counter` calls under one
-# meter for one instrument name is either a duplicate-instrument warning or a
-# second stream, and either way a dashboard's hit rate silently stops covering
-# a cache; so the pair is declared exactly once and imported.
-#
-# 🔴 They were declared in `services/rows/cache.py` until 2026-08-11 and moved
-# on the merge that put both callers in one tree: `services/images.py` importing
-# the counters while `services/rows/base.py` imported `servable_images` from
-# `services/images.py` is a cycle, and it broke collection of 27 test modules.
-# Neither task could see it alone -- each half is acyclic. `telemetry.py`
-# imports nothing from `usher`, which is what makes it the safe home rather
-# than merely a convenient one.
-#
-# The description names no cache in particular: it said "Row/screen" while the
-# pair had one caller, and that was a lie the moment it had two.
+# --------------------------------------------------------------------------- The shared
+# cache counters.
 _cache_meter = metrics.get_meter("usher.cache")
 
 CACHE_HITS = _cache_meter.create_counter(

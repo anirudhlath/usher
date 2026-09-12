@@ -1,40 +1,4 @@
-"""The image cache on a filesystem.
-
-`compose.yml` bind-mounts `./data/images` to `/data/images` and the Dockerfile
-has pre-created it, owned by uid 1000, since M1 — with a comment saying *"a
-future milestone's writer will need `chown 1000:1000 data/images`"*. **This is
-that writer**, and the sentence is a README line now rather than a deferral.
-
-## Three properties, each with a defect it exists to stop
-
-**The name is a hash and never client input.** `ImageCacheKey.digest()` is a
-`sha256` hex string, the rung is one of four integers written in `src/`, and
-the extension is a literal from `SUPPORTED_MEDIA_TYPES`. Nothing a request
-carries is ever interpolated into a path, so `?w=../../etc/passwd` is a 422
-long before it is here and would be inert even if it were not. That is a
-property of the construction rather than of a filter somebody has to keep
-correct, which is the only kind of path-traversal defence worth having.
-
-**Two levels of sharding, refused flat on the arithmetic.** 1.27M titles times
-four rungs is not a directory: `ext4`'s htree copes and `ls` does not, and a
-`readdir` over five million entries is what an operator does the first time
-they wonder how big the cache is. `ab/cd/` spreads it over 65,536 leaves at
-~78 files each.
-
-**Writes are atomic.** A `usher.atomic.scratch_beside` file, then
-`Path.replace`, which is `os.replace` and is atomic on POSIX. C5 serves these
-bytes with a very long `max-age`, so a partially written file is bytes a client
-keeps for a year; `finally: unlink(missing_ok=True)` is what makes a stream that
-dies mid-body leave nothing rather than a fragment. The rename is not
-`write_atomically` because the body arrives as an async stream under a byte
-ceiling, which a synchronous callback cannot consume.
-
-**`fsync` before the rename, and it is not ceremony here.** The rename is
-atomic with respect to *other processes*; it is not atomic with respect to a
-power cut, which can leave a correctly-named file whose contents were never
-flushed. Under `immutable` that is a corrupt image cached for a year, and one
-`fsync` on a cold request is the cheapest insurance in this milestone.
-"""
+"""The image cache on a filesystem."""
 
 import asyncio
 import os

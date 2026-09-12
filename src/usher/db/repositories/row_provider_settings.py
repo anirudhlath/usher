@@ -1,14 +1,4 @@
-"""`row_provider_settings`, and the two statements this whole port is.
-
-Implements `RowProviderSettingsRepository` (`usher.ports.repository`). No
-partial-index predicate to repeat in the `ON CONFLICT` clause -- `slug_prefix`
-is the table's only key and its primary key is the only index on it -- so the
-upsert is the plain form every other single-key repository in this package
-uses (`taste.py`'s `user_taste`, one row per key, is the closest sibling).
-
-Same session ownership as every other repository here: flushes, never
-commits.
-"""
+"""`row_provider_settings`, and the two statements this whole port is."""
 
 from collections.abc import Mapping
 
@@ -19,12 +9,7 @@ from usher.ports.repository import RowProviderSettingsRepository
 
 _OVERRIDES = "SELECT slug_prefix, enabled FROM row_provider_settings"
 
-# One statement, one writer. `now()` in the VALUES list rather than the
-# column's `server_default`, because `server_default` only ever fires on the
-# INSERT branch -- an update needs `updated_at` written explicitly on every
-# statement (this table carries no `set_updated_at` trigger; see
-# `db/models/rows.py`'s module docstring for why), and `excluded.updated_at`
-# is what carries the same `now()` value into the DO UPDATE branch.
+# One statement, one writer.
 _SET_ENABLED = """
 INSERT INTO row_provider_settings (slug_prefix, enabled, updated_at)
 VALUES (:slug_prefix, :enabled, now())

@@ -1,38 +1,4 @@
-"""PRD 03 stage 3: one canonical title, filled in from a metadata provider.
-
-**The tier and the failure are orthogonal, and that is ADR-0008 rather than
-a preference.** `EnrichmentState` has no `FAILED` member: the three rungs are
-`skeleton | stub | enriched` and a failed attempt records
-`Title.enrichment_error` while leaving the tier exactly where it was. A
-skeleton whose enrichment failed is still a perfectly usable skeleton — its
-genres, rating and runtime did not stop being true — and the next attempt
-needs to know which rung it is working from.
-
-**Every tier comparison goes through `ENRICHMENT_RANK`.** `EnrichmentState`
-is a `StrEnum`, so members compare lexicographically:
-`EnrichmentState.ENRICHED > EnrichmentState.SKELETON` is `False`, and so is
-`ENRICHED > STUB`. A guard spelled as a direct comparison therefore does not
-"sometimes downgrade" — it never promotes anything at all, silently, which is
-the shape of bug the rank map exists to make unspellable.
-
-**Fields the provider supplied win; fields it did not are left alone.** TMDb
-serves plenty of entities carrying little more than an id, and a merge that
-wrote every field would blank what a source already knew on the one title
-least able to spare it. `field_provenance` accumulates rather than being
-replaced, so an id an earlier provider supplied keeps its attribution
-(PRD 02: "so a second metadata provider can be added later without
-ambiguity").
-
-**The payload is cached before it is used, and read before the provider is
-asked.** ADR-0016: `raw_payloads` holds provider responses so M7 and M9 can
-derive `Person`/`Credit`/`Collection`/`Image` with no second network call.
-The freshness window is a *ceiling* under TMDb's six-month caching term, not
-a target — refetching every title on every attempt is how a retry storm
-becomes a rate limit.
-
-`commit` is injected because `services/` may depend only on `domain/` and
-`ports/` (ADR-0009), and a session is neither.
-"""
+"""PRD 03 stage 3: one canonical title, filled in from a metadata provider."""
 
 import time
 import uuid
@@ -59,57 +25,10 @@ from usher.services.rows.cache import RowCache
 
 _tracer = trace.get_tracer("usher.enrich")
 _meter = metrics.get_meter("usher.enrich")
-# PRD 10's name, not a shortened one: its dashboard 3 panel ("enrichment
-# throughput and p50/p99") and its "enrichment SLA missed" alert both query
-# `usher.enrichment.latency`, and a metric emitted under a near-miss name is
-# a permanently empty panel that nothing distinguishes from a healthy zero.
-# Labelled `outcome` **and** `trigger`, and the second label arrived late on
-# purpose. M4 recorded `outcome` alone and corrected PRD 10 in writing:
-# "nothing in M4 enriches on demand (`JobPriority.DEMAND` is defined and
-# unused until M5), so a `trigger` label would carry one constant value,
-# while a failure's latency and a success's are genuinely different
-# populations."
-#
-# **That withholding was conditional and M5 spent the condition.**
-# `services/titles.py` and three routers now enqueue `ENRICH` at `DEMAND`,
-# and `services/visibility.py` at `VISIBLE`, so `trigger` is a real series
-# rather than one constant value -- the same test `:604`'s sibling bullet
-# applied to `usher.jobs.queued`'s priority band ("M5 introduces demand
-# promotion and is where the band becomes a real series"). The M4 correction
-# is amended rather than reversed: `outcome` stays, because a failure's
-# latency and a success's are still different populations, and PRD 10's
-# "Enrichment SLA missed -- demand-triggered p99 > 5 s" is expressible only
-# once `trigger` is on the series it names.
-#
-# ⚠️ **Two labels is 2 x |outcome| = 4 series, and the cardinality claim is
-# stated rather than assumed.** `outcome`'s vocabulary is closed at
-# `enriched`/`failed`, `trigger`'s at `demand`/`background`; neither is
-# catalog-sized, which is the test PRD 10 applies to every label in its
-# table. A third label on this series is argued before it is appended.
-#
-# **`explicit_bucket_boundaries_advisory`, because the alert is a quantile.**
-# With no advisory a seconds-unit histogram takes the SDK's defaults, which
-# are the *millisecond* scale (0, 5, 10, ... 10000) applied to a seconds
-# instrument -- read off this host's Prometheus on 2026-09-11, that was
-# exactly this series' stored `le` set, so every enrichment under five
-# seconds fell in the single `le="5"` bucket.
-#
-# ⚠️ **The harm here is the reported value, not a rule that cannot fire, and
-# that is narrower than #86's general statement.** 5 s is itself a boundary
-# of the default ladder, so `> 5` does still discriminate: a deployment with
-# 99% of enrichments under 5 s reads a p99 of **4.95 s** and does not fire,
-# and one where more than 1% cross reads **9.95 s** and does. What it cannot
-# do is report a *latency*: a perfectly healthy 100 ms deployment pages an
-# operator a p99 of 4.95 s -- 50 ms from the SLA it is nowhere near -- and
-# there is no resolution on either side of the threshold to see a drift
-# coming. Measured 2026-09-11 against the ladder below: a true 6 s reads
-# **7.4750 s** and a true 100 ms reads **0.0995 s**, both matching
-# `lo + (hi - lo) * q` exactly.
-#
-# So these boundaries keep 5 s as a boundary (the comparison stays exact)
-# and bracket it at 4 and 7.5 so the number in the page is a latency. Issue
-# #86 is the general case -- thirteen seconds-unit histograms are still on
-# the defaults -- and this is the one instrument an alert quantiles.
+# PRD 10's name, not a shortened one: its dashboard 3 panel ("enrichment throughput and
+# p50/p99") and its "enrichment SLA missed" alert both query `usher.enrichment.latency`,
+# and a metric emitted under a near-miss name is a permanently empty panel that nothing
+# distinguishes from a healthy zero.
 _ENRICHMENT_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 30.0, 60.0)
 _enrich_duration = _meter.create_histogram(
     "usher.enrichment.latency",
@@ -142,28 +61,15 @@ def _trigger_for(priority: int) -> str:
     return "demand" if priority >= JobPriority.VISIBLE else "background"
 
 
-# Which `Title` column a provider addresses a title by, and whether that id
-# space is namespaced by kind. The same three-row table
-# `usher.services.matching._PROVIDER_TIERS` holds, restated rather than
-# imported: there it is a match ladder ordered by confidence, here it is a
-# lookup keyed by provider name, and collapsing the two would make one of
-# them read as the other's leftovers.
+# Which `Title` column a provider addresses a title by, and whether that id space is
+# namespaced by kind.
 _PROVIDER_ID_FIELDS: dict[str, tuple[str, bool]] = {
     "tmdb": ("tmdb_id", True),
     "imdb": ("imdb_id", False),
     "tvdb": ("tvdb_id", False),
 }
 
-# What a provider is allowed to overwrite. Deliberately enumerated rather
-# than derived from the result's own `field_provenance`: driving the merge
-# off the provider's bookkeeping means a mapper that forgot one provenance
-# entry silently stops merging that field, and nothing would ever say so.
-#
-# Absent, each for its own reason: `id` and `kind` are identity and the id
-# space the fetch was made in; `collection_id` is a FK to a table M7 creates;
-# `enrichment_state`/`enrichment_error`/`enriched_at` are this service's;
-# `field_provenance` is merged rather than assigned; `created_at`/`updated_at`
-# belong to the store.
+# What a provider is allowed to overwrite.
 _ENRICHABLE: tuple[str, ...] = (
     "tmdb_id",
     "imdb_id",
@@ -228,20 +134,10 @@ class EnrichService:
         # while the other works. It must be the *same* queue `MatchService`
         # and `IngestService` hold, which only a composition root can know.
         self._queue = queue
-        # The process's one `RowCache`, or `None` in a composition root that
-        # composes no screens (`usher work`, `usher sync`) -- exactly
-        # `build_push_applier`'s terms, and for its recorded reason: a service
-        # holding a cache nobody serves from would invalidate a dict with no
-        # reader.
-        #
-        # **Enrichment is the *other* write that stales a built shelf**, and
-        # until this it was the one that said nothing. `PushApplyService` and
-        # `WatchWriteService` both invalidate `WATCH_STATE_ROWS`; enrichment
-        # rewrites a card's `name`, `year`, `enrichment_state` and `artwork`,
-        # which is every field a card carries, on rows with TTLs up to six
-        # hours. `title.updated` does not cover it -- that frame is a
-        # statement to a *client*, and the console's handler is colour-only by
-        # design (patterns.md §7, "it does not refetch").
+        # The process's one `RowCache`, or `None` in a composition root that composes no
+        # screens (`usher work`, `usher sync`) -- exactly `build_push_applier`'s terms,
+        # and for its recorded reason: a service holding a cache nobody serves from
+        # would invalidate a dict with no reader.
         self._cache = cache
         self._max_age = timedelta(days=cache_max_age_days)
         # Injected, the way `EmbySession`, `TmdbClient` and `TMDbIdDataset`
@@ -263,13 +159,11 @@ class EnrichService:
         trigger = _trigger_for(priority)
         with _tracer.start_as_current_span("enrich.title") as span:
             span.set_attribute("usher.title_id", str(title_id))
-            # PRD 10: "Spans carry `title_id`, `source`, and `trigger`
-            # (`demand` vs `background`) as attributes, so 'why did the title
-            # I just opened take 45 seconds' is one query." That sentence was
-            # true of no span until now -- the vocabulary is minted here, in
-            # one place, and the histogram label below reads the same
-            # variable, so the span and the metric cannot drift into two
-            # spellings of one word.
+            # PRD 10: "Spans carry `title_id`, `source`, and `trigger` (`demand` vs
+            # `background`) as attributes, so 'why did the title I just opened take 45
+            # seconds' is one query." That sentence was true of no span until now -- the
+            # vocabulary is minted here, in one place, and the histogram label below
+            # reads the same variable, so the span and the metric cannot drift into two
             span.set_attribute("usher.trigger", trigger)
             title = await self._titles.get(title_id)
             if title is None:
@@ -304,86 +198,7 @@ class EnrichService:
         await self._titles.update(enriched)
         await self._store_hierarchy(result)
         await self._commit()
-        # PRD 03's fourth stage, enqueued from the third. **After the commit**,
-        # and that ordering is the one here with a wrong answer and no error
-        # attached: a worker claiming this job reads `titles` in a different
-        # transaction, so a job enqueued before the commit can run against the
-        # pre-enrichment row, fingerprint the old text, store a vector of the
-        # old text -- and then *stop matching the stale predicate*, because the
-        # fingerprint agrees with what it embedded. A permanently stale vector
-        # the backfill will never re-claim, produced by the enqueue that exists
-        # to keep it fresh.
-        #
-        # Success path only. A failure leaves the tier where it was (ADR-0008)
-        # and changes no text, so the fingerprint is unchanged and the job
-        # would complete without embedding -- one claim per attempt of a
-        # backoff schedule, for nothing.
-        #
-        # `BACKFILL`, the floor: nothing a client renders depends on a search
-        # document. It is also the sweep's priority, which is what makes a
-        # re-enqueue write zero rows (`_ENQUEUE`'s `WHERE jobs.priority <
-        # excluded.priority`) rather than rewriting the row.
-        #
-        # Flushes, never commits (`JobQueue`'s contract), so this row lands in
-        # the transaction `JobWorker` closes with `complete(job.id)`: "this
-        # enrich job is done" and "an index job exists" commit together.
-        #
-        # `enriched.id`, not `title.id`. `_merged` preserves the id today, so
-        # the two are the same object and the mutation between them survives
-        # every test -- it is written this way so a future `_merged` that
-        # re-mints an id cannot silently index the wrong row.
-        #
-        # **A failure here propagates**, deliberately. After a successful
-        # commit the session is healthy, so this is close to unreachable --
-        # but catching and logging would be a silently lost index job, this
-        # milestone's failure mode in miniature. The cost of propagating is
-        # one `enrichment_error` on an already-enriched title (the tier is
-        # untouched) that the next attempt clears, and the retry is cheap
-        # because `_payload_for` reads the cache.
-        #
-        # **No second client event, and that is boundary call 5 rather than an
-        # omission.** PRD 09 asks M6 to publish `title.updated` "through the
-        # `EventPublisher` port M5 built rather than inventing a channel" --
-        # and it is published immediately below, already. Nothing a client
-        # renders depends on the search document or the embedding, so a
-        # `title.indexed` would be an event with no consumer, which
-        # `ports/events.py` names: "no member nothing emits". Do not add one.
-        #
-        # **One call, two requests, and that is not tidiness.** `enqueue` is a
-        # staged write -- a temp DDL, a COPY and one `INSERT ... SELECT ... ON
-        # CONFLICT` -- so a second `await self._queue.enqueue([...])` here is a
-        # second full staging cycle per enriched title, on the path M6 already
-        # had to fix once for exactly this shape of cost. Two requests in one
-        # list is one cycle and one statement. Everything above applies to both
-        # requests and is not restated.
-        #
-        # The two are deliberately not ordered against each other. `DERIVE`
-        # writes `credit_names`, which is an input to `compose_document`, so a
-        # title whose `INDEX` job is claimed first embeds without its cast and
-        # is re-claimed once `DERIVE` moves its fingerprint. One wasted embed
-        # per enriched title at ~115 tokens, and the only lever is a
-        # `JobPriority` rung that does not exist between `BACKFILL` and `NEW`
-        # -- promoting `DERIVE` to `NEW` would put it ahead of a `match` queue
-        # that is hundreds of thousands of jobs deep on a first bootstrap.
-        #
-        # **That argument is about the sweep and it is why this is a clamp
-        # rather than plain inheritance.** `DERIVE` is what writes `images`, so
-        # at a constant `BACKFILL` a title a client opened enriches in seconds
-        # and then queues its artwork behind every background job in the
-        # system -- measured 2026-08-26 as **130,653 enriched titles carrying
-        # no image row at all**, on a catalog whose `derive` lane had never
-        # drained. Above `VISIBLE` the rung is a statement that somebody is
-        # looking at this title now, and the follow-up that draws it inherits
-        # that; at `NEW` and below the sentence above still holds and the
-        # follow-up stays where the sweep put it. `IngestService` enqueues
-        # every newly seen title at `NEW`, so this branch is the ordinary one
-        # on a first bootstrap and the inherited rungs are the exception.
-        #
-        # `int` rather than `JobPriority`, because that is what `Job.priority`
-        # is: an integer column bounded `[0, 100]` that a `GREATEST()` runs
-        # over, so a value between two members is representable and reaches
-        # here. A comparison classifies one; `JobPriority(value)` would raise
-        # on it, which is a crashed worker for a row the schema permits.
+        # PRD 03's fourth stage, enqueued from the third.
         follow_up = priority if priority >= JobPriority.VISIBLE else JobPriority.BACKFILL
         await self._queue.enqueue(
             [
@@ -391,49 +206,20 @@ class EnrichService:
                 JobRequest(kind=JobKind.DERIVE, key=str(enriched.id), priority=follow_up),
             ]
         )
-        # Every shelf holding this title was built from the row it just
-        # replaced, so it is stale in four fields at once. Dropped here rather
-        # than left to the TTL because the TTLs are the wrong order of
-        # magnitude for a catalog write: `because-you-watched` is six hours,
-        # `seasonal` twelve, and a title enriched inside that window keeps
-        # rendering under its skeleton name with a "No artwork on record"
-        # placeholder until the entry dies of old age.
-        #
-        # **On the success path only**, on the same ADR-0008 argument the
-        # publish below makes: a failure leaves the tier exactly where it was,
-        # so nothing on the card moved and a drop would turn a provider outage
-        # into a cache flush per attempt of a backoff schedule.
+        # Every shelf holding this title was built from the row it just replaced, so it
+        # is stale in four fields at once.
         if self._cache is not None:
             self._cache.invalidate_titles((enriched.id,))
-        # PRD 03's read-through loop, closed: "Completion publishes a
-        # `title.updated` event on a Server-Sent Events channel; clients patch
-        # in place."
-        #
-        # **After the commit**, because a client patches by refetching the
-        # fields named below and would otherwise read the row this
-        # transaction has not written yet. On the success path only: a
-        # failure records `enrichment_error` and leaves the tier exactly
-        # where it was (ADR-0008), so "this changed" would send a client to
-        # refetch an identical stub -- once per attempt of a backoff
-        # schedule.
+        # PRD 03's read-through loop, closed: "Completion publishes a `title.updated`
+        # event on a Server-Sent Events channel; clients patch in place." **After the
+        # commit**, because a client patches by refetching the fields named below and
+        # would otherwise read the row this transaction has not written yet.
         await self._events.publish(
             ClientEvent(
                 kind=ClientEventKind.TITLE_UPDATED,
                 title_id=enriched.id,
-                # The fields a client can patch without refetching the whole
-                # title (PRD 07: "Title id + changed fields | Patch in
-                # place"). `["*"]` turns "patch in place" back into
-                # "refetch", one request later.
-                #
-                # **`wire_field_name`, because `_ENRICHABLE` holds domain
-                # attribute names and this list is read by a deployed
-                # client.** ADR-0040 renamed three `Title` attributes and
-                # froze every DTO field name, which quietly made the two
-                # vocabularies diverge exactly here -- the one place a field
-                # name travels as *data* rather than as a key, so no DTO and
-                # no OpenAPI schema constrains it. Sorted after the mapping
-                # and not before: the order a client sees is the order of the
-                # names it is actually given.
+                # The fields a client can patch without refetching the whole title (PRD
+                # 07: "Title id + changed fields | Patch in place").
                 data={
                     "fields": [
                         *sorted(wire_field_name(field) for field in changed),
@@ -502,42 +288,7 @@ class EnrichService:
         return changes
 
     def _genres_after(self, title: Title, supplied: tuple[str, ...]) -> tuple[str, ...]:
-        """The provider's genres, plus the ones it has no word for.
-
-        **The one field in `_ENRICHABLE` where "the provider supplied it" and
-        "the provider had something to say about it" are different questions**,
-        because a genre list is a *set* and this merge replaces sets wholesale.
-        `titles.genres` unions two importers' vocabularies (ADR-0039) and TMDb
-        names 24 of the 31 canonical concepts, so before this method a title
-        whose only IMDb label was `Biography` came out of enrichment with that
-        label gone rather than re-spelled. Measured 2026-08-19 against the real
-        `title.basics.tsv.gz` and the live catalog: 53,724 of 132,116 enriched
-        titles lost at least one IMDb label — 69,160 deletions, **11,466** of
-        them of a concept TMDb cannot express, `Film-Noir` 827 deleted against
-        0 surviving. Control: **0 of 1,021,623** skeletons lost one.
-
-        **What is *not* preserved is the point.** A label whose concept the
-        provider can name is the provider's to overwrite, and 13,141 of those
-        deletions were `Drama` — TMDb disagreeing with IMDb about a film, which
-        it is entitled to do and is usually right about. `Sci-Fi` is the same
-        case one step removed: `Science Fiction` is the same concept, so
-        keeping both spellings would hand one title two words for one thing,
-        which is exactly the state `_canonical_facet`'s collapse is entitled to
-        assume no title is in.
-
-        Order: the provider's list first, in its own order, then whatever it
-        could not say. `Title.genres` order is rendered (`RowCard`, the
-        curation prompt) and the provider's is a relevance order; the preserved
-        tail has no ordering claim to make.
-
-        **This stales the document, and the bill is already on this path.**
-        `genres` is segment 6 of `compose_document`, so a preserved label moves
-        `_FINGERPRINT_SQL` — but `_apply` enqueues an `INDEX` job for every
-        successful enrichment anyway, so a title reaching this method was going
-        to be re-embedded on this pass regardless. Nothing is restaled that was
-        not already stale, which is what makes this affordable where a backfill
-        over the existing 1,272,866 rows is not (ADR-0039).
-        """
+        """The provider's genres, plus the ones it has no word for."""
         vocabulary = self._provider.genre_vocabulary
         return (
             *supplied,

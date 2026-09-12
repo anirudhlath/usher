@@ -1,14 +1,4 @@
-"""bootstrap tables
-
-Revision ID: c7a2e51d8b40
-Revises: b3f1c07d4a92
-Create Date: 2026-07-30
-
-The three tables the bulk importers need: import_runs (the checkpoint),
-tmdb_ids (Phase 1's crawl universe), id_crosswalk (Phase 2's Wikidata
-pairs). No BEFORE UPDATE trigger is created for any of them -- see
-db/models/bootstrap.py's module docstring.
-"""
+"""bootstrap tables"""
 
 from collections.abc import Sequence
 

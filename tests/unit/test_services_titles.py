@@ -10,7 +10,6 @@ failing call is absent rather than caught.
 import ast
 import inspect
 import pathlib
-import re
 import uuid
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
@@ -51,12 +50,6 @@ from usher.services.titles import CAST_LIMIT, CREW_LIMIT, TitleReadService
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 OTHER_USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000002")
 OBSERVED_AT = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
-
-#: `detail`'s docstring counts its reads in words, because it is prose first.
-#: Only the range a service of this shape could plausibly occupy -- a
-#: `KeyError` here is a docstring that grew past what this case understands,
-#: which is a louder failure than a silent re-parse.
-_NUMBER_WORDS = {"four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
 
 class _Recording:
@@ -911,7 +904,7 @@ async def test_a_title_with_no_artwork_publishes_both_series_at_zero(
     assert _counted(meter_reader, "usher.images.references") == {"served": 0.0, "unservable": 0.0}
 
 
-async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
+async def test_detail_makes_seven_reads_over_six_repositories(
     titles: FakeTitleRepository,
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
@@ -920,15 +913,13 @@ async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
     credits: FakeCreditRepository,
     images: FakeImageRepository,
 ) -> None:
-    """`detail`'s docstring counts its own reads, and this is what keeps the
-    number honest.
+    """`detail`'s fan-out is a literal here, so growing it is a decision
+    somebody makes rather than one a repository argument makes for them.
 
-    **No ordinal is written into a plan for this**, deliberately: B9 added a
-    repository and C7 added another, and which of the two merges last is not
-    knowable when either is written -- so a sentence saying "six reads over
-    five repositories" is wrong for whichever order actually happened. The
-    acceptance is that the docstring's own words equal what the service does
-    **in the tree as it stands**, which only a case can check.
+    The numbers were read out of `detail`'s own docstring until M10; a count
+    stated in prose is a count nothing holds to the code the moment the prose
+    is trimmed, and the count is the fact. Seven reads because `credits` is
+    asked twice, once per `CreditKind`.
 
     Counted through a proxy that records every awaited call rather than
     through per-fake counters, because two of the six fakes have none and
@@ -936,14 +927,8 @@ async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
     "how many reads happen". The title is `ENRICHED` so `_promote` enqueues
     nothing and every recorded call is a read; that is asserted rather than
     assumed."""
-    docstring = inspect.getdoc(TitleReadService.detail) or ""
-    stated = re.search(r"\*\*(\w+) reads over (\w+) repositories", docstring)
-    assert stated is not None, (
-        "the premise: detail's docstring states its own read count, which is the "
-        "sentence this case exists to hold to the code"
-    )
-    reads = _NUMBER_WORDS[stated.group(1).lower()]
-    repositories = _NUMBER_WORDS[stated.group(2).lower()]
+    reads = 7
+    repositories = 6
 
     calls: list[str] = []
     service = TitleReadService(
@@ -962,8 +947,14 @@ async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
     assert not any(call.startswith("FakeJobQueue.") for call in calls), (
         "the premise: an enriched title is not promoted, so every recorded call is a read"
     )
-    assert len(calls) == reads, f"{docstring.splitlines()[2]!r} against {calls}"
-    assert len({call.split(".")[0] for call in calls}) == repositories
+    assert len(calls) == reads, (
+        f"`detail` makes {len(calls)} reads, not {reads} -- a read was added or "
+        f"removed and nothing else counts them: {calls}"
+    )
+    assert len({call.split(".")[0] for call in calls}) == repositories, (
+        f"`detail` now reads {len({call.split('.')[0] for call in calls})} "
+        f"repositories, not {repositories}: {sorted({call.split('.')[0] for call in calls})}"
+    )
 
 
 async def test_reading_a_title_never_touches_a_source(service: TitleReadService) -> None:

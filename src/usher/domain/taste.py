@@ -1,20 +1,4 @@
-"""The taste centroid: one derived vector per user.
-
-Declared here in Group A rather than with the service that computes it
-(Group G, `services/taste.py`), because `ports/rows.py` must name the type on
-`RowContext.taste` and a port may only name a domain type or one of its own.
-The plan's file structure listed `db/models/taste.py`,
-`db/repositories/taste.py` and `services/taste.py` and no `domain/taste.py`,
-which is a correction Task 37 records.
-
-PRD 06 defines the centroid as *"the mean embedding of recently watched and
-highly rated titles"*. `watch_states` has **no rating column** -- none on
-`WatchState`, none on `SourceWatchState`, and the Emby adapter reads neither
-the user rating nor `IsFavorite` -- so M7 substitutes the engagement signal it
-actually has (`played`, `play_count`, completion). Group G owns that
-substitution, its correction to PRD 06, and the decision about whether it
-earns an ADR of its own.
-"""
+"""The taste centroid: one derived vector per user."""
 
 import uuid
 from dataclasses import dataclass

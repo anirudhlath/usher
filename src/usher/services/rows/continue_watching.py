@@ -1,30 +1,4 @@
-"""Continue Watching -- the row about the thing you stopped half way through.
-
-**The wrong implementations this module's cases rule out**, named here because
-a test whose docstring cannot say what it kills is a test that kills nothing:
-
-1. **Returns played titles.** A finished film is the most recently *touched*
-   thing in the household, so it heads the row under every recency ordering --
-   and a Continue Watching shelf opening with last night's finished film is
-   populated, correctly shaped, and wrong forever.
-2. **Ignores `position_seconds > 0`.** The answer becomes the entire unwatched
-   library in physical order: a plausible, fully-hydrated shelf of things
-   nobody has opened, satisfying every `len(cards) > 0` assertion written about
-   it.
-3. **Orders by `id`.** `ix_watch_states_user_played` is `(user_id, played)`
-   with no recency key, so the tempting implementation takes whatever order the
-   scan produced -- UUIDv7 insertion order, *which a fixture seeded in the
-   right order satisfies*. The cases seed permutations in both directions.
-4. **Falls back to popular titles when it finds nothing.** The correct
-   contribution from this provider on a fresh install is *nothing at all*. A
-   generic row is neither an empty row nor an absent one, and it is the one
-   that survives review because the screen looks right.
-
-Both halves of the predicate live in `WatchStateRepository.list_in_progress`
-and neither is re-derived here -- this provider reads one port method and
-orders nothing itself, which is what makes 3 a defect in the *repository*
-rather than a defect ten providers could each reintroduce.
-"""
+"""Continue Watching -- the row about the thing you stopped half way through."""
 
 import uuid
 from collections.abc import Mapping, Sequence
@@ -37,18 +11,10 @@ from usher.services.rows.base import BaseRow, Chapter, Progress
 from usher.services.rows.base import label as _label
 
 # **The highest score any provider returns -- and the positional guarantee is
-# `ScoredRow.pinned`, not this number.** PRD 06 says "1 row, always ranked
-# first"; Group A settled that as a flag, because "always first" is positional
-# and a guarantee expressed as "a score high enough to win" is one another
-# provider's arithmetic can silently take away on a screen that still looks
-# fine. Task 24's own text argues for the score and is wrong on this point.
-#
-# The score is kept at the top of the range anyway, so the two orderings agree
-# today and Task 28's registry invariant stays expressible. It is a **constant,
-# not a computation**: a household with one in-progress title and one with
-# twelve both get exactly one row, "how relevant is resuming?" is not a
-# question any column answers, and a computed score would be a plausible number
-# varying for no reason a user could perceive.
+# `ScoredRow.pinned`, not this number.** PRD 06 says "1 row, always ranked first"; Group
+# A settled that as a flag, because "always first" is positional and a guarantee
+# expressed as "a score high enough to win" is one another provider's arithmetic can
+# silently take away on a screen that still looks fine.
 CONTINUE_WATCHING_SCORE = 1.0
 
 _SLUG = "continue-watching"
@@ -147,15 +113,10 @@ class ContinueWatchingProvider(RowProvider):
             return []
 
         # **The episode roll-up is here rather than in the repository**, and
-        # `list_in_progress`' own docstring hands it over: *"Collapsing to one
-        # card per series is the provider's, and is decided once, there."* An
-        # episode's watch state carries a NULL `title_id`, so a provider that
-        # skipped this drops **every** episode resume -- on a library where
-        # 999,827 of 1,126,674 items are episodes, that is nearly the whole
-        # row, and it is trap 7 arriving through the one M7 read that does not
-        # `COALESCE` its way to a title.
-        #
-        # One call for the whole page, never one per state.
+        # `list_in_progress`' own docstring hands it over: *"Collapsing to one card per
+        # series is the provider's, and is decided once, there."* An episode's watch
+        # state carries a NULL `title_id`, so a provider that skipped this drops
+        # **every** episode resume -- on a library where 999,827 of 1,126,674 items are
         episode_ids = [state.episode_id for state in states if state.episode_id is not None]
         episodes = await ctx.episodes.list_by_ids(episode_ids) if episode_ids else {}
 

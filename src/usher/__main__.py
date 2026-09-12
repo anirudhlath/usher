@@ -1,15 +1,4 @@
-"""Container entrypoint: `python -m usher [command]`.
-
-Delegates to `usher.cli`, which owns argument parsing and the composition
-root for every command. With no arguments this still starts the HTTP server,
-because the container's `CMD` is `alembic upgrade head && exec python -m
-usher` and M2 must not change what that does.
-
-`Settings.host`/`Settings.port` are read there, not here -- the reason this
-module was created in M1's Task 13 (they validated correctly and then
-influenced nothing while the only entrypoint was the `uvicorn` CLI with
-hardcoded flags).
-"""
+"""Container entrypoint: `python -m usher [command]`."""
 
 import sys
 

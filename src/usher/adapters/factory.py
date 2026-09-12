@@ -1,18 +1,4 @@
-"""The one place a `SourceKind` becomes a concrete adapter.
-
-PRD 01 lists "additional sources" as an extension seam left open in v1. This
-module is that seam's actual hinge: a Jellyfin adapter adds a member to
-`SourceKind`, an implementation under `usher/adapters/jellyfin/`, and one
-branch below. Nothing in `services/` or `api/` moves, because neither ever
-names an adapter class -- they hold a `SourceAdapterFactory`.
-
-Lives in `adapters/`, not `services/`, because it imports every adapter and
-`services/` may depend only on `domain/` and `ports/` (PRD 01, layering
-rule 2). The composition roots -- `usher.api.deps` and `usher.cli` -- are the
-only things allowed to construct one, and `pyproject.toml`'s sixth
-import-linter contract ("no concrete source adapter escapes its package") is
-what keeps that true rather than customary.
-"""
+"""The one place a `SourceKind` becomes a concrete adapter."""
 
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.adapters.emby.push import DEFAULT_POLL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
@@ -55,19 +41,12 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         self._page_size = page_size
         self._timeout_seconds = timeout_seconds
         self._reauth_cooldown_seconds = reauth_cooldown_seconds
-        # `None` is a factory nobody handed a registry to -- a directly
-        # constructed one in a test. It gets a private registry at the default
-        # unlimited rate rather than `None`, so `build` has one shape and an
-        # unconfigured factory still shares a gate across the adapters *it*
-        # builds. A default-constructed `SourceGateRegistry()` reads no
-        # configuration, which is what keeps `usher.config` out of this module.
+        # `None` is a factory nobody handed a registry to -- a directly constructed one
+        # in a test.
         self._gates = gates if gates is not None else SourceGateRegistry()
-        # The two push knobs travel the same route as the three above: from
-        # `Settings` at a composition root, through this registry, into the
-        # adapter that owns the message ledger. Defaulted from the adapter
-        # package's own constants rather than repeated as literals, so
-        # `usher.adapters.emby.push` stays the single definition of what a
-        # channel does when nobody configures it.
+        # The two push knobs travel the same route as the three above: from `Settings`
+        # at a composition root, through this registry, into the adapter that owns the
+        # message ledger.
         self._push_stale_after_seconds = push_stale_after_seconds
         self._push_poll_seconds = push_poll_seconds
 

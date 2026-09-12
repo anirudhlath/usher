@@ -1,8 +1,4 @@
-"""Users and watch state.
-
-Watch state attaches to the canonical Title, not to a MediaItem, so it
-survives adding, changing, or losing a source.
-"""
+"""Users and watch state."""
 
 import uuid
 from datetime import UTC, datetime
@@ -54,12 +50,7 @@ class WatchState(DomainModel):
     last_played_at: AwareDatetime | None = None
 
     updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
-    # Who last wrote this record: source | api. Not a user reference (that's
-    # user_id, immediately above it in most schemas — which is exactly why
-    # this field is *not* called updated_by; that name reads as a user FK
-    # here). No default: a sync path that forgets to set this must fail
-    # loudly rather than silently mislabel source-pushed state as
-    # user-originated.
+    # Who last wrote this record: source | api.
     origin: WatchStateOrigin
 
     @model_validator(mode="after")

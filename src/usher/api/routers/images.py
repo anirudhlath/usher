@@ -1,149 +1,4 @@
-"""`GET /images/{image_id}` -- PRD 07's caching proxy, on the wire.
-
-What this route keeps is [PRD 07](../../../../docs/prd/07-client-api.md)'s
-actual promise -- *"clients never see provider image URLs and never need a
-provider key"* -- which is precisely the Home Assistant failure
-[PRD 00](../../../../docs/prd/00-overview.md) names as a reason this project
-exists. An Usher image id, a stable URL, a cache Usher owns, and no provider
-key in a frontend.
-
-**A `GET` that writes, and the shape is already in the tree.**
-`GET /titles/{id}` promotes an unenriched title's `enrich` job; this one fetches
-and stores on a cold miss. That is why it is *not* an adopter of
-`api/caching.py`'s condition 1 argument about short-circuiting -- the
-conditional check here runs **after** the handler has the bytes, never ahead of
-it, so a warm client sending `If-None-Match` cannot skip the fill.
-
-## The clamp is a security control
-
-[ADR-0032](../../../../docs/prd/decisions/0032-the-image-proxy-clamps-to-a-ladder.md)
-decides the ladder and `usher.ports.images` holds it. Two things follow that a
-reader should not have to reconstruct:
-
-- **An unclamped `w` is an attacker choosing how many files land on the
-  operator's disk**, and this process is internet-facing (PRD 08 puts it behind
-  a reverse proxy on the open internet). `Query(gt=0)` refuses a non-positive
-  or non-integer width with FastAPI's own 422 before any of this runs, and
-  `clamp_to_ladder` maps everything that survives onto one of four integers
-  written in `src/`. Nothing a client sends is ever interpolated into a path:
-  the store's filename is a `sha256` of `(provider, provider_path)` plus a rung
-  from that tuple, so *"the cache path cannot escape its root"* is a property of
-  the construction rather than of a filter somebody has to keep correct.
-- **The clamp is also what makes the proxy work at all**, which reverses PRD
-  07's original reasoning and is worth stating in the module that does it: the
-  CDN enforces a *closed* fifteen-rung allowlist and answers **HTTP 400** to
-  everything else, so a `?w=513` passed through would be somebody else's 400
-  rather than a bigger cache.
-
-**`Content-Location` is how the response says which rung it served**, rather
-than a bespoke `X-` header. RFC 9110 section 8.7 defines it as the URI of the
-representation actually selected, which is exactly *"you asked for 400 and this
-is the `w780` representation"* -- so a client caches under a URL it can re-ask
-for, instead of guessing the ladder or parsing a header nothing else in the
-world understands. It is built from the route table and the parsed `UUID`, and
-from the **clamped** rung: no client-supplied byte reaches it.
-
-## The headers
-
-**`Cache-Control: public, max-age=31536000, immutable`.** `public` because an
-image carries no user: this route takes no `user_id`, `images` has no user
-column, and the bytes are byte-identical for every household, which is the
-distinction `api/caching.py`'s `private` rule turns on. The year is what a
-content-addressed artefact is worth.
-
-✅ **`immutable` is earned, and the thing it rests on is a database
-constraint.** It is honest only if an image id survives re-derivation.
-ADR-0032 specified a long `max-age` *without* it for as long as that was
-unproven -- `m09a` shipped `images` with no unique key at all -- and **C2's
-`m09c` closed it**: `uq_images_owner_provider_path`, `UNIQUE NULLS NOT
-DISTINCT (title_id, episode_id, person_id, provider, provider_path)`, so a
-re-derive upserts and `ON CONFLICT ... DO UPDATE` returns the id the row was
-first inserted with. That interim is over and the ADR says so.
-
-**The evidence is a test and not a citation.**
-`tests/integration/test_images_route.py::test_the_same_id_still_serves_the_same_bytes_after_a_real_re_derivation`
-re-derives between two requests over real SQL -- minting a fresh UUIDv7, as
-`usher derive` does per sighting -- and asserts the client's reference still
-serves. The unit file carries the same shape over the fake. If that ever goes
-red, this directive is the thing that has become a lie, and it is a lie a
-client holds for a year.
-
-**The ETag is this route's value and A4's mechanics.**
-`caching.conditional_bytes_response` owns the strong `sha256` over the exact
-bytes served, the `If-None-Match` comparison and the 304; this module chooses
-the freshness policy and the `Content-Location`. A second implementation of
-that comparison is what would let a warm client silently re-download every
-image it holds.
-
-## Failure
-
-Seven answers, each a problem document from **ADR-0030**'s closed vocabulary
-rather than FastAPI's default `{"detail": ...}` shape. The last two are not
-this route's: an exception handler on the app answers them, so every route
-that reaches an upstream has them (`api/errors.py`).
-
-| condition | status | code |
-|---|---|---|
-| no row carries the id | 404 | `not_found` |
-| artwork this deployment declines to carry (`MediaTypeNotServable`) | 404 | `not_found` |
-| the CDN timed out, refused, or answered 408 or 5xx | 503 | `source_unavailable`, `Retry-After` |
-| the CDN answered something else unusable | 503 | `source_unavailable`, **no** `Retry-After` |
-| `w` is not a positive integer | 422 | `validation_failed` |
-| the CDN answered **429** | 503 | `source_unavailable`, `Retry-After` |
-| the CDN answered **401/403** | 503 | `source_unavailable`, **no** `Retry-After` |
-
-**Rows two and four are both `PortDataMalformed` and they are not the same
-event**, which is the whole of what C4's `MediaTypeNotServable` subclass buys
-and the one place in `src/` that spends it. `.claude/rules/
-ports-and-error-taxonomy.md` has the measurement: an SVG logo is roughly
-**one title in seventeen** and is the upstream answering *correctly* about a
-thing this proxy declines to carry, while an HTML login page under a 200 is a
-captive portal and is an incident. Mapped to one status, the common one would
-have set the alarm rate for the rare one at seventeen to one. So a declined
-media type is an **ordinary absence** -- a 404, exactly like a row that is not
-there, which is what a client renders a fallback for -- and everything else on
-that arm stays an upstream fault. The `except` order is load-bearing: the
-subclass arm must precede its parent's or Python takes the first match and the
-distinction is silently gone.
-
-🔴 **Rows three and four want two different statuses and the vocabulary has one
-code for them, so `Retry-After` carries the distinction instead.** The plan
-asked for *"an upstream failure a 502/503, a timeout distinguishable from a
-refusal"*. `PortUnavailable` is transient and 503 with a `Retry-After` is
-exactly right for it. A residual `PortDataMalformed` -- a 4xx, a body past the
-ceiling, a media type that is not a declined one -- is **not** transient, and
-its honest status is 502, which **no member of ADR-0030's seven-member
-vocabulary names**. That record's stability rule is that a code carries one
-status everywhere, so `source_unavailable` cannot be raised at 502, and its
-growth rule is that a member is minted by amending it rather than by a route.
-So C5 asks rather than invents (the amendment is written into ADR-0030), and
-ships the arm it can: both are 503 `source_unavailable`, and `Retry-After`'s
-*presence* -- a standard, machine-readable field a client already branches on
--- is what tells a retry that may work from one that never will.
-
-✅ **That amendment is answered and the answer is `Declined`**, so the sentence
-above is the contract rather than a stopgap. M10's F3 measured the residual arm
-on 2026-08-20 against the live CDN at **0 of 240** fetches -- below 1.25% at
-95% confidence, both controls firing -- so the two 503 arms are *both* rare and
-neither is setting the other's alarm rate, which is the frequency half of the
-test `.claude/rules/ports-and-error-taxonomy.md` states. ADR-0030 carries the
-sample, the populations it could not reach, and the named event that reopens it.
-
-**The last two rows are deliberately not an `except` here.** `port_error_for`
-answers a 429 with `PortRateLimited` and a 401/403 with `PortAuthFailed`, and
-**neither subclasses `PortUnavailable`**, so a ladder is exactly the shape that
-let both escape as a bare `500 text/plain` for a milestone. A route's `except`
-list encodes an assumption about what its adapter can raise that nothing type
-checks; the handler cannot be forgotten by the next route.
-
-**Both are `source_unavailable` and no member was minted.** A 429 is the most
-transient upstream failure there is, and a 401/403 against a CDN that needs no
-credential means something in front of it refused -- the captive-portal
-population wearing a status -- which is an upstream fault either way.
-`Retry-After` is what separates them, exactly as it separates rows three and
-four: the rate limit carries the upstream's own hint when it sent one and this
-project's default when it did not, and the refusal carries none.
-"""
+"""`GET /images/{image_id}` -- PRD 07's caching proxy, on the wire."""
 
 import uuid
 from datetime import timedelta
@@ -181,20 +36,10 @@ _IMAGE_CONTENT: Final[dict[str, dict[str, Any]]] = {
 }
 
 
-#: The three failures this route can answer, and the two 503s are one status
-#: on purpose: ADR-0030's stability rule gives `source_unavailable` exactly one
-#: status everywhere, and no member names a 502, so the transient arm and the
-#: non-transient one are told apart by `Retry-After` rather than by code. That
-#: distinction is a header and lives outside the schema -- ADR-0030's amendment
-#: carries it, and the `upstream_unusable`-shaped member it named as a request
-#: is **answered `Declined`** since 2026-08-20 (this comment called it "a
-#: request this task did not mint" until then), so the header is the contract
-#: rather than a placeholder and this mapping is not waiting on anything. The
-#: 500s the table above names are absent here on purpose: an undeclared status
-#: is the honest schema for an arm nothing intends. The `422` is declared
-#: rather than left to FastAPI, whose
-#: automatic one names `HTTPValidationError` while `api/errors.py` answers an
-#: RFC 9457 document. `tests/unit/test_api_openapi.py` holds all of it.
+# : The three failures this route can answer, and the two 503s are one status : on
+# purpose: ADR-0030's stability rule gives `source_unavailable` exactly one : status
+# everywhere, and no member names a 502, so the transient arm and the : non-transient
+# one are told apart by `Retry-After` rather than by code.
 _IMAGE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     404: {
         "model": ProblemResponse,
@@ -253,13 +98,7 @@ async def get_image(
     try:
         stored = await images.serve(image_id, width=rung)
     except PortUnavailable as exc:
-        # A timeout, a refused connection, a 408 or a 5xx. Transient by
-        # construction, so the client is told to come back -- and the header
-        # saying so is what separates this arm from the one below.
-        #
-        # **Not a 429 and not a 401/403.** Neither `PortRateLimited` nor
-        # `PortAuthFailed` subclasses `PortUnavailable`, so neither reaches
-        # this arm; `api/errors.py`'s handler answers both, for every route.
+        # A timeout, a refused connection, a 408 or a 5xx.
         raise ProblemException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code=ProblemCode.SOURCE_UNAVAILABLE,
@@ -267,24 +106,19 @@ async def get_image(
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from exc
     except MediaTypeNotServable as exc:
-        # **Before its parent arm, and the order is the point.** This is the
-        # provider answering correctly about artwork this deployment declines
-        # to carry -- an SVG logo, one title in seventeen -- so it is an
-        # ordinary absence and not an outage. Caught second (after
-        # `PortDataMalformed`) Python would never reach it and the seventeen-
-        # to-one alarm the subclass exists to prevent would be back.
+        # **Before its parent arm, and the order is the point.** This is the provider
+        # answering correctly about artwork this deployment declines to carry -- an SVG
+        # logo, one title in seventeen -- so it is an ordinary absence and not an
+        # outage.
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,
             detail="image not found",
         ) from exc
     except PortDataMalformed as exc:
-        # Everything else on that arm: a 4xx, a body past the ceiling, a media
-        # type that is not one of the declined ones -- a captive portal's HTML
-        # login page under a 200 is the shape worth surfacing. Asking again
-        # produces the same answer, so **no** `Retry-After`. `detail` names no
-        # URL, no host and no path: the exception's own message may carry one
-        # and this string is written here rather than interpolated from it.
+        # Everything else on that arm: a 4xx, a body past the ceiling, a media type that
+        # is not one of the declined ones -- a captive portal's HTML login page under a
+        # 200 is the shape worth surfacing.
         raise ProblemException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code=ProblemCode.SOURCE_UNAVAILABLE,

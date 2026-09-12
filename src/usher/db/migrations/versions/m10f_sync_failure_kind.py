@@ -1,13 +1,4 @@
-"""`sync_runs` records the failure kind in a column, not as a message prefix.
-
-Revision ID: m10f
-Revises: m10e
-Create Date: 2026-09-12
-
-Nullable and staying nullable: a run that completed has no failure kind, and a
-sentinel meaning "not applicable" would be a third member of a vocabulary whose
-only job is telling two failures apart.
-"""
+"""`sync_runs` records the failure kind in a column, not as a message prefix."""
 
 from collections.abc import Sequence
 

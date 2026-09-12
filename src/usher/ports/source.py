@@ -17,13 +17,8 @@ from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import UsherPortError
 
-# The provider-id keys every adapter must emit under these exact names
-# whenever it knows them. Sources spell them differently -- Emby's
-# `ProviderIds` uses `Tmdb`/`Imdb`/`Tvdb` -- and normalising at the adapter
-# boundary is what keeps M4's matcher from having to know one casing per
-# source. Keys outside this set are permitted (a source that knows an AniDB
-# id should say so) but must be lowercase, so the rule is "lowercase always,
-# these three names when known" rather than a closed vocabulary.
+# The provider-id keys every adapter must emit under these exact names whenever it knows
+# them.
 CANONICAL_PROVIDER_IDS: frozenset[str] = frozenset({"tmdb", "imdb", "tvdb"})
 
 
@@ -102,30 +97,7 @@ class SourceItem:
 
 @dataclass(frozen=True)
 class SourceWatchState:
-    """One item's watch state as a source reports it.
-
-    **`play_count` and `last_played_at` are three-valued, and `None` is not
-    zero.** `None` means "this read could not determine it"; `0` and a real
-    datetime are positive claims a caller must honour, including the claim
-    that something has been reset to unplayed.
-
-    That distinction is not fastidiousness. Verified 2026-07-31 against Emby
-    4.9.5.0: a `GET /Users/{user}/Items` *listing* reports `PlayCount: 0`
-    and omits `LastPlayedDate` entirely, for the very item whose
-    `GET /Users/{user}/Items/{item}` reports `PlayCount: 2` and a real
-    `LastPlayedDate`. `PlaybackPositionTicks` and `Played` are correct in
-    both. No `Fields` value, no `EnableUserData`, and no `Ids` restriction
-    changes it. So `watch_state()` — which walks listings — cannot carry
-    play history, and if these two fields could only say "0" then every
-    delta walk would overwrite the household's real history with zeros,
-    silently, forever.
-
-    An implementation whose listing *does* carry history is free to report
-    it from the walk; the contract requires only that a reported number be
-    true, never that it be present. `get_watch_state` is where a caller goes
-    when it needs the answer rather than whatever the cheap read happened to
-    know. See [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md).
-    """
+    """One item's watch state as a source reports it."""
 
     external_id: str
     position_seconds: int
@@ -147,44 +119,7 @@ class WatchStateUpdate:
 
 @dataclass(frozen=True)
 class SourceEvent:
-    """One thing a source's push channel said changed.
-
-    **Settled in M5** — this DTO used to carry a 🔶 asking whether a
-    `WATCH_STATE_CHANGED` event should re-walk `watch_state(since=...)` to
-    discover what changed, or carry the payload the upstream already sent.
-    It carries the payload, and the two candidates were never close:
-    `watch_state(since=...)` is a paged listing walk whose only knob is the
-    cursor, measured at 29,027 items over a 30-day `MinDateLastSavedForUser`
-    window against the one real deployment. Per event, on a lane PRD 01
-    budgets at one connection per source.
-
-    `external_ids` is the authoritative list of affected items.
-    `watch_states` is the subset the adapter was able to parse out of the
-    upstream's own message, **keyed by `external_id` rather than aligned by
-    position** — an id in the first and not the second is a state the caller
-    must fetch with `get_watch_state`, and aligning by position would let
-    one unparseable entry write every later state onto the wrong item.
-    `__post_init__` makes that a property of the DTO rather than a sentence
-    here: a state naming an item the event did not is refused, so an adapter
-    that built the two tuples out of different sets of message entries fails
-    at construction instead of merging one item's state onto another's row.
-    Unreachable from any payload on the Emby path — `UserDataChanged` has
-    one `UserDataList` and both tuples come from its entries — so this
-    refuses adapter bugs, not sources.
-
-    **A carried state's `play_count`/`last_played_at` obey ADR-0014 exactly
-    as a walk's do.** An adapter reports a number only if it is true. On
-    Emby they are `None`: a `UserDataChanged` message is a third payload
-    shape (a listing is one, an item route is another) and no run in this
-    repository has ever parsed one, so absence is the honest answer and the
-    `WATCH_HISTORY` backfill recovers the pair from the single-item route.
-    A reported `0` is a positive claim that `merge_from_source` writes, so
-    guessing one here overwrites real play history permanently.
-
-    The item kinds carry no payload at all — Emby's `LibraryChanged` sends
-    ids, not items — so `ITEM_ADDED`/`ITEM_UPDATED` are resolved with
-    `get_item` per id, bounded by the caller.
-    """
+    """One thing a source's push channel said changed."""
 
     kind: SourceEventKind
     external_ids: tuple[str, ...] = field(default_factory=tuple)
@@ -203,29 +138,7 @@ class SourceEvent:
 
 
 def redact_query(url: str) -> str:
-    """A URL cut at its query string, for rendering in a `repr` or a log line.
-
-    Everything from the first `?` or `#` onward, gone. Not a search for
-    `api_key=`: the deep-link target hides the whole direct URL, token and
-    all, percent-encoded inside its *own* query string, so a redaction that
-    matched on a parameter name would sail straight past it. Cutting at the
-    query covers both, and covers whatever a second source spells its token
-    parameter — which is the point, since `StreamTarget` is the port's DTO
-    and Jellyfin's `ApiKey` has exactly the same problem as Emby's
-    `api_key`.
-
-    Enough is kept (scheme, host, path) to identify the item in a log line;
-    the query carries no fact a reader needs that the target's own typed
-    fields do not already state.
-
-    **Public, and it has two callers.** `StreamTarget.__repr__` below, and
-    `usher.adapters.emby.push`, whose socket URL is
-    `/embywebsocket?api_key=<token>&deviceId=<id>` — the same token, in the
-    same shape, one milestone later. One rule rather than two that can
-    disagree; ADR-0012 records why it is spelled this way. It stays in this
-    module rather than moving to a utility package because it is a property
-    of this port's DTOs, and adapters may import `ports`.
-    """
+    """A URL cut at its query string, for rendering in a `repr` or a log line."""
     cut = min((index for index in (url.find("?"), url.find("#")) if index != -1), default=-1)
     return url if cut < 0 else f"{url[:cut]}<redacted>"
 
@@ -239,67 +152,14 @@ INFUSE_SCHEME = "infuse"
 
 
 def wrap_deep_link(inner_url: str) -> str:
-    """Wrap a URL as an Infuse `x-callback-url` deep link.
-
-    Moved here from `usher.adapters.emby.playback` in M9 (D2), ahead of the
-    playback ticket ADR-0012 names as its M9 successor. That ticket is
-    handed to "a third-party player that follows the redirect" -- a custom
-    scheme is not something an HTTP `302` can produce, so whatever wraps a
-    URL for Infuse has to run *after* the ticket exists, on the ticket's own
-    URL, rather than on the source's direct-play one. The function that
-    mints a ticket is therefore what has to call this, and that rules out
-    `usher.adapters.emby.playback`: import contract 6 forbids
-    `usher.services`/`usher.api` naming `usher.adapters.emby`, so a wrapper
-    only that module offered would be unreachable from the code that mints
-    the ticket.
-
-    Lives beside `redact_query` for the identical reason that one is here
-    rather than in a utility package: it is a property of this port's DTOs
-    -- the string this returns is exactly `StreamTargetKind.DEEP_LINK`'s
-    `url` -- and adapters may import `ports`. **It is a move, not a
-    rewrite**: `build_stream_targets` calls this on the direct target's
-    `url` and the result is unchanged, byte for byte, from what it built
-    when the string was assembled inline.
-    """
+    """Wrap a URL as an Infuse `x-callback-url` deep link."""
     return f"{INFUSE_SCHEME}://x-callback-url/play?url={quote(inner_url, safe='')}"
 
 
 # `repr=False` is load-bearing, not stylistic -- see `__repr__` below.
 @dataclass(frozen=True, repr=False)
 class StreamTarget:
-    """How to play an item. Clients choose between the returned targets.
-
-    Complete information, not a decision: PRD 07's playback contract is
-    that Usher "supplies complete information and never proxies bytes",
-    so a target carries everything a client needs to decide whether it can
-    play this — container, codecs, HDR format, resolution — rather than a
-    server-side guess at which one it should use.
-
-    `scheme` is set only for `StreamTargetKind.DEEP_LINK` targets and names
-    the URL scheme (`"infuse"` for `infuse://…`), so a client can check
-    whether it can handle the link without parsing the URL. `audio` is a
-    single lowercase token describing the default audio track as a client
-    thinks about it (`"truehd_atmos_7_1"`), which is a different thing from
-    `SourceItem.audio_codec`'s raw `"truehd"` — the codec alone does not
-    tell a client whether it can play the track.
-
-    **`url` carries a source credential, and `repr` therefore does not
-    render it.** A direct-play target has to authenticate itself to the
-    source — Emby's `api_key`, Jellyfin's `ApiKey` — because Usher never
-    proxies the bytes (ADR-0012, `docs/prd/decisions/`).
-    That makes this the one DTO on any port that deliberately holds a
-    secret, and PRD 08's "credentials are never logged, including in error
-    paths and request dumps" cannot then be a rule each caller remembers:
-    `logger.info(targets)`, an f-string in an exception message, a pytest
-    assertion dump, and loguru's `diagnose=True` frame-locals renderer all
-    reach the value through `__repr__` and nothing else. So the guarantee
-    lives here, once.
-
-    Verified directly: with the generated `repr`, the token appears in
-    plain text in all four. `.url` itself is untouched — PRD 07's `/play`
-    response is built from it, and a scrubbed URL would be an unplayable
-    link.
-    """
+    """How to play an item. Clients choose between the returned targets."""
 
     kind: StreamTargetKind
     url: str
@@ -362,14 +222,9 @@ class SourceStatus:
     authenticated: bool
     push_available: bool | None = None
     server_version: str | None = None
-    # `None` means "not determined", exactly as `push_available` does, and
-    # for a stronger reason: ADR-0012 accepts the risk that an operator
-    # configures an administrator account, and its recorded mitigation is
-    # guidance rather than code. A fabricated `False` here would make an
-    # unperformed check look like a performed one, which is worse than the
-    # unknown it replaces. From M5 the same token also opens a long-lived
-    # push socket, which is why the check ships now rather than staying a
-    # recommendation.
+    # `None` means "not determined", exactly as `push_available` does, and for a
+    # stronger reason: ADR-0012 accepts the risk that an operator configures an
+    # administrator account, and its recorded mitigation is guidance rather than code.
     is_administrator: bool | None = None
     detail: str | None = None
 
@@ -386,29 +241,7 @@ class SourceStatus:
 
 @dataclass(frozen=True)
 class PushProbe:
-    """What an on-demand push probe learned.
-
-    `upgraded` says a channel opened. **It is deliberately not the answer**
-    — ADR-0004 measured a handshake against a *nonexistent path* upgrading
-    and receiving `Sessions`, so an upgrade proves nothing about the path,
-    the subscription, or a proxy in between. `delivering` is
-    `supports_push` read after a bounded wait, which every honest
-    implementation grounds in received messages; that is the answer. The
-    two are reported separately rather than collapsed because "the upgrade
-    failed" and "the upgrade worked and nothing came" are different
-    problems with different fixes, and an operator needs to know which.
-
-    `events` is the kinds that arrived, for an operator who wants to know
-    *what* the channel is carrying rather than only that it is carrying.
-    Empty with `delivering=True` is normal and is the common case on an
-    idle library: Emby's periodic `Sessions` message maps to no event and
-    is exactly what keeps the channel measurably alive.
-
-    `detail` is a short operator-facing string built from a translated
-    `UsherPortError`, never a URL and never a credential — the same rule
-    `SourceStatus.detail` carries, and it matters more here because the
-    channel's own URL holds a session token (ADR-0012).
-    """
+    """What an on-demand push probe learned."""
 
     upgraded: bool
     delivering: bool
@@ -434,36 +267,8 @@ class SourceAdapter(ABC):
     @property
     @abstractmethod
     def supports_push(self) -> bool:
-        """Whether this adapter has a live push channel right now, **and the
-        answer must be grounded in messages received rather than in a socket
-        being open.**
-
-        PRD 03: when the socket can't be established (or drops and stays
-        down after N reconnect attempts), the adapter reports this `False`
-        and the reconciler's nightly walk covers the gap. Mirrors
-        `usher.domain.source.Source.supports_push`, which this populates.
-
-        ADR-0004 measured a WebSocket handshake against a *nonexistent path*
-        upgrading and being held open, so "the connection object exists" is
-        a state this must answer `False` for. A reverse proxy that forwards
-        `Upgrade` and then buffers produces the same state without any help
-        from the source.
-
-        **The relationship to `events()` is one-way, and stating it the
-        other way round was wrong.** This property is a *health* signal and
-        `SourceNotSupported` is a *capability* one:
-
-        - `True` here ⟹ `events()` yields a channel. An adapter that
-          advertises push it does not have makes the reconciler skip a
-          source it is the only cover for.
-        - `events()` raising `SourceNotSupported` ⟹ this is `False`, and
-          stays `False`; that adapter has no push channel at all.
-        - **The converse does not hold.** An adapter that *has* a channel
-          reports `False` from the moment it is opened until the first
-          message arrives on it, which is the whole of the rule ADR-0004's
-          caveat forces. A contract that asserted
-          `events()-was-offered is supports_push` would forbid exactly the
-          honest implementation.
+        """Whether this adapter has a live push channel right now, **and the answer must be
+        grounded in messages received rather than in a socket being open.**
         """
 
     @abstractmethod
@@ -484,28 +289,7 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
-        """Walk the library, or only items changed since a cursor.
-
-        Contract an implementation must guarantee:
-        - `since` is inclusive: an item changed exactly at `since` is
-          included, never dropped at the boundary.
-        - No ordering is promised across items; callers must not rely on
-          one.
-        - The same item may be yielded more than once in a single walk
-          (e.g. a paginated upstream listing whose pages overlap); callers
-          deduplicate by `external_id`.
-        - **Must stream, not materialise.** One upstream page may be held
-          at a time; the walk may not build the library into a list first.
-          The deployment this was built for holds 94,395 movies across 17
-          libraries.
-        - **Must raise, never truncate silently.** An iterator that stops
-          because the walk finished is indistinguishable from one that
-          stopped because the adapter swallowed an error — and the
-          reconciler cannot tell the difference; it would mark the rest of
-          the library `available = false`. A partial failure raises (e.g.
-          `PortUnavailable` from `usher.ports.errors`) from the generator;
-          it does not just stop yielding.
-        """
+        """Walk the library, or only items changed since a cursor."""
 
     @abstractmethod
     async def get_item(self, external_id: str) -> SourceItem | None:
@@ -536,73 +320,11 @@ class SourceAdapter(ABC):
     def watch_state(
         self, since: AwareDatetime | None = None, *, start_index: int = 0
     ) -> AsyncIterator[SourceWatchState]:
-        """Watch state from the source, optionally since a cursor.
-
-        Same `since`-inclusivity, no-ordering, possible-duplicates,
-        must-stream, and must-raise-never-truncate contract as
-        `list_items`.
-
-        Emits a state for every item the walk covers, including states that
-        are entirely zero. Filtering those out looks like an obvious saving
-        and is a correctness bug: un-marking something played *is* an
-        all-zero state, so an implementation that skipped them could never
-        propagate a reset — the delta walk would find the changed item and
-        then discard exactly the record describing the change.
-
-        May report `play_count`/`last_played_at` as `None` — "this read
-        cannot say" — and must, rather than reporting a zero, whenever the
-        listing it walks does not carry them. See `SourceWatchState`.
-
-        `start_index` resumes a walk that was interrupted. It is the number
-        of records **this walk has already yielded**, and the implementation
-        must place the resumed walk **at or before** that point: it may
-        re-yield records the caller has already seen and must never skip one
-        it has not. Everything on this lane is an idempotent upsert, so a
-        re-yield costs a request and a merge; a skip is a hole.
-
-        **Exact alignment is the goal and is not promised, because an
-        adapter that filters client-side cannot deliver it** (measured
-        2026-08-26 against `EmbyAdapter`). Emby offsets its *own* filtered
-        result, which is the closest thing a paging server can offer, but
-        `to_watch_state` then drops any payload carrying no `UserData` --
-        a drop `StartIndex` cannot see. So the upstream offset counts rows
-        the walk did not yield, the resumed walk lands that many records
-        early, and it re-walks the difference. Bounded and safe in the
-        direction that matters: the lag is one attempt's drops, not a
-        running total, because each attempt checkpoints its own yields.
-
-        **It is only meaningful under a stable order, which this port does
-        not promise and an adapter may** -- the Emby adapter walks
-        `SortBy=DateCreated,SortName` ascending over an immutable creation
-        date, so its walked prefix does not reorder between attempts. An
-        adapter with no stable order must ignore it rather than skip
-        arbitrary records, and say so.
-        """
+        """Watch state from the source, optionally since a cursor."""
 
     @abstractmethod
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
-        """Authoritative watch state for one item, including play history.
-
-        The expensive, exact counterpart to `watch_state`'s cheap walk.
-        Where the walk is permitted to report `play_count`/`last_played_at`
-        as `None` ("this read cannot say"), this method must report the real
-        values whenever the source holds them — an implementation that
-        delegates to the walk is wrong on any source whose listing is
-        lossier than its item route, which is the measured behaviour of the
-        one source that exists.
-
-        `None` means the item is gone from the source, exactly as
-        `get_item` does, and for the same reason: a caller must never learn
-        to tell a deletion from a 404. A transient failure to reach the
-        source raises (e.g. `PortUnavailable`) and is never reported as
-        `None` — conflating them would let a flaky network merge an
-        all-zero state over a real one.
-
-        Costed deliberately: one request per item, against a library
-        measured at 1,126,674 items. No walk may call this. Its caller is a
-        queued, bounded backfill over the items a walk has flagged as
-        played-but-history-unknown.
-        """
+        """Authoritative watch state for one item, including play history."""
 
     @abstractmethod
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
@@ -636,57 +358,11 @@ class SourceAdapter(ABC):
 
     @property
     def push_reconnects(self) -> int:
-        """How many times this adapter's push channel has re-**opened**.
-
-        PRD 10's `usher.source.push.reconnects`, and it is on the port
-        rather than on a ledger the lane supervisor reaches into because
-        the supervisor holds a `SourceAdapter` and nothing more — reading
-        an attribute the port does not promise would report a silent zero
-        the day it is renamed.
-
-        Concrete rather than abstract for the reason `probe_push` is, plus
-        one this property has of its own: an adapter with **no** push
-        channel has never reconnected, so `0` is its true answer rather
-        than the fabricated zero `usher.telemetry._push_observations`
-        refuses to emit. An adapter that *has* a channel must override it;
-        `tests/unit/test_ports_source.py` checks structurally that both
-        implementations do, because a forgotten override is indistinguishable
-        from "it has not reconnected yet" in every behavioural test.
-
-        Counted on the second and later **open**, never on a failure: a
-        lane that failed to connect five times and then succeeded
-        reconnected *once*, and a counter on the failure reports five and
-        makes an unreachable source look like a flapping one — a different
-        diagnosis with a different fix. Cumulative for the lane rather than
-        per connection, which is what an adapter holding one ledger across
-        reconnects buys.
-        """
+        """How many times this adapter's push channel has re-**opened**."""
         return 0
 
     async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:
-        """Open the push channel, wait, and report **what arrived**.
-
-        Concrete rather than abstract, and that is the point: the body below
-        is calls to `events()` and `supports_push` and nothing else, so
-        every adapter inherits ADR-0004's rule instead of re-deriving it —
-        and re-deriving it wrongly is a one-line mistake
-        (`return PushProbe(upgraded=True, delivering=True)`) that no test of
-        that adapter's own would obviously catch.
-
-        Never raises. Its callers are an operator's diagnostic
-        (`usher push --probe`) and a status screen, and both exist to render
-        a failure rather than to handle one — the same reason `verify()`
-        returns a `SourceStatus` instead of raising.
-
-        Bounded by wall time rather than by a message count: a channel that
-        is working may legitimately deliver nothing during the probe if
-        nothing changed, and the source's own periodic traffic is what
-        separates that from a dead one.
-
-        `dict.fromkeys` rather than a `set`, for the reason M4 uses it
-        everywhere: it deduplicates *and* keeps arrival order, so a probe's
-        output reads in the order the channel produced it.
-        """
+        """Open the push channel, wait, and report **what arrived**."""
         collected: list[SourceEventKind] = []
         upgraded = False
         try:

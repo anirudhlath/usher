@@ -1,25 +1,4 @@
-"""`GET /events` -- PRD 07's SSE channel.
-
-SSE rather than a WebSocket, and PRD 07 states the argument: the channel is
-server->client only, it survives proxies that mangle upgrades, and it
-reconnects natively in browsers. The third is what pays for the replay ring:
-an `EventSource` retries and resends `Last-Event-ID` with no client code at
-all.
-
-**No failure on this route is a 503.** PRD 08's rule -- "a degraded subsystem
-narrows functionality; it never fails a request local state can answer" --
-holds here by construction rather than by care: the bus is in-memory and this
-handler touches no `SourceAdapter`, so `PortUnavailable` is not reachable
-from it. The one failure it *can* have is a malformed `?titles=`, answered
-422 as an RFC 9457 problem document like every other rejected request.
-
-**The route is on `dto/problem.py`'s exemption list and that is about the
-stream, not about the 422.** Once this handler has answered `200
-text/event-stream` there is no status code left to carry a problem document,
-so every later failure is an SSE event (`resync_required`) or a closed
-connection; the 422 below is decided before the stream starts and is an
-ordinary document.
-"""
+"""`GET /events` -- PRD 07's SSE channel."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -36,13 +15,9 @@ from usher.services.events import SentEvent
 
 router = APIRouter(tags=["events"])
 
-#: This route is on `PROBLEM_EXEMPTIONS` for its **stream** -- once it has
-#: answered `200 text/event-stream` there is no status code left to carry a
-#: document, and its in-stream vocabulary is an SSE event instead. That
-#: exemption does not reach the one ordinary failure it has: a malformed
-#: `?titles=` is refused before the stream starts and is a problem document
-#: like any other, so it is declared like any other.
-#: `tests/unit/test_api_openapi.py` holds it.
+# : This route is on `PROBLEM_EXEMPTIONS` for its **stream** -- once it has : answered
+# `200 text/event-stream` there is no status code left to carry a : document, and its
+# in-stream vocabulary is an SSE event instead.
 _EVENTS_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ProblemResponse, "description": "`?titles=` is not a comma-separated id list."},
 }
@@ -66,12 +41,7 @@ async def events(
         # what it rejected, and a query string is a submitted body's
         # neighbour rather than its exception.
         raise ProblemException(
-            # `..._CONTENT`, not `..._ENTITY`. Starlette 1.3 deprecated the
-            # older spelling behind a module `__getattr__`, so the older one
-            # emits a `StarletteDeprecationWarning` **per request** rather
-            # than once at import -- and this suite deliberately runs with no
-            # expected warnings, because a suite with one permanent warning
-            # is a suite where the next real one is invisible.
+            # `..._CONTENT`, not `..._ENTITY`.
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             code=ProblemCode.VALIDATION_FAILED,
             detail="titles must be a comma-separated list of uuids",
@@ -90,27 +60,11 @@ async def events(
         # for the life of the process.
         async with bus.subscribe(titles=wanted, last_event_id=last_event_id) as sent_events:
             iterator = aiter(sent_events)
-            # **The pending `__anext__` is kept across heartbeats, never
-            # cancelled and re-issued, and that is not a style choice.**
-            # `asyncio.wait_for(anext(iterator), timeout)` cancels the
-            # `__anext__` it is waiting on when the timeout fires, and
-            # cancelling `__anext__` *closes the async generator* -- so the
-            # next `anext` raises `StopAsyncIteration` and this route
-            # returns. Reproducible in six lines with nothing of Usher's in
-            # them:
-            #
-            #     it = aiter(gen())
-            #     await asyncio.wait_for(anext(it), 0.05)  # TimeoutError
-            #     await asyncio.wait_for(anext(it), 0.05)  # StopAsyncIteration
-            #
-            # In production that disconnects every SSE client one
-            # `sse_heartbeat_seconds` after the last event it received -- an
-            # `EventSource` reconnects, so the symptom is a reconnect and a
-            # replay per client per 20 s rather than a dead channel, which is
-            # precisely the shape of failure this milestone exists to refuse
-            # to be quiet about. `asyncio.wait` does not cancel what it waits
-            # on, so the task outlives the heartbeat and is still there --
-            # holding the same `__anext__` -- when the next event arrives.
+            # **The pending `__anext__` is kept across heartbeats, never cancelled and
+            # re-issued, and that is not a style choice.**
+            # `asyncio.wait_for(anext(iterator), timeout)` cancels the `__anext__` it is
+            # waiting on when the timeout fires, and cancelling `__anext__` *closes the
+            # async generator* -- so the next `anext` raises `StopAsyncIteration` and
             pending: asyncio.Task[SentEvent] | None = None
             try:
                 while True:
@@ -142,12 +96,8 @@ async def events(
         stream(),
         media_type="text/event-stream",
         headers={
-            # nginx buffers a proxied response body by default, which holds
-            # every event until the buffer fills -- the exact opposite of
-            # what this route is for. `X-Accel-Buffering: no` is nginx's own
-            # opt-out and is ignored by everything else, which is why it is
-            # asserted in a test rather than trusted: nothing short of a real
-            # nginx can tell whether it is there.
+            # nginx buffers a proxied response body by default, which holds every event
+            # until the buffer fills -- the exact opposite of what this route is for.
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },

@@ -1,60 +1,5 @@
 # src/usher/adapters/emby/playback.py
-"""`StreamTarget`s for one Emby item.
-
-PRD 07: Usher "supplies complete information and never proxies bytes", and
-"the deep-link construction currently done by hand in the Home Assistant
-card moves here, where it is testable". This module is that move, and it is
-a pure function of one item payload so that it stays testable.
-
-Two targets per playable item, ranked:
-
-1. **direct** -- `/Videos/{id}/stream.{container}?static=true`, the
-   byte-for-byte file, carrying every fact a client needs to decide whether
-   it can play it. **Verified to actually serve bytes** against the live
-   Emby 4.9.5.0 server on 2026-07-31: a range request against a URL this
-   module built answered 206 with `video/x-matroska` content.
-2. **deep_link** -- `infuse://x-callback-url/play?url=<the direct URL,
-   percent-encoded>`, built by `usher.ports.source.wrap_deep_link`. The
-   wrapper itself does not live here (M9, D2): a custom scheme is not
-   something a playback ticket's HTTP redirect can produce, so whatever
-   mints the ticket has to be able to call it too, and `usher.services`/
-   `usher.api` may not import this module (import contract 6). See that
-   function's docstring for the full reasoning; this module only calls it.
-
-Direct first, because a client that *can* play the container should: a deep
-link hands playback to another application, which is a fallback rather than
-a preference. The deep link deliberately carries no quality facts -- the
-client is not choosing a stream there, it is delegating, and duplicating
-the facts would invite a UI to render them twice.
-
-`/Items/{id}/PlaybackInfo` is deliberately not called. That endpoint exists
-for transcode negotiation, which Usher explicitly does not do, and
-everything the direct URL needs -- container, `MediaSourceId`, resume
-position -- is already on the item. One fewer endpoint to have guessed
-wrong, and one fewer round trip against an upstream whose single-item reads
-are measured at **0.1495 s median / 0.1649 s mean** (M10 S1, 2026-08-15 --
-`.claude/rules/emby-push-and-ingest.md`), on the request path a person is
-waiting on.
-
-**The direct URL carries the source's access token**, because without it
-the bytes are not fetchable and Usher does not proxy them -- measured, not
-assumed: the same URL with `api_key` removed answers **401**, and with
-`static` removed answers **400**. That is knowingly in tension with PRD
-08's "no credential ever reaches a client"; ADR-0012
-(`docs/prd/decisions/`) records the decision, how it differs from the
-failure Usher replaces, and what removes it in M9. The handling rule that
-follows -- the token is a return value and never a log field -- is enforced
-by `StreamTarget`'s own `__repr__`, not by this module remembering: see
-`usher.ports.source`.
-
-**It does not carry `DeviceId`, and used to.** Removing it from the query
-leaves the route answering 206 with real bytes, so it was never
-load-bearing here. Sending it made a captured playback URL a drop-in for
-the push channel's own `/embywebsocket?api_key=…&deviceId=…` parameters and
-attributed anything done with it to Usher's registered device -- a risk
-ADR-0012 accepted only because nobody had checked whether the parameter was
-needed.
-"""
+"""`StreamTarget`s for one Emby item."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -105,14 +50,7 @@ def build_stream_targets(
         as_int(user_data.get("PlaybackPositionTicks")) if isinstance(user_data, Mapping) else None
     )
 
-    # Three parameters, not four. Measured against the live Emby 4.9.5.0
-    # server on 2026-07-31, one request each with a `Range` header: the URL
-    # as built answers 206 with real bytes; with `DeviceId` removed it still
-    # answers 206; with `api_key` removed it answers 401; with `static`
-    # removed it answers 400. `DeviceId` was never load-bearing here, and
-    # sending it made a captured URL a drop-in for the push channel's
-    # `/embywebsocket?api_key=…&deviceId=…` -- a risk ADR-0012 accepted only
-    # because nobody had checked.
+    # Three parameters, not four.
     query = urlencode(
         {
             "static": "true",

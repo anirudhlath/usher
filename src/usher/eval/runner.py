@@ -1,18 +1,4 @@
-"""generate -> run -> score -> compare -> record.
-
-**Only `FAIL` is a failure** -- `verdicts.py` has six members and five of them
-exit 0 -- and keeping them apart is what stops the harness becoming a red
-everyone learns to ignore, the failure mode `prd-maintenance.md` already records
-against a check nobody trusts. `verdict_for` below chooses among the four a bar
-can produce; `suggest_run.py` owns the run-level `SKIPPED` and
-`BASELINE_INVALID`, because only the surface knows its preconditions were unmet
-or that the catalog moved.
-
-This paragraph read *"four of the five verdicts here are not failures"* from the
-commit that created this file (2026-08-19) until 2026-09-02. `Verdict` has never
-had five members, and only `FAIL` has ever been in `_FAILING`, so neither half
-of that sentence was true on any tree.
-"""
+"""generate -> run -> score -> compare -> record."""
 
 from collections.abc import Sequence
 

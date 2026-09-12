@@ -1,31 +1,4 @@
-"""`row_provider_settings` — PRD 09's boundary call 9 coming due.
-
-M7 refused this table on the ground that *"a `row_providers` table with nine
-rows all reading `enabled = true` is indistinguishable from no table, right up
-until an operator finds it and expects toggling it to do something"*, and it
-named the admin API as the condition. The admin API is M9's, so the table
-ships — **empty**, which is the half of the refusal that survives: an absent
-row means enabled, which is exactly what *"providers are enabled by
-registration in code"* already means.
-
-**Nine was true when the call was written and is not now.** `row_providers()`
-returns **ten** as of `CuratedProvider` (`src/usher/services/rows/__init__.py`),
-and PRD 09's counted fact is corrected in the same commit rather than left to
-age.
-
-**Not seeded with ten slugs.** A migration hard-coding the registry would be a
-second copy of `services/rows/__init__.py` with nothing anywhere to detect
-drift — the exact shape `_SUSPENDABLE_INDEXES`' literal `CREATE INDEX` strings
-needed a dedicated round-trip case to stop. Reconciliation between the table
-and the registry belongs to the admin task, which is also the only thing that
-can report a slug in one and not the other.
-
-No `set_updated_at` trigger: `jobs`' precedent, already named in
-`test_migration_creates_the_updated_at_triggers`' comment block — this table's
-one writer is an admin route that sets `updated_at` explicitly on every
-statement, and that trigger set is asserted **exactly**, so a trigger here
-would be a failing case in another file.
-"""
+"""`row_provider_settings` — PRD 09's boundary call 9 coming due."""
 
 from datetime import datetime
 

@@ -1,52 +1,4 @@
-"""Availability persistence, on the staged-`COPY` path.
-
-Implements `MediaItemRepository` (`usher.ports.repository`). One batch is
-one `COPY` into an `UNLOGGED` staging table plus exactly one
-`INSERT ... SELECT ... ON CONFLICT`, the path `usher.db.staging` documents
-and `usher.db.repositories.bulk` measured. Nothing here goes through the
-ORM: at 1,126,674 items the per-row path's ~1.15 ms of SAVEPOINT/INSERT/
-RELEASE overhead is ~21 minutes of pure repository cost per full walk,
-before a byte of upstream I/O.
-
-Four details worth not re-deriving:
-
-1. **`SELECT DISTINCT ON (source_id, external_id)` is required, not
-   defensive.** `SourceAdapter.list_items`' own contract permits the same
-   item twice in one walk, so a real batch contains duplicates and
-   Postgres answers `CardinalityViolationError: ON CONFLICT DO UPDATE
-   command cannot affect row a second time`.
-2. **`COALESCE(excluded.title_id, media_items.title_id)`, never
-   `excluded.title_id` alone**, and the same for `episode_id` and
-   `added_at`. The nightly walk upserts with `title_id = NULL` for
-   everything the match pass has not yet resolved -- including every item a
-   human resolved by hand in the review queue. An unconditional assignment
-   erases those the same night they were made. `added_at` is the same
-   shape for a different reason: it is a fact about the file, not an
-   observation about this walk, and a delta payload that omits it must not
-   erase it.
-3. **`available = true` on both branches.** Appearing in a walk *is* the
-   evidence of availability, so the upsert is also what restores an item
-   that came back. The sweep only ever sets `false` (ADR-0015).
-4. **The sweep counts before it writes, in one transaction, and the guard
-   is a multiplication rather than a division.** `stale / total > ceiling`
-   is the obvious spelling and raises `ZeroDivisionError` on an empty
-   source -- which is a real state, not a hypothetical one: the first sync
-   of a source that turned out to hold nothing.
-
-`uq_media_items_source_external` is a plain `UniqueConstraint`, not a
-partial index, so trap 1 from the bulk module (repeating a partial index's
-predicate in `ON CONFLICT`) does not apply here -- named because its absence
-is otherwise indistinguishable from having forgotten it.
-
-**Every statement runs under `no_autoflush`, including the writes.** Unlike
-`PostgresTitleRepository`, nothing here ever puts a row in the session's
-identity map -- every write is raw SQL or a `COPY` -- so this repository has
-nothing of its own to flush, and an autoflush here could only ever surface
-some *other* caller's pending, invalid state as this call's conflict. That
-matters more than usual because this repository's one `except IntegrityError`
-translates whatever it catches into "a media item batch conflicts with the
-catalog", which would be a lie about someone else's row.
-"""
+"""Availability persistence, on the staged-`COPY` path."""
 
 import uuid
 from collections.abc import Sequence
@@ -75,13 +27,10 @@ from usher.ports.repository import (
     UnmatchedCursorPosition,
 )
 
-# `ordinal` is the row's index within the batch, and it is what makes
-# deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
-# last-wins, which is the rule the port documents (a resumed walk re-sends a
-# page, so the later copy is the fresher read). Ordering on `id` instead
-# would make that depend on UUIDv7 generation being monotonic within a
-# millisecond -- true of `uuid6.uuid7()` today, but a property of a
-# dependency rather than of this statement.
+# `ordinal` is the row's index within the batch, and it is what makes deduplication
+# deterministic: `ORDER BY ..., ordinal DESC` is literally last-wins, which is the rule
+# the port documents (a resumed walk re-sends a page, so the later copy is the fresher
+# read).
 _STAGING_DDL = """
 CREATE TEMP TABLE stg_media_items (
     ordinal integer, id uuid, source_id uuid, title_id uuid, episode_id uuid,
@@ -170,12 +119,7 @@ WHERE source_id = :source_id
   AND (title_id IS NOT NULL OR episode_id IS NOT NULL)
 """
 
-# One row per target, chosen rather than stumbled on. `DISTINCT ON` needs the
-# ORDER BY to lead with its own key; everything after it is the tiebreak an
-# ordinary household actually hits -- two files of one film on one server.
-# `episode_id IS NULL` in the title branch is not tidiness: an episode's row
-# carries its series' `title_id` too, so without it a series' own watch state
-# resolves to whichever of its episodes the planner reached first.
+# One row per target, chosen rather than stumbled on.
 _EXTERNAL_IDS_FOR_TITLES = """
 SELECT DISTINCT ON (title_id) title_id, external_id FROM media_items
 WHERE source_id = :source_id AND title_id = ANY(:title_ids) AND episode_id IS NULL
@@ -188,74 +132,26 @@ WHERE source_id = :source_id AND episode_id = ANY(:episode_ids)
 ORDER BY episode_id, last_seen_at DESC, external_id
 """
 
-# `ix_media_items_title_id` has existed since M4's migration with no query
-# behind it; this is the first.
-#
-# `episode_id IS NULL` is the bound, not tidiness -- the same clause, for the
-# same reason, as `_EXTERNAL_IDS_FOR_TITLES` above. An episode's row carries
-# its series' `title_id` too, so without it a series answers with one row per
-# episode file and PRD 07's `availability` array becomes a list the length of
-# the show. With it, the answer is bounded by copies of the title itself:
-# sources times versions, single digits.
-#
-# **Measured, on this statement rather than on a lookalike** (captured off
-# `before_cursor_execute` and EXPLAIN (ANALYZE, BUFFERS)'d verbatim; 2026-08-01,
-# `pgvector/pgvector:pg17`, 80,201 `media_items` rows, one series holding
-# 20,000 episodes):
-#
-#   as shipped   1 row, 0.251 ms, 21 buffers -- Sort <- Bitmap Heap Scan <-
-#                BitmapAnd(ix_media_items_episode_id, ix_media_items_title_id)
-#   filter gone  20,001 rows, 22.901 ms, 402 buffers, 3.4 MB of sort memory
-#
-# 91x, and the wrong half is linear in the episode count while the right half
-# is flat -- which is the difference between a response shape and a design
-# defect. `ix_media_items_episode_id` earns its keep a second time here: M4
-# added it for the FK's `SET NULL` scan and the planner reads `IS NULL`
-# straight out of it.
-#
-# No `NULLS LAST` on either descending key, and its absence is deliberate
-# rather than forgotten: `available` and `last_seen_at` are both `NOT NULL`
-# columns, so Postgres's NULLS-FIRST default for a DESC sort has nothing to
-# act on. `list_unmatched` sorts on the one nullable column here and spells
-# it out.
+# `ix_media_items_title_id` has existed since M4's migration with no query behind it;
+# this is the first.
 _FOR_TITLE = """
 SELECT * FROM media_items
 WHERE title_id = :title_id AND episode_id IS NULL
 ORDER BY available DESC, last_seen_at DESC, id
 """
 
-# `list_for_title`'s counterpart, for `POST /episodes/{id}/play` -- and the
-# reason it needs no `episode_id IS NOT NULL` or title-scoping clause of its
-# own is the same three-valued-logic argument `_RECENTLY_ADDED`'s window
-# relies on: `episode_id = :episode_id` against a non-null parameter is
-# simply not true for a row whose `episode_id` is NULL, so the exclusion is
-# free rather than a second predicate to get right. `ix_media_items_episode_id`
-# (`db/models/source.py:121`) is the same index `_FOR_TITLE`'s `IS NULL`
-# clause reads, from the opposite side.
+# `list_for_title`'s counterpart, for `POST /episodes/{id}/play` -- and the reason it
+# needs no `episode_id IS NOT NULL` or title-scoping clause of its own is the same
+# three-valued-logic argument `_RECENTLY_ADDED`'s window relies on: `episode_id =
+# :episode_id` against a non-null parameter is simply not true for a row whose
+# `episode_id` is NULL, so the exclusion is free rather than a second predicate to get
 _FOR_EPISODE = """
 SELECT * FROM media_items
 WHERE episode_id = :episode_id
 ORDER BY available DESC, last_seen_at DESC, id
 """
 
-# Which of a search's candidate titles this household holds a copy of. One
-# statement for the whole result set, and the two clauses that are *not* here
-# are the load-bearing part:
-#
-# - **No `available` predicate.** PRD 02's availability is a soft delete, so a
-#   copy the nightly sweep retracted is still a copy you have. A search
-#   ranking that flipped because a source went down would move results for a
-#   reason unconnected to the query, which is M5's lesson one subsystem over.
-#   `PostgresSearchIndex`'s `owned_only` filter carries the identical
-#   predicate; two definitions of owned is how a filtered list and a boosted
-#   list stop agreeing.
-# - **`episode_id IS NULL` *is* here**, and it is the same bound
-#   `_EXTERNAL_IDS_FOR_TITLES` and `_FOR_TITLE` already carry, for the same
-#   measured reason: an episode's row carries its series' `title_id` too, so
-#   without it one 20,000-episode series is 20,001 rows read to answer one
-#   boolean. `DISTINCT` would still return one id, having paid for all of
-#   them. What it costs is named on the port: a library that reported episodes
-#   but never their series row reads as not-owned for that series.
+# Which of a search's candidate titles this household holds a copy of.
 _OWNED_TITLE_IDS = """
 SELECT DISTINCT title_id FROM media_items
 WHERE title_id = ANY(:title_ids) AND episode_id IS NULL
@@ -272,83 +168,7 @@ WHERE episode_id = ANY(:episode_ids)
 """
 
 
-# Recently Added. The bound is a **time window**, not a row count, which is
-# what PRD 06 already says ("New items in the window") and what makes the
-# dedup affordable.
-#
-# `DISTINCT ON (title_id)` over ALL matched rows, and `episode_id IS NULL` --
-# the bound three statements above this one carry -- is deliberately absent.
-# An episode's row carries its series' `title_id`, so a series that landed
-# last night is one row per episode file: 20,000 for the measured
-# pathological series, one card. Collapsing them is the work rather than the
-# waste, and it is the same 20,001-vs-1 measurement `_OWNED_TITLE_IDS`
-# records, paid inside a window instead of across the table. Excluding
-# episode rows instead would mean a source that reports episode files and no
-# series-level row never shows a new series at all -- which is exactly the
-# cost `_OWNED_TITLE_IDS`' comment already names for the other direction.
-#
-# The inner `ORDER BY title_id, added_at DESC` picks the NEWEST contributing
-# file, because a season that landed last night on a two-year-old show is a
-# new arrival. Ascending would bury every long-running series the household
-# is actively collecting, at the bottom of the one row whose job is to
-# surface what just arrived.
-#
-# The cutoff is bound in rather than spelled `now() - interval '30 days'`:
-# `now()` is frozen per transaction and the integration fixture is one
-# transaction, so a statement carrying its own clock cannot be tested at its
-# boundary, and `clock_timestamp()` would make the test nondeterministic
-# instead. It also lets RecentlyAddedProvider own the window as a tunable
-# rather than as a migration.
-#
-# No source and no user: availability is household-wide. An item with no
-# `added_at` is excluded by three-valued logic rather than by a predicate.
-# The review queue, keyset-paged for `GET /admin/unmatched`. The order is
-# `list_unmatched`'s, character for character, because the port promises the
-# two forms agree on page one -- `added_at DESC NULLS LAST, id DESC` -- and
-# only the resume clause differs.
-#
-# **ADR-0034's three arms, and every one of them is reachable on this read.**
-# `media_items.added_at` is nullable (`db/models/source.py:95`), so a page
-# boundary can land inside the undated group, and the undated group is
-# precisely the population an operator opens this queue to review. Postgres
-# evaluates a row comparison element-wise and answers **NULL, not false**, when
-# the first differing pair involves one, so the spelling a reader reaches for
-# first --
-#
-#   ((added_at IS NOT NULL), added_at, id) > ((:a IS NOT NULL), :a, :id)
-#
-# -- drops the whole undated tail from an undated boundary while every page it
-# served looks full. Measured on `pgvector/pgvector:pg17` and recorded in
-# ADR-0034 with the before/after table. So the boundary's own NULL-ness picks
-# the branch, which is what `IS NOT DISTINCT FROM` would spell in one
-# expression; the caller knows it before it builds the statement.
-#
-# `<` rather than `>` because this order's tiebreak is `id DESC`. What is
-# load-bearing is that the predicate agrees with the `ORDER BY` term for term,
-# not which direction either runs -- two spellings of one rule is how they stop
-# agreeing.
-#
-# **Measured, and what it says is that the keyset fixes the depth and not the
-# page.** `EXPLAIN (ANALYZE, BUFFERS)` on `pgvector/pgvector:pg17` over 200,000
-# items of which 70,000 are unmatched, `limit = over_fetch(50)`:
-#
-#   keyset page 1                     70,000 scanned, 966 buffers, top-N
-#                                     heapsort, 16.4 ms
-#   keyset from a dated boundary      34,999 scanned, 966 buffers, 23.0 ms
-#   keyset from an undated boundary   99 scanned, 328 buffers, 1.9 ms
-#   OFFSET 0                          70,000 scanned, 966 buffers, 17.4 ms
-#   OFFSET 69,900                     69,951 scanned, external merge sort
-#                                     **on disk** (3.2 MB + a worker's 2.2 MB),
-#                                     57.3 ms
-#
-# So the offset's cost grows with depth and the keyset's does not -- but the
-# *sort* dominates either way, because `ix_media_items_unmatched` is
-# `(source_id) WHERE title_id IS NULL` and carries neither `added_at` nor `id`.
-# Every page is a top-N heapsort over the whole unmatched population, bounded by
-# the queue rather than by the table, which is survivable until a library that
-# bootstrapped and never matched makes the queue the library. The covering index
-# that would remove it is a migration this task does not own and did not mint;
-# `.claude/rules/db-and-sql.md` carries the full plans and the revision-id note.
+# Recently Added.
 _AFTER_DATED = """
   AND (added_at IS NULL
        OR added_at < CAST(:after_added_at AS timestamptz)
@@ -405,17 +225,10 @@ class PostgresMediaItemRepository(MediaItemRepository):
         if not rows:
             return BulkWriteResult(inserted=0, updated=0)
         try:
-            # A SAVEPOINT, not a full rollback: unlike
-            # PostgresImportRunRepository, this repository's caller genuinely
-            # has other pending work on the session -- IngestService commits
-            # a batch of items and its sync-run checkpoint together, which is
-            # the whole mechanism behind resumability. Postgres aborts the
-            # entire transaction on any statement error until a ROLLBACK, so
-            # without this a caught conflict leaves the session raising
-            # PendingRollbackError on the next unrelated call. The staging
-            # table's DDL is inside the SAVEPOINT too, deliberately --
-            # Postgres DDL is transactional, so a failed batch leaves no
-            # half-populated staging table for the next one to inherit.
+            # A SAVEPOINT, not a full rollback: unlike PostgresImportRunRepository, this
+            # repository's caller genuinely has other pending work on the session --
+            # IngestService commits a batch of items and its sync-run checkpoint
+            # together, which is the whole mechanism behind resumability.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await stage_records(
@@ -449,19 +262,8 @@ class PostgresMediaItemRepository(MediaItemRepository):
                     result = await self._session.execute(text(_UPSERT))
                     inserted, updated = result.one()
         except IntegrityError as exc:
-            # A CHECK violation, or a title_id/episode_id naming a row that
-            # does not exist. Both are the caller handing this port data it
-            # promised not to -- translated so nothing above imports
-            # sqlalchemy.exc.
-            #
-            # The CHECK fires here rather than during the COPY: the staging
-            # table above is declared without constraints, so a bad width
-            # reaches Postgres and fails at the INSERT ... SELECT. That is
-            # why catching IntegrityError is sufficient --
-            # copy_records_to_table runs on the raw asyncpg connection,
-            # outside SQLAlchemy's error translation, and a constraint on the
-            # staging table would raise asyncpg's own CheckViolationError
-            # straight past this handler.
+            # A CHECK violation, or a title_id/episode_id naming a row that does not
+            # exist.
             raise RepositoryConflict(
                 "a media item batch conflicts with the catalog",
                 constraint=constraint_name(exc),
@@ -601,22 +403,9 @@ class PostgresMediaItemRepository(MediaItemRepository):
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0
     ) -> list[MediaItem]:
-        # `NULLS LAST` is not optional: Postgres's default for a DESC sort is
-        # NULLS FIRST, so without it an item the source could not date heads
-        # the review queue ahead of everything it could. `id` as a tiebreak,
-        # so paging is stable -- a source that imported a thousand files in
-        # one second gives them all the same added_at, at which point an
-        # ORDER BY without a tiebreak shows an operator the same item on two
-        # pages and hides another.
-        #
-        # `CAST(:source_id AS uuid)`, not `:source_id::uuid`: SQLAlchemy's
-        # `text()` bind-parameter regex treats a name immediately followed by
-        # `::` as a Postgres cast and skips the bind entirely, so the latter
-        # reaches the driver as the literal string `:source_id::uuid` and
-        # asyncpg answers `PostgresSyntaxError: syntax error at or near ":"`.
-        # Verified by compiling both spellings against the asyncpg dialect.
-        # The cast itself is needed because an untyped NULL parameter has no
-        # type for `IS NULL` to resolve against.
+        # `NULLS LAST` is not optional: Postgres's default for a DESC sort is NULLS
+        # FIRST, so without it an item the source could not date heads the review queue
+        # ahead of everything it could.
         with self._session.no_autoflush:
             rows = (
                 (

@@ -1,31 +1,4 @@
-"""Serving Usher Console — the web client — from this same process.
-
-**Why `/console` and not `/`.** All seventeen routers are included with no
-prefix, so the API owns nineteen root path segments (`titles`, `search`, `home`,
-`browse`, `admin`, `stream`, `images`, … plus FastAPI's own `openapi.json`,
-`docs` and `redoc`). A client-side router mounted at `/` would need
-`/titles/{id}` for a detail page and `/search` for a search page, and both are
-already answered by the API. Giving the API an `/api` prefix instead would be a
-breaking change to a public, documented, generated-against contract for the
-benefit of the client that generates from it. So the console gets a subpath —
-the same call Plex (`/web/`) and Emby (`/web/`) make, for the same reason — and
-`GET /` redirects there so the bare host still lands somewhere.
-
-**What this buys, beyond one container.** The previous reference client ran
-behind its own nginx, which rewrote `/api/*` to `/*`. Two facts made that
-rewrite expensive: Usher mints playback ticket URLs with
-`request.url_for(...)`, i.e. from the incoming `Host` header, and it ships no
-CORS middleware. A proxy that dropped the port from `Host` produced ticket URLs
-pointing at the wrong service, invisibly, because a browser re-issued them
-same-origin and only a real external player (an Apple TV) followed the wrong
-one. Here there is no proxy and no prefix, so there is no header to get wrong
-and no origin to allow: the console is served by the process that mints the
-tickets.
-
-The mount is skipped, loudly, when the bundle is not present. A backend running
-from a source checkout with no `npm run build` is a normal state, not a
-misconfiguration, and it must still boot.
-"""
+"""Serving Usher Console — the web client — from this same process."""
 
 from __future__ import annotations
 
@@ -74,16 +47,11 @@ class _ConsoleFiles(StaticFiles):
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
             if exc.status_code == 405:
-                # 🔴 **`StaticFiles` raises a bare 405, and this app renders
-                # every `HTTPException` as RFC 9457** -- so the `Allow` header
-                # the router supplies on its own 405s was simply absent here,
-                # and `test_every_route_answers_a_problem_document_for_a_
+                # 🔴 **`StaticFiles` raises a bare 405, and this app renders every
+                # `HTTPException` as RFC 9457** -- so the `Allow` header the router
+                # supplies on its own 405s was simply absent here, and
+                # `test_every_route_answers_a_problem_document_for_a_
                 # method_it_does_not_have` fails on `/console/config.json`.
-                #
-                # ⚠️ **It only fails where `web/dist` exists**, because this
-                # mount is skipped without a bundle -- so a checkout that has
-                # never run `npm run build` is green and the container image,
-                # which always builds one, is not.
                 raise StarletteHTTPException(
                     status_code=405, detail=exc.detail, headers={"Allow": "GET, HEAD"}
                 ) from exc

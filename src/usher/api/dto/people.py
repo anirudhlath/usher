@@ -1,32 +1,4 @@
-"""`GET /people/{id}` (PRD 07) -- a filmography, grouped by role.
-
-**Four fields PRD 02's `Person` sketch carries are absent, and none of them is
-a null here.** `imdb_id`, `birth_year`, `death_year` and `biography` live on
-TMDb's `/person/{id}` -- one request per person -- and are M7's named orphan,
-still unassigned in PRD 09. `domain/people.py` has no column for any of them,
-so there is nothing to render and nothing to render as `null`: an always-null
-field is a client-side branch that never takes its other arm, which is the
-argument `dto/title.py` already makes about `images` and `credits`.
-
-**`sort_name` is absent too, for a different reason.** `person_sort_name` is
-the identity function today and its docstring says the obvious alternatives
-are all wrong for some real name; a wire field whose value equals `name` on
-every row is a promise this API would then have to keep.
-
-**Groups are `cast` plus one per crew `job`, and the job strings are TMDb's
-own.** Recorded rather than normalised: a normalisation map is a second
-opinion nothing measures, and it would be applied at the one place a reader
-cannot see what the derivation actually stored. What that costs is that the
-crew vocabulary on the wire is whatever TMDb emitted -- `Director`,
-`Screenplay`, `Original Music Composer` -- rather than a set this project
-controls. It is not a *source*-specific concept in CLAUDE.md's sense (TMDb is
-a metadata provider, not a media server), but it is unvalidated free text and
-a client must treat it as a label to print rather than a key to branch on.
-
-**`cast` is lower-case and every crew job TMDb emits is title-cased**, so the
-one group whose label this module chooses cannot collide with one it was
-given. `Casting` is a real TMDb crew job and is a different string.
-"""
+"""`GET /people/{id}` (PRD 07) -- a filmography, grouped by role."""
 
 import uuid
 from collections.abc import Iterable, Mapping, Sequence

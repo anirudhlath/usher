@@ -1,7 +1,6 @@
-"""Migration status: compares the code's expected head revision against
-what a live database reports, so readiness can fail on a schema mismatch
-instead of guessing -- PRD 08: "the app refuses to serve on a schema
-mismatch rather than guessing."
+"""Migration status: compares the code's expected head revision against what a live
+database reports, so readiness can fail on a schema mismatch instead of guessing --
+PRD 08: "the app refuses to serve on a schema mismatch rather than guessing."
 """
 
 from functools import lru_cache

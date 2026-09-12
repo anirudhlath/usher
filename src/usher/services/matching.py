@@ -1,69 +1,4 @@
-"""PRD 03 stage 2: resolve a source item to a canonical `Title`.
-
-**One batch in, one batch out.** The ladder below is per-item logic, but
-every *lookup* it performs is issued once per batch over a set: a page of
-500 items costs one provider-id statement and one name+year statement, not
-1,000 round trips. At the 1,126,674 items this deployment holds, the
-per-item shape is not slow, it is a design defect -- which is why
-`TitleMatchRepository` exists as a separate port from `TitleRepository`
-rather than as three more methods on it.
-
-The ladder, ordered by confidence and stopping at the first hit:
-
-1. `provider_ids["tmdb"]` -> `(tmdb_id, kind)` (ADR-0011: the kind is not
-   optional; 26,968 ids are live in both TMDb spaces).
-2. `provider_ids["imdb"]` -> `imdb_id` (one global namespace, no kind).
-3. `provider_ids["tvdb"]` -> `tvdb_id`. **Added to PRD 03's list**: M2
-   linked 50,793 titles this way and Emby series routinely carry a TVDb id
-   and no TMDb one, so a ladder stopping at IMDb pushes most television into
-   the review queue for no reason. Carries no kind, matching what
-   `TitleMatchRepository`'s TVDb lookup actually does -- that namespace is
-   series-only and its statement never filters on kind.
-4. Normalised name + year within +/-1, scoped by kind, **and only when
-   unambiguous** -- several titles sharing a name, kind and year is common,
-   and picking one attaches watch history to the wrong film.
-5. A *trusted provider id the catalog does not hold* -> create a stub. This
-   is PRD 03's "stub-on-sight", and it is deliberately narrower than the
-   PRD's prose: an id from TMDb, IMDb or TVDb is an identity claim strong
-   enough to build a canonical title on, a bare name is not. The catalog
-   holds 1,271,138 titles and only 291,737 carry a `tmdb_id`, so this tier
-   is the common path for anything modern, not an edge case.
-6. Otherwise unmatched -- `title_id` stays NULL, the item is in the review
-   queue (PRD 02: "Unmatched items are never dropped"), and a `match` job is
-   enqueued at BACKFILL priority for tier 4's remote search.
-
-**An episode never walks this ladder at all.** A source addresses episodes
-directly and an Emby episode payload carries the *episode's* own provider
-ids -- `{"Imdb": "tt99000110", "Tvdb": "91000110"}` on the live fixture -- not
-its series'. Two things follow, and both are catastrophic at 999,827
-episodes. TVDb numbers episodes and series in different namespaces that
-overlap numerically, and the TVDb lookup deliberately does not filter on
-kind, so an episode run through tier 3 resolves to whichever unrelated
-series holds that integer. And no episode's IMDb id is in the catalog at all
-(`tvEpisode` is excluded from M2's bootstrap by design), so tier 5 would
-mint one junk `Title` per episode -- a catalog of rubbish roughly the size
-of the real one, every row of it enqueued for an enrichment that cannot
-succeed. An episode is therefore returned `UNMATCHED` with no lookups and
-**no remote-search job**; `IngestService` attaches it to its series' title,
-and enqueues a `match` job only for the ones whose series it could not
-resolve.
-
-**Why the remote search is queued rather than inline.** PRD 03 lists "TMDb
-search API as a last resort" as part of this stage. It is one network call
-per unmatched item; a first full walk against an unbootstrapped catalog
-produces those in the hundreds of thousands, and running them inside the
-walk makes the walk's duration a function of TMDb's rate limit rather than
-of the source's. Queueing it is what the priority queue is for, and it means
-a sync finishes tonight and the remote matches trickle in behind it.
-
-**Nothing a source can put in a payload may abort a batch.** `Title`
-validates `imdb_id` against `^tt\\d{7,8}$` and `year` against `ge=0`, and a
-`ValidationError` is not a `UsherPortError` -- so `ReconcileService`, which
-deliberately re-raises anything that is not one, would let a single stray
-`ProviderIds.Imdb` kill every sync of that source forever. Every value that
-reaches a `Title` constructor here is filtered to the shape that model
-accepts first, and an unusable one is dropped rather than raised on.
-"""
+"""PRD 03 stage 2: resolve a source item to a canonical `Title`."""
 
 import re
 import uuid
@@ -128,37 +63,13 @@ class MatchService:
         self._titles = titles
         self._matching = matching
         self._queue = queue
-        # Optional because the *batch* path must never use it: `match()` runs
-        # inside a walk and a network call per unmatched item would make the
-        # walk's duration a function of TMDb's rate limit. Only
-        # `match_remote` -- the `match` job handler's entry point -- touches
-        # it, and a deployment with no TMDb key configured simply has no
-        # tier 4 (PRD 08's "TMDb key missing" degradation).
+        # Optional because the *batch* path must never use it: `match()` runs inside a
+        # walk and a network call per unmatched item would make the walk's duration a
+        # function of TMDb's rate limit.
         self._provider = provider
 
     async def match_remote(self, item: SourceItem) -> MatchOutcome:
-        """PRD 03's tier 4, one item at a time, off the queue.
-
-        The tier the batch path deliberately skips. It is one network call
-        per unmatched item and a first walk against an unbootstrapped catalog
-        produces those in the hundreds of thousands, so it runs at background
-        priority behind the walk rather than inside it.
-
-        **Confident or nothing.** A search for "The Office" returns twenty
-        results and picking the most popular is a coin flip that attaches a
-        household's watch history to the wrong show. The rule is the same one
-        tier 3 applies locally: the candidate's name must match once
-        case-insensitively, and -- when the source dated the item -- its year
-        must be within +/-1. Anything ambiguous stays in the review queue,
-        which PRD 03 stage 5 requires.
-
-        **Episodes never reach here**, for the reason the module docstring
-        gives: a TMDb title search for "Kissed by Fire" is not a resolution
-        path, and `MatchService` never enqueues a `match` job for one.
-        `IngestService` does enqueue them for episodes whose *series* it
-        could not resolve, and those are answered by the series arriving,
-        not by a search.
-        """
+        """PRD 03's tier 4, one item at a time, off the queue."""
         kind = _TITLE_KIND.get(item.kind)
         if self._provider is None or kind is None:
             return MatchOutcome(
@@ -202,11 +113,9 @@ class MatchService:
             span.set_attribute("usher.batch.items", len(items))
             refs = {item.external_id: self._refs_for(item) for item in items}
             # `dict.fromkeys`, never `sorted(set(...))`: `ProviderRef` and
-            # `NameYearProbe` are frozen dataclasses without `order=True`, so
-            # `sorted` raises `TypeError: '<' not supported` on the first
-            # batch carrying two of either. This deduplicates while keeping
-            # the batch's own order, which is what makes a failure read in
-            # the order the page arrived.
+            # `NameYearProbe` are frozen dataclasses without `order=True`, so `sorted`
+            # raises `TypeError: '<' not supported` on the first batch carrying two of
+            # either.
             by_ref = await self._lookup_refs(
                 list(dict.fromkeys(ref for entry in refs.values() for ref, _ in entry))
             )
@@ -215,12 +124,9 @@ class MatchService:
                 list(dict.fromkeys(p for p in probes.values() if p is not None))
             )
             outcomes: list[MatchOutcome] = []
-            # Stubs created earlier in this batch, so a film and its two
-            # alternate cuts -- three items carrying one TMDb id, which is
-            # what a multi-version library looks like -- produce one title
-            # rather than three. Keyed on the whole `ProviderRef` (kind
-            # included), because TMDb's two id spaces overlap on 26,968 ids
-            # and a bare-id key would hand a series the movie's stub.
+            # Stubs created earlier in this batch, so a film and its two alternate cuts
+            # -- three items carrying one TMDb id, which is what a multi-version library
+            # looks like -- produce one title rather than three.
             created: dict[ProviderRef, uuid.UUID] = {}
             for item in items:
                 outcomes.append(
@@ -348,14 +254,8 @@ class MatchService:
         try:
             await self._titles.add(title)
         except RepositoryConflict as exc:
-            # Two workers creating the same stub, or a title the match
-            # repository's own read did not see. `RepositoryConflict.
-            # constraint` exists for exactly this branch: without it, "this
-            # id already exists, look it up" and "some *other* row holds one
-            # of these provider ids" are the same exception and the same
-            # message. Losing the race must attach to the winner -- the
-            # alternative is an item sitting in a review queue whose title
-            # exists.
+            # Two workers creating the same stub, or a title the match repository's own
+            # read did not see.
             existing = await self._lookup_conflict(title)
             if existing is None:
                 logger.warning(
@@ -435,30 +335,7 @@ class MatchService:
 def _confident(
     candidates: Sequence[MetadataCandidate], item: SourceItem
 ) -> MetadataCandidate | None:
-    """The one candidate a remote search resolved to, or `None`.
-
-    Deliberately the same rule tier 3 applies locally, rather than a looser
-    one: an exact normalised name, a year within +/-1 when the source dated
-    the item, and **exactly one** survivor. A provider's relevance ordering
-    is not evidence -- `search` returns whatever the upstream thought was
-    relevant, and "the first result" is how a household's watch history ends
-    up on a documentary about the film it wanted.
-
-    An item with no year is matched on the name alone, which is why the
-    uniqueness requirement is not optional: "Dune" alone matches three films.
-
-    **The +/-1 is the caller's, and against TMDb it only exists because the
-    provider makes room for it.** Measured live 2026-08-01 over 320 names:
-    TMDb's `primary_release_year`/`first_air_date_year` are *exact* filters,
-    so all 294 candidates it returned carried the year that was asked for
-    and this comparison never rejected a single one.
-    `TmdbMetadataProvider._search_one` re-asks without the year when the
-    filtered search finds nothing, which is what puts a +/-1 candidate in
-    front of this function at all. Over the same 320 names the rule resolves
-    **83.1%** on TMDb's search results as they were before that retry and
-    **87.2%** with it -- against 72-75% for the identical predicate run over
-    the local catalog (tier 3).
-    """
+    """The one candidate a remote search resolved to, or `None`."""
     wanted = item.name.strip().casefold()
     matches = [
         candidate

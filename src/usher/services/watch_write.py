@@ -1,68 +1,4 @@
-"""PRD 07's four watch actions: write locally, invalidate, publish, enqueue.
-
-`PUT /watch/titles/{id}`, `PUT /watch/episodes/{id}`,
-`POST /watch/titles/{id}/played` and `DELETE /watch/titles/{id}/played` all
-land here, and the four things this service does happen in that order because
-the order is the contract rather than a sequence that happens to work.
-
-**The request never touches a source, and that is structural rather than
-defensive.** PRD 03 calls the write-back *"best effort"*, which describes the
-caller's behaviour and not the port's: `push_watch_state` *must raise* by
-contract, so "a client's write never blocks or fails on a down source" is only
-a property of this code if the call is **absent** rather than caught. Nothing
-in this module or in `api/routers/watch.py` names or imports
-`usher.ports.source`, asserted on the imports of both in
-`tests/unit/test_api_watch.py` -- because "it did not raise" is also what a
-service that swallowed everything produces. What reaches the server is a
-queued job (`JobKind.WATCH_WRITEBACK`), run by a worker that may back it off
-and retry it for as long as it takes.
-
-**`origin = api` is the correctness property this service exists to extend.**
-`WatchStateRepository.set_from_client` writes it, and it is what stops the
-next sync mistaking Usher's own write for the source's truth and round-tripping
-a position the household never set. Nothing here may write watch state by any
-other route.
-
-## The order, and where the commit sits
-
-1. **Write locally.** One statement, `origin = api`, and it wins over any walk
-   in flight by construction -- `trg_watch_states_set_updated_at` stamps the
-   write instant, which is later than the `observed_at` of a walk that started
-   before it.
-2. **Commit**, before anything is offered to a client.
-   [ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md):
-   an event is a statement about **committed** state, which is an ordering
-   rule and not a durability one. Publishing first is the defect that ADR
-   names, and it is reachable here in a way it is not in the push lane: a
-   subscriber told a position landed would refetch through a *second*
-   connection, which cannot see an uncommitted row.
-3. **Invalidate and publish**, guarded on the row having actually changed --
-   two calls and not one, on `PushApplyService._invalidate_rows`' terms
-   (`services/push.py:176-211`): *the push lane invalidates; the nightly walk
-   expires*. A client write is a change by the same reasoning and gets the
-   identical pair. The guard is the same one, for the same reason: a write
-   that changed nothing is a full recompose per second of playback.
-4. **Enqueue the write-back**, one job per source *copy*.
-
-**Step 4 is last and rides the request's own commit** (`api/deps.get_session`
-commits when the handler returns), which is the one honest cost in the list
-above. A crash in that window -- microseconds of in-process work plus one
-`INSERT` -- leaves the local row committed and the source untold until the
-household writes again; the nightly walk will not repair it, because "latest
-`updated_at` wins" correctly keeps the newer local row. The alternative,
-enqueueing *before* the commit so the two are atomic, buys that window back
-and costs the order this service's four verbs are named for. It is written
-this way rather than the other because the enqueue is the only step that is
-already idempotent and already retried: pressing anything again re-enqueues
-it, and `(kind, key)` coalesces. Nothing here is an outbox, which is the
-answer to a different question and one M9's group G explicitly refused.
-
-**The enqueue is deliberately *not* under the changed-row guard.** That guard
-compares Usher's own row before and after; it says nothing about the source,
-which may be out of step because an earlier write-back was parked or lost. An
-unchanged repeat therefore costs one statement that usually writes zero rows,
-against a household whose write silently never reaches its server.
-"""
+"""PRD 07's four watch actions: write locally, invalidate, publish, enqueue."""
 
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -88,27 +24,7 @@ _tracer = trace.get_tracer("usher.watch_write")
 
 
 def _changed(before: WatchState | None, after: WatchState) -> bool:
-    """Whether this write moved anything worth telling a client about.
-
-    **Three fields, and the two that are left out are the point.**
-
-    - `updated_at` is trigger-owned and moves on *every* write, so a guard
-      spelled `before != after` is dead: it would publish on every repeat and
-      the whole flicker-per-second-of-playback argument would be lost.
-    - `last_played_at` moves on every `played=True` write, because the shipped
-      statement's `CASE WHEN excluded.played THEN now()` carries no "and it
-      was not already played" clause. Including it would make a second press
-      of *Mark watched* publish forever, which is precisely the repeat this
-      guard exists for.
-
-    `play_count` is in, and it is the conservative direction: it moves only
-    `0 -> 1` on a row a walk left `played` with an unknown count (ADR-0014),
-    which is a number `GET /titles/{id}` renders. Publishing there is one
-    frame nobody needed; not publishing it would be a detail screen showing a
-    count the database no longer holds.
-
-    A row that did not exist before is always a change.
-    """
+    """Whether this write moved anything worth telling a client about."""
     if before is None:
         return True
     return (before.position_seconds, before.played, before.play_count) != (
@@ -309,38 +225,7 @@ class WatchWriteService:
     async def _enqueue_write_back(
         self, *, title_id: uuid.UUID | None, episode_id: uuid.UUID | None
     ) -> None:
-        """One job per source copy, and the two reads are different statements.
-
-        `list_for_title` carries `AND episode_id IS NULL`; `list_for_episode`
-        is precisely the rows that clause excludes. A title write served by
-        the unbounded read would enqueue one job per episode *file* -- 20,000
-        of them for one press on a long-running serial, measured at 20,001
-        rows and 22.901 ms against 1 row and 0.251 ms
-        (`.claude/rules/db-and-sql.md`).
-
-        A title the household owns no copy of enqueues nothing, and that is
-        correct rather than a gap: watch state attaches to the canonical
-        `Title`, so it survives adding, changing or losing a source, and there
-        is no server to tell.
-
-        Retracted copies are told too. `list_for_title` returns them with
-        `available = false` rather than dropping them (PRD 02: soft-delete
-        availability), the common cause is a temporarily unmounted drive, and
-        `handlers.watch_writeback_handler` completes rather than parks for an
-        item a source no longer has -- so including one costs a job that
-        completes, and excluding it costs a write that never arrives.
-
-        `dict.fromkeys` rather than `set`, and **it is a measured equivalent
-        mutant rather than a correctness step** -- recorded here so the next
-        reader does not take it for one. Deleting it (a plain list
-        comprehension, duplicates and all) survives all 47 cases in this
-        task's three files, because both arms of `JobQueue.enqueue`
-        deduplicate on `(kind, key)` already: Postgres with
-        `SELECT DISTINCT ON`, the fake with a dict, and every request in this
-        batch carries the same priority so "highest priority wins" cannot
-        separate them either. What it buys is a batch that says what it meant
-        -- and the ordering, which `set` would lose.
-        """
+        """One job per source copy, and the two reads are different statements."""
         copies = await self._copies(title_id, episode_id)
         if not copies:
             return
@@ -351,11 +236,8 @@ class WatchWriteService:
                     kind=JobKind.WATCH_WRITEBACK,
                     key=external_id,
                     # Client-originated, so above every background sweep; below
-                    # `DEMAND`, which means "a client opened this title right
-                    # now" and is a read a client is blocking on. Nobody blocks
-                    # on a write-back. None of the four rungs actually
-                    # describes one; this is the least wrong of four, and a
-                    # fifth rung is a scale change nobody has asked for.
+                    # `DEMAND`, which means "a client opened this title right now" and
+                    # is a read a client is blocking on.
                     priority=JobPriority.VISIBLE,
                     traceparent=traceparent,
                 )

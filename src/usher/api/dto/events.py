@@ -1,29 +1,4 @@
-"""The SSE wire format (PRD 07).
-
-`api/dto/` types are distinct from `domain/` and `ports/` models, and here
-that split has one immediate job: `SseEventKind` is the vocabulary a client
-matches on, so renaming `ClientEventKind.TITLE_UPDATED` internally is a mypy
-error at the mapping below rather than a silent wire break.
-
-**This enum is the SSE analogue of PRD 07's RFC 9457 envelope (M9,
-`api/dto/problem.py` and ADR-0030), and it is not a substitute for one.** RFC
-9457 formats a response *body*; once `GET /events` has answered `200
-text/event-stream` there is no status code left, and every later failure is
-an event or a closed connection. That is why `/events` is one of the two
-routes in `PROBLEM_EXEMPTIONS`, and ADR-0030 **preserves** M5's reason as a
-standing rule rather than discharging it -- the envelope landing changes
-nothing here. PRD 07
-already names the in-stream failure it cares about -- "on buffer overflow the
-server emits `resync_required` rather than silently skipping events" -- so
-that vocabulary is pinned here, versioned independently of the internal one,
-with no member nothing emits.
-
-There is no `response_model`. A `StreamingResponse` is bytes and FastAPI's
-serializer never sees it, so the shape is asserted in
-`tests/unit/test_api_dto_events.py` rather than described in
-`/openapi.json` -- the one place in this API where that is true, and it is a
-property of SSE rather than of this route.
-"""
+"""The SSE wire format (PRD 07)."""
 
 import json
 import uuid
@@ -45,20 +20,11 @@ class SseEventKind(StrEnum):
     RESYNC_REQUIRED = "resync_required"
 
 
-# Exhaustive by convention *and* by two cases, which is the honest wording: an
-# internal kind with no wire name is a `KeyError` raised in the middle of a
-# response that already answered 200, where there is no status code left to
-# report it with -- and **mypy does not check a dict literal for exhaustiveness
-# over its key enum**, so nothing here makes it true by construction.
-#
-# What does make it true is
-# `test_api_dto_events.py::test_every_internal_kind_has_a_wire_name`, which
-# encodes every member through `encode_sse` and therefore raises that exact
-# `KeyError` in the suite instead of in production, plus
-# `test_the_wire_map_is_total_over_the_internal_enum_directly`, which fails on
-# a set comparison naming the missing member rather than on a `KeyError` from
-# inside a formatter. Both were run against the missing-entry mutation; the
-# first kills it, which corrects an M7 plan claim that nothing did.
+# Exhaustive by convention *and* by two cases, which is the honest wording: an internal
+# kind with no wire name is a `KeyError` raised in the middle of a response that already
+# answered 200, where there is no status code left to report it with -- and **mypy does
+# not check a dict literal for exhaustiveness over its key enum**, so nothing here makes
+# it true by construction.
 _WIRE: dict[ClientEventKind, SseEventKind] = {
     ClientEventKind.TITLE_UPDATED: SseEventKind.TITLE_UPDATED,
     ClientEventKind.WATCHSTATE_UPDATED: SseEventKind.WATCHSTATE_UPDATED,

@@ -1,16 +1,4 @@
-"""Persistence for configured sources.
-
-Follows PostgresTitleRepository's two structural decisions verbatim, for
-the reasons its module docstring works through at length:
-
-- `add()`/`update()` wrap their flush in `session.begin_nested()`, a
-  SAVEPOINT, rather than `session.rollback()` -- the caller owns the
-  transaction, and this repository's one real caller (`SourceService.
-  register`) has the credential write pending on the same session.
-- Reads run inside `session.no_autoflush`, so unrelated pending state left
-  on a shared session cannot make a pure read raise a storage exception
-  from behind this port.
-"""
+"""Persistence for configured sources."""
 
 import uuid
 from typing import Any, cast

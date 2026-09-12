@@ -1,34 +1,4 @@
-"""`GET /titles/{id}` -- PRD 03's read-through, at the boundary.
-
-**This route cannot fail because a source is down**, and that is structural
-rather than defensive: `TitleReadService` holds no `SourceAdapter`, so there
-is no call to catch. PRD 08: "a degraded subsystem narrows functionality; it
-never fails a request local state can answer." What a degraded source does
-change is the *width* of the answer -- a copy the nightly sweep retracted is
-rendered with `available: false` rather than dropped -- and never the status
-code. That is why M5 shipped no RFC 9457 envelope from here: PRD 07's worked
-example of one is `503 source_unavailable`, and this route has no 503 to give
-a `code` to. M9 lands the envelope's *shape* anyway, driven by the surface
-that already exists -- so the 404 below is a problem document while the 503
-that would have forced it still does not exist on this route.
-
-**It is a `GET` that writes**, once and deliberately: opening an unenriched
-title enqueues its `enrich` job at `JobPriority.DEMAND` (PRD 03's demand
-promotion). Idempotent, and a second open writes zero rows -- the enqueue
-statement's `WHERE jobs.priority < excluded.priority` sees nothing left to
-promote. `get_session` commits it as it commits any other request, which is
-what makes the write durable rather than a flush that the response outlives.
-
-**Twice, since M9's F3**, on the same argument and the same commit: a request
-carrying `?search_id=` also attributes PRD 10's *click* to the
-`search_queries` row that search wrote. It is idempotent for a second
-reason -- `clicked_title_id` is first-write-wins, so re-opening a result
-cannot rewrite what the search led to. `api/caching.py`'s first adoption
-condition names both writes now: a conditional GET short-circuited ahead of
-this handler would silently stop the promotion *and* lose the click, for
-exactly the clients that already hold the title and would send
-`If-None-Match` on every request.
-"""
+"""`GET /titles/{id}` -- PRD 03's read-through, at the boundary."""
 
 import uuid
 from typing import Any, Final
@@ -106,16 +76,10 @@ async def get_title(
             code=ProblemCode.NOT_FOUND,
             detail="title not found",
         )
-    # **After the 404 and not before it.** A click on a title this deployment
-    # does not have is a click on nothing, and writing one would put an id in
-    # `clicked_title_id` that `fk_search_queries_clicked_title_id_titles`
-    # refuses -- turning a plain 404 into a 500. The order is what makes that
-    # unreachable rather than caught.
-    #
-    # `played=False`: this writer reports a click and nothing else. One
-    # writer setting both columns is what would make `clicked_title_id` mean
-    # "the last thing this household did" rather than "which result it
-    # opened", and `POST /titles/{id}/play` is the other writer.
+    # **After the 404 and not before it.** A click on a title this deployment does not
+    # have is a click on nothing, and writing one would put an id in `clicked_title_id`
+    # that `fk_search_queries_clicked_title_id_titles` refuses -- turning a plain 404
+    # into a 500.
     await record_search_outcome(
         queries, search_id, user_id=user_id, clicked_title_id=title_id, played=False
     )

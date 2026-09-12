@@ -1,62 +1,4 @@
-"""TMDb payloads -> canonical state. Pure functions, no client, no clock.
-
-Mirrors `usher.adapters.emby.mapping`: the wire format stops here, and
-nothing above this module reads a provider's key.
-
-**TMDb keys movies and series in two different id spaces *and* two different
-vocabularies, and the second half is what this module exists for.** The same
-concept has a different field name depending on which space an entity lives
-in, and the divergence is not cosmetic — a mapper that handled one spelling
-produces silently empty data for the other half of a catalog rather than an
-error:
-
-| Concept | Movie | Series |
-|---|---|---|
-| name | `title` | `name` |
-| original name | `original_title` | `original_name` |
-| first release | `release_date` | `first_air_date` |
-| runtime | `runtime` (minutes) | `episode_run_time` (array) |
-| keywords | `keywords.keywords` | `keywords.results` |
-| certification | `release_dates.…[].certification` | `content_ratings.…[].rating` |
-| IMDb id | top-level `imdb_id` | `external_ids.imdb_id` |
-| append namespace | `release_dates` | `content_ratings` |
-| collection | `belongs_to_collection` (object or `null`) | **key absent entirely** |
-| creator | *(none — no such concept)* | **top-level `created_by[]`, not `credits.crew`** |
-
-The last two rows were added by M7's derivation and were **read out of the
-recorded fixtures rather than assumed**: `movie.json` has
-`belongs_to_collection` and no `created_by`; `series.json` has `created_by`
-and **no `belongs_to_collection` key at all**, and its `credits.crew` is `[]`
-while its `created_by` holds the creator. So a mapper that read creators out
-of `credits.crew` — the obvious place, because that is where a *movie's*
-director lives — returns nothing for every series in the catalog, silently,
-which is exactly what this table exists to prevent.
-
-The first eight rows were read from TMDb's published reference on 2026-07-31 (see
-`tests/fixtures/tmdb/README.md` for the endpoint list), and **every one was
-then confirmed against the live API on 2026-08-01** over 29 movie and 30
-series detail responses: each movie carried `title`/`release_date`/`runtime`/
-`keywords.keywords`/a top-level `imdb_id` and none carried `name`,
-`first_air_date`, `episode_run_time` or `title`'s TV counterparts; each
-series carried the mirror set and none carried a top-level `imdb_id` at all.
-
-One row is a trap the survey found rather than confirmed: **`episode_run_time`
-is an empty array on 26 of those 30 series** (86.7%), so `_runtime` correctly
-returns `None` for the great majority of television and `Title.runtime_minutes`
-is simply not a fact TMDb has about a series any more. A test that asserts a
-series runtime is asserting about the 13% case.
-
-**Nothing TMDb can put in a payload may raise.** `Title` pattern-validates
-`imdb_id`, bounds `tmdb_vote_average` to 0-10 and `year`/`runtime_minutes`/
-`tmdb_vote_count`/`tmdb_popularity` to non-negative, and a `pydantic.ValidationError`
-is **not** a `UsherPortError` — so a single odd value would escape
-`EnrichService`'s except clause and crash the worker instead of parking the
-job. Every value is filtered to the shape the model accepts *before* the
-constructor, exactly as `usher.services.matching._usable_ids` does one stage
-earlier. The two failures that are *not* filtered — no `id`, and no usable
-name — are `PortDataMalformed`, because a canonical title cannot be built
-from either.
-"""
+"""TMDb payloads -> canonical state. Pure functions, no client, no clock."""
 
 import math
 import re
@@ -105,27 +47,8 @@ _STATUS: dict[str, ProductionStatus] = {
 # rendering it as an end year shows "2011-2026" for a show still on the air.
 _FINISHED = (ProductionStatus.ENDED, ProductionStatus.CANCELED)
 
-# TMDb's whole genre vocabulary — `/genre/movie/list` (19) and
-# `/genre/tv/list` (16), transcribed rather than fetched. **A list of names,
-# not of ids**, because `title_from_payload` reads `genres[].name` and the
-# question this answers is about the *words* TMDb has.
-#
-# Transcribed and not fetched for the reason `_STATUS` is: two extra HTTP
-# calls per process to learn a list that has not moved in a decade, on a path
-# whose whole cost model is request budget. All seven of the television-only
-# names are in this catalog (`Sci-Fi & Fantasy` 165, `Action & Adventure` 154,
-# `Reality` 57, `War & Politics` 25, `Kids` 19, `Soap` 19, `Talk` 4, measured
-# 2026-08-19), so this is not a vocabulary the adapter maps away — it reaches
-# `titles.genres` verbatim.
-#
-# **It is not the vocabulary `EnrichService` asks about.** That is
-# `genre_vocabulary`, which is this list run through
-# `usher.domain.genres.canonicalise_genres` — 35 TMDb names collapse to 24
-# canonical concepts, and the 7 canonical concepts *not* in that set
-# (`Adult`, `Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`,
-# `Sport`) are the ones enrichment must stop deleting. A genre TMDb mints
-# after this was written is simply stored: it is outside `CANONICAL_GENRES`,
-# so it is its own concept and nothing here has an opinion about it.
+# TMDb's whole genre vocabulary — `/genre/movie/list` (19) and `/genre/tv/list` (16),
+# transcribed rather than fetched.
 TMDB_GENRE_NAMES: frozenset[str] = frozenset(
     {
         # /genre/movie/list
@@ -160,18 +83,7 @@ TMDB_GENRE_NAMES: frozenset[str] = frozenset(
     }
 )
 
-# Which crew jobs become `credits` rows. **The filter is the load-bearing
-# half of the derivation's bound.** Unfiltered crew is every gaffer, best boy
-# and assistant art director, and both consumers of that table --
-# `PeopleProvider`'s "more from this director" and the search document's
-# weight class B -- want the people a viewer could name. Below the line,
-# crews repeat because studios repeat, so an unfiltered set makes
-# "recurring" mean "worked at the same studio".
-#
-# A job absent from this set maps to nothing rather than raising, exactly as
-# `_STATUS` treats a status TMDb invents. `Creator` is here because
-# `created_by[]` entries carry no `job` at all and this module supplies one;
-# it is not a value TMDb ever sends in `credits.crew`.
+# Which crew jobs become `credits` rows.
 CREDITED_JOBS: frozenset[str] = frozenset(
     {"Director", "Writer", "Screenplay", "Story", "Novel", "Creator"}
 )
@@ -182,63 +94,26 @@ _CREATOR_JOB = "Creator"
 # department for the Creator job where it does appear in `credits.crew`.
 _CREATOR_DEPARTMENT = "Writing"
 
-# The cast bound, on `order` rather than on array position -- see
-# `_cast_credits`. A large film's `credits.cast` runs into the low hundreds;
-# at the enriched tier boundary call 4 targets (2k-10k titles) an unbounded
-# cast is roughly 10k x 150 ~ 1.5M credit rows against a database PRD 08
-# budgets at 8-12 GB *total*, and at 50 it is ~500k.
-#
-# **50 is chosen, not measured**, and it is labelled that way for the reason
-# `services/search.py` labels `_POPULARITY_MIDPOINT`: the consequence of a
-# wrong cutoff is bounded, because it drops the 51st-billed actor from a
-# filmography and changes nothing else. A live run over a real enriched tier
-# is what would turn it into a number.
+# The cast bound, on `order` rather than on array position -- see `_cast_credits`.
 _CAST_LIMIT = 50
 
-# Which `images` array maps to which `ImageKind`. **The array a path was found
-# in is the only thing that says what it is** -- an entry carries
-# `file_path`, `width`, `height`, `iso_639_1` and vote counts, and no field
-# naming its kind -- so a mapper that read one array and labelled everything
-# `poster` would paint a 16:9 backdrop into a 2:3 slot with nothing reporting
-# an error. Three of `ImageKind`'s five: `still` hangs off an episode and
-# `profile` off a person, and M9 writes neither (group C's boundary call).
+# Which `images` array maps to which `ImageKind`.
 _IMAGE_ARRAYS: tuple[tuple[str, ImageKind], ...] = (
     ("posters", ImageKind.POSTER),
     ("backdrops", ImageKind.BACKDROP),
     ("logos", ImageKind.LOGO),
 )
 
-# The two top-level paths, which are TMDb's *own* pick and the only primary
-# signal a detail payload carries. `images.posters[]` is a vote-ordered list
-# with no flag on it, so without these two keys nothing in a payload says
-# which poster a card should render.
-#
-# There is no top-level logo path, which is why `logo` never gets a primary
-# from here -- `ImageRepository.primary_for_titles` falls back to the first in
-# read order for exactly that shape.
+# The two top-level paths, which are TMDb's *own* pick and the only primary signal a
+# detail payload carries.
 _PRIMARY_PATHS: tuple[tuple[str, ImageKind], ...] = (
     ("poster_path", ImageKind.POSTER),
     ("backdrop_path", ImageKind.BACKDROP),
 )
 
-# How many entries of each kind become `images` rows, applied to the arrays
-# before the top-level pair is folded in -- so TMDb's own primary is never the
-# row the cap drops, however far down its array it sits.
-#
-# **Ten is chosen, not measured**, on the bargain `services/search.py` states
-# for `_POPULARITY_MIDPOINT` and `_CAST_LIMIT` restates one array over. A
-# popular film's `posters[]` runs to hundreds and is dominated by
-# language variants of one artwork -- the same image with a different title
-# burned in -- which is a distinction no consumer in M9 draws: `RowCard.artwork`
-# renders one poster and `GET /titles/{id}` renders a list nobody paginates. The
-# consequence of a wrong cutoff is bounded and one-directional, because the
-# primary is folded in afterwards: too low drops language variants a client
-# cannot ask for anyway, and too high writes rows nothing reads.
-#
-# What would move it is a consumer that *chooses* by language -- a household
-# locale reaching the proxy -- not an argument. At that point the cap becomes
-# per (kind, language) and this constant is the wrong shape rather than the
-# wrong number.
+# How many entries of each kind become `images` rows, applied to the arrays before the
+# top-level pair is folded in -- so TMDb's own primary is never the row the cap drops,
+# however far down its array it sits.
 _IMAGES_PER_KIND_LIMIT = 10
 
 
@@ -372,42 +247,7 @@ def seasons_and_episodes(
 def people_and_credits(
     payload: Mapping[str, Any], title_id: uuid.UUID
 ) -> tuple[list[Person], list[Credit]]:
-    """One TMDb detail response -> that title's people and their credits.
-
-    Pure, and a pure function of a payload that may have come out of
-    `raw_payloads` months after the fetch that produced it -- `to_result`'s
-    property, restated because this one is reached the same way.
-
-    **Three sources, and the third is the per-kind divergence.**
-    `credits.cast[]` is billed cast, `credits.crew[]` is crew filtered to
-    `CREDITED_JOBS`, and `created_by[]` is a series' creators -- a top-level
-    array, **not** part of `credits.crew`, which is `[]` on the recorded
-    series payload. A mapper that read creators out of the crew returns
-    nothing for every series in the catalog.
-
-    **Ids are minted here and are placeholders.** `Person.id` is a fresh
-    UUIDv7 per sighting, exactly as ingest mints one per season, and every
-    `Credit.person_id` names the `Person` minted beside it in this same call.
-    A person the catalog already holds keeps the id it was inserted with, so
-    the caller upserts on `tmdb_id`, reads the real ids back through
-    `PersonRepository.resolve_tmdb_ids`, and re-points the credits. Nothing
-    here can know that id.
-
-    **An entry with no usable `id` is dropped rather than raised on.** The
-    standing rule this module opens with -- nothing TMDb can put in a payload
-    may raise, because a `pydantic.ValidationError` is not a `UsherPortError`
-    and would kill the worker instead of parking one job -- and here there is
-    a second, independent reason: a person with a NULL `tmdb_id` is inserted
-    rather than merged (the unique index is partial), so its stored id can
-    never be read back and any credit naming it would be permanently
-    orphaned.
-
-    One person may hold several credits on one title -- a director who also
-    wrote it, an actor who also created the series -- and they are separate
-    rows. `(title_id, person_id, kind, job)` is the natural key precisely so
-    they do not collapse; a mapper deduplicating on `(title_id, person_id)`
-    keeps whichever it saw second.
-    """
+    """One TMDb detail response -> that title's people and their credits."""
     entries = _credit_entries(payload)
 
     people: dict[int, Person] = {}
@@ -423,13 +263,10 @@ def people_and_credits(
                 known_for_department=one.known_for_department,
             )
         elif existing.known_for_department is None and one.known_for_department is not None:
-            # `PersonRepository.upsert_many`'s COALESCE rule arriving one
-            # layer early, and it is reachable *inside a single payload*: a
-            # `created_by[]` entry carries no `known_for_department` and a
-            # `credits.cast[]` entry does, so the same person arrives with it
-            # and without it in one pass. Frozen models, so this is a new
-            # instance -- which is why the credits are built in a second pass,
-            # against the finished map.
+            # `PersonRepository.upsert_many`'s COALESCE rule arriving one layer early,
+            # and it is reachable *inside a single payload*: a `created_by[]` entry
+            # carries no `known_for_department` and a `credits.cast[]` entry does, so
+            # the same person arrives with it and without it in one pass.
             people[one.tmdb_id] = existing.evolve(known_for_department=one.known_for_department)
 
     credits = [
@@ -457,57 +294,7 @@ def people_and_credits(
 def images_from_payload(
     payload: Mapping[str, Any], title_id: uuid.UUID, *, provider: str
 ) -> list[Image]:
-    """One TMDb detail response -> that title's artwork references.
-
-    Pure, and a pure function of a payload that may have come out of
-    `raw_payloads` months after the fetch that produced it -- `to_result`'s
-    property, restated because this one is reached the same way and because
-    **most of a real catalog was cached before `images` joined
-    `*_APPEND_TO_RESPONSE`**. Such a payload still carries `poster_path` and
-    `backdrop_path` (they are top-level detail fields, not an appended
-    namespace), so a re-derivation of it yields two rows rather than none --
-    and `series.json`'s shape, three empty arrays, yields the same two.
-
-    **Two sources, and the second decides `is_primary`.** `images.{posters,
-    backdrops,logos}[]` is the catalogue; the top-level `poster_path` and
-    `backdrop_path` are TMDb's own pick out of it. Nothing in the arrays is
-    flagged, so without the second source every card would render whichever
-    language variant sorted first.
-
-    **Deduplicated by `provider_path`, which is the natural key's own
-    spelling** -- `uq_images_owner_provider_path` is
-    `(title_id, episode_id, person_id, provider, provider_path)` and this call
-    holds the first four fixed, so the path is the whole of what can collide.
-    It is required rather than tidy, and the reason is *not* the one this
-    task's plan predicted: `ImageRepository.replace_for_titles` already
-    deduplicates last-wins on the same key, so a duplicate does not fail the
-    batch. What it does is let emission order decide `is_primary` -- in
-    `movie.json` the top-level poster **is** `posters[0]`, so the two rows
-    differ in exactly that flag, and last-wins keeps the array's unflagged
-    copy. Measured, not reasoned: see this task's sweep ledger.
-
-    So the primary is folded into the row already built for its path rather
-    than appended beside it, which keeps the array entry's `width`/`height`/
-    `iso_639_1` -- a bare promotion from the top-level key alone has no
-    dimensions at all, and a layout engine cannot ask for them again.
-
-    **A path is recorded whatever its extension, and a `logo` is where that
-    matters.** The provider publishes some logos as `.svg`, and
-    `usher.ports.images.SUPPORTED_MEDIA_TYPES` deliberately has no entry for
-    `image/svg+xml` — so a row derived here can name artwork the proxy will
-    refuse to cache. That is the right split rather than an oversight: this
-    stage records what the provider says it has, from a payload months old,
-    with no way to ask what the CDN would answer today; which media types are
-    servable is a serve-time fact and belongs to the fetcher that meets one.
-    Dropping the row here instead would make `GET /titles/{id}` deny the
-    existence of a logo the provider does publish.
-
-    **Nothing TMDb can put in a payload may raise**, this module's standing
-    rule, and `Image` bounds four fields: `provider_path` and `provider` are
-    `min_length=1` and `width`/`height` are `gt=0`. An entry with no usable
-    path is dropped; a zero, negative or unparseable dimension becomes `None`,
-    which is the same answer a provider that reports no dimensions gets.
-    """
+    """One TMDb detail response -> that title's artwork references."""
     block = payload.get("images")
     arrays = block if isinstance(block, Mapping) else {}
 
@@ -679,12 +466,10 @@ def _credit_entries(payload: Mapping[str, Any]) -> list[_CreditEntry]:
 
     for entry in _mappings(credits.get("cast")):
         billing = _non_negative_int(entry.get("order"))
-        # **The cutoff is on `order`, never on the array index.** The two
-        # agree on every array TMDb happens to have sorted, which is most of
-        # them -- and where they disagree, slicing the array keeps the wrong
-        # fifty and renumbers the lead actor. An entry with no `order` at all
-        # is kept: TMDb always sends one for cast, and dropping a cast member
-        # over a missing sort key would be losing data to tidiness.
+        # **The cutoff is on `order`, never on the array index.** The two agree on every
+        # array TMDb happens to have sorted, which is most of them -- and where they
+        # disagree, slicing the array keeps the wrong fifty and renumbers the lead
+        # actor.
         if billing is not None and billing >= _CAST_LIMIT:
             continue
         _append(entries, entry, CreditKind.CAST, job=None, department=None, billing_order=billing)

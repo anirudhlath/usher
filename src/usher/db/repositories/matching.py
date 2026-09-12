@@ -1,42 +1,4 @@
-"""Batch matching for PRD 03's match stage.
-
-Implements `TitleMatchRepository` (`usher.ports.repository`). Reads only. The
-whole reason this module exists is that matching 1,126,674 source items one
-query at a time is the design defect this milestone was warned about: at
-~0.1 ms per indexed point lookup that is minutes of pure round trips per
-sync, and the name+year tier is far worse -- measured at 300k rows, an
-unindexed name+year match seq-scans in 14.6 ms, ~600 ms per item extrapolated
-to the catalog's real 1,271,138.
-
-**Provider matching is three small statements, not one clever join.** The
-obvious spelling joins one `unnest` of the whole batch against `titles` with
-an `OR` over the three providers and casts `p.value::integer` for the two
-integer columns. It does not work: the cast is applied to *every* row the
-planner evaluates, including the IMDb ones, and Postgres does not guarantee
-to short-circuit the `OR` first. A batch carrying `('imdb', 'tt99000020')`
-alongside any TMDb ref answers `invalid input syntax for type integer:
-"tt99000020"` -- so one bad-shaped ref takes down the whole page. Split by
-provider, each against its own index (`ix_titles_tmdb_id_kind`,
-`ix_titles_imdb_id`, `ix_titles_tvdb_id`), and filter non-numeric values in
-Python before they reach a bind parameter. That is also what
-`test_a_non_numeric_tmdb_ref_is_skipped_not_raised_on` requires.
-
-**`lower(t.name)`, not `lower(:name)` against `t.name`.** The index is
-`ix_titles_name_lower_year (lower(name), year)`, and an expression index is
-only usable when the query names the same expression. The two spellings
-return identical rows, so no assertion on results can tell them apart --
-`tests/integration/test_title_match_repository.py` asserts on the plan
-instead.
-
-**The ambiguity test is a window count over the *deduplicated* batch.**
-`count(*) OVER (PARTITION BY name, year, kind) = 1` over a join between the
-probe batch and `titles` reads a probe listed twice as two candidate rows for
-one title, i.e. as ambiguous -- so a walk that re-yields a page (which
-`list_items`' contract explicitly permits) would send every item on it to the
-review queue. Deduplicating the input in Python is what stops that, and it is
-free: `ProviderRef` and `NameYearProbe` are frozen dataclasses and therefore
-hashable, which `usher.ports.ingest`'s own docstring says is deliberate.
-"""
+"""Batch matching for PRD 03's match stage."""
 
 import uuid
 from collections.abc import Sequence
@@ -189,17 +151,9 @@ class PostgresTitleMatchRepository(TitleMatchRepository):
         return {row["id"]: EnrichmentState(row["enrichment_state"]) for row in rows}
 
     async def _fetch(self, statement: str, parameters: dict[str, object]) -> Sequence[RowMapping]:
-        # `.mappings()` rather than attribute access on `Row`: SQLAlchemy
-        # types a `text()` result's rows as `Any`-free `Row[Any]`, so
-        # `row.value` is an `object` under mypy strict and every read of it is
-        # an error. A mapping is the honest shape for a statement whose
-        # columns SQLAlchemy was never told about.
-        #
-        # `no_autoflush` for the same reason every read in
-        # `PostgresTitleRepository` has it: a plain read has nothing of its own
-        # to flush, and a shared session may be carrying someone else's
-        # pending, invalid state -- which would surface here as a raw storage
-        # exception this port has no honest way to translate.
+        # `.mappings()` rather than attribute access on `Row`: SQLAlchemy types a
+        # `text()` result's rows as `Any`-free `Row[Any]`, so `row.value` is an `object`
+        # under mypy strict and every read of it is an error.
         with self._session.no_autoflush:
             result = await self._session.execute(text(statement), parameters)
         return result.mappings().all()

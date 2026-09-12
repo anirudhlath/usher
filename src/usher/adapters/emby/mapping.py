@@ -1,84 +1,5 @@
 # src/usher/adapters/emby/mapping.py
-"""Emby's JSON, translated into `usher.ports.source`'s DTOs.
-
-Pure functions, no HTTP: everything here is tested against the committed
-fixtures with no server of any kind, which is what makes those fixtures a
-real drift guard. If the fake server and this module got a field name wrong
-in the same way, the contract suite would still pass and
-`tests/unit/test_adapters_emby_mapping.py` would not.
-
-**No Emby field name appears outside `usher.adapters.emby`.** That package
-reads Emby's JSON in exactly two modules -- this one, and `playback`, which
-builds direct-play URLs out of the same item payload -- and `playback`
-coerces its values with `as_int`/`as_text`/`as_lower` from here rather than
-redefining them, so "parse an Emby integer" has one meaning in the package
-and cannot drift between an item's `SourceItem` and its `StreamTarget`.
-Nothing above the adapter boundary names an Emby field at all, which is how
-PRD 01's "raw Emby or TMDb JSON never escapes its adapter package" is
-enforced rather than merely stated.
-
-### On the fixtures
-
-`tests/fixtures/emby/*.json` are shape-recorded and value-synthetic: field
-names, nesting, and types transcribed from real Emby 4.9.5.0 responses;
-every value invented. A real capture is not committed, for three separate
-reasons -- it embeds TMDb-sourced metadata that TMDb's terms forbid
-redistributing (and CLAUDE.md's "ship importers, never data" already
-forbids committing), it identifies a real library, and it carries real
-server and user ids. `scripts/capture_emby_fixture.py` regenerates a
-scrubbed capture locally for anyone who wants to diff shapes.
-
-Diffed against the live server on 2026-07-31, movie, series and episode
-each. Two shapes they get right that are worth not re-deriving: an episode
-really does carry `SeriesId`, `SeriesName`, `ParentIndexNumber` and
-`IndexNumber` on the item, and a `Series` item really does carry no
-`MediaSources` at all. Two they get wrong in ways nothing depends on: this
-server's item ids are short numeric strings rather than 32-hex GUIDs, and
-its `MediaSourceId` is `mediasource_<item id>` -- both are opaque strings
-everywhere here. **`multi_version_movie.json` remains unverified**: no item
-with more than one `MediaSource` exists in the newest 800 movies of this
-deployment, so `primary_media_source`'s selection rule has still never met
-a real multi-version payload.
-
-### Three traps this module exists to close
-
-1. **Dolby Vision reports itself several ways at once**, and a DV stream
-   commonly *also* advertises HDR10, because the HDR10 base layer is
-   genuinely present. Checking one field first would catalogue every DV
-   file as HDR10, so any DV marker wins -- swept across *every* range field
-   before any of them is mapped: `DvProfile`, a `dvhe`/`Dolby Vision` codec
-   profile, or a range token naming DV. Tokens are matched by *prefix*,
-   because both vendors spell the base layer or the profile into the same
-   token (`DOVIWithHDR10`, `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`;
-   `DoviProfile81`, `DoviProfile50`) and an exact-match table would send
-   every one of those somewhere else. Each marker is independently
-   sufficient and independently tested.
-
-   **What Emby 4.9.5.0 actually sends, measured 2026-07-31** across every
-   video stream of 200 movies (the newest 100 4K and the newest 100 HD, out
-   of 94,438): `VideoRange` is one of `SDR`, `DolbyVision`, `HDR 10` --
-   with a space, which only reaches the right entry because
-   non-alphanumerics are stripped first -- and
-   `ExtendedVideoType`/`ExtendedVideoSubType` are one of `None`/`None`,
-   `Hdr10`/`Hdr10`, or `DolbyVision`/`DoviProfile81`|`DoviProfile50`.
-   **`VideoRangeType` and `DvProfile` never appeared once**, in any stream,
-   including all 34 Dolby Vision files. Both are still read -- older Emby
-   builds and Jellyfin do send them, and reading a field a server omits
-   costs nothing -- but until that run the two fields this server actually
-   populates were not read at all, which left the whole DV decision resting
-   on a single one.
-
-   `ExtendedVideoType` and `ExtendedVideoSubType` carry the literal string
-   `"None"`, not JSON `null`, so they are always truthy: any check on them
-   has to be a token lookup that falls through, never a truthiness test.
-2. **Naive datetimes.** Verified on Python 3.13: `fromisoformat` accepts
-   Emby's seven-digit fractional seconds and a trailing `Z`, but a value
-   with no offset yields a naive datetime -- and `SourceItem` is a plain
-   dataclass, so nothing catches it until a `TIMESTAMPTZ` insert much
-   later. Emby's timestamps are UTC, so the offset is attached.
-3. **The first audio stream is not the default one.** Commentary tracks
-   are routinely index 0. `IsDefault` decides.
-"""
+"""Emby's JSON, translated into `usher.ports.source`'s DTOs."""
 
 import re
 from collections.abc import Mapping, Sequence
@@ -115,27 +36,12 @@ _HDR_BY_TOKEN: dict[str, HdrFormat] = {
     "HLG": HdrFormat.HLG,
 }
 
-# Matched as prefixes, and checked before the exact table above, because
-# Emby's `VideoRangeType` names the *base layer* alongside the DV marker:
-# `DOVIWithHDR10`, `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`. An
-# exact-match table gets `DOVI` right and every compound spelling wrong,
-# and gets it wrong *quietly* -- `DOVIWithHDR10` falls through to
-# `VideoRange: "HDR"` and is catalogued as HDR10, `DOVIWithSDR` as SDR.
-# A prefix rule also covers a combination Emby adds after this was
-# written, which an enumerated table by construction cannot.
+# Matched as prefixes, and checked before the exact table above, because Emby's
+# `VideoRangeType` names the *base layer* alongside the DV marker: `DOVIWithHDR10`,
+# `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`.
 _DV_TOKEN_PREFIXES = ("DOVI", "DOLBYVISION")
 
-# Every field that can name a video range, most specific first. The two
-# `Extended*` ones are what Emby 4.9.5.0 actually populates -- verified
-# 2026-07-31 against 200 movies, which emitted `VideoRangeType` and
-# `DvProfile` exactly zero times between them. `VideoRangeType` is kept
-# because older Emby builds and Jellyfin do emit it, and reading a field a
-# server does not send costs nothing.
-#
-# `ExtendedVideoType`/`ExtendedVideoSubType` carry the literal string
-# `"None"` for an SDR file, not JSON `null`, so they are always truthy and
-# any check on them has to be a token lookup that falls through rather than
-# a truthiness test.
+# Every field that can name a video range, most specific first.
 _RANGE_KEYS = ("ExtendedVideoType", "ExtendedVideoSubType", "VideoRangeType", "VideoRange")
 
 # Ordered: the first match wins, so "DTS-HD MA" is not also matched by a
@@ -184,36 +90,7 @@ def parse_datetime(value: object) -> datetime | None:
 
 
 def emby_datetime(value: datetime) -> str:
-    """Format a `since` cursor for Emby's date query parameters.
-
-    Normalised to UTC and **widened by one to two seconds**, deliberately.
-    The port promises `since` is inclusive; whether Emby's own comparison
-    is `>=` or `>` is not verified against the live server. One second
-    earlier is correct under either -- an inclusive server returns a
-    superset, which the port explicitly permits because callers deduplicate
-    by `external_id`; an exclusive one still returns the boundary item. The
-    opposite mistake, assuming inclusivity and being wrong, silently drops
-    exactly the item the previous walk's cursor was set from, once per
-    walk, forever.
-
-    "One to two", not "one": the format Emby's date parameters take carries
-    whole seconds only, so a cursor of `12:00:00.9` is widened by the
-    explicit second *and* by the 0.9 that truncating discards. Both errors
-    point the same way -- wider -- so this is stated rather than corrected.
-    Rounding instead would make the total exactly one second on average and
-    sometimes *less* than one, which is the direction that loses items.
-
-    **A naive `value` raises.** `AwareDatetime` is a bare annotation on
-    `list_items(since=...)`, which pydantic never validates -- it is a
-    plain method, not a model field -- so nothing but this stops a naive
-    datetime arriving. `astimezone` then interprets it in whatever zone the
-    *host* is in: measured on a UTC-5 machine, a naive `12:00` became
-    `MinDateLastSaved=2026-07-20T16:59:59Z`, skipping five hours of
-    changes. That is the direction the widening above exists to avoid, at
-    eighteen thousand times its size, and it reports nothing -- the walk
-    just quietly returns fewer items than it should, every time. Refused
-    rather than assumed-UTC: a caller that meant UTC can say so.
-    """
+    """Format a `since` cursor for Emby's date query parameters."""
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(
             "a `since` cursor must be timezone-aware; a naive one shifts the whole "
@@ -272,33 +149,7 @@ def _playback_rank(media_source: Mapping[str, Any]) -> tuple[int, int]:
 
 
 def primary_media_source(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The version Usher describes and plays, or `None` for a folder item.
-
-    **Not `MediaSources[0]`.** Emby lists one entry per *version*: the same
-    film held at 4K and at 1080p is two entries, and a version Emby can
-    only transcode is an entry with no `Container` at all. Taking the first
-    entry takes whichever the server happened to list first, and both
-    orderings occur:
-
-    - 1080p listed before 4K makes the 4K version unreachable -- PRD 07's
-      `/play` hands back a `1920x1080` target for a library holding both;
-    - a transcode-only entry listed first has no container, and the
-      container *is* the direct URL's file extension, so
-      `build_stream_targets` returned `[]` -- "not playable here" for an
-      item that plays fine.
-
-    So: the highest-resolution entry that has a container, falling back to
-    the first entry of any kind when none does (a genuinely transcode-only
-    item still has a real codec, size and runtime to catalogue, even though
-    there is no direct URL to build for it). `max` returns the first
-    maximal element, so a single-source item and a set of equally-ranked
-    versions both still resolve to `MediaSources[0]`.
-
-    Both `to_source_item` and `build_stream_targets` call this, so an
-    item's catalogued facts and its playback URL always describe the same
-    file. Choosing separately is how a `/play` response comes to advertise
-    one version's codecs and stream another's bytes.
-    """
+    """The version Usher describes and plays, or `None` for a folder item."""
     sources = payload.get("MediaSources")
     if not isinstance(sources, list):
         return None
@@ -336,12 +187,8 @@ def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
     """
     profile = str(video.get("Profile") or "").lower()
     tokens = [_NON_ALNUM.sub("", str(video.get(key) or "")).upper() for key in _RANGE_KEYS]
-    # Every DV marker is swept before any base-layer token is mapped, rather
-    # than field by field. Field-by-field made "any DV marker wins" true only
-    # of the *first* field that said anything: a file whose `VideoRange`
-    # names its HDR10 base layer while `ExtendedVideoType` says DolbyVision
-    # would have been catalogued HDR10, which is the exact failure this
-    # function exists to prevent.
+    # Every DV marker is swept before any base-layer token is mapped, rather than field
+    # by field.
     if (
         video.get("DvProfile") is not None
         or "dolby vision" in profile
@@ -428,20 +275,7 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
         series_external_id=as_text(payload.get("SeriesId")),
         season_number=as_int(payload.get("ParentIndexNumber")),
         episode_number=as_int(payload.get("IndexNumber")),
-        # PRD 03 stores this verbatim in `raw_payloads`. Deep-copied rather
-        # than aliased so a caller that mutates the DTO cannot reach back
-        # into whatever buffer the response was parsed from -- and
-        # deep-copied rather than `dict(payload)`, because a shallow copy
-        # leaves `raw["UserData"]` and every `raw["MediaSources"]` entry
-        # pointing at the very objects `get_item` is still reading to build
-        # the item's `StreamTarget`s. Measured at 17 us per item against
-        # the movie fixture, i.e. ~1.6 s across the 94,395-item library
-        # this was built for -- against an upstream costing **30 ms per item
-        # amortised across a 200-item page** (6.04 s mean for the page; M10 S1,
-        # 2026-08-15, `.claude/rules/emby-push-and-ingest.md`). Amortised is the
-        # honest word: the *measured* price of one item fetched on its own is
-        # 0.1649 s, 5x larger, and this walk never pays it. Either way the copy
-        # is three orders of magnitude below the wire it rides on.
+        # PRD 03 stores this verbatim in `raw_payloads`.
         raw=deepcopy(dict(payload)),
     )
 
@@ -452,31 +286,7 @@ def to_watch_state(
     source_user_id: str | None,
     play_history_is_trustworthy: bool,
 ) -> SourceWatchState | None:
-    """One Emby item's `UserData` into a `SourceWatchState`.
-
-    `None` when the item carries no `UserData` at all, which means the
-    field was not requested or this item type has none. That is a different
-    claim from a zero state: emitting zeros here would push "unwatched"
-    over whatever Usher already knows. A `UserData` block that *is* present
-    and happens to be all zeros is emitted -- see the port's `watch_state`
-    docstring for why filtering those is a correctness bug.
-
-    **`play_history_is_trustworthy` names the route, not a preference.**
-    Verified 2026-07-31 against Emby 4.9.5.0: `GET /Users/{u}/Items` reports
-    `PlayCount: 0` and omits `LastPlayedDate` entirely, for the very item
-    whose `GET /Users/{u}/Items/{id}` reports `PlayCount: 2` and a real
-    date. No `Fields` value, no `EnableUserData`, and no `Ids` restriction
-    changes it. So a listing's zero is not a count, it is the absence of
-    one, and the caller -- which is the only thing that knows which route it
-    called -- has to say so. Passing `True` from a listing walk is the exact
-    bug this parameter exists to make un-writable by accident, which is also
-    why it has no default: a call site that has not thought about the route
-    does not compile.
-
-    Even under `True`, a key that is simply not present yields `None`
-    rather than `0`: trusting the route is not the same as inventing a
-    value. See [ADR-0014](../../../../docs/prd/decisions/0014-absence-is-not-zero.md).
-    """
+    """One Emby item's `UserData` into a `SourceWatchState`."""
     external_id = as_text(payload.get("Id"))
     user_data = payload.get("UserData")
     if external_id is None or not isinstance(user_data, Mapping):
@@ -501,41 +311,7 @@ def to_watch_state(
 def user_data_states(
     entries: Sequence[Any], *, source_user_id: str | None
 ) -> tuple[list[str], list[SourceWatchState]]:
-    """A `UserDataChanged` message's `UserDataList` into ids and states.
-
-    Returns both, because they are not the same list: an entry with no
-    `ItemId` cannot be keyed and is dropped from *both*, while an entry that
-    keys but whose fields are unreadable still names an item the caller must
-    resolve some other way. `SourceEvent` documents that asymmetry as the
-    reason it does not align the two by position, and refuses at
-    construction any pair that disagrees -- which is why both are built from
-    one pass over one list here rather than by two comprehensions that could
-    drift apart.
-
-    **`play_count` and `last_played_at` are always `None`, and that is
-    ADR-0014 rather than an omission.** A `UserDataChanged` entry is a third
-    payload shape -- a listing is one, a single-item route is another.
-    `WatchStateSyncService` enqueues a `watch_history` job for every played
-    item whose count it could not determine, at background priority, and
-    that job asks the single-item route.
-
-    **The live run of 2026-08-02 parsed a real entry for the first time and
-    it was truthful**: `PlayCount` and `LastPlayedDate` matched
-    `GET /Users/{u}/Items/{item}` exactly, across three transitions of one
-    item, in the same second. Reading them would save one `watch_history`
-    job per played item and it is still **not done here**, deliberately.
-    ADR-0014's rule is that a reported number must be *true*, and the
-    evidence is one movie whose history started at zero and every transition
-    of which Usher itself wrote; the failure it guards against -- an entry
-    reporting `0` for an item whose true count is 13 -- is not reachable
-    from that sample. Turning it on needs a measurement over items with real
-    history, and writing a zero over one is permanent.
-
-    Position is derived from `PlaybackPositionTicks` exactly as
-    `to_watch_state` does. `Played` defaults to `False` when absent for the
-    same reason it does there: an absent flag is not a claim that something
-    was watched.
-    """
+    """A `UserDataChanged` message's `UserDataList` into ids and states."""
     ids: list[str] = []
     states: list[SourceWatchState] = []
     for entry in entries:

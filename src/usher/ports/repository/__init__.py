@@ -1,24 +1,4 @@
-"""Ports for persistence: one module per aggregate, plus the bulk-load path.
-
-Repositories are driven ports, the same as `SourceAdapter` or
-`MetadataProvider` -- port named for the role, implementation named for the
-technology (ADR-0009). Everything here is an ABC; `usher.db.repositories.*`
-holds the Postgres implementations.
-
-**This package mirrors `usher.db.repositories` module for module**, so a port
-belongs in the module named for its aggregate and nowhere else --
-`PostgresThingRepository` in `usher.db.repositories.thing` implements
-`ThingRepository` in `usher.ports.repository.thing`. It was one 3,434-line
-module holding 19 ABCs and 107 abstract methods until M9 split it; the mirror
-is what stops the twentieth port being appended to whichever module its author
-opened, and `tests/unit/test_ports_repository_package.py` is what makes the
-mirror a failing test rather than a convention.
-
-`__all__` below is the compatibility surface: 99 files import from this
-package by name and none of them changed for the split. A new port is a new
-module, one import block here and one `__all__` entry -- never an edit to a
-shared body.
-"""
+"""Ports for persistence: one module per aggregate, plus the bulk-load path."""
 
 from usher.ports.repository._references import (
     EpisodeReference,

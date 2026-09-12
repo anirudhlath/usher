@@ -1,95 +1,4 @@
-"""The priority work queue, on `SELECT ... FOR UPDATE SKIP LOCKED`.
-
-Implements `JobQueue` (`usher.ports.jobs`). Four set-based statements, one
-per port method that writes, and this is the one module in the project where
-row-level locking appears.
-
-**Why `SKIP LOCKED` and not `FOR UPDATE`.** Both stop two workers running the
-same job, and only one of them keeps a worker pool a pool. Without `SKIP
-LOCKED` the second worker *blocks* on the first's uncommitted row lock until
-that transaction ends -- so N workers process jobs strictly one at a time,
-serialised behind whoever is slowest, and the failure looks like a
-performance problem rather than a correctness one. Without `FOR UPDATE` at
-all, both workers' `SELECT`s see the same pending row and the second's
-`UPDATE` blocks on the first's row lock anyway; the queue still serialises,
-it just does so one statement later. Pinned by
-`tests/integration/test_job_queue.py`, whose claims are bounded by
-`asyncio.wait_for` precisely because the wrong spellings hang rather than
-answer.
-
-**A park is one statement.** `_FAIL` decides "back off or park" inside the
-`UPDATE` itself, in a `CASE` over the row's own `attempts`. The obvious
-alternative -- read the row, compare in Python, write the outcome -- is two
-round trips with the job unowned in between, so a process that dies between
-them leaves a job that is neither running, nor pending, nor parked, and the
-attempt ceiling PRD 08 rests on is enforced against a value that may already
-be stale.
-
-**`clock_timestamp()`, never `now()`.** `now()` is `transaction_timestamp()`
--- frozen for the life of the transaction. Every statement here is about the
-instant it actually runs: a job that failed twenty minutes into a long
-transaction must back off from *now*, not from when that transaction opened,
-and `requeue_running`'s `updated_at <= clock_timestamp() - interval` cannot
-match a claim made in the same transaction if the claim stamped a frozen
-`now()` and the requeue compares against the same frozen value. Verified
-directly against the integration suite, whose per-test fixture is one long
-transaction and is therefore the shape that shows the difference.
-
-**Equal jitter, not full jitter.** The delay is a uniform draw from
-`[base/2, base) * 2^attempts`, not from `[0, base) * 2^attempts`. Full jitter
-is the more commonly cited shape and it is wrong for this queue: its minimum
-draw is arbitrarily close to zero, so some share of failures against a broken
-upstream retry immediately -- the hot loop the backoff exists to prevent,
-merely rationed. The spread is what breaks a thundering herd, and a
-half-interval floor keeps all of it while making "a failed job is not
-instantly re-claimable" a property rather than a probability.
-
-**`retry_after_seconds` is a floor added *inside* that same expression, not a
-second `CASE` arm and not a replacement for the jitter.** Six sites across
-four adapter modules construct `PortRateLimited(retry_after=...)` from a real
-upstream hint (TMDb's 429, Emby's, an HTTP `Retry-After` header more
-generally) and, until this parameter existed, nothing in `src/` ever read the
-attribute -- an upstream that said exactly when to come back was answered
-with this queue's own jittered guess instead. `GREATEST(:retry_after_seconds,
-0)` is not decoration: the hint may carry RFC 9110's HTTP-date form, and a
-date already in the past parses to a negative number, which would otherwise
-pull a rate-limited job's backoff *earlier* than the ordinary schedule --
-instantly re-claimable, the exact hot loop this module's jitter exists to
-prevent. Widening the existing `ELSE` arm rather than adding a new `CASE` arm
-means the two parking arms (`NOT :retryable`, `attempts + 1 >= :max_attempts`)
-are textually untouched, so "a rate limit at the attempt ceiling still parks
-with a NULL `run_after`" cannot regress by ordering. `None` is normalised to
-`0.0` in Python, at the one place that binds the parameter
-(`PostgresJobQueue.fail`), rather than wrapped in a SQL `COALESCE`: Postgres's
-`GREATEST` already ignores a NULL input, so a `COALESCE` would be a redundant
-second spelling of a guard that already holds.
-
-**A second reason for the Python normalisation was written here and measured
-false, and the correction is worth keeping over the claim.** The draft this
-was built from expected a bare `None` bound to `:retry_after_seconds` to fail
-with asyncpg's "could not determine data type of parameter" -- the general
-shape `db-and-sql.md` already documents for an untyped parameter with nothing
-around it to type against. Measured directly, on a connection that had never
-run any other statement (so no prepared-statement cache could be priming a
-type): it does not fail. `GREATEST(:retry_after_seconds, 0)` gives Postgres a
-concrete sibling literal to resolve the parameter's type against, which a bare
-`:retry_after_seconds` elsewhere in the statement would not, and
-`GREATEST(NULL, 0)` does evaluate to `0` exactly as documented, not to `NULL`
-propagating through the rest of the expression. So the mutation this was meant
-to guard against (a raw `None` bind in place of the Python normalisation)
-**survives** on this exact SQL shape. The normalisation is kept anyway: it is
-one line, and it stops the floor's correctness depending on a literal `0`
-staying textually adjacent to the parameter inside `GREATEST(...)` -- move the
-parameter, or change the literal to `0.0`, and the inference this measurement
-relies on may not reproduce. `.claude/rules/mutation-sweeps.md`'s D9 ledger
-entry carries the measurement.
-
-`ck_jobs_key_not_empty` and `ck_jobs_priority_range` fire at the
-`INSERT ... SELECT`, not during the `COPY`: `usher.db.staging`'s staging
-tables are deliberately unconstrained, so a violation reaches SQLAlchemy and
-is translatable. See that module's docstring before adding a constraint to
-`_STAGING_DDL`.
-"""
+"""The priority work queue, on `SELECT ... FOR UPDATE SKIP LOCKED`."""
 
 import uuid
 from collections.abc import Sequence
@@ -114,12 +23,9 @@ CREATE TEMP TABLE stg_jobs (
 
 _COLUMNS = ("id", "kind", "key", "priority", "traceparent")
 
-# `SELECT DISTINCT ON (kind, key)` is required rather than defensive: one
-# statement may not hit the same conflict target twice (Postgres answers
-# `CardinalityViolationError`), and a walk really does yield the same item in
-# two pages. `ORDER BY ..., priority DESC` makes the survivor the highest
-# priority in the batch, because promote-never-demote has to hold within a
-# batch for the same reason it holds across batches.
+# `SELECT DISTINCT ON (kind, key)` is required rather than defensive: one statement may
+# not hit the same conflict target twice (Postgres answers `CardinalityViolationError`),
+# and a walk really does yield the same item in two pages.
 _ENQUEUE = """
 INSERT INTO jobs (id, kind, key, priority, status, traceparent, created_at, updated_at)
 SELECT DISTINCT ON (kind, key)
@@ -230,26 +136,17 @@ WHERE id = :id
 RETURNING *
 """
 
-# The heartbeat, and `status = 'running'` is doing the same work here as in
-# `_REQUEUE` below: a beat that arrives after another worker already recovered,
-# completed or parked the job must move nothing. `clock_timestamp()` for this
-# module's usual reason -- a beat sent twenty minutes into a long transaction
-# has to stamp *now*, not when the transaction opened, or the lease it exists
-# to renew is renewed to a moment already in the past.
+# The heartbeat, and `status = 'running'` is doing the same work here as in `_REQUEUE`
+# below: a beat that arrives after another worker already recovered, completed or parked
+# the job must move nothing.
 _TOUCH = """
 UPDATE jobs SET updated_at = clock_timestamp()
 WHERE id = ANY(:ids) AND status = 'running'
 """
 
-# `status = 'running'` is the whole predicate that keeps this off parked
-# poison: a requeue keyed on anything looser un-parks it on every restart,
-# which is the failure parking exists to end, arriving through the recovery
-# path. `attempts` and `last_error` are deliberately untouched -- a job that
-# keeps killing its worker must still reach the ceiling.
-#
-# `updated_at` is what the age is measured on, which is why `_TOUCH` above
-# moves exactly that column: the two statements are one mechanism and a change
-# to either that leaves the other alone silently breaks the lease.
+# `status = 'running'` is the whole predicate that keeps this off parked poison: a
+# requeue keyed on anything looser un-parks it on every restart, which is the failure
+# parking exists to end, arriving through the recovery path.
 _REQUEUE = """
 UPDATE jobs SET status = 'pending', updated_at = clock_timestamp()
 WHERE status = 'running'
@@ -291,13 +188,11 @@ class PostgresJobQueue(JobQueue):
         if not requests:
             return 0
         try:
-            # A SAVEPOINT for the same reason PostgresMediaItemRepository has
-            # one: this port's caller genuinely has other pending work on the
-            # session -- IngestService commits a batch of jobs together with
-            # the walk's own sync-run checkpoint -- so a caught conflict must
-            # not leave the session raising PendingRollbackError on the next
-            # unrelated call. It also makes the batch atomic across the
-            # staging DDL, the COPY and the upsert.
+            # A SAVEPOINT for the same reason PostgresMediaItemRepository has one: this
+            # port's caller genuinely has other pending work on the session --
+            # IngestService commits a batch of jobs together with the walk's own sync-
+            # run checkpoint -- so a caught conflict must not leave the session raising
+            # PendingRollbackError on the next unrelated call.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await stage_records(
@@ -323,17 +218,10 @@ class PostgresJobQueue(JobQueue):
                     result = cast(CursorResult[Any], await self._session.execute(text(_ENQUEUE)))
                     written = result.rowcount
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0044).**
-            # `jobs.priority` is `integer` and `JobRequest.priority` is a bare `int` --
-            # `domain.Job`'s `ge=0, le=100` is on the shape a caller reads *back*, which this path
-            # never constructs (ADR-0044, question 5). SQLAlchemy's asyncpg dialect does not map
-            # SQLSTATE class 22 onto any classified subclass, so a column refusing a *value* arrives
-            # as a bare `DBAPIError` that `except IntegrityError` does not catch and the driver's
-            # own exception crossed this port boundary untranslated -- the one thing ADR-0009
-            # forbids. `db/repositories/_errors.py` holds the two measured shapes and the only copy
-            # of the predicate. Everything that is *not* a row refusal -- a dropped connection, a
-            # statement timeout, an undefined table -- still propagates, because a caller that
-            # cannot tell those apart retries the one thing a retry cannot fix.
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
+            # (ADR-0044).** `jobs.priority` is `integer` and `JobRequest.priority` is a
+            # bare `int` -- `domain.Job`'s `ge=0, le=100` is on the shape a caller reads
+            # *back*, which this path never constructs (ADR-0044, question 5).
             if not is_row_refusal(exc):
                 raise
             raise RepositoryConflict(

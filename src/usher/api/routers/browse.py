@@ -1,30 +1,4 @@
-"""`GET /browse` -- PRD 07's faceted paging screen, over B6's two reads.
-
-**A screen with nothing on it is a fact about the catalog and the filters, not
-a missing resource.** Every empty answer here is a `200` with an empty list and
-a `null` cursor. The only 404 this module can produce is FastAPI's own, for a
-path that is not this one.
-
-**The facet block is `?facets=true` plus a predicate, and the measurement is
-why.** B7's bar -- registered at `/var/tmp/m9-B7/BAR.md` before the first probe
--- put unfiltered facet counts at p95 <= 200 ms over 1.27M titles. Measured:
-**330.81 ms**. The plan's named consequence was to serve facets only for a
-predicated browse behind an explicit key, and the same run refuted that as a
-remedy: a genre-predicated request costs **324.43 ms**, because
-`browse_facets` computes each facet over the population *minus its own
-predicate*, so a genre-only request counts genres over the whole catalog by
-construction. `api/dto/browse.py` carries the full table. What ships is the
-plan's rule with the measurement's gate in front of it.
-
-**A cursor is minted for one `(sort, filters)` and refused for any other.** The
-refusal is A3's codec at this router, never the port: `CursorSpec.filters`
-carries the genre, the year and the owned flag, so a cursor minted under
-`sort=year&genre=horror` and replayed against `sort=name` is a
-`400 invalid_cursor` rather than a plausible, complete, wrong page. `limit` is
-deliberately **not** in the digest -- a client changing its page size mid-walk
-has not changed the population or its order, and refusing that would be a
-refusal with nothing behind it.
-"""
+"""`GET /browse` -- PRD 07's faceted paging screen, over B6's two reads."""
 
 import uuid
 from typing import Annotated, Any, Final, cast
@@ -44,13 +18,7 @@ from usher.ports.repository.title import BrowseCursorPosition, BrowseSort
 
 router = APIRouter(tags=["browse"])
 
-#: What `/openapi.json` says this route answers when it fails. The `400` is
-#: `decode_cursor`'s, raised inside `api/cursor.py` rather than here -- a
-#: cursor minted for another filter or sort is refused rather than served as a
-#: plausible, complete, wrong page. The `422` is declared rather than left to
-#: FastAPI, whose automatic one names `HTTPValidationError` while
-#: `api/errors.py` answers an RFC 9457 document carrying the same error list
-#: under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
+# : What `/openapi.json` says this route answers when it fails.
 _BROWSE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     400: {"model": ProblemResponse, "description": "The cursor is malformed or not this query's."},
     422: {"model": ProblemResponse, "description": "The request was rejected."},
@@ -64,15 +32,9 @@ _BROWSE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 DEFAULT_LIMIT = 24
 MAX_LIMIT = 100
 
-#: Each sort's keyset component types, beside `BrowseSort` rather than derived
-#: from it, because the wire type of a sort key is a fact about the **codec**
-#: and `_ORDERS` is a fact about the *table*. `CursorSpec` refuses a keyset
-#: that does not end in the UUIDv7 primary key, so the trailing `UUID` is not
-#: decoration -- it is the total order (ADR-0003, ADR-0034).
-#:
-#: `test_every_sort_has_a_cursor_type` is what keeps this exhaustive: a fifth
-#: `BrowseSort` member with no entry here would raise `KeyError` inside a
-#: route, which is a 500 for a value the enum says is legal.
+# : Each sort's keyset component types, beside `BrowseSort` rather than derived : from
+# it, because the wire type of a sort key is a fact about the **codec** : and `_ORDERS`
+# is a fact about the *table*.
 _KEYSET_TYPES: dict[BrowseSort, tuple[CursorType, ...]] = {
     BrowseSort.NAME: (CursorType.STR, CursorType.UUID),
     BrowseSort.YEAR: (CursorType.INT, CursorType.UUID),
@@ -190,15 +152,8 @@ async def browse_catalog(
         keys=lambda one: (BrowseSort.position_of(one, sort=sort).key, one.id),
         item=BrowseItemResponse.of,
     )
-    # **The page that was served, not the page that was fetched** (issue #73:
-    # a surface promotes what it draws). `over_fetch` asks for one row more
-    # than it serves and `paginate` discards it, so promoting `fetched` would
-    # enqueue one title per page that no client has been shown.
-    #
-    # Sliced by `len(page.items)` rather than by `limit`, so this is *derived
-    # from what was served* rather than a second copy of `paginate`'s
-    # truncation rule -- the two cannot drift, and on the last page (where the
-    # over-fetched row does not exist) the length is already the right one.
+    # **The page that was served, not the page that was fetched** (issue #73: a surface
+    # promotes what it draws).
     await visibility.seen(fetched[: len(page.items)])
     return BrowseResponse(
         items=page.items,

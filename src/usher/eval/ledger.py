@@ -1,15 +1,4 @@
-"""Where a run's numbers go. Two sinks, deliberately.
-
-**Postgres, `eval` schema** -- what Grafana reads, and what makes *"did the
-run where recall dropped coincide with the embedding re-index?"* a join
-rather than a cross-tool eyeball, because eval scores live in the same
-database as `search_queries`, `llm_calls` and `curated_rows`.
-
-**`docs/evals/ledger.jsonl` in git** -- one summary line per `--full` run.
-Cheap, and it buys two things the table cannot: history survives a database
-rebuild (`m09e` already forced one full wipe) and a PR diff can *show* that a
-change moved recall@5 from .82 to .79.
-"""
+"""Where a run's numbers go. Two sinks, deliberately."""
 
 import json
 import uuid

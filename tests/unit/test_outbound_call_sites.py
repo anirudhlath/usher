@@ -25,9 +25,9 @@ and this docstring cannot drift apart from the tree silently.
 count it protected was wrong.** This docstring said the census assertion kept
 PRD 01 from drifting; nothing here opened PRD 01, whose filename appeared only
 in prose and in an assertion *message*, so editing its "nine modules" to "ten"
-was green everywhere -- the same one-way-pointer finding
-`_BACK_POINTER` records for the `src/` files, applied to `src/` and not to the
-document. And the call-site count really had drifted, in the other direction:
+was green everywhere -- the same one-way-pointer finding this file records
+for the `src/` files, applied to `src/` and not to the document. And the
+call-site count really had drifted, in the other direction:
 `_OUTBOUND_METHODS` omitted **five** of `httpx.AsyncClient`'s eleven
 request-issuing methods, and one of the five was live --
 `CachedDatasetFile.revision`'s `self._client.head(...)`
@@ -100,23 +100,6 @@ _OUTBOUND_METHODS = frozenset(
 #: find, so "the scan matched nothing" cannot read like "the scan found nothing
 #: to report".
 _ANCHOR = "usher.adapters.emby.session"
-
-#: **The back-pointer every record must carry**, and what makes
-#: `test_every_recorded_decision_points_at_a_file_that_exists` able to fail.
-#: A pointer that only runs table -> file is satisfied by any `src/` module
-#: that exists for other reasons, so deleting a whole decline paragraph left
-#: that case green. This is the other direction: the file the table names has
-#: to name the table back.
-#:
-#: **Chosen over the upstream's host name, and the reason is measured rather
-#: than stylistic.** A host recurs in these files for unrelated reasons --
-#: `datasets.imdbws.com` appears three times in `bulk/download.py` and
-#: `query.wikidata.org` three times in `bulk/wikidata.py`, only one of each
-#: inside the decline -- so a host token is satisfied by a file whose decline
-#: has been deleted. This path appears **exactly once** in each of the seven
-#: files below and nowhere else under `src/`, which is why the assertion is on
-#: a count of one rather than on membership.
-_BACK_POINTER = "tests/unit/test_outbound_call_sites.py"
 
 #: The two tokens the receiver test is written in terms of. `_CLIENT` alone is
 #: what a receiver has to say to be one; both together are what an *annotation*
@@ -551,24 +534,21 @@ def test_the_push_channel_is_not_a_request_and_the_scan_confirms_it() -> None:
 
 
 def test_every_recorded_decision_points_at_a_file_that_exists() -> None:
-    """The declines are written where the code is, not only in this table --
-    and the file says so itself rather than merely existing.
+    """A `recorded_in` naming nothing is a table describing an older tree.
 
-    🔴 **Existence alone could not fail, which is what this case was for.**
-    Every `recorded_in` names an ordinary `src/` module that exists for its own
-    reasons, so as S3 shipped it, deleting an entire decline paragraph from any
-    of the docstrings left this green: the acceptance was met and nothing
-    checked that it stayed met. The repair is the **other direction of the
-    pointer** -- the file the table names has to name the table back
-    (`_BACK_POINTER`), so a record removed from the code removes the token and
-    this case goes red.
+    🔴 **This ran in both directions until M10 and now runs in one.** Each
+    named file also had to contain `tests/unit/test_outbound_call_sites.py`
+    exactly once, so deleting a decline paragraph from a docstring turned this
+    red. M10's docstring convention took those back-pointers out of `src/`
+    wholesale, and a reciprocity check whose other half the convention forbids
+    is an arm that can only fail on the convention.
 
-    **Still not a change-detector on prose**, which is the trade
-    `.claude/rules/testing-discipline.md` records both halves of: what is
-    asserted is one module *path*, not a sentence, so every word of the
-    reasoning around it can be rewritten freely. **Exactly once**, not merely
-    present, for the reason `_BACK_POINTER`'s own comment gives -- a token that
-    recurs in a file for unrelated reasons is a token a deletion cannot remove.
+    What still fails here is a module renamed or moved out from under its row.
+    What no longer fails here is a decline paragraph deleted while its row
+    stands -- but the row is still held to the tree by
+    `test_no_outbound_http_call_escapes_a_recorded_decision`'s set *equality*
+    against the walk, where a row naming a call site that no longer exists is
+    red.
     """
     repository = pathlib.Path(usher.adapters.__file__).parents[3]
     assert (repository / "src" / "usher" / "adapters").is_dir(), (
@@ -583,23 +563,8 @@ def test_every_recorded_decision_points_at_a_file_that_exists() -> None:
             if not (repository / record.recorded_in).is_file()
         }
     )
+    assert _RECORDS, "the premise: the record table is empty, so nothing was checked"
     assert not missing, f"a decision points at a file that is not there: {missing}"
-
-    unrecorded = sorted(
-        {
-            f"{record.recorded_in} ({count}x)"
-            for record in _RECORDS
-            for count in [
-                (repository / record.recorded_in).read_text(encoding="utf-8").count(_BACK_POINTER)
-            ]
-            if count != 1
-        }
-    )
-    assert not unrecorded, (
-        f"a file this table points at does not name `{_BACK_POINTER}` exactly once, so the "
-        "record beside the code has been deleted, duplicated or never written -- and this "
-        f"table would go on describing a decision the code no longer states: {unrecorded}"
-    )
 
 
 def test_the_module_census_is_the_one_the_records_quote() -> None:
@@ -759,9 +724,8 @@ def test_prd_01_prints_the_census_this_table_computes() -> None:
     `tests/unit/test_docs_currency.py` is the only PRD-consistency case in the
     repository and it covers two status tables, not this one. So editing PRD
     01's "nine modules" to "ten" was green everywhere, and what the census case
-    actually bought was a *prompt* -- which is the one-way-pointer finding
-    `_BACK_POINTER` records, applied to the `src/` files and not to the
-    document that prints the same numbers.
+    actually bought was a *prompt* -- the one-way-pointer finding, applied to
+    the `src/` files and not to the document that prints the same numbers.
 
     **Two halves, because either alone is satisfiable by the other's defect.**
     The table's rows are compared as a **set of modules** against the census, so

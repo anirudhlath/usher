@@ -1,13 +1,4 @@
-"""source credentials
-
-Revision ID: d4c9b1e37a05
-Revises: c7a2e51d8b40
-Create Date: 2026-07-30
-
-The encrypted-at-rest table PRD 08 has specified since before M1 and that
-`Source.credentials_ref` has pointed at nothing until now. No BEFORE UPDATE
-trigger -- see db/models/source.py's SourceCredentialRow docstring.
-"""
+"""source credentials"""
 
 from collections.abc import Sequence
 

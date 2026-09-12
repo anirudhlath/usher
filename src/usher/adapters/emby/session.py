@@ -1,83 +1,4 @@
-"""One authenticated HTTP session against one Emby server.
-
-PRD 03's durable-client authentication, in full:
-
-    Authorization: MediaBrowser Client="Usher", Device="<source name>",
-                   DeviceId="<persisted UUID>", Version="<app version>"
-    POST /Users/AuthenticateByName  {"Username": ..., "Pw": ...}
-    -> AccessToken, User.Id
-
-The identity header goes on **every** request, not just the authentication
-one: that is what makes Emby attribute all of Usher's traffic to a single
-device rather than to an anonymous client per call. The session token rides
-alongside in `X-Emby-Token`.
-
-**Emby has no OAuth2**, so there is no refresh-token flow to build against.
-The refresh mechanism is this: any 401 re-authenticates silently with the
-stored credentials and the *same* `DeviceId`, and no human ever pastes a
-token. That is the whole fix for the failure this project exists to
-address, where a token stored in a Home Assistant dashboard quietly started
-returning 401 on every authenticated endpoint.
-
-Two mechanisms keep that from becoming a request storm, and both are
-tested:
-
-1. **Single flight.** One `asyncio.Lock` and a generation counter. A
-   request that receives a 401 asks for a refresh *quoting the generation
-   whose token it used*; if the generation has already advanced, another
-   in-flight request re-authenticated and this one reuses that session.
-   Eight concurrent 401s therefore produce one `AuthenticateByName`.
-2. **Negative caching.** If `AuthenticateByName` itself is rejected, a
-   monotonic deadline is recorded and every call raises `PortAuthFailed`
-   without a network request until it passes. Without it a wrong password
-   doubles every request forever. ⚠️ **What the doubling costs is still
-   unmeasured**, and this is the one place it would be easy to quote the wrong
-   number: the added request is `AuthenticateByName`, which no run in this
-   repository has ever exercised -- the operator's secrets hold a token, not a
-   password. What M10's S1 priced on 2026-08-15 is the *other* half, the call
-   being retried: 0.1649 s mean for a single-item read, 6.04 s for a 200-item
-   page (`.claude/rules/emby-push-and-ingest.md`). So the storm is real and its
-   per-unit price is half-known.
-   The clock is injected so the *expiry* is testable without sleeping.
-
-The injected clock also times `usher.source.request.duration` (PRD 10's
-catalogue entry for M3). Deliberately the same one: two clocks would be a
-second constructor knob, able to disagree, for a value only a test reads.
-The visible cost is that a test freezing the clock records every duration
-as `0.0` -- so the test that asserts on a duration advances it instead.
-
-And exactly one retry per call, never a loop. A loop is how a genuinely
-wrong password becomes an infinite storm.
-
-**Which paths below are verified.** `POST /Users/AuthenticateByName` is
-verified -- it is the call ADR-0004's own end-to-end session used to mint
-its token. `/System/Info` and `/System/Info/Public` were both exercised
-against the live Emby 4.9.5.0 server on 2026-07-31, and the split
-`verify()` depends on holds exactly as designed:
-
-- `/System/Info/Public` answers **200 with no credential of any kind**,
-  carrying `ServerName`, `Version`, and `Id`. So a failure there is a
-  reachability failure and nothing else, which is what lets `SourceStatus`
-  separate "unreachable" from "bad credentials".
-- `/System/Info` answers **401 without a token** and 200 with one, and
-  carries the same `Version`. So the second probe really does test the
-  credential rather than the host.
-
-One divergence from `FakeEmbyServer`, recorded rather than smoothed over:
-the real `/System/Info/Public` **tolerates a session token** (it answers
-200, and in fact returns two extra fields, `LocalAddress` and
-`WanAddress`). The fake rejects one with a 400. That is deliberate
-over-strictness on the fake's part -- an adapter that reached this path
-through its *authenticated* helper would authenticate first, and against a
-bad credential the reachable/unauthenticated distinction would silently
-collapse. The real server would not catch that; the fake does.
-
-**Not verified, and not verifiable from that run:** silent
-re-authentication on a 401. The live run held an access token rather than a
-password, so nothing exercised the refresh path end to end against the real
-server -- only against `FakeEmbyServer`, which does model an expiring
-token.
-"""
+"""One authenticated HTTP session against one Emby server."""
 
 import asyncio
 import re
@@ -108,12 +29,9 @@ AUTHENTICATE_PATH = "/Users/AuthenticateByName"
 PUBLIC_INFO_PATH = "/System/Info/Public"
 SYSTEM_INFO_PATH = "/System/Info"
 
-# Named `_EMBY_AUTH_HEADER`, not `_TOKEN_HEADER`: ruff's S105 flags any
-# module constant whose *name* contains "token" and whose value is a string
-# literal, and a suppression comment on a header name is worse than a clear
-# name. (Spelled out rather than naming the directive: ruff parses the
-# directive's own spelling out of any comment, prose or not, and warns
-# about it on every run.)
+# Named `_EMBY_AUTH_HEADER`, not `_TOKEN_HEADER`: ruff's S105 flags any module constant
+# whose *name* contains "token" and whose value is a string literal, and a suppression
+# comment on a header name is worse than a clear name.
 _EMBY_AUTH_HEADER = "X-Emby-Token"
 
 _UNSAFE_HEADER_CHARS = re.compile(r"[^A-Za-z0-9 ._+-]")
@@ -131,18 +49,7 @@ _request_duration = _meter.create_histogram(
 )
 
 
-# Every segment this adapter issues that is a *route word* rather than an
-# identifier. Enumerated from the paths `EmbySession` and `EmbyAdapter`
-# actually build -- `/Users/AuthenticateByName`, `/System/Info{,/Public}`,
-# `/Users/{u}`, `/Users/{u}/Items{,/{i}{,/UserData}}` and
-# `/Users/{u}/PlayedItems/{i}` -- and pinned by a case that drives the real
-# adapter and reads the paths off the wire rather than transcribing them.
-#
-# **This set and the routes the adapter issues must move together**, the
-# shape `.claude/rules/ports-and-error-taxonomy.md` already carries an entry
-# about. A route word missing from here renders as `{id}`: a word lost from a
-# message, which is the *safe* direction and is why the default is to redact
-# rather than to keep.
+# Every segment this adapter issues that is a *route word* rather than an identifier.
 _ROUTE_WORDS: frozenset[str] = frozenset(
     {
         "Users",
@@ -169,43 +76,8 @@ _ID_NAMES: Mapping[str, str] = {
 
 
 def redact_path(path: str) -> str:
-    """An Emby request path with every identifier replaced by a placeholder
-    naming what it was.
-
-    **The rule that was missed, stated so it is not re-derived.** Until issue
-    #35 this module said the path was safe to interpolate *"because an Emby
-    URL carries no credential"*. That sentence is true and it is not the test
-    that was owed: `CLAUDE.md` lists **a user id** alongside a credential and
-    a host, and "carries no credential" is a strictly weaker check than
-    "carries no identifier". The gap was not theoretical -- a real Emby user
-    id reached a public issue in a copied `sync_runs.error` row.
-
-    **A redaction, not a blindfold.** The route is the whole diagnostic value
-    of these messages and it survives: an operator can still tell
-    `/Users/{user_id}/Items` (the walk) from
-    `/Users/{user_id}/Items/{item_id}` (one item) from
-    `/Users/{user_id}/PlayedItems/{item_id}` (the write-back) from
-    `/System/Info`. Collapsing every path to "a request failed" trades one
-    blindfold for another.
-
-    **Classified by route vocabulary, never by the shape of an id.** "32 hex
-    characters is a GUID" is a guess about one server build; an `external_id`
-    is whatever the source last called an item, and this adapter has been
-    surprised by a live Emby's id spellings more than once (`ProviderIds`
-    casing, `MediaSourceId`'s own namespace). A closed set of words this
-    adapter *issues* is something the project controls.
-
-    **The first segment is kept whatever it is, and that has a premise
-    rather than being a convenience.** No route this adapter issues begins
-    with an identifier -- every one of the eight starts `Users` or `System`,
-    and an HTTP route names a collection before a member -- so a root is a
-    route word by construction. Without this, a path the vocabulary has not
-    learned collapses to `{id}` with nothing left to read, which is the
-    "second blindfold" this function exists not to be.
-
-    Percent-encoding is irrelevant here and deliberately not undone:
-    `_segment` quotes an id before it reaches a path, and a quoted id is
-    still an id.
+    """An Emby request path with every identifier replaced by a placeholder naming what it
+    was.
     """
     segments = path.split("/")
     out: list[str] = []
@@ -237,33 +109,7 @@ def _header_safe(value: str) -> str:
 
 
 def decode_json(response: httpx.Response, path: str) -> dict[str, Any]:
-    """Parse a JSON object body, or raise `PortDataMalformed`.
-
-    Public because `EmbyAdapter.get_item` needs it: that call must inspect
-    a 404 before decoding, so it uses `request()` rather than `json_body()`
-    and decodes the success path itself.
-
-    The body of this now lives in `usher.adapters.http.decode_json`, which
-    `TmdbClient` and `OpenAICompatibleClient` also call -- the third copy was
-    the only one that had learned `json.loads` raises `RecursionError` rather
-    than a `ValueError` past a nesting depth of 9,999, so this adapter was
-    still one deeply nested payload away from taking the worker process down.
-    What stays here is the Emby-shaped call: the request path is both the
-    subject of the message and its `detail`, and **both go through
-    `redact_path` first**.
-
-    ⚠️ That last clause corrects this docstring rather than adding to it.
-    Until issue #35 it read *"which is safe because an Emby URL carries no
-    credential"* -- a true sentence answering the wrong question. An Emby
-    path carries no credential and does carry a **user id**, which `CLAUDE
-    .md` names alongside a credential and a host, and the two are not the
-    same test. `detail` is the half that matters most here: it is what a
-    route may put in an RFC 9457 body, so it is the one that can reach a
-    client rather than a log.
-
-    Keeping the wrapper also keeps this two-positional-argument signature,
-    which `EmbyAdapter` imports.
-    """
+    """Parse a JSON object body, or raise `PortDataMalformed`."""
     shape = redact_path(path)
     return _decode_json_body(response, what=shape, detail=shape)
 
@@ -288,24 +134,7 @@ class EmbySession:
         self._app_version = app_version
         self._reauth_cooldown = reauth_cooldown_seconds
         self._clock = clock
-        # The proactive outbound gate (ADR-0043), **handed in rather than
-        # minted**. It used to be constructed here from a `requests_per_second`
-        # scalar, which made it per *session* -- i.e. per adapter, i.e. per
-        # pipeline, i.e. per request -- so one server process running both lanes
-        # held >=2 gates for one source and ran it at twice the configured rate.
-        # `SourceGateRegistry` (`usher.adapters.http`) owns it now, keyed by
-        # `source.id` at the composition root, so every adapter for one source
-        # shares one gate however many pipelines exist (M10 S3; ADR-0043 §4).
-        # This module is one row of the closed outbound table in
-        # `tests/unit/test_outbound_call_sites.py`, which asserts that the row
-        # and this paragraph do not outlive one another.
-        #
-        # `None` is an unthrottled session, which is what a test that builds one
-        # directly wants -- and a session built without a registry has nothing
-        # to share with anyway. It gets this session's clock, one time source as
-        # the duration histogram does; a gate that *came* from a registry
-        # carries the registry's, because a gate shared by N sessions cannot
-        # take one of their clocks.
+        # The proactive outbound gate (ADR-0043), **handed in rather than minted**.
         self._limiter = (
             limiter if limiter is not None else SourceGate(0.0, source=source_name, clock=clock)
         )
@@ -473,34 +302,16 @@ class EmbySession:
         await self._limiter.take()
         started = self._clock()
         try:
-            # Built explicitly, then sent as a *reference* on its own line --
-            # not `self._client.request(..., json=payload, ...)` inline.
-            # Verified directly (see the auth-property experiments in the
-            # M3 report): loguru's diagnose=True renders the value of every
-            # name referenced on the exact source line an exception's frame
-            # reports, and a plain `client.request(method, path, json=
-            # payload, ...)` call has `payload` -- the dict holding the
-            # plaintext password during authentication -- sitting right on
-            # that line. Whether that line is where an exception is actually
-            # *raised from* is incidental to ruff's line-wrapping, not a
-            # property this class controls, so it is not something to rely
-            # on. `httpx.Request.__repr__` only ever renders a method and a
-            # URL, never a body, so once the request is built, the name that
-            # remains in scope on the awaiting line is safe under diagnose
-            # even though the global `diagnose=False` (usher.telemetry)
-            # should already prevent this from mattering.
+            # Built explicitly, then sent as a *reference* on its own line -- not
+            # `self._client.request(..., json=payload, ...)` inline.
             request = self._client.build_request(
                 method, path, params=params, json=payload, headers=dict(headers)
             )
             return await self._client.send(request)
         except UNTRANSLATED_FAILURES as exc:
-            # `failure_detail`, never `{exc}`: every httpx timeout
-            # stringifies to the empty string, so `{exc}` recorded an hour of
-            # work as a message ending at a colon (issue #35). What is
-            # interpolated here is a class name and a number Usher itself
-            # configured -- no header, no body, no URL -- so this message
-            # cannot leak the credential, and the one request that does carry
-            # it is never formatted into a message.
+            # `failure_detail`, never `{exc}`: every httpx timeout stringifies to the
+            # empty string, so `{exc}` recorded an hour of work as a message ending at a
+            # colon (issue #35).
             raise PortUnavailable(
                 f"{method} {redact_path(path)} failed: {failure_detail(exc)}"
             ) from exc

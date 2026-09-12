@@ -462,35 +462,6 @@ async def test_every_provider_composes_without_an_embedder(provider: RowProvider
 
 
 @_REGISTERED
-def test_every_provider_names_the_wrong_implementation_its_cases_rule_out(
-    provider: RowProvider,
-) -> None:
-    """**The front matter's rule 3, mechanised.** *"A test whose docstring
-    cannot name what it kills is a test that kills nothing."*
-
-    Asserted as a marker phrase in the provider's own module docstring rather
-    than by reading English -- a weak check that nonetheless fails the provider
-    added later with a one-line docstring, which is the actual failure mode.
-    Same standing as `tests/unit/test_ports_embedding.py`'s literal-substring
-    guard, and the same caveat: it proves the sentence is present, not that it
-    is true.
-
-    The module docstring rather than the class's, because M6's `Embedder`
-    finding is that a guard scoped to one surface of two reads as coverage --
-    the clause moves to the other surface and the guard stays green.
-    """
-    import importlib
-
-    module = importlib.import_module(type(provider).__module__)
-    text = (module.__doc__ or "") + (type(provider).__doc__ or "")
-
-    assert len(text) > 200, f"{_named(provider)} has no docstring worth the name"
-    assert "wrong implementation" in text.lower(), (
-        f"{_named(provider)}'s docstring does not name what its cases rule out"
-    )
-
-
-@_REGISTERED
 async def test_no_provider_reaches_a_port_the_context_does_not_carry(
     provider: RowProvider,
 ) -> None:

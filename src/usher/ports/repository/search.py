@@ -1,13 +1,4 @@
-"""Title embeddings and their neighbours: the two ports the semantic lane reads.
-
-Implemented by `usher.db.repositories.search`'s
-`PostgresTitleEmbeddingRepository` and `PostgresTitleNeighborRepository`.
-
-The name collides with `usher.ports.search`, which holds the query-side
-ports, and is deliberately not renamed: `usher.db.repositories.search` and
-`usher.adapters.search` are already that same pair one layer down, and a
-mirror that needs a lookup table is not a mirror.
-"""
+"""Title embeddings and their neighbours: the two ports the semantic lane reads."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -107,36 +98,7 @@ class NeighborSeed:
 
 @dataclass(frozen=True, slots=True)
 class NeighborCandidate:
-    """One candidate neighbour and the raw signals it offers.
-
-    **`cosine`, never a distance.** pgvector's `<=>` is a distance and the
-    blend wants agreement, so `1 - (a <=> b)` happens once, in the adapter,
-    rather than in a scorer that would then have to know which operator
-    produced its input. A signal list whose members disagree about direction is
-    how a weight silently becomes a penalty.
-
-    It may be **negative**, and clamping is deliberately the *service's* job
-    rather than this port's: `title_neighbors.score` is `CHECK (score >= 0 AND
-    score <= 1)`, so the clamp has to hold for every implementation of this
-    port rather than for the one that remembered.
-
-    **`tags` is the MovieLens tag-genome cosine, and it is `None` when *either*
-    side has no `genome_scores` row.** A cosine here too, never a distance, for
-    the reason above.
-
-    **Not `0.0` — [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md),
-    and this is the site where `0.0` is not merely uninformative but
-    *unreachable by real data*.** Every component of a genome vector is
-    positive, so the true cosine of any real pair is well above zero: Group F
-    measured the floor at **0.2556** over all 268,157,000 ordered off-diagonal
-    pairs, against a mean of 0.6101. `0.0` would therefore be the single most
-    confident *wrong* statement in the blend — it claims two films share no
-    tags, which no pair can truthfully say — and its effect is structural
-    rather than marginal: a genome-bearing title's neighbours would be
-    reordered to put every other genome-bearing title above every un-genomed
-    one, which at the measured coverage is a small clique pinned to the top of
-    the overwhelming majority of lists.
-    """
+    """One candidate neighbour and the raw signals it offers."""
 
     title_id: uuid.UUID
     cosine: float
@@ -276,77 +238,13 @@ class TitleEmbeddingRepository(ABC):
     async def nearest_for(
         self, seed_ids: Sequence[uuid.UUID], *, limit: int
     ) -> dict[uuid.UUID, list[NeighborCandidate]]:
-        """The `limit` nearest candidates for each seed, nearest first.
-
-        **Excludes the seed itself and every NULL-embedding row**, and both are
-        the implementation's job rather than the caller's. Self-exclusion,
-        because cosine with itself is 1.0 and every neighbour list would
-        otherwise open with the title the reader is already looking at.
-        NULL-exclusion, because `embedding <=> :seed` is NULL, NULLs sort last
-        on an ascending order, and so they arrive only when the population is
-        smaller than `limit` — at which point they are either a type error or,
-        under a careless `coalesce`, a distance of 0 pinning every refused
-        title to the top of every list.
-
-        **A page of seeds rather than one**, so a rebuild costs one statement
-        per page instead of one per title: the same round-trip-per-item shape
-        `index_many` was introduced to delete from `SearchIndex`, at 10,000
-        instead of 1.3M and still worth not reintroducing.
-
-        **Exact, not approximate.** PRD 05: brute-force exact cosine at this
-        scale, 10k x 384. Recall loss in a live query is per-query; recall loss
-        in a precomputed artefact is permanent, and this one is read until the
-        next rebuild. The `halfvec` quantisation figures do **not** license an
-        approximate index here — that would be laundering one measurement into
-        a claim about another, and this milestone has not measured HNSW recall.
-
-        Ties on distance break on `title_id`, so *which* candidates enter the
-        pool is decided rather than left to the executor.
-
-        A seed with no embedding, or none at all, is simply absent from the
-        answer — never a key mapped to an empty list, which a caller would have
-        to distinguish from "computed and found nothing".
-        """
+        """The `limit` nearest candidates for each seed, nearest first."""
 
     @abstractmethod
     async def list_for_titles(
         self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
     ) -> dict[uuid.UUID, tuple[float, ...]]:
-        """The stored vectors for a named set of titles, in one round trip.
-
-        `TasteService` averages ~50 named titles, and `get()` in a loop is 50
-        round trips to build one centroid — the same N+1 `nearest_for` takes a
-        page of seeds to avoid, and the one `EpisodeRepository.next_up` exists
-        to prevent one port over.
-
-        **A title with no row, and a title whose row carries a NULL vector, are
-        both simply absent from the mapping** — never a key mapped to `None`,
-        and never a key mapped to a zero vector. ADR-0014: the caller drops the
-        title from its mean rather than averaging in an origin that drags the
-        result toward nothing and shortens every subsequent cosine by a factor
-        nobody chose. Collapsing the two absences is deliberate: a consumer
-        that drops the term either way does not need to know which, and one
-        that branches on it is reading the backfill's progress out of a data
-        row.
-
-        **`model_name` is keyword-only and *optional*, and the default is this
-        method's original unscoped behaviour.** A row written under another
-        checkpoint is a vector from another space: the measured ST-vs-fastembed
-        difference is a max pairwise-similarity delta of 1.41e-03, **6x the
-        halfvec quantisation error**, so the two are not interchangeable
-        without a re-embed and a cosine across them is a confident wrong
-        number rather than a slightly worse one. A caller that *holds* a model
-        name — one comparing against a stored centroid, which carries the name
-        it was computed under — passes it and gets only rows written under it.
-
-        A *required* argument would force a name onto the two callers that
-        argue in their own docstrings for not having one:
-        `TasteService.centroid` averages whatever is stored for the window it
-        read, and `CandidatePoolService._cosine` documents the unscoped read as
-        the reason it answers "no opinion" on a width mismatch rather than
-        raising inside a nightly job. Both keep the call they have, and that
-        no-opinion path is pinned by a case rather than silently narrowed.
-        """
+        """The stored vectors for a named set of titles, in one round trip."""
 
     @abstractmethod
     async def count_without_embedding(self) -> int:
@@ -366,27 +264,7 @@ class TitleEmbeddingRepository(ABC):
 
     @abstractmethod
     async def stored_model_names(self) -> list[str]:
-        """Every distinct `model_name` carried by a row that **has a vector**,
-        sorted.
-
-        The read behind M10 J6's model guard, and the population is the one
-        `list_embedded` walks rather than the whole table: a refused title is
-        stored with a NULL embedding, is never a seed, and its recorded model
-        names no vector anything can be drawn from. Scoping this to the whole
-        table would refuse a rebuild over a set of vectors that is perfectly
-        uniform because some *unreadable* row disagreed.
-
-        **Distinct names rather than a count or a boolean**, because the
-        guard's whole output is a log line naming what it found: *"configured
-        for X, the table holds Y"* is actionable and *"the table is mixed"* is
-        not. On the catalog this project measures the answer is one string --
-        `openai:BAAI/bge-m3` over 133,364 vectors, measured 2026-09-07 -- and a
-        deployment mid-swap is exactly when it is two.
-
-        Empty for a table with no vectors at all, which is *"nothing to
-        disagree with"* rather than a disagreement: the state a fresh
-        deployment is in, and it must not refuse there.
-        """
+        """Every distinct `model_name` carried by a row that **has a vector**, sorted."""
 
 
 class TitleNeighborRepository(ABC):
@@ -419,27 +297,7 @@ class TitleNeighborRepository(ABC):
         *,
         blend_fingerprint: str,
     ) -> int:
-        """Replace every stored row for `seed_ids` with `neighbors`.
-
-        **`blend_fingerprint` is required and keyword-only**, following
-        `CreditRepository.replace_for_titles`' `credit_names`: it is what makes
-        "write the rows now and stamp them in a second statement afterwards"
-        unspellable rather than merely discouraged. A page that committed its
-        rows and then failed before the stamp would leave rows claiming a blend
-        that did not produce them, which is the exact state the column exists
-        to detect, minted by the thing detecting it.
-
-        **`seed_ids` is passed separately from the rows and that is not
-        redundancy.** A seed whose neighbours all disappeared — the other
-        enriched titles were deleted, or every candidate became degenerate —
-        contributes no rows at all, so an implementation deriving the delete's
-        scope from `neighbors` deletes nothing for it and leaves its stale
-        neighbours in place through every future rebuild. It is the one row
-        shape a rebuild cannot repair.
-
-        Returns the number of rows written, which is what makes an operator's
-        rebuild report a number rather than a reassurance.
-        """
+        """Replace every stored row for `seed_ids` with `neighbors`."""
 
     @abstractmethod
     async def list_for(self, title_id: uuid.UUID, *, limit: int) -> list[ScoredNeighbor]:
@@ -469,95 +327,10 @@ class TitleNeighborRepository(ABC):
     async def count_stale(
         self, *, blend_fingerprint: str, title_id: uuid.UUID | None = None
     ) -> int:
-        """Stored rows whose `blend_fingerprint` is not the one passed in.
-
-        **One predicate, three consumers**, which is ADR-0020's whole argument
-        expressed as a method rather than restated three times:
-        `usher.similarity.neighbors.stale` reads it whole-table, `usher similar
-        <title id>` reads it scoped to one seed, and `usher similar --rebuild`
-        is what drives it back to zero.
-
-        `title_id=None` is the whole table. A scoped call is not a convenience
-        twin — it is what lets a per-title command answer "these neighbours
-        were computed under a different blend" without minting a second
-        definition of *different*, which is how two consumers of one fact drift
-        apart.
-
-        **This answers the meaning-changed half of staleness and not the
-        other-title-was-embedded half**, and the port says so rather than
-        letting a zero here read as "the artefact is current". A row can carry
-        the running fingerprint and still be wrong, because some third title
-        was embedded into its neighbourhood since — that is undecidable per row
-        and is why `computed_at()` still exists beside this.
-        """
+        """Stored rows whose `blend_fingerprint` is not the one passed in."""
 
     @abstractmethod
     async def resume_cursor(self, *, blend_fingerprint: str) -> uuid.UUID | None:
-        """Where an interrupted rebuild should pick its keyset walk back up —
-        the `after` a resumed `list_embedded` starts from, or `None` for
-        *"start at the beginning"*.
-
-        Defined against the artefact and nothing else, which is what lets
-        `SimilarityService.rebuild(resume=True)` resume **without storing a
-        cursor anywhere** (ADR-0046: the scheduler stores nothing, and
-        resumption belongs to the registration). The value is the greatest
-        embedded `title_id` strictly *below* the lowest embedded `title_id`
-        that carries no `title_neighbors` row stamped `blend_fingerprint`.
-
-        🔴 **A starting offset, computed once — not a loop predicate.** The
-        distinction is one word and `rebuild`'s own docstring argues the other
-        side of it: *"a loop spelled 're-read what looks stale, rebuild,
-        repeat' does not terminate against a row the predicate cannot clear"*.
-        True, and this is not that loop. The walk still advances on `id` and
-        still ends when `list_embedded` returns empty, so a seed the rebuild
-        cannot clear is re-attempted **once per run** rather than looped on
-        forever. What such a seed costs is that the cursor stops moving past
-        it, so resume stops *helping* — never that a seed goes unvisited.
-
-        **Predecessor rather than the uncovered seed itself, because `after`
-        is exclusive.** Answering the first uncovered seed would make the walk
-        skip exactly the seed it was resumed for, every run, forever — the
-        non-convergence this method exists to remove, arriving through an
-        off-by-one.
-
-        **`None` has one meaning and it is the safe one.** Both an
-        all-current table (no uncovered seed at all) and a table whose *first*
-        seed is uncovered answer `None`, and both want the same thing: a walk
-        from the start. An all-current table has no interrupted walk to
-        resume, and neighbour lists still move when some other title is
-        embedded — the undecidable half of staleness `computed_at()` exists
-        for — so a full pass is the honest answer rather than a no-op.
-
-        **The spelling is `ORDER BY title_id LIMIT 1`, and that is not a
-        style choice**: PostgreSQL has no `min`/`max` aggregate for `uuid`.
-        `SELECT min(title_id) FROM title_neighbors` is
-        `ERROR: function min(uuid) does not exist` on PostgreSQL 17.10
-        (checked 2026-09-07), so it fails at the database rather than at
-        mypy — which is why the obvious first attempt is recorded here.
-
-        **Worst case ~0.8 s, and it is a full walk of the embedded
-        population.** Measured 2026-09-07 by calling this method through
-        `PostgresTitleNeighborRepository`: median **778.5 ms** over 60 samples
-        after a discarded warm-up, range 626.8-951.3. The subject is the
-        *exhaustive* case — every embedded seed carrying a current row, so the
-        anti join runs to the end and the `LIMIT 1` never fires — which the
-        live catalog is not in, so it was arranged on a clone
-        (`CREATE DATABASE … TEMPLATE usher_seed_full`, then a covering row for
-        each of the 877 seeds that had none): **133,319 embedded seeds**
-        against **3,311,927** neighbour rows.
-
-        ⚠️ **The wall-clock figure is an upper bound rather than a quiet-host
-        one** — this host carried a load average near 30 from concurrent work
-        throughout. What does not move with load is the *shape*, and it is the
-        part worth knowing: a **nested-loop anti join** driven by an index scan
-        on `pk_title_embeddings`, one `pk_title_neighbors` probe per embedded
-        seed, 666,047 buffers touched. It is **not** a parallel sequential
-        scan. The outer half then adds ~0.02 ms, because an index condition
-        against a NULL cursor matches nothing.
-
-        A table with an interrupted prefix — the case this is *for* —
-        short-circuits far earlier: **12.0 ms**, median of 60 (range
-        10.1-15.5), on the live `usher_catalog` the same day, whose first
-        uncovered seed is the 3,558th of 133,364. It is read **once per run**,
-        never per page and never per tick, against a walk of 3.58 h.
+        """Where an interrupted rebuild should pick its keyset walk back up — the `after` a
+        resumed `list_embedded` starts from, or `None` for *"start at the beginning"*.
         """

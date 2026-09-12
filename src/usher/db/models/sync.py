@@ -56,21 +56,7 @@ class SyncRunRow(Base):
         enum_column(SyncRunStatus, length=16), nullable=False, server_default=text("'running'")
     )
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The walk's resume point (ADR-0042): a **page offset**, not an ordering
-    # key. `curated_rows.position` in this same schema is the other thing --
-    # a row's ordinal within a generation -- so the two columns share a name
-    # and no concept.
-    #
-    # The CHECK below writes the column quoted, and the reason is narrower
-    # than it looks: `position` is an unreserved keyword, SQLAlchemy does
-    # *not* quote it (it is absent from the postgresql dialect's
-    # RESERVED_WORDS and compiles bare), and the unquoted body works. What
-    # quoting buys is that `pg_get_constraintdef` reprints the identifier
-    # quoted -- `quote_identifier` quotes any keyword that is not plain
-    # unreserved -- so writing it this way keeps the model-side body
-    # textually aligned with the database-side one. Cosmetic even then,
-    # since `test_migrations.py`'s `_normalise_check_body` strips quotes
-    # before comparing.
+    # The walk's resume point (ADR-0042): a **page offset**, not an ordering key.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -89,13 +75,8 @@ class SyncRunRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        # "The cursor for the next delta walk" is a single-row lookup:
-        # the newest COMPLETED run of a kind for a source. Descending on
-        # started_at so it is the index's first entry rather than its last.
-        # status is not a key: a source's runs are a handful a day, so a
-        # scan back through consecutive failures to the last clean run is
-        # bounded by how many times in a row it failed. It also serves
-        # sources' own CASCADE, leading with source_id.
+        # "The cursor for the next delta walk" is a single-row lookup: the newest
+        # COMPLETED run of a kind for a source.
         Index("ix_sync_runs_source_kind_started", "source_id", "kind", text("started_at DESC")),
         CheckConstraint("items_seen >= 0", name="ck_sync_runs_items_seen_non_negative"),
         CheckConstraint("items_matched >= 0", name="ck_sync_runs_items_matched_non_negative"),

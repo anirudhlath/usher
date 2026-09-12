@@ -1,8 +1,4 @@
-"""Usher-owned identifiers.
-
-UUIDv7 rather than v4: time-ordered, so index locality stays good during the
-bulk imports that insert millions of rows. See ADR-0003.
-"""
+"""Usher-owned identifiers."""
 
 import uuid
 

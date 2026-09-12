@@ -1,39 +1,4 @@
-"""The typo-tolerance surface: PRD 05, ADR-0002, ADR-0031.
-
-Drives the **real** `SearchService.suggest` through the real composition
-root. It reimplements no part of either tier -- an eval that reimplements the
-thing it measures measures itself.
-
-**Both tiers are measured separately and never averaged.** ADR-0031 ships a
-btree exact-prefix probe at p50 0.6 ms with 1.9% typo recall and a trigram +
-`levenshtein_less_equal` path at p50 33.6 ms that carries the tolerance.
-Neither is a degraded form of the other, so a mean over them describes
-neither -- the same argument `SuggestTier` exists for rather than a
-`typo_tolerant: bool`.
-
-**This harness resolves no household, and that is what keeps it out of
-`search_queries`.** `SearchService.suggest` writes one row per answered
-keystroke and writes none for a call carrying no `user_id`, whatever
-`USHER_SEARCH_SUGGEST_ANALYTICS` says -- which is the half that holds now that
-the switch ships on. That is
-PRD 10's *"a search with no household"* exclusion, which the search path has
-always had and which nothing shipped could reach until now. `tier_suggester`
-below is a third caller of `suggest` that the analytics amendment was not
-planned around: it holds a **real** `SearchAnalytics` over a real
-`PostgresSearchQueryRepository`, because it builds the real pipeline through
-the real composition root, so the only thing standing between
-`usher eval suggest --full` and thousands of rows of evaluation traffic wearing
-a household's clothes is that this module never names one.
-
-**So do not add one.** A household here would make every bar this harness
-scores a contributor to the table those bars are meant to be independent of --
-and PRD 10's *"which absence means what"* table would gain a further absence
-nobody could name. `tests/integration/test_search_analytics.py::
-test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller`
-drives this function against a real database and asserts the table stays empty,
-with a household-carrying control beside it, because an untested absence is
-indistinguishable from an oversight.
-"""
+"""The typo-tolerance surface: PRD 05, ADR-0002, ADR-0031."""
 
 import time
 import uuid

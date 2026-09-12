@@ -1,68 +1,5 @@
-"""What a backup reads out of the database, what a restore writes back, and
-the stamp both read with it.
-
-`usher.db.backup_manifest` decides *which* tables an artifact carries and
-`usher.db.backup_identity` decides what a carried reference *is*. Both are
-knowledge about this schema, so both live in `usher.db` -- and
-`pyproject.toml`'s third import contract (*"db is driven, not driving"*)
-forbids `usher.services` reaching either of them. This port is how
-`BackupService` gets at them anyway: it asks for the table list rather than
-holding one, and it is handed rows whose references have already been
-rewritten.
-
-**So the split is: this side knows the schema, the service knows the
-file.** The repository decides that `watch_states.title_id` travels as a
-`TitleReference` and that `media_items` carries two columns rather than
-seventeen; the service decides that a `TitleReference` is spelled
-`{"kind": …, "id": …, "imdb_id": …, "tmdb_id": …}` in JSON, that the header
-comes first, and that the whole thing is gzipped. K4's restore mirrors
-that split -- it parses the JSON in `usher.services` and hands the values
-back down -- which is why the seam is here rather than at "the repository
-returns text".
-
-**`carry` returns a tuple rather than an async iterator, and that is a
-measurement rather than a preference.** The precious set is small by
-construction: on the deployment this project runs against, re-measured
-read-only on 2026-08-25, it is 1 user, 1 source, 1 credential row, 3,347
-watch states, 0 `llm_calls`, 1 row-provider setting, 89 search queries and
-10,819 linked media items -- 14,259 rows, which is
-`docs/prd/08-operations.md`'s *"a handful of small tables"* counted rather
-than asserted. Materialising them is what lets the header's per-table
-counts be **what was written** instead of what a separate `count(*)`
-believed a moment earlier, and a count that can disagree with the body is
-worse than no count at all.
-
-✅ **`usher restore` really does read them as a truncation check, since
-2026-08-25** -- `services/restore.py::_refuse_a_short_body`. 🔴 That sentence
-was here, in the present tense, for a milestone before the check existed:
-K4 read exactly one header key and K5's drill restored an artifact whose
-header claimed 10,819 `media_items` over a body holding 10,515 with **0
-refusals and exit 0**. Recorded rather than quietly corrected, because *"a
-forward-looking claim about the next task, written in the present tense"* is
-now this milestone's most repeated defect and this file has hosted two of
-them.
-
-⚠️ **The seam a fast path would use, named so nobody has to rediscover
-it.** `usher.db.staging.raw_connection(session)` already unwraps the live
-`asyncpg.Connection`, and asyncpg 0.31.0 carries `copy_from_query(query,
-*args, output=…, format=…)` -- verified by import on 2026-08-25 -- so a
-table can be streamed out without materialising it. It is deliberately not
-taken here: the reference rewriting has to happen in Python whatever the
-transport is, and at 14,259 rows there is nothing to buy.
-
-## The write half is a second port, not four more methods on the first
-
-`BackupRepository` reads and never writes; `RestoreRepository` writes and
-resolves. They are separate because their *callers* are separate --
-`usher backup` is safe on a production box and `usher restore` is the one
-command in this project that changes the precious set -- and because a
-single port would put `apply` on the object `usher backup` holds, which is
-the shape that invites a later route to call it. Same module, because
-`usher.ports.repository` mirrors `usher.db.repositories` module for module
-and `PostgresRestoreRepository` lives beside `PostgresBackupRepository` in
-`usher.db.repositories.backup`;
-`tests/unit/test_ports_repository_package.py` makes that a failing test
-rather than a habit.
+"""What a backup reads out of the database, what a restore writes back, and the stamp
+both read with it.
 """
 
 from abc import ABC, abstractmethod
@@ -104,30 +41,8 @@ class CarriedRow:
 
 
 class BackupRepository(ABC):
-    """The read half of `usher backup`: the manifest's tables, their rows,
-    and the revision the database is at.
-
-    **No write half, and no `restore` method.** K4 adds one, and it is a
-    different shape -- it resolves references against the *target* through
-    `backup_identity.resolve_titles`, it merges rather than inserts for the
-    one `PARTIAL` entry, and it refuses on a stamp mismatch. Declaring it
-    here now would be a method with no caller in `src/`, which this project
-    has shipped twice and written up both times (`ix_titles_popularity`, an
-    index nothing read; `PushHealth.record_reconnect`, a method nothing
-    called, which made a dashboard metric a permanent flat zero).
-
-    **Nothing on this port decrypts anything.** `source_credentials` is
-    carried as the ciphertext bytes it is stored as, `build_cipher` is not
-    called anywhere on this path, and the consequence is the one thing
-    `usher backup`'s report says on every single run: an artifact restored
-    into a deployment holding a different `USHER_SECRET_KEY` restores a
-    credential nothing can decrypt. That degradation is deliberate and
-    diagnosable rather than silent -- Fernet's authentication tag makes it an
-    `InvalidToken`, which `db/repositories/credentials.py` translates to
-    `PortDataMalformed` naming the ref, and `GET /admin/sources/{id}/status`
-    already renders it as *re-enter your credentials*
-    (`docs/prd/08-operations.md`, the *"the operator re-enters the
-    credential"* sentence).
+    """The read half of `usher backup`: the manifest's tables, their rows, and the revision
+    the database is at.
     """
 
     @abstractmethod
@@ -147,30 +62,7 @@ class BackupRepository(ABC):
 
     @abstractmethod
     async def schema_revision(self) -> str | None:
-        """The revision Alembic's bookkeeping says this database is at.
-
-        `None` when `alembic_version` exists and is empty, which is a real
-        state (`alembic stamp base`) rather than a failure -- the same
-        distinction `usher.db.migrations.status.database_revision` already
-        draws, and implementations are expected to *be* that function rather
-        than to re-read the table. **One definition of "what revision is
-        this" in `src/`** matters here more than usual, because this is the
-        stamp `usher restore` writes into the artifact and
-        `RestoreRepository.schema_revision` is the value it later refuses
-        against -- and two readers of one fact is how a restore comes to
-        accept what a running service would refuse.
-
-        ⚠️ **This paragraph read *"K4's refusal compares this stamp against
-        `code_head_revision()`"* until 2026-08-25, and that was wrong in the
-        one direction that matters.** Restore compares the artifact's stamp
-        against the **database's** revision;
-        `api/routers/health.py::_check_migrations` is the thing that compares
-        the database against the code, and it answers 503. The two checks
-        share `database_revision` and nothing else, and the sentence had them
-        confused while `RestoreRepository.schema_revision` 130 lines below
-        stated the opposite -- a contradiction inside one module, which is
-        the drift the whole manifest design exists to stop.
-        """
+        """The revision Alembic's bookkeeping says this database is at."""
 
     @abstractmethod
     async def carry(self, table: str) -> tuple[CarriedRow, ...]:
@@ -212,37 +104,7 @@ class RestoreRefusal:
 
 @dataclass(frozen=True, slots=True)
 class TableOutcome:
-    """What one table's rows did to the target: four counts and a list.
-
-    **Four buckets rather than one, and rather than the three this shipped
-    with.** *"Restored 9 rows"* over an artifact holding 50 is the failure
-    this whole command exists to make visible, and K5's drill found the same
-    failure one level down inside the word *skipped*:
-
-    - `written` -- the target changed because of this row.
-    - `present` -- the target already holds this row's state. The merge rule
-      worked and there was nothing to do.
-    - `absent` -- there is **no row here to write onto**. Only reachable for
-      the one `PARTIAL` entry, whose merge is an `UPDATE` over a row the
-      *source walk* creates, so an artifact restored before the walk has run
-      lands nothing.
-    - `unresolved` -- a reference this catalog cannot resolve, dropped
-      because the operator passed `--skip-unresolvable`. Zero on every
-      default run, because the default refuses.
-
-    🔴 **`present` and `absent` were one number called `skipped` until
-    2026-08-25, and the drill printed the sentence that refuted it**:
-    `media_items 0 written / 10,515 already present` against a `media_items`
-    table holding **zero rows**. *"The target already holds this"* and
-    *"there was nothing here to write onto"* are opposite diagnoses -- the
-    first says the restore was unnecessary, the second says it was too early
-    and the operator should walk the source and run it again -- and the
-    report rendered them identically.
-
-    `written + present + absent + unresolved + len(refused)` is the number of
-    rows submitted, and a service reporting a subset of those as a total is
-    the thing this type exists to prevent.
-    """
+    """What one table's rows did to the target: four counts and a list."""
 
     written: int
     present: int
@@ -335,33 +197,6 @@ class RestoreRepository(ABC):
         *,
         skip_unresolvable: bool = False,
     ) -> TableOutcome:
-        """Resolve one table's references and merge its rows, writing
-        nothing that cannot be resolved.
-
-        `rows` carries `TitleReference`/`EpisodeReference` values under the
-        keys `restored_columns` names, and plain JSON scalars everywhere else
-        -- the service owns the artifact's spelling and this port receives
-        the values, exactly as `CarriedRow` hands them the other way.
-
-        **Refusals are returned, never raised**, so one missing title does
-        not hide the other forty. The caller decides what a non-empty
-        `refused` means for the transaction, which is what lets `--dry-run`
-        take the identical path and commit nothing.
-
-        **`skip_unresolvable` defaults to `False` and that default is the
-        command's headline guarantee**, so it is spelled here rather than
-        left to a caller: a title or episode reference this catalog cannot
-        resolve is a *refusal* unless an operator has explicitly said
-        otherwise, and *"refuses rather than half-applies"* is not weakened
-        silently. With it set, those rows are dropped and counted under
-        `unresolved` -- never written with a null, never folded into
-        `present`.
-
-        ⚠️ **It covers exactly the references K1's manifest says the
-        importers rebuild, and nothing else.** A household name the target
-        does not hold, a source colliding on a name, and a credential whose
-        source is absent all stay refusals however this flag is set: none of
-        them is *"this catalog is at a different bootstrap phase"*, they are
-        a damaged artifact or a conflict only an operator can settle, and no
-        `usher sync` re-derives any of them.
+        """Resolve one table's references and merge its rows, writing nothing that cannot
+        be resolved.
         """

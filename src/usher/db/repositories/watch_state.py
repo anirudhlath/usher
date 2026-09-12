@@ -1,72 +1,4 @@
-"""The merge that cannot zero a play count it was not told.
-
-Implements `WatchStateRepository` (`usher.ports.repository`). ADR-0014 says
-`SourceWatchState.play_count` may be *absent*, and absent is not zero; this
-module is where that has to survive contact with SQL, which is the only
-layer where the natural spelling is the wrong one.
-
-**Why this is two statements per conflict target rather than one.** The
-obvious shape is one `INSERT ... SELECT ... ON CONFLICT DO UPDATE` per
-branch, with the history columns `COALESCE`d in the conflict clause. It does
-not work, for two reasons that compound, both verified directly against
-`pgvector/pgvector:pg17` (2026-07-31):
-
-1. `watch_states.play_count` is `NOT NULL DEFAULT 0`, so the insert path must
-   write `COALESCE(play_count, 0)`. That collapse happens *before* the
-   conflict clause runs, so `excluded.play_count` is `0`, never `NULL`, and
-   `COALESCE(excluded.play_count, watch_states.play_count)` always chooses
-   the zero. Measured on a row holding `play_count = 7`: after one such
-   statement carrying an absent count, the stored value is **0**. Silently.
-   Every walk. This is exactly the failure the milestone exists to prevent,
-   arriving at the one layer where it is permanent.
-2. The raw `NULL` still exists in the `deduped` CTE, but
-   `ON CONFLICT DO UPDATE` cannot reference a CTE by name -- only `excluded`
-   and the target table are in scope. Postgres answers
-   `missing FROM-clause entry for table "d"`. So there is no one-statement
-   spelling that can read the value it needs.
-
-The way out is to *not* collapse it: `UPDATE ... FROM deduped` first, where
-`deduped.play_count` really is `NULL` and really is in scope, then
-`INSERT ... ON CONFLICT DO NOTHING` for the rows that did not exist. Both
-statements are set-based, so a batch is four statements regardless of size.
-Measured on the same row: `play_count` reads back **7**, `last_played_at` is
-untouched, and `position_seconds` still updates.
-
-`last_played_at` is worth naming separately because it fails *differently*
-under the wrong spelling. It is nullable, so the insert path does not
-collapse it, `excluded.last_played_at` is genuinely `NULL`, and the one
-statement form preserves it. "The natural spelling zeroes history" is true of
-exactly one of the two columns -- which is why the contract asserts them
-separately, and why a suite that checked only the timestamp would have
-ratified the bug.
-
-**Two branches, not one.** `uq_watch_states_user_title` and
-`uq_watch_states_user_episode` are separate constraints, so each needs its own
-`ON CONFLICT` target. Joining on `IS NOT DISTINCT FROM` to serve both at once
-would collapse them into one statement at the cost of the index, which at a
-library whose watch state is dominated by 999,827 episodes is the wrong
-trade.
-
-**`updated_at` is the database's, not this statement's, on the update path.**
-`trg_watch_states_set_updated_at` is a `BEFORE UPDATE` trigger that assigns
-`now()` unconditionally (core schema), so the `updated_at = d.observed_at`
-below lands only on the insert path. That is benign for the conflict rule --
-"was this row written after the walk observed it" is if anything the more
-honest reading of the guard -- and the assignment is kept so the SQL stays
-correct on its own terms rather than depending on a trigger it does not
-declare. `tests/integration/test_watch_state_repository.py::
-test_the_update_trigger_owns_updated_at` pins the actual behaviour so it is a
-recorded fact rather than a surprise for whatever reads this column next.
-
-**`set_from_client` is the other side of the conflict rule, single-row and
-one statement.** `merge_from_source` above exists to *lose* to a client;
-`set_from_client` exists to *win*, and it can do so with none of this
-module's staging/`COALESCE` machinery -- it has no batch, no absent field to
-preserve, and no `observed_at` to compare, because the same
-`trg_watch_states_set_updated_at` this module already leans on makes every
-client write later than any walk by construction. See its own docstring on
-the port ABC for the field semantics.
-"""
+"""The merge that cannot zero a play count it was not told."""
 
 import uuid
 from collections.abc import Sequence
@@ -129,13 +61,6 @@ def _deduped(target: str) -> str:
 
 def _update(target: str) -> str:
     # The two COALESCEs ADR-0014 exists for, plus one for `runtime_seconds`.
-    # They read `d`, the CTE -- where the value is still NULL -- which is the
-    # entire reason this is an UPDATE rather than the SET clause of an
-    # upsert. See the module docstring.
-    #
-    # The `updated_at <= observed_at` guard covers the whole record, not just
-    # the position: a stale read is stale about all of it, including a
-    # reported zero, so a merge the guard rejects writes nothing at all.
     return f"""
     WITH d AS ({_deduped(target)})
     UPDATE watch_states ws SET
@@ -153,15 +78,8 @@ def _update(target: str) -> str:
 
 
 def _insert(target: str, other: str) -> str:
-    # `DO NOTHING`, not `DO UPDATE`: the UPDATE above has already applied
-    # every row that existed, including deciding which of them the conflict
-    # rule refuses. A row reaching a conflict here either was just updated or
-    # was deliberately left alone, and in both cases the right answer is to
-    # leave it.
-    #
-    # `COALESCE(play_count, 0)` is the NOT NULL column's requirement and is
-    # correct *here*: a brand-new row has no stored history to preserve, and
-    # `played AND play_count = 0` is precisely how it asks to be backfilled.
+    # `DO NOTHING`, not `DO UPDATE`: the UPDATE above has already applied every row that
+    # existed, including deciding which of them the conflict rule refuses.
     return f"""
     WITH d AS ({_deduped(target)})
     INSERT INTO watch_states (
@@ -187,29 +105,7 @@ _STATEMENTS = (
 
 
 def _upsert(target: str, other: str) -> str:
-    """`set_from_client`'s whole statement: one row, one target, no staging.
-
-    The other side of `_update`/`_insert` above -- and simpler than both,
-    because a client write is never a batch and never `COALESCE`s toward a
-    possibly-absent value. `position_seconds` and `played` are `excluded`'s
-    verbatim, always; `play_count`/`last_played_at` are the only fields that
-    branch, and they branch on `excluded.played` -- the row this statement is
-    about to write -- rather than reading `:played` a second time.
-
-    `other` is written as the literal `NULL`, never a bound parameter, the
-    same choice `_insert` above makes and for the same reason: the caller has
-    already validated exactly one of `title_id`/`episode_id` is set, and
-    spelling the untouched column as data rather than as logic is one fewer
-    thing that validation has to keep true.
-
-    No `updated_at` on either path. The `INSERT` needs none: the column's own
-    `server_default` is `now()` (`a8a0e10ff464`'s DDL), which is the same
-    instant this statement's other `now()` calls read, frozen for the
-    transaction. The `ON CONFLICT ... DO UPDATE` needs none either --
-    `trg_watch_states_set_updated_at` (`BEFORE UPDATE`, unconditional) is the
-    entire mechanism the port docstring names, and writing it here too would
-    only be overwritten a second time by the same value.
-    """
+    """`set_from_client`'s whole statement: one row, one target, no staging."""
     return f"""
     INSERT INTO watch_states (
         id, user_id, {target}, {other}, position_seconds, played,
@@ -251,32 +147,7 @@ ORDER BY updated_at, id
 LIMIT :limit
 """
 
-# Continue Watching. `NOT played AND position_seconds > 0` is the port's
-# definition of "in progress"; the *floor* (a minimum position, or a
-# percentage of runtime) is deliberately the provider's, because Postgres can
-# use a partial index whenever the query predicate implies the index
-# predicate, so a tighter caller costs nothing and a tighter index costs a
-# migration per adjustment.
-#
-# ORDER BY: `NULLS LAST` is the correctness content, not the formatting.
-# `last_played_at` is nullable (ADR-0014 -- a walk's listing cannot determine
-# it), Postgres defaults a DESC sort to NULLS FIRST, and the natural spelling
-# therefore puts every walk-sourced state above every push-sourced one. The
-# index this reads, `ix_watch_states_user_recent`, is declared
-# `last_played_at DESC NULLS LAST` for the same reason: a DESC-NULLS-FIRST
-# btree serves the filter and cannot supply this order, so the planner adds a
-# Sort and the recency key buys nothing.
-#
-# No `updated_at` tiebreak: it is owned by trg_watch_states_set_updated_at
-# and is the write instant, which a full walk makes identical across a
-# million rows because `now()` is frozen per transaction. `id DESC` is
-# UUIDv7 creation order, which is at least a fact about the household.
-#
-# `CAST(:user_id AS uuid)`, never a colon-name followed by a double colon --
-# SQLAlchemy's `text()` bind regex skips a name spelled that way and the
-# literal reaches asyncpg. And no colon-prefixed word anywhere in these
-# comments: the same regex scans comment lines, so one there declares a real
-# bind parameter the caller must then supply.
+# Continue Watching.
 _IN_PROGRESS = """
 SELECT * FROM watch_states
 WHERE user_id = CAST(:user_id AS uuid)
@@ -287,24 +158,6 @@ LIMIT :limit
 """
 
 # `BecauseYouWatched` seeds and the taste centroid.
-#
-# The LEFT JOIN is what makes this work on a real library: 999,827 of the one
-# measured source's 1,126,674 items are episodes, `title_embeddings` and
-# `title_neighbors` are keyed on titles.id, and an episode has neither -- so
-# without the rollup this returns nothing for a TV household and both
-# consumers compute confidently from an empty set.
-#
-# The inner DISTINCT ON is mandatory rather than defensive, exactly as it is
-# in media_item.py: ten watched episodes of one series are one seed. The
-# outer level re-sorts because DISTINCT ON forces its own ORDER BY to lead
-# with the distinct key, so the recency order has to be applied again above
-# it -- which also means this statement's ordering is a Sort node by
-# construction and the index bounds the *scan*, not the sort. That is bounded
-# by the household's watch history, not by the catalog.
-#
-# `WHERE title_id IS NOT NULL` on the outer level, not the inner: an episode
-# whose series row was deleted rolls up to NULL, and filtering it inside the
-# DISTINCT ON would let a *second* state for the same series win the slot.
 _RECENT = """
 SELECT title_id, last_played_at, play_count FROM (
     SELECT DISTINCT ON (COALESCE(ws.title_id, e.title_id))
@@ -324,30 +177,6 @@ LIMIT :limit
 
 
 # Rediscover, and the substitution for the rating column that does not exist.
-#
-# PRD 06 fires this row on "watched > 2 years ago, rated highly".
-# `watch_states` has no rating column, no favorite, and `SourceWatchState`
-# carries neither -- so the signal splits in two, and the split is the design:
-# the FILTER is `played AND last_played_at < cutoff`, and the engagement proxy
-# is the ORDERING, `play_count DESC`.
-#
-# `play_count >= 2` in the WHERE is the tempting version and it is wrong.
-# `_NEEDING_HISTORY` above spells "history unknown" as `played AND play_count
-# = 0`, because Emby's listing reports `PlayCount: 0` for an item played
-# twice -- so as a filter it returns NOTHING on a freshly-walked deployment
-# and an arbitrary subset on a half-backfilled one. As an ordering the same
-# unreliable column degrades gracefully.
-#
-# `last_played_at < cutoff` is NULL, and therefore not true, for a state the
-# walk could not date -- so an undatable state is excluded for free. That is
-# the exact mirror of `_IN_PROGRESS`, where the same nullability does the
-# WRONG thing for free and `NULLS LAST` is what corrects it. Same column,
-# same three-valued logic, opposite outcomes.
-#
-# `title_id IS NOT NULL`, so Rediscover is film-only. A scope decision rather
-# than the call `_RECENT` refused: title-only there returns an EMPTY set for
-# a TV household and the centroid is computed from nothing, where title-only
-# here returns a correct but film-only row.
 _REDISCOVERABLE = """
 SELECT title_id, last_played_at, play_count
 FROM watch_states
@@ -360,20 +189,8 @@ LIMIT :limit
 """
 
 
-# "Which of these has the household seen", and the third statement in this
-# module to carry `COALESCE(ws.title_id, e.title_id)`.
-#
-# The rollup is in the WHERE as well as the SELECT, and that is the whole
-# statement: `WHERE ws.title_id = ANY(:title_ids)` is the natural spelling,
-# is green on every movie fixture, and answers **films only** on a library
-# that is 89% episodes.
-#
-# Bounded by `:title_ids` rather than by a LIMIT. This set is used to
-# *subtract*, so a truncated answer silently puts a watched title back on a
-# shelf -- where a truncated `list_recent` merely shortens one.
-#
-# `DISTINCT` rather than a GROUP BY: a series with twelve watched episodes is
-# one id, and the caller wants membership rather than a count.
+# "Which of these has the household seen", and the third statement in this module to
+# carry `COALESCE(ws.title_id, e.title_id)`.
 _PLAYED_TITLE_IDS = """
 SELECT DISTINCT COALESCE(ws.title_id, e.title_id) AS title_id
 FROM watch_states ws
@@ -389,12 +206,7 @@ class PostgresWatchStateRepository(WatchStateRepository):
         self._session = session
 
     async def merge_from_source(self, merges: Sequence[WatchStateMerge]) -> int:
-        # Validated over the whole batch before a byte is staged. Not only so
-        # the caller gets a port error rather than a raw `IntegrityError`
-        # from `ck_watch_states_exactly_one_target`: a merge naming *both*
-        # targets satisfies both branches' `IS NOT NULL` filters below, so
-        # without this guard it would be written twice, as two half-rows
-        # neither of which the caller asked for.
+        # Validated over the whole batch before a byte is staged.
         for entry in merges:
             if (entry.title_id is None) == (entry.episode_id is None):
                 raise PortDataMalformed(
@@ -405,12 +217,10 @@ class PostgresWatchStateRepository(WatchStateRepository):
             return 0
         changed = 0
         try:
-            # A SAVEPOINT for the same reason PostgresMediaItemRepository has
-            # one: this repository's caller commits a batch of merges and its
-            # sync-run checkpoint together, so a caught conflict must not
-            # leave the session raising PendingRollbackError on the next
-            # unrelated call. It also makes a failed batch atomic across all
-            # four statements below.
+            # A SAVEPOINT for the same reason PostgresMediaItemRepository has one: this
+            # repository's caller commits a batch of merges and its sync-run checkpoint
+            # together, so a caught conflict must not leave the session raising
+            # PendingRollbackError on the next unrelated call.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await stage_records(
@@ -458,13 +268,11 @@ class PostgresWatchStateRepository(WatchStateRepository):
             )
         target = "title_id" if write.title_id is not None else "episode_id"
         target_id = write.title_id if target == "title_id" else write.episode_id
-        # `refusals_as_conflict`, not the module's own `try/except
-        # IntegrityError` above: `position_seconds` is `Field(default=0,
-        # ge=0)` with no ceiling against an `integer` column -- the "field
-        # bounded on fewer sides than the column" shape -- so `2**31` is
-        # refused client-side by asyncpg's own encoder as an unclassified
-        # `DBAPIError`, which `except IntegrityError` does not catch and
-        # `is_row_refusal` does.
+        # `refusals_as_conflict`, not the module's own `try/except IntegrityError`
+        # above: `position_seconds` is `Field(default=0, ge=0)` with no ceiling against
+        # an `integer` column -- the "field bounded on fewer sides than the column"
+        # shape -- so `2**31` is refused client-side by asyncpg's own encoder as an
+        # unclassified `DBAPIError`, which `except IntegrityError` does not catch and
         async with refusals_as_conflict(
             self._session, "a client watch write conflicts with the catalog"
         ):
@@ -550,12 +358,8 @@ class PostgresWatchStateRepository(WatchStateRepository):
     async def _get(
         self, target: str, user_id: uuid.UUID, target_id: uuid.UUID
     ) -> WatchState | None:
-        # `target` is one of two module-controlled literals, never caller
-        # input -- which is why the f-string below is not an injection point.
-        # `= :target_id` also does the work of `title_id IS NOT NULL` for
-        # free: `uq_watch_states_user_title` treats NULLs as distinct, so
-        # every episode row in the table shares `(user_id, NULL)`, and an
-        # equality comparison never matches one of them.
+        # `target` is one of two module-controlled literals, never caller input -- which
+        # is why the f-string below is not an injection point.
         sql = f"SELECT * FROM watch_states WHERE user_id = :user_id AND {target} = :target_id"  # noqa: S608
         with self._session.no_autoflush:
             row = (

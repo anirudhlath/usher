@@ -1,16 +1,4 @@
-"""Season and episode tables.
-
-Both carry a `set_updated_at` trigger, added by this milestone's migration
--- which means `tests/integration/test_migrations.py`'s exact-set assertion
-grows from three triggers to five, and that test is updated in the same
-commit. The triggers exist for the same reason the first three do: these
-tables are written by `INSERT ... ON CONFLICT DO UPDATE` from a staging
-table, a path SQLAlchemy's `onupdate=` has no effect on.
-
-Both tables are sized by the one real deployment measured: 32,409 series,
-999,827 episodes. Every index here is justified against that number rather
-than against a test fixture.
-"""
+"""Season and episode tables."""
 
 import uuid
 from datetime import date, datetime
@@ -38,12 +26,9 @@ class SeasonRow(Base):
     __tablename__ = "seasons"
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    # CASCADE from titles, unlike watch_states: a season with no series is
-    # not a record worth keeping -- it carries no user state, and it is
-    # re-derivable from the provider payload in one call. ADR-0010's
-    # reasoning applies to what a row *protects*, and this one protects
-    # nothing. No standalone index on title_id: uq_seasons_title_season_number
-    # below leads with it, so the FK's own referencing-side lookup uses that.
+    # CASCADE from titles, unlike watch_states: a season with no series is not a record
+    # worth keeping -- it carries no user state, and it is re-derivable from the
+    # provider payload in one call.
     title_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="CASCADE"), nullable=False
     )
@@ -114,22 +99,9 @@ class EpisodeRow(Base):
         ),
         # seasons' own CASCADE needs this; nothing else leads with season_id.
         Index("ix_episodes_season_id", "season_id"),
-        # Partial like ix_titles_imdb_id -- NULL never collides with NULL and
-        # an upsert against it would have to repeat the predicate -- but
-        # deliberately NOT unique, which is where this departs from the
-        # titles shape. Nothing in M4 looks an episode up by IMDb id: ingest
-        # keys on (title_id, season_number, episode_number) above. Meanwhile
-        # watch.py's own FK comment records that M4's matcher produces "two
-        # episode trees" when a series is ingested twice under different
-        # provider ids, and two trees enriched from two TMDb entries for the
-        # same show carry the *same* episode IMDb ids. Under a unique index
-        # that is an IntegrityError which aborts the whole staged COPY batch
-        # -- the upsert's ON CONFLICT target is the season/episode key and
-        # cannot absorb a violation of a different constraint. So uniqueness
-        # here would buy a guarantee no reader needs at the price of a
-        # batch-aborting failure in a workflow this schema documents as
-        # expected. If an episode-level matcher ever wants uniqueness it
-        # needs a merge story first, exactly as titles did.
+        # Partial like ix_titles_imdb_id -- NULL never collides with NULL and an upsert
+        # against it would have to repeat the predicate -- but deliberately NOT unique,
+        # which is where this departs from the titles shape.
         Index(
             "ix_episodes_imdb_id",
             "imdb_id",

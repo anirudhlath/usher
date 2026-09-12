@@ -1,43 +1,4 @@
-"""People, credits, collections and artwork, out of the cache ADR-0016 kept.
-
-M4's boundary call 2 deferred `Person`/`Credit`/`Collection`/`Image` to two
-milestones by name and promised they would be **re-derived from `raw_payloads`
-with no second network call**. ADR-0016 kept that table for exactly this, and
-`ports/metadata.py` wrote the same note from the other end when it explained
-why `EnrichmentResult` has no `people` field. This module is where the note is
-presented. M7 presented three quarters of it; M9's group C added `Image`, on
-the same walk, the same page, the same transaction and the same `derive` job --
-which is why an operator gets artwork from `usher derive --backfill` with no
-new command and no new crawl.
-
-**`Image` is the entity that makes "no second network call" a property rather
-than a slogan**, because artwork is the one of the four a reader would expect
-to need one: the rows carry a *path*, not bytes, and fetching the bytes is the
-serve-time proxy's job (ADR-0032) rather than this walk's. Nothing here opens a
-socket, and `test_deriving_writes_images_and_makes_no_provider_fetch` asserts
-it over a provider whose `fetch` raises -- positive control first, because "no
-fetch happened" is also what a derivation that did nothing produces.
-
-**Nothing here reads a provider's JSON key, and that is the layering call of
-the milestone rather than a style rule.** M6 kept the search document's weight
-class B empty and said why, in `services/search.py`: *"the only place credits
-physically exist is `raw_payloads.payload`, so assembling them here would put
-a provider's JSON shape in `services/`."* Cashing that deferral is no reason
-to spend it. The payload -> entity mapping lives in
-`usher.adapters.tmdb.mapping` beside `title_from_payload`, reached through
-`MetadataProvider.to_derivation`, and this service orchestrates. `dict` is not
-an import, so `lint-imports` cannot see the difference -- the review question
-is whether a string literal that is a TMDb field name appears anywhere under
-`src/usher/services/`, and the answer must stay no.
-
-**The join back is `(provider, kind, reference)` and `kind` is half of it.**
-`raw_payloads` has no `title_id` and no foreign key to `titles`, so a walk
-that starts from a payload has to resolve its title -- and the payload's own
-`id` field is the bare integer sitting right there. ADR-0011: TMDb keys movies
-and series in separate spaces that overlap on 26,968 measured ids, so a
-resolution keyed on the integer alone writes a series' cast onto a film. With
-the right counts, the right people, and nothing to say so.
-"""
+"""People, credits, collections and artwork, out of the cache ADR-0016 kept."""
 
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -69,26 +30,8 @@ _tracer = trace.get_tracer("usher.derive")
 # a second walk, not a parameter here.
 _PROVIDER = "tmdb"
 
-# How many cast names reach `titles.credit_names`, which is **not** the number
-# of cast rows `credits` stores (that is `mapping._CAST_LIMIT`, 50). The gap is
-# the point, and both halves of it are about the search document rather than
-# about the cast:
-#
-# - **The embedding.** `cli.py:_index` measures a realistic document at
-#   ~100-130 tokens and prices the enriched tier off it. Two hundred names at
-#   ~2 tokens each is ~400 tokens: the document quadruples and the film's own
-#   name goes from ~4% of the text to under 1%, on a vector that is a mean
-#   over the whole thing.
-# - **The tsvector.** Class-B lexemes are the great majority of a big film's
-#   document once B is filled at all. `ts_rank`'s weight vector separates the
-#   classes, but a document whose B class is twenty times its A class is one
-#   where a two-word query matching one B lexeme accumulates against a much
-#   larger lexeme set.
-#
-# **Ten is chosen, not measured**, on the bargain `services/search.py` states
-# for `_POPULARITY_MIDPOINT`: small enough that A still dominates, large enough
-# to cover the billed cast anybody searches for. A search-quality pass is what
-# would move it, not an argument.
+# How many cast names reach `titles.credit_names`, which is **not** the number of cast
+# rows `credits` stores (that is `mapping._CAST_LIMIT`, 50).
 _CREDIT_NAME_CAST_LIMIT = 10
 
 
@@ -111,13 +54,8 @@ class DerivationReport:
     people_written: int = 0
     credits_written: int = 0
     collections_written: int = 0
-    # **A low number here is the age of the cache, not a defect**, and it is
-    # the one count in this report an operator will misread. `images` joined
-    # `*_APPEND_TO_RESPONSE` in M4 and `poster_path`/`backdrop_path` are
-    # top-level detail fields, so every cached payload derives its two
-    # primaries and only a payload fetched *with* the namespace derives the
-    # rest. `usher derive`'s report prints it as a count beside the others for
-    # the same reason none of them is a ratio.
+    # **A low number here is the age of the cache, not a defect**, and it is the one
+    # count in this report an operator will misread.
     images_written: int = 0
 
 
@@ -304,12 +242,11 @@ class DeriveService:
         for _, derivation in derivations:
             for person in derivation.people:
                 if person.tmdb_id is None:
-                    # Unreachable through today's mapper, which drops an entry
-                    # with no id -- and kept as a guard rather than an assert
-                    # because a person with a NULL provider id is *inserted*
-                    # rather than merged (the unique index is partial), so its
-                    # stored id can never be read back and any credit naming
-                    # it would be permanently orphaned.
+                    # Unreachable through today's mapper, which drops an entry with no
+                    # id -- and kept as a guard rather than an assert because a person
+                    # with a NULL provider id is *inserted* rather than merged (the
+                    # unique index is partial), so its stored id can never be read back
+                    # and any credit naming it would be permanently orphaned.
                     continue
                 provider_id_of[person.id] = person.tmdb_id
                 people.setdefault(person.tmdb_id, person)
@@ -350,19 +287,11 @@ class DeriveService:
 
         scope = [title_id for title_id, _ in derivations]
         written = await self._credits.replace_for_titles(scope, rows, credit_names=credit_names)
-        # **The scope is the same `derivations` list, not the titles that
-        # contributed an image**, which is the one thing an image write shares
-        # with the credit write above it: a title whose artwork all disappeared
-        # upstream contributes no rows, so a scope derived from the rows would
-        # leave its stale artwork through every future derivation -- and a
-        # stale row here is a `/images/{id}` the CDN has stopped serving,
-        # served forever with nothing reporting an error.
-        #
-        # No re-pointing pass: an image has no provider integer id, so
-        # `uq_images_owner_provider_path` is the natural key and
-        # `replace_for_titles`' upsert answers with the id the row was first
-        # inserted with. That is the whole of why `usher derive` can run twice
-        # without invalidating a client's cached artwork.
+        # **The scope is the same `derivations` list, not the titles that contributed an
+        # image**, which is the one thing an image write shares with the credit write
+        # above it: a title whose artwork all disappeared upstream contributes no rows,
+        # so a scope derived from the rows would leave its stale artwork through every
+        # future derivation -- and a stale row here is a `/images/{id}` the CDN has
         images_written = await self._images.replace_for_titles(
             scope, [one for _, derivation in derivations for one in derivation.images]
         )

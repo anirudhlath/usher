@@ -1,40 +1,5 @@
 """`GET /browse`'s wire shape -- **written after the measurement, because the
 measurement changed it.**
-
-B7's bar was registered before the first probe (`/var/tmp/m9-B7/BAR.md`,
-`sha256 256f28ba8102a4...`, and restated in `scripts/measure_browse.py`):
-unfiltered facet counts p95 <= 200 ms at 1.27M titles. It **failed at
-330.81 ms**, and the plan's named consequence -- *"facets are served only for
-a predicated browse and the response says so with an explicit key rather than
-an empty facet map"* -- is why `BrowseFacetsResponse` has a `computed` field at
-all. An empty map and "the server did not compute these" are two different
-facts about the catalog and a client cannot tell them apart.
-
-⚠️ **The measurement also refuted the remedy the plan named, and that is why
-the condition is narrower than "predicated".** A genre-predicated facet
-request measured **324.43 ms** -- indistinguishable from the unfiltered 330.81
--- because `TitleRepository.browse_facets` computes each facet over the
-filtered population **minus its own predicate**, so a request whose only filter
-is a genre computes the genre facet over the *whole* catalog by construction.
-Predicating on a genre cannot make facets affordable; it was never going to.
-Only a `year` predicate moved the number, to 201.12 ms, which still fails a bar
-with no tolerance, and only `genre` **and** `year` together came in under it at
-194.92 ms.
-
-So facets are **opt-in and predicated**: `?facets=true` *and* at least one of
-`genre`, `year`, `owned`. The opt-in is what the measurement forced on top of
-the plan's rule -- it narrows the plan's condition rather than widening it, and
-it is the only thing that stops a default browse paying 331 ms for counts most
-screens never render. `not_requested` and `unpredicated` are two reasons and
-they are reported separately, because they have two different fixes.
-
-**`genres` and `years` are absent when the counts were not computed, and
-present-and-possibly-empty when they were.** That is `api/dto/page.py`'s stated
-rule applied in both directions: *"a key is absent when its value could never
-be anything else, and present-and-null when a client has to branch."* A
-not-computed facet map could never be anything but empty, so it is absent; a
-*computed* one is legitimately `{}` when the filter matches nothing, and that
-is a fact the client must be able to read.
 """
 
 import uuid

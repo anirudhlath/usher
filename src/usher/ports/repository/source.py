@@ -1,7 +1,4 @@
-"""Sources -- the configured media servers Usher syncs from.
-
-Implemented by `usher.db.repositories.source.PostgresSourceRepository`.
-"""
+"""Sources -- the configured media servers Usher syncs from."""
 
 import uuid
 from abc import ABC, abstractmethod

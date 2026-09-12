@@ -1,114 +1,4 @@
-"""Reading the precious set out, and merging it back in.
-
-Implements `BackupRepository` and `RestoreRepository`
-(`usher.ports.repository`). It is the one place in `src/` that joins K1's
-*which tables* to K2's *what a reference is*, in both directions: the read
-half rewrites every reference into a natural key on the way out, and the
-write half resolves every natural key against **this** catalog on the way
-back in.
-
-## The merge rules, and why "insert" is wrong for five of the eight
-
-| table | rule |
-|---|---|
-| `users` | insert if the name is absent; otherwise every reference adopts the id the target holds |
-| `sources` | insert if the id is absent; **refuse** if a *different* source holds that name |
-| `source_credentials` | insert on `ref`, `DO NOTHING`; refuse if its source is not here |
-| `watch_states` | upsert on `uq_watch_states_user_title` / `uq_watch_states_user_episode` |
-| `llm_calls` | insert on `id`, `DO NOTHING` -- append-only, so one ledger restores twice safely |
-| `row_provider_settings` | upsert on `slug_prefix`, the one carried table with no id in it |
-| `search_queries` | insert on `id`, `DO NOTHING`, `clicked_title_id` nulled where unresolved |
-| `media_items` | update the two links **only where the target's `title_id` is `NULL`** |
-
-⚠️ **`sources`' refusal cannot lean on the database, and that asymmetry is
-easy to assume away.** `uq_users_name` is a real unique constraint, so
-`users` merges with `ON CONFLICT (name) DO NOTHING` and Postgres does the
-work. Measured on the live schema 2026-08-25, `pg_constraint` for `sources`
-holds **only** `pk_sources PRIMARY KEY (id)` and the unique-index-on-name
-count is **0** -- so *"two sources pointing at one server"* is a state this
-schema permits and the refusal has to be an explicit read. It is
-`_existing_sources` plus the branch in `_merge_sources`, and it has a case
-of its own because nothing else in the system would notice.
-
-**`media_items`' asymmetry is K1's argument, spelled as a `WHERE`.** The
-table carries no provenance column, so an artifact cannot carry only the
-operator's manual resolutions -- it carries every link, and the merge is
-what keeps that safe. A link the match ladder would have re-derived is
-re-derived to the same answer and skipped; a link it would not re-derive is
-exactly the operator's judgement and lands on the `NULL`. Writing over a
-link the target already holds is the one thing that would lose information
-in both directions at once.
-
-## One statement per table, over parallel `unnest` arrays
-
-Every merge below binds its whole batch through `_arrays` and reads its
-verdict off `RETURNING`; what a statement cannot decide per row is decided in
-Python first, against one read of the target.
-
-## The column list is derived, in both of the two ways a table can be carried
-
-**A `WHOLE` table's columns come from `Base.metadata`**, so a column added
-to `watch_states` or `llm_calls` in M11 is carried by the next backup with
-no edit here. A transcribed list is the failure `backup_manifest`'s own
-module docstring is about one file over -- PRD 08 kept a prose table of
-which tables were precious, M9 added four tables and the table was updated
-for none of them -- and a transcribed *column* list fails the same way one
-level down, except that nothing would notice: a backup missing a column
-still restores, into rows that quietly lost a field.
-
-**`media_items`' columns come from the manifest entry itself**, which is
-what `PARTIAL` means: `MANIFEST["media_items"].columns` is
-`("title_id", "episode_id")` and this module adds only the natural key that
-finds the row again. So K1 owns *which* operator-authored columns are
-carried and this module owns nothing but the key.
-
-## Every foreign key is accounted for, and a new one cannot be forgotten
-
-`REWRITTEN` names the four reference columns and `CARRIED_RAW` names the
-one that stays a UUID. Between them they have to cover **every** foreign
-key in every carried table, and `unaccounted_reference_columns()` is what
-makes that a failing test rather than a review habit -- because the failure
-is silent in the direction that matters. A new `titles` foreign key on a
-precious table would be written out as a raw UUID, the artifact would look
-fine, and the restore would resolve it against a catalog where that id
-belongs to a different film or to nothing at all.
-
-**`source_id` is the one that stays raw, and it is correct rather than an
-exception.** `backup_identity`'s module docstring makes the argument: a
-source id is minted when an operator adds the source and travels *inside*
-the artifact together with the `sources` row it names, so
-`source_credentials.source_id` and `media_items.source_id` are internally
-consistent within one file. A title id is not: `db/repositories/bulk.py`
-mints `new_id()` per row per import, so no title id survives a bootstrap
-boundary at all.
-
-## What is not here
-
-**No decryption and no re-encryption.** `source_credentials.ciphertext` is
-read as bytes and written back as bytes; `build_cipher` is not imported in
-either direction. See the port's docstring for the consequence, which
-`usher backup` prints on every run and which restore inherits: an artifact
-restored into a deployment holding a different `USHER_SECRET_KEY` restores a
-credential nothing can decrypt.
-
-**No `count(*)`.** The header's per-table counts are `len()` of what was
-read, because a count taken separately can disagree with the body and
-restore reads those counts as a truncation check.
-
-**No commit.** Every repository in this package leaves the transaction to
-its caller, and here that is the design rather than the convention:
-`RestoreService` commits once, at the end, over the whole file.
-
-⚠️ **`from usher.db import models` is load-bearing rather than tidy.** Every
-other repository in this package imports the two or three mapped classes it
-names, which registers those tables as a side effect; this one reads
-`Base.metadata` *generically*, so a table nothing else in the process had
-imported is simply absent and `_carried_columns` raises `KeyError` on it.
-The one other module in `src/` that reads the whole metadata --
-`db/migrations/env.py` -- carries the identical import for the identical
-reason. Found by running the unit case, which is the only context where
-nothing else has imported the models first.
-"""
+"""Reading the precious set out, and merging it back in."""
 
 import datetime as dt
 import uuid
@@ -184,15 +74,8 @@ class _Rewrite:
     key: str
 
 
-#: Every foreign-key column in the carried set that travels as a natural
-#: key, and the key it travels under. Keyed on the **column name** rather
-#: than on `(table, column)` because the meaning is the column's: a column
-#: called `title_id` names a title in all three tables that have one, and a
-#: per-table map would be three chances to disagree about that.
-#:
-#: `clicked_title_id` is spelled separately rather than normalised to
-#: `title`, because `search_queries` carries what the household *clicked*
-#: and a key called `title` on that row would read as what it searched for.
+# : Every foreign-key column in the carried set that travels as a natural : key, and the
+# key it travels under.
 REWRITTEN: Final[MappingProxyType[str, _Rewrite]] = MappingProxyType(
     {
         "title_id": _Rewrite(_Kind.TITLE, "title"),
@@ -224,12 +107,8 @@ CARRIED_RAW: Final[MappingProxyType[str, str]] = MappingProxyType(
 #: `uq_episodes_title_season_episode`.
 _MEDIA_ITEM_KEY: Final[tuple[str, ...]] = ("source_id", "external_id")
 
-#: The one carried table that is not carried whole, and the predicate that
-#: makes it cheap. A `media_items` row with neither link holds nothing this
-#: artifact wants: `(source_id, external_id)` alone re-derives from the next
-#: source walk. On the measured household that is 2,720 of 13,539 rows
-#: skipped (2026-08-25); on the 1,126,789-row library PRD 08 sizes, it is
-#: the difference between an artifact and a database dump.
+# : The one carried table that is not carried whole, and the predicate that : makes it
+# cheap.
 _MEDIA_ITEM_PREDICATE: Final = "title_id IS NOT NULL OR episode_id IS NOT NULL"
 
 
@@ -276,27 +155,8 @@ def _carried_columns(table: str) -> tuple[str, ...]:
 
 
 def unaccounted_reference_columns() -> dict[str, tuple[str, ...]]:
-    """Foreign-key columns in the carried set that are neither rewritten nor
-    declared raw -- per table, empty when the accounting is complete.
-
-    **This exists because the failure it catches is silent.** A foreign key
-    added to a precious table in some later milestone would be written out
-    as whatever UUID the column holds; the artifact would parse, the counts
-    would agree, and the restore would resolve an id minted by a different
-    import against a catalog where it names something else or nothing at
-    all. Nothing about that is visible at backup time, which is why it is a
-    derived check rather than a list somebody keeps current.
-
-    ⚠️ **It answers *"is this column rewritten?"* and never *"into what?"*,
-    and a review round caught that distinction being read as the stronger
-    one.** A column accounted for here and rewritten into the **wrong value**
-    -- a `kind` stamped `movie` on every reference, a user carried as its id,
-    two episode numbers transposed -- passes this completely, and all three
-    survived the whole suite until
-    `test_every_carried_reference_holds_the_values_of_the_row_it_names`
-    (integration) compared a carried reference to the row it was built from,
-    field by field. The two checks are a structural claim and a value claim;
-    neither subsumes the other and this one is the weaker.
+    """Foreign-key columns in the carried set that are neither rewritten nor declared raw
+    -- per table, empty when the accounting is complete.
     """
     gaps: dict[str, tuple[str, ...]] = {}
     for table in carried_tables():
@@ -333,14 +193,10 @@ class PostgresBackupRepository(BackupRepository):
         return carried_tables()
 
     async def schema_revision(self) -> str | None:
-        # `database_revision`, not a `SELECT version_num` written out here:
-        # this stamp is what `usher restore` refuses against, and it refuses
-        # against the **database's** revision -- never `code_head_revision()`,
-        # which is `_check_migrations`' comparison and answers 503. Two
-        # readers of one fact is how a restore comes to accept what a running
-        # service refuses. (This comment named the wrong one of the two until
-        # 2026-08-25; `PostgresRestoreRepository.schema_revision` below is the
-        # consumer and has always been right.)
+        # `database_revision`, not a `SELECT version_num` written out here: this stamp
+        # is what `usher restore` refuses against, and it refuses against the
+        # **database's** revision -- never `code_head_revision()`, which is
+        # `_check_migrations`' comparison and answers 503.
         return await database_revision(self._session)
 
     async def carry(self, table: str) -> tuple[CarriedRow, ...]:
@@ -356,13 +212,9 @@ class PostgresBackupRepository(BackupRepository):
         statement = f"SELECT {', '.join(columns)} FROM {table}"  # noqa: S608
         if MANIFEST[table].kind is BackupClass.PARTIAL:
             statement += f" WHERE {_MEDIA_ITEM_PREDICATE}"
-        # Ordered by the primary key so two nights' artifacts diff, rather
-        # than by heap order, which makes every row look changed the first
-        # time Postgres rewrites a page. The key is read off the metadata
-        # rather than named, because three of the eight carried tables have
-        # a primary key that is not `id` (`source_credentials.ref`,
-        # `row_provider_settings.slug_prefix`) or is not carried at all
-        # (`media_items`, whose `id` is not in the `PARTIAL` column set).
+        # Ordered by the primary key so two nights' artifacts diff, rather than by heap
+        # order, which makes every row look changed the first time Postgres rewrites a
+        # page.
         statement += f" ORDER BY {', '.join(_order_by(table, columns))}"
         rows = (await self._session.execute(text(statement))).mappings().all()
         return tuple(
@@ -555,12 +407,8 @@ _COLUMN_FOR_KEY: Final[MappingProxyType[str, _Rewrite]] = MappingProxyType(
 #: foreign-key error wearing an operator report's clothes.
 _DEFAULT_UNRESOLVED_RULE: Final = UnresolvedRule.REFUSE
 
-#: The `watch_states` columns an upsert adopts from the artifact, and the ones
-#: it compares to decide whether anything changed. `id` is absent because the
-#: conflict target is `(user_id, <target>)` and the row the target already
-#: holds keeps its own primary key; `updated_at` is absent because
-#: `trg_watch_states_set_updated_at` owns it on the update path and assigning
-#: it there would be a value nothing can observe (`db-and-sql.md`).
+# : The `watch_states` columns an upsert adopts from the artifact, and the ones : it
+# compares to decide whether anything changed.
 _WATCH_STATE_MERGED: Final[tuple[str, ...]] = (
     "position_seconds",
     "runtime_seconds",
@@ -608,13 +456,9 @@ class PostgresRestoreRepository(RestoreRepository):
         )
 
     async def schema_revision(self) -> str | None:
-        # `database_revision`, never `code_head_revision()`: the artifact has
-        # to fit *this database's* columns, and a container whose code is
-        # ahead of its database is a broken deployment `/health/ready` already
-        # reports. See `RestoreRepository.schema_revision` for the argument --
-        # and note that this pointer read "see the port" while the port's
-        # *other* method said the opposite, so a reader following it landed on
-        # the stale copy.
+        # `database_revision`, never `code_head_revision()`: the artifact has to fit
+        # *this database's* columns, and a container whose code is ahead of its database
+        # is a broken deployment `/health/ready` already reports.
         return await database_revision(self._session)
 
     async def apply(
@@ -630,14 +474,9 @@ class PostgresRestoreRepository(RestoreRepository):
         prepared, refused, unresolved = await self._prepare(
             table, rows, skip_unresolvable=skip_unresolvable
         )
-        # One SAVEPOINT for the table, which is also the granularity the
-        # writes have: a refused row here is a damaged artifact and the whole
-        # file is about to be rolled back either way. ADR-0044's rule is what
-        # makes the wrapper non-optional -- `watch_states.position_seconds`,
-        # `llm_calls.cost_usd` and `search_queries.result_count` are all
-        # narrower than the value a hand-edited artifact can carry, and an
-        # untranslated write here would put those columns back in the
-        # `exposed-sqlalchemy` bucket that F9 emptied.
+        # One SAVEPOINT for the table, which is also the granularity the writes have: a
+        # refused row here is a damaged artifact and the whole file is about to be
+        # rolled back either way.
         async with refusals_as_conflict(self._session, f"a restored {table} row is out of bounds"):
             merged = await self._merge(table, prepared)
         return TableOutcome(
@@ -708,41 +547,7 @@ class PostgresRestoreRepository(RestoreRepository):
         return TableOutcome(written=written, present=len(rows) - written)
 
     async def _merge_sources(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
-        """Insert on the id, and refuse a name a *different* source holds.
-
-        ⚠️ **The refusal is an explicit read because the schema cannot make
-        it.** `sources` carries `pk_sources` and a `NOT NULL`/non-empty CHECK
-        on `name` and no unique index on `name` at all -- measured on the live
-        schema 2026-08-25, unique-index-on-name count **0** -- so an
-        `ON CONFLICT (name)` here would not compile and a silent insert would
-        leave two sources pointing at one server, which is a state an operator
-        has to resolve and nothing downstream can.
-
-        🔴 **The two maps are updated *inside* the loop, and the first version
-        of this method updated neither.** It read the target once before the
-        loop and compared every artifact row against that snapshot, so two
-        rows in one artifact carrying the same `name` under different ids both
-        passed both checks and both landed -- the restore creating, with an
-        empty `refused` list and an exit code of 0, exactly the state the
-        paragraph above says it may not create. Measured against a real
-        schema on 2026-08-25: `written={'sources': 2}`, two rows in the table,
-        and a report claiming success.
-
-        **The precondition is reachable rather than theoretical**, which is
-        what makes it a bug rather than a tidy-up. `PostgresSourceRepository.
-        add` guards `pk_sources` and nothing else, and there is no unique index
-        on the column, so two same-named sources are creatable through the
-        ordinary admin path -- and `usher backup` then carries both. The
-        artifact this restore refuses is one this project can itself produce.
-
-        **Keyed on the id as well as the name, because the name is not a key
-        here.** `_existing_sources` returns both directions for exactly that
-        reason: a target already holding two same-named sources collapses to
-        one entry in a `name -> id` map, and the id membership test built from
-        `.values()` would then miss the second one and drive an insert into a
-        primary-key violation -- a refusal with the wrong message, about the
-        wrong row.
-        """
+        """Insert on the id, and refuse a name a *different* source holds."""
         if not rows:
             return TableOutcome(written=0, present=0)
         by_id, by_name = await self._existing_sources(rows)
@@ -920,33 +725,7 @@ class PostgresRestoreRepository(RestoreRepository):
         return TableOutcome(written=written, present=len(rows) - written)
 
     async def _merge_media_item_links(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
-        """Write the two links **only where the target's `title_id` is NULL**.
-
-        K1's asymmetry argument, as a `WHERE`. `media_items` carries no
-        provenance column, so an artifact cannot carry only the operator's
-        manual resolutions -- it carries every link. A link the match ladder
-        would have re-derived is re-derived to the same answer; a link it would
-        not is the operator's judgement, and it lands on the row the ladder
-        left unmatched. Writing over a link the target already holds is the one
-        move that can lose information on both sides at once.
-
-        🔴 **`present` and `absent` are two states and were one number until
-        K5's drill printed the sentence that refuted it.** A row the target has
-        already linked, and a row the next source walk has not created yet --
-        `(source_id, external_id)` is `uq_media_items_source_external`, so the
-        `UPDATE` matches nothing in both cases and `RETURNING` cannot tell them
-        apart. Neither is a refusal: the first is the rule working and the
-        second is an artifact that is ahead of the walk. **They are opposite
-        instructions to an operator**, which is why the extra read below is
-        worth a round trip: *already linked* means the restore was unnecessary,
-        *nothing here yet* means run `usher sync` and restore again. The drill
-        measured `10,515 already present` against a `media_items` table holding
-        **zero rows**, which is the second state wearing the first's word.
-
-        One batched `SELECT` for the whole table, never one per row: the key
-        list is the artifact's own and on the deployment this project measures
-        that is 10,819 pairs against a real unique index.
-        """
+        """Write the two links **only where the target's `title_id` is NULL**."""
         if not rows:
             return TableOutcome(written=0, present=0)
         # `external_id` is `TEXT`, so the target's side of the key is a `str`
@@ -1036,12 +815,10 @@ class PostgresRestoreRepository(RestoreRepository):
                         params[rewrite.key] = None
                         continue
                     if skip_unresolvable:
-                        # Dropped, never written with a null: the columns this
-                        # rule guards are `NOT NULL` foreign keys on
-                        # `watch_states` and operator-authored links on
-                        # `media_items`, so a null here is either an
-                        # `IntegrityError` or a link silently blanked. The
-                        # operator asked to skip the row, not to damage it.
+                        # Dropped, never written with a null: the columns this rule
+                        # guards are `NOT NULL` foreign keys on `watch_states` and
+                        # operator-authored links on `media_items`, so a null here is
+                        # either an `IntegrityError` or a link silently blanked.
                         dropped = True
                         break
                     refusal = RestoreRefusal(
@@ -1051,20 +828,10 @@ class PostgresRestoreRepository(RestoreRepository):
                     )
                     break
                 if isinstance(answer, _UnknownUser):
-                    # Never `NULL`: `watch_states.user_id` and
-                    # `search_queries.user_id` are both `NOT NULL`, so the
-                    # `NULL` rule cannot apply to a household however the table
-                    # is classified -- and a household the `users` pass did not
-                    # create is a file that was edited by hand.
-                    #
-                    # ⚠️ **And never skipped either, whatever
-                    # `skip_unresolvable` says.** That flag is for references
-                    # the *importers* rebuild: a title stub is re-derived by
-                    # the next `usher sync` and losing its link costs nothing.
-                    # A household is rebuilt by nothing, and skipping it would
-                    # silently drop every watch state in the file -- the exact
-                    # loss this command exists to carry, arriving through the
-                    # escape hatch built for the opposite case.
+                    # Never `NULL`: `watch_states.user_id` and `search_queries.user_id`
+                    # are both `NOT NULL`, so the `NULL` rule cannot apply to a
+                    # household however the table is classified -- and a household the
+                    # `users` pass did not create is a file that was edited by hand.
                     refusal = RestoreRefusal(
                         table=table,
                         keys=(f"name={answer.name}",),
@@ -1162,44 +929,7 @@ def _named_users(rows: Sequence[Mapping[str, object]]) -> set[str]:
 
 
 def _coerce(column: sa.Column[Any], value: object) -> object:
-    """One JSON scalar, as the type its column takes.
-
-    JSON has three scalar types and this schema has rather more, so the
-    artifact spells a UUID, a timestamp and a `NUMERIC` as strings
-    (`services/backup.py::_encode`) and something has to read them back.
-    That something is here rather than in `usher.services`, because *"what
-    type is this column"* is exactly the schema knowledge the third import
-    contract keeps out of that layer -- and it is driven off `Base.metadata`
-    rather than a per-table list, so a column added to a precious table in a
-    later milestone round-trips with no edit.
-
-    ⚠️ **`Decimal(str)` and not `float(str)` -- and on today's schema that is
-    a guard against a future column, not a repair of a live defect.** This
-    paragraph claimed reading `cost_usd` back as a `float` *"would put the
-    round trip back where `_encode`'s `:f` found it"*, and measurement refutes
-    it. Against a real `pgvector/pgvector:pg17` on 2026-08-25, `Decimal` and
-    `float` store **byte-identical** values across the whole
-    `NUMERIC(12, 8)` range -- `0.00870000`, `0.12345679`, `1234.56789013`,
-    `3E-8` and `9999.99999999` all read back the same text under both --
-    because 12 significant digits sits comfortably inside an IEEE double's
-    15-to-17, so every value this column can hold is exactly recoverable.
-
-    **What the same probe found is where the guard starts paying**, and it is
-    one column widening away: at `NUMERIC(30, 20)`, `0.123456789012345678`
-    stores as `…67800` through `Decimal` and `…67737` through `float`. So the
-    rule is *the scale, not the type* -- `Decimal` costs nothing, is correct
-    at every scale, and is what stops a later `ALTER` silently turning a
-    ledger into an approximation. Stated this way because the previous
-    sentence made a false claim about **this** column, and a refuted
-    measurement in a docstring is a defect in this repository. It also makes
-    the `float` spelling an *equivalent mutant* on the schema as it stands
-    rather than a coverage gap, which the sweep ledger now records.
-
-    (`_encode`'s `:f` is a separate and still-live concern: it is about
-    `Decimal.__str__` switching to scientific notation below an adjusted
-    exponent of -6, which is a readability property of the artifact rather
-    than a precision one.)
-    """
+    """One JSON scalar, as the type its column takes."""
     if value is None:
         return None
     if isinstance(value, str):

@@ -1,50 +1,4 @@
-"""`people` and `credits`, both on the staged-`COPY` path.
-
-Implements `PersonRepository` and `CreditRepository`
-(`usher.ports.repository`). The derivation writes the whole enriched tier --
-2k-10k titles at tens of credits apiece, so order 10^5-10^6 credit rows -- and
-a per-row ORM write here is the same defect `PostgresEpisodeRepository`
-measured at ~19 minutes of pure repository overhead one table over.
-
-Four details worth not re-deriving:
-
-1. **`SELECT DISTINCT ON` on `people` is required, not defensive.** One
-   derivation pass spans many titles and a working actor is credited on
-   several of them, so a batch genuinely names the same `tmdb_id` a dozen
-   times. Without it Postgres answers `CardinalityViolationError: ON CONFLICT
-   DO UPDATE command cannot affect row a second time`. On `credits` it *is*
-   defensive, and the dedup key is
-   `COALESCE(tmdb_credit_id, CAST(id AS text))` so a credit with no provider
-   id dedupes against its own row rather than collapsing onto another one.
-2. **`ON CONFLICT` repeats the partial index's predicate.**
-   `ix_people_tmdb_id` is `WHERE tmdb_id IS NOT NULL`, so the upsert says so
-   too -- `db/staging.py`'s first trap. The tempting "fix" for the error
-   Postgres gives without it is dropping `postgresql_where` from the index,
-   which silently makes two `tmdb_id`-less people collide.
-3. **`COALESCE(excluded.x, people.x)` on `known_for_department`, and
-   assignment on everything else.** This is not the defensive version of the
-   rule: a `created_by[]` entry carries no `known_for_department` while a
-   `credits.cast[]` entry does -- verified against the recorded payloads -- so
-   the same person arrives with it and without it *inside one pass over one
-   series*. `name` and `sort_name` are assigned rather than COALESCEd: both
-   are `NOT NULL` and always supplied, so preserving a stored one would make
-   a corrected name unfixable, which is `season_id`'s exception exactly.
-4. **A credit set is replaced, never merged.** A credit removed upstream is
-   the one change an upsert cannot express, so `replace_for_titles` is
-   `DELETE ... WHERE title_id = ANY(...)` followed by a staged insert, both
-   inside one SAVEPOINT. Delete first: the reverse order would meet
-   `ix_credits_tmdb_credit_id` on the rows it is about to remove.
-
-`updated_at` on `people` is owned by `trg_people_set_updated_at`, a
-`BEFORE UPDATE` assigning `now()` unconditionally -- which is exactly why it
-exists, since this path never goes through the ORM and SQLAlchemy's
-`onupdate=` never fires. `credits` has no `updated_at`: every write to it is
-an insert.
-
-**`character` is quoted everywhere below.** It is a `col_name_keyword` in
-PostgreSQL's grammar, and an unquoted one in an `INSERT` column list is a
-parse risk that gets "fixed" by dropping the column from the statement.
-"""
+"""`people` and `credits`, both on the staged-`COPY` path."""
 
 import json
 import uuid
@@ -69,21 +23,9 @@ from usher.ports.repository import (
     RecurringPerson,
 )
 
-# `ordinal` is the row's index within the batch and is what makes
-# deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
-# last-wins, the rule the port documents. Ordering on `id` instead would make
-# that depend on UUIDv7 generation being monotonic within a millisecond --
-# true of `uuid6.uuid7()` today, but a property of a dependency rather than of
-# this statement.
-#
-# CREATE TEMP TABLE ... ON COMMIT DROP, and both halves are a correctness
-# precondition rather than a style rule -- see db/staging.py's module
-# docstring for the three measured failures a public staging table produces.
-# `CREATE TEMP UNLOGGED TABLE` is a syntax error.
-# The one member of `SearchNameKind` this module writes, and it is bound as a
-# parameter rather than written into the SQL twice: the delete's scope and the
-# insert's value have to agree, and a literal in each is two places to change.
-# The other member is `alias`, whose emitter is group T's `title.akas` loader.
+# `ordinal` is the row's index within the batch and is what makes deduplication
+# deterministic: `ORDER BY ..., ordinal DESC` is literally last-wins, the rule the port
+# documents.
 _PERSON_NAME_KIND = SearchNameKind.PERSON.value
 
 _PEOPLE_DDL = """
@@ -142,14 +84,7 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 FROM all_rows
 """
 
-# `GET /people/{id}`'s first statement. Columns named rather than `SELECT *`,
-# even though `people` has no derived column and the model's field set is held
-# in exact 1:1 correspondence with the table's by
-# `tests/unit/test_db_models_people.py`: a `*` here would make a column added
-# later arrive at `Person.model_validate` as an unexpected key from a statement
-# nobody edited, which is a failure a long way from its cause.
-#
-# `pk_people` is the driving index and the whole predicate.
+# `GET /people/{id}`'s first statement.
 _GET_PERSON = """
 SELECT id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at
 FROM people
@@ -166,33 +101,7 @@ FROM unnest(CAST(:tmdb_ids AS integer[])) AS q(tmdb_id)
 JOIN people p ON p.tmdb_id = q.tmdb_id
 """
 
-# PeopleProvider's whole question, in ONE statement. The obvious shape --
-# list the user's watch states, then list_for_title each one -- is one
-# statement per watched title against a history the one measured deployment
-# sizes at up to 1,126,789 states. Driving index: ix_watch_states_user_played
-# (user_id, played), then pk_episodes, then ix_credits_title_id.
-#
-# Three things here are load-bearing and each has a contract case:
-#
-#   count(DISTINCT c.title_id), not count(*). A person credited twice on one
-#   film -- two jobs, or two characters, both of which TMDb emits -- reads as
-#   two titles under count(*), so a one-film person out-ranks a four-film one.
-#   Note that the GROUP BY includes `c.job`, so the seeding that discriminates
-#   is two CHARACTERS rather than two jobs: two jobs land in two groups of one
-#   row each, where the two counts agree. Measured in group B's contract
-#   exercise, where the count(*) injection survived the job-based seeding.
-#
-#   LEFT JOIN episodes, then coalesce(w.title_id, e.title_id). An
-#   episode-level watch state carries title_id IS NULL and an episode_id; the
-#   series is on episodes.title_id. Without this arm the row is about films
-#   only, on a library where 999,827 of 1,126,674 measured items are episodes.
-#   It also means twelve watched episodes of one series are ONE title in the
-#   count above, which is the other half of why the count is distinct.
-#
-#   WHERE w.played. A row with played = false and position_seconds = 0 is a
-#   state a sync created and nobody watched.
-#
-# Ties break on p.id so two reads of one catalog agree.
+# PeopleProvider's whole question, in ONE statement.
 _RECURRING_PEOPLE = """
 SELECT p.id AS person_id, p.name AS name, c.kind AS kind, c.job AS job,
        count(DISTINCT c.title_id) AS watched_title_count,
@@ -237,12 +146,9 @@ _CREDITS_COLUMNS = (
     "billing_order",
 )
 
-# The scope comes from :title_ids, never from the rows -- a title whose
-# credits all disappeared upstream contributes no rows at all, so a delete
-# derived from them deletes nothing for it and leaves its stale credits in
-# place through every future derivation. TitleNeighborRepository.replace
-# makes the identical argument, and it is the one row shape a re-derivation
-# cannot repair. Served by ix_credits_title_id.
+# The scope comes from :title_ids, never from the rows -- a title whose credits all
+# disappeared upstream contributes no rows at all, so a delete derived from them deletes
+# nothing for it and leaves its stale credits in place through every future derivation.
 _DELETE_CREDITS = "DELETE FROM credits WHERE title_id = ANY(CAST(:title_ids AS uuid[]))"
 
 # DISTINCT ON is defensive here rather than required, and the key is
@@ -268,44 +174,9 @@ WITH deduped AS (
 SELECT count(*) FROM inserted
 """
 
-# NULLS LAST on billing_order, explicitly: Postgres defaults to NULLS LAST for
-# ASC, and writing it down is what stops a later "tidy-up" from dropping it
-# and putting uncredited crew above the lead. Ties break on person_id.
-#
-# The kind predicate is `CAST(:kind AS text) IS NULL OR ...` rather than two
-# statements: an implementation with the filter hardcoded passes a cast case
-# and fails the crew one, which is why the contract has both.
-# `titles.credit_names` is written by this same call, in the same
-# transaction, and that is boundary call 5's requirement rather than
-# tidiness: the array and the table are two spellings of one fact, and if
-# they are ever written by two statements they diverge -- the symptom being a
-# full-text hit on a name `credits` no longer holds, which nothing in the
-# suite would catch unless a case asserts on both.
-#
-# **The scope is `:title_ids`, exactly as the delete's is.** A title whose
-# credits all disappeared upstream contributes no rows, so an array derived
-# from the rows leaves its stale names in place through every future
-# derivation -- the one row shape a re-derivation cannot repair.
-# `COALESCE(..., '{}')` is what empties such a title rather than skipping it.
-#
-# `IS DISTINCT FROM` rather than `<>`: `credit_names` is NOT NULL so the two
-# agree today, and it is written this way because it is the same guard
-# `attach_titles` needs for a genuinely nullable column, and because a
-# re-derivation over an unchanged catalog must write zero rows -- `titles`
-# carries a GIN index and a stored generated column, so a dead row version
-# per title per pass is not free.
-#
-# The names travel as **one jsonb object keyed by title id**, not as two
-# parallel arrays: `unnest(uuid[], text[][])` flattens the second argument
-# rather than yielding one array per row, so the obvious parallel-array
-# spelling silently pairs the wrong names with the wrong title. Keys are the
-# canonical UUID text, which is what `CAST(uuid AS text)` produces on both
-# sides.
-#
-# `array_agg(... ORDER BY ord)` with `WITH ORDINALITY` preserves the order
-# the caller chose, and that order is the ranking -- top-billed first. An
-# unordered `array_agg` reads the same in every test with fewer than two
-# names and reorders the search document's class B for every real title.
+# NULLS LAST on billing_order, explicitly: Postgres defaults to NULLS LAST for ASC, and
+# writing it down is what stops a later "tidy-up" from dropping it and putting
+# uncredited crew above the lead.
 _WRITE_CREDIT_NAMES = """
 WITH wanted AS (
     SELECT s.title_id,
@@ -325,46 +196,19 @@ WHERE t.id = w.title_id
   AND t.credit_names IS DISTINCT FROM w.names
 """
 
-# **The `person` half of `title_search_names`, written by the call that already
-# writes `credit_names` -- the third spelling of one fact.** The array and the
-# table were already two; this is the same names again, in a row per name, so a
-# `LIKE 'pre%'` probe can find a title by somebody credited on it.
-#
-# **The delete is scoped by `title_ids` AND by `kind`, and both halves are
-# load-bearing for a different reason.** `title_ids` is `_DELETE_CREDITS`'
-# argument unchanged: a title whose credits all disappeared upstream
-# contributes no rows, so a scope derived from the names leaves its stale ones
-# in place forever. `kind` is new here and is about a *second writer* -- group
-# T's `title.akas` loader lands `alias` rows in this same table, and a delete on
-# `title_id` alone makes the two mutually destructive, whichever runs second
-# erasing the other's rows with nothing raised and nothing logged.
-#
-# Served by `ix_title_search_names_title_id`, which `m09a` created for the
-# `ON DELETE CASCADE` lookup and which this delete's leading column is.
+# **The `person` half of `title_search_names`, written by the call that already writes
+# `credit_names` -- the third spelling of one fact.** The array and the table were
+# already two; this is the same names again, in a row per name, so a `LIKE 'pre%'` probe
+# can find a title by somebody credited on it.
 _DELETE_SEARCH_NAMES = """
 DELETE FROM title_search_names
 WHERE title_id = ANY(CAST(:title_ids AS uuid[]))
   AND kind = CAST(:kind AS text)
 """
 
-# Three parallel *flat* arrays rather than one jsonb object, and the choice is
-# the opposite of `_WRITE_CREDIT_NAMES`' for a reason that is about the id
-# rather than about taste. That statement pairs one array with one title, which
-# `unnest(uuid[], text[][])` cannot express -- it flattens the second argument.
-# This one pairs one *name* with one title and one freshly minted UUIDv7, which
-# is exactly what a positional multi-argument `unnest` is: three arrays built
-# from one comprehension, so they cannot be of different lengths and cannot
-# pair the wrong name with the wrong title.
-#
-# **The ids are minted in Python, in order, and that is what carries the
-# ranking.** `m09a` gives this table no rank column -- an alias is a set, not a
-# ranking -- so the only thing recording that `credit_names`' order is
-# top-billed-first is that the row for the first name has the lowest id.
-# `gen_random_uuid()` would be one fewer parameter and would lose it.
-#
-# `region` and `language` are left to their column defaults, which is NULL: a
-# credited person's name is not specific to a locale, and NULL means exactly
-# that. Group T's half is what fills them.
+# Three parallel *flat* arrays rather than one jsonb object, and the choice is the
+# opposite of `_WRITE_CREDIT_NAMES`' for a reason that is about the id rather than about
+# taste.
 _INSERT_SEARCH_NAMES = """
 INSERT INTO title_search_names (id, title_id, name, kind)
 SELECT r.id, r.title_id, r.name, CAST(:kind AS text)
@@ -426,12 +270,10 @@ class PostgresPersonRepository(PersonRepository):
             for ordinal, row in enumerate(people)
         ]
         try:
-            # A SAVEPOINT for PostgresEpisodeRepository's reason: DeriveService
-            # commits a batch of people together with its job checkpoint, so a
-            # caught conflict must not leave the session raising
-            # PendingRollbackError on the next unrelated call. The staging DDL
-            # is inside it too -- Postgres DDL is transactional, so a failed
-            # batch leaves no half-populated staging table for the next one.
+            # A SAVEPOINT for PostgresEpisodeRepository's reason: DeriveService commits
+            # a batch of people together with its job checkpoint, so a caught conflict
+            # must not leave the session raising PendingRollbackError on the next
+            # unrelated call.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await stage_records(
@@ -501,22 +343,7 @@ class PostgresCreditRepository(CreditRepository):
     ) -> int:
         if not title_ids and not credits:
             return 0
-        # Built from the `credit_names` **mapping**, never from `credits`. The
-        # two are not the same list and were never meant to be:
-        # `services/derive._credit_names` truncates the cast at
-        # `_CREDIT_NAME_CAST_LIMIT = 10` and appends every stored crew name,
-        # while `credits` holds up to `mapping._CAST_LIMIT = 50` of them in
-        # provider order. Projecting the rows here would produce a plausible,
-        # populated, differently-ordered index nothing outside its own contract
-        # case would see.
-        #
-        # `dict.fromkeys` twice rather than a `set` twice, because both of
-        # these are ordered: the scope keeps the caller's order so the ids
-        # ascend with it, and the names keep `credit_names`' order, which *is*
-        # the ranking. One person credited as both cast and crew is one row
-        # here and two entries in the array -- the array is weight class B's
-        # input, where a repeated lexeme is a `ts_rank` contribution, and this
-        # is a name index.
+        # Built from the `credit_names` **mapping**, never from `credits`.
         search_ids: list[uuid.UUID] = []
         search_title_ids: list[uuid.UUID] = []
         search_names: list[str] = []
@@ -558,13 +385,9 @@ class PostgresCreditRepository(CreditRepository):
                     await self._session.execute(
                         text(_DELETE_CREDITS), {"title_ids": list(title_ids)}
                     )
-                    # In the same nested block as the delete and the
-                    # insert, and before the early return, so that a title
-                    # whose credits all disappeared upstream still has its
-                    # array emptied. Splitting these across two calls or two
-                    # transactions is what makes the array and the table
-                    # disagree, and the symptom is a full-text hit on a name
-                    # `credits` no longer holds.
+                    # In the same nested block as the delete and the insert, and before
+                    # the early return, so that a title whose credits all disappeared
+                    # upstream still has its array emptied.
                     await self._session.execute(
                         text(_WRITE_CREDIT_NAMES),
                         {
@@ -574,12 +397,10 @@ class PostgresCreditRepository(CreditRepository):
                             ),
                         },
                     )
-                    # The third destination, in the same nested block and
-                    # before the early return, for the same reason the array
-                    # is: a title in scope whose credits all disappeared has
-                    # its searchable names emptied rather than skipped. The
-                    # delete runs unconditionally and the insert only has
-                    # something to do when the mapping named a name.
+                    # The third destination, in the same nested block and before the
+                    # early return, for the same reason the array is: a title in scope
+                    # whose credits all disappeared has its searchable names emptied
+                    # rather than skipped.
                     await self._session.execute(
                         text(_DELETE_SEARCH_NAMES),
                         {"title_ids": list(title_ids), "kind": _PERSON_NAME_KIND},
@@ -605,19 +426,11 @@ class PostgresCreditRepository(CreditRepository):
                     )
                     written = (await self._session.execute(text(_INSERT_CREDITS))).scalar_one()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9 (ADR-0044).** This
-            # method writes `title_search_names` and `titles.credit_names`, neither of which is
-            # narrower than the field feeding it -- but its statements bind caller-supplied
-            # `uuid[]`, `text[]` and `text` arrays, so every class-22 refusal they can raise is
-            # about a value this call handed in, and the older `IntegrityError` was narrower than
-            # that. SQLAlchemy's asyncpg dialect does not map SQLSTATE class 22 onto any classified
-            # subclass, so a column refusing a *value* arrives as a bare `DBAPIError` that `except
-            # IntegrityError` does not catch and the driver's own exception crossed this port
-            # boundary untranslated -- the one thing ADR-0009 forbids. `db/repositories/_errors.py`
-            # holds the two measured shapes and the only copy of the predicate. Everything that is
-            # *not* a row refusal -- a dropped connection, a statement timeout, an undefined table
-            # -- still propagates, because a caller that cannot tell those apart retries the one
-            # thing a retry cannot fix.
+            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
+            # (ADR-0044).** This method writes `title_search_names` and
+            # `titles.credit_names`, neither of which is narrower than the field feeding
+            # it -- but its statements bind caller-supplied `uuid[]`, `text[]` and
+            # `text` arrays, so every class-22 refusal they can raise is about a value
             if not is_row_refusal(exc):
                 raise
             # A `title_id`/`person_id` naming a row that does not exist, a

@@ -1,36 +1,4 @@
-"""Encrypted-at-rest storage for source credentials.
-
-PRD 08: credentials are encrypted using a key supplied via
-`USHER_SECRET_KEY`, `Source.credentials_ref` points at the encrypted row,
-and the plaintext exists only in memory in the adapter that needs it.
-
-Fernet (AES-128-CBC with an HMAC-SHA256 authentication tag) over a key
-derived from `USHER_SECRET_KEY` with HKDF-SHA256. HKDF rather than a
-password-based KDF such as scrypt because the input is already
-high-entropy: the documented way to produce this value is
-`openssl rand -hex 32`, `Settings.secret_key` enforces `min_length=32`, and
-`Settings` rejects the example placeholder outright. HKDF is the primitive
-designed for deriving subkeys from an existing strong secret; scrypt's work
-factor buys nothing against 32 random bytes and would cost a full KDF run
-per call.
-
-The `info` string is versioned so a future scheme change becomes a new
-derivation rather than a silent reinterpretation of old ciphertext, and so
-this subkey is domain-separated from any other use a later milestone makes
-of `USHER_SECRET_KEY`.
-
-The authentication tag is what makes a rotated key a *diagnosable* failure
-rather than a garbage read: decrypting with the wrong key raises
-`InvalidToken`, which becomes `PortDataMalformed` with the ref (never the
-payload, never the key) so an operator can find the row and re-enter the
-credential.
-
-`SecretStr.get_secret_value()` is unwrapped exactly once, in `__init__`,
-and the plaintext secret is not retained -- only the derived Fernet key,
-which is an HKDF output and not the secret. That satisfies CLAUDE.md's
-"never store the unwrapped value in a variable that outlives that call",
-and re-deriving per call would be strictly worse for no benefit.
-"""
+"""Encrypted-at-rest storage for source credentials."""
 
 import base64
 import json
@@ -145,43 +113,7 @@ class PostgresCredentialStore(CredentialStore):
 
 
 class PostgresCredentialRotationStore(CredentialCiphertextStore):
-    """`source_credentials`' ciphertext, moved without being read.
-
-    **This is the whole of what `USHER_SECRET_KEY` protects that is
-    persisted, and saying the size out loud is what stops the command that
-    uses it being over-built.** There are exactly two HKDF derivations over
-    that key: this module's `build_cipher`
-    (`info=b"usher.source-credentials.v1"`), whose output encrypts the JSON
-    `{username, password}` blob in the column below, and
-    `usher.services.playback_ticket.build_ticket_cipher`
-    (`info=b"usher.playback-ticket.v1"`), whose output encrypts a playback
-    target URL inside a ticket that is **never stored**. So rotation is one
-    table, one row per configured source -- measured 2026-08-25 on the
-    deployment this project runs: `SELECT count(*) FROM source_credentials`
-    is **1** and the table is **48 kB**.
-
-    ⚠️ Two neighbours that look like they belong here and do not.
-    `api/cursor.py` records that `Settings.secret_key` is *deliberately not*
-    what signs a keyset cursor, so cursors are outside this entirely --
-    checked rather than assumed, a cursor being the other opaque string in
-    this API. And the ticket cipher needs no rotation, which is a fact about
-    a ticket's lifetime rather than an omission: rotating the key invalidates
-    every outstanding one, which renders as a `404 ticket_invalid` the client
-    answers by asking `/play` again. **"Short-lived" is five minutes** --
-    `api.routers.playback.TICKET_TTL_SECONDS`, verified 2026-08-26. It lives
-    at the route rather than in this subsystem because
-    `services/playback_ticket.py` says in as many words that *no TTL constant
-    lives here* (`redeem`'s `ttl_seconds` is required with no default), and it
-    is deliberately **not** `USHER_PLAYBACK_TICKET_TTL_SECONDS`: that name
-    appears in both modules only as the setting PRD 08's
-    mechanism-before-the-setting rule refused, and `Settings` has no such
-    field.
-
-    **No `secret_key`, and the absent constructor argument is the design.**
-    `PostgresCredentialStore` takes one because it decrypts; this class moves
-    bytes it cannot open, so an instance of it is not a thing that can leak a
-    credential even if a later caller misuses it.
-    """
+    """`source_credentials`' ciphertext, moved without being read."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -207,17 +139,9 @@ class PostgresCredentialRotationStore(CredentialCiphertextStore):
 
     async def write_ciphertext(self, ref: str, ciphertext: bytes) -> None:
         # `updated_at` is set here because `source_credentials` carries no
-        # `set_updated_at` trigger -- see `SourceCredentialRow`'s docstring,
-        # which named `PostgresCredentialStore` as the table's only writer
-        # until this class became the second one. A rotation that left the
-        # column alone would make the stamp say when the *credential* last
-        # changed, which is not what any other table in this schema means by
-        # it and not what an operator diagnosing a half-rotated deployment
-        # needs.
-        #
-        # `synchronize_session=False` because nothing above this call holds a
-        # `SourceCredentialRow`: the read is a projection, so there is no
-        # identity map for the ORM to reconcile.
+        # `set_updated_at` trigger -- see `SourceCredentialRow`'s docstring, which named
+        # `PostgresCredentialStore` as the table's only writer until this class became
+        # the second one.
         await self._session.execute(
             update(SourceCredentialRow)
             .where(SourceCredentialRow.ref == ref)

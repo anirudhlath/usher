@@ -1,32 +1,4 @@
-"""`GET /collections/{id}` -- PRD 07's franchise page, at the boundary.
-
-One read and a hydration. `CollectionRepository.get` answers the franchise and
-the household's coverage of it in one statement -- two lists, so the two counts
-are `len()` and cannot disagree -- and `TitleRepository.list_by_ids` turns the
-member ids into cards. The ownership predicate stays in SQL, where B6 settled
-it: an **available**, **title-level** media item.
-
-**`get` is not `list_owned` with a filter, and the difference is `min_owned`.**
-`list_owned`'s floor of 2 is a statement about what belongs on a *screen* -- a
-franchise you own one of is a single film with a subtitle. This route answers a
-franchise the client asked for by id, so there is no floor at all: "you own 1 of
-4" is the honest answer, and it is the one a household that has barely started a
-series most wants to be told.
-
-**A franchise the household owns none of is a 200**, and only a franchise the
-catalog does not hold is a 404. Collapsing the two would make "you own 0 of 7"
-unreachable, which is a real answer for a client that followed a link from a
-film it does own.
-
-**No cursor, stated as a bound rather than assumed.** TMDb franchises are
-single-digit to low-double-digit members, and the hydration is one statement
-over all of them. The day one is unbounded it is the same opaque codec
-`GET /browse` uses over the keyset shape it already has.
-
-**No user.** Ownership is a property of the household's sources -- `MediaItem`
-has no user and never has -- which is the argument `list_owned` already makes
-about carrying no `user_id`.
-"""
+"""`GET /collections/{id}` -- PRD 07's franchise page, at the boundary."""
 
 import uuid
 from typing import Any, Final

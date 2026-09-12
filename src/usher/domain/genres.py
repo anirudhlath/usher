@@ -1,79 +1,9 @@
-"""One genre vocabulary over two importers that share none.
-
-`titles.genres` is written from two places with no agreement between them. The
-IMDb bulk phase (`adapters/bulk/imdb.py`) writes IMDb's 28 labels; `EnrichService`
-lists `genres` among the fields it replaces wholesale from TMDb, which writes
-TMDb's 19 movie genres or its 16 television ones. Measured on the live catalog
-2026-08-19 over 1,272,866 titles: **37 distinct labels, and the two alphabets
-are disjoint on every concept they both name.** 20,051 titles carry `Sci-Fi`
-and 6,223 carry `Science Fiction`; **zero carry both**, and the same holds for
-all nine alias pairs below. `/browse?genre=` was exact containment, so it
-answered half a concept under either spelling and `?facets=true` offered both
-as separate buttons.
-
-**The vocabulary is Usher's own rather than TMDb's** — [ADR-0039](
-../../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md). TMDb's
-is smaller and is what the enriched tier already speaks, which is the argument
-for taking it; the reason not to is that seven concepts have nowhere to go in
-it. `Biography` (24,552 titles), `Musical` (13,546), `Sport` (19,918),
-`Short` (6,248), `Game-Show` (10,729), `Film-Noir` (49) and `Adult` are named by
-IMDb and by no TMDb genre in either id space, so a TMDb-canonical vocabulary
-does not *rename* them — it has no name for them at all.
-
-**Two rules, and the second is the one that is easy to get wrong.**
-
-1. A label maps to the canonical labels it *names*. Six do not name themselves.
-2. **A fused label names two concepts, not one.** TMDb's television vocabulary
-   fuses concepts its movie vocabulary keeps apart, and all three fusions are
-   in this catalog: `Sci-Fi & Fantasy` (165), `Action & Adventure` (154),
-   `War & Politics` (25). Collapsing one onto a single canonical label deletes
-   the other half of what it says. `War & Politics` is the asymmetric case —
-   there is no canonical `Politics` for its second half to land in, so it maps
-   to one label and not two.
-
-**This map is applied at both ends, and the two are not redundant.**
-`PostgresTitleRepository._browse_filters` expands a filter into every spelling
-of the concept and `browse_facets` collapses the counts back — that is the
-*reader*, and it is what makes `/browse` correct on a catalog nobody has swept.
-`GenreNormalisationService` (`usher genres --backfill`) rewrites the column
-through `canonicalise_genres` — that is the *writer*, and it is the only thing
-that reaches `search_document`'s weight class D, the embedded documents, and the
-five row providers that read the raw array. The reader stays because a fresh
-bootstrap, a partially-swept catalog and a deployment that has never run the
-command all need `/browse` to answer correctly without an operator's action.
-
-**What ADR-0039 got wrong about the writer, kept here because the shape
-recurs.** It deferred write-time normalisation at *"~1.8 h of re-embedding plus
-a 3.3 h `usher similar --rebuild`"*, which is the cost of re-embedding the
-whole embedded population. The population a genre rewrite stales is the
-intersection of "carries a source spelling" and "carries a vector", and those
-two very nearly do not overlap — the split follows the enrichment boundary and
-`_POPULATION` excludes skeletons. Measured 2026-08-19: **79,913 rows rewritten,
-304 embeddings staled** of 132,440. The deferral was priced on the wrong
-denominator.
-
-**The facet collapse sums its spellings' counts, and that is exact only while
-no title carries two spellings of one concept.** Measured zero across all nine
-alias pairs on 1,272,866 titles; `EnrichService` cannot create one — it
-preserves a label only when the provider's vocabulary has no name for its
-concept, which is by definition a concept with a single spelling — and the
-backfill cannot either, because `canonicalise_genres` deduplicates. A
-normalised catalog has one spelling per concept by construction, so on it the
-sum is over a single key. The exact spelling (`SELECT DISTINCT (id,
-canonical)`) was measured at **1,789 ms against 199 ms** on the live catalog,
-which is why the sum is what ships.
-"""
+"""One genre vocabulary over two importers that share none."""
 
 from collections.abc import Iterable
 from types import MappingProxyType
 
-#: Usher's own vocabulary: every concept either importer can name, spelled
-#: once. The rule that picks each spelling is ADR-0039's and it has exactly one
-#: clause — **TMDb's spelling wherever TMDb names the concept, IMDb's verbatim
-#: wherever it does not** — so `Science Fiction` beats `Sci-Fi`, `Reality` beats
-#: `Reality-TV`, and `Film-Noir` keeps IMDb's hyphen because nothing else names
-#: it. One clause rather than a per-label judgement, because a vocabulary whose
-#: spellings are decided one at a time is a vocabulary nobody can extend.
+# : Usher's own vocabulary: every concept either importer can name, spelled : once.
 CANONICAL_GENRES: frozenset[str] = frozenset(
     {
         "Action",
@@ -110,14 +40,7 @@ CANONICAL_GENRES: frozenset[str] = frozenset(
     }
 )
 
-#: Every source spelling that is not already canonical, and the concepts it
-#: names. Deliberately **only** the non-identity entries: a table that also
-#: restated the twenty-odd labels both sources spell identically would be a
-#: table where a missing row and a correct row look the same.
-#:
-#: `MappingProxyType` for immutability and not for hashability — CLAUDE.md's
-#: rule, and `mappingproxy` delegates `__hash__` to the dict it wraps, which is
-#: `None`.
+# : Every source spelling that is not already canonical, and the concepts it : names.
 GENRE_ALIASES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
     {
         # IMDb's spelling of TMDb's `Science Fiction`. The pair issue #30 is

@@ -45,34 +45,12 @@ class WatchStateRow(Base):
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     # RESTRICT, not CASCADE -- deliberately the opposite of MediaItem.title_id
-    # (ForeignKey("titles.id", ondelete="SET NULL") in source.py). The two
-    # look parallel but protect opposite things: an unmatched MediaItem row
-    # is worth keeping (review queue), so losing its Title link just clears
-    # it; a WatchState *is* the thing worth keeping, so losing its Title
-    # link must not silently delete it. PRD 02 (Identity) requires merging
-    # two Titles to be "a repointing operation rather than a primary-key
-    # rewrite cascading through watch state" -- UUIDv7 identity exists
-    # specifically so that's possible, and M4's four-tier matcher will
-    # produce duplicate Titles to merge. A merge is "repoint every
-    # watch_states/media_items row from the loser to the winner, then delete
-    # the loser"; under CASCADE, any bug that deletes the loser before (or
-    # instead of) repointing silently destroys watch history with no error.
-    # RESTRICT makes that fail loudly at the DELETE instead. See
-    # ADR-0010.
+    # (ForeignKey("titles.id", ondelete="SET NULL") in source.py).
     title_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="RESTRICT")
     )
-    # RESTRICT, matching title_id immediately above and for the identical
-    # reason (ADR-0010): a WatchState *is* the thing worth keeping. An
-    # episode merge -- which M4's matcher produces, because a series
-    # ingested twice under different provider ids yields two episode trees
-    # -- must repoint every watch_states row before deleting the loser, and
-    # RESTRICT makes skipping that step fail at the DELETE instead of
-    # silently destroying history. It composes with episodes.title_id's
-    # CASCADE rather than fighting it: deleting a Title cascades into
-    # episodes, and this RESTRICT then refuses that cascade if any history
-    # points at one. Proven against real Postgres in
-    # tests/integration/test_migrations.py.
+    # RESTRICT, matching title_id immediately above and for the identical reason
+    # (ADR-0010): a WatchState *is* the thing worth keeping.
     episode_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("episodes.id", ondelete="RESTRICT")
     )
@@ -95,14 +73,8 @@ class WatchStateRow(Base):
         onupdate=func.now(),
         nullable=False,
     )
-    # Renamed from updated_by: that name reads as a user FK in nearly every
-    # schema, and this table has user_id right next to it. No default -- on
-    # either the ORM or the database side, and deliberately not: a sync path
-    # that forgets to set this must fail loudly rather than silently
-    # mislabel source-pushed state as user-originated. Do not add
-    # server_default here to "match" the other bulk-load-friendly columns
-    # above; that would defeat the entire point. See the domain-model
-    # WatchState commit.
+    # Renamed from updated_by: that name reads as a user FK in nearly every schema, and
+    # this table has user_id right next to it.
     origin: Mapped[WatchStateOrigin] = mapped_column(
         enum_column(WatchStateOrigin, length=16), nullable=False
     )
@@ -110,41 +82,8 @@ class WatchStateRow(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "title_id", name="uq_watch_states_user_title"),
         UniqueConstraint("user_id", "episode_id", name="uq_watch_states_user_episode"),
-        # Continue Watching, and it REPLACED ix_watch_states_user_played
-        # rather than joining it. That index was declared in M1 for a query
-        # nobody wrote: all seven shipped watch_states statements were
-        # EXPLAINed at 1,119,097 rows before the swap and not one used it --
-        # _NEEDING_HISTORY leads with `played` and leaves `user_id` unbound,
-        # and the getters and both merge branches drive off the single-column
-        # title_id/episode_id indexes with `user_id` as a filter. This is a
-        # strict prefix superset of it, so nothing it could serve is lost,
-        # and two indexes where one suffices is a write cost on every merge
-        # of every nightly walk for no read.
-        #
-        # `DESC NULLS LAST` is the correctness content, not the formatting.
-        # `last_played_at` is nullable because a walk's listing cannot
-        # determine it (ADR-0014); Postgres defaults a DESC sort to NULLS
-        # FIRST; and a DESC-NULLS-FIRST btree cannot supply
-        # `ORDER BY last_played_at DESC NULLS LAST` as an ordered scan. So
-        # without the spelled-out clause the index would serve the filter,
-        # the planner would fall back to a full Sort, and Continue Watching
-        # would sort the household's whole per-user set on every home screen
-        # while an index sat there looking like it was helping.
-        #
-        # `compare_metadata` *does* diff this clause -- measured by mutation
-        # in both directions, against the plan's assumption that it does not
-        # -- so `test_migration_matches_the_orm_metadata` is one guard here.
-        # `test_the_row_read_indexes_carry_the_clauses_that_make_them_work`
-        # is the other, and it is the one that does not depend on which
-        # clauses a future Alembic happens to render: it reads
-        # `pg_indexes.indexdef`, i.e. what Postgres will actually do.
-        #
-        # Measured (`scripts/measure_rows.py --scale 1126674`): _IN_PROGRESS
-        # goes from a Parallel Seq Scan at 38.123 ms to an Index Scan under
-        # an Incremental Sort at 0.029 ms, touching 24 buffers.
-        # `list_rediscoverable` borrows it for its equality pair plus range
-        # and gains almost nothing (14.614 -> 13.864 ms), because its
-        # `ORDER BY play_count DESC` is a Sort no index here can serve.
+        # Continue Watching, and it REPLACED ix_watch_states_user_played rather than
+        # joining it.
         Index(
             "ix_watch_states_user_recent",
             "user_id",

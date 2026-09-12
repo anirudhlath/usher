@@ -1,44 +1,4 @@
-"""Seasonal -- the one provider whose content is a taste judgement.
-
-**There is no data source for this row and there is not going to be one.**
-Nothing in the catalog, in TMDb, in MovieLens or in the household's history
-says that October means horror. Every other constant in `services/` is a
-weight over a signal something computed; `WINDOWS` below is a claim about what
-people watch in October, and the only evidence for it is that it is obviously
-true and obviously parochial. **It is curated by the author, not measured**,
-and it is a module-level table rather than configuration so that changing it
-is a code change with a diff.
-
-**The wrong implementations this module's cases rule out:**
-
-1. **Matches the window's predicate against the whole catalog rather than the
-   owned library.** 1.27M titles, of which the household can play none, in a
-   correctly-shaped and beautifully-themed row. PRD 06's *"things to seek
-   out"* is the LLM candidate pool's property and belongs to M8's
-   `CuratedProvider`; a source-family row on the home screen is playable or it
-   is not there.
-2. **Reads `datetime.now()` instead of `ctx.now`.** Window boundaries are this
-   provider's *entire* behaviour, so a wall-clock read makes every one of them
-   untestable and the provider unverifiable except in October. This is the
-   single most important line in the module.
-3. **A window that wraps the year end.** `(12, 27) <= today <= (1, 2)` is
-   false for every date in the year, so the row is permanently absent with no
-   error anywhere -- and no assertion about a row's *contents* can detect a
-   row that never appears. There is no such window today;
-   `test_no_seasonal_window_wraps_the_year_end` is a guard on a future edit.
-4. **A catch-all window covering the rest of the year**, which is the
-   popular-titles fallback with a calendar bolted on.
-5. **A TTL longer than the shortest window**, which serves a Halloween row in
-   November -- correct when built, wrong when served, which is the one
-   staleness bug a per-row TTL can actually produce.
-6. **Asking only about genres.** There is no Christmas *genre*; "christmas" is
-   a keyword TMDb really carries. A genre-only provider returns nothing in
-   December while looking entirely correct in October.
-
-**Outside every window this provider returns nothing, and that is roughly 320
-days out of 365.** Stated out loud so an operator does not read a missing
-seasonal row in March as a fault.
-"""
+"""Seasonal -- the one provider whose content is a taste judgement."""
 
 import uuid
 from collections.abc import Sequence
@@ -70,27 +30,7 @@ class Window:
     slug: str
 
 
-# **Curated by the author. Not measured, and not derivable from anything this
-# project stores.** It is Gregorian, northern-hemisphere and anglophone by
-# construction: there is no Diwali window, no Lunar New Year window and no
-# southern-hemisphere summer, because adding them would be the same guess made
-# less carefully rather than a measurement. A household that wants one is
-# asking for a feature this milestone does not have.
-#
-# Three windows, 46 days a year. **Outside them this provider returns nothing,
-# which is its behaviour for roughly 320 days out of 365** -- the correct
-# behaviour, stated here so an operator does not read a missing seasonal row in
-# March as a fault.
-#
-# Public rather than `_WINDOWS`: two of this module's cases assert properties
-# of the *table* rather than of a build, because both failures they guard
-# against produce a row that is permanently absent with no error anywhere.
-# **The provider's own stable identifier**, and every row it proposes carries a
-# slug that starts with it. It is the `provider` label on
-# `usher.row.build.duration` and the leftmost column of `usher home`'s report,
-# so it is bounded at one value per provider where the *row* slug below is one
-# per window -- a label whose cardinality grows with the catalog is a
-# metrics-backend outage rather than a dashboard.
+# **Curated by the author.
 _SLUG_PREFIX = "seasonal"
 
 

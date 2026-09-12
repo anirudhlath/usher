@@ -1,71 +1,4 @@
-"""Wikidata SPARQL -> `IdCrosswalkPair`. CC0, and no download.
-
-PRD 04 forbids pulling the 144 GiB Wikidata dump for this, and the numbers
-back it: three paged SPARQL joins return the whole crosswalk in seconds.
-Measured against `query.wikidata.org` on 2026-07-30, unchunked:
-
-| Property pair | Rows | Time | Payload |
-|---|---|---|---|
-| P345 + P4947 (TMDb movie) | 277,678 | 14.5 s | 48.0 MB |
-| P345 + P4983 (TMDb series) | 57,343 | 2.1 s | 9.9 MB |
-| P345 + P4835 (TheTVDB series) | 51,415 | 1.1 s | 8.9 MB |
-
-Work is nonetheless chunked by IMDb-id prefix, into 10 x 3 = 30 units. Two
-reasons, neither of them "the unchunked query is too slow":
-
-1. **Resumability needs checkpoints.** Thirty units means thirty commit
-   points; one unbounded query means all-or-nothing.
-2. **Headroom against the WDQS timeout.** Exceeding it returns
-   `HTTP 504 text/plain "upstream request timeout"` after ~65 s with no
-   `Retry-After` (verified directly). The largest chunk, `tt0`, measured
-   160,849 rows in 8.4 s -- roughly 7x of headroom, which the unbounded
-   movie query at 14.5 s does not have if WDQS is under load.
-
-Total measured chunked cost is a few minutes, not PRD 04's "~1 h" estimate.
-
-**A work unit's own rows are further split into `batch_size`-sized
-sub-batches**, because 30 checkpoints is not the same thing as 30 bounded
-writes: the largest single unit, `tt0`/P4947, is 160,849 rows -- at this
-module's own measured ~173 bytes/row that is roughly 300 MB of `TmdbId`-
-shaped tuples live at once, and downstream it would be a single COPY +
-upsert in one transaction. `batch_size` bounds that without touching the
-fetch itself -- WDQS has no cheap, deterministic way to paginate a single
-query's results, so the JSON response for one unit is still fetched whole.
-
-A unit's sub-batches all carry `position=index` (the unit's own, *not yet
-advanced*, index) except the last, which carries `index + 1`. A crash
-between two sub-batches of the same unit therefore resumes by re-querying
-and re-yielding the whole unit from scratch -- correct, not merely
-tolerated, because `BulkDataset.batches`' own contract is that every write
-downstream is an upsert, so replaying already-committed sub-batches is a
-no-op.
-
-**Every unit yields a batch, even an empty one.** `BulkDataset.batches`
-explicitly allows a row-less batch "solely to advance the cursor... so a
-trailing run of [dropped records] doesn't lose progress on a crash" -- an
-earlier draft of this module read that the other way around and skipped
-the yield for an empty unit instead. Several of these thirty property/
-prefix combinations are genuinely, structurally near-empty (TheTVDB
-crosswalk entries thin out sharply in the higher `tt` prefixes), so a run
-whose *trailing* units are all empty would never advance its checkpoint
-past the last unit that had any rows at all -- stuck there permanently,
-with every same-day resume re-querying all the empty trailing units again
-against a rate-limited endpoint, and never reaching the point where the
-whole run can checkpoint complete.
-
-**Upstream: `query.wikidata.org` (WDQS). Deliberately unthrottled, and named
-rather than left implicit** (M10's S3; the enumeration is
-`tests/unit/test_outbound_call_sites.py`). This is a **bootstrap phase an
-operator runs by hand** -- `usher bootstrap --phase crosswalk` -- not a lane
-polling on a timer: **30 chunked queries**, each yielding whole, totalling a
-few minutes, once per install. Three things already bound it and a
-requests-per-second gate would add nothing to any of them: the chunking itself
-(one query per `(property pair, IMDb prefix)`, issued strictly in sequence),
-WDQS's own ~65 s timeout, and `retry_after_seconds` on the 429 that endpoint
-really does send. ADR-0043's gate is for a household's media server, where the
-failure is starving a person watching television; nobody is waiting behind
-this one.
-"""
+"""Wikidata SPARQL -> `IdCrosswalkPair`. CC0, and no download."""
 
 import datetime as dt
 import re
@@ -206,12 +139,8 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
                 timeout=_TIMEOUT_SECONDS,
             )
         except httpx.HTTPError as exc:
-            # `failure_detail`, never `{exc}`: every httpx timeout
-            # stringifies to the empty string (issue #35). It matters more
-            # here than anywhere, because WDQS's own **504** already means
-            # "the query took too long at their end" and is translated a few
-            # lines down -- so a `ReadTimeout` is the other failure, ours
-            # gave up first, and `{exc}` distinguished neither.
+            # `failure_detail`, never `{exc}`: every httpx timeout stringifies to the
+            # empty string (issue #35).
             raise PortUnavailable(f"WDQS request failed: {failure_detail(exc)}") from exc
         if response.status_code == 429:
             raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
@@ -246,13 +175,7 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         self, resume_from: BulkCursor | None, revision: str | None
     ) -> AsyncIterator[BulkBatch[IdCrosswalkPair]]:
         # `revision`, when given, is the value the caller's own prior call to
-        # `revision()` already resolved this run. Honouring it rather than
-        # recomputing is a correctness point here, not just an efficiency
-        # one: `revision()` is a free local date computation, so threading it
-        # through saves no network call, but a fresh recompute could
-        # disagree with the caller's own value across a UTC-midnight race
-        # between the two calls, which would make an intended same-day
-        # resume restart from zero instead.
+        # `revision()` already resolved this run.
         resolved = revision if revision is not None else await self.revision()
         usable = resume_from if resume_from and resume_from.revision == resolved else None
         start = usable.position if usable else 0
@@ -261,13 +184,10 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         for index in range(start, len(_WORK_UNITS)):
             prop, column, prefix = _WORK_UNITS[index]
             pairs = _pairs(await self._bindings(prop, prefix), column)
-            # Split into batch_size-sized sub-batches -- and always at least
-            # one, even when `pairs` is empty, so an empty unit still gets a
-            # batch that advances the cursor past it (see the module
-            # docstring's "every unit yields a batch" section). `[()]` is
-            # exactly that one-empty-chunk case: `range(0, 0, batch_size)`
-            # yields nothing, so the list comprehension below is empty, and
-            # `or [()]` supplies the single empty chunk instead.
+            # Split into batch_size-sized sub-batches -- and always at least one, even
+            # when `pairs` is empty, so an empty unit still gets a batch that advances
+            # the cursor past it (see the module docstring's "every unit yields a batch"
+            # section).
             chunks = [
                 pairs[offset : offset + self._batch_size]
                 for offset in range(0, len(pairs), self._batch_size)

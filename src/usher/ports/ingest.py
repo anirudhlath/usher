@@ -1,26 +1,4 @@
-"""DTOs that cross the ingest pipeline's service<->repository boundary.
-
-Separate from `usher.ports.repository` because that module is a list of
-ABCs and this one is a vocabulary; separate from `usher.ports.source`
-because nothing here is a source's concept. `usher.ports.metadata` imports
-`ProviderRef` from here too, which settles one of its 🔶 markers -- a
-provider reference is one idea, and having TMDb's integer id baked into one
-signature and a string ref in another was the thing that marker complained
-about.
-
-Every dataclass here is `frozen=True` and therefore hashable, deliberately:
-`MatchService` turns a batch of source items into sets of `ProviderRef` and
-`NameYearProbe`, issues one query per set, and joins the answers back by
-dict lookup. At 1,126,674 items the alternative is 1,126,674 round trips.
-
-**Not only inbound, despite the module's name.** `WatchStateWrite`, beside
-`WatchStateMerge` below, travels the opposite direction -- from a client
-action route, through `WatchStateRepository.set_from_client`, rather than
-from a source walk. It lives here anyway: this module is not "DTOs from a
-source", it is every DTO that crosses into a repository this package owns,
-and splitting the one client-originated member out into a module of its own
-would be a distinction with no reader.
-"""
+"""DTOs that cross the ingest pipeline's service<->repository boundary."""
 
 import uuid
 from dataclasses import dataclass
@@ -83,28 +61,7 @@ class MatchOutcome:
 
 @dataclass(frozen=True, slots=True)
 class MediaItemTarget:
-    """What one stored `MediaItem` is matched to.
-
-    Read in two directions, and the asymmetry between them is the point.
-    Coming *out* of `MediaItemRepository.resolve_targets` this is what the
-    row holds, and an episode's row holds **both** ids: `IngestService`
-    writes `title_id` (the series' canonical title) and `episode_id`
-    together, because a client browsing a season wants both. Going *in* to
-    `resolve_external_ids` it is a watch-state target, where
-    `watch_states`' own `num_nonnulls(title_id, episode_id) = 1` CHECK means
-    exactly one is set.
-
-    So the two are not interchangeable, and the collapse from the first to
-    the second (`episode_id` wins; a title-only target must not match an
-    episode row) belongs to whoever is merging watch state --
-    `usher.services.watch_sync`, which is the only caller and states the
-    rule where it is legible. Handing `merge_from_source` a pair with both
-    ids set raises `PortDataMalformed` by contract, which at 999,827
-    episodes would abort a batch of five thousand states over 89% of the
-    library.
-
-    Hashable (frozen) because it is a dict key in both directions.
-    """
+    """What one stored `MediaItem` is matched to."""
 
     title_id: uuid.UUID | None
     episode_id: uuid.UUID | None
@@ -146,27 +103,7 @@ class MediaItemUpsert:
 
 @dataclass(frozen=True, slots=True)
 class IngestResult:
-    """What one batch of a walk did, from `IngestService.ingest_batch`.
-
-    `inserted`/`updated` are `BulkWriteResult`'s two counts, restated rather
-    than nested so the common read (`result.inserted`) stays one attribute
-    deep. `matched`/`unmatched` are the *outcome* counts, and they are here
-    because `SyncRun` carries `items_matched`/`items_unmatched` and the
-    alternative was a `list_unmatched` query per batch to recover a number
-    the batch already knew.
-
-    They do not have to sum to `inserted + updated`: a batch may legitimately
-    contain the same `(source_id, external_id)` twice (`list_items`' own
-    contract permits it), which is two outcomes and one row.
-
-    `outcomes` is one per item, in the order they were given, *after* episode
-    attachment -- so an episode's outcome here carries the title and episode
-    ids it was hung off, which the match stage on its own never knows. It is
-    returned rather than kept internal because it is the only place the
-    per-item resolution is expressible: the counters above are sums, and the
-    method label on PRD 10's `usher.ingest.items` counter is not something a
-    caller can recover from them.
-    """
+    """What one batch of a walk did, from `IngestService.ingest_batch`."""
 
     inserted: int
     updated: int
@@ -269,12 +206,11 @@ class AvailabilitySweepRefused(UsherPortError):
     """
 
     def __init__(self, *, would_retract: int, total: int, ceiling: float) -> None:
-        # `total or 1`: the one guard that raises this today only fires when
-        # at least one row is stale, which implies a non-empty source -- but
-        # a ZeroDivisionError thrown from inside the constructor of the error
-        # that exists to stop a sweep from erasing a library would replace a
-        # refusal with a crash, and there is no reading of that trade worth
-        # taking. An empty source reports 0%.
+        # `total or 1`: the one guard that raises this today only fires when at least
+        # one row is stale, which implies a non-empty source -- but a ZeroDivisionError
+        # thrown from inside the constructor of the error that exists to stop a sweep
+        # from erasing a library would replace a refusal with a crash, and there is no
+        # reading of that trade worth taking.
         share = would_retract / (total or 1)
         super().__init__(
             f"refusing to mark {would_retract} of {total} items unavailable in one run "

@@ -1,36 +1,4 @@
-"""PRD 07's Actions table, the watch half: four routes over one service.
-
-`PUT /watch/titles/{id}`, `PUT /watch/episodes/{id}`,
-`POST /watch/titles/{id}/played` and `DELETE /watch/titles/{id}/played`.
-
-**This router reaches no source and holds no adapter or factory**, which is
-structural rather than defensive and is asserted on this module's imports in
-`tests/unit/test_api_watch.py`. PRD 03's write-back is *best effort* as a
-description of the caller: the port raises by contract, so "a client's write
-never blocks or fails on a down server" only holds if the request does not
-make the call at all. `WatchWriteService` enqueues a job instead, and a worker
-carries it with backoff and retries. "It did not raise" is what a route that
-swallowed everything would also produce, which is why the claim is checked on
-the import list rather than on a status code.
-
-**Existence is a separate read, and it has to be.** `set_from_client` is an
-upsert on `(user_id, title_id)`, and `watch_states.title_id` references
-`titles(id)`, so a write for an id that names no row is a foreign-key
-violation -- a 500 carrying a constraint name, for what is plainly a client
-error. The two `/play` routes resolve existence first for a different reason
-(their service cannot tell "no such title" from "no copy of it") and this one
-does it for this one; both spell the answer `ProblemCode.NOT_FOUND`, so the
-tree ships one 404 convention rather than two. ADR-0030 is where
-generic-versus-per-resource is settled, once, for every route.
-
-**Episodes get `PUT` and no `/played` pair**, which is PRD 07's Actions table
-read literally. It is an odd asymmetry at a library that is 999,927 episodes
-(`docs/prd/03-sources-and-sync.md`), and marking an episode played is
-therefore reachable only through a full `PUT` body. Raised in the M9 plan's
-group D preamble rather than invented here: either the table is an oversight
-or the asymmetry is deliberate, and a route this module minted on its own
-would settle a PRD question in a router.
-"""
+"""PRD 07's Actions table, the watch half: four routes over one service."""
 
 import uuid
 from typing import Any, Final

@@ -1,11 +1,4 @@
-"""Request-scoped dependencies, and the API's composition root.
-
-`api/` is allowed to import `adapters/` and `db/` -- that is what a
-composition root does. The import-linter contracts forbid only
-`domain`/`ports`/`services` from reaching either, plus (contract six) any
-direct naming of a *concrete* adapter, which is why the factory below is
-`ConfiguredSourceAdapterFactory` and not `EmbyAdapter`.
-"""
+"""Request-scoped dependencies, and the API's composition root."""
 
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -249,32 +242,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 async def get_default_user_id(session: SessionDep) -> uuid.UUID:
-    """The singleton `is_default` user's id, creating the row on first use.
-
-    `usher.db.users.ensure_default_user` used to be called from `usher.cli`
-    and nowhere else, so a deployment that only ever ran the server -- which
-    is exactly what the container's `CMD` does -- had an empty `users`
-    table, and `watch_states.user_id` is a real foreign key. Unreachable in
-    M4, because no route writes a watch state; M5's push and reconnect-delta
-    routes are precisely the ones that do.
-
-    **Request-scoped rather than a lifespan call, deliberately.**
-    `create_app`'s lifespan builds an engine and opens no connection, and
-    that is load-bearing: `/health` keeps answering 200 with Postgres down
-    while `/health/ready` reports 503, verified live against a real
-    container (PRD 08). A write at startup would turn a database outage into
-    a crash loop and an unmigrated schema into a failure to boot -- trading a
-    documented, tested degradation for a worse one, and for a row that is
-    only ever needed by a request. Here it costs one `SELECT` on the request
-    that needs it and one `INSERT` on the first such request ever, inside
-    that request's own transaction, committed by `get_session`.
-
-    Nothing routes over this yet, for the same reason nothing routes over
-    the pipeline services above: the surface is M5's and M9's. It is wired
-    and tested now so the milestone that adds those routes is adding
-    routes, not discovering wiring
-    (`tests/integration/test_pipeline_deps.py`).
-    """
+    """The singleton `is_default` user's id, creating the row on first use."""
     return await ensure_default_user(session)
 
 
@@ -411,24 +379,8 @@ def get_source_service(
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
 
 
-# ---------------------------------------------------------------------------
-# The ingest pipeline (M4).
-#
-# PRD 07's `POST /admin/sources/{id}/sync` and the two `/admin/unmatched`
-# routes are M9's surface, so nothing here is routed over yet. It exists
-# because a composition root is the thing that has to agree with the other
-# one: `usher.cli` wires the identical graph, and a second root that had
-# never been written would let M9 discover at route-writing time that a
-# service needs something a request scope cannot give it. Every provider
-# below is exercised by `tests/integration/test_pipeline_deps.py`, which
-# resolves each one through FastAPI's own dependency machinery rather than
-# by calling the functions -- an unresolvable `Depends` graph is a startup
-# error a plain call cannot produce.
-#
-# Return types are the *ports*, not the `Postgres*` classes, so a route
-# written against one of these annotations cannot reach a method the port
-# does not have.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- The ingest
+# pipeline (M4).
 
 
 def get_title_repository(session: SessionDep) -> TitleRepository:
@@ -602,16 +554,8 @@ def get_watch_state_sync_service(
     )
 
 
-# `EnrichService` is deliberately absent, and this is the one place the plan
-# was wrong rather than incomplete. It needs a `MetadataProvider`, whose only
-# implementation owns the token bucket that keeps this deployment under
-# TMDb's ~40 rps ceiling -- and a request-scoped `TmdbClient` gives every
-# concurrent request a *fresh* bucket, so N in-flight requests get N x 30
-# rps. The bucket has to outlive a request, which makes it a lifespan
-# resource on `app.state` rather than a `Depends`, and nothing in PRD 07's
-# surface calls enrichment directly (M5's demand promotion enqueues a job;
-# `usher work` runs it). Adding the provider here would be wiring a rate
-# limiter to be bypassed.
+# `EnrichService` is deliberately absent, and this is the one place the plan was wrong
+# rather than incomplete.
 IngestServiceDep = Annotated[IngestService, Depends(get_ingest_service)]
 ReconcileServiceDep = Annotated[ReconcileService, Depends(get_reconcile_service)]
 WatchStateSyncServiceDep = Annotated[WatchStateSyncService, Depends(get_watch_state_sync_service)]
@@ -660,46 +604,15 @@ def get_title_read_service(
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     images: Annotated[ImageRepository, Depends(get_image_repository)],
 ) -> TitleReadService:
-    """Six repositories and the queue, and deliberately no adapter factory.
-
-    The absence is the design (PRD 08: "a degraded subsystem narrows
-    functionality; it never fails a request local state can answer"), not an
-    omission that a later route should fill in: with no `SourceAdapter` in the
-    graph there is no path from an unreachable Emby to a failed title read,
-    and therefore no 503 for M5 to invent an error `code` for.
-    `tests/unit/test_services_titles.py` asserts it on the service's own
-    imports so that adding one here would fail rather than pass review.
-
-    **`CreditRepository` and `ImageRepository` are the fifth and sixth and
-    neither weakens that.** Both read tables `usher derive` fills from
-    `raw_payloads` with no second network call, so neither adds a way for this
-    route to depend on anything being up. It was four repositories until M9's
-    `credits` key and five until its `images` key.
-
-    ⚠️ **`ImageRepository` in particular is not the image proxy.**
-    `GET /images/{id}` fetches bytes from a CDN and can fail because that CDN
-    is down; this route reads *rows*, which is why an unreachable CDN narrows
-    a client's screen to a missing picture and cannot touch this response's
-    status code. The two are a separate route with a separate failure mode by
-    construction, not by a caught exception -- `usher.ports.images` is not in
-    this function's graph at all.
-    """
+    """Six repositories and the queue, and deliberately no adapter factory."""
     return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]
 
 
-# ---------------------------------------------------------------------------
-# The composed home screen (M7). `GET /home` is the first client-facing route
-# since M5, and ADR-0006 is why: "one request paints a screen" is a property of
-# a request boundary, which no CLI can exhibit.
-#
-# **Each provider is declared above its first user.** `Depends(...)` is
-# evaluated when the `def` below it executes, so appending a provider after its
-# consumer is a `NameError` at import of this module rather than a puzzle at
-# request time.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- The
+# composed home screen (M7).
 
 
 def get_title_neighbor_repository(session: SessionDep) -> TitleNeighborRepository:
@@ -718,12 +631,9 @@ def get_collection_repository(session: SessionDep) -> CollectionRepository:
     return PostgresCollectionRepository(session)
 
 
-# M9's `GET /people/{id}` reads the first two directly rather than through a
-# service (`api/routers/people.py` says why), so the two repositories that were
-# `RowContext` fields only now have route-facing annotations as well. Declared
-# here beside their providers rather than at the bottom of the module: the
-# aliases are what a router imports, and a reader following `PersonRepositoryDep`
-# lands on the function that builds it.
+# M9's `GET /people/{id}` reads the first two directly rather than through a service
+# (`api/routers/people.py` says why), so the two repositories that were `RowContext`
+# fields only now have route-facing annotations as well.
 PersonRepositoryDep = Annotated[PersonRepository, Depends(get_person_repository)]
 CreditRepositoryDep = Annotated[CreditRepository, Depends(get_credit_repository)]
 # And `GET /collections/{id}`, on the same terms: one port read plus a
@@ -786,42 +696,7 @@ def get_taste_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     taste: Annotated[TasteRepository, Depends(get_taste_repository)],
 ) -> TasteService:
-    """**No embedder, and that is the same call `get_home_service` makes.**
-
-    ⚠️ **The reason changed with issue #31 and the answer did not.** This used
-    to say the lifespan builds a model only under `worker_enabled` and exposes
-    it nowhere, so reaching for one *"would work in development and 500 in
-    exactly the push-only deployment PRD 08 describes"*. There is now a model
-    on `app.state` whenever one is configured, and `get_search_service` below
-    takes it -- so availability is no longer the argument. What is: **computing
-    a centroid is a job and not a request.** `TasteService.centroid` walks the
-    household's recent watch history, reads ~50 titles' vectors and averages
-    them; the request path wants the *stored* answer, which
-    `TasteRepository.latest` gives it in one indexed probe. Handing this an
-    embedder would put a walk behind `GET /home` and would let two processes
-    write `user_taste` on different schedules.
-
-    What that costs, stated rather than hidden: `TasteService.centroid` returns
-    `None` when there is no embedder, so `RowContext.taste` is `None` on every
-    request. **No provider registered in M7 reads that field**, so nothing on
-    the screen changes. `genre_affinity` is unaffected: it is counts over
-    `titles.genres` and needs no model at all, which is the whole reason M7
-    declined PRD 06's "taste centroid concentrated in a genre".
-
-    ⚠️ **This docstring used to end "a deployment whose worker *did* compute a
-    centroid cannot serve it from here". That is closed, and not here.**
-    `centroid`'s contract is unchanged -- it still checks the embedder first,
-    still refuses without one, and still writes its refusals -- because the
-    thing a request needs is not a *computation* under a model it does not
-    have. It is a **read**: `TasteRepository.latest(user_id)` answers the
-    stored row whatever model wrote it, and `SearchService` uses it for PRD
-    05's taste-centroid ranking term (`composition.build_search_service` wires
-    it). So the gap is closed by a second port method rather than by giving
-    this dependency an embedder, and `RowContext.taste` staying `None` is now a
-    statement about the *row providers*, which read no centroid, rather than
-    about what a request can reach. A provider that wanted one would take
-    `latest` too.
-    """
+    """**No embedder, and that is the same call `get_home_service` makes.**"""
     return TasteService(
         watch_states=watch_states,
         embeddings=embeddings,
@@ -833,33 +708,7 @@ def get_taste_service(
 
 
 class _Affinities:
-    """This household's genre affinities, read on demand and then remembered.
-
-    **The whole point is that `__call__` may never run.** `RowContext`'s field
-    used to be the awaited *value*, which put three statements --
-    `list_recent(50)`, `list_by_ids(50)` and a library-wide `unnest(genres)
-    GROUP BY` over 1.27M titles -- in front of `HomeService.compose_report`'s
-    look in the ~30 s screen cache, on every request including the ones that
-    hit. Deferred, a hit costs nothing and a miss costs exactly what it did.
-
-    **Memoised because the field is a promise about the request, not about the
-    reader.** `GenreAffinityProvider` is the only thing that awaits it today
-    and awaits it once; a second reader tomorrow must not be a second read, and
-    a provider cannot arrange that for itself because a context is frozen
-    precisely so nothing can stash state on it between `propose` and `build`.
-    One request, one answer, at most one read.
-
-    **`_answer is None` is the miss test rather than falsiness**, because `[]`
-    is the *common* real answer -- no genre cleared `_MIN_LIFT` and
-    `_MIN_SUPPORT`, which is what most households produce -- and a memo that
-    read falsiness would re-read on every ask for exactly the households with
-    nothing to find. Same shape as `TasteService._engaged`'s own memo, one
-    layer down, and stated in both places because both are one keystroke from
-    the version that quietly does nothing.
-
-    Not a closure, so the memo has a name a reader can find and the docstring
-    has somewhere to live; `__slots__` because one is built per request.
-    """
+    """This household's genre affinities, read on demand and then remembered."""
 
     __slots__ = ("_answer", "_taste", "_user_id")
 
@@ -888,50 +737,7 @@ async def get_row_context(
     images: Annotated[ImageRepository, Depends(get_image_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
-    """The thirteen values a row may reach, for one request, for one user.
-
-    **`affinities` is a value the composer hands over, not a service a
-    provider reaches.** A provider may import only `domain/` and `ports/`, so
-    `TasteService` cannot appear on the context -- and recomputing the affinity
-    inside a provider would need a `TasteRepository` field *and* a second copy
-    of the lift arithmetic. `ports/rows.py` argues it at length.
-
-    **It is handed over as a callable, and nothing in this function reads the
-    household's taste.** `await taste.genre_affinity(user.id)` was evaluated
-    here, which is *before* `HomeService.compose_report` can look in the screen
-    cache -- FastAPI resolves the dependency graph and only then calls the
-    handler -- so a 30 s cache hit, which is most requests, had already paid
-    the three most expensive statements on the path. `_Affinities` defers them
-    to `GenreAffinityProvider`'s own `await` and memoises the answer for the
-    request.
-
-    **`search` and `taste` used to be here and are not.** No provider read
-    either, and `taste` cost a `user_taste` read on every request to deliver a
-    value that is structurally `None` on this path -- `TasteService.centroid`
-    returns `None` without an embedder and this route deliberately holds none.
-    `TasteService` is still injected, for `genre_affinity`.
-
-    **`curated` is M8's, and it is a repository on the same terms as the other
-    nine.** `CuratedProvider` hydrates what a background job stored; nothing on
-    this path generates anything, so `GET /home` acquires no `LLMClient`, no
-    API key and no reason to 503 when the endpoint is down. A deployment with
-    `USHER_LLM_ENABLED=false` reads an empty table and gets a home screen with
-    fewer rows -- the same shape as a deployment with no embedder.
-
-    **`images` is M9's, and it is the one field here whose reader is
-    `BaseRow.hydrate` rather than a named provider.** A card's artwork is
-    chosen against the *row's* `display_hint`, so the poster/backdrop decision
-    belongs to the shelf and the read is one statement per shelf
-    (`ImageRepository.primary_for_titles` takes a sequence precisely so the
-    per-card shape cannot be expressed). It is the read half only, on
-    `curated`'s terms: `replace_for_titles` is `usher derive`'s, and nothing on
-    this path writes artwork.
-
-    **No `AsyncSession` here either**, which is the structural half of trap 4:
-    a row holding repositories has no session to share, so there is nothing for
-    a `gather` to interleave. That the repositories underneath share one is the
-    composer's problem, stated once in `HomeService`.
-    """
+    """The thirteen values a row may reach, for one request, for one user."""
     return RowContext(
         user=user,
         # The wall clock, bound per request. `SeasonalProvider` fires on a
@@ -1001,40 +807,8 @@ async def get_home_service(
     provider_settings: RowProviderSettingsRepositoryDep,
     visibility: VisibilityServiceDep,
 ) -> HomeService:
-    """The composer, over the registry `services/rows/__init__.py` owns, minus
-    what an operator has switched off.
-
-    **The provider list is still not *assembled* here, and the distinction is
-    the one M9's E2 must not blur.** Boundary call 9's argument -- *"a list a
-    composition root builds by hand is a list the tenth provider is forgotten
-    from"* -- is against **enumeration**, and this root names no provider: it
-    hands `enabled_row_providers` the whole registry and removes the ones a
-    stored row disables. An eleventh provider composes here with no edit,
-    which is the property that argument protects.
-
-    **The read is unconditional and precedes the screen-cache check, which is
-    a cost stated rather than discovered.** `get_home_service` is a FastAPI
-    dependency, so it resolves before the handler runs -- the same shape
-    `RowContext.affinities` was made lazy to escape (`.claude/rules/
-    rows-and-genome.md`: a 30 s cache hit was paying `list_recent(50)` plus a
-    library-wide genre aggregate over 1.27M titles). It is left eager here
-    because the two are not comparable: this is one `SELECT slug_prefix,
-    enabled FROM row_provider_settings` over a table the registry bounds at
-    **ten rows**, usually zero. Deferring it would mean a `HomeService` that
-    took its providers as a callable -- a lazy field on the composer, for a
-    read a sequential scan of ten rows answers -- and the cache hit it would
-    save is a hit the toggle has already invalidated.
-
-    **And no embedder**, on the terms `get_taste_service` states: every
-    similarity input this route reads is a precomputed artefact.
-
-    **`refresh=queue.schedule` is what opens the grace window.** `HomeService`
-    serves stale only when it has somewhere to hand the key, so this one
-    argument is the difference between PRD 06's "served stale while
-    refreshing" and "served stale". A bound method rather than a lambda so the
-    thing being injected has a name, a docstring and a `__qualname__` a
-    traceback can print -- and it is *synchronous*, which is the whole of "the
-    screen never waits on it": there is nothing here for a handler to await.
+    """The composer, over the registry `services/rows/__init__.py` owns, minus what an
+    operator has switched off.
     """
     return HomeService(
         enabled_row_providers(row_provider_settings(await provider_settings.overrides())),
@@ -1126,32 +900,7 @@ def get_playback_service(
     credentials: Annotated[CredentialStore, Depends(get_credential_store)],
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
 ) -> PlaybackService:
-    """`PlaybackService`, with the mint closure this request's URL implies.
-
-    **The mint returns a whole URL, not a token, and that is the seam
-    `services/playback.py` was shaped for.** Its `mint` is
-    `Callable[[str], str]` whose answer is substituted verbatim -- so a deep
-    link wraps whatever comes back, and the service needs to know nothing
-    about ciphers, TTLs or the redeem route's path.
-
-    **`quote(ticket, safe="=")`, and the `safe` is measured rather than
-    idiomatic.** A Fernet token's alphabet is url-safe base64 *plus* the `=`
-    padding, and `=` is an RFC 3986 sub-delim and hence a legal `pchar`. D1
-    measured that `quote(ticket, safe="")` -- the reflexive spelling -- is a
-    no-op for only 192 of the 599 plaintext lengths 1-599, because it
-    re-encodes `=` to `%3D`; `safe="="` is a no-op at every length tested.
-    Starlette's own `url_path_for` substitutes the value raw, so if this line
-    does not encode, nothing does.
-
-    **`request.url_for`, not a hand-built string**, so the path can only ever
-    be the redeem route's real path. ⚠️ It builds an absolute URL from the
-    request's own `Host`, so **behind a reverse proxy that does not send
-    `X-Forwarded-Proto`/`-Host` the ticket URL names the internal address.**
-    That is an operator setting (`uvicorn --proxy-headers`, or
-    `ProxyHeadersMiddleware`) rather than a code fix here -- naming it because
-    the failure is a client following a URL it cannot reach, which looks like
-    a playback bug.
-    """
+    """`PlaybackService`, with the mint closure this request's URL implies."""
 
     def mint_ticket_url(url: str) -> str:
         ticket = mint(cipher, url, minted_at=datetime.now(UTC))
@@ -1172,123 +921,7 @@ PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
 def get_search_service(
     request: Request, session: SessionDep, settings: SettingsDep
 ) -> SearchService:
-    """PRD 05's read path, request-scoped.
-
-    **Reached through `usher.composition` rather than assembled here**, and
-    that is a contract rather than a preference: contract 7 ("no concrete
-    search, embedding or LLM implementation escapes its package") lists
-    `usher.api` whole among its sources, so this module may not name
-    `PostgresSearchIndex` even though it is a composition root and names
-    `Postgres*` repositories on every other line. `allow_indirect_imports =
-    true` is what sanctions the chain `usher.api.deps -> usher.composition ->
-    usher.adapters.search.postgres` while leaving a direct import BROKEN.
-
-    **Deliberately `build_search_service` and not `build_pipeline`.** The
-    latter constructs the whole ingest graph -- matcher, reconciler,
-    watch-state sync, similarity, ten row providers, the curation pool -- to
-    reach one of its fields, once per request.
-
-    **One dependency serves two routes and three indexes.** `GET /search` and
-    `GET /search/suggest` share this provider, and the suggest half is two
-    `SuggestIndex` implementations rather than one (ADR-0031): the btree prefix
-    probe and the trigram path, selected per request by `?tier=`. Both are
-    built inside `build_search_service` and neither is conditional, so there is
-    no deployment on which `?tier=prefix` has no honest answer. A second
-    provider for the suggest route would be a second wiring of the same
-    session-scoped objects -- and, worse, one that could disagree with this one
-    about which index is which while both returned a working `SearchService`.
-
-    **The embedder is this process's own, read off `app.state` and never built
-    here** (issue #31). `create_app`'s lifespan builds one per process and
-    parks it there; `None` is what it parks on a deployment that configured
-    none, which is `build_search_service`'s own default for the parameter. So
-    this line is a *read* of an existing resource, and reading is what makes
-    `?mode=semantic` and the vector half of `?mode=fused` answerable from the
-    HTTP surface at all.
-
-    ⚠️ **This paragraph used to argue the opposite, on two grounds, and both
-    are recorded here rather than deleted because the second is still true of
-    something.** It said a dependency reaching for a model *"would work in
-    development and 500 in exactly the push-only deployment PRD 08
-    describes"*, and that it is *"a once-per-process 65 MB resource"*.
-
-    - The 500 was never reachable and is now pinned as not being: no model
-      means `None`, `None` is the default, and the answer is the 422 naming
-      the missing capability -- `tests/unit/test_api_search.py::
-      test_a_deployment_with_no_embedding_model_exposes_none_rather_than_
-      nothing`. What made it *look* reachable was a lifespan that built the
-      model conditionally and parked nothing, so the attribute was absent
-      rather than `None`; the fix is to park it unconditionally.
-    - The 65 MB is **runtime-dependent, and the sentence predates the second
-      runtime.** Since 2026-08-13 `USHER_EMBEDDING_MODEL` carries a prefix:
-      `fastembed:` is an in-process ONNX session (65 MB, 4.84 s cold) and
-      `openai:` is an `httpx.AsyncClient` against an OpenAI-compatible
-      endpoint, holding no model at all. It is also an argument against
-      *building* one per API process -- the other option issue #31 names --
-      and not against reading one that this process built anyway. Nothing
-      here is conditional on the prefix, because on this path the two
-      runtimes cost the same: an attribute read.
-
-    **And no expander, on terms that are still stricter.** An expansion is a
-    paid completion in front of an embed; it needs an `LLMClient` outliving
-    the session and an `LLMCallRepository` on it, and only `build_pipeline`
-    holds both. It also ships off twice over (`USHER_LLM_ENABLED` false, and
-    `USHER_QUERY_EXPANSION_ENABLED` false even where that is true, because
-    expansion measured *worse* -- PRD 05). Since #16 `SearchService` declines
-    it for a population with no vectors as well, so wiring one here would be a
-    capability with a measurement against it; that is issue #15's to settle,
-    not this dependency's.
-
-    **The household is not wired here, and looking for it here is the mistake
-    this paragraph exists to prevent.** `SearchService.search` takes a
-    `user_id` per call, so the route reads `DefaultUserIdDep` beside this
-    dependency and passes it in; what `build_search_service` wires is the
-    `WatchStateRepository` the term reads *through*. A service built around one
-    household would be a per-request object cached per session, and the two
-    would disagree the first time a request carried an identity.
-
-    **`search_queries` is written from here too, and this root does not commit
-    it.** `get_session` already commits when the handler returns, so the row
-    lands in the same transaction as everything else the request did. The
-    commit inside `SearchService` exists for the *other* root --
-    `cli._session_for` yields a session and disposes its engine without ever
-    committing -- so this one passes `nothing` and keeps a request to one
-    transaction and one WAL flush.
-
-    **`GET /search/suggest` shares this dependency and writes through it too**
-    -- one row per answered keystroke, `surface = 'suggest'`, `tier` naming the
-    index that ran. Those rows go to the lifespan's `SearchQueryBuffer` rather
-    than into this request, so the keystroke pays an append. This function
-    decides none of it: the surface is a property of `SearchService.suggest`
-    and the switch (`USHER_SEARCH_SUGGEST_ANALYTICS`) is read once in
-    `composition.build_search_service`, so both boundaries obey one answer.
-    The suggest route reads `HouseholdDep` beside this, because
-    `search_queries.user_id` is `NOT NULL` -- that is a second dependency on
-    that route, not a change here.
-
-    **The taste term does not depend on the model above, and that is worth
-    keeping now that there is one.** PRD 05's sixth ranking term needs a
-    *centroid*, not an *embedder*: `build_search_service` wires a
-    `TasteRepository` and a `TitleEmbeddingRepository`, and `SearchService`
-    reads the household's stored row through `latest` and scopes its vector
-    read by the model that row names. So the term is served on a deployment
-    with **no** model in this process, which is what the paragraph said before
-    #31 and is still the load-bearing half -- a centroid is written by
-    whichever process computed it, and this route only ever reads one.
-
-    **The `Request` is here for one attribute, and the read is inline rather
-    than a provider of its own** -- unlike `get_row_cache` and
-    `get_row_refresh_queue`, which are the shape this otherwise copies. Those
-    two guard `app.state` with `getattr(..., None)` plus an `isinstance` and
-    raise a sentence naming a missing lifespan, because for them `None` means
-    *the lifespan did not run*. Here `None` is a **legal value** -- a
-    deployment that configured no model -- so that same guard would read a
-    missing lifespan as a missing model and answer a 422 for the wrong reason.
-    A bare attribute read keeps the two apart (an absent attribute raises), and
-    the diagnosable failure for a missing lifespan is already in front of this
-    line: `SessionDep` resolves first and `get_session_factory` raises it by
-    name.
-    """
+    """PRD 05's read path, request-scoped."""
     # Annotated rather than passed straight through: `app.state` is typed
     # `Any`, so without a name carrying the port type nothing downstream of
     # this line is checked at all.
@@ -1333,27 +966,7 @@ def get_search_id(
         ),
     ] = None,
 ) -> uuid.UUID | None:
-    """The `?search_id=` a client attached, parsed, or `None`.
-
-    **Typed `str` and parsed here rather than annotated `uuid.UUID | None` on
-    the route, and the difference is a status code.** FastAPI would answer
-    `422 validation_failed` for a malformed value -- so a client that
-    truncated, re-encoded or invented a `search_id` would be refused *the
-    title*, over a piece of optional telemetry attached to a resource that
-    exists and that the request is otherwise entitled to. Analytics may not
-    decide whether a resource is served.
-
-    So a malformed value is collapsed into the same `None` an absent one
-    produces, and the route cannot tell them apart. That is deliberate: there
-    is no behaviour to differentiate, and one layer further down an id that
-    *is* a UUID but names no row is already indistinguishable from both. The
-    three cases -- absent, unparseable, unknown -- are one case, and it is
-    "nothing to attribute".
-
-    One dependency shared by all three attributing routes, so `?search_id=` is
-    described once in `/openapi.json` instead of three times in three
-    wordings.
-    """
+    """The `?search_id=` a client attached, parsed, or `None`."""
     if search_id is None:
         return None
     try:
@@ -1408,12 +1021,7 @@ def get_watch_write_service(
 WatchWriteServiceDep = Annotated[WatchWriteService, Depends(get_watch_write_service)]
 
 
-# The image proxy (M9). One dependency function, deliberately: `app.py` and
-# this module are the milestone's worst collision pair, and every other
-# consumer of `images` -- `RowCard.artwork`, `GET /titles/{id}`'s `images` key
-# -- reads the repository rather than this service, so a shared
-# `get_image_repository` would be a second claimant on one line for no caller.
-# ---------------------------------------------------------------------------
+# The image proxy (M9).
 
 
 def get_image_proxy_service(request: Request, session: SessionDep) -> ImageProxyService:

@@ -1,8 +1,4 @@
-"""Sync runs and the raw payloads a run banks for later re-derivation.
-
-Implemented by `usher.db.repositories.sync`'s `PostgresSyncRunRepository`
-and `PostgresRawPayloadStore`.
-"""
+"""Sync runs and the raw payloads a run banks for later re-derivation."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -42,44 +38,7 @@ class SyncRunRepository(ABC):
 
     @abstractmethod
     async def save(self, run: SyncRun) -> None:
-        """Update an existing run. An unknown id raises `RepositoryNotFound`.
-
-        `started_at` is not mutable through this call in any meaningful sense:
-        it is the sweep's own `seen_since`, so a run that could rewrite it
-        after the fact could retract items it had already seen.
-
-        **Non-destructive, and that is a contract rather than an
-        implementation note.** ADR-0042 has a `WATCH_STATE` run reuse one row
-        across attempts, and two attempts really can reach it: the queue
-        coalesces `sync` *jobs*, but `LaneSupervisor._close_gap` and
-        `usher sync` both call the service directly, the second from another
-        process. So two rules, which every arm owes:
-
-        - **`position` may advance and may never regress.** A save carrying a
-          lower one leaves the stored checkpoint where it is. The loser
-          otherwise pulls the resume point back to the page *it* started from,
-          which is exactly the restart loop `position` was added to close.
-        - **`completed` is absorbing.** A save over a run that has already
-          completed writes nothing at all and returns quietly -- not the
-          status alone, the whole row. An overtaken walk's counters are lower
-          and its `error` would render through `usher sync-status` as a
-          failure of the walk that succeeded, and `latest_completed_cursor`
-          would stop answering for a walk that provably finished.
-
-        Neither is an error: the caller has done real work and its merges
-        stand, it simply is not the attempt whose bookkeeping survives.
-
-        **The one consequence that is otherwise invisible**, because nothing
-        raises and nothing logs: after a refused save the `SyncRun` a service
-        holds -- and returns -- describes its own *attempt* rather than the
-        stored row, so `usher sync` can print a `watch_state completed` that
-        `sync_runs` does not carry. Cosmetic, and deliberately so: the merges
-        stand either way and the row belongs to the walk that got further.
-        It is new with ADR-0042, and it is the reason a reader diagnosing
-        this lane trusts the table over the command's last line. (`usher
-        sync` is the only renderer -- the `sync` job handler discards the run
-        it gets back.)
-        """
+        """Update an existing run. An unknown id raises `RepositoryNotFound`."""
 
     @abstractmethod
     async def get(self, run_id: uuid.UUID) -> SyncRun | None:
@@ -220,27 +179,4 @@ class RawPayloadStore(ABC):
     async def iterate(
         self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
     ) -> list[CachedPayload]:
-        """One page of this provider's cached payloads, oldest id first.
-
-        **A keyset cursor, not an offset**, for the reason `list_stale`'s is
-        one: `OFFSET` pagination is measured in this repository at 43.7 ms at
-        offset 0 and 388.9 ms at offset 1,126,574 -- linear per page, quadratic
-        to drain -- and a derivation's entire job is to walk a population to
-        exhaustion. Pass the last `id` of a page as `after` to get the next
-        one; an empty list means drained.
-
-        Ordered by `id`, which is the primary key and therefore a **total**
-        order. `fetched_at` is not: the INSERT arm's `server_default` is
-        `now()` = `transaction_timestamp()`, so every row a bootstrap
-        transaction writes shares one instant, and a page boundary inside that
-        group drops the rest of it with nothing to say so.
-
-        **Scoped by `provider`, and deliberately not by `kind`.** The
-        derivation needs both TMDb id spaces in one walk, and
-        `CachedPayload.kind` is what keeps them apart -- a signature that took
-        `kind` would invite two walks and a caller that forgot the second. It
-        is not scoped by freshness either: a payload outside `EnrichService`'s
-        window is still a payload, and refusing to derive from it would mean a
-        re-derivation that silently covered less of the catalog than the last
-        one.
-        """
+        """One page of this provider's cached payloads, oldest id first."""

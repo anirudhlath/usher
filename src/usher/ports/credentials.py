@@ -1,27 +1,4 @@
-"""Port for the credentials a source adapter authenticates with.
-
-PRD 08: source credentials are **encrypted at rest** under
-`USHER_SECRET_KEY`, `Source.credentials_ref` points at the encrypted row,
-and the plaintext exists only in memory in the adapter that needs it. This
-port is that indirection made concrete — a service holds a
-`credentials_ref`, asks a `CredentialStore` for the secret, hands it
-straight to a `SourceAdapter`, and never persists, returns, or logs it.
-
-Separate from `SourceRepository` on purpose. Both could have been one port
-with a `credentials` field on `Source`, and that is exactly the shape PRD
-08's "credentials are never returned by any API, including admin" is
-hardest to hold: every read of a source would carry the secret, and
-write-only would be a convention enforced by whoever remembered. Splitting
-them makes the read of a credential a deliberate, separately-auditable call
-that the admin API simply never makes.
-
-`password` is a `pydantic.SecretStr`, not a `str`, so the never-logged rule
-is enforced by the type system rather than by discipline: `repr()` and
-`str()` of a `SecretStr` are `'**********'`, so a credential cannot reach a
-log line, a loguru record, a traceback frame summary, or an exception
-message by accident. `usher.config.Settings` already holds `database_url`,
-`secret_key`, and `tmdb_api_key` the same way.
-"""
+"""Port for the credentials a source adapter authenticates with."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -91,33 +68,8 @@ class CredentialStore(ABC):
 
 
 class CredentialCiphertextStore(ABC):
-    """Stored credentials as the ciphertext they are stored as, for
-    `usher rotate-secret` and for nothing else.
-
-    **A second port rather than three more methods on `CredentialStore`, and
-    the reason is the sentence `api/deps.py::get_credential_store` already
-    rests on**: *"the return type is the port, so a caller written against
-    this annotation cannot reach a method `CredentialStore` does not have"*.
-    Every route and both services that hold a credential store hold it under
-    that annotation, and a `read_ciphertext` on it would put a raw credential
-    blob one attribute access away from all of them. Split, the reachability
-    argument keeps working and the only thing that can name this port is the
-    composition root that builds the rotation service.
-
-    Two smaller consequences fall out of the split and both are wanted.
-    `FakeCredentialStore` holds plaintext deliberately -- *"a fake that
-    encrypted into a dict would be modelling ceremony rather than
-    behaviour"* -- so it has no ciphertext to hand back and is not asked to
-    invent one. And `CredentialStoreContract` stays a contract about
-    round-tripping a secret, which is what every implementation owes,
-    rather than growing cases that only one backing store can answer.
-
-    **The plaintext key is not here either.** These methods move opaque bytes;
-    which cipher opens them is `usher.services.rotation`'s question, and the
-    two ciphers it holds are built by the composition root. So an
-    implementation of this port needs no `SecretStr` at all, which is the
-    difference between "the rotation store can read every credential in the
-    deployment" and "the rotation store can move bytes it cannot read".
+    """Stored credentials as the ciphertext they are stored as, for `usher rotate-secret`
+    and for nothing else.
     """
 
     @abstractmethod

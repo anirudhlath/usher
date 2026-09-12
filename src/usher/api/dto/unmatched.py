@@ -1,24 +1,5 @@
-"""The review queue's wire shapes: one queue entry, one resolution, and what
-a resolution answers with.
-
-**`external_id` is on the wire here and is refused on `GET /titles/{id}`, and
-that is a decision rather than an inconsistency.** `api/routers/titles.py`'s
-leak assertions exist because a *client* has no use for a source's own item id
-and every route a client calls addresses things by Usher's UUIDv7 -- so an
-`external_id` in a client response is a source concept escaping its adapter.
-This queue is the opposite case: an operator resolving an unmatched file
-resolves it by finding that file **on their own server**, and the source's own
-id is the only handle that gets them there. `usher unmatched` has printed it
-since M4 for exactly that reason, and a route that withheld it would be a
-review queue an operator cannot review from.
-
-**What a queue entry deliberately does not carry.** No container, codec,
-resolution or file size: this is a listing an operator scans, not a detail
-screen, and each of those would be a claim about what identifies a file that
-nothing here has measured. `MediaItem` holds them all and a later detail route
-can render them; adding them now would be a response shape chosen by
-availability rather than by need. No `title_id` either -- every row on this
-page has none, which is what put it here.
+"""The review queue's wire shapes: one queue entry, one resolution, and what a
+resolution answers with.
 """
 
 import uuid

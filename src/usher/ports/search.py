@@ -32,29 +32,8 @@ class FilterNotSupported(UsherPortError):
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
-    """One candidate, its backend's own score, and whether the query *is* this
-    title's name.
-
-    **`exact_name` is a retrieval fact and not a second score**, which is why
-    it is a `bool` beside `score` rather than a bonus folded into it. A backend
-    cannot add an exact-name bonus to its own score without knowing how large
-    that score can get -- `ts_rank_cd` is unbounded above and grows with the
-    number of matched terms -- so any constant is either too small to decide or
-    large enough to swamp the ranking it was meant to break a tie in.
-    `SearchService._dense_ranks` reads it as the leading key instead, which
-    needs no scale at all (issue #25).
-
-    **Ordering is part of the contract**: an implementation returns every hit
-    carrying this flag *before* every hit that does not. `_dense_ranks` walks
-    the hits in the order the index gave them, so a backend that flagged the
-    right row and returned it fourth would leave it at dense rank 3, where the
-    other five signals are free to bury it again.
-
-    **`False` is the honest default and not merely a convenient one.** It is
-    what a lane with no notion of the typed string answers -- the vector lane
-    matches an embedding, not a name -- and it is what `SuggestIndex`
-    implementations answer, whose hits are already an all-prefix set ordered by
-    popularity and are never re-ranked (`SearchService.suggest`).
+    """One candidate, its backend's own score, and whether the query *is* this title's
+    name.
     """
 
     title_id: uuid.UUID
@@ -94,36 +73,7 @@ class SearchSurface(StrEnum):
 
 
 class SuggestTier(StrEnum):
-    """Which of the two `SuggestIndex` implementations answers a keystroke.
-
-    ADR-0002's typo-tolerance gate failed and ADR-0031 is what it bought: two
-    indexes, one port, and a caller that says which. `PREFIX` is the btree
-    `lower(name) text_pattern_ops` probe with **1.9% measured typo recall**;
-    `FUZZY` is the trigram + `levenshtein_less_equal` path at **p50 33.6 ms**.
-    Neither is a better version of the other and neither is a fallback for the
-    other -- the split is a division of labour, and the whole reason this enum
-    exists rather than a `typo_tolerant: bool` is that a bool invites reading
-    one as a degraded form of the other.
-
-    **Here, beside `SearchMode`, since `m10c` -- and it lived in
-    `usher.services.search` until then.** That module's own condition for
-    keeping it was *"**no port method anywhere takes a tier**, because a tier
-    *is* the choice of implementation and an implementation cannot be told
-    which implementation it is"*. `search_queries.tier` makes a port method
-    take one, and the layering contract then forces the move rather than
-    inviting it: `SearchQueryRecord` lives in
-    `usher.ports.repository.search_query` and a field typed on a services-layer
-    enum would make `usher.ports` import `usher.services`, an upward import
-    under contract 1 (`layers = ["usher.api", "usher.services", "usher.ports",
-    "usher.domain"]`).
-
-    **The distinction that licenses the move is the direction.** A port takes
-    a tier as a *record of which implementation ran*, never as an instruction;
-    nothing here tells a `SuggestIndex` which index it is. **No alias is left
-    behind in `usher.services.search`**: a second name for one vocabulary is
-    the two-vocabularies-under-one-column hazard this file's neighbour refuses,
-    one layer up.
-    """
+    """Which of the two `SuggestIndex` implementations answers a keystroke."""
 
     PREFIX = "prefix"
     FUZZY = "fuzzy"
@@ -201,93 +151,24 @@ class SearchRequest:
     query_vector: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
-        # The same move `SourceEvent.__post_init__` makes one port over: a
-        # DTO that can be constructed in a state no implementation can serve
-        # pushes the failure onto whichever backend notices first. A
-        # SEMANTIC request with no vector has two plausible readings --
-        # "return nothing" and "embed it yourself" -- and the second is
-        # exactly what moving the vector onto the request exists to delete.
+        # The same move `SourceEvent.__post_init__` makes one port over: a DTO that can
+        # be constructed in a state no implementation can serve pushes the failure onto
+        # whichever backend notices first.
         if self.mode is not SearchMode.FULL_TEXT and self.query_vector is None:
             raise ValueError(f"a {self.mode} request needs a query_vector; the caller embeds")
 
 
 @dataclass(frozen=True, slots=True)
 class SearchOutcome:
-    """Hits, plus how much of the population the semantic lane could see.
-
-    `semantic_coverage` is the fraction of the filtered **embeddable**
-    population that actually had a vector. It exists because RRF cannot tell
-    "ranked last" from "never a candidate": with no embeddings at all, a
-    `FUSED` search degrades to full-text wearing a blended score, and nothing
-    in the result set says so. A caller that reads 0.0 knows to say "semantic
-    search is still warming up" rather than presenting a confident ranking.
-
-    ⚠️ **"Embeddable" is load-bearing and this sentence said "the *filtered*
-    population" until issue #31 measured what that implies.** The denominator
-    excludes skeletons (`enrichment_state <> 'skeleton'`, boundary call 4 --
-    they are never embedded, and counting them would report ~0.008 on a
-    healthy catalog and read as a broken subsystem forever). The **lexical**
-    lane has no such restriction, so the two lanes of one `FUSED` search do
-    not see the same population, and `1.0` does not mean the vector lane can
-    see everything the request could match. On the catalog this project
-    measures that gap is an order of magnitude: 130,720 vectors over ~130,647
-    enriched titles reports `1.000`, against 1,271,138 rows in `titles`.
-
-    So this answers *"has the backfill drained?"* and **not** *"can the vector
-    lane see this catalog?"*. The number is not changed to the second
-    question's: a denominator with a measured argument behind it is not
-    improved by being swapped for one without, and the second question is
-    answerable from `usher index`'s own report. What changed is that the field
-    now says which question it answers.
-
-    A `FULL_TEXT` request reports **0.0**, because no semantic lane ran.
-    That is a statement about the request, not about the catalog, and a
-    caller must not read it as "there are no embeddings" -- ask for
-    `SEMANTIC` or `FUSED` if that is the question.
-    """
+    """Hits, plus how much of the population the semantic lane could see."""
 
     hits: tuple[SearchHit, ...] = ()
     semantic_coverage: float = 0.0
 
 
 class SearchIndex(ABC):
-    """Candidate generation. Ranking blends happen in application code, so
-    this returns hits and scores, not final ordering.
-
-    **Settled in M6** -- this class used to carry a 🔶 naming four defects,
-    all of which came from the same place: the port was written from the
-    inside of one implementation outward. Each, and what replaced it:
-
-    1. *`index(title_id)` forced a second engine to fetch each title back
-       out* -- 1.3M round-trips on a rebuild. Replaced by `index_many`,
-       which takes **documents, not ids**: `SearchDocument` is assembled by
-       the service from a `Title` it is already holding, so no
-       implementation ever fetches back.
-    2. *`filters: dict[str, Any]` had no key vocabulary*, so two backends
-       would invent different ones and disagree silently. Replaced by
-       `SearchFilters`, closed. A backend that cannot express a member
-       raises `FilterNotSupported`; it may not ignore one, because an
-       ignored filter returns more rows and more rows reads as working.
-    3. *No bulk operation.* `index_many` yes. **`rebuild` deliberately
-       not** -- it would be a second path to the same state, exercised only
-       by an operator, and the predicate-driven backfill already rebuilds
-       from scratch by construction, through the code path production runs
-       nightly. A port method whose only test is its own test is a
-       liability, and the failure mode of a rare path is that it has rotted
-       by the time somebody needs it.
-    4. *Semantic search needs the query vector*, which ADR-0002 anticipates
-       handing Meilisearch as `userProvided`. `SearchRequest.query_vector`,
-       computed by the **caller** -- which is what keeps this port
-       engine-neutral and simultaneously settles who applies the model's
-       instruction prefix (see `ports/embedding.py`, settled in M6 by
-       measurement: nobody does).
-
-    Where a `FUSED` request is *computed* -- one SQL statement with a CTE,
-    or two round-trips fused in Python -- is deliberately not specified;
-    both are legitimate and M6 measures them. What is specified is the
-    property: fusion is by **rank**, never by adding scores from
-    incompatible scales (ADR-0002), and the result must be able to differ
-    from both inputs.
+    """Candidate generation. Ranking blends happen in application code, so this returns
+    hits and scores, not final ordering.
     """
 
     @abstractmethod
@@ -322,93 +203,14 @@ class SearchIndex(ABC):
 
     @abstractmethod
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        """`SearchOutcome.semantic_coverage` for this filtered population,
-        without running a search. The same number over the same denominator --
-        see that field for what the denominator is, and is not.
-
-        **It exists because a caller has to decide things before it has a
-        vector, and the whole of what makes that possible is the signature:
-        this takes `SearchFilters` and no `SearchRequest`.** PRD 09's
-        carried-debt entry on issue #16 recorded the filtered predicate as
-        *"not answerable before the vector that does the filtering exists"* --
-        which reads as a fact about the question and was a fact about where the
-        only spelling of it happened to sit. Nothing in `SearchFilters` is
-        derived from a query vector, so the population is knowable a statement
-        earlier, and `SearchService` uses it to decline a paid query expansion
-        for a lane that has nothing to rank.
-
-        Raises `FilterNotSupported` on the same terms as `search`, and for the
-        same reason: a caller narrowing on a member this backend cannot express
-        must not be told the lane is empty when what is true is that the
-        question could not be asked.
-
-        **A `float` rather than a `bool`, deliberately.** A predicate would be
-        this number compared against a constant chosen inside an implementation,
-        where no caller could see it -- and the one thing a guard over this must
-        not quietly become is a *quality* threshold nobody measured. Callers
-        compare it themselves, in the open.
+        """`SearchOutcome.semantic_coverage` for this filtered population, without running
+        a search. The same number over the same denominator -- see that field for what
+        the denominator is, and is not.
         """
 
 
 class SuggestIndex(ABC):
-    """Type-ahead over names. One method, and no write path.
-
-    **This opened *"Typo-tolerant* type-ahead over names" until M9, and that
-    became false the moment a second implementation existed.** ADR-0002's
-    typo-tolerance gate ran on 2026-08-03 against 1,271,138 real names and
-    failed both halves of a bar written down first -- 27.8% recall on a
-    2-4-character name against 0.75, and no configuration within 6x of a 50 ms
-    keystroke budget -- so what ships is two tiers, and **only one of them is
-    typo-tolerant**:
-
-    - `PostgresPrefixSuggestIndex` (`adapters/search/prefix.py`) is the btree
-      `lower(name) text_pattern_ops` probe. p50 0.6 ms, and **1.9% typo
-      recall** -- it finds nothing at all for a misspelt prefix. That is the
-      whole design, not a shortfall: it is the only configuration measured that
-      fits inside a keystroke, and it runs on every one.
-    - `PostgresSuggestIndex` (`adapters/search/postgres.py`) is the trigram +
-      `levenshtein_less_equal` path that carries the tolerance, at 33.3 ms p50,
-      **debounced** behind the first.
-
-    The contract suite splits the same way: `SuggestIndexContract` holds what
-    both owe and `TypoTolerantSuggestIndexContract` holds the three cases that
-    are claims about `pg_trgm`. A port docstring promising tolerance would have
-    made the prefix tier read as a defective implementation of this interface
-    rather than as half of the answer to the gate.
-
-    **Settled in M6** -- `SearchIndex.suggest` used to carry a 🔶 asking
-    whether the type-ahead box was its own port. It is, and the argument
-    that decides it is not tidiness, it is **dual-write visibility**.
-
-    ADR-0002's whole case for Postgres-first is "no dual-write
-    synchronisation, no ghost documents, no second stateful service". If the
-    gate in PRD 05 fails and Meilisearch is added for the instant-search box
-    -- which is the *only* thing ADR-0002 gates it to -- then documents must
-    be written to both engines, which is exactly the cost that ADR refused.
-    Splitting the port puts that cost in the type system: adding Meilisearch
-    then means adding a write path to a port that today has none, and that
-    is a visible, deliberate act with a name. Folded back into
-    `SearchIndex`, the identical change looks like implementing a method
-    that was already there.
-
-    **So there is no `index` and no `remove` here, deliberately.**
-    `PostgresSuggestIndex` queries `titles` directly through a trigram index
-    and writes nothing at all, so abstract write methods would exist solely
-    to be no-opped by the only implementation -- and a no-opped abstract
-    method is how the dual write gets paid for by accident. The day a second
-    implementation needs them is the day that cost becomes real and gets
-    paid for on purpose.
-
-    **That day arrived in M9 and the cost is still not owed.**
-    `PostgresPrefixSuggestIndex` is the second implementation, and it reads
-    `titles` and `title_search_names` through two btrees and maintains no
-    artefact of its own either -- so the sentence above is now a measurement
-    rather than a prediction. Meilisearch remains the case that would change
-    the answer, exactly as ADR-0002 scopes it.
-
-    `SearchIndex` keeps `index_many`/`remove` because the semantic half
-    genuinely is a written artefact.
-    """
+    """Type-ahead over names. One method, and no write path."""
 
     @abstractmethod
     async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:

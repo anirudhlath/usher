@@ -508,18 +508,6 @@ def test_no_case_in_this_file_sleeps_or_patches_a_clock() -> None:
     assert "freezer" not in arguments
 
 
-def test_the_module_carries_the_rotation_consequence_in_its_docstring() -> None:
-    """The risk the plan asks to be written down where it will not be
-    rediscovered as a bug: rotating `USHER_SECRET_KEY` invalidates every
-    outstanding ticket. `test_a_different_secret_redeems_nothing` is the
-    behaviour; this is the sentence that stops it reading as a defect.
-    """
-    doc = playback_ticket.__doc__ or ""
-
-    assert "USHER_SECRET_KEY" in doc
-    assert "rotat" in doc.lower()
-
-
 def test_the_ticket_cipher_is_a_fernet_over_a_thirty_two_byte_subkey() -> None:
     """`Fernet` refuses a key that is not 32 url-safe-base64-encoded bytes, so
     `length=32` is load-bearing at construction rather than at use. Pinned by

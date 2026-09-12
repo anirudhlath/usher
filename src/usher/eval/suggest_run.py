@@ -1,8 +1,4 @@
-"""The suggest surface end to end: preflight, generate, run, score, record.
-
-Its own module rather than a function in `runner.py` because `runner.py` is
-surface-agnostic and E2 adds two more of these beside it.
-"""
+"""The suggest surface end to end: preflight, generate, run, score, record."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
