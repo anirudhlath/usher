@@ -1,22 +1,6 @@
 """The two shapes a backup artifact names a row by, shared by two ports.
 
-Private and shared for `_results`' reason, arriving at a *parameter* type
-rather than a return one. `EpisodeReference` embeds a `TitleReference`
-because an episode is named by its series' key plus two numbers, so homing
-the title's shape in `title.py` and importing it back into `episode.py`
-resolves perfectly well today and makes the episode port drag the title port
-into every consumer -- which is the cycle
-`test_no_aggregate_module_imports_another_aggregate_module` exists to
-prevent, and the first thing it caught after `BulkWriteResult`.
-
-**Why these are ports types at all**, given that
-`usher.db.backup_identity` is the module that argues for them and builds
-them: `pyproject.toml`'s third import contract (*"db is driven, not
-driving"*) forbids `usher.ports` reaching `usher.db`, and
-`resolve_natural_keys` has to be typed in terms of something.
-`BrowseCursorPosition` and `EpisodeCursorPosition` are the precedent --
-typed values a caller builds above and hands down, rather than an opaque
-token the port would have to interpret. See ADR-0045.
+Private so the episode port does not drag the title port into every consumer.
 """
 
 import uuid
