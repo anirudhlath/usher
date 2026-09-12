@@ -613,6 +613,12 @@ class SearchQueryRetention(ScheduledJob):
         period: timedelta,
         now: Callable[[], datetime] = _utc_now,
     ) -> None:
+        # The drain's terminator is a chunk shorter than the limit, so a limit
+        # below 1 never produces one. Refused here rather than left to
+        # `Settings.search_query_retention_batch`'s `ge=1`, which is two layers
+        # away and is not reached by a job built any other way.
+        if batch < 1:
+            raise ValueError(f"a retention batch of {batch} deletes nothing and never drains")
         self._scope = scope
         self._window = window
         self._batch = batch
@@ -695,10 +701,9 @@ class SearchQueryRetention(ScheduledJob):
         the two failures are one defect and the case that owns it is
         `test_the_prune_commits_each_chunk_where_a_composition_root_wired_it`.
 
-        ⚠️ **`batch` must be at least 1 or the same loop never ends**, for the
-        adjacent reason: at `batch = 0` a chunk deletes nothing and `0 < 0` is
-        false. `Settings.search_query_retention_batch` is `ge=1` and carries
-        the measurement.
+        The other half of the terminator is that `batch` is at least 1, which
+        `__init__` refuses to accept otherwise: at `batch = 0` a chunk deletes
+        nothing and `0 < 0` is false.
 
         The count is logged rather than counted on an instrument: this runs
         once a day, and *"a filter is invisible without a counter"* is
@@ -713,6 +718,8 @@ class SearchQueryRetention(ScheduledJob):
             async with self._scope() as queries:
                 deleted = await queries.prune(before=cutoff, limit=self._batch)
             removed += deleted
+            # A short chunk is an exhausted predicate, and `__init__`'s floor
+            # on `batch` is what keeps one reachable.
             if deleted < self._batch:
                 break
         logger.info(

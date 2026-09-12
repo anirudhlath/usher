@@ -612,6 +612,25 @@ async def test_the_prune_drains_in_chunks_and_opens_a_scope_for_each() -> None:
     assert sorted((clock.now - record.at).days for record in repository.rows.values()) == [1, 80]
 
 
+def test_a_chunk_size_below_one_is_refused_where_the_job_is_built() -> None:
+    """A batch of zero deletes nothing per chunk and `0 < 0` is false, so the
+    drain never ends.
+
+    What stopped that today was `Settings.search_query_retention_batch`'s
+    `ge=1`, two layers from the loop it protects and reachable only through
+    the composition root -- a job built any other way looped forever and the
+    symptom was a lane that never returned. The refusal belongs where the
+    number arrives.
+    """
+    with pytest.raises(ValueError, match="batch"):
+        SearchQueryRetention(
+            _scope_over(FakeSearchQueryRepository()),
+            window=timedelta(days=90),
+            batch=0,
+            period=RETENTION_PERIOD,
+        )
+
+
 async def test_the_cutoff_is_taken_once_and_not_per_chunk() -> None:
     """A boundary recomputed inside its own loop moves under it.
 
