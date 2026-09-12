@@ -15,14 +15,14 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     fails loudly here instead of silently changing what "the" expected head
     means.
     """
-    assert code_head_revision() == "m10d"
+    assert code_head_revision() == "m10e"
 
 
 #: The chain three documents spell out, in the order they spell it: every
 #: revision from `ffa` -- the landing that created
 #: `test_migrations.py`'s `-1` block -- to head inclusive. A literal for
 #: `test_code_head_revision_matches_the_head_migration_on_disk`'s reason, so
-#: the fourteenth landing is a loud red here rather than a silent
+#: the fifteenth landing is a loud red here rather than a silent
 #: disagreement with the prose.
 _REPOINTING_CHAIN = (
     "ffa",
@@ -39,6 +39,7 @@ _REPOINTING_CHAIN = (
     "m10b",
     "m10c",
     "m10d",
+    "m10e",
 )
 
 #: The English cardinal `.claude/rules/db-and-sql.md` and

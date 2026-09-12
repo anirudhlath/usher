@@ -321,6 +321,11 @@ class TitleNeighborRow(Base):
         # sequentially scans this table. Identical argument to M4's
         # `ix_media_items_episode_id` / `ix_watch_states_episode_id`.
         Index("ix_title_neighbors_neighbor_id", "neighbor_id"),
+        # `NeighborRebuildJob.last_done()` is `min(computed_at)`, asked once a
+        # tick forever. Without this it is a sequential scan of the whole
+        # table to learn that a job is not due; with it the planner takes the
+        # first live entry off the index.
+        Index("ix_title_neighbors_computed_at", "computed_at"),
         # No `(title_id, rank)` index. The read is `WHERE title_id = :id
         # ORDER BY rank`, and the primary key's leading column already serves
         # the lookup; what remains is a sort of at most `limit` rows, which

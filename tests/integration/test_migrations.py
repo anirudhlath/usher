@@ -633,15 +633,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m10d` and the `-1` half is re-pointed at its one artefact** --
+    **Head is `m10e` and the `-1` half is re-pointed at its one artefact** --
     `ix_title_embeddings_model_name`, asserted absent one step below head,
     because a creating head's `downgrade()` is what removes it. One artefact
-    and one assertion: `m10d` creates an index on a table nothing below it
-    drops, so there is no second artefact kind for a `downgrade()` to forget.
-    That is the **fourteenth** landing in a row to break and re-point this
-    block (`ffa`, `ffb`, `ffc`, `m08a`, `m08b`, `m09a`, `m09c`, `m09d`,
-    `m09e`, `m09f`, `m10a`, `m10b`, `m10c`, `m10d`).
-    `.claude/rules/db-and-sql.md` carries the same count.
+    and one assertion: `m10e` creates an index on a table nothing below it
+    drops, so there is no second artefact kind for a `downgrade()` to forget,
+    and the premise beside it is what keeps the check from passing at a depth
+    where `title_embeddings` has ceased to exist. That is the **fifteenth**
+    landing in a row to break and re-point this block (`ffa`, `ffb`, `ffc`,
+    `m08a`, `m08b`, `m09a`, `m09c`, `m09d`, `m09e`, `m09f`, `m10a`, `m10b`,
+    `m10c`, `m10d`, `m10e`). `.claude/rules/db-and-sql.md` carries the same
+    count.
 
     **The worked example below is `m09c` and is kept because it is the
     better one**, not because it is the head. Its predecessor asserted
@@ -673,7 +675,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     below, where revision ids do not drift -- displaced *because they had
     teeth*, on the first run with the new head present. `m09a`'s five moved
     when `m09c` landed; `m10a`'s seven moved when `m10b` did; `m10b`'s one
-    moved when `m10c` did; `m10c`'s five moved when `m10d` did.
+    moved when `m10c` did; `m10c`'s five moved when `m10d` did; `m10d`'s one
+    moved when `m10e` did.
 
     That is the general case rather than this migration's luck, and it is
     worth stating because the opposite was written here first and was wrong:
@@ -684,8 +687,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Fourteen landings, fourteen loud breaks --
-    the same fourteen the paragraph above counts, which is the point of
+    `blend_fingerprint` is present. Fifteen landings, fifteen loud breaks --
+    the same fifteen the paragraph above counts, which is the point of
     stating the number in both places and only works if both are maintained.
     **So the alarm to watch for is a `-1` half that stays green after a new
     migration**, which means the assertion it inherited never had teeth.
@@ -724,9 +727,9 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
         # M9 Task C2 for `m09c`, T4R for `m09d`, then `m09e`, `m09f` and
         # `m10a` in turn, issue #41's Task 1 for `m10b`, M10's J1 for `m10c`,
-        # and the polish pass for `m10d` — fourteen. It is cheaper than a step
-        # count, which keeps passing for the wrong reason instead of failing
-        # for the right one.
+        # and the polish pass for `m10d` and `m10e` — fifteen. It is cheaper
+        # than a step count, which keeps passing for the wrong reason instead
+        # of failing for the right one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
         # creates a constraint and renames a column, so its artefacts are
@@ -747,37 +750,46 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
-        # **`m10d`'s one artefact, re-pointed here the moment it became
-        # head** — the fourteenth landing in a row to do this. `m10d`
-        # *creates*, so the assertion is negative: one step below head the
-        # index does not exist, and only `m10d.upgrade()` makes it.
-        #
-        # Note this block reads `title_embeddings`, and the one it replaced
-        # read `search_queries` and `llm_calls`. The tables follow the head,
-        # not the block.
-        #
-        # **One artefact, one assertion**, because `m10d` creates one index and
-        # nothing else — there is no second artefact kind here for a
-        # `downgrade()` to drop and a check to miss.
-        at_m10c_indexes = await _index_set(url)
-        assert "ix_title_embeddings_model_name" not in at_m10c_indexes, (
-            "ix_title_embeddings_model_name should not exist below m10d"
+        # **`m10e`'s one artefact, re-pointed here the moment it became
+        # head** — the fifteenth landing in a row to do this. `m10e` *creates*,
+        # so the assertion is negative: one step below head the index does not
+        # exist, and only `m10e.upgrade()` makes it. The tables follow the
+        # head, not the block.
+        at_m10d_indexes = await _index_set(url)
+        assert "ix_title_embeddings_model_name" not in at_m10d_indexes, (
+            "ix_title_embeddings_model_name should not exist below m10e"
         )
         # The premise, for the reason the `m09a` stop below records: an index
         # set that had lost `title_embeddings` entirely satisfies the absence
-        # above for a reason that has nothing to do with `m10d.downgrade()`.
-        assert "ix_title_embeddings_hnsw" in at_m10c_indexes, (
-            "the premise: `title_embeddings` still exists at `m10c`"
+        # above for a reason that has nothing to do with `m10e.downgrade()`.
+        assert "ix_title_embeddings_hnsw" in at_m10d_indexes, (
+            "the premise: `title_embeddings` still exists at `m10d`"
+        )
+
+        # **A named stop at `m10c`, holding `m10d`'s one.** Displaced from the
+        # `-1` half the moment `m10e` became head, and displaced *because it
+        # had teeth*: `-1`-from-`m10e` lands on `m10d`'s applied state, where
+        # the index is present and `not in` is false.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="down"))
+        at_m10c_indexes = await _index_set(url)
+        assert "ix_title_neighbors_computed_at" not in at_m10c_indexes
+        # The premise, on the same terms: an index set that had lost
+        # `title_neighbors` entirely satisfies the absence above for a reason
+        # that has nothing to do with `m10d.downgrade()`.
+        assert "pk_title_neighbors" in at_m10c_indexes, (
+            "the premise: `title_neighbors` still exists at `m10c`"
         )
 
         # **A named stop at `m10b`, holding `m10c`'s five.** Displaced from the
         # `-1` half the moment `m10d` became head, and displaced *because they
-        # had teeth*: `-1`-from-`m10d` lands on `m10c`'s applied state, where
+        # had teeth*: `-1`-from-`m10d` landed on `m10c`'s applied state, where
         # all five are present and every `not in` is false.
         #
         # **Five artefacts, five assertions**: `m10c` touches two tables and
         # neither is dropped below it, so a `downgrade()` that dropped the
         # columns and forgot the indexes satisfies a check naming only one.
+        # The columns are invisible to `_index_set` and the indexes to
+        # `_column_set`, which is `m09c`'s per-artefact-kind rule as well.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="down"))
         at_m10b_columns = await _column_set(url, "search_queries")
         assert "surface" not in at_m10b_columns, "surface should not exist below m10c"
@@ -787,9 +799,6 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert "ix_search_queries_at" not in at_m10b_indexes
         assert "ix_llm_calls_at" not in at_m10b_indexes
         assert "ix_llm_calls_generation_id" not in at_m10b_indexes
-        # The premise for the three above, and it is a different table's: an
-        # index set that had lost `llm_calls` entirely would satisfy two of
-        # them for a reason that has nothing to do with `m10c.downgrade()`.
         assert "pk_llm_calls" in at_m10b_indexes, "the premise: `llm_calls` still exists at `m10b`"
 
         # **A named stop at `m10a`, holding `m10b`'s one.** Displaced from the

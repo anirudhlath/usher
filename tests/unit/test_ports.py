@@ -59,7 +59,7 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 from usher.ports.rows import Row, RowProvider
-from usher.ports.scheduler import ScheduledJob
+from usher.ports.scheduler import JobOutcome, ScheduledJob
 from usher.ports.search import (
     FilterNotSupported,
     SearchIndex,
@@ -419,8 +419,8 @@ def test_a_scheduled_job_that_forgets_its_name_cannot_be_instantiated() -> None:
         async def last_done(self) -> datetime | None:
             return None
 
-        async def run(self) -> None:
-            return None
+        async def run(self) -> JobOutcome:
+            return JobOutcome.DONE
 
     # `type: ignore[abstract]` and the ignore is itself part of the finding:
     # mypy refuses this line too, statically, which a bare annotation would
