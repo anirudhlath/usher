@@ -3207,3 +3207,48 @@ the quickstart's step 7 says *rows back* means the whole path worked.
 
 Torn down with `down -v`; no containers, no network, and this host's
 `usher-postgres-1` still has no database named `usher`.
+
+### R13's second run — steps 4–7, and the quickstart was wrong
+
+The operator supplied the Emby password, so the three steps the first run could
+not verify were run. **All three pass, and between them they found that the
+quickstart could never reach its own step 7.**
+
+| step | | |
+|---|---|---|
+| 4 · `POST /admin/sources` | **HTTP 201** | real Emby, credentials authenticate |
+| 5 · `usher sync` | **24,000 items in 10 min**, killed | ≈ **8 h** for the 1.14M-item library |
+| 6 · `usher work --once` | 52 s | 2,229 enrich jobs left pending |
+| 7 · `GET /home` | 200, **0 rows** | with 25,000 items and 24,034 matched |
+
+🔴 **`--phase imdb` alone makes enrichment impossible, and nothing says so until
+step 6.** Every enrich job parked with `title carries no tmdb id to enrich
+from`. IMDb supplies titles with no TMDb id; `tmdb-ids` and `crosswalk` are what
+supply one, and without them `/home` returns `200` with an empty `rows` array
+**forever**. Measured after running them: 16 s and 246 s, taking 293,219 titles
+from no TMDb id to one. The quickstart prescribed neither.
+
+🔴 **`.env.example` ships an empty `USHER_TMDB_API_KEY` and step 1 never
+mentioned it**, though `## Requirements` lists it. Same failure shape: nothing
+complains until step 6, and the symptom appears at step 7.
+
+🔴 **Step 5 has no bound and was presented as one line of a short path.** The
+outbound limiter is deliberate (ADR-0043), so the walk is paced by the media
+server, not by Usher — hours on a real library.
+
+**The quickstart is rewritten rather than the claim defended**, which is this
+task's own instruction. It now opens by saying the path is not five minutes and
+names steps 5 and 6 as the long poles; step 1 carries the TMDb key and the
+network-collision warning; step 3 runs three phases with the measured times and
+says what skipping the third costs; step 5 carries the 24,000-in-10-minutes
+measurement; and step 7 lists the three honest reasons an empty screen comes
+back.
+
+⚠️ **`/home` was still empty at teardown** — 20 titles enriched of 25,000 owned,
+because the remaining 2,229 enrichments are rate-limited TMDb calls. That is the
+documented behaviour of a half-enriched catalog rather than a further defect,
+and step 7 now says so. **The path was not observed end to end with rows on the
+screen**, and that is recorded rather than claimed.
+
+Torn down with `down -v`; the request body holding the credential was shredded.
+No credential, token, user id or host reached the repository.

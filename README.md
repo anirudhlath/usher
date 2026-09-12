@@ -138,29 +138,36 @@ authentication, a VPN, or an SSH tunnel. That decision belongs before the
 
 ## Quickstart
 
-Seven steps from clone to a screen with rows on it. Each is one command and
-links the section that explains it. **It is a path, not a substitute** — every
-step's detail is below.
+Seven steps from clone to a screen with rows on it, every command through
+`docker compose exec` so they work in any shell.
 
-Everything runs through `docker compose exec`, so these work in any shell.
+🔴 **Read this first: it is not a five-minute path, and the long poles are
+steps 5 and 6.** Measured end to end on a real deployment, 2026-09-11 — the
+numbers below are that run's, not estimates. Setup and catalog are ~6 minutes;
+syncing and enriching a real library are **hours**, because both are bounded by
+somebody else's server rather than by yours.
 
 **1. Configure and start.** See [Running it](#running-it) for what each line is
 for — especially the `chown`, which has the best paragraph in this file.
-
-⚠️ **Already running Usher on this host?** `compose.yml` pins its network name
-(`usher_default`) deliberately, so a second stack joins the first one's network
-and **both `postgres` containers answer to the alias `postgres`**. Docker's DNS
-then round-robins between them and the CLI reaches the wrong server — the
-symptom is `database "usher" does not exist` from `usher bootstrap` while
-`psql -d usher` works fine. Give the second stack its own network with an
-override file, or run it on a host that has none.
 
 ```
 cp .env.example .env
 openssl rand -hex 32          # paste into USHER_SECRET_KEY= in .env
 mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
-docker compose up -d --build
+docker compose up -d --build  # ~28 s
 ```
+
+⚠️ **Put your TMDb key in `.env` now, as `USHER_TMDB_API_KEY=`.** It is listed
+under [Requirements](#requirements) and it is easy to skip here, because
+nothing fails until step 6 — where every enrichment job parks and step 7 then
+returns an empty screen with a `200`.
+
+⚠️ **Already running Usher on this host?** `compose.yml` pins its network name
+(`usher_default`) deliberately, so a second stack joins the first one's network
+and **both `postgres` containers answer to the alias `postgres`**. Docker's DNS
+round-robins and the CLI reaches the wrong server — the symptom is
+`database "usher" does not exist` from `usher bootstrap` while `psql -d usher`
+works fine. Give the second stack its own network with an override file.
 
 **2. Check it is up.**
 
@@ -168,28 +175,27 @@ docker compose up -d --build
 curl -sf http://localhost:8100/health/ready
 ```
 
-**3. Load a catalog — and this step takes a shortcut, stated here rather than
-in a footnote.**
+**3. Load a catalog — three phases, and the third is not optional.**
 
 ```
-docker compose exec usher usher bootstrap --phase imdb
+docker compose exec usher usher bootstrap --phase imdb       # ~94 s, 1,277,520 titles
+docker compose exec usher usher bootstrap --phase tmdb-ids   # ~16 s
+docker compose exec usher usher bootstrap --phase crosswalk  # ~246 s
 ```
 
-⚠️ **`--phase imdb` only.** The full bootstrap is **~3–5 hours**, mostly the
-TMDb crawl ([catalog bootstrap](docs/prd/04-catalog-bootstrap.md)). What you
-give up by stopping here, and you should know it before you judge the result:
+🔴 **`--phase imdb` alone is not enough, and the failure is silent until step
+6.** IMDb gives you titles with no TMDb id, and enrichment has nothing to
+enrich *from*: every job parks with `title carries no tmdb id to enrich from`,
+and `/home` then returns `200` with zero rows forever. `tmdb-ids` and
+`crosswalk` are what make the catalog enrichable — measured, they take 293,219
+titles from "no TMDb id" to "has one".
 
-- **No TMDb enrichment**, so every title is a *skeleton* — no overview, no
-  artwork, no genres.
-- **No embeddings**, so search is full-text and type-ahead only. Semantic
-  search and "more like this" need `usher index --backfill`.
-- **No genome**, so similarity blends fewer signals.
+This still skips the IMDb expansion phases and MovieLens — see
+[Command line](#command-line) for `--phase all`, which is **3–5 hours**, mostly
+the TMDb crawl.
 
-A degraded answer that looks like a working one is worse than an error — see
-[Command line](#command-line) for the full path when you want it.
-
-**4. Register a source.** There is no CLI subcommand for this — it is the
-admin API, and the credentials are encrypted at rest with `USHER_SECRET_KEY`.
+**4. Register a source.** There is no CLI subcommand for this — it is the admin
+API, and the credentials are encrypted at rest with `USHER_SECRET_KEY`.
 
 ```
 curl -sf -X POST http://localhost:8100/admin/sources \
@@ -200,26 +206,42 @@ curl -sf -X POST http://localhost:8100/admin/sources \
 ⚠️ That route requires no authentication, like every route here — read the
 posture under [Requirements](#requirements) before exposing this port.
 
-**5. Walk it.**
+**5. Walk the source. This is the long pole.**
 
 ```
 docker compose exec usher usher sync --source "Living Room"
 ```
 
-**6. Drain the queue once**, rather than leaving a worker running.
+🔴 **Budget hours, not minutes, and there is no bound flag.** Usher is a polite
+guest: outbound requests are rate-limited on purpose
+([ADR-0043](docs/prd/decisions/0043-the-outbound-limiter-is-per-source-and-spaces-requests.md)),
+so the walk is paced by your media server. Measured against a 1.14M-item Emby:
+**24,000 items in 10 minutes**, i.e. roughly **8 hours** for the whole library.
+A small library is proportionally quicker. Run it in a terminal you can leave,
+and note that it resumes rather than restarting if it is interrupted.
+
+**6. Enrich what you just ingested.**
 
 ```
 docker compose exec usher usher work --once
 ```
 
+⚠️ **One rate-limited TMDb call per title**, so this is also hours on a large
+library — `--once` drains a single pass, and a full catalog needs the daemon
+(`usher work`) rather than one pass. This is the step that needs the key from
+step 1.
+
 **7. Ask for a screen.**
 
 ```
-curl -sf http://localhost:8100/home | head -c 400
+curl -sf http://localhost:8100/home
 ```
 
-Rows back means the whole path worked: catalog, source, ingest, composition.
-The console is at <http://localhost:8100/console>.
+**Rows back means the whole path worked.** An empty `rows` array with a `200`
+means the catalog has no *enriched, owned* titles yet — the honest answers are
+usually a missing TMDb key (step 1), a skipped `crosswalk` (step 3), or simply
+that steps 5 and 6 have not finished. The console is at
+<http://localhost:8100/console>.
 
 ## Running it
 
