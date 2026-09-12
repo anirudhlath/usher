@@ -27,7 +27,8 @@ import math
 import pathlib
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -66,6 +67,7 @@ from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
 from usher.services.search import (
     SearchAnalytics,
     SearchAnswer,
+    SearchQueryBuffer,
     SearchService,
     SemanticSearchUnavailable,
     _blend,
@@ -2273,6 +2275,107 @@ async def test_type_ahead_with_no_household_records_nothing_on_either_tier(
 
     assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1
     assert len(recorder.rows) == 1, "the control: the same call with a household writes"
+
+
+def _keystroke_row(offset: int) -> SearchQueryRecord:
+    """One buffered suggest row, with a fixed id so an order assertion reads."""
+    return SearchQueryRecord(
+        id=uuid.UUID(int=0x900 + offset),
+        at=_NOW,
+        user_id=_HOUSEHOLD,
+        query="vac",
+        mode=SearchMode.FULL_TEXT,
+        result_count=1,
+        latency_ms=1,
+        tier=SuggestTier.PREFIX,
+    )
+
+
+class _Batches:
+    """`SearchQueryScope`'s shape over the fake, with the transactions counted.
+
+    The count is the subject: a buffer that opened a scope per row would write
+    the same rows and cost a WAL flush per keystroke, which is the whole thing
+    the buffer exists to stop.
+    """
+
+    def __init__(self, queries: FakeSearchQueryRepository) -> None:
+        self.queries = queries
+        self.batches: list[int] = []
+
+    def __call__(self) -> AbstractAsyncContextManager[FakeSearchQueryRepository]:
+        return self._open()
+
+    @asynccontextmanager
+    async def _open(self) -> AsyncIterator[FakeSearchQueryRepository]:
+        before = len(self.queries.rows)
+        yield self.queries
+        self.batches.append(len(self.queries.rows) - before)
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_an_answered_keystroke_hands_its_row_over_rather_than_waiting_for_it(
+    tier: SuggestTier,
+) -> None:
+    """A `search_queries` row costs ~3.5 ms, of which 3.0 ms is a WAL flush,
+    against a tier-1 answer of 2.53 ms -- so a keystroke that waits for its own
+    row is measuring something it caused.
+
+    `suggest` returns with the row submitted and nothing written; the drain
+    writes it. Both tiers, because a buffer reached on one is a defect a
+    single-tier case cannot see.
+    """
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    recorder = _Recorder()
+    batches = _Batches(recorder.queries)
+    buffer = SearchQueryBuffer(batches)
+    service = await _service(
+        _ScriptedIndex(SearchOutcome()),
+        suggestions=_ScriptedSuggest(hits),
+        tier=tier,
+        analytics=SearchAnalytics(queries=recorder.queries, commit=recorder._commit, buffer=buffer),
+    )
+
+    assert len(await service.suggest("vac", tier=tier, user_id=_HOUSEHOLD)) == 1
+    assert (recorder.rows, recorder.commits) == ([], 0), "the request wrote nothing"
+
+    await buffer.flush()
+    assert [(one.user_id, one.surface, one.tier) for one in recorder.rows] == [
+        (_HOUSEHOLD, SearchSurface.SUGGEST, tier)
+    ]
+
+
+async def test_a_run_of_keystrokes_is_one_transaction_rather_than_one_each() -> None:
+    """The drain's own claim: N buffered rows cost one WAL flush, not N.
+
+    Fails: a buffer that opened its scope per record, which writes the same
+    rows and would satisfy every assertion in the case above.
+    """
+    recorder = _Recorder()
+    batches = _Batches(recorder.queries)
+    buffer = SearchQueryBuffer(batches)
+    for offset in range(5):
+        assert buffer.submit(_keystroke_row(offset))
+    assert recorder.rows == [], "the premise: submitting writes nothing"
+
+    await buffer.flush()
+    assert batches.batches == [5]
+
+
+async def test_a_full_buffer_refuses_a_row_rather_than_making_a_keystroke_wait() -> None:
+    """Back-pressure on a type-ahead box would let an analytics row slow down
+    the answer, which is the one property this class exists to remove. So the
+    bound is a drop, and it is reported.
+
+    Fails: an unbounded buffer, which grows with a database that is down.
+    """
+    recorder = _Recorder()
+    buffer = SearchQueryBuffer(_Batches(recorder.queries), capacity=2)
+    rows = [_keystroke_row(offset) for offset in range(3)]
+    assert [buffer.submit(one) for one in rows] == [True, True, False]
+
+    await buffer.flush()
+    assert [one.id for one in recorder.rows] == [rows[0].id, rows[1].id]
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))

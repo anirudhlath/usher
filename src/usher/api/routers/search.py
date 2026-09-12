@@ -403,55 +403,32 @@ async def suggest(
     have installed. Both tiers are btree/GIN reads over tables `m09a` creates
     unconditionally.
 
-    **Where a deployment has turned type-ahead analytics on, an answered
-    request is recorded and a refused one is not.** One row per request that
-    clears its tier's `min_query_length`, naming the surface that asked and the
-    tier that answered; a shorter `q` returns before the service and is
-    recorded nowhere, exactly as a blank one is. It is **off by default**,
-    because on the prefix tier the write costs more than the request it
-    measures. The row carries no id a client can use — a keystroke has no click
-    or play to attribute against it. Nothing about the request or this response
-    changes either way.
+    **An answered request is recorded and a refused one is not.** One row per
+    request that clears its tier's `min_query_length`, naming the surface that
+    asked and the tier that answered; a shorter `q` returns before the service
+    and is recorded nowhere, exactly as a blank one is. The row is written
+    after the response, so nothing here waits for it, and it carries no id a
+    client can use — a keystroke has no click or play to attribute against it.
+    An operator can switch the recording off; nothing else changes if they do.
     """
     # **The writer, and why the paragraph above is short.** A route handler's
     # docstring is published as the operation's `description` in
-    # `/openapi.json` (`.claude/rules/api-telemetry-and-lanes.md`), so the
-    # internal half of this argument is a comment: three descriptions in this
-    # API already leak a rules-file path and this must not be a fourth.
+    # `/openapi.json`, so the internal half of this argument is a comment:
+    # three descriptions in this API already leak a rules-file path.
     #
-    # ✅ **One `search_queries` row per answered request, on both tiers, since
-    # M10's J2 -- behind a switch that ships off, see the last paragraph.**
-    # PRD 10's amendment 2, which that document named for M10 to
-    # plan rather than rediscover. The objection this route used to carry was
-    # two vocabularies under one name: `search_queries.mode` is a `SearchMode`,
-    # three reachable values, and a tier is a disjoint vocabulary. `m10c`
-    # answered it with two columns rather than a fourth `SearchMode` member --
-    # `surface` says which box asked and `tier` says which index ran -- so the
-    # question PRD 10 most wants that table for, *whether real users type two-
-    # to four-character queries at all*, is now a question the table can
-    # answer. **Every mode-split panel owes a `WHERE surface = 'search'` it did
-    # not previously need**, recorded in PRD 10 in the same commit.
+    # One `search_queries` row per answered request, on both tiers, and the
+    # vocabulary objection it used to carry is answered by two columns rather
+    # than a fourth `SearchMode` member: `surface` says which box asked and
+    # `tier` says which index ran. Every mode-split panel owes a
+    # `WHERE surface = 'search'` it did not previously need.
     #
     # 🔴 **The short-`q` arm below writes nothing, and that is this route's
     # decision rather than the service's.** It returns before
     # `SearchService.suggest` is called at all, so there is no answered query
-    # to record: PRD 10 excludes *"a blank or whitespace-only query"* because a
+    # to record: PRD 10 excludes a blank or whitespace-only query because a
     # search box sends one between every character, and a `q` below its tier's
     # minimum is that same exclusion with a number on it. A writer moved above
     # this line would be a row per keystroke a client never meant to send.
-    #
-    # 🔴 **What the row costs was measured under a bar written first, and the
-    # bar came back against it, so `USHER_SEARCH_SUGGEST_ANALYTICS` defaults
-    # `false`.** Through *this* route against a clone of the real catalog:
-    # tier 1 p50 **2.53 ms** without the row and **6.29 ms** with it, against a
-    # refutation condition of 5 ms. `record()` plus its commit is p50 3.957 ms
-    # of which 3.0 ms is the WAL flush (PRD 10), and that lands on a tier whose
-    # own statement is 0.6 ms. Tier 2 absorbs it at 7.8%. The switch is
-    # whole-or-nothing rather than a sample rate, because every row of PRD 10's
-    # *"which absence means what"* table is a count, and it covers both tiers
-    # rather than one, because a per-tier switch would add the same
-    # unnameable absence one axis over. The run is in
-    # `.claude/rules/search-and-embeddings.md`.
     minimum = _MIN_CHARS_FOR_TIER[tier]
     if len(q.strip()) < minimum:
         return SuggestResponse.of(q, tier=tier, min_query_length=minimum)

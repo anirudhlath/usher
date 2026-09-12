@@ -1506,9 +1506,8 @@ async def test_only_the_root_with_no_commit_boundary_commits_the_analytics_row()
             assert analytics.queries._session is session
             assert analytics.commit == session.commit
 
-        request = cast(
-            "Request", SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(embedder=None)))
-        )
+        state = SimpleNamespace(embedder=None, search_queries=None)
+        request = cast("Request", SimpleNamespace(app=SimpleNamespace(state=state)))
         requested = get_search_service(request, session, _settings())._analytics
         assert requested is not None
         assert requested.queries._session is session  # type: ignore[attr-defined]

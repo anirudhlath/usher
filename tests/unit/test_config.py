@@ -750,42 +750,33 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
     ) == (50, 60, 200, 0.3, 200)
 
 
-def test_the_suggest_writer_ships_off_and_the_two_defaults_for_it_agree(
+def test_the_suggest_writer_ships_on_and_the_two_defaults_for_it_agree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """🔴 **A tenth `search_*` field, and its default is the *refutation* of a
-    bar written before the numbers were known.**
+    """The keystroke writer ships **on**, because the row no longer sits on the
+    request that produced it.
 
-    M10's J2 registered *"both tiers write, unconditionally, gated by one
-    setting defaulting `true`"* and the condition that would refute it:
-    tier 1's end-to-end p50 staying under 5 ms with the writer on. Measured
-    through the shipped route against a clone of the real 1,272,870-title
-    catalog, **2.53 ms without the row and 6.29 ms with it** -- so the
-    analytics write is 148% of the request it measures on the tier ADR-0031
-    exists to make cheap, the registered position is refuted, and this default
-    is what the number produced rather than what the plan predicted. Tier 2
-    pays the same ~3.5 ms as 7.8% and could carry it; one switch governs both
-    tiers because a per-tier one would put an unnameable absence into PRD 10's
-    table, so the tier that cannot afford it decides.
+    It shipped off while the write was synchronous: end to end against a clone
+    of the real catalog, tier 1 was p50 2.53 ms without the row and 6.29 ms
+    with it, so the analytics write was half again the cost of the request it
+    measured. `SearchQueryBuffer` takes the row and a drain writes it, so what
+    the request pays is an append and the knob is no longer a knob over a
+    feature nobody can afford to turn on.
 
     **Both defaults are asserted, and that pairing is the point.** The value
     lives in two places -- `Settings.search_suggest_analytics`, which is what a
     deployment gets, and `SearchService.__init__`'s `suggest_analytics`, which
-    is what a *hand-built* service gets, i.e. every unit fixture in this
-    repository. Every shipped construction passes the first into the second
-    through `composition.build_search_service`, so a disagreement between them
-    is invisible on every path an operator can reach and visible only in a
-    test fixture -- which is precisely the direction this repository has been
-    bitten in before (`list_unwatched_candidates`' three copies of one
-    `limit`). Asserted equal rather than each against `False`, so the day the
-    measurement moves, one edit fails this case rather than two edits being
-    required and one being forgotten.
+    is what a hand-built service gets. Every shipped construction passes the
+    first into the second through `composition.build_search_service`, so a
+    disagreement is invisible on every path an operator can reach and visible
+    only in a fixture. Asserted equal rather than each against a literal, so
+    one edit fails this case rather than two edits being required.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     service_default = inspect.signature(SearchService.__init__).parameters["suggest_analytics"]
     assert service_default.default is Settings().search_suggest_analytics
-    assert Settings().search_suggest_analytics is False
+    assert Settings().search_suggest_analytics is True
 
 
 def test_the_embedding_model_name_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:

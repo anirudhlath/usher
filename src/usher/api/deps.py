@@ -90,7 +90,7 @@ from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache
-from usher.services.search import SearchService
+from usher.services.search import SearchQueryBuffer, SearchService
 from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
@@ -1255,18 +1255,13 @@ def get_search_service(
     committing -- so this one passes `nothing` and keeps a request to one
     transaction and one WAL flush.
 
-    **`GET /search/suggest` shares this dependency and can write through it
-    too, since M10's J2** -- one row per answered keystroke, `surface =
-    'suggest'`, `tier` naming the index that ran. This paragraph read *"writes
-    nothing, on either tier"* until then, on the argument that a `SuggestTier`
-    is not a `SearchMode`; `m10c` answered that by giving the table two columns
-    rather than collapsing two vocabularies into `mode`. **What did not change
-    is that this function decides none of it.** The surface is a property of
-    `SearchService.suggest` and the switch
-    (`USHER_SEARCH_SUGGEST_ANALYTICS`, default off because the row measured
-    larger than a tier-1 request) is read once in
-    `composition.build_search_service`, so both boundaries obey the same
-    answer and neither this dependency nor the route branches on it.
+    **`GET /search/suggest` shares this dependency and writes through it too**
+    -- one row per answered keystroke, `surface = 'suggest'`, `tier` naming the
+    index that ran. Those rows go to the lifespan's `SearchQueryBuffer` rather
+    than into this request, so the keystroke pays an append. This function
+    decides none of it: the surface is a property of `SearchService.suggest`
+    and the switch (`USHER_SEARCH_SUGGEST_ANALYTICS`) is read once in
+    `composition.build_search_service`, so both boundaries obey one answer.
     The suggest route reads `HouseholdDep` beside this, because
     `search_queries.user_id` is `NOT NULL` -- that is a second dependency on
     that route, not a change here.
@@ -1302,7 +1297,12 @@ def get_search_service(
     # row that committed itself would end this request's transaction and leave
     # everything after it -- the demand promotion both search routes do -- in a
     # second one, for two WAL flushes per request where one will do.
-    return build_search_service(session, settings, embedder=model, commit=nothing)
+    #
+    # The buffer is the lifespan's, read the same way the model above is: a
+    # keystroke's row is submitted to it and written by the process's own
+    # drain, so the answered request waits for nothing.
+    buffer: SearchQueryBuffer = request.app.state.search_queries
+    return build_search_service(session, settings, embedder=model, commit=nothing, buffer=buffer)
 
 
 SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]

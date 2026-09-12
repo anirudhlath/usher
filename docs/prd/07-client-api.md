@@ -313,33 +313,27 @@ be added if a client turns out to need flexible field selection.
 > tier 2 is bounded differently:
 > [ADR-0031](decisions/0031-the-two-tier-suggest.md).
 >
-> ✅ **It resolves a household since M10, and the wire is unchanged.** This
-> paragraph read *"no household — a `DefaultUserIdDep` here would be a `SELECT`
-> per keystroke for an id nothing downstream reads"*, and the last clause is
-> what stopped being true: [10](10-telemetry-and-dashboards.md)'s amendment 2
-> makes an answered keystroke a `search_queries` row — where an operator has
-> set `USHER_SEARCH_SUGGEST_ANALYTICS`, which ships **off** because on this
-> tier the write costs more than the request — and `user_id` on that table is
-> `NOT NULL` behind a real foreign key, so a keystroke nobody is
-> speaking for has no row rather than a row with a hole in it. So the id comes
-> from `DefaultUserIdDep`, the same dependency `GET /search` and
-> `PUT /watch/{id}` use, and **not** from a query parameter: *"whose search
-> history is this"* is not a client's to choose, least of all on the one route
-> a browser drives per keystroke. **Nothing about the request or the response
-> changes** — still `q`, `tier`, `limit` in and `query`, `tier`,
-> `min_query_length`, `results` out — and no `search_id` is published, because
-> a keystroke has no click or play to attribute against it. **The `SELECT` the
-> old sentence objected to is real and is measured rather than waved through**
-> — the number is in `.claude/rules/search-and-embeddings.md` beside tier 1's
-> own budget. ⚠️ **It is paid on every request including the two that write no
-> row**, because a FastAPI dependency resolves before the handler body and the
-> length bound is in the body, and it is paid even with
-> `USHER_SEARCH_SUGGEST_ANALYTICS=false`, which switches off the row and not
-> the dependency. Making the read conditional would put a latency budget in the
-> dependency graph, which is worse than the read — and the read is what the
-> measurement made cheap to say: at the resolution of this route it is **not
-> distinguishable from zero**, so the sentence that objected to it was objecting
-> to the smallest term in the request.
+> ✅ **It resolves a household, and the wire is unchanged.**
+> [10](10-telemetry-and-dashboards.md)'s amendment 2 makes an answered keystroke
+> a `search_queries` row, and `user_id` on that table is `NOT NULL` behind a
+> real foreign key — so a keystroke nobody is speaking for has no row rather
+> than a row with a hole in it. The id comes from the same singleton household
+> `GET /search` and `PUT /watch/{id}` resolve and **not** from a query
+> parameter: *"whose search history is this"* is not a client's to choose,
+> least of all on the one route a browser drives per keystroke.
+> **Nothing about the request or the response changes** — still `q`, `tier`,
+> `limit` in and `query`, `tier`, `min_query_length`, `results` out — and no
+> `search_id` is published, because a keystroke has no click or play to
+> attribute against it.
+>
+> ✅ **Neither the household read nor the row is on the path the keystroke
+> waits for.** The `users` read is deferred into the handler, so the two
+> request shapes that write no row — a `q` below the tier's minimum, and a
+> deployment with `USHER_SEARCH_SUGGEST_ANALYTICS` off — pay nothing for it.
+> The row itself is handed to an in-process buffer and written by a drain, so
+> what an answered keystroke pays is an append. That is why the setting ships
+> **on**: it was off while the write was synchronous, because on the prefix
+> tier the row cost half again as much as the request it was measuring.
 
 ### Resources
 

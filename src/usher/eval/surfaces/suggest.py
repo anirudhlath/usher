@@ -11,12 +11,11 @@ Neither is a degraded form of the other, so a mean over them describes
 neither -- the same argument `SuggestTier` exists for rather than a
 `typo_tolerant: bool`.
 
-🔴 **This harness resolves no household, and since M10's J2 that is what keeps
-it out of `search_queries`.** `SearchService.suggest` can write one row per
-answered keystroke -- `USHER_SEARCH_SUGGEST_ANALYTICS`, off by default, so most
-deployments are protected by the switch as well -- and it writes none for a
-call carrying no `user_id` whatever the switch says, which is the half that
-holds on the deployment that turned it on. That is
+🔴 **This harness resolves no household, and that is what keeps it out of
+`search_queries`.** `SearchService.suggest` writes one row per answered
+keystroke and writes none for a call carrying no `user_id`, whatever
+`USHER_SEARCH_SUGGEST_ANALYTICS` says -- which is the half that holds now that
+the switch ships on. That is
 PRD 10's *"a search with no household"* exclusion, which the search path has
 always had and which nothing shipped could reach until now. `tier_suggester`
 below is a third caller of `suggest` that the analytics amendment was not

@@ -40,6 +40,7 @@ scans this file.
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
@@ -62,6 +63,7 @@ from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.eval.surfaces.suggest import tier_suggester
 from usher.ports.search import SuggestTier
+from usher.services.search import SearchQueryBuffer
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 
@@ -195,18 +197,41 @@ async def catalog(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[u
     await _wipe(sessions)
 
 
-async def _client(settings: Settings) -> AsyncIterator[AsyncClient]:
+@dataclass(frozen=True, slots=True)
+class _Deployment:
+    """The shipped app, and the buffer its keystroke rows are handed to.
+
+    A keystroke submits its row and does not wait for it, so a case that reads
+    the table has to flush the *same* buffer that request submitted to.
+    """
+
+    client: AsyncClient
+    keystrokes: SearchQueryBuffer
+
+
+async def _client(settings: Settings) -> AsyncIterator[_Deployment]:
     app: FastAPI = create_app(settings)
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
         async with AsyncClient(transport=transport, base_url="http://test") as connected:
-            yield connected
+            yield _Deployment(client=connected, keystrokes=app.state.search_queries)
 
 
 @pytest_asyncio.fixture
-async def client(settings: Settings, catalog: uuid.UUID) -> AsyncIterator[AsyncClient]:
-    async for connected in _client(settings):
-        yield connected
+async def deployment(settings: Settings, catalog: uuid.UUID) -> AsyncIterator[_Deployment]:
+    async for opened in _client(settings):
+        yield opened
+
+
+@pytest_asyncio.fixture
+async def client(deployment: _Deployment) -> AsyncClient:
+    return deployment.client
+
+
+@pytest_asyncio.fixture
+async def keystrokes(deployment: _Deployment) -> SearchQueryBuffer:
+    """The drain, for a case that reads back a row a keystroke only submitted."""
+    return deployment.keystrokes
 
 
 async def _rows(sessions: async_sessionmaker[AsyncSession]) -> list[dict[str, object]]:
@@ -230,7 +255,9 @@ async def _count(sessions: async_sessionmaker[AsyncSession]) -> int:
 
 
 async def test_a_suggest_records_its_surface_and_the_tier_that_answered(
-    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+    client: AsyncClient,
+    keystrokes: SearchQueryBuffer,
+    sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """PRD 10's amendment 2, through the shipped routes and read back from a
     session no request touched.
@@ -280,6 +307,9 @@ async def test_a_suggest_records_its_surface_and_the_tier_that_answered(
     assert prefix.status_code == 200, prefix.text
     assert len(prefix.json()["results"]) == 1, "the premise: tier 1 answered the prefix"
 
+    # A keystroke hands its row over and does not wait for it, so a reader that
+    # did not flush would be racing the drain rather than asserting on it.
+    await keystrokes.flush()
     written = await _rows(sessions)
     assert [(row["surface"], row["tier"]) for row in written] == [
         ("search", None),
@@ -292,7 +322,9 @@ async def test_a_suggest_records_its_surface_and_the_tier_that_answered(
 
 
 async def test_the_tier_on_the_row_is_the_parameter_that_selected_the_index(
-    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+    client: AsyncClient,
+    keystrokes: SearchQueryBuffer,
+    sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """A response and a row can never disagree about which index answered.
 
@@ -310,12 +342,15 @@ async def test_the_tier_on_the_row_is_the_parameter_that_selected_the_index(
     assert answered.status_code == 200, answered.text
     assert answered.json()["tier"] == "prefix", "the premise: the default tier answered"
 
+    await keystrokes.flush()
     (row,) = await _rows(sessions)
     assert row["tier"] == answered.json()["tier"]
 
 
 async def test_a_prefix_below_its_tiers_minimum_writes_no_row_on_either_tier(
-    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+    client: AsyncClient,
+    keystrokes: SearchQueryBuffer,
+    sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     """The short-`q` arm returns before the service, so there is no answered
     query to record.
@@ -339,12 +374,17 @@ async def test_a_prefix_below_its_tiers_minimum_writes_no_row_on_either_tier(
         "/search/suggest", params={"q": TYPED_SHORT, "tier": "prefix"}
     )
     assert short_on_tier_one.status_code == 200, short_on_tier_one.text
+    # Flushed before every absence too: an unflushed buffer makes *every* count
+    # zero, which is the shape that would satisfy this case for the wrong
+    # reason.
+    await keystrokes.flush()
     assert await _count(sessions) == 0
 
     short_on_tier_two = await client.get(
         "/search/suggest", params={"q": TYPED_SHORT, "tier": "fuzzy"}
     )
     assert short_on_tier_two.status_code == 200, short_on_tier_two.text
+    await keystrokes.flush()
     assert [(row["surface"], row["tier"], row["query"]) for row in await _rows(sessions)] == [
         ("suggest", "fuzzy", TYPED_SHORT)
     ], "the control: the same string is above tier 2's minimum and is recorded"
@@ -377,11 +417,15 @@ async def test_the_switch_is_whole_or_nothing_and_leaves_the_search_row_alone(
     The control is `GET /search` through the same app: this switch is about the
     suggest surface and must not reach the search one.
     """
-    async for client in _client(settings_without_the_writer):
+    async for deployment in _client(settings_without_the_writer):
+        client = deployment.client
         for tier, probe in (("prefix", TYPED_PREFIX), ("fuzzy", TYPED_TYPO)):
             response = await client.get("/search/suggest", params={"q": probe, "tier": tier})
             assert response.status_code == 200, response.text
             assert len(response.json()["results"]) == 1, "the premise: the box answered"
+        # Flushed, or this absence would be the buffer holding rows rather than
+        # the switch refusing them.
+        await deployment.keystrokes.flush()
         assert await _count(sessions) == 0
 
         assert (await client.get("/search", params={"q": "marrowlight"})).status_code == 200
