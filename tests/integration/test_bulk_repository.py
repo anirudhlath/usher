@@ -913,6 +913,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     # parametrisation is, and `add` is the writer that binds the value
     # unconditionally (`save` binds it through `GREATEST`, which refuses just
     # the same but says less about why).
+    ("sync_runs", "error_code"): lambda bed: _refused_sync_run(bed, error_code="e" * 33),
     ("sync_runs", "position"): lambda bed: _refused_sync_run(bed, position=_OVER_INT32),
     ("sync_runs", "items_seen"): lambda bed: _refused_sync_run(bed, items_seen=_OVER_INT32),
     ("sync_runs", "items_matched"): lambda bed: _refused_sync_run(bed, items_matched=_OVER_INT32),

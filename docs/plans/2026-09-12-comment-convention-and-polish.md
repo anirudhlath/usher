@@ -79,7 +79,7 @@ independently by three agents each, the third by two; they lead the list.
 
 1. ✅ `telemetry.py:539` — the observable-gauge template is a fifth verbatim copy
    (`:329`, `:432`, `:504`, `:652`). One `register_gauge` helper.
-2. `db/repositories/backup.py:690-949` — seven per-row merge loops: one round
+2. ✅ `db/repositories/backup.py:690-949` — seven per-row merge loops: one round
    trip per row (~14,259) and the SQL string plus its `TextClause` rebuilt
    inside each loop. Set-based `unnest` statements, hoisted constants, one
    helper for what remains.
@@ -89,9 +89,9 @@ independently by three agents each, the third by two; they lead the list.
 
 ### Reuse
 
-4. `services/backup.py:276` — third hand-rolled atomic scratch-write, missing
+4. ✅ `services/backup.py:276` — third hand-rolled atomic scratch-write, missing
    the `fsync` the other two take, PID suffix where they use `uuid4`.
-5. `services/restore.py:358` — damaged-gzip exception set, second spelling.
+5. ✅ `services/restore.py:358` — damaged-gzip exception set, second spelling.
 6. ✅ `scripts/measure_source_lane.py:471,694` — quiet-host check, fourth copy,
    missing the settle sleep the other three take.
 7. ✅ `scripts/measure_source_lane.py:628` — `Timing` → dict hand-typed; three
@@ -103,61 +103,52 @@ independently by three agents each, the third by two; they lead the list.
 
 ### Simplification
 
-10. `services/restore.py:152` — `RestoreReport` shreds `TableOutcome` into four
+10. ✅ `services/restore.py:152` — `RestoreReport` shreds `TableOutcome` into four
     parallel maps and rebuilds it; `_apply` is typed `Any` to dodge the import.
 11. ✅ `scripts/audit_bounded_columns.py:1942` — seven reading-independent scans
     re-run per pair; ~3× off a 23.5 s guard by hoisting them.
 12. ✅ `ports/repository/llm_call.py:173` — `list_since` has no caller in `src/`,
     and ships `SELECT *` unbounded.
-13. `db/backup_manifest.py:212` — `BackupEntry.restore` is derived state
+13. ✅ `db/backup_manifest.py:212` — `BackupEntry.restore` is derived state
     validated against the mapping it came from. A property.
 14. ✅ `scripts/measure_source_lane.py:430` — `_overlap_table` dead, two fields
     unread, a bare `_ = _CPU_SETTLE_SECONDS` discard.
 15. ✅ `services/scheduler.py:628,166` — test-only accessors; two parallel
     backoff dicts that must be cleared together.
-16. `ports/repository/search_query.py:95` — `surface` derivable from `tier`.
-<<<<<<< HEAD
-17. `ports/repository/_references.py:12` — paragraph repeated verbatim at `:38`.
-18. ✅ `scripts/measure_source_latency.py:804` — three injected seams with no
-=======
+16. ✅ `ports/repository/search_query.py:95` — `surface` derivable from `tier`.
 17. ✅ `ports/repository/_references.py:12` — paragraph repeated verbatim at `:38`.
-18. `scripts/measure_source_latency.py:804` — three injected seams with no
->>>>>>> polish/1f-repos
+18. ✅ `scripts/measure_source_latency.py:804` — three injected seams with no
     caller; the reuse they were built for declined them.
 
 ### Efficiency
 
-19. `api/routers/search.py:364` — a `users` SELECT per keystroke, paid on the
+19. ✅ `api/routers/search.py:364` — a `users` SELECT per keystroke, paid on the
     short-`q` arm and when analytics is off.
 20. ✅ `db/models/search.py` — no index on `title_neighbors.computed_at`; the
     scheduler full-scans 3.3M rows ~288×/day to learn a job is not due.
-<<<<<<< HEAD
     Landed as `m10d`; not applied to any database.
-21. `db/repositories/title.py:140`, `episode.py:192` — the natural-key ladder
-=======
 21. ✅ `db/repositories/title.py:140`, `episode.py:192` — the natural-key ladder
->>>>>>> polish/1f-repos
     runs all three joins unconditionally; lazy `COALESCE` SubPlans instead.
-22. `services/search.py:1595` — two transactions and two WAL flushes per
+22. ✅ `services/search.py:1595` — two transactions and two WAL flushes per
     keystroke.
-23. `services/restore.py:263` — the decoded row list rescanned once per table.
-24. `db/repositories/search.py:743` — `SELECT DISTINCT model_name` scans ~270 MB
+23. ✅ `services/restore.py:263` — the decoded row list rescanned once per table.
+24. ✅ `db/repositories/search.py:743` — `SELECT DISTINCT model_name` scans ~270 MB
     of inline vector heap.
-25. `services/backup.py:254` — the carried set materialised whole, then gzipped
+25. ✅ `services/backup.py:254` — the carried set materialised whole, then gzipped
     synchronously on the event loop.
 26. ⛔ `services/similar.py:768` — two scopes per due tick. **Not taken.**
     The two are `last_done()`'s and `run()`'s, which are separate `ScheduledJob`
     calls at separate moments; one would do only by holding a session open
     across the due comparison. Item 31's backoff is what cuts how often the
     pair is paid.
-27. `db/backup_identity.py:292` — the reference list deduplicated twice.
+27. ✅ `db/backup_identity.py:292` — the reference list deduplicated twice.
 
 ### Altitude
 
 28. ✅ `cli.py:737` — the `usher work` daemon is a hand-copied
     `LaneSupervisor._run_worker`, guarded by an AST test asserting the two
     copies still look alike. One loop in `services/jobs.py`.
-29. `config.py:751` — `USHER_SEARCH_SUGGEST_ANALYTICS` is a knob over a
+29. ✅ `config.py:751` — `USHER_SEARCH_SUGGEST_ANALYTICS` is a knob over a
     synchronous write on the request path, shipped `false`, so the milestone's
     analytics feature is inert. Buffer or enqueue in `SearchAnalytics`.
 30. ✅ `services/reconcile.py:164` — the sync failure *kind* is a magic prefix on a
