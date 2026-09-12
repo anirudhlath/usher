@@ -706,6 +706,16 @@ class SearchService:
         # argument.
         self._suggest_analytics = suggest_analytics
 
+    @property
+    def records_suggestions(self) -> bool:
+        """Whether an answered keystroke produces a `search_queries` row.
+
+        Published so a request boundary can decide whether to resolve a
+        household: the row is the only thing on the suggest path that needs
+        one, and resolving it is a `users` read per keystroke.
+        """
+        return self._analytics is not None and self._suggest_analytics
+
     async def search(
         self,
         query: str,

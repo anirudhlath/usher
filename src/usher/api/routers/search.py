@@ -99,28 +99,13 @@ the full argument and the alternatives.
 **Hence `_MIN_PREFIX_CHARS`, which is this route's answer and the only lever a
 request boundary has.** See its own comment for why four.
 
-**A household, since M10's J2, and the objection this paragraph used to make
-is retired by a measurement rather than by an argument.** It read: *"a
-`DefaultUserIdDep` here would be a `SELECT` (and, on a first run, an `INSERT`)
-per keystroke to resolve an id nothing downstream reads."* Two of its three
-clauses still hold — the suggest path runs no blend, so there is no
-watch-state term and no taste term for a household to change, and the read
-really is one `SELECT` per keystroke against `users` (the `INSERT` happens on
-the deployment's first request, once). The clause that stopped being true is
-the last one: **something downstream reads it.** `search_queries.user_id` is
-`NOT NULL` behind `ON DELETE RESTRICT`, and PRD 10 refuses the alternative in
-terms — *"a search nobody is speaking for has no row rather than a row with a
-hole in it"* — so the column does not become nullable and the row is not
-written without one.
-
-**The `SELECT` is measured rather than waved through**, end to end against the
-real catalog, and the number is in `.claude/rules/search-and-embeddings.md`
-with tier 1's own budget beside it. ⚠️ **It is paid on the short-`q` arm too**,
-because FastAPI resolves a dependency before the handler body runs and the
-length bound is in the body — so the one request shape that writes no row still
-resolves a household. That is stated here rather than left to be found in a
-profile; moving the bound into a dependency to avoid it would put a latency
-budget in the dependency graph.
+**A household, on the suggest route, only where a row is written.** That path
+runs no blend, so nothing in the *answer* varies by household; what needs an id
+is `search_queries.user_id`, which is `NOT NULL` behind `ON DELETE RESTRICT`.
+So the route takes the read rather than the id (`HouseholdDep`) and pays it
+past the length bound, on a deployment that records keystrokes -- a dependency
+typed as the id resolves before the handler runs, which is a `users` SELECT per
+character typed whether or not anything reads it.
 
 **No completion is ever bought on this path, on either tier**, and that is
 structural rather than a rule to remember: `QueryExpansionService.expand` is
@@ -133,7 +118,12 @@ from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Query, status
 
-from usher.api.deps import DefaultUserIdDep, SearchServiceDep, VisibilityServiceDep
+from usher.api.deps import (
+    DefaultUserIdDep,
+    HouseholdDep,
+    SearchServiceDep,
+    VisibilityServiceDep,
+)
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.search import SearchResponse, SuggestResponse
 from usher.api.errors import ProblemException
@@ -354,14 +344,12 @@ async def search(
 async def suggest(
     search_service: SearchServiceDep,
     visibility: VisibilityServiceDep,
-    # **The household, and it is here for the row rather than for the answer.**
-    # `GET /search` reads this because the blend has a watch-state term; this
-    # route has no blend and reads it because `search_queries.user_id` is
-    # `NOT NULL` behind a real foreign key, so a keystroke nobody is speaking
-    # for has no row. Resolved the same way `GET /search` and `PUT /watch/…`
-    # resolve it, so the day a request carries an identity one dependency
-    # changes and this line does not.
-    user_id: DefaultUserIdDep,
+    # **The household read, not the household.** This route has no blend, so
+    # the only thing here that needs an id is the `search_queries` row -- and
+    # it writes one on neither the short-`q` arm nor a deployment with the
+    # writer off. A `DefaultUserIdDep` resolves before the handler runs, which
+    # would be a `users` SELECT per keystroke for an id nothing reads.
+    household: HouseholdDep,
     q: Annotated[
         str,
         Query(
@@ -469,7 +457,16 @@ async def suggest(
         return SuggestResponse.of(q, tier=tier, min_query_length=minimum)
     # Bound once rather than inlined into the DTO, because the promotion below
     # has to see the same rows the response carries.
-    offered = await search_service.suggest(q, limit=limit, tier=tier, user_id=user_id)
+    offered = await search_service.suggest(
+        q,
+        limit=limit,
+        tier=tier,
+        # Asked of the service rather than branched on here: the switch is read
+        # once, in `composition.build_search_service`, so a household resolved
+        # by this route and a row written by that one cannot disagree about
+        # whether this deployment records keystrokes.
+        user_id=await household() if search_service.records_suggestions else None,
+    )
     # **This route fires per keystroke**, which makes it the highest-volume
     # surface on the demand lane (issue #73). Wired anyway: a dropdown of names
     # a viewer is choosing between is drawn, and the repeat is free at the

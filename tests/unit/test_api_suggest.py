@@ -43,7 +43,7 @@ from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_default_user_id, get_search_service, get_visibility_service
+from usher.api.deps import get_household, get_search_service, get_visibility_service
 from usher.config import Settings
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
@@ -141,7 +141,7 @@ class _Kit:
         return list(self.queries.rows.values())
 
 
-async def _kit(*, result_limit: int = 50) -> _Kit:
+async def _kit(*, result_limit: int = 50, suggest_analytics: bool = True) -> _Kit:
     """One catalog, four readers of it: both tiers, the hydration, and
     `search_queries` since M10's J2."""
     titles = FakeTitleRepository()
@@ -175,12 +175,9 @@ async def _kit(*, result_limit: int = 50) -> _Kit:
         # floor, so a route that had stopped passing one would look identical.
         # The fake never touches a database, so this stays a unit file.
         analytics=SearchAnalytics(queries=queries, commit=_nothing),
-        # **Stated, because the shipped default is `False`.** The writer
-        # is off on every deployment that has not asked for it -- the
-        # measurement in `Settings.search_suggest_analytics` says why --
-        # so a fixture relying on the default would assert nothing about
-        # the household reaching the row.
-        suggest_analytics=True,
+        # Stated rather than defaulted, so a case that turns it off is
+        # varying this fixture rather than relying on a shipped default.
+        suggest_analytics=suggest_analytics,
     )
     return _Kit(
         service=service,
@@ -207,24 +204,35 @@ def _settings() -> Settings:
 
 
 #: The household this file's requests carry. Invented, and it never reaches a
-#: database: `get_default_user_id` is overridden below.
+#: database: `get_household` is overridden below.
 _HOUSEHOLD = uuid.UUID(int=0xD1)
 
 
-def _app(service: SearchService) -> FastAPI:
+class _Household:
+    """The `users` read, counted rather than performed.
+
+    The route pays a real `SELECT` for this, so what a case asserts is how many
+    times it asked -- not what it got back.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> uuid.UUID:
+        self.calls += 1
+        return _HOUSEHOLD
+
+
+def _app(service: SearchService, *, household: _Household | None = None) -> FastAPI:
     built = create_app(_settings())
     built.dependency_overrides[get_search_service] = lambda: service
-    # **Overridden, because this app points at a database nothing listens on.**
-    # Since M10's J2 the suggest route resolves a household -- not for the
-    # answer, which has no blend, but for the `search_queries` row, whose
-    # `user_id` is `NOT NULL` behind a real foreign key. Left unoverridden
-    # every case in this file would 500 on a connection refused, which would
-    # say nothing about the tier selector this file exists to pin.
-    #
-    # Its *presence* is asserted separately, on `/openapi.json` and on the
-    # service call, because an override is exactly the thing that would hide a
-    # route that had quietly stopped reading one.
-    built.dependency_overrides[get_default_user_id] = lambda: _HOUSEHOLD
+    # Overridden, because this app points at a database nothing listens on:
+    # left alone, every case here would 500 on a connection refused and say
+    # nothing about the tier selector this file exists to pin. The route's
+    # *use* of it is asserted separately, because an override is exactly what
+    # would hide a route that had quietly stopped reading one.
+    resolve = household if household is not None else _Household()
+    built.dependency_overrides[get_household] = lambda: resolve
     # Since #73 this route promotes the skeletons it offered, so the queue and
     # the catalog are on its path and `UNREACHABLE_DSN` is exactly what the
     # name says. What this route *promotes* is asserted in
@@ -539,6 +547,36 @@ async def test_the_household_is_a_dependency_and_never_a_query_parameter(
     assert [(row.user_id, row.surface, row.tier) for row in kit.rows] == [
         (_HOUSEHOLD, SearchSurface.SUGGEST, SuggestTier.PREFIX)
     ]
+
+
+async def test_the_household_is_resolved_only_for_a_request_that_writes_a_row() -> None:
+    """One `users` SELECT per keystroke is what a dependency costs; this route
+    pays it where the row is written and nowhere else.
+
+    Three arms, because a route that simply stopped resolving one would satisfy
+    the first two: a `q` below the tier's minimum returns before the service
+    and writes nothing; a deployment with the writer off writes nothing on any
+    `q`; and an answered keystroke on a deployment that records resolves
+    exactly one household, which reaches the row.
+    """
+    short = _Household()
+    kit = await _kit()
+    async for client in _client(_app(kit.service, household=short)):
+        assert (await client.get("/search/suggest", params={"q": "kes"})).status_code == 200
+    assert (short.calls, kit.rows) == (0, [])
+
+    off = _Household()
+    quiet = await _kit(suggest_analytics=False)
+    async for client in _client(_app(quiet.service, household=off)):
+        assert (await client.get("/search/suggest", params={"q": _TYPED})).status_code == 200
+    assert (off.calls, quiet.rows) == (0, [])
+
+    recorded = _Household()
+    writing = await _kit()
+    async for client in _client(_app(writing.service, household=recorded)):
+        assert (await client.get("/search/suggest", params={"q": _TYPED})).status_code == 200
+    assert recorded.calls == 1
+    assert [row.user_id for row in writing.rows] == [_HOUSEHOLD]
 
 
 # --- the service's own seam ------------------------------------------------

@@ -8,7 +8,7 @@ direct naming of a *concrete* adapter, which is why the factory below is
 """
 
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, cast
 from urllib.parse import quote
@@ -278,6 +278,29 @@ async def get_default_user_id(session: SessionDep) -> uuid.UUID:
 
 
 DefaultUserIdDep = Annotated[uuid.UUID, Depends(get_default_user_id)]
+
+
+#: The household read, deferred. `usher.api.routers.search` is the caller.
+Household = Callable[[], Awaitable[uuid.UUID]]
+
+
+def get_household(session: SessionDep) -> Household:
+    """`get_default_user_id`, handed over as the read rather than the answer.
+
+    A dependency resolves on every request that declares it, including the ones
+    that turn out not to need an id -- and `GET /search/suggest` declares one
+    for a `search_queries` row it may not write, on a route a browser drives
+    per keystroke. A route that takes this pays the `SELECT` only where the row
+    is.
+    """
+
+    async def resolve() -> uuid.UUID:
+        return await get_default_user_id(session)
+
+    return resolve
+
+
+HouseholdDep = Annotated[Household, Depends(get_household)]
 
 
 def get_source_repository(session: SessionDep) -> SourceRepository:
@@ -1253,7 +1276,7 @@ def get_search_service(
     larger than a tier-1 request) is read once in
     `composition.build_search_service`, so both boundaries obey the same
     answer and neither this dependency nor the route branches on it.
-    ⚠️ **The route now also reads `DefaultUserIdDep` beside this**, because
+    The suggest route reads `HouseholdDep` beside this, because
     `search_queries.user_id` is `NOT NULL` -- that is a second dependency on
     that route, not a change here.
 
