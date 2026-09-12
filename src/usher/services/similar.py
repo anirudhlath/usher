@@ -350,7 +350,7 @@ class SimilarityService:
         and what the table holds -- because "the table is mixed" is not a
         message anybody can act on. Exposed rather than reached for through
         `_embedding_model` so the log line is a property of the service's
-        declared configuration, the way `SearchQueryRetention.window` is.
+        declared configuration.
         """
         return self._embedding_model
 

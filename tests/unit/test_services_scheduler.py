@@ -342,51 +342,60 @@ def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None
     assert scheduler.jobs == ()
 
 
-def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set() -> None:
+async def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The two settings reach the job, and the period comes from neither.
 
     The wrong implementations this kills: a registration that hard-codes 90
     days beside a setting an operator can change, which is the failure a
-    setting exists to prevent; one that passes the *days* where a `timedelta`
-    is wanted, which is a factor of 86,400 and reads as correct at a glance;
-    one that wires the batch into the window or the window into the batch --
-    two adjacent keyword arguments, so the names are all that stop a swap; and
-    one that reads the *period* off the retention window, which is precisely
-    the design ADR-0046 shipped with and `ScheduledJob.last_done` refuses.
+    setting exists to prevent; one that ignores the chunk size and drains the
+    whole table in a single transaction; and one that reads the *period* off
+    the retention window, which is the design ADR-0046 shipped with and
+    `ScheduledJob.last_done` refuses.
 
-    Read off the job's own declared configuration rather than its private
-    attributes: `period`, `window` and `batch` are properties for this reason.
-    Non-default values on both settings, because 90 and 10,000 are what a
-    registration ignoring them would also produce.
+    **Read off what the job does, not off accessors it would otherwise have
+    no reason to carry.** The window is the arithmetic in `last_done()` --
+    `min(at) + window` -- and the chunk size is observable as the number of
+    scopes a drain opens, which is `test_the_prune_drains_in_chunks_and_opens
+    _a_scope_for_each`'s own idiom: seven expired rows at a batch of three are
+    chunks of 3, 3, 1, where the shipped default of 10,000 would be one.
 
-    🔴 **The period is pinned to the literal and not to the constant**, the
-    way the job's *name* already is one case above. `job.period ==
-    RETENTION_PERIOD` compares the registration against the same symbol the
-    composition root passes it, so it is a statement about the wiring and
-    about nothing else -- measured 2026-09-07, moving `RETENTION_PERIOD` from
-    `timedelta(days=1)` to `timedelta(days=30)` left this whole file green.
-    **A day is a published number**: `.env.example`,
-    `web/src/features/operator/Config.settings.ts`, PRD 08 and PRD 10 all
-    state it in prose an operator reads, and a constant that moves under them
-    is the same silent drift a renamed metric label is. Both assertions are
-    kept -- the literal for the value, the symbol for the wiring.
+    The period is pinned to the literal as well as to the constant: a day is
+    what `.env.example`, `Config.settings.ts`, PRD 08 and PRD 10 all state in
+    prose no other test reads.
     """
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    oldest = _NOW - timedelta(days=300)
+    for minute in range(7):
+        await repository.record(_row(at=oldest + timedelta(minutes=minute), user_id=user_id))
+    scope = _RecordingScope(repository)
+    monkeypatch.setattr(
+        "usher.composition.search_query_scope",
+        lambda sessions: scope,
+    )
+
     scheduler = build_scheduler(
         _settings(search_query_retention_days=7, search_query_retention_batch=3),
         sessions=_no_sessions(),
     )
 
     job = next(one for one in scheduler.jobs if isinstance(one, SearchQueryRetention))
-    assert job.window == timedelta(days=7)
-    assert job.batch == 3
+    assert await job.last_done() == oldest + timedelta(days=7), (
+        "the reading is min(at) + the window an operator set, capped at now"
+    )
+    opened_by_the_reading = scope.opened
+
+    await _drain(job)
+
+    assert scope.opened - opened_by_the_reading == 3, "3 + 3 + 1 at the batch an operator set"
+    assert not repository.rows, "the premise: every row was past the seven-day cutoff"
     assert timedelta(days=1) == RETENTION_PERIOD, (
         "the retention job offers itself once a day, and .env.example, Config.settings.ts, "
         "PRD 08 and PRD 10 all say so in prose no test reads"
     )
     assert job.period == RETENTION_PERIOD
-    assert job.period != job.window, (
-        "the period is the job's own and must not be read off the retention window"
-    )
 
 
 def test_the_rebuild_registration_carries_the_period_an_operator_set() -> None:
