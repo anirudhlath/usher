@@ -172,6 +172,25 @@ the gate green after each merge.
 Nothing is relocated. Prose is deleted, not moved. Target is the convention
 above, not a percentage.
 
+**Two passes, because only the first is mechanical.**
+
+*Pass A* is `/var/tmp/prose-cut/reduce.py` (sha256 `6938e1fe6bea8d95d2b9154868e81a2c9031e10b7d17d54a140036195ae124ba`),
+a throwaway rather than a `scripts/` entry -- it runs once and the convention it
+serves is the hook, not this file. It truncates: a module docstring to its first
+paragraph and 3 lines, a function or class docstring to its summary plus any
+Args/Returns/Yields/Raises a caller needs, a comment block over 5 lines to its
+first sentence. It refuses to write a file whose code AST moved, and it compiles
+every result before writing.
+
+Measured over the tree at stage 1's close: **653 files, 274,646 -> 220,095
+lines**, and `src/usher` falls from 62.4% prose to 35.1%, `tests` from 41.8% to
+31.9%, `scripts` to 19.7%. Zero files skipped, zero broken, zero code changes.
+
+*Pass B* is one agent per slice over what pass A leaves: a summary that lost its
+grammar, a `why` worth keeping that the truncation took, the forbidden register
+in what survives, and the ADR citations stage 3 makes dangling. `ruff check
+--select D` is the worklist.
+
 `pyproject.toml` is in scope: the `extend-exclude` comment is 30 lines and the
 mypy override comment is longer.
 
