@@ -1,6 +1,6 @@
 """The scheduler gauge's reader slot."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 import pytest
 from opentelemetry.metrics import CallbackOptions, Observation
@@ -10,6 +10,13 @@ from usher import telemetry
 
 def _observations(callback_result: Iterable[Observation]) -> list[tuple[float, str]]:
     return [(one.value, str((one.attributes or {})["job"])) for one in callback_result]
+
+
+@pytest.fixture(autouse=True)
+def _unregistered() -> Iterator[None]:
+    """A registration outlives the test that made it; the slot is module state."""
+    yield
+    telemetry._scheduler.clear()
 
 
 def test_an_unregistered_scheduler_reader_observes_nothing(

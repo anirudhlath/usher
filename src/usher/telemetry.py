@@ -317,8 +317,12 @@ class _ReaderSlot[T]:
     def set(self, read: Callable[[], T]) -> None:
         self._read = read
 
+    def clear(self) -> None:
+        self._read = None
+
     def observe(self, build: Callable[[T], Iterable[Observation]]) -> Iterable[Observation]:
-        return [] if self._read is None else list(build(self._read()))
+        read = self._read
+        return [] if read is None else list(build(read()))
 
 
 @dataclass(frozen=True, slots=True)
