@@ -499,9 +499,12 @@ name here:
   250-request run** and `.claude/rules/ports-and-error-taxonomy.md` records
   130,750 requests to two upstreams with no 429 at all, so it is a live defect
   nobody has met. It does not move the answer below — a 429 the route mishandles
-  is still not a 502 anybody is asking for a member for. **Owned by
-  [PRD 09](../09-roadmap.md)'s carried debt**, which is where a finding gets a
-  schedule rather than only a neighbour.
+  is still not a 502 anybody is asking for a member for. ✅ **Closed by the
+  polish milestone's 1F, and with no member minted**: both families are answered
+  by an exception handler on the app (`api/errors.py`) as
+  `503 source_unavailable`, which is this table's existing entry for a transient
+  upstream. A handler rather than a fourth `except`, because a per-route ladder
+  is what left them outside the envelope in the first place.
 
   **F3 changed no behaviour, and the reason it gave first was the weaker one.**
   It is *not* the fan-out: the 429 half needs **no vocabulary decision at all**

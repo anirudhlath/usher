@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from usher.api.console import mount_console
 from usher.api.errors import (
     http_error_as_a_problem_document,
+    port_error_as_a_problem_document,
     problem_responses_carry_their_media_type,
     validation_error_without_the_request_body,
 )
@@ -49,6 +50,7 @@ from usher.composition import (
 )
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
+from usher.ports.errors import PortAuthFailed, PortRateLimited
 from usher.services.events import InMemoryEventBus
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
@@ -308,6 +310,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # app for the reason above: a route added later inherits the shape
     # instead of having to remember it.
     app.add_exception_handler(StarletteHTTPException, http_error_as_a_problem_document)
+    # The two port failures no route can answer better than the app can.
+    # Registered by exact type rather than on `UsherPortError`, because
+    # `PortUnavailable` genuinely means different things to different routes --
+    # `routers/rows.py` wants the 500 it gets today. See `api/errors.py`.
+    app.add_exception_handler(PortRateLimited, port_error_as_a_problem_document)
+    app.add_exception_handler(PortAuthFailed, port_error_as_a_problem_document)
     app.include_router(bootstrap.router)
     app.include_router(browse.router)
     app.include_router(collections.router)

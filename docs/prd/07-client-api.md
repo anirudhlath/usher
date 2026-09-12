@@ -1511,13 +1511,18 @@ URL it can re-ask for rather than guessing the ladder. It is built from the
 route table and the *clamped* rung, never from the request's own path, so no
 byte a client sent reaches a response header.
 
-**Four failures and each is a problem document.** A missing row is
+**Six failures and each is a problem document.** A missing row is
 `404 not_found`; **artwork this deployment declines to carry — the SVG logos
 above — is the same `404`**, because the provider answered correctly and a
 client owes it the same fallback it renders for a title with no logo. A CDN
 that did not answer is `503 source_unavailable` with `Retry-After`; a CDN that
-answered something else unusable is the same code without it. [08](08-operations.md)'s
-degradation table carries all four with the reason the fourth is not a 502:
+answered something else unusable is the same code without it. A CDN that asked
+to be backed off is the same code with the **upstream's own** `Retry-After`,
+and a CDN that refused this server's credentials is the same code with none —
+those two are answered by an exception handler on the app rather than by this
+route, so every route that can reach an upstream gets them.
+[08](08-operations.md)'s degradation table carries all six with the reason the
+fourth is not a 502:
 [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
 closed vocabulary has no member for one, and C5 asked rather than minting.
 

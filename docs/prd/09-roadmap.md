@@ -1262,8 +1262,15 @@ suspicion.
   by an observation, and the honest closing note names which of the two the
   reader is getting** — is in
   `.claude/rules/ports-and-error-taxonomy.md`.
-- 🔴 **`GET /images/{image_id}` catches two of the four families
-  `port_error_for` returns, so a CDN 429 or 401/403 leaves the RFC 9457 envelope
+- ✅ **Closed by the polish milestone's 1F: `PortRateLimited` and
+  `PortAuthFailed` are answered by an exception handler registered on the app
+  (`api/errors.py`), so every route gets the envelope rather than the route that
+  happened to raise.** Both are `503 source_unavailable`, the rate limit
+  carrying the upstream's own `Retry-After` and the refused credential carrying
+  none; no `ProblemCode` was minted. The finding, left standing because its
+  transferable half is not about images:
+  🔴 **`GET /images/{image_id}` caught two of the four families
+  `port_error_for` returns, so a CDN 429 or 401/403 left the RFC 9457 envelope
   as a bare `500 text/plain`** — found by M10's F3 on 2026-08-20 while measuring
   something else, and confirmed independently in review. `port_error_for` answers
   429 with `PortRateLimited` and 401/403 with `PortAuthFailed`; **neither
