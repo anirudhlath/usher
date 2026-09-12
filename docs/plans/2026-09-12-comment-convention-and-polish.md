@@ -59,7 +59,7 @@ independently by three agents each, the third by two; they lead the list.
 
 ### Converged
 
-1. `telemetry.py:539` — the observable-gauge template is a fifth verbatim copy
+1. ✅ `telemetry.py:539` — the observable-gauge template is a fifth verbatim copy
    (`:329`, `:432`, `:504`, `:652`). One `register_gauge` helper.
 2. `db/repositories/backup.py:690-949` — seven per-row merge loops: one round
    trip per row (~14,259) and the SQL string plus its `TextClause` rebuilt
@@ -132,11 +132,11 @@ independently by three agents each, the third by two; they lead the list.
     free-text column read back by substring. An `error_code` column.
 31. `services/similar.py:800` — `ScheduledJob` has no "declined" outcome, so a
     refusal counts as work, pollutes the duration histogram and never backs off.
-32. `domain/title.py:111` — `allow_inf_nan=False` on one field; belongs on
+32. ✅ `domain/title.py:111` — `allow_inf_nan=False` on one field; belongs on
     `DomainModel.model_config`, which closes three more.
 33. `api/routers/images.py:284` — the port-error mapping is a per-route ladder,
     so `PortRateLimited` and `PortAuthFailed` escape as bare `500 text/plain`.
-34. `composition.py:1029,1066` — two scope factories differing only in whether
+34. ✅ `composition.py:1029,1066` — two scope factories differing only in whether
     they commit, stated only in prose.
 35. `services/scheduler.py:732` — the retention drain's termination is
     guaranteed by a `Settings` validator two layers away.
