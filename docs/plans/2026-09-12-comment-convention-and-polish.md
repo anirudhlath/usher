@@ -1,8 +1,13 @@
 # Comment convention, and the polish pass that adopts it
 
-Two stages, both landing in PR #44. Stage 1 applies the `/simplify` findings
-while the explanatory prose that justifies the current shapes is still present.
-Stage 2 replaces that prose with a conventional one.
+Four stages, all landing in PR #44, in this order. The order is the point: each
+stage reads rationale that the next one deletes.
+
+1. Apply the `/simplify` findings, while the prose explaining why the code is
+   shaped this way is still there to read.
+2. Cut code prose to the convention.
+3. Delete `docs/prd/decisions/`.
+4. Cut the PRD to user-facing behaviour.
 
 ## Why
 
@@ -15,28 +20,27 @@ docstrings are the design record"). Docstrings became the uncapped destination.
 
 The register that results is history, not documentation: `services/scheduler.py`
 carries 38 comment lines on `RETENTION_PERIOD = timedelta(days=1)`, including a
-dated correction of the comment's own prior claim. `CLAUDE.md` already forbids
-exactly this, but only for `.claude/rules/`.
+dated correction of the comment's own prior claim.
 
-## The convention (ADR-0048)
+## The convention
 
-Adopted from the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
+From the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
 and [PEP 257](https://peps.python.org/pep-0257/). Google's rule is the one that
 bites: *"Never describe the code."*
 
 | subject | rule |
 |---|---|
-| Module docstring | One-line summary, then at most a short paragraph. ≤ 10 lines. |
+| Module docstring | One-line summary. ≤ 3 lines. |
 | Function/class docstring | Enough to write a call without reading the body. Args/Returns/Raises only when a caller needs them. ≤ 20 lines. |
 | Contiguous `#` block | ≤ 5 lines. Explains why, never what. |
-| Design rationale | Lives in `docs/prd/decisions/`. A docstring links to the ADR; it does not inline it. |
-| Forbidden | Dates, row counts, measurement narratives, `🔴` markers, corrections of prior claims, refutations, commit SHAs. Git holds these. |
+| Forbidden | Dates, row counts, measurement narratives, `🔴` markers, corrections of prior claims, refutations, commit SHAs, alternatives considered, "how we got here". |
+| Rationale | Not kept. A rule that must survive is a bare line in `.claude/rules/`, with no justification attached. |
 
-No file-wide ratio cap. A `ports/` ABC is legitimately docstring-dense and that
-is correct.
+No file-wide ratio cap: a `ports/` ABC is legitimately docstring-dense.
 
-ADR-0048 supersedes the docstring-as-design-record delegation. The four rules
-files that point at docstrings are repointed at ADRs in the same commit.
+**The convention is not written down as a document.** It is the hook plus the
+ruff config. A prose document describing a prose limit is the failure mode this
+plan exists to end.
 
 ## Enforcement
 
@@ -44,9 +48,9 @@ files that point at docstrings are repointed at ADRs in the same commit.
 custom code. Currently `["E","F","I","UP","B","SIM","RUF","S"]`.
 
 **`.claude/hooks/guard-prose.sh`**, a fourth hook, `PreToolUse` on `Edit|Write`,
-enforcing the length caps and the forbidden register. It is a **ratchet**: an
-edit that leaves a file over a cap is refused only if it made the file worse.
-Without that, the hook refuses the 317 files stage 2 exists to fix.
+enforcing the caps and the forbidden register. It is a **ratchet**: an edit that
+leaves a file over a cap is refused only if it made the file worse. Without
+that, the hook refuses the 317 files stage 2 exists to fix.
 
 ## Stage 1 — the `/simplify` findings
 
@@ -62,20 +66,19 @@ independently by three agents each, the third by two; they lead the list.
    inside each loop. Set-based `unnest` statements, hoisted constants, one
    helper for what remains.
 3. `scripts/measure_*.py` — the `main()` bar/secrets/redaction preamble is four
-   copies and has drifted: three of them redact `str(exc)` where the original
-   redacts `format_exc()`, losing the traceback. One `run_measurement`.
+   copies and has drifted: three redact `str(exc)` where the original redacts
+   `format_exc()`, losing the traceback. One `run_measurement`.
 
 ### Reuse
 
 4. `services/backup.py:276` — third hand-rolled atomic scratch-write, missing
-   the `fsync` the other two argue for, PID suffix where they use `uuid4`.
+   the `fsync` the other two take, PID suffix where they use `uuid4`.
 5. `services/restore.py:358` — damaged-gzip exception set, second spelling.
 6. `scripts/measure_source_lane.py:471,694` — quiet-host check, fourth copy,
    missing the settle sleep the other three take.
 7. `scripts/measure_source_lane.py:628` — `Timing` → dict hand-typed; three
    sites want `dataclasses.asdict`.
-8. `scripts/*` — `build_session(...)` triplicated with its placeholder
-   credentials.
+8. `scripts/*` — `build_session(...)` triplicated with placeholder credentials.
 9. `tests/integration/` — `_column_set`/`_index_set` verbatim copies; 26 copies
    of the `sessions` fixture; `_scratch`/`_drop`; the Grafana panel walk ×3; the
    CLI dispatch test ×4 and its env helper ×5.
@@ -120,7 +123,7 @@ independently by three agents each, the third by two; they lead the list.
 ### Altitude
 
 28. `cli.py:737` — the `usher work` daemon is a hand-copied
-    `LaneSupervisor._run_worker`, and the guard is an AST test asserting the two
+    `LaneSupervisor._run_worker`, guarded by an AST test asserting the two
     copies still look alike. One loop in `services/jobs.py`.
 29. `config.py:751` — `USHER_SEARCH_SUGGEST_ANALYTICS` is a knob over a
     synchronous write on the request path, shipped `false`, so the milestone's
@@ -138,34 +141,68 @@ independently by three agents each, the third by two; they lead the list.
 35. `services/scheduler.py:732` — the retention drain's termination is
     guaranteed by a `Settings` validator two layers away.
 
-Items 29, 30, 31 and 33 change behaviour and are out of `/simplify`'s stated
-remit. They are included because the standing rule here is that every reviewer
-finding gets fixed. Each needs a failing test first.
+Items 29, 30, 31 and 33 change behaviour and are outside `/simplify`'s remit.
+They are included because every reviewer finding gets fixed here. Each needs a
+failing test first.
 
-## Stage 2 — the rewrite
+## Stage 2 — code prose
 
-692 files, staged `src/usher` → `scripts` → `tests`, one agent per directory
-slice in its own worktree under `~/code/.worktrees/usher-m10/<slice>/`, merged
-`--no-ff` with the gate green after each merge — the shape M10 already uses.
+692 files, staged `src/usher` → `scripts` → `tests`, one agent per slice in its
+own worktree under `~/code/.worktrees/usher-m10/<slice>/`, merged `--no-ff` with
+the gate green after each merge.
 
-Before deleting, rationale worth keeping is relocated to an ADR. Prose is
-deleted only when it is history, restates the code, or duplicates an ADR that
-now exists. The rule is not "make it short"; it is "say the thing a caller needs
-and stop".
+Nothing is relocated. Prose is deleted, not moved. Target is the convention
+above, not a percentage.
 
 `pyproject.toml` is in scope: the `extend-exclude` comment is 30 lines and the
 mypy override comment is longer.
 
+## Stage 3 — delete `docs/prd/decisions/`
+
+48 files, 12,378 lines, removed outright. Nothing is folded into `CLAUDE.md`.
+
+Dead pointers to strip: 3 in `CLAUDE.md`, 60 in `.claude/rules/`, 3 in
+`docs/runbooks/`. The 575 in `docs/prd/` and 1,452 in code die with stages 2
+and 4 rather than needing separate edits — of 1,513 ADR citations in
+`src`/`tests`/`scripts`, only **61 are in executable code**; the rest are inside
+prose already being deleted.
+
+Stripping the pointers shortens `CLAUDE.md` and the rules files. It does not add
+to them.
+
+## Stage 4 — the PRD
+
+`docs/prd/` is 12 files and 13,219 lines. Target: a concise statement of
+user-facing behaviour per feature. No rationale, no measurements, no
+alternatives, no implementation notes.
+
+## Open: `docs/plans/`
+
+15 files, **98,172 lines** — larger than the PRD and the decisions directory
+combined, and by category it is pure history. Not yet decided, and it cannot be
+deleted wholesale while M10 is in flight: `2026-08-13-m10-hardening.md` is the
+task index for the work still outstanding (F6, F7, F10, D4–D14, J7, R13), and
+that index is already known-stale.
+
+Recommendation: keep the in-flight M10 plan and this file, delete the twelve
+completed milestone plans (M1–M9, E1, and the two issue plans), ~85,000 lines.
+
 ## Risks
 
-- **Dangling pointers.** Four rules files name docstrings as the design record.
-  Repointing them is part of ADR-0048's commit, not a follow-up — issue #82
-  exists because the last audit did not do this.
-- **Rationale loss.** This prose was written into docstrings, not commit
-  messages, so deletion leaves it recoverable only by pickaxe. Relocation to
-  ADRs is the mitigation and it is the slow part of stage 2.
-- **PR size.** #44 is 68,536 insertions. Stage 2 removes ~70,000–90,000 lines on
-  top. This was raised and accepted; the cost is that no reviewer or review tool
-  will process the diff whole, so per-slice commits have to carry the review.
+- **A failed experiment gets re-run.** ADR-0002 records that the Meilisearch
+  gate was run on 2026-08-03 and failed. Deleting it does not delete the
+  temptation. Same class: "there is no honest conversion between embedding
+  widths" — without it, someone writes a conversion migration and corrupts every
+  vector.
+- **Rules lose their defence.** `abc.ABC` over `Protocol`, `.evolve()` over
+  `model_copy`, UUIDv7 identity and the Emby containment rule all look like
+  mistakes to a competent reader. They survive as bare lines in `.claude/rules/`
+  with nothing behind them, so a challenge to any of them has no answer.
+- Both were raised and accepted. Recorded here because this file is itself
+  scheduled for deletion once M10 closes, which is the appropriate lifetime for
+  the record.
+- **PR size.** #44 is 68,536 insertions; the four stages remove on the order of
+  180,000 lines. No reviewer or review tool will process the diff whole, so
+  per-slice commits have to carry the review.
 - **The gate under load.** `npm run verify` needs `--maxWorkers=3` to be
   trustworthy when agents run concurrently.
