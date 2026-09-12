@@ -259,10 +259,8 @@ def cost_anomaly_sql() -> str:
 
     Exported because `tests/integration/test_cost_anomaly_query.py` executes
     **this** string against a real `pgvector/pgvector:pg17` rather than a
-    transcription of it -- `db/repositories/llm_call.py` exports
-    `_LIST_SINCE_SQL` for the same reason, and its own plan case imports it.
-    A statement measured in one file and shipped from another is a statement
-    whose copy is what stops tracking the original.
+    transcription of it. A statement measured in one file and shipped from
+    another is a statement whose copy is what stops tracking the original.
     """
     rule = _grafana_rule("Cost anomaly")
     queries = [query for query in rule["data"] if query["refId"] == rule["condition"]]

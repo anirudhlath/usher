@@ -1,7 +1,6 @@
 """Ports are ABCs (ADR-0001), not Protocols: an incomplete implementation
 must fail at instantiation, not at the call site."""
 
-import inspect
 from abc import ABC
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -9,7 +8,6 @@ from decimal import Decimal
 from typing import Protocol, get_type_hints
 
 import pytest
-from pydantic import AwareDatetime
 
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.curation import LLMCall
@@ -235,30 +233,15 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
             CuratedRowRepository,
             {"replace_for_user", "list_for_user"},
         ),
-        # M8 Task 10, **updated by M10 rather than deleted**, and the update
-        # is the whole point of the entry. From M8 to M10 this set was
-        # `{"record"}` and the absence of a read was its content: `m08a`
-        # shipped `llm_calls` with its primary key and no other index on the
-        # strength of it. `m10c` then landed `ix_llm_calls_at` and the partial
-        # `ix_llm_calls_generation_id` ahead of any reader, and `list_since`
-        # is what stops those from being `ix_titles_popularity` again.
-        #
-        # `test_the_cost_ledger_has_no_read_method` was the same claim spelled
-        # as its own case and is **deleted in the commit that added the read**
-        # -- it named that deletion as its own exit condition. What that case
-        # contributed beyond this line was a name and a reason rather than a
-        # set, so what replaces it is
-        # `test_the_cost_ledgers_read_answers_a_window_of_the_domain_model`
-        # below: the surface is pinned here, and the *shape* of the method
-        # that closed the gap is pinned there, the way
-        # `test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts`
-        # already pins `record`'s. A guard left standing against a shipped
-        # reader would be a red everybody learns to ignore, which is the
-        # failure `.claude/rules/prd-maintenance.md` records about the PRD
-        # link check.
+        # **An append and no read, and the absence is the entry's content.**
+        # A windowed `list_since` was added in M10 and deleted again once it
+        # was measured to have no caller in `src/`: every spend panel and the
+        # cost-anomaly alert are SQL living in Grafana, so a read here is a
+        # surface maintained for a consumer that never imports it.
+        # `ix_llm_calls_at` answers that alert directly.
         (
             LLMCallRepository,
-            {"record", "list_since"},
+            {"record"},
         ),
     ],
 )
@@ -428,50 +411,6 @@ def test_a_scheduled_job_that_forgets_its_name_cannot_be_instantiated() -> None:
     # the ignore is the record that the type checker agrees.
     with pytest.raises(TypeError, match="name"):
         _Nameless()  # type: ignore[abstract]
-
-
-def test_the_cost_ledgers_read_answers_a_window_of_the_domain_model() -> None:
-    """**What replaces `test_the_cost_ledger_has_no_read_method`**, deleted in
-    the commit that gave this port `list_since`.
-
-    That case asserted the read's *absence* and named its own exit condition:
-    *"Adding `list_since` and the index it needs, in the milestone that adds
-    the panel reading them, is a decision; adding it without deleting this
-    case is a failing test."* M10 is that milestone -- `m10c` shipped
-    `ix_llm_calls_at` and the partial `ix_llm_calls_generation_id`, and the
-    read arrived against them -- so the case retired on the terms it set for
-    itself. The parametrised entry above was **updated** rather than deleted,
-    so the exact abstract set stays pinned and a *third* method still moves it.
-
-    What the deleted case contributed that a set cannot is a name and a
-    reason, and this is that half, pointed at the decision the read actually
-    embodies. Two things are pinned and both are choices a later edit could
-    undo without reading a word of the port's argument:
-
-    - **`Sequence[LLMCall]` out, symmetric with `record()`'s `LLMCall` in.**
-      The tempting alternative is a narrower return -- `(day, model, purpose,
-      sum(cost_usd), ...)` -- which moves the `GROUP BY` that decides whether a
-      retried generation is one night's spend or two into a repository, where
-      the panel author reading the number cannot see it.
-    - **`until` is optional and keyword-only.** Optional because an unbounded
-      window is the ordinary call and `now()` is the wrong default for a
-      column the caller timestamps; keyword-only because two adjacent
-      `AwareDatetime` parameters are two chances to swap the bounds and still
-      get a well-formed, empty answer.
-
-    Asserted on the annotations rather than on the parameter count, for
-    `test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts`'
-    reason: a parts-shaped `list_since(**window: Any)` has one parameter too.
-    """
-    hints = get_type_hints(LLMCallRepository.list_since)
-    assert hints == {
-        "since": AwareDatetime,
-        "until": AwareDatetime | None,
-        "return": Sequence[LLMCall],
-    }
-    parameters = inspect.signature(LLMCallRepository.list_since).parameters
-    assert parameters["until"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert parameters["until"].default is None
 
 
 def test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts() -> None:

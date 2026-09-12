@@ -1,23 +1,15 @@
 """Behaviour every `LLMCallRepository` implementation must satisfy.
 
-The port has **an append and one windowed read**, and `record()` is called on
-both the path where a generation worked and the path where it did not -- a
-ledger holding only the successes understates spend by exactly the failures,
-which are the rows an operator most wants to see -- and `ok` is the
-discriminator rather than "the HTTP call returned 200".
+The port is **an append and nothing else**, and `record()` is called on both
+the path where a generation worked and the path where it did not -- a ledger
+holding only the successes understates spend by exactly the failures, which
+are the rows an operator most wants to see -- and `ok` is the discriminator
+rather than "the HTTP call returned 200".
 
-**A write is still observed through an abstract `LLMCallLedger` rather than
-through `list_since`, and M10 made that a choice rather than a necessity.**
-Until this milestone the port had no read at all and the ledger was the only
-way to see anything; `list_since` now exists, and every case below that
-predates it still reads through `LLMCallLedger` on purpose. Two reasons. A
-read observed through itself cannot fail -- a `record()` that dropped
-`generation_id` and a `list_since` that never selected it agree perfectly, and
-the round trip would be green against both. And `list_since` is *windowed and
-ordered*, so it answers a question about a slice; `get(id)` and `count()`
-answer questions about the row and the table, which is what the write cases
-need. The three read cases at the end of this suite are the ones whose subject
-*is* `list_since`, and they are the only ones that call it.
+**A write is observed through an abstract `LLMCallLedger`**, because the port
+offers no read to observe it with and a read added for that purpose could not
+fail: a `record()` that dropped `generation_id` and a read that never selected
+it agree perfectly.
 
 Its `ABC` shape is ADR-0001's argument applied to a test double -- a
 `Protocol` would let one arm drift out of the suite silently.
@@ -36,7 +28,7 @@ the gap hid a live defect for a milestone.
 
 import uuid
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -79,53 +71,6 @@ MEASURED_COSTS = [
     Decimal("1.92"),
     Decimal("0"),
 ]
-
-#: The window `list_since` is asked for, and the four timestamps around it.
-#:
-#: **Every one of these is a literal, and not one is written as `WINDOW_START ±
-#: something`.** A fixture spelled as an offset from the bound it is testing
-#: moves *with* the bound: narrow `>=` to `>` and a row placed at
-#: `WINDOW_START + timedelta(0)` is still computed from whatever the predicate
-#: became, so the case ratifies that *a* bound exists while pinning nothing
-#: about which one. `.claude/rules/mutation-sweeps.md` records three constants
-#: in one milestone lost that way -- `TICKET_TTL_SECONDS`, `CAST_LIMIT` and
-#: `SimilarityService._WEIGHTS`.
-#:
-#: Two of them are deliberately *equal* to a bound rather than near it:
-#: `FIRST_IN_WINDOW` is exactly `WINDOW_START`, which is the only row a `>`
-#: drops, and `AFTER_THE_WINDOW` is exactly `WINDOW_END`, which is the only row
-#: a `<=` keeps. A fixture that placed both an hour clear of their bounds would
-#: be green under either spelling of either comparison.
-WINDOW_START = datetime(2026, 8, 5, 0, 0, tzinfo=UTC)
-WINDOW_END = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
-
-#: A minute before the window opens. The row every `WHERE at >= :since` must
-#: leave behind, and the one an unbounded `SELECT *` returns.
-BEFORE_THE_WINDOW = datetime(2026, 8, 4, 23, 59, tzinfo=UTC)
-
-#: Exactly `WINDOW_START`. `>=` keeps it and `>` does not, and that is the
-#: whole of what separates the two.
-FIRST_IN_WINDOW = WINDOW_START
-
-#: Comfortably inside, so the window has an interior and the case is not two
-#: boundary rows wearing a window's clothes.
-SECOND_IN_WINDOW = datetime(2026, 8, 5, 21, 0, tzinfo=UTC)
-
-#: Exactly `WINDOW_END`. The window is half-open -- `[since, until)` -- so this
-#: row belongs to the *next* window and to no other, which is what keeps a
-#: spend-per-day panel from billing one call to two days.
-AFTER_THE_WINDOW = WINDOW_END
-
-#: How far past `datetime.now(UTC)` the one clock-relative fixture in this
-#: module sits -- `test_a_window_with_no_end_runs_to_the_end_of_the_ledger`'s
-#: row, and nothing else.
-#:
-#: **A day, so that no plausible skew between this process's clock and
-#: Postgres's `now()` can close the gap**, since the row is written here and
-#: the hypothetical `now()` it must outlive would be evaluated on the server.
-#: Seconds or minutes would make the case's verdict a property of two clocks;
-#: a day makes it a property of the statement.
-A_CLEAR_DAY = timedelta(days=1)
 
 
 def llm_call(
@@ -171,11 +116,9 @@ def llm_call(
 class LLMCallLedger(ABC):
     """The stored ledger, read without going through the port.
 
-    Not `LLMCallRepository.list_since`, and not because the port lacks a read
-    any more -- M10 gave it one. This stays an independent observer so that a
-    write case cannot be satisfied by a read with the mirrored defect: a
-    `record()` that dropped `generation_id` and a `list_since` that never
-    selected it round-trip perfectly. See this module's docstring.
+    An independent observer, so a write case cannot be satisfied by a read
+    with the mirrored defect. The port has no read of its own either, which is
+    why the ledger is the only way to see a stored row at all.
 
     **No `user()`, unlike `CuratedRowSeeder`.** That one exists because
     `curated_rows.user_id` is a foreign key on one arm and nothing on the
@@ -505,185 +448,3 @@ class LLMCallRepositoryContract:
         assert raised.value.constraint == "pk_llm_calls"
         assert await ledger.count() == 1
         assert await ledger.get(call.id) == call
-
-    async def test_the_ledger_reads_back_every_attempted_call_in_the_window_including_the_failures(
-        self, repository: LLMCallRepository, ledger: LLMCallLedger
-    ) -> None:
-        """**The read, and the three wrong implementations it rules out**: a
-        window that leaks the rows outside it, a window whose bounds are the
-        wrong comparison, and a read that filters to the calls that *worked*.
-
-        The last one is the expensive one and it is why the failed row here
-        costs money. `02-data-model.md`'s `llm_calls` row: *"a ledger of
-        successes alone understates spend by exactly the failures"*. A
-        `WHERE ok` nobody wrote is the cheapest way to lose that property --
-        it makes the read *look* right on every deployment whose calls all
-        succeed, and wrong by exactly the amount an operator opened the
-        dashboard to see. So the failed row is seeded with a real
-        `cost_usd` and a real `tokens_in`, and its presence is asserted by
-        name rather than only by the whole-list compare.
-
-        **The two in-window rows differ on `generation_id` in the two states
-        that column has**, which is not decoration: `ix_llm_calls_generation_id`
-        is partial (`WHERE generation_id IS NOT NULL`) precisely because
-        query-expansion rows carry `NULL`, and a read that dropped them would
-        return the curation half of the spend while looking complete.
-
-        **The bounds are asserted at the instant, not near it.** `FIRST_IN_
-        WINDOW` *is* `WINDOW_START` and `AFTER_THE_WINDOW` *is* `WINDOW_END`,
-        so narrowing `>=` to `>` loses the first row and widening `<` to `<=`
-        gains the last one -- each a one-row diff on this case's own compare.
-        The premises below state both equalities, because a later edit that
-        moved either timestamp an hour clear of its bound would leave this
-        case green against both mutants and nothing would say so.
-
-        ⚠️ **What this case deliberately cannot see is a dropped `ORDER BY
-        at`.** The four rows are minted in `at` order, so `new_id()`'s UUIDv7
-        makes insertion order, id order and `at` order agree, and an
-        unordered read passes here by accident.
-        `test_the_window_is_returned_in_time_order_rather_than_in_the_order_
-        it_was_written` is the case that separates them, and it carries the
-        premise that makes it able to.
-        """
-        assert FIRST_IN_WINDOW == WINDOW_START, (
-            "the first in-window row must sit exactly on the lower bound, or `>` survives"
-        )
-        assert AFTER_THE_WINDOW == WINDOW_END, (
-            "the trailing row must sit exactly on the upper bound, or `<=` survives"
-        )
-        before = llm_call(generation_id=new_id(), at=BEFORE_THE_WINDOW)
-        worked = llm_call(generation_id=new_id(), at=FIRST_IN_WINDOW)
-        failed = llm_call(
-            generation_id=None,
-            at=SECOND_IN_WINDOW,
-            purpose=LLMPurpose.QUERY_EXPANSION,
-            ok=False,
-            error="the pool validator kept none of the four proposed rows",
-        )
-        after = llm_call(generation_id=new_id(), at=AFTER_THE_WINDOW)
-        seeded = [before, worked, failed, after]
-        assert failed.cost_usd > 0, (
-            "a failed call that cost nothing cannot see a read that filters on `ok`"
-        )
-
-        for call in seeded:
-            await repository.record(call)
-
-        # **The positive control, and it is `count()` rather than
-        # `len(seeded)`.** `seeded` is a list this method just built, so its
-        # length is four whether or not a single row reached the store -- and
-        # against a `record()` that wrote nothing, an empty answer would then
-        # be compared to an empty expectation and the case would pass. Only a
-        # read of the store can say the fixture landed.
-        assert await ledger.count() == 4, "the fixture did not write the four rows it seeded"
-
-        found = await repository.list_since(WINDOW_START, until=WINDOW_END)
-
-        assert list(found) == [worked, failed], (
-            "the window must hold exactly the two calls inside it, in `at` order"
-        )
-        # Named separately from the compare above, because the whole-list
-        # equality fails identically for a leaked row and for a dropped one,
-        # and these two say which.
-        assert failed in found, "the failed call is missing, so the read understates spend"
-        assert before not in found and after not in found, (
-            "the read returned a call from outside the window it was asked for"
-        )
-
-    async def test_the_window_is_returned_in_time_order_rather_than_in_the_order_it_was_written(
-        self, repository: LLMCallRepository, ledger: LLMCallLedger
-    ) -> None:
-        """The wrong implementation this kills: a read with no `ORDER BY at`
-        -- which Postgres answers in whatever order the chosen plan produces,
-        and which the fake answers in insertion order.
-
-        **The premise is the case.** `llm_calls.id` is a UUIDv7 minted by
-        `new_id()`, so ids sort by *mint* time; every other case in this suite
-        builds its rows in the order it wants them back, which makes
-        `ORDER BY id`, `ORDER BY at` and no ordering at all give the identical
-        answer. This repository has paid for that coincidence before -- it is
-        the same accident `test_a_call_that_worked_is_recorded_whole` names
-        for three adjacent integers, one column over. So these three rows are
-        minted in the *reverse* of their `at` order, and
-        `assert minted_order != sorted(minted_order)` refuses to let a later
-        edit quietly restore the agreement.
-
-        `at` is what the panels group on -- spend per day, and a trailing
-        seven-day median -- so an answer in mint order is an answer in the
-        order the *rows were inserted*, which for a redelivered job is not the
-        order the calls happened in at all.
-        """
-        newest = llm_call(generation_id=new_id(), at=datetime(2026, 8, 5, 22, 0, tzinfo=UTC))
-        middle = llm_call(generation_id=new_id(), at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC))
-        oldest = llm_call(generation_id=new_id(), at=datetime(2026, 8, 5, 2, 0, tzinfo=UTC))
-        in_at_order = [oldest, middle, newest]
-        minted_order = [call.id for call in in_at_order]
-        assert minted_order != sorted(minted_order), (
-            "the fixture minted its ids in `at` order, so `ORDER BY id` and no ordering at "
-            "all answer this case correctly and it proves nothing"
-        )
-
-        for call in (newest, middle, oldest):
-            await repository.record(call)
-        assert await ledger.count() == 3, "the fixture did not write the three rows it seeded"
-
-        found = await repository.list_since(WINDOW_START, until=WINDOW_END)
-
-        assert [call.at for call in found] == [oldest.at, middle.at, newest.at]
-        assert list(found) == in_at_order
-
-    async def test_a_window_with_no_end_runs_to_the_end_of_the_ledger(
-        self, repository: LLMCallRepository, ledger: LLMCallLedger
-    ) -> None:
-        """`until` is optional, and this is what its default means.
-
-        The wrong implementation this kills: a read that supplies its own
-        upper bound when the caller gave none -- `until or now()` is the
-        tempting spelling, and it silently drops every row a clock skew or a
-        `at` in the near future puts ahead of the server's idea of now. The
-        ledger records *when the completion happened*, written by the caller
-        rather than by a `server_default`, so "later than now" is a reachable
-        state and not a corrupt one.
-
-        🔴 **Which is why one row here is computed from the clock, and it is
-        the only fixture in this suite that is.** Every other timestamp in this
-        module is a literal, for `mutation-sweeps.md`'s reason: a fixture
-        spelled as an offset from the bound it tests moves *with* the bound.
-        This case tests the absence of a bound nobody wrote, and the bound it
-        would have is `now()` -- so a literal cannot express it. Written with
-        the module's own constants alone, `until or now()` keeps every seeded
-        row (`AFTER_THE_WINDOW` is a date in the past) and the case is green
-        against the exact implementation its first paragraph claims to kill.
-        The premise below reads the row back through the ledger and asserts it
-        really is ahead of the clock, so a later edit replacing it with a
-        literal fails here rather than quietly disarming the case.
-
-        The sibling case pins the closed window; this pins the open one, and
-        the two together are what make `until` a parameter rather than a
-        decoration. A read that ignored `until` entirely would pass here and
-        fail the sibling; one that hardcoded an end would pass the sibling and
-        fail here.
-        """
-        before = llm_call(generation_id=new_id(), at=BEFORE_THE_WINDOW)
-        inside = llm_call(generation_id=new_id(), at=SECOND_IN_WINDOW)
-        after = llm_call(generation_id=new_id(), at=AFTER_THE_WINDOW)
-        ahead_of_the_clock = llm_call(generation_id=None, at=datetime.now(UTC) + A_CLEAR_DAY)
-
-        for call in (before, inside, after, ahead_of_the_clock):
-            await repository.record(call)
-        assert await ledger.count() == 4, "the fixture did not write the four rows it seeded"
-        stored = await ledger.get(ahead_of_the_clock.id)
-        assert stored is not None and stored.at > datetime.now(UTC), (
-            "the row meant to sit ahead of the server's clock does not, as stored, so "
-            "`until or now()` survives this case"
-        )
-
-        found = await repository.list_since(WINDOW_START)
-
-        assert list(found) == [inside, after, ahead_of_the_clock], (
-            "an unbounded window must run past `WINDOW_END` and still start at `since`"
-        )
-        assert ahead_of_the_clock in found, (
-            "the read supplied an upper bound the caller did not, dropping the call "
-            "timestamped ahead of the server's clock"
-        )

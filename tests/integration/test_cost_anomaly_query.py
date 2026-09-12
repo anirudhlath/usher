@@ -12,9 +12,8 @@ relying on at 2 a.m.
 
 **Every case here executes the committed statement**, read out of
 `dashboards/alerts/grafana/usher.yml` by `cost_anomaly_sql()` and never
-retyped -- the shape `db/repositories/llm_call.py` uses for `_LIST_SINCE_SQL`,
-and for the same reason: a statement measured in one file and shipped from
-another is a statement whose copy is what stops tracking the original.
+retyped: a statement measured in one file and shipped from another is a
+statement whose copy is what stops tracking the original.
 
 🔴 **And most of them execute a *planted* variant beside it.** The four
 decisions in this query -- eight calendar days, a median rather than a mean,
@@ -102,8 +101,7 @@ _A_MIDDAY = 12
 #: rows the planner picks `Seq Scan` and is right to -- the relation is a
 #: handful of pages. At 300 it already picks the index, so a case asserting
 #: only the plan's *name* would be **green there**, on a margin of **1.07** --
-#: a tie-break wearing a measurement's clothes, and an even flatter one than
-#: the 1.17 `_SEEDED_LEDGER_ROWS` records for `list_since`. At 1,000 the margin
+#: a tie-break wearing a measurement's clothes. At 1,000 the margin
 #: is still **1.65**, below the 2.0 `A_DECISIVE_MARGIN` demands. 4,000 reads
 #: 4.11, which clears it twice over.
 #:
@@ -665,11 +663,9 @@ async def test_the_windows_lower_bound_is_served_by_the_time_index(
     That migration wrote the DDL out by name and said what it was for:
     *"dashboard 5's 'LLM spend per day and month' and the cost-anomaly alert
     ('daily spend > 3x the trailing 7-day median'), both `WHERE at >=
-    :since`"*. D3 shipped the reader for the first half and
-    `test_the_windowed_read_is_served_by_the_time_index` asserts its plan.
-    This is the second half, and it is the one the index was actually named
-    for -- `list_since` is `src/`'s consumer, but the alert is the query the
-    docstring quotes.
+    :since`"*. **This case is the whole of that justification**: no reader of
+    `llm_calls` exists in `src/`, so the index is defensible only against the
+    statement quoted there, and this is that statement.
 
     🔴 **The seeded size is the assertion's premise**, and
     `_SEEDED_LEDGER_ROWS` carries the measured ladder that picked it. The short

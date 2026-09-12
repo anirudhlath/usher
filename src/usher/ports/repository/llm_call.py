@@ -1,14 +1,9 @@
-"""The LLM cost ledger: a write on every attempted completion, and one
-windowed read for the statement that judges what they cost.
+"""The LLM cost ledger: a write on every attempted completion.
 
-Implemented by
-`usher.db.repositories.llm_call.PostgresLLMCallRepository`.
+Implemented by `usher.db.repositories.llm_call.PostgresLLMCallRepository`.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-
-from pydantic import AwareDatetime
 
 from usher.domain.curation import LLMCall
 
@@ -21,53 +16,25 @@ class LLMCallRepository(ABC):
     """`llm_calls` -- PRD 10's cost ledger, one row per *attempted*
     completion.
 
-    **Two methods: an append and one windowed read, and the read arrived last
-    on purpose.** This port carried no read at all from M8 until M10, and the
-    deferral was a decision with a date on it rather than an oversight. `m08a`
-    shipped this table with its primary key and no other index *on the
-    strength of this port having no read*, and wrote the two indexes it was
-    deferring out as copy-pasteable `CREATE INDEX` statements beside the query
-    each serves; `m10c` then shipped both verbatim, ahead of any reader,
-    because M10 gets one migration and a reader task authoring its own DDL
-    would be a second head. `list_since` is what discharges the rest of it.
-    Until it landed, `ix_llm_calls_at` was an index nothing read -- which is
-    the state `ffc` dropped `ix_titles_popularity` out of, and the state
-    `PushHealth.record_reconnect` left PRD 10's reconnect metric in for a
-    milestone, a dashboard reporting a healthy number about a thing that was
-    never measured.
-
-    🔴 **The caller that justifies the read is in `src/`, and it is not a
-    dashboard.** PRD 10's own first principle
-    (`10-telemetry-and-dashboards.md`, the datasource table: *"What is in the
-    library, what do I watch, what did it cost -- **Postgres**, queried
-    directly by Grafana"*) puts every spend panel on SQL living in the
-    dashboard JSON, so dashboard 5 never calls this method and never will. A
-    read whose only consumer were a Grafana panel would be
-    `ix_titles_popularity` with extra steps: a surface maintained by this
-    codebase for something that does not import it. What this method exists
-    for is M10's **cost-anomaly evaluation**, which is application code that
-    has to answer *"is today's spend more than three times the trailing
-    seven-day median"* against the same rows, and which is the only consumer
-    that makes the index defensible from inside `src/`. Anything that deletes
-    that caller should delete this method with it.
+    **One method, an append, and the absence of a read is the decision.**
+    Every spend panel and the cost-anomaly alert are SQL living in Grafana
+    (PRD 10's datasource table), so nothing in `src/` reads this table and a
+    read added for one would be a surface maintained for a consumer that does
+    not import it. `ix_llm_calls_at` serves that alert rather than a caller
+    here.
 
     **`record()` is called on both paths and `ok` is the discriminator.** A
     ledger holding only the successes understates spend by exactly the
-    failures, which are the rows an operator most wants to see -- and `ok` is
-    not "the HTTP call returned 200" but "this generation produced something",
-    the two being allowed to disagree in exactly one direction (ADR-0028: a
-    call that answered perfectly and validated to zero rows is `ok = false`
-    with a reason).
+    failures -- and `ok` is "this generation produced something" rather than
+    "the HTTP call returned 200" (ADR-0028).
 
     **There is no `user_id` anywhere on this port**, because there is none on
-    the table. Spend is attributed to an outcome by joining `curated_rows` on
-    `generation_id`, which is what PRD 10's dashboard 5 *is*, rather than by
-    denormalising a household onto a cost row.
+    the table: spend is attributed to an outcome by joining `curated_rows` on
+    `generation_id`.
 
-    **Same session ownership as every other repository here: flushes, never
-    commits.** `CurationService` writes the rows and the ledger entry for one
-    generation in one transaction -- that join is dashboard 5 -- so the commit
-    boundary is the caller's.
+    **Flushes, never commits**, like every repository here. `CurationService`
+    writes the rows and the ledger entry for one generation in one
+    transaction, so the commit boundary is the caller's.
     """
 
     @abstractmethod
@@ -167,70 +134,4 @@ class LLMCallRepository(ABC):
         typically already inside an exception handler with curated rows it
         still has to commit, and a poisoned session turns a failed ledger
         write into a lost generation.
-        """
-
-    @abstractmethod
-    async def list_since(
-        self, since: AwareDatetime, *, until: AwareDatetime | None = None
-    ) -> Sequence[LLMCall]:
-        """Every *attempted* completion whose `at` falls in `[since, until)`,
-        oldest first.
-
-        **Returns the domain model, symmetrically with `record()`, and the
-        symmetry is the decision.** The parts-shaped alternative here is not a
-        wider signature but a narrower *return*: a method answering
-        `(day, model, purpose, sum(cost_usd), sum(tokens_in), sum(tokens_out))`
-        instead of rows. That spelling looks cheaper and puts the aggregation
-        inside a repository, which is the one place a panel author cannot read
-        it -- the `GROUP BY` that decides whether a retried generation is one
-        night's spend or two would live in SQL nobody reviews alongside the
-        number it produces. `record()`'s own docstring makes the mirrored
-        argument for the write: the parts version raises the identical
-        `ValidationError` one stack frame deeper, inside a repository, where
-        the caller reading its own failure path cannot see it. Rows out, model
-        in, and the arithmetic stays where somebody can check it.
-
-        **Half-open, `[since, until)`, and both halves are load-bearing.** A
-        closed upper bound puts a call landing exactly on midnight into two
-        adjacent days, so a spend-per-day series billing consecutive windows
-        double-counts precisely the boundary rows -- and those are the rows a
-        nightly curation run at a fixed hour produces most of. `since` is
-        inclusive for the mirrored reason: the window that starts where the
-        last one ended must not drop the instant between them.
-
-        **`until=None` is unbounded, never `now()`.** `at` is when the
-        completion happened, written by the caller -- `llm_calls.at` carries no
-        `server_default` for exactly that reason -- so a row timestamped ahead
-        of the server's clock is a reachable state rather than a corrupt one,
-        and a default upper bound would silently discard it.
-
-        **Every attempt, and never a `WHERE ok`.** The read is as wide as the
-        write, or the ledger it reads back is not the ledger `record()` wrote:
-        a call that answered perfectly and validated to zero rows
-        ([ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md))
-        really did burn its tokens and really was billed for them. Filtering to
-        the successes understates spend by exactly the failures, which are the
-        calls an operator most wants to see, and it does it invisibly on every
-        deployment whose calls happen to succeed.
-
-        **Ordered by `at`, declared rather than inherited.** Postgres returns
-        whatever the chosen plan produces, and `llm_calls.id` being a UUIDv7
-        makes id order agree with `at` order on every fixture that mints its
-        rows in the order it wants them back -- so an implementation with no
-        `ORDER BY` looks correct until the day a redelivered job records an
-        older call after a newer one.
-
-        **No `purpose` or `model` filter, and no `limit`.** Neither column is
-        indexed and both are refused deliberately (`m08a`: a deployment holds
-        one or two values of each, so a btree over either is a structure with
-        two entries). The caller groups in Python over a window it already
-        bounded; a predicate here would be a sequential scan wearing a
-        parameter. The bound on the answer is the window, which is the same
-        bound `ix_llm_calls_at` serves.
-
-        Raises nothing. There is no scope to refuse, no second source for any
-        column to disagree with, and a window matching no rows is an empty
-        sequence rather than an error -- a night on which nothing was
-        generated is a real answer and the one a cost alert must be able to
-        read.
         """
