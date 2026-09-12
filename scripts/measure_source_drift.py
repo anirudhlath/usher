@@ -67,7 +67,6 @@ the log.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import os
 import sys
 import time
@@ -82,10 +81,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.measure_source_latency import (
     Budget,
     _iso,
-    _sha256,
     build_session,
-    read_secrets,
     redact,
+    run_measurement,
 )
 
 from usher.adapters.emby.adapter import ITEM_TYPES
@@ -266,20 +264,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not args.secrets:
-        raise SystemExit("--secrets or USHER_EMBY_SECRETS is required")
-    if args.bar.exists():
-        print(f"bar: {args.bar} sha256 {_sha256(args.bar)}")
-    else:
-        raise SystemExit(f"the pre-registered bar {args.bar} does not exist; write it first")
-    secrets = read_secrets(Path(args.secrets))
-    try:
-        return asyncio.run(_run(args, secrets))
-    except SystemExit:
-        raise
-    except BaseException as exc:
-        print(redact(f"{type(exc).__name__}: {exc}", secrets))
-        return 1
+    return run_measurement(
+        lambda secrets: _run(args, secrets), bar=args.bar, secrets_path=args.secrets
+    )
 
 
 if __name__ == "__main__":

@@ -123,13 +123,12 @@ from scripts.measure_source_latency import (
     Timing,
     _iso,
     _item_ids,
-    _sha256,
     _table,
     build_session,
     get_item_probe,
     issue,
-    read_secrets,
     redact,
+    run_measurement,
     summarise,
     verify_probe,
 )
@@ -710,21 +709,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not args.secrets:
-        raise SystemExit("--secrets or USHER_EMBY_SECRETS is required")
-    if args.bar.exists():
-        print(f"bar: {args.bar} sha256 {_sha256(args.bar)}")
-    else:
-        raise SystemExit(f"the pre-registered bar {args.bar} does not exist; write it first")
-    secrets = read_secrets(Path(args.secrets))
     started = time.time()
-    try:
-        code = asyncio.run(_run(args, secrets))
-    except SystemExit:
-        raise
-    except BaseException as exc:
-        print(redact(f"{type(exc).__name__}: {exc}", secrets))
-        return 1
+    code = run_measurement(
+        lambda secrets: _run(args, secrets), bar=args.bar, secrets_path=args.secrets
+    )
     print(f"elapsed {time.time() - started:.1f}s")
     return code
 

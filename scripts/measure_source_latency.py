@@ -93,7 +93,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -662,6 +662,45 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def run_measurement(
+    run: Callable[[Mapping[str, str]], Coroutine[Any, Any, int]],
+    *,
+    bar: str | Path,
+    secrets_path: str | Path | None,
+) -> int:
+    """The bar, the secrets and the redacting handler every live arm shares.
+
+    A missing bar is fatal rather than a `MISSING` line: a bar's only property
+    is that it provably predates the numbers, and a run that cannot show one
+    has no way to acquire that property afterwards.
+
+    `logger.remove()` because loguru's default handler runs with
+    `diagnose=True`, which renders every name on the frame of a raised
+    exception -- including the payload dict `EmbySession._send` goes to such
+    lengths to keep off its own awaiting line. `create_app` installs
+    `configure_logging`; a bare script does not.
+
+    The handler prints the **traceback**, redacted. `str(exc)` alone loses
+    where the run died, and an unredacted traceback prints a frame carrying
+    the token; `redact` over `format_exc` keeps both properties.
+    """
+    logger.remove()
+    if not secrets_path:
+        raise SystemExit("--secrets (or USHER_EMBY_SECRETS) is required; there is no default")
+    bar = Path(bar)
+    if not bar.exists():
+        raise SystemExit(f"the pre-registered bar {bar} does not exist; refusing to measure")
+    print(f"bar: {bar} sha256 {_sha256(bar)}")
+    secrets = read_secrets(Path(secrets_path))
+    try:
+        return asyncio.run(run(secrets))
+    except SystemExit:
+        raise
+    except BaseException:
+        print(f"FAILED:\n{redact(traceback.format_exc(), secrets)}")
+        return 1
+
+
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).strftime("%H:%M:%SZ")
 
@@ -1064,39 +1103,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-
-    # **loguru's default handler runs with `diagnose=True`, which renders the
-    # value of every name on the frame of a raised exception -- including the
-    # `payload` dict `EmbySession._send` goes to such lengths to keep off its
-    # own awaiting line (`session.py`, the long comment there). `create_app`
-    # installs `configure_logging`; a bare script does not, so for a live run
-    # against a real household the default handler is what is listening.
-    # Removed rather than reconfigured: this script prints its own output and
-    # has no use for a log line it did not write.
-    logger.remove()
-
-    bar = Path(args.bar)
-    if not bar.exists():
-        # **Fatal, not a `MISSING` line and carry on.** The only property a
-        # pre-registered bar has is that it provably predates the numbers, and
-        # a run that cannot show its bar has no way to acquire that property
-        # afterwards. Printing `sha256=MISSING` and measuring anyway produces
-        # numbers nobody can ever score.
-        raise SystemExit(f"the pre-registered bar {bar} does not exist; refusing to measure")
-    print(f"bar: {bar} sha256={_sha256(bar)}")
-    if not args.secrets:
-        raise SystemExit("--secrets (or USHER_EMBY_SECRETS) is required; there is no default")
-    secrets = read_secrets(Path(args.secrets))
-    try:
-        return asyncio.run(_run(args, secrets))
-    except Exception:
-        # **The traceback, redacted -- not `str(exc)` alone.** Dropping it
-        # loses where the failure happened, and keeping it raw would print a
-        # frame carrying the token. `redact` over the formatted traceback
-        # keeps both properties; the test drives this path with a known fake
-        # secret and asserts the value is gone and the placeholder is there.
-        print(f"FAILED:\n{redact(traceback.format_exc(), secrets)}")
-        return 1
+    return run_measurement(
+        lambda secrets: _run(args, secrets), bar=args.bar, secrets_path=args.secrets
+    )
 
 
 if __name__ == "__main__":
