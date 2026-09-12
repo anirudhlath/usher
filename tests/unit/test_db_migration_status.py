@@ -15,7 +15,7 @@ def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
     fails loudly here instead of silently changing what "the" expected head
     means.
     """
-    assert code_head_revision() == "m10c"
+    assert code_head_revision() == "m10d"
 
 
 #: The chain three documents spell out, in the order they spell it: every
@@ -38,6 +38,7 @@ _REPOINTING_CHAIN = (
     "m10a",
     "m10b",
     "m10c",
+    "m10d",
 )
 
 #: The English cardinal `.claude/rules/db-and-sql.md` and
