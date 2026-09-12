@@ -1408,9 +1408,11 @@ async def run(args: argparse.Namespace) -> None:
         raise
     finally:
         await engine.dispose()
-    # Sampled after the engine is disposed and every backend is gone, so the
-    # "after" reading is taken under the same condition as the "before" one:
-    # this harness idle, and whatever else is on the box still running.
+    # Not `quiet_closing`: this one persists raw snapshots into `log.load` and
+    # *warns* rather than gating, neither of which a bool carries. Sampled
+    # after the engine is disposed, so the "after" reading is taken under the
+    # same condition as the "before" one: this harness idle, and whatever else
+    # is on the box still running.
     time.sleep(_CPU_SETTLE_SECONDS)
     log.load["after"] = _load_snapshot()
     log.verdicts.update(_verdicts(log))
