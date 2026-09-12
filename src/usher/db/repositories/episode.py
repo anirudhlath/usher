@@ -177,13 +177,17 @@ JOIN seasons sn ON sn.title_id = p.pt AND sn.season_number = p.ps
 # it is reading a backup artifact: `TitleReference`'s ladder and the two
 # numbers, in **one** statement. `usher.db.backup_identity` argues for the
 # ladder and `PostgresTitleRepository._RESOLVE_NATURAL_KEYS` is the title-only
-# half of this join, spelled identically so the two cannot drift on
-# precedence.
+# half of it, spelled identically so the two cannot drift on precedence.
 #
-# **`WITH ORDINALITY` for the same reason it is there**: two rungs of the
-# probe are nullable by construction, and a join back on a nullable probe
-# answers NULL rather than false. The ordinal is the reference's position in
-# the caller's own deduplicated list.
+# **The rungs are scalar subqueries inside `COALESCE` rather than three
+# `LEFT JOIN`s**, for that statement's reason: `COALESCE` stops at its first
+# non-null argument, so a reference that resolves on `imdb_id` never probes
+# the other two indexes.
+#
+# `WITH ORDINALITY` for the same reason it is there: two rungs of the probe
+# are nullable by construction, and a join back on a nullable probe answers
+# NULL rather than false. The ordinal is the reference's position in the
+# caller's own deduplicated list.
 #
 # The final `JOIN` is inner rather than left, which is what makes "the series
 # did not resolve" and "the series resolved and has no such episode" one
@@ -199,11 +203,13 @@ FROM unnest(
     CAST(:season_numbers AS integer[]),
     CAST(:episode_numbers AS integer[])
 ) WITH ORDINALITY AS p(imdb_id, kind, tmdb_id, raw_id, season_number, episode_number, ord)
-LEFT JOIN titles AS by_imdb ON by_imdb.imdb_id = p.imdb_id
-LEFT JOIN titles AS by_tmdb ON by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind
-LEFT JOIN titles AS by_raw ON by_raw.id = p.raw_id
 JOIN episodes e
-  ON e.title_id = COALESCE(by_imdb.id, by_tmdb.id, by_raw.id)
+  ON e.title_id = COALESCE(
+         (SELECT by_imdb.id FROM titles AS by_imdb WHERE by_imdb.imdb_id = p.imdb_id),
+         (SELECT by_tmdb.id FROM titles AS by_tmdb
+           WHERE by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind),
+         (SELECT by_raw.id FROM titles AS by_raw WHERE by_raw.id = p.raw_id)
+     )
  AND e.season_number = p.season_number
  AND e.episode_number = p.episode_number
 """

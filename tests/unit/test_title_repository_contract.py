@@ -161,7 +161,7 @@ class TestFakeTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
 class TestFakeTitleRepositoryNaturalKeys(TitleRepositoryNaturalKeyContract):
     """`resolve_natural_keys` against the fake. The Postgres half is
     `tests/integration/test_title_repository.py`, and it is the one that can
-    fail on `WITH ORDINALITY`, on the three `LEFT JOIN`s' precedence, and on
+    fail on `WITH ORDINALITY`, on the three rungs' `COALESCE` precedence, and on
     the "one statement per call" promise -- a dict has no round trip to
     count."""
 

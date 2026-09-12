@@ -115,21 +115,19 @@ from usher.ports.repository import (
 
 # The natural-key ladder as one statement: `imdb_id`, then `(kind, tmdb_id)`,
 # then the raw id, first hit wins. `usher.db.backup_identity` argues for the
-# order; this is where it is spelled against Postgres, and the fake's
-# `resolve_title_reference` is where it is spelled in Python.
+# order; the fake's `resolve_title_reference` is the same ladder in Python.
 #
-# **`WITH ORDINALITY`, not a join back on the probe values.** Two rungs of the
-# probe are nullable by construction -- 980,176 of the live catalog's titles
-# carry no `tmdb_id` and 72 carry no `imdb_id` -- and a join keyed on a
-# nullable probe answers NULL rather than false, which is exactly the
-# three-valued trap ADR-0034 was corrected over one read down. The ordinal is
-# the row's position in the caller's own list and cannot be null.
+# `WITH ORDINALITY` rather than a join back on the probe values: two rungs of
+# the probe are nullable by construction, and a join keyed on a nullable probe
+# answers NULL rather than false. An ordinal cannot be null.
 #
-# **Three `LEFT JOIN`s, not three statements and not a `UNION`.** Each is an
-# index probe -- `ix_titles_imdb_id`, `ix_titles_tmdb_id_kind`, `pk_titles` --
-# and `COALESCE` is what makes the ladder's precedence a property of the
-# statement rather than of the order a caller happened to iterate in. A
-# `UNION` would answer the set and lose which rung won, so a reference whose
+# **Scalar subqueries inside `COALESCE`, not three `LEFT JOIN`s.** `COALESCE`
+# does not evaluate the arguments after its first non-null one, so a reference
+# that hits `imdb_id` never probes the other two indexes; the joins paid for
+# all three on every row. Each rung stays single-valued because each of
+# `ix_titles_imdb_id`, `ix_titles_tmdb_id_kind` and `pk_titles` is unique.
+#
+# A `UNION` would answer the set and lose which rung won, so a reference whose
 # `imdb_id` names a merged row and whose raw id names the loser would resolve
 # to whichever Postgres returned first.
 #
@@ -139,16 +137,18 @@ from usher.ports.repository import (
 # storage identifier, never the member's `.name`.
 _RESOLVE_NATURAL_KEYS = """
 SELECT p.ord AS ord,
-       COALESCE(by_imdb.id, by_tmdb.id, by_raw.id) AS id
+       COALESCE(
+           (SELECT by_imdb.id FROM titles AS by_imdb WHERE by_imdb.imdb_id = p.imdb_id),
+           (SELECT by_tmdb.id FROM titles AS by_tmdb
+             WHERE by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind),
+           (SELECT by_raw.id FROM titles AS by_raw WHERE by_raw.id = p.raw_id)
+       ) AS id
 FROM unnest(
     CAST(:imdb_ids AS text[]),
     CAST(:kinds AS text[]),
     CAST(:tmdb_ids AS integer[]),
     CAST(:raw_ids AS uuid[])
 ) WITH ORDINALITY AS p(imdb_id, kind, tmdb_id, raw_id, ord)
-LEFT JOIN titles AS by_imdb ON by_imdb.imdb_id = p.imdb_id
-LEFT JOIN titles AS by_tmdb ON by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind
-LEFT JOIN titles AS by_raw ON by_raw.id = p.raw_id
 """
 
 
@@ -635,7 +635,7 @@ class PostgresTitleRepository(TitleRepository):
                 )
             ).all()
         # A reference the target does not hold comes back with a NULL `id`
-        # (three `LEFT JOIN`s and a `COALESCE`), and is dropped rather than
+        # (every rung of the `COALESCE` answered nothing), and is dropped rather than
         # mapped to `None`: the port says absent means "not held", and
         # `usher.db.backup_identity.resolve_titles` is what turns that into a
         # named refusal a caller can count.
