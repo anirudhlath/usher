@@ -93,7 +93,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -801,50 +801,22 @@ async def _run(
     args: argparse.Namespace,
     secrets: Mapping[str, str],
     *,
-    plan: Callable[..., list[Probe]] = plan_probes,
-    runner: Callable[..., Awaitable[None]] = run_probes,
-    warmer: Callable[..., Awaitable[int]] = warm_up,
     client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     provider_factory: Callable[..., MeterProvider] = build_meter_provider,
 ) -> int:
-    """The whole run, with the three things a second arm must replace injected.
+    """The whole run, against the two collaborators a test must replace.
 
-    **`plan`, `runner` and `warmer` are composition seams, not test seams**, and
-    they exist because M10's S7 is invited to build a *concurrency* arm on this
-    harness. A concurrency arm replaces exactly those three -- a different probe
-    plan, a loop with N in flight, and possibly a different warm-up -- and
-    reuses everything else here: the quiet check, `_item_ids`, the budget, the
-    session and its token swap, `summarise`/`_table`, `--timings-out`, the
-    replay and `read_back`. Without the seams that reuse is a fork, and a fork
-    is how two harnesses come to disagree about what a request costs.
-    `--bar`, `--source-label` and `--service-name` are arguments for the same
-    reason: they were S1 identities at module scope.
+    `--budget 0` is enforced *here* rather than in `run_probes`: by the time a
+    probe loop is reached the warm-ups have already gone to the operator's
+    server, so a guard down there is unreachable in production.
 
-    ⚠️ **`--budget`'s default is S1's share of Group S's ceiling, not a
-    property of this file.** A second arm passes its own, and there is still no
-    shared ledger across S1/S7/S8/S11 -- each declares and each is trusted.
-    Named here rather than discovered by whoever spends it twice.
+    `client_factory` is what lets a test drive this function against a stub
+    transport and assert on the wire; `provider_factory` lets it run the real
+    loop without a `PeriodicExportingMetricReader` opening a gRPC channel.
 
-    `--budget 0` is enforced *here*: by the time `runner` is reached the
-    warm-ups have already gone to the operator's server, so a guard down there
-    is unreachable in production. `client_factory` is what lets a test drive
-    *this* function against a stub transport and assert on the wire, and
-    `provider_factory` lets it run the real loop without a
-    `PeriodicExportingMetricReader` opening a gRPC channel.
-
-    **Three spellings of the dry-run defect, measured rather than described,
-    because two earlier versions of this docstring asserted one spelling's
-    behaviour for all of them:**
-
-    * this early return moved below the **warm-ups**, alone -> **0** requests
-      on the wire and an **uncaught `BudgetExceeded`**; the case dies there,
-      before it reaches its own assertions.
-    * the same, plus `Budget.spend`'s "0 means unlimited" idiom -> **4**
-      requests on somebody else's Emby, and it returns 0.
-    * this early return moved below the **client construction** -- literally
-      the shape this harness shipped before the guard was hoisted -> **0**
-      requests, but a client is built. This is the plant `built == []` earns
-      its place against, and `return 1` here is what `code == 0` earns its.
+    ⚠️ `--budget`'s default is S1's share of Group S's ceiling, not a property
+    of this file. There is no shared ledger across the group -- each arm
+    declares its own and each is trusted -- so a second arm passes its own.
     """
     # The import is inside the function on purpose: `_run` reads these three
     # names at *call* time, so a test can `monkeypatch.setattr` the module and
@@ -900,17 +872,17 @@ async def _run(
         user_id=secrets["emby_user_id"],
     )
     try:
-        total_items = await warmer(
+        total_items = await warm_up(
             session, user_id=secrets["emby_user_id"], item_ids=item_ids, into=warmups
         )
-        probes = plan(
+        probes = plan_probes(
             user_id=secrets["emby_user_id"],
             item_ids=item_ids,
             total_items=total_items,
             reps=args.reps,
             seed=args.seed,
         )
-        await runner(session, probes, timings)
+        await run_probes(session, probes, timings)
     except (BudgetExceeded, ProbeFailed, UsherPortError) as exc:
         # **Caught, not propagated, so the partial run still reports.** Every
         # observation already on `timings` was paid for against a real
