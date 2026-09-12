@@ -176,16 +176,16 @@ to them.
 user-facing behaviour per feature. No rationale, no measurements, no
 alternatives, no implementation notes.
 
-## Open: `docs/plans/`
+## Out of scope: `docs/plans/` and `docs/specs/`
 
-15 files, **98,172 lines** — larger than the PRD and the decisions directory
-combined, and by category it is pure history. Not yet decided, and it cannot be
-deleted wholesale while M10 is in flight: `2026-08-13-m10-hardening.md` is the
-task index for the work still outstanding (F6, F7, F10, D4–D14, J7, R13), and
-that index is already known-stale.
+Untouched, by decision — 15 files and 98,172 lines of plans, 6 files and 2,177
+of specs. They are frozen history and are read as history.
 
-Recommendation: keep the in-flight M10 plan and this file, delete the twelve
-completed milestone plans (M1–M9, E1, and the two issue plans), ~85,000 lines.
+The consequence is that the 1,009 ADR citations in `docs/plans/` go stale when
+stage 3 lands. Accepted: a dangling pointer inside a completed milestone plan
+misleads nobody, because the document it sits in is already a record of a past
+state rather than a description of the current one. The in-flight M10 plan is
+the one exception worth watching.
 
 ## Risks
 
