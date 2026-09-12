@@ -322,7 +322,7 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
     cache so neither reader can catch a subset of it. `UnicodeDecodeError`
     joins it only here, because this file is decoded strictly: the artifact is
     the household's own history and a byte that is not UTF-8 in it is damage,
-    where a replacement character in one row of a 12.7M-line dump is not.
+    where a replacement character in one row of a public dataset is not.
 
     ⚠️ **The line number comes from the enumeration and never from
     `JSONDecodeError.lineno`.** Each line is decompressed and parsed on its
@@ -476,8 +476,8 @@ def _decode_rows(
     per table.
 
     Grouped here rather than by the caller filtering the whole body once per
-    table: the artifact interleaves tables freely, and eight passes over
-    14,259 rows to find eight batches is a scan the decode is already making.
+    table: the artifact interleaves tables freely, and a pass per table to
+    find its batch is a scan the decode is already making.
 
     The key set is compared against `restored_columns` rather than trusted,
     which is the *truncated row* half of refusal 1: a row that lost a column
