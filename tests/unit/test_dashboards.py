@@ -1260,6 +1260,99 @@ def _prometheus_targets() -> list[tuple[str, str]]:
     return targets
 
 
+def _legend_targets() -> list[tuple[str, str, str]]:
+    """`(where, expr, legendFormat)` for every committed Prometheus target."""
+    targets: list[tuple[str, str, str]] = []
+    for path in _dashboard_files():
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        for panel in _panels(dashboard):
+            if panel.get("type") == "row":
+                continue
+            for target in panel.get("targets") or []:
+                if _datasource_type(panel, target) == "prometheus":
+                    where = f"{path.name}:{panel.get('title')}:{target.get('refId')}"
+                    targets.append(
+                        (where, str(target.get("expr", "")), str(target.get("legendFormat", "")))
+                    )
+    return targets
+
+
+# `{{outcome}}` in a legend: the label Grafana substitutes per series.
+_LEGEND_LABEL = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+def test_every_legend_entry_names_a_label_its_own_query_still_groups_by() -> None:
+    """🔴 The legend and the `by (…)` are two halves of one claim and only the
+    legend half had teeth.
+
+    `test_the_enrichment_panel_says_its_label_is_outcome_and_carries_no_demand_split`
+    asserts dashboard 3's enrichment targets *legend* on `{{outcome}}`, and
+    nothing asserted what the same target *grouped* by. So changing the legend
+    was caught (it caught D9 at integration) and changing the expression was
+    not: `sum by (outcome) (…)` → `sum by (trigger) (…)` left every case in
+    this file green.
+
+    **That mutation has got worse rather than better since D8 shipped.** When
+    dashboard 3 was written `trigger` was not a label on
+    `usher.enrichment.latency` at all, so the swap would at least have drawn an
+    empty panel. D12 then put `trigger` on the series -- deliberately, because
+    PRD 10's *"Enrichment SLA missed -- demand-triggered p99 > 5 s"* is not
+    expressible without it -- so today the same swap draws a **full** panel
+    over the wrong split, under a legend that still says `outcome` and renders
+    blank because the series no longer carries it.
+
+    Asserted generally rather than on the one panel, because the asymmetry is
+    a property of every `(expr, legendFormat)` pair on every dashboard: a
+    legend entry names a label, and a label the query grouped away is not
+    there to substitute. Together with the legend cases this closes both
+    directions -- change the expr and this fails, change the legend and the
+    per-panel case fails, change both and the panel no longer claims to be the
+    panel PRD 10 asked for.
+    """
+    targets = _legend_targets()
+    named = [
+        (where, expr, legend)
+        for where, expr, legend in targets
+        if _LEGEND_LABEL.search(legend) and _aggregations(expr)
+    ]
+
+    assert len(named) >= 15, (
+        f"only {len(named)} committed Prometheus targets carry both an aggregation and a "
+        "`{{label}}` legend, so this scan has stopped reading the dashboards and every "
+        "assertion below is vacuous"
+    )
+
+    parameterised = [
+        f"{where}: {expr}"
+        for where, expr, _legend in targets
+        if re.search(r"\b(?:topk|bottomk|quantile)\s*\(", expr)
+    ]
+    assert parameterised == [], (
+        "`topk`, `bottomk` and `quantile` take their first argument inside the same "
+        "parentheses, so `_aggregations` reads their label set as empty and this case "
+        f"would call a legend orphaned that is not; extend it before one ships: "
+        f"{parameterised}"
+    )
+    without = [f"{where}: {expr}" for where, expr, _legend in targets if "without" in expr]
+    assert without == [], (
+        "a committed target aggregates with `without (…)`, whose label set is the "
+        f"complement of the one this case reads; extend it before one ships: {without}"
+    )
+
+    orphaned = [
+        f"{where}: legend {{{{{label}}}}} against `{' '.join(expr.split())}`"
+        for where, expr, legend in named
+        for label in _LEGEND_LABEL.findall(legend)
+        if any(label not in labels for labels, _operand in _aggregations(expr))
+    ]
+
+    assert orphaned == [], (
+        "these legends name a label their own query aggregates away, so Grafana "
+        "substitutes nothing and the panel draws a split it does not compute — the "
+        f"expression is what decides the population, the legend only names it: {orphaned}"
+    )
+
+
 def test_the_cache_panel_groups_by_cache_and_never_sums_across_it() -> None:
     """PRD 10 declares `usher.cache.hits` with `cache` **and** `freshness`
     while `usher.cache.misses` carries `cache` alone — *"a miss served nothing,
