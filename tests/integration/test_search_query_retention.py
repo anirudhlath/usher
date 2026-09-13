@@ -63,8 +63,9 @@ def _record(*, at: datetime, user_id: uuid.UUID) -> SearchQueryRecord:
 
 
 def _scope_over(repository: SearchQueryRepository) -> SearchQueryScope:
-    """A scope that yields a repository already bound to this test's
-    transaction and **does not commit**.
+    """A scope that yields a repository already bound to this test's transaction and **does not.
+
+    commit**.
 
     Deliberate: this suite's isolation is a rolled-back transaction, so a
     scope that committed would leak rows into the session-scoped container and
@@ -103,7 +104,10 @@ DRAIN_DEADLINE = 5.0
 
 
 async def _drain(job: SearchQueryRetention) -> None:
-    """`job.run()`, bounded. See `DRAIN_DEADLINE`."""
+    """`job.run()`, bounded.
+
+    See `DRAIN_DEADLINE`.
+    """
     await asyncio.wait_for(job.run(), DRAIN_DEADLINE)
 
 
@@ -115,8 +119,9 @@ async def _count(session: AsyncSession) -> int:
 async def test_the_retention_job_deletes_only_rows_past_the_cutoff(
     session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """**The failing test this task was written against**, run through the
-    real statement against the real column.
+    """**The failing test this task was written against**.
+
+    run through the real statement against the real column.
 
     Four rows at 91, 90, 89 and 0 days. Only the 91-day one may go.
 
@@ -148,8 +153,9 @@ async def test_the_retention_job_deletes_only_rows_past_the_cutoff(
 async def test_the_oldest_row_comes_back_with_a_timezone(
     repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """🔴 **A naive `last_done()` is a `TypeError` at the tick, not a wrong
-    number**, and this is the round trip that can tell.
+    """🔴 **A naive `last_done()` is a `TypeError` at the tick.
+
+    not a wrong number**, and this is the round trip that can tell.
 
     `Scheduler._due_now` subtracts the reading from `datetime.now(UTC)`.
     `search_queries.at` is `TIMESTAMP WITH TIME ZONE`, so asyncpg hands back an
@@ -178,9 +184,10 @@ async def test_the_oldest_row_comes_back_with_a_timezone(
 async def test_an_empty_table_reads_as_satisfied_now_rather_than_never_built(
     repository: PostgresSearchQueryRepository,
 ) -> None:
-    """`min()` over an empty table is one row holding `NULL`, not no row --
-    so a `scalar_one_or_none()` here would raise rather than answer `None`,
-    and this is the arm that tells them apart against the real driver.
+    """`min()` over an empty table is one row holding `NULL`, not no row.
+
+    so a `scalar_one_or_none()` here would raise rather than answer `None`, and this is
+    the arm that tells them apart against the real driver.
 
     The reading is `now`, which is what stops an idle deployment pruning
     nothing on every tick forever.
@@ -192,8 +199,7 @@ async def test_an_empty_table_reads_as_satisfied_now_rather_than_never_built(
 async def test_a_live_shaped_population_wholly_inside_the_window_is_not_due_and_deletes_nothing(
     session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """The state this deployment is actually in, asserted rather than
-    described.
+    """The state this deployment is actually in, asserted rather than described.
 
     J5's own text says the not-due reading must be pinned "against the
     live-shaped nine-row population". **Nine was true on 2026-08-13 and is
@@ -344,9 +350,7 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
 async def test_the_prune_commits_each_chunk_where_a_composition_root_wired_it(
     postgres_url: str, session: AsyncSession
 ) -> None:
-    """🔴 **The one claim a rolled-back suite cannot make, so this case owns its own
-    engine.**
-    """
+    """🔴 **The one claim a rolled-back suite cannot make, so this case owns its own engine.**."""
     engine = build_engine(postgres_url)
     sessions = build_session_factory(engine)
     real = search_query_scope(sessions)

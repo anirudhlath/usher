@@ -1,4 +1,4 @@
-"""staging tables are temporary, so drop the leftovers in public"""
+"""Staging tables are temporary, so drop the leftovers in public."""
 
 from collections.abc import Sequence
 

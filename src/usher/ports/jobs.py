@@ -1,6 +1,4 @@
-"""The priority work queue (PRD 03's read-through queue, PRD 08's job reliability
-rules).
-"""
+"""The priority work queue (PRD 03's read-through queue, PRD 08's job reliability rules)."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -28,7 +26,10 @@ class JobRequest:
 class JobQueue(ABC):
     @abstractmethod
     async def enqueue(self, requests: Sequence[JobRequest]) -> int:
-        """Add work, deduplicated on `(kind, key)`. Returns rows written."""
+        """Add work, deduplicated on `(kind, key)`.
+
+        Returns rows written.
+        """
 
     @abstractmethod
     async def claim(self, kinds: Sequence[JobKind], *, limit: int = 1) -> list[Job]:
@@ -52,7 +53,9 @@ class JobQueue(ABC):
 
     @abstractmethod
     async def complete(self, job_id: uuid.UUID) -> None:
-        """The work succeeded. **Deletes the row.**
+        """The work succeeded.
+
+        **Deletes the row.**
 
         Not a status change: `JobStatus` has no `DONE` member, because the
         only two interesting populations are "waiting" and "poisoned" and a
@@ -75,11 +78,16 @@ class JobQueue(ABC):
         retryable: bool,
         retry_after_seconds: float | None = None,
     ) -> Job | None:
-        """The work raised. Back it off, or park it."""
+        """The work raised.
+
+        Back it off, or park it.
+        """
 
     @abstractmethod
     async def touch(self, job_ids: Sequence[uuid.UUID]) -> int:
-        """Say these claims are still being worked on. Returns rows moved.
+        """Say these claims are still being worked on.
+
+        Returns rows moved.
 
         The heartbeat half of the lease `requeue_running` reads. An
         implementation moves whatever `requeue_running` compares against -- for
@@ -100,7 +108,10 @@ class JobQueue(ABC):
 
     @abstractmethod
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
-        """Return claimed-but-unfinished jobs to `pending`. Returns how many."""
+        """Return claimed-but-unfinished jobs to `pending`.
+
+        Returns how many.
+        """
 
     @abstractmethod
     async def depth(self) -> dict[JobKind, int]:
@@ -117,7 +128,8 @@ class JobQueue(ABC):
 
     @abstractmethod
     async def parked(self, *, limit: int = 100) -> list[Job]:
-        """Parked jobs, newest first. PRD 08: "Parked jobs are listed in the
-        admin API and counted in metrics. Silent failure is the thing worth
-        engineering against."
+        """Parked jobs, newest first.
+
+        PRD 08: "Parked jobs are listed in the admin API and counted in
+        metrics. Silent failure is the thing worth engineering against."
         """

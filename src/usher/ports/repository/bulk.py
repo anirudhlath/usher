@@ -103,14 +103,13 @@ class GenomeCoverage:
 
 
 class BulkCatalogRepository(ABC):
-    """Bulk writes into the catalog, deliberately *not* expressed through
-    `TitleRepository`.
-    """
+    """Bulk writes into the catalog, deliberately *not* expressed through `TitleRepository`."""
 
     @abstractmethod
     def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
-        """Scope inside which the implementation may relax storage-level optimisations that
-        only pay for themselves on one-row-at-a-time writes, restoring them on exit.
+        """Scope inside which the implementation may relax storage-level optimisations that only.
+
+        pay for themselves on one-row-at-a-time writes, restoring them on exit.
         """
 
     @abstractmethod
@@ -131,29 +130,35 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
-        """Set `imdb_average_rating`/`imdb_num_votes` on titles that already exist,
+        """Set `imdb_average_rating`/`imdb_num_votes` on titles that already exist.
+
         returning how many rows changed.
         """
 
     @abstractmethod
     async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:
-        """Fill `titles.credit_names` from IMDb, for titles TMDb has not reached. Never
-        creates a title, and never writes a person or a credit.
+        """Fill `titles.credit_names` from IMDb, for titles TMDb has not reached.
+
+        Never creates a title, and never writes a person or a credit.
         """
 
     @abstractmethod
     async def replace_aliases(
         self, rows: Sequence[ImdbAka], *, imdb_ids: Sequence[str]
     ) -> AliasWriteResult:
-        """Replace the `alias` half of `title_search_names` for the titles `imdb_ids`
-        names, from IMDb `title.akas`. Never creates a title, and never touches a row of
-        any other `kind`.
+        """Replace the `alias` half of `title_search_names` for the titles `imdb_ids` names.
+
+        from IMDb `title.akas`.
+
+        Never creates a title, and never touches a row of any other `kind`.
         """
 
     @abstractmethod
     async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:
-        """Insert or update the TMDb id universe, keyed on
-        `(tmdb_id, kind)`. Returns rows written."""
+        """Insert or update the TMDb id universe, keyed on `(tmdb_id, kind)`.
+
+        Returns rows written.
+        """
 
     @abstractmethod
     async def upsert_crosswalk(self, rows: Sequence[IdCrosswalkPair]) -> int:
@@ -173,14 +178,16 @@ class BulkCatalogRepository(ABC):
     async def upsert_genome_vectors(
         self, rows: Sequence[GenomeVector], *, revision: str
     ) -> GenomeWriteResult:
-        """Store genome vectors against the titles their `imdb_id` resolves to, returning
-        what changed and how many resolved to nothing.
+        """Store genome vectors against the titles their `imdb_id` resolves to.
+
+        returning what changed and how many resolved to nothing.
         """
 
     @abstractmethod
     async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
-        """Replace the whole genome tag vocabulary with `tags` at `revision`, returning how
-        many rows it wrote.
+        """Replace the whole genome tag vocabulary with `tags` at `revision`.
+
+        returning how many rows it wrote.
         """
 
     @abstractmethod
@@ -195,5 +202,8 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     async def count_titles(self) -> int:
-        """How many titles the catalog holds. Used to decide whether
-        `bulk_load_window` may suspend indexes, and reported by the CLI."""
+        """How many titles the catalog holds.
+
+        Used to decide whether `bulk_load_window` may suspend indexes, and reported by
+        the CLI.
+        """

@@ -63,8 +63,9 @@ def curated_row(
 
 
 class CuratedRowSeeder(ABC):
-    """Rows written *without* going through `replace_for_user`'s delete, plus
-    a count that ignores `list_for_user`'s generation filter.
+    """Rows written *without* going through `replace_for_user`'s delete.
+
+    plus a count that ignores `list_for_user`'s generation filter.
 
     Not a `put()` on the port. The port deliberately cannot write a second
     generation for one user -- that is the whole of what `replace_for_user`
@@ -173,8 +174,10 @@ class CuratedRowRepositoryContract:
     async def test_the_rows_come_back_in_the_models_own_order(
         self, repository: CuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """The wrong implementation this kills: `ORDER BY "position"` dropped, so the
-        screen is whatever order the storage happens to hand back.
+        """The wrong implementation this kills.
+
+        `ORDER BY "position"` dropped, so the screen is whatever order the storage
+        happens to hand back.
         """
         generation = new_id()
         # Minted in descending position order, so the row at position 0 holds
@@ -207,8 +210,10 @@ class CuratedRowRepositoryContract:
     async def test_a_replacement_drops_the_generation_it_replaced(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """The wrong implementation this kills: an insert where a replace was
-        asked for, so last night's shelves accumulate behind tonight's.
+        """The wrong implementation this kills.
+
+        an insert where a replace was asked for, so last night's shelves accumulate
+        behind tonight's.
 
         Asserted through the seeder's count as well as through the read,
         because the read alone cannot see the difference: it returns the
@@ -237,9 +242,10 @@ class CuratedRowRepositoryContract:
     async def test_a_generation_that_produced_nothing_clears_the_screen(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """**The case the scope rule exists for**, and the only one whose *read* can see it
-        -- the module docstring above says which two cases see it at all and through
-        which assertion each one does.
+        """**The case the scope rule exists for**, and the only one whose *read* can see it.
+
+        the module docstring above says which two cases see it at all and through which
+        assertion each one does.
         """
         generation = new_id()
         await repository.replace_for_user(
@@ -260,8 +266,9 @@ class CuratedRowRepositoryContract:
         other_user_id: uuid.UUID,
         seeder: CuratedRowSeeder,
     ) -> None:
-        """The mirror of the case above: a `DELETE` with no `WHERE`, or one
-        scoped to the whole table.
+        """The mirror of the case above.
+
+        a `DELETE` with no `WHERE`, or one scoped to the whole table.
 
         It wipes every household's screen on the first generation of the night
         and then repopulates exactly one of them -- and on a single-household
@@ -284,9 +291,11 @@ class CuratedRowRepositoryContract:
         user_id: uuid.UUID,
         other_user_id: uuid.UUID,
     ) -> None:
-        """The wrong implementation this kills: **deciding which generation is
-        newest without a `user_id` predicate**, so the household that was
-        generated for most recently decides what every other household sees.
+        """The wrong implementation this kills.
+
+        **deciding which generation is newest without a `user_id` predicate**, so the
+        household that was generated for most recently decides what every other
+        household sees.
 
         The two generations are stamped a night apart and the other
         household's is the newer one, so a household-blind choice of
@@ -319,9 +328,11 @@ class CuratedRowRepositoryContract:
         user_id: uuid.UUID,
         other_user_id: uuid.UUID,
     ) -> None:
-        """The wrong implementation this kills: a read that finds the right generation and
-        then returns **every row carrying it**, whoever it belongs to -- one household's
-        shelves, headings and reasons included, on another household's screen.
+        """The wrong implementation this kills.
+
+        a read that finds the right generation and then returns **every row carrying
+        it**, whoever it belongs to -- one household's shelves, headings and reasons
+        included, on another household's screen.
         """
         run = new_id()
         mine = [
@@ -338,11 +349,12 @@ class CuratedRowRepositoryContract:
     async def test_only_the_newest_generation_reaches_the_screen(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """The wrong implementation this kills: a read with no generation
-        filter, which mixes two nights' output into one screen -- the exact
-        state `CuratedRow.generation_id` exists to make impossible to read
-        back, and the one a household cannot see is wrong, because both halves
-        are well-formed shelves.
+        """The wrong implementation this kills.
+
+        a read with no generation filter, which mixes two nights' output into one screen
+        -- the exact state `CuratedRow.generation_id` exists to make impossible to read
+        back, and the one a household cannot see is wrong, because both halves are well-
+        formed shelves.
 
         The stale generation is seeded **after** the fresh one and stamped
         **before** it, so three cheaper spellings all fail: newest-by-`id`
@@ -389,20 +401,24 @@ class CuratedRowRepositoryContract:
     async def test_a_household_with_no_generation_reads_as_an_empty_list(
         self, repository: CuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """Empty, never `None`: there is no third state to tell apart, and a
-        nullable answer would make every caller branch on a difference between
-        "nothing yet" and "nothing tonight" that this table cannot express
-        either. `HomeService` composes ten providers and a `None` here is a
-        `TypeError` in the composition rather than a screen without curated
-        shelves.
+        """Empty, never `None`.
+
+        there is no third state to tell apart, and a nullable answer would make every
+        caller branch on a difference between "nothing yet" and "nothing tonight" that
+        this table cannot express either.
+
+        `HomeService` composes ten providers and a `None` here is a `TypeError` in the
+        composition rather than a screen without curated shelves.
         """
         assert await repository.list_for_user(user_id) == []
 
     async def test_the_same_generation_written_twice_is_the_same_screen(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """PRD 08's redelivery rule: the job queue *will* redeliver, and
-        `JobWorker.recover()` requeues an abandoned claim.
+        """PRD 08's redelivery rule.
+
+        the job queue *will* redeliver, and `JobWorker.recover()` requeues an abandoned
+        claim.
 
         The wrong implementation this kills is insert-then-delete rather than
         delete-then-insert -- the reverse order meets this table's primary key
@@ -429,8 +445,9 @@ class CuratedRowRepositoryContract:
         other_user_id: uuid.UUID,
         seeder: CuratedRowSeeder,
     ) -> None:
-        """The wrong implementation this kills: rows written under whichever
-        `user_id` each one happens to carry.
+        """The wrong implementation this kills.
+
+        rows written under whichever `user_id` each one happens to carry.
 
         Such a row lands on a household this call never named, *outside this
         delete's scope*, and shows up on their screen until their own next
@@ -466,8 +483,7 @@ class CuratedRowRepositoryContract:
     async def test_rows_from_two_generations_are_refused_and_write_nothing(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """The wrong implementation this kills: accepting a half-built
-        generation.
+        """The wrong implementation this kills: accepting a half-built generation.
 
         Nothing downstream would raise on one. `list_for_user` returns the
         newest generation, so a screen assembled from two would silently come

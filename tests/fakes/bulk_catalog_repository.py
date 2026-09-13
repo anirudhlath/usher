@@ -35,10 +35,11 @@ _NULLS_LAST = math.inf
 
 
 def _crosswalk_sort_key(pair: IdCrosswalkPair) -> tuple[float, float, float]:
-    """Mirrors the real implementation's tie-break for two crosswalk rows
-    sharing one `imdb_id` in a single batch: `ORDER BY tmdb_movie_id NULLS
-    LAST, tmdb_series_id NULLS LAST, tvdb_series_id NULLS LAST` -- smallest
-    non-null id wins, column by column."""
+    """Mirrors the real implementation's tie-break for two crosswalk rows sharing one `imdb_id`.
+
+    in a single batch: `ORDER BY tmdb_movie_id NULLS LAST, tmdb_series_id NULLS LAST,
+    tvdb_series_id NULLS LAST` -- smallest non-null id wins, column by column.
+    """
     return (
         _NULLS_LAST if pair.tmdb_movie_id is None else float(pair.tmdb_movie_id),
         _NULLS_LAST if pair.tmdb_series_id is None else float(pair.tmdb_series_id),
@@ -233,8 +234,10 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         )
 
     def search_names(self, imdb_id: str) -> tuple[tuple[str, str, str | None, str | None], ...]:
-        """Every stored `title_search_names` row for a title, as
-        `(kind, name, region, language)` ascending."""
+        """Every stored `title_search_names` row for a title.
+
+        as `(kind, name, region, language)` ascending.
+        """
         stored = self._titles.get(imdb_id)
         if stored is None:
             return ()
@@ -247,8 +250,10 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         )
 
     def seed_person_search_name(self, imdb_id: str, name: str) -> None:
-        """What `CreditRepository.replace_for_titles` leaves behind for one
-        credited person: `kind = 'person'`, no region and no language."""
+        """What `CreditRepository.replace_for_titles` leaves behind for one credited person.
+
+        `kind = 'person'`, no region and no language.
+        """
         stored = self._titles[imdb_id]
         self._search_names.append((stored.id, SearchNameKind.PERSON.value, name, None, None))
 
@@ -433,8 +438,11 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
             stored.enriched = True
 
     def mark_derived(self, imdb_id: str, names: tuple[str, ...]) -> None:
-        """The state `DeriveService` leaves a title in: off the skeleton tier,
-        with `credit_names` written from the TMDb-derived `credits`."""
+        """The state `DeriveService` leaves a title in.
+
+        off the skeleton tier, with `credit_names` written from the TMDb-derived
+        `credits`.
+        """
         stored = self._titles.get(imdb_id)
         if stored is not None:
             stored.enriched = True
@@ -462,10 +470,12 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
 
 
 def _refuse_partial_vocabulary(tags: Sequence[GenomeTag], revision: str) -> None:
-    """The port's four `replace_genome_tags` refusals, modelled rather than
-    diverged -- kept identical to
-    `usher.db.repositories.bulk._refuse_partial_vocabulary`, which holds the
-    argument for each. The contract suite is what holds the two together.
+    """The port's four `replace_genome_tags` refusals, modelled rather than diverged.
+
+    kept identical to `usher.db.repositories.bulk._refuse_partial_vocabulary`, which
+    holds the argument for each.
+
+    The contract suite is what holds the two together.
 
     Modelled rather than diverged because two of the four have no Postgres
     constraint behind them at all: `ck_genome_tags_tag_id_in_vocabulary`

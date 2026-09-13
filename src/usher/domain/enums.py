@@ -1,4 +1,7 @@
-"""Shared enumerations. Values are stable wire and storage identifiers."""
+"""Shared enumerations.
+
+Values are stable wire and storage identifiers.
+"""
 
 from enum import StrEnum
 
@@ -9,8 +12,10 @@ class TitleKind(StrEnum):
 
 
 class EnrichmentState(StrEnum):
-    """How complete a Title's metadata is. Always exposed to clients so they
-    render deliberately rather than inferring from nulls.
+    """How complete a Title's metadata is.
+
+    Always exposed to clients so they render deliberately rather than inferring from
+    nulls.
 
     A three-rung ladder, not a status: `skeleton` and `stub` differ by
     *provenance* as much as by completeness — `skeleton` comes from a bulk
@@ -53,10 +58,13 @@ class WatchStateOrigin(StrEnum):
 
 
 class ProductionStatus(StrEnum):
-    """TMDb production status. Movies and series draw from overlapping but
-    not identical vocabularies (grouped per member below); nothing here
-    enforces the pairing — `Title(kind=MOVIE, status=RETURNING)` is still
-    constructible. The grouping documents intent, not a constraint."""
+    """TMDb production status.
+
+    Movies and series draw from overlapping but not identical vocabularies (grouped per
+    member below); nothing here enforces the pairing — `Title(kind=MOVIE,
+    status=RETURNING)` is still constructible. The grouping documents intent, not a
+    constraint.
+    """
 
     RELEASED = "released"  # movie
     IN_PRODUCTION = "in_production"  # movie, series
@@ -94,12 +102,15 @@ class MatchMethod(StrEnum):
 
 
 class ImageKind(StrEnum):
-    """What an artwork reference *is*, from [PRD 02](../../../docs/prd/02-data-model.md)'s
-    `Image`. Five members, and every one of them is emitted by a real
-    provider payload rather than reserved: `poster`/`backdrop`/`logo` hang off
-    a title, `still` off an episode, `profile` off a person — which is the
-    same three-way split `ck_images_exactly_one_owner` enforces in SQL, and
-    the reason the vocabulary is not a per-owner enum each.
+    """What an artwork reference *is*.
+
+    from [PRD 02](../../../docs/prd/02-data-model.md)'s `Image`.
+
+    Five members, and every one of them is emitted by a real provider payload rather
+    than reserved: `poster`/`backdrop`/`logo` hang off a title, `still` off an episode,
+    `profile` off a person — which is the same three-way split
+    `ck_images_exactly_one_owner` enforces in SQL, and the reason the vocabulary is not
+    a per-owner enum each.
 
     Nothing here constrains the pairing: `Image(kind=PROFILE, title_id=…)` is
     still storable, exactly as `ProductionStatus` documents its movie/series
@@ -114,8 +125,9 @@ class ImageKind(StrEnum):
 
 
 class SearchNameKind(StrEnum):
-    """Why a row exists in `title_search_names`, and it is deliberately two
-    members rather than three.
+    """Why a row exists in `title_search_names`.
+
+    and it is deliberately two members rather than three.
 
     Each has a named emitter inside M9: `alias` is the `title.akas` loader and
     `person` is the two-tier suggest's people half. **There is no `primary`
@@ -134,10 +146,12 @@ class SearchNameKind(StrEnum):
 
 
 class HdrFormat(StrEnum):
-    """Canonical HDR formats. A source's own vocabulary (Emby, for
-    instance, emits strings like "DolbyVision") is translated into one of
-    these by its adapter — this enum, never the source's raw string, is
-    what reaches `MediaItem` and the API. See `source.py`'s docstring."""
+    """Canonical HDR formats.
+
+    A source's own vocabulary (Emby, for instance, emits strings like "DolbyVision") is
+    translated into one of these by its adapter — this enum, never the source's raw
+    string, is what reaches `MediaItem` and the API. See `source.py`'s docstring.
+    """
 
     HDR10 = "HDR10"
     DOLBY_VISION = "DV"

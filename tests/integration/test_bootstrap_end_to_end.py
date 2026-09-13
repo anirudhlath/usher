@@ -1,4 +1,5 @@
 """The whole Phase 0-2 pipeline against real Postgres, over committed synthetic slices.
+
 Nothing downloads.
 """
 
@@ -69,9 +70,10 @@ def cache(tmp_path: Path) -> Path:
 
 
 def _local(cache: Path) -> httpx.MockTransport:
-    """Serves from the already-staged cache, so ensure_local short-circuits
-    on the revision stamp -- see the same helper in
-    tests/unit/test_adapters_bulk_imdb.py."""
+    """Serves from the already-staged cache, so ensure_local short-circuits on the revision stamp.
+
+    see the same helper in tests/unit/test_adapters_bulk_imdb.py.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         name = str(request.url).rsplit("/", 1)[-1]
@@ -168,10 +170,11 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
 
 
 async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, cache: Path) -> None:
-    """ADR-0005 and the spec both promise the catalog is usable during
-    bootstrap. With batch_size=2 the first commit lands two titles, and a
-    reader sees them before the import finishes -- this asserts the loop
-    really does commit per batch rather than once at the end.
+    """ADR-0005 and the spec both promise the catalog is usable during bootstrap.
+
+    With batch_size=2 the first commit lands two titles, and a reader sees them before
+    the import finishes -- this asserts the loop really does commit per batch rather
+    than once at the end.
 
     `commits` (not just `seen`) is what actually pins that: `upsert_titles`
     writes via `COPY` straight to the connection, so `seen` alone stays
@@ -180,7 +183,8 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
     which still passed. `commits` counts calls to the *injected* commit
     callable itself, independent of COPY's own within-session visibility,
     so it is the assertion that actually distinguishes committing per batch
-    from merely writing per batch and committing once at the end."""
+    from merely writing per batch and committing once at the end.
+    """
     catalog = PostgresBulkCatalogRepository(session)
     commits = 0
 
@@ -215,9 +219,10 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
 async def test_a_restart_resumes_from_the_stored_checkpoint(
     session: AsyncSession, cache: Path
 ) -> None:
-    """Simulates a crash by importing with a service whose write fails on
-    the third batch, then re-running -- the second run must pick up the
-    cursor the first one committed."""
+    """Simulates a crash by importing with a service whose write fails on the third batch.
+
+    then re-running -- the second run must pick up the cursor the first one committed.
+    """
     catalog = PostgresBulkCatalogRepository(session)
     runs = PostgresImportRunRepository(session)
     service = BootstrapService(
@@ -266,9 +271,11 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
 
 
 class _Stop(Exception):
-    """Not a UsherPortError, deliberately: BootstrapService records port
-    errors and swallows them, so a port error here would give a COMPLETED-
-    shaped path rather than the abrupt stop this test needs."""
+    """Not a UsherPortError, deliberately.
+
+    BootstrapService records port errors and swallows them, so a port error here would
+    give a COMPLETED- shaped path rather than the abrupt stop this test needs.
+    """
 
 
 async def _written(catalog: PostgresBulkCatalogRepository, rows: Sequence[ImdbTitle]) -> int:
@@ -282,8 +289,9 @@ async def _written(catalog: PostgresBulkCatalogRepository, rows: Sequence[ImdbTi
 async def test_a_titles_aliases_survive_a_batch_boundary_against_real_postgres(
     session: AsyncSession, cache: Path
 ) -> None:
-    """The alias phase's dataset and its writer, composed, against the
-    statement that actually does the deleting.
+    """The alias phase's dataset and its writer.
+
+    composed, against the statement that actually does the deleting.
 
     `replace_aliases` is `DELETE ... WHERE title_id = ANY(:ids) AND kind =
     'alias'` followed by an insert, so a title split across two batches has
@@ -416,9 +424,10 @@ def _write_titles(
 async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
     session: AsyncSession, cache: Path
 ) -> None:
-    """The whole `movielens` phase against real Postgres: archive -> adapter
-    -> staged `real[]` -> `halfvec(1128)` -> a row keyed on the resolved
-    `titles.id`.
+    """The whole `movielens` phase against real Postgres.
+
+    archive -> adapter -> staged `real[]` -> `halfvec(1128)` -> a row keyed on the
+    resolved `titles.id`.
 
     **This is the only place the `halfvec`-over-`COPY` path runs end to end.**
     A `halfvec` had never crossed asyncpg's binary `COPY` in this repository
@@ -469,9 +478,9 @@ async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
 async def test_the_tag_vocabulary_crosses_the_whole_phase_at_the_production_width(
     session: AsyncSession, cache: Path
 ) -> None:
-    """`genome-tags.csv` -> adapter -> `replace_genome_tags` -> 1,128 rows of
-    `genome_tags` -> `GenomeRepository.vocabulary`, at the width production
-    runs at.
+    """`genome-tags.csv` -> adapter -> `replace_genome_tags` -> 1,128 rows of `genome_tags` ->.
+
+    `GenomeRepository.vocabulary`, at the width production runs at.
 
     **1,128 rather than a convenient three**, for the reason the fixture
     comment above gives about vectors and one more that belongs to this table:
@@ -505,8 +514,9 @@ async def test_the_tag_vocabulary_crosses_the_whole_phase_at_the_production_widt
 async def test_a_vocabulary_one_lane_wider_than_the_schema_is_refused_by_the_column(
     session: AsyncSession, cache: Path
 ) -> None:
-    """`ck_genome_tags_tag_id_in_vocabulary` is the ceiling on `tag_id`, and
-    this is the case that proves it is a *constraint* rather than an encoder
+    """`ck_genome_tags_tag_id_in_vocabulary` is the ceiling on `tag_id`.
+
+    and this is the case that proves it is a *constraint* rather than an encoder
     refusal.
 
     A vocabulary of `GENOME_TAG_COUNT + 1` tags is contiguous `1…n`, so
@@ -533,8 +543,10 @@ async def test_a_vocabulary_one_lane_wider_than_the_schema_is_refused_by_the_col
 async def test_a_failure_that_is_not_the_rows_propagates_untranslated(
     session: AsyncSession,
 ) -> None:
-    """`if not is_row_refusal(exc): raise` -- the half of the `except` that
-    every sibling repository has and that no case had exercised here.
+    """`if not is_row_refusal(exc): raise`.
+
+    the half of the `except` that every sibling repository has and that no case had
+    exercised here.
 
     A missing table is SQLSTATE `42P01`, which is neither class `22` nor class
     `23`: it is the deployment being wrong, not the vocabulary, and a caller
@@ -560,10 +572,13 @@ async def test_a_failure_that_is_not_the_rows_propagates_untranslated(
 async def test_a_replayed_genome_phase_reports_updates_and_the_same_coverage(
     session: AsyncSession, cache: Path
 ) -> None:
-    """Trap 3 through the whole phase rather than through one statement, and
-    the coverage report alongside it. Rowcount reports the sum, so without
-    `xmax = 0` the second run of an operator's `--phase movielens` would be
-    indistinguishable from the first."""
+    """Trap 3 through the whole phase rather than through one statement.
+
+    and the coverage report alongside it.
+
+    Rowcount reports the sum, so without `xmax = 0` the second run of an operator's
+    `--phase movielens` would be indistinguishable from the first.
+    """
     catalog = await _seed_catalog(session, _genome_cache(cache))
     rows = [
         GenomeVector(

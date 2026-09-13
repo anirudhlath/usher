@@ -62,9 +62,10 @@ def _movie(external_id: str) -> SourceItem:
 
 @pytest.fixture
 def span_exporter() -> InMemorySpanExporter:
-    """Installed *before* `create_app`, so `configure_tracing`'s
-    `isinstance` idempotency guard leaves this provider in place instead of
-    replacing it with an unexported one.
+    """Installed *before* `create_app`.
+
+    so `configure_tracing`'s `isinstance` idempotency guard leaves this provider in
+    place instead of replacing it with an unexported one.
 
     **The `uninstrument()` is the ProxyTracer trap, one library over, and it
     is load-bearing for the third case in this file.**
@@ -137,10 +138,10 @@ async def _source_id(request: object = None) -> str:
 
 @pytest_asyncio.fixture(autouse=True)
 async def seeded_source(postgres_url: str) -> AsyncIterator[None]:
-    """The probe route needs a real `sources` row -- `sync_runs.source_id`
-    is a foreign key. Written on its own connection and committed, because
-    the route runs in the request's session and cannot see an uncommitted
-    write made in a different one.
+    """The probe route needs a real `sources` row -- `sync_runs.source_id` is a foreign key.
+
+    Written on its own connection and committed, because the route runs in the request's
+    session and cannot see an uncommitted write made in a different one.
 
     **Everything the probe writes has to be undone, not just the source.**
     The route goes through `get_session`, which is the request's
@@ -225,8 +226,9 @@ def _ancestry_of(spans: tuple[ReadableSpan, ...], start: ReadableSpan) -> list[s
 async def test_pipeline_spans_nest_under_the_server_span(
     probe: AsyncClient, span_exporter: InMemorySpanExporter
 ) -> None:
-    """The property M1's instrumentation was wired for, asserted as
-    parentage rather than as existence.
+    """The property M1's instrumentation was wired for.
+
+    asserted as parentage rather than as existence.
 
     `sync.reconcile` -> `ingest.item` -> `match.title` all hang off the
     FastAPI server span, so the whole chain shares one trace and "what
@@ -250,10 +252,13 @@ async def test_pipeline_spans_nest_under_the_server_span(
 async def test_the_whole_pipeline_shares_the_requests_trace(
     probe: AsyncClient, span_exporter: InMemorySpanExporter
 ) -> None:
-    """The same property stated the way Tempo asks it: one `trace_id` for
-    the request and everything it caused. A root-started pipeline span mints
-    a *new* trace id, so the request's trace ends at the handler and the
-    work appears in an unrelated trace with no link back."""
+    """The same property stated the way Tempo asks it.
+
+    one `trace_id` for the request and everything it caused.
+
+    A root-started pipeline span mints a *new* trace id, so the request's trace ends at
+    the handler and the work appears in an unrelated trace with no link back.
+    """
     await probe.get("/_probe/sync")
     spans = _by_name(span_exporter.get_finished_spans())
     server = spans[_SERVER_SPAN]
@@ -267,11 +272,13 @@ async def test_the_whole_pipeline_shares_the_requests_trace(
 async def test_the_databases_own_spans_nest_under_the_pipeline(
     probe: AsyncClient, span_exporter: InMemorySpanExporter
 ) -> None:
-    """`SQLAlchemyInstrumentor` is wired in `configure_tracing` and its
-    spans are what make "why was this batch slow" answerable at all. They
-    only help if they land *inside* the pipeline span rather than beside it,
-    which is a property of the pipeline using `start_as_current_span`
-    (context-setting) rather than `start_span`.
+    """`SQLAlchemyInstrumentor` is wired in `configure_tracing` and its spans are what make "why.
+
+    was this batch slow" answerable at all.
+
+    They only help if they land *inside* the pipeline span rather than beside it, which
+    is a property of the pipeline using `start_as_current_span` (context-setting) rather
+    than `start_span`.
     """
     await probe.get("/_probe/sync")
     spans = span_exporter.get_finished_spans()
@@ -375,8 +382,10 @@ async def test_a_row_build_nests_under_the_composition_and_that_under_the_reques
 async def test_every_propose_nests_under_the_composition_and_that_under_the_request(
     probe: AsyncClient, span_exporter: InMemorySpanExporter, a_recent_arrival: uuid.UUID
 ) -> None:
-    """M10's `propose`, closed end to end -- and the arm the unit case cannot
-    reach, because there is no request to be a parent of in a unit test.
+    """M10's `propose`, closed end to end.
+
+    and the arm the unit case cannot reach, because there is no request to be a parent
+    of in a unit test.
 
     **Every one of them, not the last one.** The composer emits a `propose` per
     *registered* provider, so a name-keyed walk would assert about whichever

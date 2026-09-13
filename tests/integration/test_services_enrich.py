@@ -25,8 +25,9 @@ _MARK = "enrich-index-case"
 
 
 class _ReadsOnItsOwnConnection(JobQueue):
-    """Enqueues through the real queue, and records what a *different*
-    transaction can see at that instant.
+    """Enqueues through the real queue.
+
+    and records what a *different* transaction can see at that instant.
 
     The whole point: `EnrichService` writes the enriched name inside its own
     transaction, so a second connection reads the pre-enrichment row until
@@ -97,12 +98,14 @@ async def _wipe(session: AsyncSession) -> None:
 
 @pytest_asyncio.fixture
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """This module commits for real, because the ordering it exists to check
-    is only visible from a second connection -- which cannot see a rolled-back
-    transaction at all. So it cleans up after itself: a leftover `titles` row
-    fails an unrelated file on `ix_titles_tmdb_id_kind`. A leftover `stg_jobs`
-    used to be the other half of that and no longer can be -- the staging
-    tables are temporary and drop at commit.
+    """This module commits for real.
+
+    because the ordering it exists to check is only visible from a second connection --
+    which cannot see a rolled-back transaction at all.
+
+    So it cleans up after itself: a leftover `titles` row fails an unrelated file on
+    `ix_titles_tmdb_id_kind`. A leftover `stg_jobs` used to be the other half of that
+    and no longer can be -- the staging tables are temporary and drop at commit.
     """
     async with sessions() as session:
         await _wipe(session)
@@ -176,7 +179,7 @@ async def test_a_finished_enrichment_leaves_one_index_job_in_the_table(
 async def test_the_enqueue_sees_a_committed_title(
     sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The case the unit suite structurally cannot write.**
+    """**The case the unit suite structurally cannot write.**.
 
     A second connection is opened at the instant of the enqueue and asked what
     it can see. After the commit it reads `enriched`; before it, it reads

@@ -176,11 +176,11 @@ class LLMCallRepositoryContract:
     async def test_a_call_that_failed_is_a_row_with_its_error(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
     ) -> None:
-        """**The whole point of the task.** The wrong implementation this
-        kills is a `record()` that returns early on `ok = false` -- or one
-        that drops `error`, or writes `ok` as a constant -- so the ledger
-        holds only the calls that worked and understates spend by exactly the
-        failures.
+        """**The whole point of the task.** The wrong implementation this kills is a `record()`.
+
+        that returns early on `ok = false` -- or one that drops `error`, or writes `ok`
+        as a constant -- so the ledger holds only the calls that worked and understates
+        spend by exactly the failures.
 
         **The failure modelled here is the one that is not an HTTP failure**,
         and it is chosen deliberately over a timeout. ADR-0028: a call that
@@ -218,9 +218,10 @@ class LLMCallRepositoryContract:
     async def test_a_failure_does_not_displace_the_success_before_it(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
     ) -> None:
-        """The wrong implementation this kills: a `record()` that replaces
-        rather than appends -- a dict keyed on anything, or an `INSERT` grown
-        an `ON CONFLICT DO UPDATE` to be "safe" against PRD 08's redelivery.
+        """The wrong implementation this kills: a `record()` that replaces rather than appends.
+
+        a dict keyed on anything, or an `INSERT` grown an `ON CONFLICT DO UPDATE` to be
+        "safe" against PRD 08's redelivery.
 
         Two calls, two generations, two rows. Both are read back whole rather
         than counted, because a store keyed on the *newest* row and one keyed
@@ -253,9 +254,10 @@ class LLMCallRepositoryContract:
     async def test_two_calls_for_one_generation_are_two_rows(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
     ) -> None:
-        """The wrong implementation this kills: a write keyed on
-        `generation_id` -- an `ON CONFLICT (generation_id)`, or a dict indexed
-        by it -- which is the shape "one generation, one completion" invites.
+        """The wrong implementation this kills: a write keyed on `generation_id`.
+
+        an `ON CONFLICT (generation_id)`, or a dict indexed by it -- which is the shape
+        "one generation, one completion" invites.
 
         **This case exists because every other case in the suite mints a fresh
         `generation_id` per call**, so a store keyed on the generation is
@@ -299,10 +301,10 @@ class LLMCallRepositoryContract:
     async def test_a_call_belonging_to_no_generation_is_recorded(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
     ) -> None:
-        """The wrong implementation this kills: a write that requires a
-        generation -- one that refuses `None`, or coalesces it to the row's
-        own id, or hardcodes `purpose` to `curation` because that is the only
-        value every other case uses.
+        """The wrong implementation this kills: a write that requires a generation.
+
+        one that refuses `None`, or coalesces it to the row's own id, or hardcodes
+        `purpose` to `curation` because that is the only value every other case uses.
 
         `LLMPurpose.QUERY_EXPANSION` produces no rows at all, so its ledger
         entry belongs to no generation. `QueryExpansionService` writes one per
@@ -330,8 +332,9 @@ class LLMCallRepositoryContract:
     async def test_a_cost_is_stored_exactly(
         self, repository: LLMCallRepository, ledger: LLMCallLedger, cost: Decimal
     ) -> None:
-        """The wrong implementation this kills: a write that rounds or re-scales `cost_usd`
-        on the way in.
+        """The wrong implementation this kills.
+
+        a write that rounds or re-scales `cost_usd` on the way in.
         """
         call = llm_call(generation_id=new_id(), cost_usd=cost)
 
@@ -344,9 +347,10 @@ class LLMCallRepositoryContract:
     async def test_recording_one_call_twice_is_a_conflict_rather_than_an_update(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
     ) -> None:
-        """The wrong implementation this kills: an upsert where an insert was
-        asked for -- `ON CONFLICT (id) DO NOTHING`, which is what a reading of
-        PRD 08's redelivery rule invites, or `DO UPDATE`.
+        """The wrong implementation this kills: an upsert where an insert was asked for.
+
+        `ON CONFLICT (id) DO NOTHING`, which is what a reading of PRD 08's redelivery
+        rule invites, or `DO UPDATE`.
 
         **Redelivery does not need it and is the reason it would be wrong.**
         A requeued `CURATE` job re-runs the whole generation and makes a

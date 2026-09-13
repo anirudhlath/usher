@@ -215,8 +215,10 @@ async def test_the_subscription_frame_arrives_verbatim(server: _Server) -> None:
 
 
 async def test_a_real_message_becomes_a_real_event(server: _Server) -> None:
-    """Bytes on a socket into a `SourceEvent`, with nothing faked in
-    between, and the ledger moving because a frame really arrived."""
+    """Bytes on a socket into a `SourceEvent`.
+
+    with nothing faked in between, and the ledger moving because a frame really arrived.
+    """
     server.to_send = [_library_changed(str(FIRST_ITEM_ID))]
     channel = _channel(server.base_url)
     async with _consuming(channel) as received:
@@ -265,8 +267,9 @@ async def test_the_ledger_reports_delivering_only_once_a_real_frame_has_arrived(
 async def test_every_frame_sent_while_the_lane_was_not_reading_is_still_delivered(
     server: _Server,
 ) -> None:
-    """The premise `PushSupervisor`'s connect-then-walk ordering rests on: a real socket
-    loses nothing while the lane is somewhere else.
+    """The premise `PushSupervisor`'s connect-then-walk ordering rests on.
+
+    a real socket loses nothing while the lane is somewhere else.
     """
     count = 300
     channel = _channel(server.base_url)
@@ -291,8 +294,9 @@ async def test_every_frame_sent_while_the_lane_was_not_reading_is_still_delivere
 async def test_a_real_server_close_raises_port_unavailable_out_of_the_iterator(
     server: _Server,
 ) -> None:
-    """A real close frame with a real code, translated, raised out of the
-    channel's own `async for`.
+    """A real close frame with a real code.
+
+    translated, raised out of the channel's own `async for`.
 
     The unit suite arranges this with `FakePushConnection.drop`, which
     raises the exception the wrapper is *supposed* to produce -- so it can
@@ -316,8 +320,9 @@ async def test_a_real_server_close_raises_port_unavailable_out_of_the_iterator(
 async def test_a_real_ping_is_answered_while_the_poll_loop_is_cancelling_recv(
     server: _Server,
 ) -> None:
-    """A real ping, a real pong, through a poll loop that keeps cancelling the receive
-    underneath it.
+    """A real ping.
+
+    a real pong, through a poll loop that keeps cancelling the receive underneath it.
     """
     channel = _channel(server.base_url)
     async with _consuming(channel):
@@ -332,10 +337,12 @@ async def test_a_real_ping_is_answered_while_the_poll_loop_is_cancelling_recv(
 
 
 async def test_a_failed_connection_names_no_url(server: _Server) -> None:
-    """`websockets.exceptions.InvalidURI.__str__` contains the URI, and this
-    URI contains the token. Arranged against a port nothing is listening on,
-    which is a real `OSError` out of the real connector rather than a fake's
-    ready-made `PortUnavailable`.
+    """`websockets.exceptions.InvalidURI.__str__` contains the URI.
+
+    and this URI contains the token.
+
+    Arranged against a port nothing is listening on, which is a real `OSError` out of
+    the real connector rather than a fake's ready-made `PortUnavailable`.
 
     Port 1 on loopback: reserved, never bound, and refused immediately, so
     this costs nothing and waits for nothing.
@@ -356,8 +363,7 @@ async def test_a_failed_connection_names_no_url(server: _Server) -> None:
 async def test_a_proxy_in_the_environment_does_not_capture_a_loopback_connection(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`connect_websocket(proxy=None)`, and the proof that the argument is
-    doing something.
+    """`connect_websocket(proxy=None)`, and the proof that the argument is doing something.
 
     `websockets` 16 resolves a proxy from the environment by default, and
     `urllib.request.proxy_bypass` does **not** exempt loopback unless
@@ -399,8 +405,7 @@ async def test_a_proxy_in_the_environment_does_not_capture_a_loopback_connection
 async def test_the_channel_cannot_log_the_token_at_debug(
     server: _Server, capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """The leak, closed and proved against the real library through the real
-    channel.
+    """The leak, closed and proved against the real library through the real channel.
 
     `websockets/client.py:294` debug-logs the request line, which for this
     channel carries `api_key=`, and `configure_logging` forces every logger
@@ -435,8 +440,9 @@ async def test_the_channel_cannot_log_the_token_at_debug(
 async def test_a_stock_server_logger_leaks_the_token_from_the_harness_side(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """**Why the fixture above passes `logger=socket_logger()` to its own
-    server**, pinned as a measurement rather than left as a comment.
+    """**Why the fixture above passes `logger=socket_logger()` to its own server**.
+
+    pinned as a measurement rather than left as a comment.
 
     `websockets/server.py:561` is the mirror of the client's line and logs
     the same request line -- so a loopback file that silenced only the

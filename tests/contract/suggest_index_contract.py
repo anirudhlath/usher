@@ -1,5 +1,6 @@
-"""What every `SuggestIndex` implementation owes the type-ahead box, and what only the
-typo-tolerant one does.
+"""What every `SuggestIndex` implementation owes the type-ahead box.
+
+and what only the typo-tolerant one does.
 """
 
 import uuid
@@ -19,9 +20,11 @@ class SuggestIndexContract:
     async def test_a_prefix_returns_the_title_that_starts_with_it(
         self, index: SuggestIndex
     ) -> None:
-        """The empty implementation. Asserts position rather than
-        membership even here, because the distractor is seeded first and a
-        physical-order implementation would return it first."""
+        """The empty implementation.
+
+        Asserts position rather than membership even here, because the distractor is
+        seeded first and a physical-order implementation would return it first.
+        """
         await self.given_title(index, name="Vacuum Chamber", popularity=900.0)
         wanted = await self.given_title(index, name="Harbour Lights", popularity=1.0)
         hits = await index.suggest("harb")
@@ -30,10 +33,11 @@ class SuggestIndexContract:
     async def test_results_are_ordered_by_popularity_within_equal_distance(
         self, index: SuggestIndex
     ) -> None:
-        """An implementation that returns candidates in physical order, so
-        the type-ahead box's first row is arbitrary among equally-good
-        matches -- which on a household catalog means the obvious answer is
-        second about half the time and nobody can reproduce it.
+        """An implementation that returns candidates in physical order.
+
+        so the type-ahead box's first row is arbitrary among equally-good matches --
+        which on a household catalog means the obvious answer is second about half the
+        time and nobody can reproduce it.
 
         The two names are *exactly* equidistant from the prefix by
         construction, so distance cannot decide -- and on the prefix tier,
@@ -89,11 +93,12 @@ class TypoTolerantSuggestIndexContract(SuggestIndexContract):
     async def test_a_single_character_typo_still_finds_a_short_title(
         self, index: SuggestIndex
     ) -> None:
-        """**ADR-0002's known genuine weakness, asserted rather than
-        assumed.** Fails a pure `LIKE 'prefix%'` implementation, which finds
-        nothing at all for a misspelt prefix, and a pure trigram
-        implementation with no `levenshtein` re-rank, whose overlap on a
-        four-character name is one trigram or none.
+        """**ADR-0002's known genuine weakness.
+
+        asserted rather than assumed.** Fails a pure `LIKE 'prefix%'` implementation,
+        which finds nothing at all for a misspelt prefix, and a pure trigram
+        implementation with no `levenshtein` re-rank, whose overlap on a four-character
+        name is one trigram or none.
 
         The distractor shares no characters with the query and is 900x more
         popular, so an implementation that returns its whole table ordered
@@ -112,8 +117,9 @@ class TypoTolerantSuggestIndexContract(SuggestIndexContract):
         assert hits[0].title_id == wanted
 
     async def test_a_transposition_still_finds_a_short_title(self, index: SuggestIndex) -> None:
-        """Trigram overlap's near-blind spot, named explicitly in ADR-0002
-        and asserted here rather than trusted.
+        """Trigram overlap's near-blind spot.
+
+        named explicitly in ADR-0002 and asserted here rather than trusted.
 
         `"vnae"` and `"vane"` share **no trigram at all** ({vna, nae} against
         {van, ane}), so `similarity()` is 0.0 and a trigram-only candidate
@@ -131,9 +137,10 @@ class TypoTolerantSuggestIndexContract(SuggestIndexContract):
         assert hits[0].title_id == wanted
 
     async def test_the_candidate_set_is_capped_before_the_rerank(self, index: SuggestIndex) -> None:
-        """An implementation running `levenshtein` over the whole table --
-        the exact latency cliff PRD 05 says the narrow path exists to avoid,
-        and the reason `levenshtein_less_equal` exists at all.
+        """An implementation running `levenshtein` over the whole table.
+
+        the exact latency cliff PRD 05 says the narrow path exists to avoid, and the
+        reason `levenshtein_less_equal` exists at all.
 
         Asserted by measured work rather than by wall clock: a timing
         assertion over a 500-row fixture measures the host, and the cliff is

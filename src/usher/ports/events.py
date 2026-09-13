@@ -1,6 +1,4 @@
-"""The client event channel (PRD 07's SSE surface, PRD 03's read-through loop), as a
-port.
-"""
+"""The client event channel (PRD 07's SSE surface, PRD 03's read-through loop), as a port."""
 
 import uuid
 from abc import ABC, abstractmethod

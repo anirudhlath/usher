@@ -15,22 +15,27 @@ class ImageFetcherContract(ABC):
         """A fetcher whose next `fetch` of `path()` succeeds."""
 
     def path(self) -> str:
-        """A provider path this fetcher can answer. Overridden by the live arm,
-        which needs one the real CDN actually holds."""
+        """A provider path this fetcher can answer.
+
+        Overridden by the live arm, which needs one the real CDN actually holds.
+        """
         return "/quiet-vacuum.jpg"
 
     async def test_a_fetch_yields_a_media_type_the_cache_can_name(self) -> None:
-        """`DiskImageBlobStore` names an entry from its media type, so an
-        implementation that answered `application/octet-stream` would produce a
-        `PortDataMalformed` at the *store*, one layer past where it is
-        diagnosable."""
+        """`DiskImageBlobStore` names an entry from its media type.
+
+        so an implementation that answered `application/octet-stream` would produce a
+        `PortDataMalformed` at the *store*, one layer past where it is diagnosable.
+        """
         async with self.fetcher().fetch(self.path(), IMAGE_LADDER[0]) as fetched:
             assert fetched.content_type.split(";", 1)[0].strip() in SUPPORTED_MEDIA_TYPES
 
     async def test_a_fetch_yields_a_body(self) -> None:
-        """The chunks concatenate to something. A generator that yielded
-        nothing would leave a zero-byte entry on disk, which every subsequent
-        request would then serve as a valid cache hit."""
+        """The chunks concatenate to something.
+
+        A generator that yielded nothing would leave a zero-byte entry on disk, which
+        every subsequent request would then serve as a valid cache hit.
+        """
         chunks = []
         async with self.fetcher().fetch(self.path(), IMAGE_LADDER[0]) as fetched:
             async for chunk in fetched.chunks:
@@ -38,10 +43,12 @@ class ImageFetcherContract(ABC):
         assert b"".join(chunks) != b""
 
     async def test_every_rung_of_the_ladder_is_fetchable(self) -> None:
-        """All four, because ADR-0032's ladder rests on a measurement — every
-        rung served 10/10 in all three kinds M9 emits — and an implementation
-        that only worked at one would make the clamp's other three widths a
-        runtime discovery."""
+        """All four, because ADR-0032's ladder rests on a measurement.
+
+        every rung served 10/10 in all three kinds M9 emits — and an implementation that
+        only worked at one would make the clamp's other three widths a runtime
+        discovery.
+        """
         fetcher = self.fetcher()
         for rung in IMAGE_LADDER:
             async with fetcher.fetch(self.path(), rung) as fetched:
@@ -51,8 +58,9 @@ class ImageFetcherContract(ABC):
     async def test_a_width_that_is_not_a_rung_is_refused_before_anything_is_sent(
         self, width: int
     ) -> None:
-        """`ValueError`, not a `UsherPortError`: an off-ladder width is a
-        defect in the caller rather than an upstream saying no.
+        """`ValueError`, not a `UsherPortError`.
+
+        an off-ladder width is a defect in the caller rather than an upstream saying no.
 
         The values are the measurement. `w500` and `w1920` are widths the real
         CDN **serves** and this proxy still refuses, because a rung resting on

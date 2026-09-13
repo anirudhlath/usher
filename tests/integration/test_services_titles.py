@@ -1,5 +1,6 @@
-"""`TitleReadService` against real Postgres, for the things its port fakes structurally
-cannot express.
+"""`TitleReadService` against real Postgres.
+
+for the things its port fakes structurally cannot express.
 """
 
 import uuid
@@ -118,8 +119,10 @@ async def _seed_person(session: AsyncSession, name: str) -> Person:
 async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The ordering, the `kind` filter and the `title_id` scope as one real
-    statement rather than as three comprehensions.
+    """The ordering.
+
+    the `kind` filter and the `title_id` scope as one real statement rather than as
+    three comprehensions.
 
     **Seeded so `ORDER BY c.person_id` alone answers the wrong list.** The
     people are minted lowest-id-first in the order bit part, lead, uncredited,
@@ -136,7 +139,6 @@ async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
 
     The second title exists so the `WHERE c.title_id = ...` scope is a real
     assertion -- an implementation that forgot it returns four cast entries
-    here in whatever order the planner reached them.
     """
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     other = await _seed_title(session, EnrichmentState.ENRICHED)
@@ -280,9 +282,11 @@ async def test_opening_a_stub_raises_a_queued_job_to_demand(
 async def test_opening_a_parked_title_leaves_it_parked_at_its_own_priority(
     service: TitleReadService, queue: PostgresJobQueue, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """PRD 08's "re-enqueueing does not un-park, and a parked job's priority
-    is not promoted behind their back either" -- both halves, against the
-    statement that actually enforces them."""
+    """PRD 08's "re-enqueueing does not un-park.
+
+    and a parked job's priority is not promoted behind their back either" -- both
+    halves, against the statement that actually enforces them.
+    """
     title = await _seed_title(session, EnrichmentState.STUB)
     await queue.enqueue(
         [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.NEW)]
@@ -336,12 +340,14 @@ async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
 async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
     service: TitleReadService, session: AsyncSession, source: Source, user_id: uuid.UUID
 ) -> None:
-    """`watch_states` has a `num_nonnulls(title_id, episode_id) = 1` CHECK, so
-    an episode's state and its series' state are separate rows that a dict
-    cannot keep apart by constraint -- and `get_for_title` on a series must
-    not pick up whichever of its episodes the planner reached first. Same
-    asymmetry `resolve_external_ids`' title branch needed `episode_id IS
-    NULL` for, and the same one `list_for_title` now needs it for.
+    """`watch_states` has a `num_nonnulls(title_id.
+
+    episode_id) = 1` CHECK, so an episode's state and its series' state are separate
+    rows that a dict cannot keep apart by constraint -- and `get_for_title` on a series
+    must not pick up whichever of its episodes the planner reached first.
+
+    Same asymmetry `resolve_external_ids`' title branch needed `episode_id IS NULL` for,
+    and the same one `list_for_title` now needs it for.
     """
     series = await _seed_title(session, EnrichmentState.ENRICHED, kind=TitleKind.SERIES)
     season, episode = uuid.uuid4(), uuid.uuid4()
@@ -388,9 +394,11 @@ async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
 async def test_a_read_of_a_title_with_no_source_row_answers_rather_than_raising(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The catalog is 1,271,138 titles against one source's 1,126,789 items,
-    89% of them episodes, so "on no source" is the majority state and has to
-    be a normal 200-shaped answer rather than an absence."""
+    """The catalog is 1,271,138 titles against one source's 1,126,789 items.
+
+    89% of them episodes, so "on no source" is the majority state and has to be a normal
+    200-shaped answer rather than an absence.
+    """
     title = await _seed_title(session, EnrichmentState.SKELETON)
     detail = await service.detail(title.id, user_id=user_id)
     assert detail is not None
@@ -401,12 +409,14 @@ async def test_a_read_of_a_title_with_no_source_row_answers_rather_than_raising(
 async def test_the_images_order_comes_from_the_statement_and_not_from_the_heap(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The fifth divergence, and it runs the same way as the credits one: the
-    fake sorts in Python, so its ordering case passes because the key function
-    *is* the answer. Only here can a deleted `ORDER BY` leave heap order --
-    which on a small fixture is frequently already sorted, and which is why
-    the premise below is stated from the ids the fixture minted rather than
-    from the order they were inserted in.
+    """The fifth divergence, and it runs the same way as the credits one.
+
+    the fake sorts in Python, so its ordering case passes because the key function *is*
+    the answer.
+
+    Only here can a deleted `ORDER BY` leave heap order -- which on a small fixture is
+    frequently already sorted, and which is why the premise below is stated from the ids
+    the fixture minted rather than from the order they were inserted in.
 
     The backdrop is written first, so its UUIDv7 id is the smaller and
     `is_primary DESC` is the only thing that can put the poster in front of
@@ -445,11 +455,13 @@ async def test_the_images_order_comes_from_the_statement_and_not_from_the_heap(
 async def test_a_declined_logo_is_filtered_out_of_a_real_read(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The filter over rows Postgres really returned, which is the arm that
-    can see the *row still being there*: `replace_for_titles` stored it,
-    `list_for_title` answers it, and the service drops it -- so an operator
-    debugging a missing logo finds the reference with one `SELECT`, which is
-    the reason C4 rejected refusing at the write instead."""
+    """The filter over rows Postgres really returned.
+
+    which is the arm that can see the *row still being there*: `replace_for_titles`
+    stored it, `list_for_title` answers it, and the service drops it -- so an operator
+    debugging a missing logo finds the reference with one `SELECT`, which is the reason
+    C4 rejected refusing at the write instead.
+    """
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     images = PostgresImageRepository(session)
     await images.replace_for_titles(

@@ -100,9 +100,10 @@ def _without_suspending(coro: Coroutine[Any, Any, Any]) -> Any:
 async def test_a_stale_screen_is_served_without_waiting_for_the_refresh(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """The clock stepped **onto** `_SCREEN_TTL` -- expired, and inside the
-    grace window -- and a refresh queue nothing is draining, so the refresh
-    that gets scheduled can never complete during this case.
+    """The clock stepped **onto** `_SCREEN_TTL`.
+
+    expired, and inside the grace window -- and a refresh queue nothing is draining, so
+    the refresh that gets scheduled can never complete during this case.
 
     At HEAD this fails because an expired entry is popped and the request pays
     a full compose: `_builds` is 2 and the provider was re-proposed. Against a
@@ -127,10 +128,12 @@ async def test_a_stale_screen_is_served_without_waiting_for_the_refresh(
 
 
 async def test_a_fresh_screen_schedules_no_refresh(ctx: RowContext, clock: _Clock) -> None:
-    """The control the case above needs. Without it, a composer that scheduled
-    a refresh on *every* read -- turning one request per TTL into one refresh
-    per request, which is the stampede the bound exists to prevent -- passes
-    every assertion in this file."""
+    """The control the case above needs.
+
+    Without it, a composer that scheduled a refresh on *every* read -- turning one
+    request per TTL into one refresh per request, which is the stampede the bound exists
+    to prevent -- passes every assertion in this file.
+    """
     cache = RowCache(clock=clock)
     queue = RefreshQueue()
     service = HomeService(providers=[_provider()], cache=cache, refresh=queue.schedule)
@@ -148,7 +151,7 @@ async def test_a_fresh_screen_schedules_no_refresh(ctx: RowContext, clock: _Cloc
 async def test_past_the_grace_window_the_entry_is_a_hard_miss_and_is_never_served(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """**Stepped exactly onto the second boundary, not past it.**
+    """**Stepped exactly onto the second boundary, not past it.**.
 
     `_SCREEN_TTL + SCREEN_STALE_GRACE` is the instant a stale entry stops
     being servable, and `>=` versus `>` there is the same one-keystroke
@@ -173,9 +176,11 @@ async def test_past_the_grace_window_the_entry_is_a_hard_miss_and_is_never_serve
 async def test_one_second_inside_the_grace_window_is_still_served_stale(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """The other side of that boundary, so "hard miss" cannot be satisfied by
-    a grace window of zero -- which is what deleting the feature looks like
-    and which the case above alone would pass."""
+    """The other side of that boundary.
+
+    so "hard miss" cannot be satisfied by a grace window of zero -- which is what
+    deleting the feature looks like and which the case above alone would pass.
+    """
     cache = RowCache(clock=clock)
     queue = RefreshQueue()
     provider = _provider()
@@ -191,7 +196,7 @@ async def test_one_second_inside_the_grace_window_is_still_served_stale(
 async def test_a_composer_with_no_refresher_never_serves_stale(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """**The grace window is gated on having somewhere to send the key.**
+    """**The grace window is gated on having somewhere to send the key.**.
 
     A composer that opened the window with nothing behind it would serve a
     stale screen and never replace it -- strictly worse than the miss it
@@ -218,8 +223,9 @@ async def test_a_composer_with_no_refresher_never_serves_stale(
 async def test_two_reads_over_one_stale_key_schedule_one_refresh(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """The deduplication, at the queue's own level -- **and the second read is
-    still served the stale screen.**
+    """The deduplication, at the queue's own level.
+
+    **and the second read is still served the stale screen.**.
 
     That second half is not decoration. `read_screen` returning the stale value
     *and popping the entry* is a one-line mutation that satisfies every other
@@ -258,7 +264,7 @@ async def test_two_reads_over_one_stale_key_schedule_one_refresh(
 async def test_a_full_queue_drops_the_key_and_the_request_still_does_not_wait(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """**Full means dropped, never blocked.**
+    """**Full means dropped, never blocked.**.
 
     `asyncio.Queue.put` on a full queue suspends, and a request path that
     suspended there would block on exactly the load that filled it -- the
@@ -288,7 +294,7 @@ async def test_a_full_queue_drops_the_key_and_the_request_still_does_not_wait(
 async def test_the_key_stays_pending_until_the_refresh_says_it_is_done(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """**Taking a key off the queue does not clear it.**
+    """**Taking a key off the queue does not clear it.**.
 
     The dedup window has to cover the refresh itself, not just the wait for
     one: cleared at `take()`, a second request arriving mid-refresh schedules
@@ -321,11 +327,11 @@ async def test_the_key_stays_pending_until_the_refresh_says_it_is_done(
 async def test_rebuild_ignores_the_cached_screen_and_replaces_it(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """`rebuild` is the refresh's entry point and it is a *different* method
-    from `compose` for one reason: a refresh that went through the ordinary
-    read would find its own stale entry, serve it to itself, and schedule
-    another refresh -- a lane spinning on one key forever, with the household
-    still looking at the same stale screen.
+    """`rebuild` is the refresh's entry point and it is a *different* method from `compose` for.
+
+    one reason: a refresh that went through the ordinary read would find its own stale
+    entry, serve it to itself, and schedule another refresh -- a lane spinning on one
+    key forever, with the household still looking at the same stale screen.
 
     **The row cache underneath is still consulted**, which is PRD 06's two
     layers doing what they exist for: 30 s past the screen's TTL the row's own
@@ -353,12 +359,13 @@ async def test_rebuild_ignores_the_cached_screen_and_replaces_it(
 
 
 async def test_a_stale_serve_costs_no_taste_read(clock: _Clock) -> None:
-    """`RowContext.affinities` is a callable so that a screen the cache can
-    answer never pays the three statements behind it (`api/deps.py`
-    `_Affinities`). A *stale* serve is a screen the cache answered, so it owes
-    them no more than a fresh one does -- and a serve-stale path that resolved
-    the context eagerly would put the whole genre-affinity read back in front
-    of the answer it already has.
+    """`RowContext.affinities` is a callable so that a screen the cache can answer never pays.
+
+    the three statements behind it (`api/deps.py` `_Affinities`).
+
+    A *stale* serve is a screen the cache answered, so it owes them no more than a fresh
+    one does -- and a serve-stale path that resolved the context eagerly would put the
+    whole genre-affinity read back in front of the answer it already has.
     """
     reads = 0
 
@@ -383,7 +390,7 @@ async def test_a_stale_serve_costs_no_taste_read(clock: _Clock) -> None:
 
 
 def test_the_queue_hands_over_the_user_the_request_already_resolved() -> None:
-    """**A frozen domain value, never the `RowContext`.**
+    """**A frozen domain value, never the `RowContext`.**.
 
     The context holds ten repositories bound to the request's `AsyncSession`,
     which `get_session` commits and closes when the handler returns -- so a
@@ -401,10 +408,12 @@ def test_the_queue_hands_over_the_user_the_request_already_resolved() -> None:
 
 
 def test_a_screen_stale_by_a_negative_ttl_is_still_inside_the_grace_window() -> None:
-    """The shape `tests/integration/test_rows_refresh.py` plants with, pinned
-    here so that file's premise is not an assumption about arithmetic it
-    cannot step a clock to check: a real wall clock cannot be advanced, so the
-    integration case makes an entry that is *already* expired instead."""
+    """The shape `tests/integration/test_rows_refresh.py` plants with.
+
+    pinned here so that file's premise is not an assumption about arithmetic it cannot
+    step a clock to check: a real wall clock cannot be advanced, so the integration case
+    makes an entry that is *already* expired instead.
+    """
     cache = RowCache(clock=lambda: _START)
     user = uuid.uuid4()
     screen: tuple[BuiltRow, ...] = ()

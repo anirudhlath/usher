@@ -23,10 +23,11 @@ async def _live_tables(postgres_url: str) -> set[str]:
 async def test_every_table_the_migrations_create_is_classified_by_the_manifest(
     postgres_url: str,
 ) -> None:
-    """Both directions, each with its own message, because they are two
-    different mistakes: a table nobody classified is a table a backup
-    silently drops, and a table the manifest names that does not exist is a
-    manifest describing a schema this deployment no longer has.
+    """Both directions, each with its own message, because they are two different mistakes.
+
+    a table nobody classified is a table a backup silently drops, and a table the
+    manifest names that does not exist is a manifest describing a schema this deployment
+    no longer has.
     """
     live = await _live_tables(postgres_url)
 

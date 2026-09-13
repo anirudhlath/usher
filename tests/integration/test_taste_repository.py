@@ -197,8 +197,7 @@ async def test_a_stored_vector_survives_the_halfvec_round_trip_to_a_thousandth(
 async def test_a_bare_text_read_would_hand_the_centroid_back_as_a_string(
     session: AsyncSession,
 ) -> None:
-    """**The `.columns()` declaration on `_GET` is load-bearing and its absence
-    is silent.**
+    """**The `.columns()` declaration on `_GET` is load-bearing and its absence is silent.**.
 
     asyncpg has no codec for a pgvector type and a `text()` construct carries
     no type information, so the read gets the extension's *text output form*:
@@ -230,8 +229,7 @@ async def test_a_bare_text_read_would_hand_the_centroid_back_as_a_string(
 
 
 async def test_deleting_a_user_takes_their_centroid_with_it(session: AsyncSession) -> None:
-    """`ON DELETE CASCADE`, and it is `title_embeddings`' call rather than
-    `watch_states`'.
+    """`ON DELETE CASCADE`, and it is `title_embeddings`' call rather than `watch_states`'.
 
     ADR-0010 makes `watch_states.user_id` protect state a delete would destroy
     irrecoverably. A centroid is neither user state nor irrecoverable -- it is
@@ -257,8 +255,9 @@ async def test_deleting_a_user_takes_their_centroid_with_it(session: AsyncSessio
 
 
 async def test_user_taste_carries_no_updated_at_trigger(session: AsyncSession) -> None:
-    """One writer, one statement, which sets `computed_at` in its own
-    `ON CONFLICT DO UPDATE` -- `title_embeddings`' precedent.
+    """One writer, one statement, which sets `computed_at` in its own `ON CONFLICT DO UPDATE`.
+
+    `title_embeddings`' precedent.
 
     Mechanically required as well as argued:
     `test_migration_creates_the_updated_at_triggers` asserts the trigger set
@@ -280,8 +279,7 @@ async def test_user_taste_carries_no_updated_at_trigger(session: AsyncSession) -
 async def test_the_watermark_is_the_max_updated_at_across_a_real_history(
     session: AsyncSession,
 ) -> None:
-    """The aggregate against the real table, including the column the trigger
-    owns.
+    """The aggregate against the real table, including the column the trigger owns.
 
     `updated_at` rather than `last_played_at` is the whole point: a re-merge
     that raises `play_count` without moving `last_played_at` is exactly the

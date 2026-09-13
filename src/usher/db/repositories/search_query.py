@@ -1,5 +1,6 @@
-"""`search_queries` -- one row per answered search, then attributed by up to two later
-calls: a click, and separately a play.
+"""`search_queries`.
+
+one row per answered search, then attributed by up to two later calls: a click, and
 """
 
 import uuid

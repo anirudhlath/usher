@@ -32,9 +32,7 @@ class FilterNotSupported(UsherPortError):
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
-    """One candidate, its backend's own score, and whether the query *is* this title's
-    name.
-    """
+    """One candidate, its backend's own score, and whether the query *is* this title's name."""
 
     title_id: uuid.UUID
     score: float
@@ -42,10 +40,12 @@ class SearchHit:
 
 
 class SearchMode(StrEnum):
-    """`SearchRequest.mode`'s three reachable values. Reciprocal Rank
-    Fusion is the design (ADR-0002), not a hypothetical option alongside a
-    bool -- which is why this replaced a `semantic: bool` that could not
-    express `FUSED` at all."""
+    """`SearchRequest.mode`'s three reachable values.
+
+    Reciprocal Rank Fusion is the design (ADR-0002), not a hypothetical option alongside
+    a bool -- which is why this replaced a `semantic: bool` that could not express
+    `FUSED` at all.
+    """
 
     FULL_TEXT = "full_text"
     SEMANTIC = "semantic"
@@ -167,8 +167,10 @@ class SearchOutcome:
 
 
 class SearchIndex(ABC):
-    """Candidate generation. Ranking blends happen in application code, so this returns
-    hits and scores, not final ordering.
+    """Candidate generation.
+
+    Ranking blends happen in application code, so this returns hits and scores, not
+    final ordering.
     """
 
     @abstractmethod
@@ -203,14 +205,20 @@ class SearchIndex(ABC):
 
     @abstractmethod
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        """`SearchOutcome.semantic_coverage` for this filtered population, without running
-        a search. The same number over the same denominator -- see that field for what
-        the denominator is, and is not.
+        """`SearchOutcome.semantic_coverage` for this filtered population.
+
+        without running a search.
+
+        The same number over the same denominator -- see that field for what the
+        denominator is, and is not.
         """
 
 
 class SuggestIndex(ABC):
-    """Type-ahead over names. One method, and no write path."""
+    """Type-ahead over names.
+
+    One method, and no write path.
+    """
 
     @abstractmethod
     async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:

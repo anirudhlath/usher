@@ -22,8 +22,9 @@ def _affinity(genre: str, *, lift: float, support: int) -> GenreAffinity:
 
 
 async def test_the_affinity_row_is_about_lift_and_not_about_volume() -> None:
-    """**Six engaged westerns at lift 4.4 against forty engaged dramas at lift
-    1.6**, handed over in Task 23's own lift order.
+    """**Six engaged westerns at lift 4.4 against forty engaged dramas at lift 1.6**.
+
+    handed over in Task 23's own lift order.
 
     The wrong implementation re-ranks by `support`, which is the count of
     titles -- volume -- and it produces a populated, hydrated, plausibly
@@ -55,11 +56,11 @@ async def test_the_affinity_row_is_about_lift_and_not_about_volume() -> None:
 
 
 async def test_the_reason_claims_lift_rather_than_volume() -> None:
-    """`reason` is written to be spoken (PRD 06's Alfred section), and this
-    sentence is *generated from the computation*: it says the household watches
-    more of this genre than their library would predict, which is what lift
-    means and what a volume ranking would make false on every household at
-    once.
+    """`reason` is written to be spoken (PRD 06's Alfred section).
+
+    and this sentence is *generated from the computation*: it says the household watches
+    more of this genre than their library would predict, which is what lift means and
+    what a volume ranking would make false on every household at once.
     """
     library = Library()
     for index in range(4):
@@ -76,9 +77,10 @@ async def test_the_reason_claims_lift_rather_than_volume() -> None:
 
 
 async def test_the_cards_are_owned_and_unwatched_with_the_best_first() -> None:
-    """Two distractors, each varying **one** thing, and each seeded as the
-    *best* match in the catalog so it is `cards[0]` under the implementation
-    that forgets it.
+    """Two distractors.
+
+    each varying **one** thing, and each seeded as the *best* match in the catalog so it
+    is `cards[0]` under the implementation that forgets it.
 
     - An unowned horror at the highest popularity in the library. A "you love
       horror" shelf of films nobody can play looks perfect and does nothing.
@@ -107,11 +109,11 @@ async def test_the_cards_are_owned_and_unwatched_with_the_best_first() -> None:
 
 
 async def test_a_series_watched_only_through_its_episodes_is_not_offered_again() -> None:
-    """**Trap 7 in the unwatched filter.** An episode's watch state carries
-    `title_id IS NULL`, so a "has the household seen this" check keyed on
-    `watch_states.title_id` answers films only -- and every series the
-    household is partway through comes back as something new, in a row headed
-    "you watch a lot more Horror".
+    """**Trap 7 in the unwatched filter.** An episode's watch state carries `title_id IS NULL`.
+
+    so a "has the household seen this" check keyed on `watch_states.title_id` answers
+    films only -- and every series the household is partway through comes back as
+    something new, in a row headed "you watch a lot more Horror".
 
     The distractor is a *film* the household finished, so a films-only
     implementation still drops something and still looks like it is filtering.
@@ -134,9 +136,10 @@ async def test_a_series_watched_only_through_its_episodes_is_not_offered_again()
 
 
 async def test_a_genre_whose_owned_titles_are_all_watched_builds_empty() -> None:
-    """The row is **proposed** -- the affinity is real and the claim is true --
-    and builds with no cards, so `HomeService` drops it (PRD 06: *"drops any
-    that build empty"*).
+    """The row is **proposed**.
+
+    the affinity is real and the claim is true -- and builds with no cards, so
+    `HomeService` drops it (PRD 06: *"drops any that build empty"*).
 
     Fails the implementation that pads with watched titles to avoid an empty
     row, which is the popular-titles fallback scoped to one genre. It is also
@@ -164,11 +167,12 @@ async def test_a_genre_whose_owned_titles_are_all_watched_builds_empty() -> None
 
 
 async def test_no_more_than_three_affinity_rows_are_proposed() -> None:
-    """PRD 06 says 1-3 rows. Task 23's `_MAX_AFFINITY_ROWS` bounds the
-    affinities; this pins that the provider does not then emit one row per
-    *card set* or re-expand them -- and it is written against a context
-    carrying five, because a provider that trusted its input would be correct
-    only for as long as the other cap holds.
+    """PRD 06 says 1-3 rows.
+
+    Task 23's `_MAX_AFFINITY_ROWS` bounds the affinities; this pins that the provider
+    does not then emit one row per *card set* or re-expand them -- and it is written
+    against a context carrying five, because a provider that trusted its input would be
+    correct only for as long as the other cap holds.
     """
     library = Library()
     genres = ("Horror", "Western", "Musical", "Noir", "Documentary")
@@ -193,10 +197,13 @@ async def test_no_more_than_three_affinity_rows_are_proposed() -> None:
 
 
 async def test_a_household_with_no_affinities_proposes_nothing() -> None:
-    """No genre cleared Task 23's lift and support floors, which is the common
-    answer and is a real one. **Never "the library's most common genres"**,
-    which is the popular-titles fallback wearing a taste row's title -- so the
-    library here is deliberately full and deliberately tagged.
+    """No genre cleared Task 23's lift and support floors.
+
+    which is the common answer and is a real one.
+
+    **Never "the library's most common genres"**, which is the popular-titles fallback
+    wearing a taste row's title -- so the library here is deliberately full and
+    deliberately tagged.
     """
     library = Library()
     for index in range(10):
@@ -237,10 +244,11 @@ async def test_a_bigger_lift_outscores_a_smaller_one_and_then_saturates() -> Non
 
 
 async def test_the_provider_returns_the_same_rows_with_and_without_a_centroid() -> None:
-    """**The reason this provider exists in this shape.** PRD 06 fires it on
-    *"taste centroid concentrated in a genre"*; implemented literally it makes
-    the most broadly-useful provider the one that never fires, because the
-    embedder is optional and off by default (ADR-0022).
+    """**The reason this provider exists in this shape.** PRD 06 fires it on *"taste centroid.
+
+    concentrated in a genre"*; implemented literally it makes the most broadly-useful
+    provider the one that never fires, because the embedder is optional and off by
+    default (ADR-0022).
 
     Task 23 corrected that, and this is the provider-level half of the same
     assertion: the row fires from `affinities` -- counts over `titles.genres`,

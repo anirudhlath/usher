@@ -146,8 +146,9 @@ async def test_a_leftover_public_staging_table_cannot_serialise_two_enqueues(
 async def test_a_committed_enqueue_leaves_no_table_in_the_public_schema(
     backends: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The wrong implementation: today's, and the reason nine test files
-    carry a `DROP TABLE IF EXISTS stg_*` line.
+    """The wrong implementation.
+
+    today's, and the reason nine test files carry a `DROP TABLE IF EXISTS stg_*` line.
 
     Postgres DDL is transactional, so a caller that *commits* leaves the
     staging table behind. That is invisible in this suite's usual
@@ -184,8 +185,7 @@ async def test_a_committed_enqueue_leaves_no_table_in_the_public_schema(
 async def test_staging_is_idempotent_within_one_transaction(
     backends: async_sessionmaker[AsyncSession], rows: int
 ) -> None:
-    """`ON COMMIT DROP` drops at commit, and a caller may stage twice before
-    one.
+    """`ON COMMIT DROP` drops at commit, and a caller may stage twice before one.
 
     `IngestService` enqueues match jobs and then watch-history jobs against
     the same session before its batch commit, so the second `CREATE TEMP

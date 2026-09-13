@@ -99,7 +99,7 @@ async def _queue_depth(sessions: async_sessionmaker[AsyncSession]) -> int:
 async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
     lane_settings: Settings, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The milestone's central claim, proved rather than asserted.**
+    """**The milestone's central claim, proved rather than asserted.**.
 
     A real `match` job goes into a real `jobs` table, an app is started with
     nothing but `LifespanManager`, and the row is gone before the app stops.
@@ -140,11 +140,13 @@ async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
 async def test_the_worker_lane_is_off_when_the_setting_is(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """PRD 01's `--worker` flag, as configuration: the same image with the
-    switch off leaves the queue for another container.
+    """PRD 01's `--worker` flag, as configuration.
+
+    the same image with the switch off leaves the queue for another container.
 
     The mirror of the case above and the reason it is evidence -- without
-    this, "the job disappeared" could be anything in the process."""
+    this, "the job disappeared" could be anything in the process.
+    """
     async with sessions() as session:
         pipeline = build_pipeline(
             session, Settings(database_url=postgres_url, secret_key=SECRET_KEY)
@@ -180,10 +182,12 @@ async def _curate_status(sessions: async_sessionmaker[AsyncSession], key: str) -
 async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to_curate(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The wiring `create_app` has that no unit test can see**, and it is the shape a
-    `RowContext.curated = None` took when `mypy` was the only thing holding it:
-    `tests/unit/test_api_lanes.py` proves a `LaneSupervisor` *given* an `LLMClient`
-    claims curate work, and says nothing about whether the lifespan ever builds one.
+    """**The wiring `create_app` has that no unit test can see**.
+
+    and it is the shape a `RowContext.curated = None` took when `mypy` was the only
+    thing holding it: `tests/unit/test_api_lanes.py` proves a `LaneSupervisor` *given*
+    an `LLMClient` claims curate work, and says nothing about whether the lifespan ever
+    builds one.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -219,8 +223,9 @@ async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to
 async def test_a_curate_job_waits_for_a_process_that_has_a_model(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """The mirror, and the reason the case above is evidence: without it,
-    "the job parked" could be anything in the process.
+    """The mirror, and the reason the case above is evidence.
+
+    without it, "the job parked" could be anything in the process.
 
     `USHER_LLM_ENABLED=false` is the shipped default, so this is what nearly
     every deployment does with a curate job -- it leaves it `pending` for a
@@ -276,7 +281,7 @@ class _Closes:
 async def test_the_lifespan_releases_every_process_resource_it_built(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch, clean: None
 ) -> None:
-    """**`create_app`'s `finally` is asserted rather than read.**"""
+    """**`create_app`'s `finally` is asserted rather than read.**."""
     closes = _Closes()
     monkeypatch.setattr("usher.api.app.metadata_provider", closes.factory("provider"))
     monkeypatch.setattr("usher.api.app.embedder", closes.factory("embedder"))
@@ -329,8 +334,10 @@ def _with_fake_adapters(
 async def test_a_push_lane_starts_for_a_real_source_row(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """The lane's source list, credential decryption and adapter build, all
-    through the real repositories against real rows.
+    """The lane's source list.
+
+    credential decryption and adapter build, all through the real repositories against
+    real rows.
 
     A fake `SourceRepository` cannot express the one thing that has ever
     gone wrong here -- an encrypted credential that does not decrypt under
@@ -386,9 +393,10 @@ async def test_a_push_lane_starts_for_a_real_source_row(
 async def test_writing_the_push_availability_it_already_has_writes_nothing(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`, so a
-    lane that wrote unconditionally would move a column an operator reads to
-    see when a source last changed, once per reconnect of a flapping socket.
+    """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`.
+
+    so a lane that wrote unconditionally would move a column an operator reads to see
+    when a source last changed, once per reconnect of a flapping socket.
 
     **And the guard is not what prevents that, measured.** Deleting
     `_write_push_available`'s equality check leaves this case green:

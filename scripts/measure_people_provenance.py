@@ -37,8 +37,9 @@ CAST_CATEGORIES: frozenset[str] = frozenset({"actor", "actress", "self"})
 
 
 def _check_bar() -> None:
-    """Refuse to measure anything if the pre-registered bar is not the one
-    this script was written against.
+    """Refuse to measure anything if the pre-registered bar is not the one this script was.
+
+    written against.
 
     A bar that can be edited after a number is seen is not a bar. This is the
     cheap half of that guarantee; the durable half is that `/var/tmp` is btrfs
@@ -147,7 +148,10 @@ def _rows(cached: CachedDatasetFile) -> Iterator[list[str]]:
 
 
 def _escape(value: str) -> str:
-    r"""One field, safe for `COPY ... FROM STDIN` in text format."""
+    r"""One field, safe for `COPY ...
+
+    FROM STDIN` in text format.
+    """
     return (
         value.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
     )

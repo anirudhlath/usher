@@ -19,8 +19,9 @@ class TitleMatchRepository(ABC):
     async def match_by_provider_ids(
         self, refs: Sequence[ProviderRef]
     ) -> dict[ProviderRef, uuid.UUID]:
-        """Resolve provider references to title ids, in a bounded number of round trips
-        regardless of batch size.
+        """Resolve provider references to title ids.
+
+        in a bounded number of round trips regardless of batch size.
         """
 
     @abstractmethod

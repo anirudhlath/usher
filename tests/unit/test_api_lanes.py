@@ -123,9 +123,10 @@ def _item(external_id: str) -> SourceItem:
 
 
 class _CrashingAdapter(FakeSourceAdapter):
-    """A lane whose `events()` raises something that is not a
-    `UsherPortError` -- i.e. a bug, which `PushSupervisor.run` deliberately
-    does not catch."""
+    """A lane whose `events()` raises something that is not a `UsherPortError` -- i.e.
+
+    a bug, which `PushSupervisor.run` deliberately does not catch.
+    """
 
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
         raise ZeroDivisionError("a bug in the lane")
@@ -154,8 +155,10 @@ class _SlowAdapter(FakeSourceAdapter):
 
 
 class _Adapters(SourceAdapterFactory):
-    """Hands out one `FakeSourceAdapter` per source and remembers them, so a
-    case can push an event at a *running* lane's channel."""
+    """Hands out one `FakeSourceAdapter` per source and remembers them.
+
+    so a case can push an event at a *running* lane's channel.
+    """
 
     def __init__(self) -> None:
         self.built: dict[str, FakeSourceAdapter] = {}
@@ -622,10 +625,12 @@ async def test_a_lane_is_started_for_each_enabled_source(fakes: _Fakes) -> None:
 
 
 async def test_a_source_added_later_gets_a_lane_without_a_restart(fakes: _Fakes) -> None:
-    """PRD 08: "Sources live in the database because they are added through
-    the admin API. A deployment that needs a compose edit and a restart to
-    connect a media server is the wrong shape for this." A lane set fixed at
-    startup makes that false for push alone."""
+    """PRD 08: "Sources live in the database because they are added through the admin API.
+
+    A deployment that needs a compose edit and a restart to connect a media server is
+    the wrong shape for this." A lane set fixed at startup makes that false for push
+    alone.
+    """
     supervisor = _supervisor(fakes)
     await supervisor.start()
     await _settle()
@@ -640,10 +645,12 @@ async def test_a_source_added_later_gets_a_lane_without_a_restart(fakes: _Fakes)
 
 
 async def test_the_refresher_picks_a_source_up_on_its_own_interval(fakes: _Fakes) -> None:
-    """The case above calls `refresh()` by hand, so it passes against a
-    supervisor with **no refresh loop at all** -- and a lane set fixed at
-    startup is exactly what PRD 08 says a source must not need a restart
-    for. This one seeds after `start()` and never calls `refresh()`.
+    """The case above calls `refresh()` by hand.
+
+    so it passes against a supervisor with **no refresh loop at all** -- and a lane set
+    fixed at startup is exactly what PRD 08 says a source must not need a restart for.
+
+    This one seeds after `start()` and never calls `refresh()`.
 
     A real interval rather than zero: `push_source_refresh_seconds` is
     `gt=0`, and a loop that slept for nothing would spin.
@@ -660,9 +667,11 @@ async def test_the_refresher_picks_a_source_up_on_its_own_interval(fakes: _Fakes
 
 
 async def test_a_disabled_source_has_its_lane_cancelled(fakes: _Fakes) -> None:
-    """`enabled` is how an operator parks a server that is being rebuilt,
-    and a lane that kept reconnecting to it would keep the backoff schedule
-    warm against a machine nobody wants touched."""
+    """`enabled` is how an operator parks a server that is being rebuilt.
+
+    and a lane that kept reconnecting to it would keep the backoff schedule warm against
+    a machine nobody wants touched.
+    """
     source = _source("A")
     await _seed(fakes, source)
     supervisor = _supervisor(fakes)
@@ -693,9 +702,11 @@ async def test_stopping_cancels_every_lane_and_closes_every_adapter(fakes: _Fake
 async def test_a_source_with_no_credentials_is_skipped_and_the_others_still_run(
     fakes: _Fakes,
 ) -> None:
-    """The same reasoning `usher sync` applies one layer over: an operator
-    with two sources needs the second to run when the first's credential row
-    has gone missing."""
+    """The same reasoning `usher sync` applies one layer over.
+
+    an operator with two sources needs the second to run when the first's credential row
+    has gone missing.
+    """
     broken = _source("A")
     await fakes.sources.add(broken)  # no credential row
     await _seed(fakes, _source("B"))
@@ -711,8 +722,9 @@ async def test_a_source_with_no_credentials_is_skipped_and_the_others_still_run(
 async def test_push_availability_for_a_source_with_no_lane_is_not_probed(
     fakes: _Fakes,
 ) -> None:
-    """`None` is an absence and `False` is a claim, and a supervisor with no
-    lane for a source has only the first to offer.
+    """`None` is an absence and `False` is a claim.
+
+    and a supervisor with no lane for a source has only the first to offer.
 
     `GET /admin/sources/{id}/status` renders this straight through, so a
     `False` here turns "nobody has looked" into "push is broken" on every
@@ -738,7 +750,8 @@ async def test_push_availability_for_a_source_with_no_lane_is_not_probed(
 async def test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told(
     fakes: _Fakes,
 ) -> None:
-    """A delta with no cursor is not a delta, it is a full walk wearing a delta's name --
+    """A delta with no cursor is not a delta, it is a full walk wearing a delta's name.
+
     and the lane is the one caller nobody typed a command for.
     """
     atrium, belfry, cellar = _source("Atrium"), _source("Belfry"), _source("Cellar")
@@ -830,8 +843,11 @@ async def test_the_gap_closers_delta_carries_the_ceiling_and_the_watch_lane_stil
     await _item_run(fakes, source, SyncRunStatus.COMPLETED)
 
     def stock(adapter: FakeSourceAdapter) -> None:
-        """More items than the ceiling, on the lane's own adapter, so the
-        walk genuinely truncates rather than merely being handed a number."""
+        """More items than the ceiling.
+
+        on the lane's own adapter, so the walk genuinely truncates rather than merely
+        being handed a number.
+        """
         for index in range(10):
             adapter.seed(_item(f"a-{index}"), datetime.now(UTC))
 
@@ -875,8 +891,9 @@ async def test_the_gap_closers_delta_carries_the_ceiling_and_the_watch_lane_stil
 
 
 async def test_an_operators_delta_on_a_fresh_source_still_walks(fakes: _Fakes) -> None:
-    """The other side of the refusal above, and the reason it lives in
-    `LaneSupervisor` rather than in `ReconcileService`.
+    """The other side of the refusal above.
+
+    and the reason it lives in `LaneSupervisor` rather than in `ReconcileService`.
 
     `usher sync --kind delta` against a source that has never completed a run
     is an operator asking for a walk of everything, and it must keep working
@@ -975,10 +992,12 @@ async def test_a_deferred_push_event_on_a_cursorless_source_is_refused_and_its_i
 
 
 async def test_a_lane_that_crashes_does_not_take_the_others_down(fakes: _Fakes) -> None:
-    """A `PushSupervisor.run` that raised something that is not a
-    `UsherPortError` -- a bug -- must cost its own source. Two lanes sharing
-    one `TaskGroup` would take the whole set down, and the server with them
-    if the group is awaited in the lifespan.
+    """A `PushSupervisor.run` that raised something that is not a `UsherPortError`.
+
+    a bug -- must cost its own source.
+
+    Two lanes sharing one `TaskGroup` would take the whole set down, and the server with
+    them if the group is awaited in the lifespan.
 
     **`running_sources() == ["B"]` alone would not test this.** A supervisor
     whose second lane was created and never scheduled reports exactly that,
@@ -1058,9 +1077,10 @@ def _intersection_over_union(a: tuple[float, float], b: tuple[float, float]) -> 
 
 
 async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
-    """`_guard`'s `except` is not what isolates the other lanes -- one task
-    per lane is, measured -- so what it must actually deliver is that the
-    crash is *not silent*.
+    """`_guard`'s `except` is not what isolates the other lanes.
+
+    one task per lane is, measured -- so what it must actually deliver is that the crash
+    is *not silent*.
 
     Without it a crashed lane leaves an unretrieved task exception, which
     CPython reports at garbage-collection time, to stderr, with no source
@@ -1131,9 +1151,10 @@ async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_
 
 
 async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> None:
-    """PRD 10's `usher.source.push.reconnects` is fed straight from here, so
-    a hard-coded `0` would plot a flat line for every source forever -- the
-    exact failure `PushHealth.record_reconnect` had one milestone ago.
+    """PRD 10's `usher.source.push.reconnects` is fed straight from here.
+
+    so a hard-coded `0` would plot a flat line for every source forever -- the exact
+    failure `PushHealth.record_reconnect` had one milestone ago.
 
     Written against a ledger holding a *non-zero* count, because zero is the
     true value on a first connect and a case that only ever saw one could
@@ -1168,8 +1189,11 @@ _GAP_MARKER = "push gap"
 
 
 async def _completed_walk(fakes: _Fakes, source: Source) -> None:
-    """What `usher sync` leaves behind: one completed item-lane run, whose
-    `started_at` is the floor every later delta resumes from."""
+    """What `usher sync` leaves behind.
+
+    one completed item-lane run, whose `started_at` is the floor every later delta
+    resumes from.
+    """
     await fakes.runs.add(
         SyncRun(
             source_id=source.id,
@@ -1244,10 +1268,12 @@ async def test_a_gap_close_walks_the_delta_once_a_walk_has_completed(fakes: _Fak
 
 
 async def test_push_gap_close_always_walks_uncursored_and_says_so_first(fakes: _Fakes) -> None:
-    """The escape hatch for an operator who wants the old behaviour back --
-    and it is not silent. The line goes out *before* the walk starts, at
-    WARNING, naming the source and naming the size, because an operator who
-    finds out from their media server's access log has found out too late."""
+    """The escape hatch for an operator who wants the old behaviour back -- and it is not silent.
+
+    The line goes out *before* the walk starts, at WARNING, naming the source and naming
+    the size, because an operator who finds out from their media server's access log has
+    found out too late.
+    """
     source = _source("A")
     await _seed(fakes, source)
     fakes.adapters.stock(_item("emby-1"), _CHANGED_AT)
@@ -1268,8 +1294,10 @@ async def test_push_gap_close_always_walks_uncursored_and_says_so_first(fakes: _
 
 
 async def test_push_gap_close_never_closes_no_gap_at_all(fakes: _Fakes) -> None:
-    """The other end of the switch: a deployment pointed at a household it
-    does not own, whose walks are an operator's cron and nothing else.
+    """The other end of the switch.
+
+    a deployment pointed at a household it does not own, whose walks are an operator's
+    cron and nothing else.
 
     Costly and stated rather than hidden -- with no gap-closer, a change made
     while the socket was down is not seen until the next walk -- so the line
@@ -1302,8 +1330,9 @@ async def _drain_lane(supervisor: LaneSupervisor, sink: io.StringIO, fakes: _Fak
 async def test_the_gap_close_is_logged_per_close_and_not_per_supervisor_poll(
     fakes: _Fakes,
 ) -> None:
-    """A per-lane fact logged in a per-poll function is the ~17,280 warnings a
-    day `config-cli-and-deployment.md` records against `build_worker`.
+    """A per-lane fact logged in a per-poll function is the ~17,280 warnings a day.
+
+    `config-cli-and-deployment.md` records against `build_worker`.
 
     The refresher re-reads the source list every `push_source_refresh_seconds`
     and the lanes it finds are already running, so a line written there would
@@ -1333,9 +1362,12 @@ async def test_the_gap_close_is_logged_per_close_and_not_per_supervisor_poll(
 
 
 async def test_the_worker_lane_runs_when_enabled(fakes: _Fakes) -> None:
-    """PRD 03's read-through loop only closes if the enrichment happens in
-    the process the SSE client is connected to. M5's bus is in-memory, so
-    this is what makes `title.updated` reach anybody."""
+    """PRD 03's read-through loop only closes if the enrichment happens in the process the SSE.
+
+    client is connected to.
+
+    M5's bus is in-memory, so this is what makes `title.updated` reach anybody.
+    """
     supervisor = _supervisor(fakes)
     await supervisor.start()
     await _settle()
@@ -1364,10 +1396,10 @@ async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
 async def test_a_cancel_in_the_idle_sleep_still_closes_the_worker_lanes_registry(
     fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The registry holds one connection pool per adapter it built, and
-    `stop()` lands its cancel in the idle sleep nearly every time: a pass over
-    an empty queue is milliseconds and the sleep after it is the shipped five
-    seconds.
+    """The registry holds one connection pool per adapter it built.
+
+    and `stop()` lands its cancel in the idle sleep nearly every time: a pass over an
+    empty queue is milliseconds and the sleep after it is the shipped five seconds.
 
     The close therefore has to be a `finally` around the whole loop rather
     than an arm around the pass. It was the latter until both worker roots
@@ -1474,8 +1506,9 @@ class _JustBooted:
 async def test_the_worker_lane_recovers_on_its_first_pass_on_a_host_that_just_booted(
     fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """🔴 **The throttle's origin is the identity element of its own comparison, and that
-    made the field above lie.**
+    """🔴 **The throttle's origin is the identity element of its own comparison.
+
+    and that made the field above lie.**.
     """
     monkeypatch.setattr("usher.services.jobs.time", _JustBooted(10.0))
     supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
@@ -1533,9 +1566,12 @@ async def test_a_missing_tmdb_key_is_not_re_reported_on_every_pass(fakes: _Fakes
 
 
 async def test_the_lanes_are_settings_gated(fakes: _Fakes) -> None:
-    """PRD 01: "A `--worker` entrypoint flag exists from day one so lanes
-    can be moved to a separate container later by editing compose, with no
-    code change." These settings are that flag."""
+    """PRD 01.
+
+    "A `--worker` entrypoint flag exists from day one so lanes can be moved to a
+    separate container later by editing compose, with no code change." These settings
+    are that flag.
+    """
     await _seed(fakes, _source("A"))
     supervisor = _supervisor(fakes, push_enabled=False, worker_enabled=False)
     await supervisor.start()
@@ -1552,11 +1588,13 @@ async def test_the_lanes_are_settings_gated(fakes: _Fakes) -> None:
 
 
 async def test_start_creates_tasks_and_never_awaits_a_unit_of_work(fakes: _Fakes) -> None:
-    """`create_app`'s lifespan builds an engine and opens no connection, and
-    that is load-bearing: `/health` answers 200 with Postgres down while
-    `/health/ready` reports 503, verified live against a real container in
-    M1. A `start()` that read the source list inline would turn a database
-    outage into a failure to boot.
+    """`create_app`'s lifespan builds an engine and opens no connection, and that is load-bearing.
+
+    `/health` answers 200 with Postgres down while `/health/ready` reports 503, verified
+    live against a real container in M1.
+
+    A `start()` that read the source list inline would turn a database outage into a
+    failure to boot.
 
     Driven **one step by hand** rather than timed: `coro.send(None)` raises
     `StopIteration` for a coroutine that never awaited and hands back a
@@ -1592,8 +1630,10 @@ def _stored(media_items: MediaItemRepository) -> list[str]:
 async def _drain(
     until: Callable[[], bool], *, bound: float = 5.0, note: Callable[[], str] | None = None
 ) -> None:
-    """Turn the loop until `until()` holds, bounded so a supervisor that
-    never runs the lane fails the case instead of hanging the suite.
+    """Turn the loop until `until()` holds.
+
+    bounded so a supervisor that never runs the lane fails the case instead of hanging
+    the suite.
 
     `asyncio.wait_for` cannot bound a coroutine that never yields, which is
     why this is a deadline over `sleep(0)` rather than a timeout around one
@@ -1618,8 +1658,9 @@ async def _drain(
 
 
 async def test_the_worker_lane_holds_one_embedder_across_every_pass(fakes: _Fakes) -> None:
-    """**The measured failure `composition.embedder` exists to prevent, at
-    the layer where the mistake is actually available.**
+    """**The measured failure `composition.embedder` exists to prevent.
+
+    at the layer where the mistake is actually available.**.
 
     `_run_worker` rebuilds the pipeline, the registry and the worker every
     turn of a loop whose floor is `IDLE_SLEEP_SECONDS = 5.0`. A model is the
@@ -1675,9 +1716,9 @@ async def test_a_worker_lane_without_an_embedder_never_claims_index_work(
 async def test_a_worker_lane_without_an_llm_client_never_claims_curate_work(
     fakes: _Fakes,
 ) -> None:
-    """The same guard as the embedder's, one lane over, and observed the same
-    way: through what the lane *asked the queue for* rather than through the
-    wiring.
+    """The same guard as the embedder's, one lane over, and observed the same way.
+
+    through what the lane *asked the queue for* rather than through the wiring.
 
     `usher.composition.llm_client` answers `(None, no-op)` for
     `USHER_LLM_ENABLED=false`, which is the shipped default, so this is what
@@ -1708,9 +1749,10 @@ async def test_a_worker_lane_without_an_llm_client_never_claims_curate_work(
 
 
 async def test_a_worker_lane_with_an_llm_client_claims_curate_work(fakes: _Fakes) -> None:
-    """The control that makes the case above evidence rather than a
-    tautology, and the only thing that proves the client the composition root
-    built ever reaches `build_worker`.
+    """The control that makes the case above evidence rather than a tautology.
+
+    and the only thing that proves the client the composition root built ever reaches
+    `build_worker`.
 
     `LaneSupervisor` carries the client for the reason it carries the
     embedder: both are per-*process* resources, and `_run_worker` rebuilds
@@ -1737,8 +1779,9 @@ async def test_a_worker_lane_with_an_llm_client_claims_curate_work(fakes: _Fakes
 
 
 class _GatedRow(FakeRow):
-    """A row whose build parks until a case opens the gate, recording the
-    wall-clock window it spent inside `build`.
+    """A row whose build parks until a case opens the gate.
+
+    recording the wall-clock window it spent inside `build`.
 
     Real time in a real `await`, for the reason `_SlowAdapter` above states: a
     fake that never truly suspends makes every concurrency window disjoint,
@@ -1784,7 +1827,10 @@ def _gated_provider(slug: str = "recently-added") -> tuple[FakeRowProvider, _Gat
 
 
 def _overlap(left: tuple[float, float], right: tuple[float, float]) -> float:
-    """Seconds the two windows share. Zero when they merely touch."""
+    """Seconds the two windows share.
+
+    Zero when they merely touch.
+    """
     return max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
 
 
@@ -1838,8 +1884,9 @@ def _context(user: User) -> RowContext:
 async def test_a_stale_key_is_refreshed_on_the_lanes_own_unit_of_work(
     fakes: _Fakes,
 ) -> None:
-    """The lane drains the queue, rebuilds the screen and replaces the stale
-    entry -- and it opens a unit of work of its own to do it.
+    """The lane drains the queue, rebuilds the screen and replaces the stale entry.
+
+    and it opens a unit of work of its own to do it.
 
     A refresh sharing the request's session passes almost every test that does
     not look for it, because the request's session usually still works for a
@@ -1881,8 +1928,7 @@ async def test_a_stale_key_is_refreshed_on_the_lanes_own_unit_of_work(
 async def test_a_refresh_composes_the_registry_minus_what_an_operator_disabled(
     fakes: _Fakes,
 ) -> None:
-    """**The hole a route-only toggle leaves, and it is the one that reopens
-    itself** (M9 E2).
+    """**The hole a route-only toggle leaves, and it is the one that reopens itself** (M9 E2).
 
     `PUT /admin/rows/providers/{slug}` clears `RowCache`, so the next request
     composes without the disabled provider and caches that. Thirty seconds
@@ -1935,7 +1981,7 @@ async def test_a_refresh_composes_the_registry_minus_what_an_operator_disabled(
 async def test_a_read_during_an_in_flight_refresh_schedules_nothing_and_they_overlap(
     fakes: _Fakes,
 ) -> None:
-    """**The concurrency claim, with observed overlap rather than a count.**
+    """**The concurrency claim, with observed overlap rather than a count.**.
 
     "Exactly one refresh for one key" is also what a serialised pair produces,
     so the case records the wall-clock interval the refresh occupied and the
@@ -2042,7 +2088,7 @@ async def test_a_refresh_that_raises_leaves_the_stale_screen_and_names_the_lane(
 
 
 async def test_the_refresh_lane_is_not_a_source_lane(fakes: _Fakes) -> None:
-    """**A third lane kind must not change what `running_sources()` means.**
+    """**A third lane kind must not change what `running_sources()` means.**.
 
     That list is what `/health/ready` reports as `lanes.push`, and it is also
     the mutation surface for "readiness gates on the lanes": a refresh lane
@@ -2067,8 +2113,9 @@ async def test_the_refresh_lane_is_not_a_source_lane(fakes: _Fakes) -> None:
 
 
 async def test_no_cache_means_no_refresh_lane(fakes: _Fakes) -> None:
-    """The control for the case above, and the reason the lane is gated on
-    being handed the pair rather than on a setting.
+    """The control for the case above.
+
+    and the reason the lane is gated on being handed the pair rather than on a setting.
 
     `usher work` builds a supervisor that serves no screens, so it holds
     neither cache nor queue and must start no refresh lane -- a lane polling a

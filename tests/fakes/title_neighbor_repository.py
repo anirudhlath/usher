@@ -68,8 +68,10 @@ class FakeTitleNeighborRepository(TitleNeighborRepository):
         )
 
     def given_fingerprint(self, seed_id: uuid.UUID, fingerprint: str) -> None:
-        """Re-stamp a seed's stored rows, so a case can arrange a table written
-        under a *previous* blend without owning a previous blend.
+        """Re-stamp a seed's stored rows.
+
+        so a case can arrange a table written under a *previous* blend without owning a
+        previous blend.
 
         Not a port method. The alternative -- mutating `_WEIGHTS`, rebuilding,
         restoring -- makes the arrangement depend on module state that other
@@ -105,7 +107,9 @@ class FakeTitleNeighborRepository(TitleNeighborRepository):
         return None
 
     def stamps(self) -> list[datetime]:
-        """Every stored row's timestamp. Not a port method -- it exists so a
-        case can assert *which* of two instants `computed_at` chose rather than
-        that it chose one."""
+        """Every stored row's timestamp.
+
+        Not a port method -- it exists so a case can assert *which* of two instants
+        `computed_at` chose rather than that it chose one.
+        """
         return [stamp for rows in self._rows.values() for _, stamp, _ in rows]

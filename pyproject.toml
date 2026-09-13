@@ -232,7 +232,11 @@ src = ["src", "tests"]
 extend-exclude = ["docs", ".claude", "web", "dashboards/README.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S", "D"]
+ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest tests assert; not a bandit finding here.

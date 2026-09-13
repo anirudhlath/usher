@@ -17,8 +17,11 @@ def _key(one: Image) -> _Key:
 
 
 def _read_order(one: Image) -> tuple[bool, uuid.UUID]:
-    """`(is_primary DESC, id)`. `not is_primary` because Python sorts ascending
-    and `False < True`, so the flagged image leads."""
+    """`(is_primary DESC, id)`.
+
+    `not is_primary` because Python sorts ascending and `False < True`, so the flagged
+    image leads.
+    """
     return (not one.is_primary, one.id)
 
 

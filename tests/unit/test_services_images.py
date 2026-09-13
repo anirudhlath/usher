@@ -77,9 +77,11 @@ async def test_a_second_request_for_the_same_rung_fetches_nothing(tmp_path: Path
 
 
 async def test_an_id_no_row_carries_is_absent_rather_than_an_error() -> None:
-    """`None`, which is C5's 404. A raise would make the ordinary case — a
-    client holding an artwork reference the catalog re-derived away — an
-    exception path."""
+    """`None`, which is C5's 404.
+
+    A raise would make the ordinary case — a client holding an artwork reference the
+    catalog re-derived away — an exception path.
+    """
     fetcher = FakeImageFetcher()
     service = _service(FakeImageRepository(), fetcher, FakeImageBlobStore())
 
@@ -103,8 +105,7 @@ async def test_an_id_no_row_carries_is_absent_rather_than_an_error() -> None:
     ],
 )
 async def test_the_width_asked_of_the_cdn_is_always_a_rung(requested: int, rung: int) -> None:
-    """Clamp **up**, and a request above the top rung gets the top rung
-    (ADR-0032).
+    """Clamp **up**, and a request above the top rung gets the top rung (ADR-0032).
 
     Asserted through the *fetcher's* recorded width rather than through
     `clamp_to_ladder` directly, because the defect that matters is the service
@@ -136,8 +137,10 @@ async def test_an_absent_width_is_the_row_card_rung() -> None:
 
 
 async def test_two_rungs_of_one_image_are_two_cache_entries_and_two_fetches() -> None:
-    """The cache is bounded at four entries an image, not one — a second rung
-    is a second fetch, and the first rung's bytes are not served for it."""
+    """The cache is bounded at four entries an image, not one.
+
+    a second rung is a second fetch, and the first rung's bytes are not served for it.
+    """
     images = FakeImageRepository()
     stored = await _seed(images, _image())
     fetcher = FakeImageFetcher(answers=[b"small-bytes", b"large-bytes"])
@@ -244,8 +247,10 @@ async def test_a_stream_that_dies_part_way_leaves_no_fragment_to_serve(tmp_path:
 
 
 async def test_the_service_reads_the_row_once_per_request_and_not_per_rung() -> None:
-    """A guard on the shape rather than on the answer: the resolve is one
-    `ImageRepository.get`, so a cache hit costs one statement and no network.
+    """A guard on the shape rather than on the answer.
+
+    the resolve is one `ImageRepository.get`, so a cache hit costs one statement and no
+    network.
     """
     images = FakeImageRepository()
     stored = await _seed(images, _image())
@@ -259,9 +264,11 @@ async def test_the_service_reads_the_row_once_per_request_and_not_per_rung() -> 
 
 
 async def test_a_width_of_zero_is_refused_rather_than_rounded_up() -> None:
-    """C5's `Query(gt=0)` answers 422 before this is reachable, and this is
-    what keeps a route that forgets it from serving a rung nobody asked for —
-    `154` for a `?w=0` is a plausible answer to an impossible question."""
+    """C5's `Query(gt=0)` answers 422 before this is reachable.
+
+    and this is what keeps a route that forgets it from serving a rung nobody asked for
+    — `154` for a `?w=0` is a plausible answer to an impossible question.
+    """
     images = FakeImageRepository()
     stored = await _seed(images, _image())
     fetcher = FakeImageFetcher()
@@ -296,10 +303,14 @@ async def test_the_cache_directory_is_created_on_demand_rather_than_at_startup(
 
 
 def test_uuid_shaped_nonsense_is_the_repositorys_problem_and_not_this_services() -> None:
-    """A type-level statement, kept as a case so the absence is deliberate:
-    `serve` takes a `uuid.UUID`, so there is no string parsing here for a
-    hostile id to escape through. C5's path converter is what rejects
-    `../../etc/passwd` before this service sees anything at all."""
+    """A type-level statement, kept as a case so the absence is deliberate.
+
+    `serve` takes a `uuid.UUID`, so there is no string parsing here for a hostile id to
+    escape through.
+
+    C5's path converter is what rejects `../../etc/passwd` before this service sees
+    anything at all.
+    """
     from typing import get_type_hints
 
     hints = get_type_hints(ImageProxyService.serve)

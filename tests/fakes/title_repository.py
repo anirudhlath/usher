@@ -30,9 +30,10 @@ _PROVIDER_ID_CONSTRAINTS: tuple[tuple[str, str, bool], ...] = (
 
 
 def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
-    """The constraint name Postgres's own partial unique index would
-    report for the first non-null tmdb_id, imdb_id, or tvdb_id `candidate`
-    and `other` (a different row) share -- `None` if they don't conflict.
+    """The constraint name Postgres's own partial unique index would report for the first.
+
+    non-null tmdb_id, imdb_id, or tvdb_id `candidate` and `other` (a different row)
+    share -- `None` if they don't conflict.
 
     Mirrors `db/models/title.py`'s three partial unique indexes
     (`ix_titles_tmdb_id_kind`/`ix_titles_imdb_id`/`ix_titles_tvdb_id` —
@@ -56,8 +57,9 @@ def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
 def resolve_title_reference(
     wanted: TitleReference, stored: Iterable[TitleReference]
 ) -> uuid.UUID | None:
-    """`usher.db.backup_identity.RESOLUTION_ORDER`, in Python: `imdb_id`,
-    then `(kind, tmdb_id)`, then the raw id, first hit wins.
+    """`usher.db.backup_identity.RESOLUTION_ORDER`, in Python.
+
+    `imdb_id`, then `(kind, tmdb_id)`, then the raw id, first hit wins.
 
     **One definition, imported by `FakeEpisodeRepository` rather than
     re-spelled there.** Both fakes resolve a `TitleReference` -- the episode
@@ -88,9 +90,11 @@ def resolve_title_reference(
 
 
 def _conflict(title_id: uuid.UUID, constraint: str) -> RepositoryConflict:
-    """Same message shape as the real repository's title.py:_conflict --
-    see that function's docstring for why it never claims `title_id`
-    itself already exists."""
+    """Same message shape as the real repository's title.py:_conflict.
+
+    see that function's docstring for why it never claims `title_id` itself already
+    exists.
+    """
     return RepositoryConflict(
         f"title {title_id} conflicts with an existing title (constraint: {constraint})",
         constraint=constraint,
@@ -99,8 +103,7 @@ def _conflict(title_id: uuid.UUID, constraint: str) -> RepositoryConflict:
 
 @dataclass(frozen=True, slots=True)
 class FakeWatchRow:
-    """One `watch_states` row, as much of it as `list_unwatched_candidates`
-    reads.
+    """One `watch_states` row, as much of it as `list_unwatched_candidates` reads.
 
     **Both targets are modelled rather than collapsed to a title id**, for
     `available_copies`' reason one table over: the real statement rolls a
@@ -120,7 +123,8 @@ class FakeWatchRow:
 
 
 class FakeTitleRepository(TitleRepository):
-    """Keyed the same way the real Postgres-backed `PostgresTitleRepository` (Task 10) is:
+    """Keyed the same way the real Postgres-backed `PostgresTitleRepository` (Task 10) is.
+
     by id, with tmdb_id and imdb_id as secondary lookups.
     """
 
@@ -320,8 +324,9 @@ class FakeTitleRepository(TitleRepository):
         return candidates[: max(limit, 0)]
 
     def _played_title_ids(self, user_id: uuid.UUID) -> set[uuid.UUID]:
-        """`COALESCE(ws.title_id, e.title_id)` for this household's played
-        rows, as a dict lookup.
+        """`COALESCE(ws.title_id.
+
+        e.title_id)` for this household's played rows, as a dict lookup.
 
         An episode this fake has no `episode_series` entry for resolves to
         `None` and is dropped, which is what the real statement's `COALESCE`
@@ -352,9 +357,10 @@ class FakeTitleRepository(TitleRepository):
     def _browse_matches(
         self, title: Title, *, genre: str | None, year: int | None, owned: bool | None
     ) -> bool:
-        """`browse`'s `WHERE`, shared with `browse_facets` so a facet is the
-        same population minus one predicate rather than a second reading of
-        the filters.
+        """`browse`'s `WHERE`.
+
+        shared with `browse_facets` so a facet is the same population minus one
+        predicate rather than a second reading of the filters.
 
         The genre leg is the `&&`-over-every-spelling of ADR-0039, in Python:
         `titles.genres` unions two importers' vocabularies and the label the

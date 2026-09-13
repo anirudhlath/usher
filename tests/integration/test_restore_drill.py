@@ -49,7 +49,7 @@ STAMP = datetime(2026, 8, 25, 14, 30, tzinfo=UTC)
 async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """🔴 **Every title id moves and every precious row comes back.**"""
+    """🔴 **Every title id moves and every precious row comes back.**."""
     await _truncate_the_precious_tables(session)
     catalog = await _seed_the_catalog(session)
     await _seed_the_precious_rows(session, catalog)
@@ -467,10 +467,13 @@ async def _media_item_links(session: AsyncSession) -> set[tuple[str, uuid.UUID, 
 
 
 async def _counts(session: AsyncSession) -> dict[str, int]:
-    """One count per precious table, so *"every carried row is back"* is a
-    statement about all seven rather than about the two a case felt like
-    naming. `media_items` is excluded because it is `PARTIAL`: its rows are
-    the walk's and only their links are the artifact's.
+    """One count per precious table.
+
+    so *"every carried row is back"* is a statement about all seven rather than about
+    the two a case felt like naming.
+
+    `media_items` is excluded because it is `PARTIAL`: its rows are the walk's and only
+    their links are the artifact's.
     """
     counted: dict[str, int] = {}
     for table in carried_tables():

@@ -78,7 +78,7 @@ async def test_ready_reports_database_connectivity(client: AsyncClient) -> None:
 
 
 async def test_a_process_with_no_lanes_running_is_still_ready(client: AsyncClient) -> None:
-    """**The correction PRD 08 needs, and the only place it has teeth.**
+    """**The correction PRD 08 needs, and the only place it has teeth.**.
 
     A readiness check that failed because no push lane was up would take
     this process out of a load balancer for a reason restarting it cannot
@@ -103,7 +103,7 @@ async def test_a_process_with_no_lanes_running_is_still_ready(client: AsyncClien
 async def test_a_third_lane_kind_changes_neither_the_status_code_nor_the_report(
     app: FastAPI, client: AsyncClient
 ) -> None:
-    """**M9 adds a `rows.refresh` lane, and readiness must not notice.**
+    """**M9 adds a `rows.refresh` lane, and readiness must not notice.**.
 
     The lane is running in this very process -- it is gated on `create_app`
     building a cache and a queue, not on a setting, so it is up even with
@@ -191,8 +191,11 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
 
 @pytest_asyncio.fixture
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """Either side, because a run that died between the two would otherwise
-    leave a `running` row that makes the next run's count wrong."""
+    """Either side.
+
+    because a run that died between the two would otherwise leave a `running` row that
+    makes the next run's count wrong.
+    """
     await _wipe(sessions)
     yield
     await _wipe(sessions)
@@ -201,9 +204,11 @@ async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[Non
 async def test_a_recovered_orphan_is_reported_in_the_body_and_moves_no_status_code(
     worker_app: FastAPI, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**M9's S3 condition, survivable since ADR-0037's lease and until now unobservable.**
-    A worker died holding claims; another worker took them back; an operator watching
-    `/health/ready` saw `worker: true` throughout and nothing else.
+    """**M9's S3 condition.
+
+    survivable since ADR-0037's lease and until now unobservable.** A worker died
+    holding claims; another worker took them back; an operator watching `/health/ready`
+    saw `worker: true` throughout and nothing else.
     """
     settings = worker_app.state.settings
     key = f"an-orphan-{new_id()}"
@@ -254,8 +259,9 @@ async def test_a_recovered_orphan_is_reported_in_the_body_and_moves_no_status_co
 async def test_a_worker_that_asked_and_found_nothing_reports_zero_not_null_and_not_one(
     worker_app: FastAPI, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The case that makes the number a count of claims rather than of
-    passes**, and the third value this field has to be able to take.
+    """**The case that makes the number a count of claims rather than of passes**.
+
+    and the third value this field has to be able to take.
 
     `null` / `0` / non-zero are three different statements -- never asked,
     asked and found none, took some back -- and the two cases beside this one
@@ -293,14 +299,14 @@ async def test_a_worker_that_asked_and_found_nothing_reports_zero_not_null_and_n
 
 
 async def test_check_migrations_detects_a_mismatch(session: AsyncSession) -> None:
-    """Uses the transaction-isolated `session` fixture directly, not the
-    `app`/`client` fixtures above: corrupting `alembic_version` needs to
-    be visible to the very next query on the *same* connection (ordinary
-    read-your-own-writes within one open transaction), not committed and
-    visible cross-connection to the app's own separately-built engine --
-    and the rollback this fixture does afterward means the shared,
-    session-scoped `postgres_url` database is left exactly as every other
-    test in this session expects to find it.
+    """Uses the transaction-isolated `session` fixture directly.
+
+    not the `app`/`client` fixtures above: corrupting `alembic_version` needs to be
+    visible to the very next query on the *same* connection (ordinary read-your-own-
+    writes within one open transaction), not committed and visible cross-connection to
+    the app's own separately-built engine -- and the rollback this fixture does
+    afterward means the shared, session-scoped `postgres_url` database is left exactly
+    as every other test in this session expects to find it.
     """
     await session.execute(text("UPDATE alembic_version SET version_num = 'deadbeefcafe'"))
     assert await _check_migrations(session) is False

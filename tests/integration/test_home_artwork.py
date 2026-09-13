@@ -202,8 +202,9 @@ async def test_a_card_carries_the_poster_its_portrait_row_asked_for(
 async def test_a_card_for_a_title_with_no_artwork_carries_null_on_the_same_shelf(
     client: AsyncClient, household: _Household
 ) -> None:
-    """The other arm, beside a card that has one -- so `null` is a fact about
-    the title rather than about the whole read.
+    """The other arm, beside a card that has one.
+
+    so `null` is a fact about the title rather than about the whole read.
 
     A catalog that has been synced and never derived holds no `images` row at
     all, which is the state this arm is the ordinary answer for. Asserting it

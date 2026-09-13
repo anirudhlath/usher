@@ -84,7 +84,7 @@ __all__ = [
 
 
 def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
-    """**The registry, and it is the composition point.**"""
+    """**The registry, and it is the composition point.**."""
     return (
         ContinueWatchingProvider(),
         NextUpProvider(),
@@ -111,8 +111,9 @@ ROW_PROVIDERS: tuple[RowProvider, ...] = row_providers()
 
 @dataclass(frozen=True, slots=True)
 class RowProviderSetting:
-    """One registered provider and whether it composes -- the row PRD 09 item 9
-    means by *"one row per registered provider"*.
+    """One registered provider and whether it composes.
+
+    the row PRD 09 item 9 means by *"one row per registered provider"*.
 
     **Carries the provider rather than only its slug**, because the two
     consumers want different halves of the same join and a second traversal to
@@ -127,12 +128,15 @@ class RowProviderSetting:
 
     @property
     def slug(self) -> str:
-        """`RowProvider.slug_prefix` -- the operator-facing identifier, which
-        is what `row_provider_settings.slug_prefix` is keyed on and what
-        `usher home`'s leftmost column and `usher.row.build.duration`'s
-        `provider` label already carry. Never the class name (E1's port says
-        why: a rename must not silently re-enable a provider somebody turned
-        off)."""
+        """`RowProvider.slug_prefix`.
+
+        the operator-facing identifier, which is what
+        `row_provider_settings.slug_prefix` is keyed on and what `usher home`'s leftmost
+        column and `usher.row.build.duration`'s `provider` label already carry.
+
+        Never the class name (E1's port says why: a rename must not silently re-enable a
+        provider somebody turned off).
+        """
         return self.provider.slug_prefix
 
 

@@ -69,11 +69,12 @@ PRD_10_M4_METRICS = frozenset(
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """A real `MeterProvider` with an in-memory reader, installed for this
-    test alone -- `tests/conftest.py::reset_otel_meter_provider` is what
-    makes "for this test alone" true (the API refuses a second
-    `set_meter_provider` in a process, and every module-level instrument
-    caches the first real one it is handed)."""
+    """A real `MeterProvider` with an in-memory reader, installed for this test alone.
+
+    `tests/conftest.py::reset_otel_meter_provider` is what makes "for this test alone"
+    true (the API refuses a second `set_meter_provider` in a process, and every module-
+    level instrument caches the first real one it is handed).
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -131,10 +132,13 @@ def _ingest_service() -> IngestService:
 async def test_a_walk_records_ingest_items_and_match_result(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10's `usher.ingest.items` (source, result) and
-    `usher.match.result` (method, confident). Both are counters a dashboard
-    integrates, so a `pass` in place of either leaves "library growth per
-    week" (dashboard 1) a flat line at zero."""
+    """PRD 10's `usher.ingest.items` (source.
+
+    result) and `usher.match.result` (method, confident).
+
+    Both are counters a dashboard integrates, so a `pass` in place of either leaves
+    "library growth per week" (dashboard 1) a flat line at zero.
+    """
     await _ingest_service().ingest_batch(
         new_id(),
         [_movie("m1", "90000550"), _movie("m2", "90000551")],
@@ -149,9 +153,11 @@ async def test_a_walk_records_ingest_items_and_match_result(
 
 
 async def test_a_job_records_its_duration_by_kind(meter_reader: InMemoryMetricReader) -> None:
-    """PRD 10's `usher.jobs.duration` (kind). Dashboard 3 plots enrichment
-    p50/p99 off it and the "enrichment SLA missed" alert reads the same
-    series."""
+    """PRD 10's `usher.jobs.duration` (kind).
+
+    Dashboard 3 plots enrichment p50/p99 off it and the "enrichment SLA missed" alert
+    reads the same series.
+    """
     queue = FakeJobQueue()
     ran: list[Job] = []
 
@@ -173,10 +179,11 @@ async def test_a_job_records_its_duration_by_kind(meter_reader: InMemoryMetricRe
 async def test_enrichment_records_prd_10s_latency_metric(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`usher.enrichment.latency`, PRD 10's own name. This was emitted as
-    `usher.enrich.duration` until M4 Task 24 -- a near-miss name is a
-    permanently empty panel, and nothing tells it apart from a healthy
-    zero."""
+    """`usher.enrichment.latency`, PRD 10's own name.
+
+    This was emitted as `usher.enrich.duration` until M4 Task 24 -- a near-miss name is
+    a permanently empty panel, and nothing tells it apart from a healthy zero.
+    """
     titles = FakeTitleRepository()
     title = Title(
         kind=TitleKind.MOVIE,
@@ -260,8 +267,9 @@ async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_la
 async def test_the_rung_the_visible_lane_promotes_at_is_recorded_as_a_demand_enrichment(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 The boundary the `trigger` label is drawn on, exercised at the rung the largest
-    population actually arrives at.
+    """🔴 The boundary the `trigger` label is drawn on.
+
+    exercised at the rung the largest population actually arrives at.
     """
     queue = FakeJobQueue()
     titles = FakeTitleRepository()
@@ -318,9 +326,11 @@ async def test_the_rung_the_visible_lane_promotes_at_is_recorded_as_a_demand_enr
 async def test_a_provider_request_is_counted_by_status(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10's `usher.provider.requests` (provider, status). Dashboard 3
-    wants "TMDb requests/sec against the ~40 ceiling with 429 count", which
-    is a counter rate rather than a histogram's sampled `_count`."""
+    """PRD 10's `usher.provider.requests` (provider, status).
+
+    Dashboard 3 wants "TMDb requests/sec against the ~40 ceiling with 429 count", which
+    is a counter rate rather than a histogram's sampled `_count`.
+    """
     client = TmdbClient(
         httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"id": 1}))
@@ -339,10 +349,11 @@ async def test_a_provider_request_is_counted_by_status(
 async def test_a_provider_request_that_never_answered_is_still_counted(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """A transport failure reaches no status line at all. Counting only the
-    answered half makes the "provider degraded" alert's denominator drop
-    exactly when the upstream is worst, so the rate reads *low* during an
-    outage."""
+    """A transport failure reaches no status line at all.
+
+    Counting only the answered half makes the "provider degraded" alert's denominator
+    drop exactly when the upstream is worst, so the rate reads *low* during an outage.
+    """
 
     def _explode(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host")
@@ -359,10 +370,13 @@ async def test_a_provider_request_that_never_answered_is_still_counted(
 
 
 def test_the_provider_metric_names_this_provider() -> None:
-    """The counter's `provider` label is a literal in `client.py` because
-    `provider.py` imports that module and reaching back would be a cycle.
-    That makes it a string that can drift from `PROVIDER_NAME` with nothing
-    to notice, so the two are pinned together here."""
+    """The counter's `provider` label is a literal in `client.py` because `provider.py` imports.
+
+    that module and reaching back would be a cycle.
+
+    That makes it a string that can drift from `PROVIDER_NAME` with nothing to notice,
+    so the two are pinned together here.
+    """
     from usher.adapters.tmdb.provider import PROVIDER_NAME
 
     assert PROVIDER_NAME == "tmdb"
@@ -371,10 +385,12 @@ def test_the_provider_metric_names_this_provider() -> None:
 def test_the_queue_gauges_report_what_the_last_read_found(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10's `usher.jobs.queued` / `usher.jobs.parked`. Observable, so
-    the value is pulled at collection time rather than pushed -- which is
+    """PRD 10's `usher.jobs.queued` / `usher.jobs.parked`.
+
+    Observable, so the value is pulled at collection time rather than pushed -- which is
     what makes them survive a `complete` that deletes a row without anything
-    decrementing a counter."""
+    decrementing a counter.
+    """
     register_queue_gauges(
         lambda: QueueSnapshot(queued={"enrich": 3, "match": 0}, parked={"enrich": 1})
     )
@@ -388,10 +404,10 @@ def test_the_queue_gauges_report_what_the_last_read_found(
 def test_the_queue_gauges_report_nothing_before_anything_has_read_the_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fabricated zero is the one value that makes PRD 10's "ingest
-    stalled" alert quietly wrong: it fires on depth *rising*, and a gauge
-    that reported 0 from process start until the first read would show a
-    step up that no queue actually took.
+    """A fabricated zero is the one value that makes PRD 10's "ingest stalled" alert quietly.
+
+    wrong: it fires on depth *rising*, and a gauge that reported 0 from process start
+    until the first read would show a step up that no queue actually took.
 
     Pinned by calling the callback directly with the reader unset, not
     through a collection, and for the same reason `_links_for`'s validity
@@ -410,10 +426,13 @@ def test_the_queue_gauges_report_nothing_before_anything_has_read_the_table(
 def test_re_registering_the_gauges_replaces_the_reader(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The SDK keeps only the *first* observable gauge registered under a
-    name and silently discards the rest -- verified directly. So a second
-    `register_queue_gauges` that created a second instrument would leave the
-    first, dead reader reporting forever. The reader is swapped instead."""
+    """The SDK keeps only the *first* observable gauge registered under a name and silently.
+
+    discards the rest -- verified directly.
+
+    So a second `register_queue_gauges` that created a second instrument would leave the
+    first, dead reader reporting forever. The reader is swapped instead.
+    """
     register_queue_gauges(lambda: QueueSnapshot(queued={"enrich": 1}))
     _recorded(meter_reader)
     register_queue_gauges(lambda: QueueSnapshot(queued={"enrich": 9}))
@@ -424,8 +443,11 @@ def test_re_registering_the_gauges_replaces_the_reader(
 async def test_the_pipeline_span_names_match_prd_10s_tree(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """PRD 10 draws `ingest.item -> match.title`. A tree whose names drifted
-    makes every Tempo query in the shipped dashboards wrong, silently."""
+    """PRD 10 draws `ingest.item -> match.title`.
+
+    A tree whose names drifted makes every Tempo query in the shipped dashboards wrong,
+    silently.
+    """
     await _ingest_service().ingest_batch(
         new_id(), [_movie("m1", "90000550")], observed_at=datetime.now(UTC)
     )
@@ -436,8 +458,11 @@ async def test_the_pipeline_span_names_match_prd_10s_tree(
 async def test_match_title_is_a_child_of_ingest_item(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """PRD 10 draws them nested, and a flat pair of siblings answers "why
-    was this batch slow" with two unrelated durations."""
+    """PRD 10 draws them nested.
+
+    and a flat pair of siblings answers "why was this batch slow" with two unrelated
+    durations.
+    """
     await _ingest_service().ingest_batch(
         new_id(), [_movie("m1", "90000550")], observed_at=datetime.now(UTC)
     )
@@ -448,9 +473,11 @@ async def test_match_title_is_a_child_of_ingest_item(
 
 
 def test_a_worker_span_links_rather_than_parents(span_exporter: InMemorySpanExporter) -> None:
-    """A job's span is a root with a `Link`, never a child: the request that
-    enqueued it has usually already returned, and growing a branch on a
-    finished trace misstates causality."""
+    """A job's span is a root with a `Link`, never a child.
+
+    the request that enqueued it has usually already returned, and growing a branch on a
+    finished trace misstates causality.
+    """
     job = Job(
         kind=JobKind.ENRICH,
         key=str(new_id()),
@@ -463,11 +490,15 @@ def test_a_worker_span_links_rather_than_parents(span_exporter: InMemorySpanExpo
 
 
 def test_an_invalid_traceparent_produces_no_link_at_all() -> None:
-    """Pinned directly rather than through a span, because the OTel SDK
-    *also* silently drops an invalid `Link` on the way in -- so a worker
-    that built one records the same empty `links` tuple a worker that
-    refused to would. The guard is unobservable through the span it guards
-    and survives every indirect assertion."""
+    """Pinned directly rather than through a span.
+
+    because the OTel SDK *also* silently drops an invalid `Link` on the way in -- so a
+    worker that built one records the same empty `links` tuple a worker that refused to
+    would.
+
+    The guard is unobservable through the span it guards and survives every indirect
+    assertion.
+    """
     job = Job(
         kind=JobKind.ENRICH,
         key=str(new_id()),
@@ -630,11 +661,11 @@ def _instrument_names(reader: InMemoryMetricReader) -> set[str]:
 def test_every_prd_10_metric_m4_owes_actually_exists(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The catalogue as a set, read off the instruments themselves rather
-    than restated. Each name has its own case above that drives the code
-    emitting it -- this is the one that fails when a rename in `src/` moves
-    a dashboard's target, even if whoever renamed it also updated the case
-    that drives it.
+    """The catalogue as a set, read off the instruments themselves rather than restated.
+
+    Each name has its own case above that drives the code emitting it -- this is the one
+    that fails when a rename in `src/` moves a dashboard's target, even if whoever
+    renamed it also updated the case that drives it.
     """
     assert _instrument_names(meter_reader) >= PRD_10_M4_METRICS
 

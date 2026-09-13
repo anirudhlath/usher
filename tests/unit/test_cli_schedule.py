@@ -12,10 +12,11 @@ from usher.services.scheduler import Scheduler
 
 
 def test_schedule_is_advertised_by_the_parser_in_both_forms() -> None:
-    """A subcommand `build_parser` does not declare is a command
-    `test_cli_errors.py`'s boundary sweep never runs -- and `--once` is the
-    half an operator's crontab calls, so it is the half most worth having a
-    parser assertion of its own."""
+    """A subcommand `build_parser` does not declare is a command `test_cli_errors.py`'s boundary.
+
+    sweep never runs -- and `--once` is the half an operator's crontab calls, so it is
+    the half most worth having a parser assertion of its own.
+    """
     daemon = build_parser().parse_args(["schedule"])
     assert daemon.command == "schedule"
     assert daemon.once is False
@@ -26,10 +27,12 @@ def test_schedule_is_advertised_by_the_parser_in_both_forms() -> None:
 
 
 def test_schedule_mirrors_works_argument_surface() -> None:
-    """`usher work` / `usher work --once` is the shape this deliberately
-    copies, so the two are asserted to carry the same argument rather than
-    left to look similar. A second flag added to one and not the other is what
-    this fails on."""
+    """`usher work` / `usher work --once` is the shape this deliberately copies.
+
+    so the two are asserted to carry the same argument rather than left to look similar.
+
+    A second flag added to one and not the other is what this fails on.
+    """
     schedule = vars(build_parser().parse_args(["schedule"]))
     work = vars(build_parser().parse_args(["work"]))
     assert set(schedule) == set(work) == {"command", "traceback", "once"}
@@ -38,9 +41,11 @@ def test_schedule_mirrors_works_argument_surface() -> None:
 def test_schedule_dispatches_to_the_scheduler_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both forms, because `--once` and the daemon reach the same arm through
-    the same `args.once` and a dispatch that ignored the flag would still
-    record."""
+    """Both forms.
+
+    because `--once` and the daemon reach the same arm through the same `args.once` and
+    a dispatch that ignored the flag would still record.
+    """
     configured(monkeypatch)
 
     once = dispatched(monkeypatch, arm="_schedule", argv=["schedule", "--once"])
@@ -109,7 +114,7 @@ class _Recent(ScheduledJob):
 def test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """🔴 **The decision ADR-0046 does not state, made here and pinned here.**
+    """🔴 **The decision ADR-0046 does not state, made here and pinned here.**.
 
     That record sells `usher schedule --once` as the answer for a wall-clock
     schedule -- an operator's 3am cron -- without saying whether the period

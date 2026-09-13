@@ -12,9 +12,11 @@ _DDL = "CREATE TEMP TABLE stg_probe (n integer, label text) ON COMMIT DROP"
 
 
 async def test_a_staging_table_is_recreated_per_batch(session: AsyncSession) -> None:
-    """The caller commits between batches, so a leftover table from a
-    crashed batch would otherwise merge into the next one -- silently
-    doubling a batch rather than failing."""
+    """The caller commits between batches.
+
+    so a leftover table from a crashed batch would otherwise merge into the next one --
+    silently doubling a batch rather than failing.
+    """
     await stage_records(
         session, ddl=_DDL, table="stg_probe", columns=("n", "label"), records=[(1, "a")]
     )
@@ -26,11 +28,14 @@ async def test_a_staging_table_is_recreated_per_batch(session: AsyncSession) -> 
 
 
 async def test_a_destination_check_is_not_enforced_by_the_copy(session: AsyncSession) -> None:
-    """The plan this was built from says "CHECK constraints fire during
-    `COPY`, so one bad row aborts its batch", which is true of a `COPY`
-    straight into a constrained table and **not** true of this path: these
-    staging tables are declared without constraints, so the violating value
-    lands in staging and only fails at the `INSERT ... SELECT` that follows.
+    """The plan this was built from says "CHECK constraints fire during `COPY`.
+
+    so one bad row aborts its batch", which is true of a `COPY` straight into a
+    constrained table and **not** true of this path: these staging tables are declared
+    without constraints, so the violating value lands in staging and only fails at the
+    `INSERT ...
+
+    SELECT` that follows.
 
     That difference decides which exception a repository has to catch.
     `copy_records_to_table` runs on the raw asyncpg connection, outside
@@ -51,8 +56,10 @@ async def test_a_destination_check_is_not_enforced_by_the_copy(session: AsyncSes
 
 
 async def test_the_raw_connection_is_the_asyncpg_driver(session: AsyncSession) -> None:
-    """Two unwrapping layers deep and typed `Any` on the way out, so nothing
-    static catches this going stale across a SQLAlchemy upgrade."""
+    """Two unwrapping layers deep and typed `Any` on the way out.
+
+    so nothing static catches this going stale across a SQLAlchemy upgrade.
+    """
     driver = await raw_connection(session)
     assert type(driver).__module__.startswith("asyncpg")
     assert hasattr(driver, "copy_records_to_table")
@@ -68,7 +75,10 @@ async def test_the_raw_connection_is_the_asyncpg_driver(session: AsyncSession) -
 async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
     session: AsyncSession,
 ) -> None:
-    """The shape ADR-0044 predicted and had not run. It predicts correctly."""
+    """The shape ADR-0044 predicted and had not run.
+
+    It predicts correctly.
+    """
     with pytest.raises(asyncpg.exceptions.StringDataRightTruncationError) as caught:
         await stage_records(
             session,
@@ -88,9 +98,10 @@ async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
 async def test_the_copy_refuses_an_out_of_range_integer_with_no_sqlstate_at_all(
     session: AsyncSession,
 ) -> None:
-    """The *other* of ADR-0044's two shapes, and the reason it says a fix that
-    widens `bigint` and forgets `text` reaches 28 of 31 rather than all of
-    them.
+    """The *other* of ADR-0044's two shapes.
+
+    and the reason it says a fix that widens `bigint` and forgets `text` reaches 28 of
+    31 rather than all of them.
 
     An out-of-range `int` never reaches Postgres: asyncpg's binary encoder
     refuses it client-side as a bare `builtins.OverflowError`, which has no
@@ -116,8 +127,9 @@ async def test_the_copy_refuses_an_out_of_range_integer_with_no_sqlstate_at_all(
 async def test_a_bigint_staging_column_takes_the_same_value_the_integer_one_refused(
     session: AsyncSession,
 ) -> None:
-    """The control for ADR-0044's scope item 2, which widens
-    `stg_genome.tmdb_id` and `stg_akas.ordering` to `bigint`.
+    """The control for ADR-0044's scope item 2.
+
+    which widens `stg_genome.tmdb_id` and `stg_akas.ordering` to `bigint`.
 
     Without this the widening's whole claim — that the value now *stages* —
     rests on the two cases above failing, which is an absence. The same

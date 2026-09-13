@@ -32,9 +32,10 @@ class Season(DomainModel):
 
 
 class Episode(DomainModel):
-    """One episode. First-class -- it carries watch state and it is what a
-    source actually holds -- but not independently searchable in v1
-    (PRD 05).
+    """One episode.
+
+    First-class -- it carries watch state and it is what a source actually holds -- but
+    not independently searchable in v1 (PRD 05).
 
     `absolute_number` is nullable and stays that way: it is TVDb's ordering
     concept, TMDb does not supply it, and an alternate-ordering provider is

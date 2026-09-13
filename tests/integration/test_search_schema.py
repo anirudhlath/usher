@@ -1,5 +1,6 @@
-"""The two tables the semantic half writes, and the four schema decisions that are not
-obvious from their column lists.
+"""The two tables the semantic half writes.
+
+and the four schema decisions that are not obvious from their column lists.
 """
 
 import uuid
@@ -38,10 +39,10 @@ async def _embed(session: AsyncSession, title_id: uuid.UUID, *, vector: str | No
 async def test_a_refused_embedding_is_a_written_row_with_a_null_vector(
     session: AsyncSession,
 ) -> None:
-    """The nullability is load-bearing and this is what it buys.
+    r"""The nullability is load-bearing and this is what it buys.
 
     Every whitespace-only input embeds to the *identical* vector -- measured
-    cos("", " ") = cos("", "\\n") = 1.0000 exactly -- so a degenerate
+    cos("", " ") = cos("", "\n") = 1.0000 exactly -- so a degenerate
     document is a perfect unit vector at cosine 1.0 from every other
     degenerate one, which is an unbounded cluster pinned to the top of every
     "more like this". The composer refuses to emit one.
@@ -98,9 +99,10 @@ async def test_a_halfvec_column_refuses_the_wrong_width(session: AsyncSession) -
 async def test_the_hnsw_index_is_partial_on_a_present_vector(
     session: AsyncSession,
 ) -> None:
-    """A refused title must be *absent from the candidate list*, not ranked
-    last -- an implementation that treats a missing vector as a zero vector
-    makes every unembedded title a mediocre match for every query.
+    """A refused title must be *absent from the candidate list*, not ranked last.
+
+    an implementation that treats a missing vector as a zero vector makes every
+    unembedded title a mediocre match for every query.
 
     The partial predicate is how that is made structural: the graph
     physically cannot contain a NULL row, so the semantic query's matching
@@ -132,11 +134,12 @@ async def test_the_hnsw_index_is_partial_on_a_present_vector(
 async def test_the_hnsw_index_carries_the_parameters_it_was_measured_with(
     session: AsyncSession,
 ) -> None:
-    """`m = 16, ef_construction = 64` are pgvector's defaults and are kept
-    *because that is what was measured*: 50,000 x halfvec(384) built in
-    4.109 s into 56 MB (1,170.5 bytes/row), which is what the 10k projection
-    (~11.7 MB / ~0.7 s) and the 1.27M one (~1.39 GiB / ~136 s) are derived
-    from.
+    """`m = 16.
+
+    ef_construction = 64` are pgvector's defaults and are kept *because that is what was
+    measured*: 50,000 x halfvec(384) built in 4.109 s into 56 MB (1,170.5 bytes/row),
+    which is what the 10k projection (~11.7 MB / ~0.7 s) and the 1.27M one (~1.39 GiB /
+    ~136 s) are derived from.
 
     Asserted off `pg_indexes.indexdef` rather than off `Base.metadata`,
     because a parameter present in the model and absent from the migration
@@ -157,10 +160,11 @@ async def test_the_hnsw_index_carries_the_parameters_it_was_measured_with(
 
 
 async def test_a_neighbour_row_cannot_name_its_own_title(session: AsyncSession) -> None:
-    """The wrong implementation this fails: a cosine search that forgets to
-    exclude the query title, which returns itself at distance 0 as the top
-    "more like this" -- correct by the metric, useless as a result, and
-    invisible to any assertion that only checks the list is non-empty.
+    """The wrong implementation this fails.
+
+    a cosine search that forgets to exclude the query title, which returns itself at
+    distance 0 as the top "more like this" -- correct by the metric, useless as a
+    result, and invisible to any assertion that only checks the list is non-empty.
     """
     title_id = await _title(session)
     with pytest.raises(DBAPIError):
@@ -176,11 +180,11 @@ async def test_a_neighbour_row_cannot_name_its_own_title(session: AsyncSession) 
 async def test_deleting_a_title_removes_it_from_every_other_neighbour_list(
     session: AsyncSession,
 ) -> None:
-    """`neighbor_id` is ON DELETE CASCADE, and this is the half that is not
-    obvious. `title_id` CASCADE only cleans up the deleted title's *own*
-    list; without the second one, every other title keeps a row naming an id
-    that no longer resolves, and M9's `GET /titles/{id}/similar` answers with
-    it.
+    """`neighbor_id` is ON DELETE CASCADE, and this is the half that is not obvious.
+
+    `title_id` CASCADE only cleans up the deleted title's *own* list; without the second
+    one, every other title keeps a row naming an id that no longer resolves, and M9's
+    `GET /titles/{id}/similar` answers with it.
 
     RESTRICT was the alternative and is unusable here: at one neighbour list
     per title, nearly every title is somebody's neighbour, so it is a delete
@@ -210,10 +214,11 @@ async def test_deleting_a_title_removes_it_from_every_other_neighbour_list(
 async def test_the_neighbour_cascade_has_an_index_it_can_use(
     session: AsyncSession,
 ) -> None:
-    """Every referenced-side DELETE runs a lookup by the *referencing*
-    column, and the primary key `(title_id, neighbor_id)` leads with the
-    wrong one -- so without `ix_title_neighbors_neighbor_id`, deleting one
-    title sequentially scans the whole neighbour table.
+    """Every referenced-side DELETE runs a lookup by the *referencing* column.
+
+    and the primary key `(title_id, neighbor_id)` leads with the wrong one -- so without
+    `ix_title_neighbors_neighbor_id`, deleting one title sequentially scans the whole
+    neighbour table.
 
     Identical argument, identical test shape, to M4's
     `ix_media_items_episode_id`/`ix_watch_states_episode_id`. `enable_seqscan
@@ -235,8 +240,11 @@ async def test_the_neighbour_cascade_has_an_index_it_can_use(
 async def test_the_new_foreign_keys_carry_the_delete_rules_they_were_given(
     session: AsyncSession,
 ) -> None:
-    """Read off `pg_constraint`, not off `Base.metadata`: `confdeltype` is
-    what Postgres will actually do. `c` is CASCADE.
+    """Read off `pg_constraint`, not off `Base.metadata`.
+
+    `confdeltype` is what Postgres will actually do.
+
+    `c` is CASCADE.
 
     The cast is not decoration -- the column's type is `"char"`, which
     asyncpg hands back as `bytes`, so the uncast comparison fails against

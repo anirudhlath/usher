@@ -27,7 +27,8 @@ def _card(**overrides: object) -> RowCard:
 
 
 def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
-    """**Boundary call 3's other day.** M7 refused this field rather than shipping it null,
+    """**Boundary call 3's other day.** M7 refused this field rather than shipping it null.
+
     on the grounds that there was no `Image` table, no `images` column and no
     `poster_path` on `titles`.
     """
@@ -42,8 +43,9 @@ def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
 
 
 def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> None:
-    """`watch_states.runtime_seconds` is nullable, so a progress *fraction*
-    is best-effort dressed as arithmetic.
+    """`watch_states.runtime_seconds` is nullable.
+
+    so a progress *fraction* is best-effort dressed as arithmetic.
 
     Kills `progress: float`, which divides by `None` or by a COALESCE'd zero,
     and kills `progress: float | None`, which is correct but relocates the
@@ -60,7 +62,7 @@ def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> No
 
 
 def test_an_unknown_runtime_stays_unknown_on_a_card() -> None:
-    """**ADR-0014: absence is not zero.**
+    """**ADR-0014: absence is not zero.**.
 
     Kills `runtime_seconds: int = 0`. A zero runtime is not "no progress" --
     it is a divisor that makes every partially-watched title read as
@@ -73,8 +75,10 @@ def test_an_unknown_runtime_stays_unknown_on_a_card() -> None:
 
 
 def test_the_display_hint_vocabulary_is_adr_0006s_four_and_no_others() -> None:
-    """ADR-0006's only concrete client vocabulary: "Rows carry a display
-    *hint* (`portrait | landscape | wide | square`) but never a layout."
+    """ADR-0006's only concrete client vocabulary.
+
+    "Rows carry a display *hint* (`portrait | landscape | wide | square`) but never a
+    layout.".
 
     Kills a fifth member. The realistic fifth is `HERO` or `GRID_3_COLUMN`,
     and `GRID_3_COLUMN` is a layout wearing a hint's name -- the exact thing
@@ -96,7 +100,7 @@ def test_a_display_hint_belongs_to_the_row_and_not_to_a_card() -> None:
 
 
 def test_a_built_row_with_no_cards_is_constructible() -> None:
-    """**An empty row and an absent row are different states.**
+    """**An empty row and an absent row are different states.**.
 
     Kills `min_length=1` on `cards`, and kills a `model_validator` that
     raises on an empty tuple. Either one forces `Row.build()` to return
@@ -116,7 +120,9 @@ def test_a_built_row_with_no_cards_is_constructible() -> None:
 
 
 def test_a_built_row_carries_its_own_ttl_so_a_cached_row_is_self_describing() -> None:
-    """PRD 06 puts `ttl` on the `Row` class. It is on the value instead.
+    """PRD 06 puts `ttl` on the `Row` class.
+
+    It is on the value instead.
 
     A cache stores a built row, not its producer. With the TTL on the class,
     the cache needs a reference back to the object that built it to know
@@ -132,15 +138,17 @@ def test_a_built_row_carries_its_own_ttl_so_a_cached_row_is_self_describing() ->
 
 
 def test_the_row_family_vocabulary_is_prd_06s_three_and_no_others() -> None:
-    """PRD 06's family table, as a set rather than a `<=`: a fourth member fails here and a
-    deleted third one does too.
+    """PRD 06's family table, as a set rather than a `<=`.
+
+    a fourth member fails here and a deleted third one does too.
     """
     assert {family.value for family in RowFamily} == {"source", "similarity", "curated"}
 
 
 def test_a_built_row_names_its_family_and_there_is_only_one_spelling_of_it() -> None:
-    """The diversity constraints are stated in families -- "no three
-    consecutive similarity rows; cap per family" -- so the composer needs a
+    """The diversity constraints are stated in families.
+
+    "no three consecutive similarity rows; cap per family" -- so the composer needs a
     typed key to state them in, and needs exactly one.
 
     Kills shipping `RowKind` and `RowFamily` as two enums with the same
@@ -202,8 +210,7 @@ def test_a_centroid_over_no_titles_is_not_constructible() -> None:
 
 
 def test_a_centroid_with_an_empty_vector_is_not_constructible() -> None:
-    """The other half of the refusal above, and the one that matters at the
-    reader.
+    """The other half of the refusal above, and the one that matters at the reader.
 
     Kills `vector: tuple[float, ...] = ()`. An empty vector is not a
     centroid at all, and every whitespace-only document already embeds to

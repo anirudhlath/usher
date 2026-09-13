@@ -1,5 +1,6 @@
-"""`GET /browse`'s wire shape -- **written after the measurement, because the
-measurement changed it.**
+"""`GET /browse`'s wire shape.
+
+**written after the measurement, because the measurement changed it.**.
 """
 
 import uuid
@@ -28,8 +29,9 @@ class FacetsOmitted(StrEnum):
 
 
 class BrowseFacetsResponse(BaseModel):
-    """What else this client could have asked for, counted -- or an explicit
-    statement that nobody counted.
+    """What else this client could have asked for, counted.
+
+    or an explicit statement that nobody counted.
 
     `computed` is always present and is the field a client branches on.
     `reason` is present exactly when `computed` is false; `genres` and `years`

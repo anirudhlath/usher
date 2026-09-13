@@ -7,8 +7,10 @@ from usher.eval.verdicts import Verdict, exit_code_for
 
 
 def test_quick_is_the_default_and_full_is_opt_in() -> None:
-    """A slow default is a command nobody types. `--quick` reports numbers,
-    enforces no bar and writes no ledger."""
+    """A slow default is a command nobody types.
+
+    `--quick` reports numbers, enforces no bar and writes no ledger.
+    """
     assert parse_args(["eval"]).full is False
     assert parse_args(["eval", "--full"]).full is True
 
@@ -19,8 +21,11 @@ def test_the_surface_defaults_to_every_surface() -> None:
 
 
 def test_the_seed_defaults_to_the_gates_own() -> None:
-    """20260803 is ADR-0002's seed. A different default would make every E1
-    number incomparable with the measurement E1 exists to reproduce."""
+    """20260803 is ADR-0002's seed.
+
+    A different default would make every E1 number incomparable with the measurement E1
+    exists to reproduce.
+    """
     from usher.eval.goldens.suggest import GATE_SEED
 
     assert parse_args(["eval"]).seed == GATE_SEED
@@ -38,7 +43,9 @@ def test_the_seed_defaults_to_the_gates_own() -> None:
     ],
 )
 def test_only_a_failed_bar_is_a_non_zero_exit(verdict: Verdict, code: int) -> None:
-    """**`BASELINE_INVALID` exits 0 deliberately.** A catalog that moved under
-    the baseline is not the diff's fault, and a red the author cannot fix is
-    the red everyone learns to ignore."""
+    """**`BASELINE_INVALID` exits 0 deliberately.** A catalog that moved under the baseline is.
+
+    not the diff's fault, and a red the author cannot fix is the red everyone learns to
+    ignore.
+    """
     assert exit_code_for(verdict) == code

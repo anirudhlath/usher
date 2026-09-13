@@ -82,11 +82,12 @@ def _prd_10_m6_metrics() -> dict[str, str]:
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """A real `MeterProvider` with an in-memory reader, installed for this
-    test alone -- `tests/conftest.py::reset_otel_meter_provider` is what makes
-    "for this test alone" true (the API refuses a second `set_meter_provider`
-    in a process, and every module-level instrument caches the first real one
-    it is handed)."""
+    """A real `MeterProvider` with an in-memory reader, installed for this test alone.
+
+    `tests/conftest.py::reset_otel_meter_provider` is what makes "for this test alone"
+    true (the API refuses a second `set_meter_provider` in a process, and every module-
+    level instrument caches the first real one it is handed).
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -155,11 +156,14 @@ def _service(titles: FakeTitleRepository, index: FakeSearchIndex) -> SearchServi
 async def test_a_search_records_its_duration_and_its_result_count(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The wrong implementations: `usher.search.result` (singular, by analogy
-    with `usher.enrich.result` two rows up PRD 10's own table),
-    `usher.search.hits`, or a `create_counter` for the result series. None
-    raises, none fails a test asserting "a histogram was recorded", and each
-    leaves dashboard 1's search panel looking like a quiet search box.
+    """The wrong implementations.
+
+    `usher.search.result` (singular, by analogy with `usher.enrich.result` two rows up
+    PRD 10's own table), `usher.search.hits`, or a `create_counter` for the result
+    series.
+
+    None raises, none fails a test asserting "a histogram was recorded", and each leaves
+    dashboard 1's search panel looking like a quiet search box.
 
     Driven through the real `SearchService`, so an instrument created at
     import and never recorded to fails here.
@@ -180,8 +184,9 @@ async def test_a_search_records_its_duration_and_its_result_count(
 
 
 async def test_the_mode_label_is_the_mode_that_ran(meter_reader: InMemoryMetricReader) -> None:
-    """A `FUSED` request on a deployment with no embedder is served as
-    full-text, and the label says `full_text`.
+    """A `FUSED` request on a deployment with no embedder is served as full-text.
+
+    and the label says `full_text`.
 
     The wrong implementation is labelling with the *requested* mode: the
     histogram would then attribute full-text latency and full-text result
@@ -218,8 +223,9 @@ async def test_the_mode_label_is_the_mode_that_ran(meter_reader: InMemoryMetricR
 async def test_a_blank_query_is_not_counted_as_a_search(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`SearchService.search` returns empty for a whitespace query before it
-    reaches an index, and a search box sends one between every keystroke.
+    """`SearchService.search` returns empty for a whitespace query before it reaches an index.
+
+    and a search box sends one between every keystroke.
 
     Counted, those zero-duration zero-result calls would dominate both
     histograms and make dashboard 1's search latency a measure of how fast
@@ -234,8 +240,9 @@ async def test_a_blank_query_is_not_counted_as_a_search(
 async def test_the_row_and_the_histogram_are_the_same_interval(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`search_queries.latency_ms` and `usher.search.duration` are one clock
-    read with two consumers (F2), and this is the case that says so.
+    """`search_queries.latency_ms` and `usher.search.duration` are one clock read with two.
+
+    consumers (F2), and this is the case that says so.
 
     They are the two things an operator compares when a search-latency panel
     and the analytics table disagree, so the interesting failure is not either
@@ -282,9 +289,9 @@ async def test_the_row_and_the_histogram_are_the_same_interval(
 async def test_the_analytics_write_is_not_counted_as_search_latency(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The `search_queries` INSERT sits **outside** the interval
-    `usher.search.duration` records, and this is the only place that is
-    observable.
+    """The `search_queries` INSERT sits **outside** the interval `usher.search.duration` records.
+
+    and this is the only place that is observable.
 
     **`search_queries.latency_ms` cannot see it and that is worth saying**, so
     that the next reader does not add the cheaper assertion and think it
@@ -347,11 +354,14 @@ async def test_the_analytics_write_is_not_counted_as_search_latency(
 
 
 async def test_an_embed_call_records_its_duration(meter_reader: InMemoryMetricReader) -> None:
-    """PRD 10's `usher.embedding.duration`, with **no labels**, which is a
-    decision rather than an omission: the obvious label is `model`, and adding
-    one makes the series unqueryable by the documented panel while looking
-    like an improvement. The model is recorded where it belongs --
-    `title_embeddings.model_name`, where it drives the stale predicate.
+    """PRD 10's `usher.embedding.duration`.
+
+    with **no labels**, which is a decision rather than an omission: the obvious label
+    is `model`, and adding one makes the series unqueryable by the documented panel
+    while looking like an improvement.
+
+    The model is recorded where it belongs -- `title_embeddings.model_name`, where it
+    drives the stale predicate.
     """
     titles = FakeTitleRepository()
     title = _title("The Quiet Vacuum")
@@ -372,12 +382,14 @@ async def test_an_embed_call_records_its_duration(meter_reader: InMemoryMetricRe
 def test_the_result_series_is_a_histogram_and_not_a_counter(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10 documents a histogram, and the distinction is the question it
-    answers: "how many results did a search return" is a distribution whose
-    interesting values are the zeroes and the ones that hit the limit. A
-    counter answers "how many results have ever been returned", which nobody
-    asks -- and a row emitted under its documented *name* but the wrong
-    *type* is the same class of failure as a near-miss name.
+    """PRD 10 documents a histogram, and the distinction is the question it answers.
+
+    "how many results did a search return" is a distribution whose interesting values
+    are the zeroes and the ones that hit the limit.
+
+    A counter answers "how many results have ever been returned", which nobody asks --
+    and a row emitted under its documented *name* but the wrong *type* is the same class
+    of failure as a near-miss name.
 
     Read off the exported data rather than off the call, so a `create_counter`
     fails here even if the case that drives it still passes.
@@ -409,9 +421,10 @@ def _suggest_service(
     prefix_tier: FakePrefixSuggestIndex,
     fuzzy_tier: FakeSuggestIndex,
 ) -> SearchService:
-    """`_service`'s shape with the two suggest doubles handed in rather than
-    constructed, because a case about *which tier answered* has to seed
-    them."""
+    """`_service`'s shape with the two suggest doubles handed in rather than constructed.
+
+    because a case about *which tier answered* has to seed them.
+    """
     return SearchService(
         FakeSearchIndex(),
         prefix_tier,
@@ -428,8 +441,9 @@ def _suggest_service(
 async def test_a_suggest_records_its_duration_and_its_result_count_under_the_tier_that_answered(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`usher.suggest.duration` and `usher.suggest.results`, both labelled `tier`, driven
-    once per tier through the real `SearchService`.
+    """`usher.suggest.duration` and `usher.suggest.results`.
+
+    both labelled `tier`, driven once per tier through the real `SearchService`.
     """
     titles = FakeTitleRepository()
     hydrated = _title("Quiet Vacuum")
@@ -461,11 +475,11 @@ async def test_a_suggest_records_its_duration_and_its_result_count_under_the_tie
 async def test_a_blank_prefix_records_no_suggest_point(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`SearchService.suggest` returns empty for a whitespace prefix before it
-    reaches a tier, and a type-ahead box sends one between every keystroke --
-    the mirror of `test_a_blank_query_is_not_counted_as_a_search`, on the
-    surface where it matters more, because the box is driven per keystroke
-    rather than per submit.
+    """`SearchService.suggest` returns empty for a whitespace prefix before it reaches a tier.
+
+    and a type-ahead box sends one between every keystroke -- the mirror of
+    `test_a_blank_query_is_not_counted_as_a_search`, on the surface where it matters
+    more, because the box is driven per keystroke rather than per submit.
 
     Counted, those zero-duration zero-result calls would dominate both series
     and make a suggest-latency panel a measure of how fast somebody types.
@@ -496,10 +510,12 @@ async def test_a_blank_prefix_records_no_suggest_point(
 def test_the_suggest_series_are_histograms_and_not_counters(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10 documents two histograms, and a row emitted under its documented
-    *name* but the wrong *type* is the same class of failure as a near-miss
-    name -- `test_the_result_series_is_a_histogram_and_not_a_counter`'s
-    precedent, one surface over.
+    """PRD 10 documents two histograms.
+
+    and a row emitted under its documented *name* but the wrong *type* is the same class
+    of failure as a near-miss name --
+    `test_the_result_series_is_a_histogram_and_not_a_counter`'s precedent, one surface
+    over.
 
     "How long did a keystroke take" and "how many rows came back" are both
     distributions whose interesting values are the tails: the keystrokes that
@@ -534,7 +550,7 @@ def test_the_suggest_series_are_histograms_and_not_counters(
 def test_the_duration_buckets_resolve_a_keystroke_rather_than_a_five_second_page(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 **The one assertion without which this whole pair is decorative.**"""
+    """🔴 **The one assertion without which this whole pair is decorative.**."""
     from usher.services import search as search_module
 
     search_module._suggest_duration.record(0.0336, {"tier": "fuzzy"})
@@ -608,19 +624,23 @@ def test_every_prd_10_search_metric_actually_exists(meter_reader: InMemoryMetric
 
 
 def test_the_modules_owning_those_instruments_are_imported() -> None:
-    """`_instrument_names` walks `sys.modules`, so a catalogue case whose
-    module was never imported compares an empty set against a set it happens
-    to contain and passes having measured nothing. Pinned rather than relied
-    on -- the same family as "a harness must refuse to classify a run that did
-    not run"."""
+    """`_instrument_names` walks `sys.modules`.
+
+    so a catalogue case whose module was never imported compares an empty set against a
+    set it happens to contain and passes having measured nothing.
+
+    Pinned rather than relied on -- the same family as "a harness must refuse to
+    classify a run that did not run".
+    """
     assert {"usher.services.search", "usher.services.index"} <= set(sys.modules)
 
 
 def test_prd_10_marks_every_milestones_rows_as_shipped() -> None:
-    """The other direction of the same maintenance rule. PRD 10's `Emitted`
-    column is "maintained rather than aspirational", so a metric that now
-    exists and is still marked `M6` rather than `✅ M6` tells the next reader
-    it is owed by a future milestone.
+    """The other direction of the same maintenance rule.
+
+    PRD 10's `Emitted` column is "maintained rather than aspirational", so a metric that
+    now exists and is still marked `M6` rather than `✅ M6` tells the next reader it is
+    owed by a future milestone.
 
     **Every row rather than M6's, and generalising is cheaper than a third
     copy** -- this was M6's alone until M10's D1 added the two suggest rows,
@@ -654,8 +674,7 @@ def _points(reader: InMemoryMetricReader, name: str) -> list[float]:
 def test_the_backlog_gauges_report_the_snapshot_they_are_given(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """Two numbers, because the second is what stops the first being read
-    wrongly.
+    """Two numbers, because the second is what stops the first being read wrongly.
 
     `stale` is the backfill's own predicate; `refused` is titles carrying a
     row with a NULL embedding, the deliberate written outcome for a degenerate
@@ -673,13 +692,15 @@ def test_the_backlog_gauges_report_the_snapshot_they_are_given(
 def test_registering_a_second_reader_replaces_the_first(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The SDK keeps only the *first* observable instrument registered under a
-    name and silently discards the rest -- verified directly for
-    `register_queue_gauges` and true here for the same reason. A
-    `register_search_gauges` that captured its reader in a closure would leave
-    the first, now-dead reader reporting forever, which in this suite means
-    every test after the first reads a snapshot belonging to a discarded
-    session."""
+    """The SDK keeps only the *first* observable instrument registered under a name and silently.
+
+    discards the rest -- verified directly for `register_queue_gauges` and true here for
+    the same reason.
+
+    A `register_search_gauges` that captured its reader in a closure would leave the
+    first, now-dead reader reporting forever, which in this suite means every test after
+    the first reads a snapshot belonging to a discarded session.
+    """
     register_search_gauges(lambda: SearchSnapshot(stale=1, refused=0))
     _recorded(meter_reader)
     register_search_gauges(lambda: SearchSnapshot(stale=9, refused=4))
@@ -690,10 +711,12 @@ def test_registering_a_second_reader_replaces_the_first(
 def test_no_reader_reports_no_observation_rather_than_a_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wrong implementation: a callback returning `Observation(0)` when
-    `_search_reader is None`. A drained backfill and one that has never run
-    then plot identically, and "the backfill has drained" is the only claim
-    this series supports.
+    """The wrong implementation.
+
+    a callback returning `Observation(0)` when `_search_reader is None`.
+
+    A drained backfill and one that has never run then plot identically, and "the
+    backfill has drained" is the only claim this series supports.
 
     Called directly with the reader unset rather than through a collection,
     for the reason M4 recorded for the queue gauges: the branch is unreachable
@@ -728,9 +751,10 @@ def test_the_reader_is_never_a_coroutine_function() -> None:
 async def test_the_gauges_hold_the_last_complete_re_read(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`SearchGauges` is `QueueGauges`' shape and for the same reason: a held
-    snapshot the caller refreshes where awaiting is safe, so the reported
-    value is stale but never wrong.
+    """`SearchGauges` is `QueueGauges`' shape and for the same reason.
+
+    a held snapshot the caller refreshes where awaiting is safe, so the reported value
+    is stale but never wrong.
 
     Also pins that the refresh takes the repository rather than holding one --
     a backfill pass's session lives for one pass while the snapshot outlives
@@ -760,8 +784,7 @@ async def test_the_gauges_hold_the_last_complete_re_read(
 async def test_the_neighbour_gauge_counts_rows_from_another_blend(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`usher.similarity.neighbors.stale`, and the case that makes it mean
-    something.
+    """`usher.similarity.neighbors.stale`, and the case that makes it mean something.
 
     A gauge asserted only at zero is satisfied by a reader that returns zero,
     so this arranges the state the column exists to detect -- rows written
@@ -791,12 +814,14 @@ async def test_the_neighbour_gauge_counts_rows_from_another_blend(
 def test_the_snapshot_defaults_to_zero_and_that_is_not_a_reading(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`SearchSnapshot()` is what `SearchGauges` holds before its first
-    refresh, and a zero there is a *held* zero rather than a fabricated one --
-    the distinction `_observations`' "no reader means no observation" rule
-    draws one level up. Pinned because a default of `-1` or `None` would be
-    the obvious way to spell "not read yet" and would put a nonsense value on
-    a dashboard instead of an honest floor."""
+    """`SearchSnapshot()` is what `SearchGauges` holds before its first refresh.
+
+    and a zero there is a *held* zero rather than a fabricated one -- the distinction
+    `_observations`' "no reader means no observation" rule draws one level up.
+
+    Pinned because a default of `-1` or `None` would be the obvious way to spell "not
+    read yet" and would put a nonsense value on a dashboard instead of an honest floor.
+    """
     assert SearchSnapshot() == SearchSnapshot(stale=0, refused=0)
 
 
@@ -815,8 +840,7 @@ def span_exporter() -> Iterator[InMemorySpanExporter]:
 async def test_an_index_job_nests_its_embed_span_under_index_title(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """PRD 10's tree, walked as a parent chain: `index.embed` -> `index.title`
-    -> `job.index`.
+    """PRD 10's tree, walked as a parent chain: `index.embed` -> `index.title` -> `job.index`.
 
     The wrong implementation: an `IndexService` that started `index.embed` as
     a root, or with `start_span` rather than `start_as_current_span`. Valid
@@ -864,8 +888,9 @@ async def test_an_index_job_nests_its_embed_span_under_index_title(
 async def test_a_skipped_index_job_emits_no_embed_span(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """`index.embed` measures an embed call, so a job that found the
-    fingerprint already current must not produce one.
+    """`index.embed` measures an embed call.
+
+    so a job that found the fingerprint already current must not produce one.
 
     The wrong implementation opens the span around the whole method and
     reports a 0.2 ms `index.embed` for every redelivered job --

@@ -126,15 +126,16 @@ async def test_add_leaves_the_session_usable_after_a_caught_conflict(
 async def test_update_translates_a_conflicting_provider_id(
     repo: PostgresTitleRepository,
 ) -> None:
-    """update() sets tmdb_id/imdb_id/tvdb_id from the incoming title, and
-    ix_titles_tmdb_id_kind is already a live unique partial index (Task 8/9,
-    shipped before Task 10; widened from a single-column index to
-    (tmdb_id, kind) by ADR-0011) -- so update() can violate it today, not
-    just hypothetically. The plan's amendment claim ("nothing in its current
-    body raises IntegrityError... it can't yet") does not hold against the
-    schema as actually shipped. Left uncaught, that IntegrityError would
-    escape PostgresTitleRepository -- the one thing ADR-0009 says must
-    never happen, since the only way a caller could then handle it is to
+    """Update() sets tmdb_id/imdb_id/tvdb_id from the incoming title.
+
+    and ix_titles_tmdb_id_kind is already a live unique partial index (Task 8/9, shipped
+    before Task 10; widened from a single-column index to (tmdb_id, kind) by ADR-0011)
+    -- so update() can violate it today, not just hypothetically.
+
+    The plan's amendment claim ("nothing in its current body raises IntegrityError... it
+    can't yet") does not hold against the schema as actually shipped. Left uncaught,
+    that IntegrityError would escape PostgresTitleRepository -- the one thing ADR-0009
+    says must never happen, since the only way a caller could then handle it is to
     import sqlalchemy itself.
     """
     first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=1)
@@ -162,8 +163,10 @@ async def test_update_leaves_the_session_usable_after_a_caught_conflict(
 async def test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_it(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """The case above reads back a *different* title; this one reads back the title the
-    conflict was about, which is the one the SAVEPOINT rollback leaves behind.
+    """The case above reads back a *different* title.
+
+    this one reads back the title the conflict was about, which is the one the SAVEPOINT
+    rollback leaves behind.
     """
     first = Title(
         kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000201, imdb_id="tt99000201"
@@ -212,16 +215,17 @@ async def test_a_caught_conflict_leaves_an_expired_row_and_every_read_refreshes_
 
 
 async def _insert_bypassing_the_identity_map(session: AsyncSession, **values: object) -> uuid.UUID:
-    """Inserts a title through Core, not the ORM (`session.add(...)`) --
-    `session.get()`'s documented shortcut ("if the given primary key
-    identifier is present in the local identity map... no SQL is emitted")
-    would otherwise serve the row straight out of memory and never touch
-    the session's autoflush path, which would make every test below pass
-    whether or not title.py's fix actually works. Standing in for a row
-    some *other* session or process wrote -- M2's bulk COPY path is exactly
-    this shape already (see TitleRepository's docstring) -- which is
-    realistically how a caller ends up asking this session to look up an id
-    it has never itself loaded.
+    """Inserts a title through Core, not the ORM (`session.add(...)`).
+
+    `session.get()`'s documented shortcut ("if the given primary key identifier is
+    present in the local identity map...
+
+    no SQL is emitted") would otherwise serve the row straight out of memory and never
+    touch the session's autoflush path, which would make every test below pass whether
+    or not title.py's fix actually works. Standing in for a row some *other* session or
+    process wrote -- M2's bulk COPY path is exactly this shape already (see
+    TitleRepository's docstring) -- which is realistically how a caller ends up asking
+    this session to look up an id it has never itself loaded.
     """
     title_id = new_id()
     # DeclarativeBase.__table__ is typed as the broader FromClause in
@@ -234,13 +238,16 @@ async def _insert_bypassing_the_identity_map(session: AsyncSession, **values: ob
 
 
 def _stage_conflicting_pending_row(session: AsyncSession, tmdb_id: int) -> None:
-    """Adds -- without flushing -- a row under its own, unrelated id that
-    will violate ix_titles_tmdb_id_kind whenever it's next flushed (always
-    kind=MOVIE here, matching every caller's other row, so the composite
-    index still fires). Stands in for a different repository's unrelated
-    pending write sharing this session: the row that eventually fails to
-    flush has nothing to do with the id any method below is asked to look
-    up."""
+    """Adds.
+
+    without flushing -- a row under its own, unrelated id that will violate
+    ix_titles_tmdb_id_kind whenever it's next flushed (always kind=MOVIE here, matching
+    every caller's other row, so the composite index still fires).
+
+    Stands in for a different repository's unrelated pending write sharing this session:
+    the row that eventually fails to flush has nothing to do with the id any method
+    below is asked to look up.
+    """
     session.add(
         TitleRow(
             id=new_id(),
@@ -300,10 +307,11 @@ async def test_count_by_state_does_not_leak_integrity_error_from_pending_state(
 async def test_update_translates_integrity_error_from_its_own_lookup(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """update()'s session.get() used to run outside the try -- so an
-    autoflush it triggered of unrelated pending state raised a raw
-    IntegrityError instead of the RepositoryConflict every other failure in
-    this method produces."""
+    """Update()'s session.get() used to run outside the try.
+
+    so an autoflush it triggered of unrelated pending state raised a raw IntegrityError
+    instead of the RepositoryConflict every other failure in this method produces.
+    """
     title_id = await _insert_bypassing_the_identity_map(
         session, name="Dune", sort_name="Dune", tmdb_id=105
     )
@@ -348,8 +356,9 @@ def _capturing_sql(session: AsyncSession) -> Iterator[list[str]]:
 
 
 def _entity_reads_of_titles(statements: Sequence[str]) -> list[str]:
-    """The captured statements that read `titles` as an *entity* -- i.e. that
-    project the wide column list `_to_domain` consumes.
+    """The captured statements that read `titles` as an *entity* -- i.e.
+
+    that project the wide column list `_to_domain` consumes.
 
     A filter rather than "the only statement", because a session flush or a
     fixture's own write can share the capture window, and a case that indexed
@@ -364,8 +373,9 @@ def _entity_reads_of_titles(statements: Sequence[str]) -> list[str]:
 
 
 def _projections_over_titles(statement: str) -> list[str]:
-    """Every `SELECT <projection> FROM titles` stage in one statement, in the
-    order they appear in the text.
+    """Every `SELECT <projection> FROM titles` stage in one statement.
+
+    in the order they appear in the text.
 
     Only stages reading `titles` itself: the ownership subquery selects from
     `media_items` and the exclusion from `watch_states`, so neither is matched
@@ -392,9 +402,10 @@ _COLUMNS_NO_CONSUMER_READS = (
 async def test_no_entity_read_ships_credit_names_over_the_wire(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """`credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` drops it from every row it
-    builds -- after Postgres has detoasted up to ten cast names per title, serialised
-    them and put them on the wire.
+    """`credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` drops it from every row it builds.
+
+    after Postgres has detoasted up to ten cast names per title, serialised them and put
+    them on the wire.
     """
     title = Title(
         kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", genres=("Sci-Fi",), year=2021
@@ -471,10 +482,11 @@ async def test_an_unloaded_derived_column_refuses_by_name_rather_than_by_greenle
 async def test_the_candidate_pool_ranks_on_a_narrow_projection(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """**The sort is over the whole catalog and the projection it carried was the whole
-    row.** `list_unwatched_candidates` outer-joins 1,271,138 titles to a `DISTINCT` over
+    """**The sort is over the whole catalog and the projection it carried was the whole row.**.
+
+    `list_unwatched_candidates` outer-joins 1,271,138 titles to a `DISTINCT` over
     `media_items`, anti-joins `watch_states`, sorts on four keys and keeps 200 -- and
-    every row entering that sort carried all thirty-one columns, including `overview`,
+    every row entering that sort carried all thirty-one columns, including `overview`,.
     """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     await repo.add(title)
@@ -517,14 +529,15 @@ async def test_the_candidate_pool_ranks_on_a_narrow_projection(
 async def test_update_does_not_rewrite_unchanged_columns(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """`_to_row` used to emit tuples for the four ARRAY(Text) columns while
-    a loaded row always holds lists on read (see title.py's module
-    docstring) -- `("a",) != ["a"]` in Python regardless of contents, so
-    SQLAlchemy's attribute-history comparison always saw those four columns
-    as changed, and update() rewrote them on *every* call, even a call that
-    changes nothing at all. That would confound any "changed since?" logic
-    M4 builds on updated_at once it reflects real writes (see
-    test_migrations.py).
+    """`_to_row` used to emit tuples for the four ARRAY(Text) columns while a loaded row always.
+
+    holds lists on read (see title.py's module docstring) -- `("a",) != ["a"]` in Python
+    regardless of contents, so SQLAlchemy's attribute-history comparison always saw
+    those four columns as changed, and update() rewrote them on *every* call, even a
+    call that changes nothing at all.
+
+    That would confound any "changed since?" logic M4 builds on updated_at once it
+    reflects real writes (see test_migrations.py).
     """
     title = Title(
         kind=TitleKind.MOVIE,
@@ -548,11 +561,13 @@ async def test_update_does_not_rewrite_unchanged_columns(
 
 
 class TestPostgresTitleRepositoryContract(TitleRepositoryContract):
-    """Same shared assertions as tests/unit/test_title_repository_contract.py
+    """Same shared assertions as tests/unit/test_title_repository_contract.py.
+
     (FakeTitleRepository), now against a real PostgreSQL -- see
-    tests/contract/title_repository_contract.py's module docstring. This is
-    what actually proves the fake and PostgresTitleRepository agree, rather
-    than merely asserting each looks right in isolation.
+    tests/contract/title_repository_contract.py's module docstring.
+
+    This is what actually proves the fake and PostgresTitleRepository agree, rather than
+    merely asserting each looks right in isolation.
     """
 
     @pytest.fixture
@@ -561,8 +576,9 @@ class TestPostgresTitleRepositoryContract(TitleRepositoryContract):
 
     @pytest.fixture
     async def collection_id(self, session: AsyncSession) -> uuid.UUID:
-        """A real `collections` row, because M7 gave `titles.collection_id`
-        a real foreign key (`fd7c3a5b9e12`).
+        """A real `collections` row.
+
+        because M7 gave `titles.collection_id` a real foreign key (`fd7c3a5b9e12`).
 
         The contract's default is a bare `new_id()`, which the fake accepts
         because it is a dict and Postgres refuses with a
@@ -634,8 +650,9 @@ class TestPostgresTitleRepositoryOwned(TitleRepositoryOwnedContract):
 
 
 class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
-    """`list_unwatched_candidates` against real Postgres, which is where its
-    three Postgres-shaped halves can fail.
+    """`list_unwatched_candidates` against real Postgres.
+
+    which is where its three Postgres-shaped halves can fail.
 
     The `NOT EXISTS` roll-up through `episodes.title_id` is the one that
     matters: the fake reproduces it as a dict lookup, which is naturally the
@@ -671,9 +688,10 @@ class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
 
     @pytest_asyncio.fixture
     async def other_user_id(self, session: AsyncSession) -> uuid.UUID:
-        """A second household member, so the read's `user_id` predicate has
-        something to exclude. On a single-household deployment a lost
-        `WHERE user_id` is invisible."""
+        """A second household member, so the read's `user_id` predicate has something to exclude.
+
+        On a single-household deployment a lost `WHERE user_id` is invisible.
+        """
         return await _add_user(session)
 
     @pytest.fixture
@@ -805,8 +823,9 @@ async def _add_episode(session: AsyncSession, series_id: uuid.UUID) -> uuid.UUID
 
 
 class TestPostgresTitleRepositoryBrowse(TitleRepositoryBrowseContract):
-    """`browse`/`browse_facets` against real Postgres, which is where four of
-    this read's halves can fail and the fake's cannot.
+    """`browse`/`browse_facets` against real Postgres.
+
+    which is where four of this read's halves can fail and the fake's cannot.
 
     The keyset's NULL branch is the one that matters: the natural
     `ROW(...) > ROW(...)` spelling answers **NULL** rather than false for an
@@ -889,7 +908,7 @@ async def _browse_by_offset(
 async def test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """**PRD 07's own reason for refusing offset paging, measured instead of asserted.**"""
+    """**PRD 07's own reason for refusing offset paging, measured instead of asserted.**."""
     seeded = [
         Title(kind=TitleKind.MOVIE, name=name, sort_name=name.lower())
         for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo")
@@ -978,8 +997,9 @@ async def _seed_equivalence_population(repo: PostgresTitleRepository) -> list[Ti
 async def test_the_shipped_order_is_byte_identical_to_the_written_out_one(
     repo: PostgresTitleRepository, session: AsyncSession, sort: BrowseSort
 ) -> None:
-    """**The guarantee that replaced a legibility argument, and it is stronger than what it
-    replaced.**
+    """**The guarantee that replaced a legibility argument.
+
+    and it is stronger than what it replaced.**.
     """
     seeded = await _seed_equivalence_population(repo)
     column, descending = BrowseSort.order_for(sort)
@@ -1047,8 +1067,10 @@ def _plan_nodes(plan: dict[str, object]) -> list[dict[str, object]]:
 async def test_the_written_out_order_cannot_use_the_index_that_nulls_last_can(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """**Why the clause changed: not "the index is missing", but "the spelling
-    cannot be matched to the index that is there".**
+    """**Why the clause changed.
+
+    not "the index is missing", but "the spelling cannot be matched to the index that is
+    there".**.
 
     `titles.sort_name` is `NOT NULL` and `ix_titles_sort_name` is a plain btree
     on it. Postgres 17 nevertheless does **not** simplify
@@ -1065,7 +1087,6 @@ async def test_the_written_out_order_cannot_use_the_index_that_nulls_last_can(
     disabled-node penalty and is the signature of the second.
 
     B7's numbers on a real catalog: 299.21 ms p50 -> 0.92 ms, **317x**, 51x
-    under its own 50 ms bar, and byte-identical on 25 of 25 positions.
     """
     await _seed_equivalence_population(repo)
     await session.execute(text("SET LOCAL enable_seqscan = off"))
@@ -1140,8 +1161,9 @@ class TestPostgresTitleRepositoryNaturalKeys(TitleRepositoryNaturalKeyContract):
 async def test_resolving_natural_keys_costs_one_statement_for_a_whole_batch(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """The N+1 the port refuses, and the only arm that can see it: the fake
-    has no round trip to count.
+    """The N+1 the port refuses, and the only arm that can see it.
+
+    the fake has no round trip to count.
 
     Held against a fixed batch count rather than a fixed batch -- a
     `media_items` restore on the household this project measures carries one

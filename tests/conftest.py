@@ -1,6 +1,7 @@
-"""Shared fixtures. Autouse fixtures here define the isolation guarantees
-every test in the suite gets for free — this is the first conftest in the
-project, and the pattern set here is what later milestones inherit."""
+"""Shared fixtures.
+
+Autouse fixtures here define the isolation guarantees every test in the suite gets for
+"""
 
 import os
 import sys
@@ -22,8 +23,9 @@ pytest.register_assert_rewrite("tests.contract")
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Isolate every test from the real process environment, from any real
-    `.env` file on disk, and from any other test's cached settings.
+    """Isolate every test from the real process environment.
+
+    from any real `.env` file on disk, and from any other test's cached settings.
 
     Three distinct leaks, all closed here:
 
@@ -52,7 +54,8 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def reset_otel_tracer_provider() -> Iterator[None]:
-    """Isolate every test from any real SDK `TracerProvider` a previous test (or
+    """Isolate every test from any real SDK `TracerProvider` a previous test (or.
+
     `usher.telemetry.configure_tracing`, which every `create_app()` call runs)
     installed.
     """
@@ -74,8 +77,9 @@ def reset_otel_tracer_provider() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def reset_otel_meter_provider() -> Iterator[None]:
-    """`reset_otel_tracer_provider`'s twin, for metrics, and it fails in a louder way than
-    the tracer one does.
+    """`reset_otel_tracer_provider`'s twin.
+
+    for metrics, and it fails in a louder way than the tracer one does.
     """
 
     def _reset() -> None:

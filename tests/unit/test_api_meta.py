@@ -22,9 +22,10 @@ _ADAPTERS_ROOT = Path(__file__).resolve().parents[2] / "src" / "usher" / "adapte
 
 
 def _scanned_attribution_values(root: Path) -> list[str]:
-    """Every module-level `*_ATTRIBUTION` assignment under `root`, literally
-    evaluated. Deliberately does not follow `ImportFrom` -- a re-export is
-    not a fifth definition."""
+    """Every module-level `*_ATTRIBUTION` assignment under `root`, literally evaluated.
+
+    Deliberately does not follow `ImportFrom` -- a re-export is not a fifth definition.
+    """
     values: list[str] = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -38,20 +39,22 @@ def _scanned_attribution_values(root: Path) -> list[str]:
 
 
 def _attribution_property_offenders(root: Path) -> list[str]:
-    """Every `attribution` implementation under `root` that does not reduce
-    to the one shape `_scanned_attribution_values` can see: a bare `return
-    <NAME>_ATTRIBUTION` inside an `@property`-decorated method, referencing a
-    module-level constant. Flags a class-level `attribution = ...` attribute
-    outright (the scan never descends into a class body at all), and flags a
-    property whose body is anything else -- a computed expression, a
-    dict/format lookup, `self.<attr>` -- because none of those produce a
-    module-level `Assign` the scan's `ast.literal_eval` will ever reach.
+    """Every `attribution` implementation under `root` that does not reduce to the one shape.
+
+    `_scanned_attribution_values` can see: a bare `return <NAME>_ATTRIBUTION` inside an
+    `@property`-decorated method, referencing a module-level constant.
+
+    Flags a class-level `attribution = ...` attribute outright (the scan never descends
+    into a class body at all), and flags a property whose body is anything else -- a
+    computed expression, a dict/format lookup, `self.<attr>` -- because none of those
+    produce a module-level `Assign` the scan's `ast.literal_eval` will ever reach.
 
     This does not widen what the scan sees (`ports/bulk.py`'s docstring says
     why: seeing the property directly would mean instantiating every
     `BulkDataset` subclass). It pins the shape the scan depends on, so a
     future adapter drifting from that shape fails here, loudly, in place of
-    `GET /meta/attribution` silently omitting a required string."""
+    `GET /meta/attribution` silently omitting a required string.
+    """
     offenders: list[str] = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -119,9 +122,11 @@ async def _get(settings: Settings, path: str) -> tuple[int, list[dict[str, str]]
 
 
 def _flatten(dependant: Dependant) -> set[object]:
-    """Every callable in a route's dependency tree -- the same three-line
-    walk `test_api_health.py` uses, since FastAPI 0.121 has no public
-    `get_flat_dependant`."""
+    """Every callable in a route's dependency tree.
+
+    the same three-line walk `test_api_health.py` uses, since FastAPI 0.121 has no
+    public `get_flat_dependant`.
+    """
     found: set[object] = {dependant.call}
     for sub in dependant.dependencies:
         found |= _flatten(sub)
@@ -158,44 +163,55 @@ async def test_attribution_answers_all_four_values_byte_identically() -> None:
 
 
 async def test_attribution_answers_in_a_pinned_order() -> None:
-    """Order is part of this contract, not an accident of how `_ATTRIBUTIONS`
-    happened to be typed. Pinned to PRD 04's licensing table row order (IMDb,
-    TMDb, Wikidata, MovieLens) -- a licensing surface's response bytes should
-    be deterministic. This is a *list* comparison, deliberately unlike
-    `test_every_attribution_constant_in_the_adapters_is_served`'s set
-    comparison above: swapping any two entries in `_ATTRIBUTIONS` changes the
-    bytes actually on the wire, so it must fail this case, even though the
-    scanned-vs-served *completeness* check neither needs nor wants to notice
-    it (the scan's own order is file-path order and has no relationship to
-    this one)."""
+    """Order is part of this contract.
+
+    not an accident of how `_ATTRIBUTIONS` happened to be typed.
+
+    Pinned to PRD 04's licensing table row order (IMDb, TMDb, Wikidata, MovieLens) -- a
+    licensing surface's response bytes should be deterministic. This is a *list*
+    comparison, deliberately unlike
+    `test_every_attribution_constant_in_the_adapters_is_served`'s set comparison above:
+    swapping any two entries in `_ATTRIBUTIONS` changes the bytes actually on the wire,
+    so it must fail this case, even though the scanned-vs-served *completeness* check
+    neither needs nor wants to notice it (the scan's own order is file-path order and
+    has no relationship to this one).
+    """
     status, body = await _get(_settings(), "/meta/attribution")
     assert status == 200
     assert [entry["source"] for entry in body] == ["IMDb", "TMDb", "Wikidata", "MovieLens"]
 
 
 def test_every_bulkdataset_attribution_property_is_a_bare_scanned_constant() -> None:
-    """The canary for the scan's own blind spot -- see
-    `_attribution_property_offenders`'s docstring and `ports/bulk.py`'s.
-    Passes today because all four concrete `attribution` properties
-    (`imdb.py`, `movielens.py`, `tmdb_ids.py`, `wikidata.py`) are `return
-    X_ATTRIBUTION` one-liners; fails the moment a future one stops being that
-    shape, rather than `GET /meta/attribution` silently omitting it."""
+    """The canary for the scan's own blind spot.
+
+    see `_attribution_property_offenders`'s docstring and `ports/bulk.py`'s.
+
+    Passes today because all four concrete `attribution` properties (`imdb.py`,
+    `movielens.py`, `tmdb_ids.py`, `wikidata.py`) are `return X_ATTRIBUTION` one-liners;
+    fails the moment a future one stops being that shape, rather than `GET
+    /meta/attribution` silently omitting it.
+    """
     assert _attribution_property_offenders(_ADAPTERS_ROOT) == []
 
 
 def test_the_two_tmdb_attribution_constants_are_byte_identical() -> None:
-    """The duplication (`adapters/bulk/tmdb_ids.py` and
-    `adapters/tmdb/client.py`) is deliberate -- `client.py`'s own comment
-    says why -- but two copies of a *required* string that drift put two
-    different legal claims on the wire. This is the assertion that catches
-    that drift; the route only ever serves one of the two."""
+    """The duplication (`adapters/bulk/tmdb_ids.py` and `adapters/tmdb/client.py`) is deliberate.
+
+    `client.py`'s own comment says why -- but two copies of a *required* string that
+    drift put two different legal claims on the wire.
+
+    This is the assertion that catches that drift; the route only ever serves one of the
+    two.
+    """
     assert TMDB_ATTRIBUTION_BULK == TMDB_ATTRIBUTION_CLIENT
 
 
 def test_the_route_holds_no_sessiondep() -> None:
-    """ "It cannot 503 and cannot leak a host" as a property of the
-    dependency graph, asserted rather than reviewed -- the same shape
-    `test_api_health.py::test_readiness_never_touches_a_source` uses."""
+    """It cannot 503 and cannot leak a host, as a property of the graph.
+
+    Asserted rather than reviewed -- the same shape
+    `test_api_health.py::test_readiness_never_touches_a_source` uses.
+    """
     route = next(
         r for r in meta_router.routes if isinstance(r, APIRoute) and r.path == "/meta/attribution"
     )
@@ -204,10 +220,13 @@ def test_the_route_holds_no_sessiondep() -> None:
 
 
 async def test_the_route_answers_identically_under_two_settings_instances() -> None:
-    """Static and not filtered by `import_runs`: a fresh install and a
-    populated one must answer the same body. Two `Settings` instances that
-    differ in everything this route could plausibly leak (the secret key,
-    which stands in for "a host") produce byte-identical responses."""
+    """Static and not filtered by `import_runs`.
+
+    a fresh install and a populated one must answer the same body.
+
+    Two `Settings` instances that differ in everything this route could plausibly leak
+    (the secret key, which stands in for "a host") produce byte-identical responses.
+    """
     status_a, body_a = await _get(_settings(), "/meta/attribution")
     status_b, body_b = await _get(
         _settings(secret_key="fedcba9876543210fedcba9876543210fed"),
@@ -218,8 +237,7 @@ async def test_the_route_answers_identically_under_two_settings_instances() -> N
 
 
 def test_openapi_describes_a_real_response_model() -> None:
-    """`/openapi.json` describes the route with a real response model, not
-    `200: {}`."""
+    """`/openapi.json` describes the route with a real response model, not `200: {}`."""
     app = create_app(_settings())
     schema = app.openapi()
     operation = schema["paths"]["/meta/attribution"]["get"]

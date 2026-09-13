@@ -14,9 +14,11 @@ from usher.services.search import SearchService
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """get_settings() exists to be a FastAPI Depends — it must not re-read
-    and re-parse the environment (and, once .env exists, hit disk) on every
-    call and injection site."""
+    """Get_settings() exists to be a FastAPI Depends.
+
+    it must not re-read and re-parse the environment (and, once .env exists, hit disk)
+    on every call and injection site.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     get_settings.cache_clear()
@@ -73,12 +75,13 @@ def test_settings_reject_short_secret_key(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_settings_reject_placeholder_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """.env.example itself ships USHER_SECRET_KEY= blank, not this string
-    (a fresh copy fails validation for a different reason: a missing
-    required field) -- this guards the case where someone instead pastes
-    in a placeholder shown in documentation, an old README, or a setup
-    guide, which would ship a credential-encryption key published in the
-    repo."""
+    """.env.example itself ships USHER_SECRET_KEY= blank.
+
+    not this string (a fresh copy fails validation for a different reason: a missing
+    required field) -- this guards the case where someone instead pastes in a
+    placeholder shown in documentation, an old README, or a setup guide, which would
+    ship a credential-encryption key published in the repo.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "change-me-to-a-long-random-string")
     with pytest.raises(ValidationError):
@@ -100,10 +103,11 @@ def test_telemetry_enabled_when_endpoint_set(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_service_name_read_without_usher_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """service_name (and otlp_endpoint) use an explicit alias to the
-    unprefixed OTEL_* convention, bypassing env_prefix="USHER_" entirely —
-    the one interaction in this module a routine refactor would most easily
-    break silently."""
+    """Service_name (and otlp_endpoint) use an explicit alias to the unprefixed OTEL_* convention.
+
+    bypassing env_prefix="USHER_" entirely — the one interaction in this module a
+    routine refactor would most easily break silently.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     monkeypatch.setenv("OTEL_SERVICE_NAME", "usher-test")
@@ -111,9 +115,11 @@ def test_service_name_read_without_usher_prefix(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_blank_tmdb_api_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """USHER_TMDB_API_KEY= (present but empty, as .env.example ships it) must
-    parse to None, not '' — otherwise `is not None` checks take the wrong
-    branch."""
+    """USHER_TMDB_API_KEY= (present but empty.
+
+    as .env.example ships it) must parse to None, not '' — otherwise `is not None`
+    checks take the wrong branch.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     monkeypatch.setenv("USHER_TMDB_API_KEY", "")
@@ -130,7 +136,7 @@ def test_blank_otlp_endpoint_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_unknown_field_in_env_file_rejected(tmp_path: Path) -> None:
-    """extra='forbid' catches typos like USHER_LOG_LEVL in a real .env file.
+    """Extra='forbid' catches typos like USHER_LOG_LEVL in a real .env file.
 
     Note the scope: pydantic-settings' EnvSettingsSource looks up each
     declared field's expected name in os.environ rather than scanning it, so
@@ -167,8 +173,10 @@ def test_port_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_database_url_rejects_wrong_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A sync postgresql:// URL must fail fast at config load, not deep
-    inside SQLAlchemy's async engine much later."""
+    """A sync postgresql:// URL must fail fast at config load.
+
+    not deep inside SQLAlchemy's async engine much later.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     with pytest.raises(ValidationError):
@@ -176,9 +184,11 @@ def test_database_url_rejects_wrong_driver(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_bulk_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every one of these is read by usher.cli. None is a field that
-    validates and then influences nothing -- the failure mode Settings.host
-    and Settings.port had before M1's Task 13."""
+    """Every one of these is read by usher.cli.
+
+    None is a field that validates and then influences nothing -- the failure mode
+    Settings.host and Settings.port had before M1's Task 13.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     settings = Settings()
@@ -198,8 +208,10 @@ def test_bulk_batch_size_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_bulk_user_agent_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:
-    """WDQS's user-agent policy blocks default and empty agents; an empty
-    one would fail the crosswalk with an opaque 403."""
+    """WDQS's user-agent policy blocks default and empty agents.
+
+    an empty one would fail the crosswalk with an opaque 403.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_BULK_USER_AGENT", "")
@@ -208,9 +220,12 @@ def test_bulk_user_agent_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_ingest_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PRD 03's pipeline knobs. Constructor arguments on the repositories and
-    services that read them -- `db/` must not import `config` (ADR-0009) --
-    so the composition roots are what wire these through."""
+    """PRD 03's pipeline knobs.
+
+    Constructor arguments on the repositories and services that read them -- `db/` must
+    not import `config` (ADR-0009) -- so the composition roots are what wire these
+    through.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     settings = Settings()
@@ -321,9 +336,11 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
 
 
 def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ceiling of zero parks every job on its first failure, which takes
-    the retry out of a retry queue -- PRD 08 asks for "after N attempts",
-    and N is at least one."""
+    """A ceiling of zero parks every job on its first failure.
+
+    which takes the retry out of a retry queue -- PRD 08 asks for "after N attempts",
+    and N is at least one.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_JOB_MAX_ATTEMPTS", "0")
@@ -332,9 +349,10 @@ def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_job_backoff_seconds_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A zero base collapses the whole exponential schedule to "retry
-    immediately", which is the hot loop against a broken upstream that the
-    backoff exists to prevent."""
+    """A zero base collapses the whole exponential schedule to "retry immediately".
+
+    which is the hot loop against a broken upstream that the backoff exists to prevent.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_JOB_BACKOFF_SECONDS", "0")
@@ -343,9 +361,11 @@ def test_job_backoff_seconds_must_be_positive(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_sync_max_retract_fraction_is_a_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ADR-0015's guard is a fraction of a source, so 1.0 is "disabled" and
-    anything above it is a typo that would silently disable the guard rather
-    than loosen it."""
+    """ADR-0015's guard is a fraction of a source.
+
+    so 1.0 is "disabled" and anything above it is a typo that would silently disable the
+    guard rather than loosen it.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_SYNC_MAX_RETRACT_FRACTION", "1.5")
@@ -354,10 +374,12 @@ def test_sync_max_retract_fraction_is_a_fraction(monkeypatch: pytest.MonkeyPatch
 
 
 def test_metadata_provider_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PRD 03's enrich stage. `tmdb_region` is genuinely configuration rather
-    than a constant: TMDb returns every country's certification and showing a
-    household outside the US somebody else's rating is worse than showing
-    none."""
+    """PRD 03's enrich stage.
+
+    `tmdb_region` is genuinely configuration rather than a constant: TMDb returns every
+    country's certification and showing a household outside the US somebody else's
+    rating is worse than showing none.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     settings = Settings()
@@ -367,8 +389,10 @@ def test_metadata_provider_settings_have_usable_defaults(monkeypatch: pytest.Mon
 
 
 def test_tmdb_requests_per_second_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Zero is not "unthrottled", it is a token bucket that never refills --
-    the first request would wait forever."""
+    """Zero is not "unthrottled", it is a token bucket that never refills.
+
+    the first request would wait forever.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_TMDB_REQUESTS_PER_SECOND", "0")
@@ -377,8 +401,10 @@ def test_tmdb_requests_per_second_must_be_positive(monkeypatch: pytest.MonkeyPat
 
 
 def test_tmdb_region_must_be_a_two_letter_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ISO 3166-1 alpha-2, which is what TMDb keys `iso_3166_1` on. A longer
-    value matches nothing and silently produces no content rating at all."""
+    """ISO 3166-1 alpha-2, which is what TMDb keys `iso_3166_1` on.
+
+    A longer value matches nothing and silently produces no content rating at all.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_TMDB_REGION", "USA")
@@ -389,9 +415,11 @@ def test_tmdb_region_must_be_a_two_letter_code(monkeypatch: pytest.MonkeyPatch) 
 def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TMDb's caching term is a six-month ceiling, so the bound is a
-    compliance constraint expressed as a type rather than a tuning range --
-    and zero is not "always fresh", it is "refetch on every retry"."""
+    """TMDb's caching term is a six-month ceiling.
+
+    so the bound is a compliance constraint expressed as a type rather than a tuning
+    range -- and zero is not "always fresh", it is "refetch on every retry".
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     assert Settings().enrich_cache_max_age_days == 30
@@ -404,12 +432,16 @@ def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
 def test_the_sse_heartbeat_is_under_every_proxy_idle_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """nginx closes an idle connection at 60 s and Cloudflare at ~100 s
-    (ADR-0004's operational facts, which apply to a long-lived HTTP response
-    exactly as they apply to a WebSocket). A default at or above 60 would
-    make an idle SSE stream drop on every proxied deployment, so `lt=60` is
-    a compliance bound expressed as a type rather than a tuning range -- and
-    zero is not "no heartbeat", it is a comment line per event-loop turn."""
+    """Nginx closes an idle connection at 60 s and Cloudflare at ~100 s (ADR-0004's operational.
+
+    facts, which apply to a long-lived HTTP response exactly as they apply to a
+    WebSocket).
+
+    A default at or above 60 would make an idle SSE stream drop on every proxied
+    deployment, so `lt=60` is a compliance bound expressed as a type rather than a
+    tuning range -- and zero is not "no heartbeat", it is a comment line per event-loop
+    turn.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     assert Settings().sse_heartbeat_seconds == 20.0
@@ -423,10 +455,12 @@ def test_the_sse_heartbeat_is_under_every_proxy_idle_timeout(
 def test_the_sse_ring_and_queue_are_bounded_both_ways(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both are read by `create_app`, which is what builds the bus. Bounded
-    above as well as below because each is an in-memory allocation *per
-    process* and *per connection* respectively -- a queue an operator could
-    set to a million is one browser tab holding a million events."""
+    """Both are read by `create_app`, which is what builds the bus.
+
+    Bounded above as well as below because each is an in-memory allocation *per process*
+    and *per connection* respectively -- a queue an operator could set to a million is
+    one browser tab holding a million events.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     assert (Settings().sse_buffer_size, Settings().sse_queue_size) == (256, 64)
@@ -441,10 +475,11 @@ def test_the_sse_ring_and_queue_are_bounded_both_ways(
 def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ten new fields, and the two lane switches are PRD 01's "--worker
-    entrypoint flag ... so lanes can be moved to a separate container later
-    by editing compose, with no code change" expressed as configuration --
-    one image serves an all-in-one deployment and a split one.
+    """Ten new fields, and the two lane switches are PRD 01's "--worker entrypoint flag ...
+
+    so lanes can be moved to a separate container later by editing compose, with no code
+    change" expressed as configuration -- one image serves an all-in-one deployment and
+    a split one.
 
     The plan called this task "eleven settings" and said eight were new;
     both numbers are wrong. Its own field list holds ten, and with the three
@@ -468,8 +503,10 @@ def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
 def test_the_gap_closer_defaults_to_refusing_an_uncursored_walk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one default in this block that is a *refusal*, and the one that
-    changed behaviour for an existing deployment (2026-08-19, issue #9).
+    """The one default in this block that is a *refusal*.
+
+    and the one that changed behaviour for an existing deployment (2026-08-19, issue
+    #9).
 
     A reconnect delta reads its `since` from the newest completed item-lane
     run; with none there is no `since`, so the walk is the whole library --
@@ -493,15 +530,18 @@ def test_the_gap_closer_defaults_to_refusing_an_uncursored_walk(
 def test_the_staleness_window_is_bounded_below_by_something_useful(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A window shorter than the source's own message interval reconnects a
-    healthy channel forever. `gt=0` alone would permit `0.001`; the floor is
-    a *documented* one rather than a guessed one -- Emby's `Sessions`
-    interval is the subscription's own `0,1000`, i.e. one second, and 5 s
-    leaves it real headroom.
+    """A window shorter than the source's own message interval reconnects a healthy channel.
+
+    forever.
+
+    `gt=0` alone would permit `0.001`; the floor is a *documented* one rather than a
+    guessed one -- Emby's `Sessions` interval is the subscription's own `0,1000`, i.e.
+    one second, and 5 s leaves it real headroom.
 
     The default must also match `usher.adapters.emby.push`'s own, because
     the adapter's constructor default is what a caller that forgets to pass
-    one gets -- two numbers that mean the same thing and can drift apart."""
+    one gets -- two numbers that mean the same thing and can drift apart.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     assert Settings().push_stale_after_seconds == DEFAULT_STALE_AFTER_SECONDS
@@ -513,10 +553,13 @@ def test_the_staleness_window_is_bounded_below_by_something_useful(
 
 
 def test_max_items_per_event_is_bounded_above(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cap exists because Emby emits `LibraryChanged` during a library
-    scan and it can name thousands, against a source measured at 1,126,789
-    items and 1-5 s per request. A ceiling an operator could set to 100,000
-    would turn the guard off while looking configured."""
+    """The cap exists because Emby emits `LibraryChanged` during a library scan and it can name.
+
+    thousands, against a source measured at 1,126,789 items and 1-5 s per request.
+
+    A ceiling an operator could set to 100,000 would turn the guard off while looking
+    configured.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     for bad in ("0", "5000"):
@@ -528,15 +571,18 @@ def test_max_items_per_event_is_bounded_above(monkeypatch: pytest.MonkeyPatch) -
 def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`job_backoff_seconds`' argument, one lane over: a zero base collapses
-    the whole schedule to "retry immediately", which is the hot loop the
-    backoff exists to prevent. And `job_max_attempts`' argument for `ge=1`:
-    a ceiling of zero disables push on the first blip, before a single
-    reconnect has been attempted.
+    """`job_backoff_seconds`' argument, one lane over.
+
+    a zero base collapses the whole schedule to "retry immediately", which is the hot
+    loop the backoff exists to prevent.
+
+    And `job_max_attempts`' argument for `ge=1`: a ceiling of zero disables push on the
+    first blip, before a single reconnect has been attempted.
 
     `push_gap_min_interval_seconds` is the deliberate exception at `ge=0` --
     zero means "close the gap on every reconnect", which is expensive but
-    correct, unlike every other zero here."""
+    correct, unlike every other zero here.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     for name in (
@@ -557,8 +603,10 @@ def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
 def test_the_retention_window_and_the_chunk_cannot_be_switched_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both `ge=1` floors on the retention pair, and **the two zeros fail differently**,
-    which is why the comments beside them are not interchangeable.
+    """Both `ge=1` floors on the retention pair.
+
+    and **the two zeros fail differently**, which is why the comments beside them are
+    not interchangeable.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -576,8 +624,9 @@ def test_the_retention_window_and_the_chunk_cannot_be_switched_off(
 
 
 def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`config.py`'s own comment: "none is a field that validates and then
-    influences nothing". Asserted rather than trusted.
+    """`config.py`'s own comment: "none is a field that validates and then influences nothing".
+
+    Asserted rather than trusted.
 
     A setting nothing reads is a knob an operator turns with no effect --
     the same shape M4 found three times in PRD 10's metric table (two
@@ -598,9 +647,10 @@ def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> 
 def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`source_requests_per_second` is a *derived* default, not a chosen one, so
-    it gets pinned like a measurement (the `search_*`/`embedding_*` treatment):
-    Little's law over S1's page p95 and the Emby concurrency, `4 / 9.1713 =
+    """`source_requests_per_second` is a *derived* default.
+
+    not a chosen one, so it gets pinned like a measurement (the `search_*`/`embedding_*`
+    treatment): Little's law over S1's page p95 and the Emby concurrency, `4 / 9.1713 =
     0.436` rps, with the shipped **0.4** a courtesy margin below it (ADR-0043).
 
     Two properties beyond the number. `ge=0`, not `ge=1`, because `0` is
@@ -625,8 +675,9 @@ def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
 def test_the_search_and_embedding_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nine fields pinned together, and most of them are *measurements* rather than choices
-    -- which is why an edit to any one of them has to be visible somewhere.
+    """Nine fields pinned together, and most of them are *measurements* rather than choices.
+
+    which is why an edit to any one of them has to be visible somewhere.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -664,8 +715,9 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
 def test_the_suggest_writer_ships_on_and_the_two_defaults_for_it_agree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The keystroke writer ships **on**, because the row no longer sits on the
-    request that produced it.
+    """The keystroke writer ships **on**.
+
+    because the row no longer sits on the request that produced it.
 
     `SearchQueryBuffer` takes the row and a drain writes it, so what the
     request pays is an append -- which is what makes this a setting an operator
@@ -689,12 +741,13 @@ def test_the_suggest_writer_ships_on_and_the_two_defaults_for_it_agree(
 
 
 def test_the_embedding_model_name_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`min_length=1` is not decoration. The string is written to
-    `title_embeddings.model_name` and the stale predicate compares against
-    it, so an empty name makes **every** row stale forever: the backfill
-    re-claims the whole enriched tier every pass, the
-    `usher.search.embeddings.stale` gauge never reaches zero, and nothing
-    raises."""
+    """`min_length=1` is not decoration.
+
+    The string is written to `title_embeddings.model_name` and the stale predicate
+    compares against it, so an empty name makes **every** row stale forever: the
+    backfill re-claims the whole enriched tier every pass, the
+    `usher.search.embeddings.stale` gauge never reaches zero, and nothing raises.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
     monkeypatch.setenv("USHER_EMBEDDING_MODEL", "")
@@ -703,9 +756,9 @@ def test_the_embedding_model_name_cannot_be_blank(monkeypatch: pytest.MonkeyPatc
 
 
 def test_the_embed_batch_is_bounded_both_ways(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Zero is not "no batching", it is a call that embeds nothing while
-    looking configured -- the same shape every other `ge=1` in this file
-    refuses.
+    """Zero is not "no batching", it is a call that embeds nothing while looking configured.
+
+    the same shape every other `ge=1` in this file refuses.
 
     The ceiling is memory rather than throughput, which is a **deliberate
     departure from the plan's `le=64`**: 64 is the top of the measured flat
@@ -727,8 +780,10 @@ def test_the_embed_batch_is_bounded_both_ways(monkeypatch: pytest.MonkeyPatch) -
 def test_the_trigram_floor_stays_inside_similaritys_own_range(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`similarity()` returns [0, 1], so a floor outside it is not a strict
-    setting but one that silently means "everything" or "nothing".
+    """`similarity()` returns [0.
+
+    1], so a floor outside it is not a strict setting but one that silently means
+    "everything" or "nothing".
 
     Zero admits every row in `titles` to the `levenshtein` re-rank -- the
     exact cliff ADR-0002 says the narrow path exists to avoid, measured at
@@ -769,10 +824,11 @@ def test_the_rrf_constant_and_the_ef_search_cannot_be_switched_off(
 
 
 def test_the_suggest_cap_is_above_the_result_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cross-field rule, in the shape
-    `test_the_sse_heartbeat_is_under_every_proxy_idle_timeout` established: a
-    constraint no single field can express, asserted as a type rather than
-    left in a comment.
+    """A cross-field rule.
+
+    in the shape `test_the_sse_heartbeat_is_under_every_proxy_idle_timeout` established:
+    a constraint no single field can express, asserted as a type rather than left in a
+    comment.
 
     `PostgresSuggestIndex` collects `search_suggest_candidates` trigram
     matches, re-ranks them by edit distance, and keeps the best
@@ -804,7 +860,7 @@ def test_the_suggest_cap_is_above_the_result_limit(monkeypatch: pytest.MonkeyPat
 def test_the_two_llm_spenders_have_independent_switches_and_both_default_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**Three reachable configurations, and each is a different deployment.**
+    """**Three reachable configurations, and each is a different deployment.**.
 
     `USHER_LLM_ENABLED` used to gate both spenders at once, on the argument
     that a second switch's only honest default is "follow the first". That
@@ -869,8 +925,9 @@ def test_query_expansion_without_an_llm_is_refused_rather_than_silently_ignored(
 def test_the_image_proxy_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Four fields pinned together, and two of them are *measurements* rather than choices
-    — which is why an edit to either has to be visible somewhere.
+    """Four fields pinned together, and two of them are *measurements* rather than choices.
+
+    which is why an edit to either has to be visible somewhere.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -884,9 +941,10 @@ def test_the_image_proxy_settings_have_the_measured_defaults(
 
 
 def test_the_image_ladder_is_not_a_setting() -> None:
-    """ADR-0032: the four widths are a tuple in `usher.ports.images`, because
-    they are what bounds the cache and are reviewable in `src/` rather than
-    per deployment.
+    """ADR-0032.
+
+    the four widths are a tuple in `usher.ports.images`, because they are what bounds
+    the cache and are reviewable in `src/` rather than per deployment.
 
     PRD 08's Configuration table listed an "image cache ladder" as a TOML-layer
     concern until 2026-08-11, and there is no TOML layer — so this is the

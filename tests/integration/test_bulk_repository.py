@@ -226,22 +226,27 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
 async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batches(
     session: AsyncSession,
 ) -> None:
-    """The shared contract only exercises the empty-batch guard for
-    upsert_titles (test_upsert_titles_accepts_an_empty_batch) -- these three
-    early-return the same way (`if not rows: return 0`), and were otherwise
-    unreached by any test, live or in-memory. Coverage gap found running
-    `pytest --cov` during this task's verification pass, closed here rather
-    than in the shared contract (tests/contract/), which is not this file's
-    to extend."""
+    """The shared contract only exercises the empty-batch guard for upsert_titles.
+
+    (test_upsert_titles_accepts_an_empty_batch) -- these three early-return the same way
+    (`if not rows: return 0`), and were otherwise unreached by any test, live or in-
+    memory.
+
+    Coverage gap found running `pytest --cov` during this task's verification pass,
+    closed here rather than in the shared contract (tests/contract/), which is not this
+    file's to extend.
+    """
     assert await PostgresBulkCatalogRepository(session).apply_ratings([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_tmdb_ids([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_crosswalk([]) == 0
 
 
 async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession) -> None:
-    """**The whole of ADR-0040 in one assertion.** Before it, this same call wrote
-    `vote_count`/`community_rating` -- the columns TMDb enrichment also writes -- so an
-    IMDb import silently overwrote a TMDb figure and nothing recorded which had won.
+    """**The whole of ADR-0040 in one assertion.** Before it.
+
+    this same call wrote `vote_count`/`community_rating` -- the columns TMDb enrichment
+    also writes -- so an IMDb import silently overwrote a TMDb figure and nothing
+    recorded which had won.
     """
     title_id = new_id()
     await session.execute(
@@ -278,14 +283,16 @@ async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession)
 async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_constraint(
     session: AsyncSession,
 ) -> None:
-    """**The measurement `parse_akas_row`'s length filter exists for, asserted
-    where it is actually enforced.** 33 rows of the pinned
-    `title.akas.tsv.gz` exceed `SEARCH_NAME_MAX_CHARS` (longest 831), and
-    `ck_title_search_names_name_within_btree_bound` refuses them — per
-    *statement*, so one such row takes a ten-thousand-row batch with it. That
-    is why the parser drops them upstream, and it is a claim about *this*
-    repository that only a real database can check: the fake has no CHECK to
-    mirror and `tests/unit` cannot see this at all.
+    """**The measurement `parse_akas_row`'s length filter exists for.
+
+    asserted where it is actually enforced.** 33 rows of the pinned `title.akas.tsv.gz`
+    exceed `SEARCH_NAME_MAX_CHARS` (longest 831), and
+    `ck_title_search_names_name_within_btree_bound` refuses them — per *statement*, so
+    one such row takes a ten-thousand-row batch with it.
+
+    That is why the parser drops them upstream, and it is a claim about *this*
+    repository that only a real database can check: the fake has no CHECK to mirror and
+    `tests/unit` cannot see this at all.
 
     Two assertions, and the second is the one `SEARCH_NAME_MAX_CHARS`' own
     docstring argues for. **The bound is a named CHECK rather than the btree's
@@ -332,10 +339,11 @@ async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_co
 async def test_the_canonical_comparison_is_the_databases_own_lower_and_not_pythons(
     session: AsyncSession,
 ) -> None:
-    """**Three case-folding functions disagree on real IMDb names, and only one of them is
-    the right answer here.** Measured 2026-08-11 over the whole pinned
-    `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`): **32,223 of
-    46,202,631 retained rows (0.070%) have `str.lower()` != `str.casefold()`**, in two
+    """**Three case-folding functions disagree on real IMDb names.
+
+    and only one of them is the right answer here.** Measured 2026-08-11 over the whole
+    pinned `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`): **32,223 of
+    46,202,631 retained rows (0.070%) have `str.lower()` != `str.casefold()`**, in two.
     """
     greek = ImdbTitle(
         imdb_id="tt99000150",
@@ -374,8 +382,9 @@ async def test_the_canonical_comparison_is_the_databases_own_lower_and_not_pytho
 async def test_the_alias_prefix_probe_uses_the_tables_own_prefix_index(
     session: AsyncSession,
 ) -> None:
-    """**The reason the rows are worth storing at all**, and it is asserted on
-    the plan rather than on an index name: `m09a` builds
+    """**The reason the rows are worth storing at all**.
+
+    and it is asserted on the plan rather than on an index name: `m09a` builds
     `ix_title_search_names_name_lower_prefix` as a btree over `lower(name)
     text_pattern_ops`, and tier 1 of the two-tier suggest reads this table with
     `lower(name) LIKE 'typed%'`.
@@ -416,10 +425,13 @@ async def test_the_alias_prefix_probe_uses_the_tables_own_prefix_index(
 
 
 async def test_copy_writes_the_server_default_columns(session: AsyncSession) -> None:
-    """The reason TitleRow carries server_defaults at all: the COPY path
-    never mentions enrichment_state, field_provenance, keywords,
-    spoken_languages, origin_countries, or created_at. Without them this
-    insert fails on `null value in column "genres"`."""
+    """The reason TitleRow carries server_defaults at all.
+
+    the COPY path never mentions enrichment_state, field_provenance, keywords,
+    spoken_languages, origin_countries, or created_at.
+
+    Without them this insert fails on `null value in column "genres"`.
+    """
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
     result = await session.execute(
@@ -436,10 +448,12 @@ async def test_copy_writes_the_server_default_columns(session: AsyncSession) -> 
 
 
 async def test_copy_preserves_embedded_double_quotes(session: AsyncSession) -> None:
-    """IMDb's TSVs carry literal `"` in title fields and have no quoting
-    mechanism. This asserts the value survives the whole COPY path
-    byte-for-byte, which is the other half of the parser-side decision not
-    to use csv.reader (see adapters/bulk/imdb.py)."""
+    """IMDb's TSVs carry literal `"` in title fields and have no quoting mechanism.
+
+    This asserts the value survives the whole COPY path byte-for-byte, which is the
+    other half of the parser-side decision not to use csv.reader (see
+    adapters/bulk/imdb.py).
+    """
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
     result = await session.execute(
@@ -462,11 +476,13 @@ async def test_bulk_load_window_suspends_indexes_on_an_empty_catalog(
 async def test_bulk_load_window_declines_on_a_populated_catalog(
     session: AsyncSession,
 ) -> None:
-    """ADR-0005 promises the catalog is browsable while bootstrap runs. On
-    a first bootstrap there is nothing to browse, so dropping the two
-    ordering indexes is free; on a re-import a browse ordered by name would
-    seq-scan for the whole window, so the write cost is accepted instead.
-    Delete the count_titles() guard and this fails."""
+    """ADR-0005 promises the catalog is browsable while bootstrap runs.
+
+    On a first bootstrap there is nothing to browse, so dropping the two ordering
+    indexes is free; on a re-import a browse ordered by name would seq-scan for the
+    whole window, so the write cost is accepted instead. Delete the count_titles() guard
+    and this fails.
+    """
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
     async with repo.bulk_load_window():
@@ -476,8 +492,9 @@ async def test_bulk_load_window_declines_on_a_populated_catalog(
 async def test_bulk_load_window_commits_the_callers_own_pending_work(
     postgres_url: str,
 ) -> None:
-    """Pins the documented, deliberate exception to "these flush and return counts; they
-    never commit" -- see BulkCatalogRepository.bulk_load_window and
+    """Pins the documented, deliberate exception to "these flush and return counts.
+
+    they never commit" -- see BulkCatalogRepository.bulk_load_window and
     PostgresBulkCatalogRepository's own docstrings for the full rationale and the
     (rejected) alternatives.
     """
@@ -549,10 +566,13 @@ async def _indexdef(session: AsyncSession, name: str) -> str | None:
 async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
     session: AsyncSession,
 ) -> None:
-    """`_SUSPENDABLE_INDEXES` holds literal `CREATE INDEX` strings that `bulk_load_window`
-    executes verbatim in its `finally`. Nothing has ever checked that those strings
-    reproduce the index the migration created, and until M6 the hazard was mild -- both
-    entries were plain btrees whose only degree of freedom is the column list.
+    """`_SUSPENDABLE_INDEXES` holds literal `CREATE INDEX` strings that `bulk_load_window`.
+
+    executes verbatim in its `finally`.
+
+    Nothing has ever checked that those strings reproduce the index the migration
+    created, and until M6 the hazard was mild -- both entries were plain btrees whose
+    only degree of freedom is the column list.
     """
     from usher.db.repositories.bulk import _SUSPENDABLE_INDEXES
 
@@ -948,8 +968,7 @@ async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_n
 async def test_a_movielens_tmdb_id_above_int32_stages_and_is_reported_unmatched(
     bed: _Bed,
 ) -> None:
-    """`stg_genome.tmdb_id` is `bigint` since M10's F9, and this is the
-    behaviour that buys.
+    """`stg_genome.tmdb_id` is `bigint` since M10's F9, and this is the behaviour that buys.
 
     That column is written to **nothing**: `upsert_genome_vectors`' destination
     statement joins on `imdb_id`, and MovieLens's own `tmdb_id` is carried
@@ -988,8 +1007,7 @@ async def test_a_movielens_tmdb_id_above_int32_stages_and_is_reported_unmatched(
 async def test_an_imdb_akas_ordering_above_int32_stages_and_the_batch_is_written(
     bed: _Bed,
 ) -> None:
-    """`stg_akas.ordering` is `bigint` since M10's F9, for
-    `stg_genome.tmdb_id`'s reason exactly.
+    """`stg_akas.ordering` is `bigint` since M10's F9, for `stg_genome.tmdb_id`'s reason exactly.
 
     IMDb's own `ordering` field is read by the destination statement's
     `DISTINCT ON`/`ORDER BY` and written to no column, so bounding it to

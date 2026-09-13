@@ -1,5 +1,6 @@
-"""The series hierarchy -- PRD 07's three rows that `GET /titles/{id}` has carried as
-an absence since M5.
+"""The series hierarchy.
+
+PRD 07's three rows that `GET /titles/{id}` has carried as an absence since M5.
 """
 
 import uuid
@@ -113,8 +114,7 @@ async def list_series_seasons(
     titles: TitleRepositoryDep,
     episodes: EpisodeRepositoryDep,
 ) -> SeasonsResponse:
-    """Every season of one title, ordered by `season_number`, specials
-    included.
+    """Every season of one title, ordered by `season_number`, specials included.
 
     **A `movie` answers `200` with an empty list.** Nothing about a film is
     missing when it has no seasons, and the route is addressable for any title
@@ -189,8 +189,9 @@ async def list_season_episodes(
     summary="One episode",
 )
 async def get_episode(episode_id: uuid.UUID, episodes: EpisodeRepositoryDep) -> EpisodeResponse:
-    """One episode by its own id, with the `title_id` and `season_id` a client
-    climbs back up with.
+    """One episode by its own id.
+
+    with the `title_id` and `season_id` a client climbs back up with.
 
     No new port method: `list_by_ids` already answers this in one round trip
     and returns absence as a **missing key** rather than a key mapped to

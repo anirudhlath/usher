@@ -1,5 +1,6 @@
-"""BootstrapService against real Postgres, racing two processes for the same dataset's
-checkpoint row.
+"""BootstrapService against real Postgres.
+
+racing two processes for the same dataset's checkpoint row.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -45,13 +46,14 @@ class _AlwaysFreshStart(PostgresImportRunRepository):
 
 
 class _NeverDrained(BulkDataset[object]):
-    """A `BulkDataset` standing in for the loser's dataset. `revision()`
-    must succeed -- the conflict this test cares about comes from
-    `self._runs.start()`, not from resolving a revision -- but `batches()`
-    must never actually be reached: a `start()` conflict is handled before
-    `import_dataset` ever calls it. Raising here, rather than yielding
-    nothing, turns "the conflict path really does short-circuit before
-    draining" into something this test verifies rather than assumes.
+    """A `BulkDataset` standing in for the loser's dataset.
+
+    `revision()` must succeed -- the conflict this test cares about comes from
+    `self._runs.start()`, not from resolving a revision -- but `batches()` must never
+    actually be reached: a `start()` conflict is handled before `import_dataset` ever
+    calls it. Raising here, rather than yielding nothing, turns "the conflict path
+    really does short-circuit before draining" into something this test verifies rather
+    than assumes.
     """
 
     @property
@@ -82,21 +84,23 @@ async def _write(rows: Sequence[object]) -> int:
 
 
 async def test_a_conflicting_start_leaves_the_winners_run_untouched(postgres_url: str) -> None:
-    """Two real, engine-bound sessions -- not the shared `session` fixture
-    every other test in this suite uses, and deliberately so: that fixture
-    binds to a connection with an externally-managed outer transaction, and
-    SQLAlchemy's own `join_transaction_mode` resolves to "rollback_only" for
-    exactly that shape (see tests/integration/conftest.py's own docstring).
-    `PostgresImportRunRepository.save()`'s fix calls a real
-    `session.rollback()` on the *loser's* session specifically; against the
-    shared fixture that would roll back the fixture's own transaction
-    instead of just the loser's failed insert, corrupting every other
-    integration test's isolation rather than pinning this one. Same shape as
+    """Two real, engine-bound sessions.
+
+    not the shared `session` fixture every other test in this suite uses, and
+    deliberately so: that fixture binds to a connection with an externally-managed outer
+    transaction, and SQLAlchemy's own `join_transaction_mode` resolves to
+    "rollback_only" for exactly that shape (see tests/integration/conftest.py's own
+    docstring).
+
+    `PostgresImportRunRepository.save()`'s fix calls a real `session.rollback()` on the
+    *loser's* session specifically; against the shared fixture that would roll back the
+    fixture's own transaction instead of just the loser's failed insert, corrupting
+    every other integration test's isolation rather than pinning this one. Same shape as
     tests/integration/test_bulk_repository.py's
     `test_bulk_load_window_commits_the_callers_own_pending_work` and
     tests/integration/test_import_run_repository.py's
-    `test_the_session_survives_a_conflict_for_the_callers_next_statement`,
-    including the cleanup discipline.
+    `test_the_session_survives_a_conflict_for_the_callers_next_statement`, including the
+    cleanup discipline.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)

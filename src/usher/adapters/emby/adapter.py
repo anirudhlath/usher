@@ -166,8 +166,9 @@ class EmbyAdapter(SourceAdapter):
 
     @property
     def supports_push(self) -> bool:
-        """Whether this adapter has a live push channel **right now**, and
-        the answer comes from messages.
+        """Whether this adapter has a live push channel **right now**.
+
+        and the answer comes from messages.
 
         `self._health.is_delivering` requires a connection, at least one
         received message, and a recent one. **There is no path from "a
@@ -179,16 +180,18 @@ class EmbyAdapter(SourceAdapter):
 
     @property
     def push_reconnects(self) -> int:
-        """The ledger's own count, which is the lane's history rather than
-        this connection's — one `PushHealth` outlives every channel this
-        adapter opens."""
+        """The ledger's own count, which is the lane's history rather than this connection's.
+
+        one `PushHealth` outlives every channel this adapter opens.
+        """
         return self._health.reconnects
 
     @property
     def push_health(self) -> PushHealth:
-        """The ledger, for the lane supervisor and for
-        `GET /admin/sources/{id}/status`. Read-only by convention; nothing
-        outside `adapters/emby` writes it."""
+        """The ledger, for the lane supervisor and for `GET /admin/sources/{id}/status`.
+
+        Read-only by convention; nothing outside `adapters/emby` writes it.
+        """
         return self._health
 
     async def verify(self) -> SourceStatus:
@@ -398,8 +401,10 @@ class EmbyAdapter(SourceAdapter):
                 yield state
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
-        """Authoritative watch state for one item, from the single-item
-        route that carries the play history the listing route does not.
+        """Authoritative watch state for one item.
+
+        from the single-item route that carries the play history the listing route does
+        not.
 
         Reuses `_fetch`, so a 404 is `None` and every other failure raises,
         exactly as `get_item` behaves -- the two must not diverge or a
@@ -420,8 +425,9 @@ class EmbyAdapter(SourceAdapter):
             )
 
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
-        """Write watch state back to Emby: one call, plus a second when the item is being
-        marked played.
+        """Write watch state back to Emby.
+
+        one call, plus a second when the item is being marked played.
         """
         with _tracer.start_as_current_span("source.push_watch_state") as span:
             span.set_attribute("usher.source", self._source.name)

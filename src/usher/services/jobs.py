@@ -128,7 +128,9 @@ class JobWorker:
         return frozenset(self._concurrency)
 
     async def recover(self) -> int:
-        """Return **abandoned** claims to `pending`. Returns how many.
+        """Return **abandoned** claims to `pending`.
+
+        Returns how many.
 
         PRD 08's *"startup requeues anything left `in_progress`"*, corrected in
         two ways that are the same correction:
@@ -159,8 +161,9 @@ class JobWorker:
         return requeued
 
     async def run_once(self) -> int:
-        """Claim and run up to `batch_size` jobs, concurrently. Returns how
-        many ran.
+        """Claim and run up to `batch_size` jobs, concurrently.
+
+        Returns how many ran.
 
         Claims only the kinds this worker has a handler for. Claiming
         everything and discovering the gap afterwards would either crash on
@@ -408,7 +411,9 @@ class WorkerLoop:
         self._throttled_at = float("-inf")
 
     async def pass_once(self) -> int:
-        """One pass, unguarded. Returns how many jobs ran.
+        """One pass, unguarded.
+
+        Returns how many jobs ran.
 
         Recovery is throttled to half the lease because it is an `UPDATE`
         scanning `status = 'running'` and between leases there is nothing to
@@ -426,9 +431,10 @@ class WorkerLoop:
         return ran
 
     async def guarded_pass(self) -> int:
-        """`pass_once`, with a crashed pass costing the pass rather than the
-        process. Returns `0` on a crash, which is what makes the caller sleep
-        instead of hot-looping a failing pass.
+        """`pass_once`, with a crashed pass costing the pass rather than the process.
+
+        Returns `0` on a crash, which is what makes the caller sleep instead of hot-
+        looping a failing pass.
 
         **`logger.exception`, never `logger.warning`.** An arm that
         swallowed a bug and logged a *message* would turn a dead worker --
@@ -448,9 +454,10 @@ class WorkerLoop:
             return 0
 
     async def run(self, *, after: Callable[[int], None] | None = None) -> None:
-        """Guarded passes until cancelled, sleeping after one that claimed
-        nothing. `after` is the root's chance to report a pass it has just
-        seen."""
+        """Guarded passes until cancelled, sleeping after one that claimed nothing.
+
+        `after` is the root's chance to report a pass it has just seen.
+        """
         while True:
             ran = await self.guarded_pass()
             if after is not None:

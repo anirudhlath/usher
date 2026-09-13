@@ -51,7 +51,9 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         self._push_poll_seconds = push_poll_seconds
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
-        """Construct the adapter for `source.kind`. The caller owns it.
+        """Construct the adapter for `source.kind`.
+
+        The caller owns it.
 
         The `raise` below is unreachable today -- `SourceKind` has exactly
         one member -- and is kept rather than collapsed into an unconditional

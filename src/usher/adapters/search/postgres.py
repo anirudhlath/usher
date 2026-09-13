@@ -140,8 +140,7 @@ async def _apply_hnsw_gucs(session: AsyncSession, ef_search: int) -> None:
 
 
 async def _force_exact_scan(session: AsyncSession) -> None:
-    """Boundary call 4's exact path: no ANN, no approximation, no recall
-    question at all.
+    """Boundary call 4's exact path: no ANN, no approximation, no recall question at all.
 
     PRD 05 puts owned titles on exact brute-force cosine, and the reason it
     is affordable is boundary call 4 -- the embedded population is the
@@ -304,7 +303,7 @@ def _predicates(filters: object) -> tuple[str, dict[str, object]]:
 
 
 def _as_vector_text(vector: Sequence[float] | None) -> str | None:
-    """pgvector's own text form, or `None` for a title with no embedding.
+    """Pgvector's own text form, or `None` for a title with no embedding.
 
     `None` all the way down, never a zero vector: a title with no vector is
     not a semantic candidate, and the origin is a *point*, equidistant-ish
@@ -358,7 +357,9 @@ class PostgresSearchIndex(SearchIndex):
             ) from exc
 
     async def remove(self, title_id: uuid.UUID) -> None:
-        """Drop the vector this adapter wrote. **Not the title.**
+        """Drop the vector this adapter wrote.
+
+        **Not the title.**
 
         The port says "text and vector together", and on this backend the
         text is a generated column of `titles` -- a table the search index
@@ -594,7 +595,10 @@ LIMIT :limit
 
 
 class PostgresSuggestIndex(SuggestIndex):
-    """Typo-tolerant type-ahead over `titles.name`. **Writes nothing.**"""
+    """Typo-tolerant type-ahead over `titles.name`.
+
+    **Writes nothing.**
+    """
 
     def __init__(self, session: AsyncSession, *, threshold: float, candidates: int) -> None:
         low, high = _THRESHOLD_RANGE

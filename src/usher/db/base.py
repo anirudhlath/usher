@@ -51,11 +51,11 @@ def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 
 
 def enum_column(enum_cls: type[PyEnum], *, length: int) -> SAEnum:
-    """A `String`-backed column type for a domain `StrEnum` that round-trips
-    to real enum members on read instead of plain `str` — plain
-    `mapped_column(String(N))` has no result processor, so `Mapped[SomeEnum]`
-    lies: `isinstance(row.kind, TitleKind)` is `False` even though mypy
-    believes otherwise (verified).
+    """A `String`-backed column type for a domain `StrEnum` that round-trips to real enum.
+
+    members on read instead of plain `str` — plain `mapped_column(String(N))` has no
+    result processor, so `Mapped[SomeEnum]` lies: `isinstance(row.kind, TitleKind)` is
+    `False` even though mypy believes otherwise (verified).
 
     `native_enum=False` compiles to `VARCHAR(length)`, identical DDL to the
     `String(length)` it replaces — no native Postgres `CREATE TYPE ... AS

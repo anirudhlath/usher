@@ -27,10 +27,12 @@ def _cli_settings() -> Settings:
 
 @contextlib.asynccontextmanager
 async def _no_session(_: Settings) -> AsyncIterator[None]:
-    """`_session_for` without the engine. The claim under test is what the
-    command *prints*, and opening a real connection would make it a claim
-    about Postgres -- `tests/unit/test_cli.py` takes the same shape for the
-    same reason."""
+    """`_session_for` without the engine.
+
+    The claim under test is what the command *prints*, and opening a real connection
+    would make it a claim about Postgres -- `tests/unit/test_cli.py` takes the same
+    shape for the same reason.
+    """
     yield None
 
 
@@ -46,9 +48,10 @@ def test_derive_parses_with_its_defaults() -> None:
 
 
 def test_derive_backfill_is_opt_in() -> None:
-    """The bare form only reads, so it is safe on a production box while
-    diagnosing something. A `--backfill` that defaulted to on would make the
-    diagnostic a write."""
+    """The bare form only reads, so it is safe on a production box while diagnosing something.
+
+    A `--backfill` that defaulted to on would make the diagnostic a write.
+    """
     assert build_parser().parse_args(["derive", "--backfill"]).backfill is True
 
 
@@ -84,8 +87,9 @@ def fakes() -> _Fakes:
 
 
 async def test_derive_reports_zeroes_against_an_empty_database(fakes: _Fakes) -> None:
-    """PRD 08's rule, at the five reads the bare form makes: *every one of
-    them has to work against an empty database*.
+    """PRD 08's rule, at the five reads the bare form makes.
+
+    *every one of them has to work against an empty database*.
 
     The arithmetic hazard in this command is the coverage ratio, which is why
     the report prints two counts and no percentage --
@@ -103,7 +107,7 @@ async def test_derive_reports_zeroes_against_an_empty_database(fakes: _Fakes) ->
 
 
 async def test_derive_backfill_writes_no_job_rows(fakes: _Fakes) -> None:
-    """**The task's second decision, and nothing else asserts it.**
+    """**The task's second decision, and nothing else asserts it.**.
 
     `usher index --backfill` enqueues one job per stale title because the
     worker owns the model, and a CLI that embedded would load 65 MB of ONNX in
@@ -224,8 +228,9 @@ async def test_a_derive_job_key_that_is_not_a_uuid_parks_rather_than_killing_the
 
 
 async def test_a_derive_job_for_a_deleted_title_completes(fakes: _Fakes) -> None:
-    """The control beside the case above, and it is what makes that one about
-    *parsing* rather than about "derive raises".
+    """The control beside the case above.
+
+    and it is what makes that one about *parsing* rather than about "derive raises".
 
     `raw_payloads` outlives `titles`, so a job naming a title deleted since it
     was enqueued is ordinary. `handlers.py`'s standing rule: a job for work
@@ -243,8 +248,9 @@ async def test_a_derive_job_for_a_deleted_title_completes(fakes: _Fakes) -> None
 async def test_the_backfill_report_prints_every_count_the_walk_produced(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**A number a report does not print is a number nobody sees**, and this
-    command is the only surface `images_written` has.
+    """**A number a report does not print is a number nobody sees**.
+
+    and this command is the only surface `images_written` has.
 
     The five lines are asserted together rather than only the new one, because
     the wrong implementation here is not a missing line -- it is a line printed
@@ -296,13 +302,14 @@ async def test_the_backfill_report_prints_every_count_the_walk_produced(
 async def test_a_derivation_that_found_no_artwork_still_prints_the_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**Zero is the number this line exists to print.** `images` joined
-    `*_APPEND_TO_RESPONSE` in M4, so most of a real cache predates it, and an
-    operator's first `usher derive --backfill` will report far fewer images
-    than titles. A report that suppressed the line when it was zero would make
-    "the cache is old" and "the write is broken" look identical -- and the
-    second is what an operator would assume, because the line they saw last
-    time is gone.
+    """**Zero is the number this line exists to print.** `images` joined `*_APPEND_TO_RESPONSE`.
+
+    in M4, so most of a real cache predates it, and an operator's first `usher derive
+    --backfill` will report far fewer images than titles.
+
+    A report that suppressed the line when it was zero would make "the cache is old" and
+    "the write is broken" look identical -- and the second is what an operator would
+    assume, because the line they saw last time is gone.
     """
 
     class _Service:

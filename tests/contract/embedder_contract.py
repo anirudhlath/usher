@@ -19,8 +19,9 @@ _TEXTS = (
 
 class EmbedderContract:
     def model_calls(self, embedder: Embedder) -> int | None:
-        """How many times the underlying model was invoked, or `None` if
-        this implementation cannot see inside itself.
+        """How many times the underlying model was invoked.
+
+        or `None` if this implementation cannot see inside itself.
 
         Only the empty-batch case reads it, and only the half that needs it
         is conditional -- the "empty in, empty out" half runs everywhere.
@@ -28,12 +29,12 @@ class EmbedderContract:
         return None
 
     async def test_every_vector_is_unit_normalised(self, embedder: Embedder) -> None:
-        """**The port's own stated contract, which nothing had ever
-        checked.** PRD 05's "brute-force exact cosine" equals a dot product
-        only when this holds, and the failure is silent: a checkpoint whose
-        `2_Normalize` module is missing returns norms 8.99-9.46 (measured),
-        which makes every dot-product score ~85x too large and every ranking
-        plausible and wrong.
+        """**The port's own stated contract.
+
+        which nothing had ever checked.** PRD 05's "brute-force exact cosine" equals a
+        dot product only when this holds, and the failure is silent: a checkpoint whose
+        `2_Normalize` module is missing returns norms 8.99-9.46 (measured), which makes
+        every dot-product score ~85x too large and every ranking plausible and wrong.
 
         This is why the shipped implementation asserts the norm on its first
         batch rather than trusting a model card.
@@ -44,21 +45,22 @@ class EmbedderContract:
             assert abs(norm - 1.0) <= _NORM_TOLERANCE, f"{text!r} embedded to norm {norm}"
 
     async def test_dimension_matches_the_declared_dimension(self, embedder: Embedder) -> None:
-        """A model swap that silently changes width and writes vectors a
-        `halfvec(384)` column rejects -- or worse, accepts, because the
-        declared dimension and the real one drifted in the same commit and
-        only one of them is what the migration created."""
+        """A model swap that silently changes width and writes vectors a `halfvec(384)` column.
+
+        rejects -- or worse, accepts, because the declared dimension and the real one
+        drifted in the same commit and only one of them is what the migration created.
+        """
         assert embedder.dimension > 0
         vectors = await embedder.embed(list(_TEXTS))
         assert [len(vector) for vector in vectors] == [embedder.dimension] * len(_TEXTS)
 
     async def test_a_batch_returns_one_vector_per_input_in_order(self, embedder: Embedder) -> None:
-        """**The most damaging possible bug in this milestone, and it is
-        completely invisible to any per-vector assertion.** An implementation
-        that deduplicates or reorders internally lands title *n*'s vector on
-        title *m*: every vector is a valid unit vector of the right width,
-        every norm assertion passes, and the catalog's similarity graph is
-        quietly wired to the wrong titles.
+        """**The most damaging possible bug in this milestone.
+
+        and it is completely invisible to any per-vector assertion.** An implementation
+        that deduplicates or reorders internally lands title *n*'s vector on title *m*:
+        every vector is a valid unit vector of the right width, every norm assertion
+        passes, and the catalog's similarity graph is quietly wired to the wrong titles.
 
         The batch carries a **duplicate at positions 0 and 2**, which is what
         a deduplicating implementation collapses -- returning two vectors for
@@ -75,11 +77,13 @@ class EmbedderContract:
         assert batch[1] == alone[1]
 
     async def test_the_same_text_embeds_identically_twice(self, embedder: Embedder) -> None:
-        """Non-determinism that would make `source_fingerprint` useless and
-        the backfill never drain: the predicate re-claims the row, the
-        `usher.search.embeddings.stale` gauge never reaches zero, and the
-        queue churns forever on work that cannot succeed. This project has
-        shipped exactly that bug once, in the watch-history repair.
+        """Non-determinism that would make `source_fingerprint` useless and the backfill never.
+
+        drain: the predicate re-claims the row, the `usher.search.embeddings.stale`
+        gauge never reaches zero, and the queue churns forever on work that cannot
+        succeed.
+
+        This project has shipped exactly that bug once, in the watch-history repair.
 
         Exact equality, not `approx`. A real implementation whose kernels
         are non-deterministic *fails this*, and that is the intended
@@ -94,10 +98,12 @@ class EmbedderContract:
     async def test_an_empty_batch_is_an_empty_result_and_not_a_call(
         self, embedder: Embedder
     ) -> None:
-        """An implementation that round-trips a model for zero inputs, which
-        on a GPU-resident model is the difference between a no-op and a
-        stall -- and which a backfill draining the tail of a predicate hits
-        on its last pass, every pass, forever."""
+        """An implementation that round-trips a model for zero inputs.
+
+        which on a GPU-resident model is the difference between a no-op and a stall --
+        and which a backfill draining the tail of a predicate hits on its last pass,
+        every pass, forever.
+        """
         before = self.model_calls(embedder)
         assert await embedder.embed([]) == []
         after = self.model_calls(embedder)

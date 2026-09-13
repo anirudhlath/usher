@@ -97,9 +97,7 @@ def problem_response(
 
 
 def problem_responses_carry_their_media_type(document: dict[str, Any]) -> dict[str, Any]:
-    """Move every `ProblemResponse` in `/openapi.json` to `application/problem+json`, in
-    place.
-    """
+    """Move every `ProblemResponse` in `/openapi.json` to `application/problem+json`, in place."""
     for item in document.get("paths", {}).values():
         for operation in item.values():
             if not isinstance(operation, MutableMapping):

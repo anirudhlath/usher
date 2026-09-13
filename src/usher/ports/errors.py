@@ -68,8 +68,7 @@ class RepositoryNotFound(UsherPortError):
 
 
 class PortDataMalformed(UsherPortError):
-    """An upstream payload could not be parsed into the shape this port
-    promises.
+    """An upstream payload could not be parsed into the shape this port promises.
 
     Distinct from `PortUnavailable`: the upstream answered, and the answer
     was wrong. Retrying does not help, so a caller parks the work rather

@@ -35,8 +35,10 @@ class LLMClient(ABC):
         *,
         purpose: LLMPurpose,
     ) -> tuple[dict[str, Any], LLMUsage]:
-        """Return a JSON object conforming to `schema`, plus usage for cost
-        accounting. `purpose` is recorded against the call."""
+        """Return a JSON object conforming to `schema`, plus usage for cost accounting.
+
+        `purpose` is recorded against the call.
+        """
 
     @abstractmethod
     async def aclose(self) -> None:

@@ -26,10 +26,11 @@ async def _horror_library(count: int = 6) -> Library:
 
 
 def test_no_seasonal_window_wraps_the_year_end() -> None:
-    """A window from 27 December to 2 January never fires: `(12, 27) <= today
-    <= (1, 2)` is false for **every** date in the year, so the row is
-    permanently absent with no error anywhere and no assertion about a row's
-    contents can see it.
+    """A window from 27 December to 2 January never fires.
+
+    `(12, 27) <= today <= (1, 2)` is false for **every** date in the year, so the row is
+    permanently absent with no error anywhere and no assertion about a row's contents
+    can see it.
 
     There is no wrapping window today. This case exists so that adding one
     fails loudly rather than quietly, which is why it asserts a property of
@@ -41,9 +42,10 @@ def test_no_seasonal_window_wraps_the_year_end() -> None:
 
 
 def test_no_row_ttl_outlives_the_shortest_seasonal_window() -> None:
-    """A TTL longer than a window means a row that is *correct when built* and
-    wrong when served -- a cached Halloween shelf in November, which is the one
-    staleness bug a per-row TTL can actually produce.
+    """A TTL longer than a window means a row that is *correct when built* and wrong when served.
+
+    a cached Halloween shelf in November, which is the one staleness bug a per-row TTL
+    can actually produce.
 
     Compares the two rather than pinning either, so it fails a future four-day
     window as well as a future long TTL.
@@ -57,9 +59,10 @@ def test_no_row_ttl_outlives_the_shortest_seasonal_window() -> None:
 
 
 async def test_a_matching_title_the_household_does_not_own_is_absent() -> None:
-    """**The front matter's distractor**, seeded as the *best* match in the
-    catalog -- highest popularity, exact genre -- so it is `cards[0]` under the
-    wrong implementation.
+    """**The front matter's distractor**, seeded as the *best* match in the catalog.
+
+    highest popularity, exact genre -- so it is `cards[0]` under the wrong
+    implementation.
 
     That implementation matches the window's predicate against the whole
     catalog rather than the owned library: 1.27M titles, of which the household
@@ -91,8 +94,7 @@ async def test_a_matching_title_the_household_does_not_own_is_absent() -> None:
     ],
 )
 async def test_seasonal_proposes_nothing_outside_every_window(day: datetime) -> None:
-    """Roughly 320 days of the year, and that is the correct behaviour rather
-    than a fault.
+    """Roughly 320 days of the year, and that is the correct behaviour rather than a fault.
 
     Fails an implementation with a catch-all "seasonal" window covering the
     remainder, which is the popular-titles fallback with a calendar bolted on.
@@ -105,10 +107,12 @@ async def test_seasonal_proposes_nothing_outside_every_window(day: datetime) -> 
 
 
 async def test_the_window_fires_on_its_own_first_and_last_day() -> None:
-    """Both bounds are inclusive, and both are the boundary a `<`/`<=` slip
-    moves by one day -- silently, on the one day of the year anyone would
-    notice. Asserted from *outside* on each side too, so a window widened by a
-    day fails as well as one narrowed.
+    """Both bounds are inclusive, and both are the boundary a `<`/`<=` slip moves by one day.
+
+    silently, on the one day of the year anyone would notice.
+
+    Asserted from *outside* on each side too, so a window widened by a day fails as well
+    as one narrowed.
     """
     library = await _horror_library()
     provider = SeasonalProvider()
@@ -121,8 +125,9 @@ async def test_the_window_fires_on_its_own_first_and_last_day() -> None:
 
 
 async def test_a_library_with_too_few_matching_titles_proposes_nothing() -> None:
-    """A two-card Halloween row is worse than none, and a household that owns
-    no horror should not be told it is Halloween season.
+    """A two-card Halloween row is worse than none.
+
+    and a household that owns no horror should not be told it is Halloween season.
 
     Seeded one *below* the floor rather than at zero, so the case fails
     `_MIN_CARDS = 1` as well as a dropped check.
@@ -133,10 +138,11 @@ async def test_a_library_with_too_few_matching_titles_proposes_nothing() -> None
 
 
 async def test_the_christmas_window_selects_on_a_keyword_rather_than_a_genre() -> None:
-    """Not every window is a genre. "Christmas" is a keyword TMDb really
-    carries and there is no Christmas *genre*, so a provider that only knew how
-    to ask about genres would return nothing in December while looking entirely
-    correct in October.
+    """Not every window is a genre.
+
+    "Christmas" is a keyword TMDb really carries and there is no Christmas *genre*, so a
+    provider that only knew how to ask about genres would return nothing in December
+    while looking entirely correct in October.
 
     The distractor is a film whose **genre** is the word, which is what a
     provider searching the wrong array would return.
@@ -160,8 +166,9 @@ async def test_the_christmas_window_selects_on_a_keyword_rather_than_a_genre() -
 
 
 async def test_the_row_says_which_season_it_is_and_scores_flat() -> None:
-    """`_SCORE` is flat and is not scaled by depth into the window: inside a
-    window the row is either right or absent, and scaling by proximity to a
+    """`_SCORE` is flat and is not scaled by depth into the window.
+
+    inside a window the row is either right or absent, and scaling by proximity to a
     date the author invented would be a second guess stacked on the first.
     """
     library = await _horror_library()
@@ -178,10 +185,12 @@ async def test_the_row_says_which_season_it_is_and_scores_flat() -> None:
 
 
 async def test_a_household_that_has_watched_nothing_still_gets_its_seasonal_row() -> None:
-    """Seasonal is about the calendar, not the person, so it fires on a fresh
-    install -- one of only three providers that may. This is the case that
-    keeps `test_rows_invariants.py`'s empty-history sweep honest by asserting
-    the exception rather than letting the sweep assume it.
+    """Seasonal is about the calendar, not the person, so it fires on a fresh install.
+
+    one of only three providers that may.
+
+    This is the case that keeps `test_rows_invariants.py`'s empty-history sweep honest
+    by asserting the exception rather than letting the sweep assume it.
     """
     library = await _horror_library()
 

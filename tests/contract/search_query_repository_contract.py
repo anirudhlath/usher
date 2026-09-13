@@ -42,8 +42,7 @@ def search_query_record(
     latency_ms: int = LATENCY_MS,
     tier: SuggestTier | None = None,
 ) -> SearchQueryRecord:
-    """One `SearchQueryRecord`, with the fields a case does not care about
-    filled in.
+    """One `SearchQueryRecord`, with the fields a case does not care about filled in.
 
     A test-double builder, not a port method. `mode` defaults to `SEMANTIC`
     rather than `SearchMode`'s first member (`FULL_TEXT`) deliberately: a
@@ -107,8 +106,7 @@ class SearchQueryLedger(ABC):
 
     @abstractmethod
     async def count(self) -> int:
-        """Every row the table holds -- what makes "recorded once, not
-        twice" assertable at all."""
+        """Every row the table holds -- what makes "recorded once, not twice" assertable at all."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,8 +123,7 @@ class ReferenceRowCounts:
 
 
 class ReferenceCounts(ABC):
-    """The two tables a `search_queries` row points **at**, counted out of
-    band.
+    """The two tables a `search_queries` row points **at**, counted out of band.
 
     Test infrastructure. It exists because *"the delete is a leaf"* is the
     kind of claim that is true, obvious, and asserted by nothing -- and the
@@ -141,9 +138,11 @@ class ReferenceCounts(ABC):
 
 
 class SearchQueryRepositoryContract:
-    """Subclasses supply `repository`, `ledger`, `user_id` and `add_title` as
-    fixtures/hooks. Not an `ABC`, matching every other contract suite here:
-    the fixtures are supplied by pytest rather than by inheritance."""
+    """Subclasses supply `repository`, `ledger`, `user_id` and `add_title` as fixtures/hooks.
+
+    Not an `ABC`, matching every other contract suite here: the fixtures are supplied by
+    pytest rather than by inheritance.
+    """
 
     async def add_title(self) -> uuid.UUID:
         """A title `record_outcome` can legitimately attribute a click to."""
@@ -240,12 +239,12 @@ class SearchQueryRepositoryContract:
     async def test_a_recorded_query_starts_with_no_click_and_not_played(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """**`record()` writes the two outcome columns as literals, not as
-        columns it leaves unset.** The wrong implementation this kills:
-        `played` left NULL (the table has no default for it at all, and a
-        write that relied on one would refuse the whole row) or
-        `clicked_title_id` written to something other than `NULL` before any
-        client has done anything.
+        """**`record()` writes the two outcome columns as literals.
+
+        not as columns it leaves unset.** The wrong implementation this kills: `played`
+        left NULL (the table has no default for it at all, and a write that relied on
+        one would refuse the whole row) or `clicked_title_id` written to something other
+        than `NULL` before any client has done anything.
         """
         record = search_query_record(user_id=user_id)
 
@@ -259,10 +258,12 @@ class SearchQueryRepositoryContract:
     async def test_recording_the_same_query_twice_is_a_conflict_rather_than_an_update(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """The wrong implementation this kills: an upsert where an insert was
-        asked for -- `ON CONFLICT (id) DO NOTHING` or `DO UPDATE`.
-        `TitleRepository.add` and `LLMCallRepository.record` are the
-        precedent: an insert, not an upsert, and a duplicate id raises.
+        """The wrong implementation this kills: an upsert where an insert was asked for.
+
+        `ON CONFLICT (id) DO NOTHING` or `DO UPDATE`.
+
+        `TitleRepository.add` and `LLMCallRepository.record` are the precedent: an
+        insert, not an upsert, and a duplicate id raises.
 
         The constraint name is asserted on both arms, which is what makes the
         two agree rather than merely both raise.
@@ -281,15 +282,16 @@ class SearchQueryRepositoryContract:
     async def test_an_attributed_query_reads_back_with_its_click_and_played(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """The storage control, and the one case here that writes both
-        columns in a single call -- **no shipped caller does**, deliberately
-        (the click writer names a title, the play writer names none), so this
-        exists to prove both columns are reachable at all rather than to
-        model the funnel.
+        """The storage control, and the one case here that writes both columns in a single call.
+
+        **no shipped caller does**, deliberately (the click writer names a title, the
+        play writer names none), so this exists to prove both columns are reachable at
+        all rather than to model the funnel.
 
         The wrong implementation this kills: `record_outcome` that writes
         `played` but not `clicked_title_id`, or updates the wrong row (no
-        `WHERE id = ...`, or a dropped `id` parameter)."""
+        `WHERE id = ...`, or a dropped `id` parameter).
+        """
         record = search_query_record(user_id=user_id)
         await repository.record(record)
         title_id = await self.add_title()
@@ -306,11 +308,12 @@ class SearchQueryRepositoryContract:
     async def test_a_later_click_does_not_steal_an_earlier_titles_attribution(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """**First write wins, on `clicked_title_id` specifically.** The
-        wrong implementation this kills: an unconditional `UPDATE` with no
-        guard on that column, which lets a second, genuinely different click
-        -- someone else's redelivered event, or a stale retry naming the
-        wrong result -- overwrite a real attribution with a less informative
+        """**First write wins.
+
+        on `clicked_title_id` specifically.** The wrong implementation this kills: an
+        unconditional `UPDATE` with no guard on that column, which lets a second,
+        genuinely different click -- someone else's redelivered event, or a stale retry
+        naming the wrong result -- overwrite a real attribution with a less informative
         one.
 
         `played` is held constant (`False` on both calls) so this case is
@@ -340,18 +343,18 @@ class SearchQueryRepositoryContract:
     async def test_a_later_play_reaches_a_query_already_attributed_to_a_click(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """**The funnel `record_outcome` exists to serve, and the one a
-        shared `clicked_title_id IS NULL` guard silently drops.** F3's two
-        writers fire at two different times on the *same* row: viewing a
-        result from a search (`GET /titles/{id}?search_id=…`) attributes the
-        click, and playing it (`POST /titles/{id}/play`) is a later, separate
-        call that names **no** title and only reports `played`. The wrong
-        implementation this kills: a
-        guard that keys the whole `UPDATE` off `clicked_title_id IS NULL`,
-        which treats this second call as if it were a duplicate delivery of
-        the first and silently drops the one fact PRD 10's
-        `## Analytics tables` says this table exists to answer -- *did they
-        play anything*.
+        """**The funnel `record_outcome` exists to serve.
+
+        and the one a shared `clicked_title_id IS NULL` guard silently drops.** F3's two
+        writers fire at two different times on the *same* row: viewing a result from a
+        search (`GET /titles/{id}?search_id=…`) attributes the click, and playing it
+        (`POST /titles/{id}/play`) is a later, separate call that names **no** title and
+        only reports `played`.
+
+        The wrong implementation this kills: a guard that keys the whole `UPDATE` off
+        `clicked_title_id IS NULL`, which treats this second call as if it were a
+        duplicate delivery of the first and silently drops the one fact PRD 10's `##
+        Analytics tables` says this table exists to answer -- *did they play anything*.
 
         It also kills a `SET clicked_title_id = :clicked_title_id` with no
         `COALESCE`: the play writer's `None` would blank the attribution the
@@ -376,14 +379,16 @@ class SearchQueryRepositoryContract:
     async def test_a_play_with_no_click_before_it_is_played_with_the_click_still_null(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """**A legal state, not a hole**, and the reason
-        `clicked_title_id` is nullable on the argument as well as on the
-        column. A client can hold a `search_id` and go straight to
-        `POST /titles/{id}/play` -- it never asked Usher for the detail page,
-        so nothing told Usher which result it opened. The row then says
-        *"this search led to a play, and which result is unknown"*, which is
-        a different fact from *"this search led to nothing"* and from
-        *"this search led to a click that went nowhere"*.
+        """**A legal state.
+
+        not a hole**, and the reason `clicked_title_id` is nullable on the argument as
+        well as on the column.
+
+        A client can hold a `search_id` and go straight to `POST /titles/{id}/play` --
+        it never asked Usher for the detail page, so nothing told Usher which result it
+        opened. The row then says *"this search led to a play, and which result is
+        unknown"*, which is a different fact from *"this search led to nothing"* and
+        from *"this search led to a click that went nowhere"*.
 
         The wrong implementation this kills: a `record_outcome` that treats
         an absent click as nothing to do and returns early, so the whole
@@ -408,11 +413,11 @@ class SearchQueryRepositoryContract:
     async def test_a_search_belonging_to_another_household_is_not_attributed(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """**The scope is a security boundary and this is where it is
-        pinned.** A `query_id` reaches this port from a query parameter and
-        UUIDv7 is partially time-ordered, so an unscoped `WHERE id = :id`
-        lets one household write attribution onto another's row -- silently,
-        with no error, no log line and no metric.
+        """**The scope is a security boundary and this is where it is pinned.** A `query_id`.
+
+        reaches this port from a query parameter and UUIDv7 is partially time-ordered,
+        so an unscoped `WHERE id = :id` lets one household write attribution onto
+        another's row -- silently, with no error, no log line and no metric.
 
         **The positive control is in the same case and is what makes the
         negative half mean anything**: the byte-identical call from the
@@ -455,14 +460,16 @@ class SearchQueryRepositoryContract:
     async def test_played_does_not_revert_to_false_once_true(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """`played`'s own condition is monotonic -- it only ever moves toward
-        `True` -- and that is a decision this case pins rather than leaves
-        implicit. The wrong implementation this kills: writing `played` from
-        the call's own value unconditionally (`SET played = :played`), which
-        would let a later call that has not itself observed a play erase the
-        evidence that one already happened -- there is no route in F3's
-        design that means "actually, undo the play", so a call carrying
-        `played=False` after `played=True` is stale information, not a
+        """`played`'s own condition is monotonic.
+
+        it only ever moves toward `True` -- and that is a decision this case pins rather
+        than leaves implicit.
+
+        The wrong implementation this kills: writing `played` from the call's own value
+        unconditionally (`SET played = :played`), which would let a later call that has
+        not itself observed a play erase the evidence that one already happened -- there
+        is no route in F3's design that means "actually, undo the play", so a call
+        carrying `played=False` after `played=True` is stale information, not a
         correction.
         """
         record = search_query_record(user_id=user_id)
@@ -482,11 +489,11 @@ class SearchQueryRepositoryContract:
     async def test_attributing_a_query_that_was_never_recorded_is_a_silent_no_op(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """The wrong implementation this kills: a `record_outcome` that
-        raises on an unknown id rather than leaving a table it did not
-        change alone, which would make a stale or duplicate client callback
-        a request failure rather than a fact about a table with nothing to
-        update.
+        """The wrong implementation this kills.
+
+        a `record_outcome` that raises on an unknown id rather than leaving a table it
+        did not change alone, which would make a stale or duplicate client callback a
+        request failure rather than a fact about a table with nothing to update.
 
         This is also the shape a client holding a `search_id` from a
         database that has since been pruned produces -- PRD 10's retention
@@ -507,8 +514,9 @@ class SearchQueryRepositoryContract:
     async def test_the_oldest_row_is_what_min_at_answers_and_an_empty_table_is_none(
         self, repository: SearchQueryRepository, user_id: uuid.UUID
     ) -> None:
-        """`SearchQueryRetention.last_done()` is built on this, so both halves are contract
-        rather than storage.
+        """`SearchQueryRetention.last_done()` is built on this.
+
+        so both halves are contract rather than storage.
         """
         assert await repository.oldest() is None, (
             "an empty table has no oldest row and must not invent one"
@@ -531,8 +539,7 @@ class SearchQueryRepositoryContract:
     async def test_pruning_removes_what_is_before_the_cutoff_and_keeps_the_row_exactly_on_it(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """The boundary, and the row *exactly* at the cutoff is the arm that
-        makes it one.
+        """The boundary, and the row *exactly* at the cutoff is the arm that makes it one.
 
         The wrong implementations this kill: `<=` for `<`, which is one
         character and reads as correct either way -- so the case places a row
@@ -564,8 +571,9 @@ class SearchQueryRepositoryContract:
     async def test_a_prune_deletes_at_most_its_limit_and_repeating_it_drains_the_rest(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """Chunking, from the caller's side: the count is the loop's only
-        terminator, so it has to be exact.
+        """Chunking, from the caller's side.
+
+        the count is the loop's only terminator, so it has to be exact.
 
         The wrong implementations this kills: a `limit` the statement builds
         and ignores, which makes `SearchQueryRetention.run()` hold one

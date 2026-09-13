@@ -1,5 +1,6 @@
-"""Every outbound HTTP call in `src/usher/adapters/` is enumerated, and each one has a
-recorded decision about its rate limiter.
+"""Every outbound HTTP call in `src/usher/adapters/` is enumerated.
+
+and each one has a recorded decision about its rate limiter.
 """
 
 import ast
@@ -264,8 +265,9 @@ def _names_an_httpx_client(spelling: str) -> bool:
 
 
 def _client_spellings(tree: ast.Module) -> set[str]:
-    """Every spelling in one module that refers to an httpx client, beyond the ones whose
-    own text says so.
+    """Every spelling in one module that refers to an httpx client.
+
+    beyond the ones whose own text says so.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -312,8 +314,9 @@ def _client_spellings(tree: ast.Module) -> set[str]:
 
 
 def _call_sites() -> list[tuple[str, str, int]]:
-    """Every `<an httpx client>.<outbound method>(...)` under
-    `src/usher/adapters/`, as `(module, expression, line)`.
+    """Every `<an httpx client>.<outbound method>(...)` under `src/usher/adapters/`.
+
+    as `(module, expression, line)`.
 
     Resolved from the AST rather than by grep so a call spelled across a line
     break is found -- `.claude/rules/api-telemetry-and-lanes.md` records a
@@ -348,8 +351,10 @@ def _call_sites() -> list[tuple[str, str, int]]:
 
 
 def test_no_outbound_http_call_escapes_a_recorded_decision() -> None:
-    """The acceptance: every outbound call site is in the table above, and
-    every row of the table is a call site.
+    """The acceptance.
+
+    every outbound call site is in the table above, and every row of the table is a call
+    site.
 
     The three guards before the assertion are the ones this repository requires
     of a scan, and each fails for a different reason: a walk that found nothing
@@ -454,8 +459,9 @@ def test_every_recorded_decision_points_at_a_file_that_exists() -> None:
 
 
 def test_the_module_census_is_the_one_the_records_quote() -> None:
-    """The four numbers this file's docstring and PRD 01 both print, asserted
-    off the table rather than counted by hand twice.
+    """The four numbers this file's docstring and PRD 01 both print.
+
+    asserted off the table rather than counted by hand twice.
 
     🔴 **Three countings were in circulation and none of them reconciled.**
     PRD 01 said *"nine upstreams, fifteen call sites across eight modules"* over
@@ -501,8 +507,9 @@ def _imports_httpx(tree: ast.Module) -> bool:
 
 
 def test_every_module_that_imports_httpx_is_recorded_or_exempt() -> None:
-    """The complement of the scan above, and it closes structurally what the receiver test
-    can only close by spelling.
+    """The complement of the scan above.
+
+    and it closes structurally what the receiver test can only close by spelling.
     """
     importers = {
         module
@@ -579,7 +586,7 @@ def _census_table(document: str) -> list[str]:
 
 
 def test_prd_01_prints_the_census_this_table_computes() -> None:
-    """🔴 **The docstring above claimed this and no case did it.**"""
+    """🔴 **The docstring above claimed this and no case did it.**."""
     document = _prd_01()
     rows = _census_table(document)
     assert len(rows) >= 5, f"the premise: the table walk found {len(rows)} rows"

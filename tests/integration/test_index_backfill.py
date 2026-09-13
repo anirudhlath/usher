@@ -69,8 +69,11 @@ async def _wipe(session: AsyncSession) -> None:
 
 @pytest_asyncio.fixture
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """This module commits for real: `_index` opens its own engine, so a
-    rolled-back fixture transaction would be invisible to it."""
+    """This module commits for real.
+
+    `_index` opens its own engine, so a rolled-back fixture transaction would be
+    invisible to it.
+    """
     async with sessions() as session:
         await _wipe(session)
     yield
@@ -216,9 +219,10 @@ async def test_re_running_the_backfill_writes_zero_rows(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`enqueue`'s upsert already carries `WHERE jobs.status <> 'parked' AND
-    jobs.priority < excluded.priority`, so a second sweep at BACKFILL over
-    jobs already at BACKFILL costs one index probe per row and no writes.
+    """`enqueue`'s upsert already carries `WHERE jobs.status <> 'parked' AND jobs.priority <.
+
+    excluded.priority`, so a second sweep at BACKFILL over jobs already at BACKFILL
+    costs one index probe per row and no writes.
 
     **This cannot be written against `FakeJobQueue`**, which counts a no-op
     re-enqueue as a row written -- it would pass and assert the opposite of
@@ -353,9 +357,9 @@ async def test_the_bare_form_writes_nothing(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """What makes `usher index` safe to run on a production box while
-    diagnosing something. It reports the two counters and the sizing estimate
-    and enqueues nothing at all.
+    """What makes `usher index` safe to run on a production box while diagnosing something.
+
+    It reports the two counters and the sizing estimate and enqueues nothing at all.
 
     The counters are asserted as a *pair*: `count_stale` and `count_refused`
     partition the population, and a `count_refused` spelled as a bare
@@ -391,10 +395,11 @@ async def test_the_bare_form_writes_nothing(
 async def test_limit_stops_the_sweep_early(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """`--limit` is the operator's brake on a first backfill over a large
-    enriched tier. Checked because a `limit` compared against the wrong
-    counter -- rows *written* rather than rows *seen* -- stops early on a
-    re-run, where nothing is written and the honest answer is 0.
+    """`--limit` is the operator's brake on a first backfill over a large enriched tier.
+
+    Checked because a `limit` compared against the wrong counter -- rows *written*
+    rather than rows *seen* -- stops early on a re-run, where nothing is written and the
+    honest answer is 0.
     """
     await _seed(sessions, *[_title(f"Title {index}") for index in range(5)])
 
@@ -406,10 +411,13 @@ async def test_limit_stops_the_sweep_early(
 async def test_uuid_is_the_cursor_type(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """A guard on the import, not on behaviour: `_index` declares its cursor
-    as `uuid.UUID | None`, and this file is where a change to that would be
-    seen. Kept trivial deliberately -- it exists so `uuid` is a used import
-    rather than a decorative annotation.
+    """A guard on the import, not on behaviour.
+
+    `_index` declares its cursor as `uuid.UUID | None`, and this file is where a change
+    to that would be seen.
+
+    Kept trivial deliberately -- it exists so `uuid` is a used import rather than a
+    decorative annotation.
     """
     assert uuid.UUID(str(_title("Ledgerhand").id))
 
@@ -448,8 +456,9 @@ async def test_a_re_run_terminates_and_still_honours_limit(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The case that catches a cursor advanced on writes rather than on
-    ids**, and it has to be a *second* run to do it.
+    """**The case that catches a cursor advanced on writes rather than on ids**.
+
+    and it has to be a *second* run to do it.
 
     On a first sweep every page writes, so a cursor spelled `after =
     page[-1].id if written else after` advances exactly as the correct one
@@ -478,7 +487,7 @@ async def test_a_re_run_terminates_and_still_honours_limit(
 async def test_a_title_embedded_before_its_credits_landed_is_stale_again(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """**Why one backfill pass over a freshly enriched tier is not enough.**"""
+    """**Why one backfill pass over a freshly enriched tier is not enough.**."""
     title = _title("The Quiet Vacuum")
     await _seed(sessions, title)
     async with sessions() as session:

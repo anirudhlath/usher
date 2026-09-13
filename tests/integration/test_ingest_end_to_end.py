@@ -120,8 +120,7 @@ async def source(session: AsyncSession) -> Source:
 
 @pytest_asyncio.fixture
 async def catalog(session: AsyncSession) -> uuid.UUID:
-    """One title M2's bootstrap would have left behind, so tier 1 has
-    something to find."""
+    """One title M2's bootstrap would have left behind, so tier 1 has something to find."""
     title = Title(
         kind=TitleKind.MOVIE,
         name="Fight Club",
@@ -275,8 +274,7 @@ def statement_counter() -> Iterator[list[str]]:
 
 
 async def _explain(session: AsyncSession, statement: str, parameters: Sequence[object]) -> str:
-    """`EXPLAIN` the statement **as the driver received it**, with the
-    parameters it received.
+    """`EXPLAIN` the statement **as the driver received it**, with the parameters it received.
 
     Not a hand-copied lookalike: two earlier tasks in this project asserted
     on the plan of a transcribed query and both were replaced, because the
@@ -293,8 +291,11 @@ async def _explain(session: AsyncSession, statement: str, parameters: Sequence[o
 def _capture(
     predicate: Callable[[str], bool],
 ) -> tuple[list[tuple[str, Sequence[object]]], Callable[[], None]]:
-    """Record (statement, parameters) for every statement matching
-    `predicate`, and the callable that stops recording."""
+    """Record (statement.
+
+    parameters) for every statement matching `predicate`, and the callable that stops
+    recording.
+    """
     seen: list[tuple[str, Sequence[object]]] = []
 
     def record(
@@ -331,9 +332,11 @@ async def test_a_library_becomes_a_catalog(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """Registered source in, canonical catalog out: one movie the catalog
-    already holds, one it does not (stub-on-sight), one with no ids at all
-    (review queue), a series, and two of its episodes hung off it."""
+    """Registered source in, canonical catalog out.
+
+    one movie the catalog already holds, one it does not (stub-on-sight), one with no
+    ids at all (review queue), a series, and two of its episodes hung off it.
+    """
     _seed(emby, LIBRARY)
     run = await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
 
@@ -373,13 +376,14 @@ async def test_no_episode_ever_mints_a_title(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """The catastrophe this pipeline is shaped around, end to end. Each
-    seeded episode carries its *own* `Imdb` id -- a live Emby episode really
-    does -- and no episode's IMDb id is in the catalog at all (`tvEpisode`
-    is excluded from M2's bootstrap by design), so an episode that walked
-    the ladder would fall through to stub-on-sight and mint one junk title
-    apiece: 999,827 of them at the one measured deployment, a catalog of
-    rubbish roughly the size of the real one."""
+    """The catastrophe this pipeline is shaped around, end to end.
+
+    Each seeded episode carries its *own* `Imdb` id -- a live Emby episode really does
+    -- and no episode's IMDb id is in the catalog at all (`tvEpisode` is excluded from
+    M2's bootstrap by design), so an episode that walked the ladder would fall through
+    to stub-on-sight and mint one junk title apiece: 999,827 of them at the one measured
+    deployment, a catalog of rubbish roughly the size of the real one.
+    """
     _seed(emby, LIBRARY)
     before = (await session.execute(text("SELECT count(*) FROM titles"))).scalar_one()
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
@@ -444,9 +448,13 @@ async def test_a_deleted_item_is_retracted_and_its_watch_state_survives(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """PRD 08's backup asymmetry as behaviour: the catalog is rebuildable,
-    watch state is precious. A retracted item keeps its row, its title link,
-    and everything attached to that title."""
+    """PRD 08's backup asymmetry as behaviour.
+
+    the catalog is rebuildable, watch state is precious.
+
+    A retracted item keeps its row, its title link, and everything attached to that
+    title.
+    """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
     await watch_states.merge_from_source(
@@ -487,10 +495,14 @@ async def test_a_walk_that_dies_mid_run_leaves_a_resumable_catalog(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """A crash costs the batch in flight, not the walk -- and nothing is
-    retracted in between, because the sweep is on the success path and
-    nowhere else. The second run upserts everything again, which is free
-    because every write is an upsert."""
+    """A crash costs the batch in flight, not the walk.
+
+    and nothing is retracted in between, because the sweep is on the success path and
+    nowhere else.
+
+    The second run upserts everything again, which is free because every write is an
+    upsert.
+    """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
 
@@ -522,7 +534,7 @@ async def test_watch_state_survives_a_walk_that_cannot_report_history(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """**The whole milestone, end to end.**
+    """**The whole milestone, end to end.**.
 
     A backfill records `play_count = 7`. A full nightly watch-state walk
     then runs over the same item, through the real `EmbyAdapter` against a
@@ -642,12 +654,16 @@ async def test_an_episodes_watch_state_lands_on_the_episode_not_the_series(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """89% of this library is episodes, and an episode's `MediaItem` carries
-    its series' `title_id` *and* its own `episode_id` while `watch_states`
-    permits exactly one (`num_nonnulls(title_id, episode_id) = 1`).
-    Collapsing to the *title* would merge every episode of a show onto one
-    row, quietly; passing both through raises `PortDataMalformed` and aborts
-    a batch of five thousand states."""
+    """89% of this library is episodes.
+
+    and an episode's `MediaItem` carries its series' `title_id` *and* its own
+    `episode_id` while `watch_states` permits exactly one (`num_nonnulls(title_id,
+    episode_id) = 1`).
+
+    Collapsing to the *title* would merge every episode of a show onto one row, quietly;
+    passing both through raises `PortDataMalformed` and aborts a batch of five thousand
+    states.
+    """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
     emby.set_watch_state(
@@ -685,10 +701,12 @@ async def test_a_delta_walk_never_retracts(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """ADR-0015's second rule, end to end. A delta returns only what
-    changed, so by construction nearly everything is "unseen" -- a sweep
-    after one would retract the library. The real adapter's `since` filter
-    is what makes this a real delta rather than a relabelled full walk."""
+    """ADR-0015's second rule, end to end.
+
+    A delta returns only what changed, so by construction nearly everything is "unseen"
+    -- a sweep after one would retract the library. The real adapter's `since` filter is
+    what makes this a real delta rather than a relabelled full walk.
+    """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
     emby.add_item(
@@ -717,8 +735,9 @@ async def test_a_delta_walk_never_retracts(
 
 
 def _mixed(*, series: int, episodes: int, movies: int, offset: int) -> list[SourceItem]:
-    """A slice of the measured library's shape: mostly episodes, spread over
-    many series, with movies alongside.
+    """A slice of the measured library's shape.
+
+    mostly episodes, spread over many series, with movies alongside.
 
     **Many series, not one**, and many movies, and that is what makes the
     flatness assertion below bite. `IngestService._series_titles` resolves
@@ -777,7 +796,7 @@ async def test_statements_do_not_grow_with_the_page(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """**The measurement, at the library's own shape.**"""
+    """**The measurement, at the library's own shape.**."""
 
     def _walker(batch_size: int) -> ReconcileService:
         matching = PostgresTitleMatchRepository(session)
@@ -824,8 +843,7 @@ async def test_the_only_per_item_write_is_one_insert_per_new_title(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """The one place the pipeline is *not* set-based, measured rather than
-    asserted about.
+    """The one place the pipeline is *not* set-based, measured rather than asserted about.
 
     `MatchService._create_stub` calls `TitleRepository.add` per item, so a
     first walk over items the catalog has never seen costs one `INSERT INTO
@@ -870,10 +888,11 @@ async def test_the_only_per_item_write_is_one_insert_per_new_title(
 async def test_a_re_seen_job_is_not_rewritten_every_night(
     queue: PostgresJobQueue, session: AsyncSession
 ) -> None:
-    """`_ENQUEUE`'s `ON CONFLICT DO UPDATE` used to stamp `updated_at` for
-    every re-seen job, so a nightly walk rewrote a row per job for no state
-    change -- 1.1M dead-weight row versions and the vacuum to match, every
-    night, on a table whose whole purpose is to be small.
+    """`_ENQUEUE`'s `ON CONFLICT DO UPDATE` used to stamp `updated_at` for every re-seen job.
+
+    so a nightly walk rewrote a row per job for no state change -- 1.1M dead-weight row
+    versions and the vacuum to match, every night, on a table whose whole purpose is to
+    be small.
 
     The promotion path still writes, because that is a real state change.
     """
@@ -923,9 +942,7 @@ async def test_the_availability_sweeps_update_uses_its_index(
     source: Source,
     analyze: Analyze,
 ) -> None:
-    """`ix_media_items_sweep` exists for the sweep's `UPDATE`, and the numbers say exactly
-    that.
-    """
+    """`ix_media_items_sweep` exists for the sweep's `UPDATE`, and the numbers say exactly that."""
     seen_since = CHANGED_AT + timedelta(days=1)
     await media_items.upsert_many(
         [
@@ -990,13 +1007,14 @@ async def test_resolving_a_target_uses_the_unique_index(
     catalog: uuid.UUID,
     analyze: Analyze,
 ) -> None:
-    """`resolve_targets` runs once per watch-state batch against
-    `external_id = ANY(...)`, and it is the only lookup on the hot path
-    keyed by a source's own id. A plan that reached the rows through
-    `source_id` alone and then *filtered* on `external_id` is a full pass
-    over the source per batch -- 1,126,674 rows per thousand states -- and
-    is exactly what an empty fixture cannot tell apart from a real lookup,
-    because every `source_id`-leading index looks the same when there is
+    """`resolve_targets` runs once per watch-state batch against `external_id = ANY(...)`.
+
+    and it is the only lookup on the hot path keyed by a source's own id.
+
+    A plan that reached the rows through `source_id` alone and then *filtered* on
+    `external_id` is a full pass over the source per batch -- 1,126,674 rows per
+    thousand states -- and is exactly what an empty fixture cannot tell apart from a
+    real lookup, because every `source_id`-leading index looks the same when there is
     nothing to scan.
 
     So this seeds two thousand rows and `ANALYZE`s before asking. The rows

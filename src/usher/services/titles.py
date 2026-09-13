@@ -98,9 +98,10 @@ class TitleReadService:
         self._images = images
 
     async def detail(self, title_id: uuid.UUID, *, user_id: uuid.UUID) -> TitleDetail | None:
-        """One title, everything local about it, and a promotion if it needs one. `None`
-        when no such title exists -- the route turns that into a 404, and a raise would
-        make the common case travel an exception path.
+        """One title, everything local about it, and a promotion if it needs one.
+
+        `None` when no such title exists -- the route turns that into a 404, and a raise
+        would make the common case travel an exception path.
         """
         title = await self._titles.get(title_id)
         if title is None:

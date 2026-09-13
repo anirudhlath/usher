@@ -1,5 +1,6 @@
-"""`ConfiguredSourceAdapterFactory` -- the registry, and the only module in `src/`
-outside `usher.adapters.emby` that may name `EmbyAdapter`.
+"""`ConfiguredSourceAdapterFactory`.
+
+the registry, and the only module in `src/` outside `usher.adapters.emby` that may name
 """
 
 from enum import StrEnum
@@ -48,11 +49,11 @@ async def test_an_emby_source_gets_an_emby_adapter() -> None:
 
 
 async def test_the_deployment_tuning_reaches_the_adapter() -> None:
-    """A factory that accepted its knobs and then dropped them would build a
-    working adapter with none of this deployment's configuration applied --
-    default paging against a 94,395-item library, a default timeout against
-    an upstream PRD 01 measures at 1-5 s per request -- and every other test
-    here would still pass.
+    """A factory that accepted its knobs and then dropped them would build a working adapter.
+
+    with none of this deployment's configuration applied -- default paging against a
+    94,395-item library, a default timeout against an upstream PRD 01 measures at 1-5 s
+    per request -- and every other test here would still pass.
 
     Reaches through private attributes because there is no public accessor
     for any of the three, and inventing one purely so a test could read it
@@ -88,9 +89,9 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
 
 
 async def test_each_call_builds_a_new_adapter_and_every_one_shares_the_sources_gate() -> None:
-    """`SourceAdapterFactory.build`'s docstring: "the caller owns it and must
-    `aclose()` it". A factory that cached one instance would hand a closed
-    adapter to the next caller.
+    """`SourceAdapterFactory.build`'s docstring: "the caller owns it and must `aclose()` it".
+
+    A factory that cached one instance would hand a closed adapter to the next caller.
 
     **And the one thing that must *not* be per adapter, asserted in the same
     place because the two rules pull opposite ways.** An adapter is a
@@ -116,8 +117,9 @@ async def test_each_call_builds_a_new_adapter_and_every_one_shares_the_sources_g
 
 
 def test_an_unregistered_kind_is_refused_rather_than_defaulted() -> None:
-    """The next `SourceKind` member must land on the `raise`, not on an Emby
-    adapter pointed at something that is not Emby -- which would
+    """The next `SourceKind` member must land on the `raise`.
+
+    not on an Emby adapter pointed at something that is not Emby -- which would
     authenticate, walk, and return plausible nonsense rather than fail.
 
     `model_construct` deliberately bypasses `Source`'s validation: it is the

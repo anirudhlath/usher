@@ -1,5 +1,6 @@
-"""Inbound watch state, against port fakes and a source adapter that lies the way
-Emby's listing route does.
+"""Inbound watch state.
+
+against port fakes and a source adapter that lies the way Emby's listing route does.
 """
 
 import dataclasses
@@ -129,8 +130,10 @@ class _Fixture:
     async def given_matched(
         self, external_id: str, *, episode: bool = False, changed_at: AwareDatetime = T0
     ) -> uuid.UUID:
-        """A source item that is stored and matched -- the state every watch
-        record needs before it has anywhere to land."""
+        """A source item that is stored and matched.
+
+        the state every watch record needs before it has anywhere to land.
+        """
         title_id = new_id()
         episode_id = new_id() if episode else None
         self.adapter.seed(_item(external_id), changed_at)
@@ -161,10 +164,13 @@ class _Fixture:
         return episode_id if episode_id is not None else title_id
 
     async def given_history(self, external_id: str, play_count: int) -> None:
-        """A stored play count, as a backfill or an earlier authoritative
-        read would have left it. Merged at an instant *before* every walk in
-        these tests, so the conflict rule never accounts for a preserved
-        count on its own."""
+        """A stored play count.
+
+        as a backfill or an earlier authoritative read would have left it.
+
+        Merged at an instant *before* every walk in these tests, so the conflict rule
+        never accounts for a preserved count on its own.
+        """
         await self.watch_states.merge_from_source(
             [
                 WatchStateMerge(
@@ -194,8 +200,11 @@ def fixture() -> _Fixture:
 
 @pytest.fixture
 def fixture_batched() -> _Fixture:
-    """Batch size 2, so a five-state walk commits three times and the
-    trailing partial batch is one of them."""
+    """Batch size 2.
+
+    so a five-state walk commits three times and the trailing partial batch is one of
+    them.
+    """
     return _Fixture(batch_size=2)
 
 
@@ -223,10 +232,12 @@ async def test_a_walk_merges_position_and_played(fixture: _Fixture) -> None:
 
 
 async def test_a_walk_that_cannot_report_history_leaves_it_alone(fixture: _Fixture) -> None:
-    """The end-to-end form of ADR-0014, through the service rather than the
-    repository. The stored 7 was recovered by an authoritative read; the walk
-    that follows says `PlayCount: 0` on the wire and `None` in the port, and
-    the household's history has to survive it -- every night, forever."""
+    """The end-to-end form of ADR-0014, through the service rather than the repository.
+
+    The stored 7 was recovered by an authoritative read; the walk that follows says
+    `PlayCount: 0` on the wire and `None` in the port, and the household's history has
+    to survive it -- every night, forever.
+    """
     await fixture.given_matched("movie-1")
     await fixture.given_history("movie-1", 7)
     fixture.adapter.seed_state(
@@ -240,10 +251,14 @@ async def test_a_walk_that_cannot_report_history_leaves_it_alone(fixture: _Fixtu
 
 
 async def test_a_batch_of_walked_states_zeroes_none_of_their_counts(fixture: _Fixture) -> None:
-    """The same property one batch wide, which is how it actually arrives:
-    5,000 states in one `merge_from_source`, all of them carrying an absent
-    count, over rows holding different real ones. A service that collapsed
-    `None` to `0` anywhere in the batch path erases all of them at once."""
+    """The same property one batch wide, which is how it actually arrives.
+
+    5,000 states in one `merge_from_source`, all of them carrying an absent count, over
+    rows holding different real ones.
+
+    A service that collapsed `None` to `0` anywhere in the batch path erases all of them
+    at once.
+    """
     for index, count in enumerate((7, 3, 1, 12), start=1):
         await fixture.given_matched(f"movie-{index}")
         await fixture.given_history(f"movie-{index}", count)
@@ -260,10 +275,13 @@ async def test_a_batch_of_walked_states_zeroes_none_of_their_counts(fixture: _Fi
 
 
 async def test_a_source_that_reports_a_zero_has_its_zero_written(fixture: _Fixture) -> None:
-    """The over-correction the `COALESCE` is not: "never write a count from
-    a merge" makes un-marking something played impossible to propagate,
-    which is the same correctness bug as filtering zero states out of a walk.
-    A source that *can* count and says zero is reporting a reset."""
+    """The over-correction the `COALESCE` is not.
+
+    "never write a count from a merge" makes un-marking something played impossible to
+    propagate, which is the same correctness bug as filtering zero states out of a walk.
+
+    A source that *can* count and says zero is reporting a reset.
+    """
     await fixture.given_matched("movie-1")
     await fixture.given_history("movie-1", 7)
     honest = FakeSourceAdapter(fixture.source)
@@ -281,13 +299,16 @@ async def test_a_source_that_reports_a_zero_has_its_zero_written(fixture: _Fixtu
 async def test_an_episodes_state_is_merged_against_its_episode_not_its_series(
     fixture: _Fixture,
 ) -> None:
-    """An episode's `MediaItem` carries its series' `title_id` *and* its
-    `episode_id`, because a client browsing a season wants both. A watch
-    state may carry exactly one (`num_nonnulls(title_id, episode_id) = 1`),
-    so the service has to collapse the pair -- and handing both through
-    raises `PortDataMalformed`, which aborts a batch of five thousand states
-    over 89% of this library. Passing the *title* instead is quieter and
-    worse: every episode of a show merges onto one row."""
+    """An episode's `MediaItem` carries its series' `title_id` *and* its `episode_id`.
+
+    because a client browsing a season wants both.
+
+    A watch state may carry exactly one (`num_nonnulls(title_id, episode_id) = 1`), so
+    the service has to collapse the pair -- and handing both through raises
+    `PortDataMalformed`, which aborts a batch of five thousand states over 89% of this
+    library. Passing the *title* instead is quieter and worse: every episode of a show
+    merges onto one row.
+    """
     episode_id = await fixture.given_matched("episode-1", episode=True)
     fixture.adapter.seed_state(
         SourceWatchState(external_id="episode-1", position_seconds=133, played=True)
@@ -305,11 +326,12 @@ async def test_an_episodes_state_is_merged_against_its_episode_not_its_series(
 
 
 def test_a_target_matched_to_nothing_collapses_to_nothing() -> None:
-    """`_watch_target`'s third branch, tested directly because nothing that
-    honours `MediaItemRepository`'s contract can reach it: `resolve_targets`
-    omits an unmatched item rather than answering with a pair of `None`s, so
-    the service's own filter is the `targets.get(...)` miss above and this
-    branch is the belt to that pair of braces.
+    """`_watch_target`'s third branch.
+
+    tested directly because nothing that honours `MediaItemRepository`'s contract can
+    reach it: `resolve_targets` omits an unmatched item rather than answering with a
+    pair of `None`s, so the service's own filter is the `targets.get(...)` miss above
+    and this branch is the belt to that pair of braces.
 
     Kept rather than deleted, and pinned rather than trusted: a repository
     that answered with an empty pair would otherwise hand
@@ -329,11 +351,13 @@ def test_a_target_matched_to_nothing_collapses_to_nothing() -> None:
 async def test_a_state_for_an_unmatched_item_is_skipped_not_raised_on(
     fixture: _Fixture,
 ) -> None:
-    """A `WatchStateMerge` with neither a title nor an episode raises
-    `PortDataMalformed` by contract, and an unmatched `MediaItem` produces
-    exactly that -- which would abort a batch of 5,000 states over one item
-    sitting in the review queue. The service filters them and counts them
-    instead."""
+    """A `WatchStateMerge` with neither a title nor an episode raises `PortDataMalformed` by.
+
+    contract, and an unmatched `MediaItem` produces exactly that -- which would abort a
+    batch of 5,000 states over one item sitting in the review queue.
+
+    The service filters them and counts them instead.
+    """
     fixture.adapter.seed(_item("orphan-1"), T0)
     fixture.adapter.seed_state(
         SourceWatchState(external_id="orphan-1", position_seconds=90, played=False)
@@ -345,10 +369,12 @@ async def test_a_state_for_an_unmatched_item_is_skipped_not_raised_on(
 
 
 async def test_a_walk_longer_than_one_batch_merges_every_state(fixture: _Fixture) -> None:
-    """The trailing partial batch. Seven states at a batch size of two is
-    three full batches and one of one, and a walk that flushed only on the
-    size threshold silently drops the last page of nearly every run -- here
-    that is a resume position a household would notice."""
+    """The trailing partial batch.
+
+    Seven states at a batch size of two is three full batches and one of one, and a walk
+    that flushed only on the size threshold silently drops the last page of nearly every
+    run -- here that is a resume position a household would notice.
+    """
     fixture.service._batch_size = 2
     for index in range(7):
         await fixture.given_matched(f"movie-{index}")
@@ -365,9 +391,11 @@ async def test_a_walk_longer_than_one_batch_merges_every_state(fixture: _Fixture
 async def test_states_are_resolved_once_per_batch_rather_than_once_per_state(
     fixture: _Fixture,
 ) -> None:
-    """1,126,674 items. One `resolve_targets` per batch is the difference
-    between a walk that finishes and one that does not, and it is invisible
-    in every assertion about stored values."""
+    """1,126,674 items.
+
+    One `resolve_targets` per batch is the difference between a walk that finishes and
+    one that does not, and it is invisible in every assertion about stored values.
+    """
     for index in range(50):
         await fixture.given_matched(f"movie-{index}")
         fixture.adapter.seed_state(
@@ -381,8 +409,10 @@ async def test_states_are_resolved_once_per_batch_rather_than_once_per_state(
 async def test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now(
     fixture: _Fixture,
 ) -> None:
-    """**One instant for the whole walk, never `now()` per batch**, and the difference is
-    PRD 03's conflict rule rather than tidiness.
+    """**One instant for the whole walk.
+
+    never `now()` per batch**, and the difference is PRD 03's conflict rule rather than
+    tidiness.
     """
     seen: list[datetime] = []
     original = fixture.watch_states.merge_from_source
@@ -406,10 +436,12 @@ async def test_every_merge_in_one_walk_carries_one_instant_not_a_per_batch_now(
 
 
 async def test_a_walk_never_retracts_a_watch_state(fixture: _Fixture) -> None:
-    """PRD 08 lists watch state as the precious set that survives
-    everything, so there is no sweep here and there is no lane that could
-    grow one by accident. `ReconcileService`'s availability sweep is the
-    shape this must never acquire."""
+    """PRD 08 lists watch state as the precious set that survives everything.
+
+    so there is no sweep here and there is no lane that could grow one by accident.
+
+    `ReconcileService`'s availability sweep is the shape this must never acquire.
+    """
     swept: list[object] = []
     original = fixture.media_items.mark_unseen_unavailable
 
@@ -427,10 +459,12 @@ async def test_a_walk_never_retracts_a_watch_state(fixture: _Fixture) -> None:
 
 
 async def test_apply_states_merges_a_batch_and_reports_its_targets(fixture: _Fixture) -> None:
-    """The push lane's entry point. The same chain as a walk's, minus the
-    run bookkeeping -- because a push event is not a run, and inventing a
-    `sync_runs` row per `UserDataChanged` would put a row per few seconds of
-    playback into a table an operator reads."""
+    """The push lane's entry point.
+
+    The same chain as a walk's, minus the run bookkeeping -- because a push event is not
+    a run, and inventing a `sync_runs` row per `UserDataChanged` would put a row per few
+    seconds of playback into a table an operator reads.
+    """
     await fixture.given_matched("movie-1")
     outcome = await fixture.service.apply_states(
         fixture.source.id,
@@ -453,15 +487,17 @@ async def test_apply_states_merges_a_batch_and_reports_its_targets(fixture: _Fix
 async def test_apply_states_pairs_every_target_with_the_state_it_came_from(
     fixture: _Fixture,
 ) -> None:
-    """**The pairing, and the reason it is reported rather than recovered.**
-    The M5 plan's own self-review found a caller zipping `merged` against
-    the batch it handed in; `merged` is the *matched subset*, so one
-    unmatched item at the front shifts every pair by one and the push lane
-    publishes item A's resume position under item B's title.
+    """**The pairing.
+
+    and the reason it is reported rather than recovered.** The M5 plan's own self-review
+    found a caller zipping `merged` against the batch it handed in; `merged` is the
+    *matched subset*, so one unmatched item at the front shifts every pair by one and
+    the push lane publishes item A's resume position under item B's title.
 
     An unmatched item first, then two matched ones, is the smallest batch
     that shows it -- with the unmatched item last, a positional zip agrees
-    with the truth and ratifies the bug."""
+    with the truth and ratifies the bug.
+    """
     await fixture.given_matched("movie-1")
     await fixture.given_matched("movie-2")
     outcome = await fixture.service.apply_states(
@@ -482,9 +518,12 @@ async def test_apply_states_pairs_every_target_with_the_state_it_came_from(
 
 
 async def test_apply_states_does_not_commit(fixture: _Fixture) -> None:
-    """The commit is the caller's, and the two callers disagree about what
-    a unit of work is: a walk commits per batch of a thousand, the push lane
-    per event. A commit in here would make the second impossible to state."""
+    """The commit is the caller's, and the two callers disagree about what a unit of work is.
+
+    a walk commits per batch of a thousand, the push lane per event.
+
+    A commit in here would make the second impossible to state.
+    """
     await fixture.given_matched("movie-1")
     before = fixture.commits
     await fixture.service.apply_states(
@@ -497,10 +536,12 @@ async def test_apply_states_does_not_commit(fixture: _Fixture) -> None:
 
 
 async def test_apply_states_counts_an_unmatched_item_without_raising(fixture: _Fixture) -> None:
-    """PRD 02: unmatched items are never dropped, and there will always be
-    some. `merge_from_source` answers a target-less merge with
-    `PortDataMalformed`, which on the push lane would take the channel down
-    and cost a reconnect plus a gap-closing delta walk."""
+    """PRD 02: unmatched items are never dropped, and there will always be some.
+
+    `merge_from_source` answers a target-less merge with `PortDataMalformed`, which on
+    the push lane would take the channel down and cost a reconnect plus a gap-closing
+    delta walk.
+    """
     outcome = await fixture.service.apply_states(
         fixture.source.id,
         [SourceWatchState(external_id="unknown", position_seconds=1, played=False)],
@@ -514,9 +555,11 @@ async def test_apply_states_counts_an_unmatched_item_without_raising(fixture: _F
 async def test_apply_states_enqueues_a_history_backfill_for_a_played_unknown_count(
     fixture: _Fixture,
 ) -> None:
-    """ADR-0014's chain, reached from the push lane exactly as it is from a
-    walk. A `UserDataChanged` entry carries no trustworthy `PlayCount`, so
-    every played item pushed produces one of these."""
+    """ADR-0014's chain, reached from the push lane exactly as it is from a walk.
+
+    A `UserDataChanged` entry carries no trustworthy `PlayCount`, so every played item
+    pushed produces one of these.
+    """
     await fixture.given_matched("movie-1")
     outcome = await fixture.service.apply_states(
         fixture.source.id,
@@ -531,12 +574,13 @@ async def test_apply_states_enqueues_a_history_backfill_for_a_played_unknown_cou
 
 async def test_apply_states_reports_merges_built_not_rows_changed(fixture: _Fixture) -> None:
     """`items_matched` on a `SyncRun` is the number of merges *built*.
-    `merge_from_source` returns rows *changed*, and the two differ whenever
-    PRD 03's "latest `updated_at` wins" refuses one -- a client set a resume
-    position thirty seconds ago and a walk that started an hour ago must not
-    stomp it. Returning the repository's count in `items_matched`'s place
-    silently changes what every stored `sync_runs` row means and what
-    PRD 10's dashboard plots."""
+
+    `merge_from_source` returns rows *changed*, and the two differ whenever PRD 03's
+    "latest `updated_at` wins" refuses one -- a client set a resume position thirty
+    seconds ago and a walk that started an hour ago must not stomp it. Returning the
+    repository's count in `items_matched`'s place silently changes what every stored
+    `sync_runs` row means and what PRD 10's dashboard plots.
+    """
     await fixture.given_matched("movie-1")
     fixture.watch_states.refuse_next_merge()
     outcome = await fixture.service.apply_states(
@@ -552,11 +596,13 @@ async def test_apply_states_reports_merges_built_not_rows_changed(fixture: _Fixt
 async def test_a_walk_still_reports_the_same_counters_after_the_split(
     fixture: _Fixture,
 ) -> None:
-    """The refactor's own regression test. `_flush` used to compute
-    `items_matched` as `len(batch) - unmatched` inline; if the split starts
-    reporting rows-written instead, every existing `sync_runs` row means
-    something different -- and the two agree on every batch where nothing is
-    refused, which is nearly all of them."""
+    """The refactor's own regression test.
+
+    `_flush` used to compute `items_matched` as `len(batch) - unmatched` inline; if the
+    split starts reporting rows-written instead, every existing `sync_runs` row means
+    something different -- and the two agree on every batch where nothing is refused,
+    which is nearly all of them.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed(_item("orphan-1"), T0)
     fixture.watch_states.refuse_next_merge()
@@ -570,8 +616,11 @@ async def test_a_walk_still_reports_the_same_counters_after_the_split(
 async def test_a_played_item_with_unknown_history_is_enqueued_for_backfill(
     fixture: _Fixture,
 ) -> None:
-    """The bounded recovery. Enqueued rather than fetched inline: one request
-    per item against a library of 1,126,674 is not a walk, it is a week."""
+    """The bounded recovery.
+
+    Enqueued rather than fetched inline: one request per item against a library of
+    1,126,674 is not a walk, it is a week.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-1", position_seconds=0, played=True, play_count=7)
@@ -583,8 +632,10 @@ async def test_a_played_item_with_unknown_history_is_enqueued_for_backfill(
 
 
 async def test_an_unplayed_item_is_not_enqueued_for_backfill(fixture: _Fixture) -> None:
-    """1,126,674 items, of which the household has played a few thousand. An
-    enqueue predicate that ignored `played` would queue the library."""
+    """1,126,674 items, of which the household has played a few thousand.
+
+    An enqueue predicate that ignored `played` would queue the library.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-1", position_seconds=0, played=False)
@@ -596,11 +647,13 @@ async def test_an_unplayed_item_is_not_enqueued_for_backfill(fixture: _Fixture) 
 async def test_a_played_item_whose_count_the_source_reported_is_not_enqueued(
     fixture: _Fixture,
 ) -> None:
-    """The other half of the predicate, and the half `played` alone does not
-    cover. A source whose walk *can* count (the contract permits it, and
-    Jellyfin's listing may well) needs no backfill at all -- enqueueing one
-    per played item anyway is a standing queue of thousands of requests that
-    can only ever confirm what is already stored."""
+    """The other half of the predicate, and the half `played` alone does not cover.
+
+    A source whose walk *can* count (the contract permits it, and Jellyfin's listing may
+    well) needs no backfill at all -- enqueueing one per played item anyway is a
+    standing queue of thousands of requests that can only ever confirm what is already
+    stored.
+    """
     honest = FakeSourceAdapter(fixture.source)
     await fixture.given_matched("movie-1")
     honest.seed(_item("movie-1"), T0)
@@ -612,8 +665,11 @@ async def test_a_played_item_whose_count_the_source_reported_is_not_enqueued(
 
 
 async def test_an_unmatched_played_item_is_not_enqueued_for_backfill(fixture: _Fixture) -> None:
-    """There is no row to backfill into. A job for one parks or no-ops
-    forever, and the review queue is the lane that fixes it."""
+    """There is no row to backfill into.
+
+    A job for one parks or no-ops forever, and the review queue is the lane that fixes
+    it.
+    """
     fixture.adapter.seed(_item("orphan-1"), T0)
     fixture.adapter.seed_state(
         SourceWatchState(external_id="orphan-1", position_seconds=0, played=True, play_count=2)
@@ -649,14 +705,15 @@ async def test_the_backfill_writes_the_authoritative_count(fixture: _Fixture) ->
 async def test_a_backfill_right_after_a_walk_is_not_rejected_as_stale(
     fixture: _Fixture,
 ) -> None:
-    """`observed_at` is the instant the backfill read the source, never the
-    run's. PRD 03's "latest `updated_at` wins" applies to the whole record,
-    so a backfill carrying an instant at or before the row's stored
-    `updated_at` writes nothing -- and against Postgres, where a `BEFORE
-    UPDATE` trigger stamps the *write* instant, "at or before" is every
-    instant the walk could hand it. The backfill would then never converge
-    and nothing in this file would say so; the paired integration case is
-    what actually closes it."""
+    """`observed_at` is the instant the backfill read the source, never the run's.
+
+    PRD 03's "latest `updated_at` wins" applies to the whole record, so a backfill
+    carrying an instant at or before the row's stored `updated_at` writes nothing -- and
+    against Postgres, where a `BEFORE UPDATE` trigger stamps the *write* instant, "at or
+    before" is every instant the walk could hand it. The backfill would then never
+    converge and nothing in this file would say so; the paired integration case is what
+    actually closes it.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-1", position_seconds=0, played=True, play_count=9)
@@ -672,11 +729,14 @@ async def test_a_backfill_right_after_a_walk_is_not_rejected_as_stale(
 
 
 async def test_a_backfill_of_a_deleted_item_is_not_an_error(fixture: _Fixture) -> None:
-    """`get_watch_state` returns `None` for an item the source no longer
-    has, exactly as `get_item` does. A backfill job for one must complete
-    rather than park: the item's disappearance is what the reconcile lane
-    handles, and parking here would fill the poison list with items that
-    were simply deleted."""
+    """`get_watch_state` returns `None` for an item the source no longer has.
+
+    exactly as `get_item` does.
+
+    A backfill job for one must complete rather than park: the item's disappearance is
+    what the reconcile lane handles, and parking here would fill the poison list with
+    items that were simply deleted.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.forget("movie-1")
     assert (
@@ -690,9 +750,12 @@ async def test_a_backfill_of_a_deleted_item_is_not_an_error(fixture: _Fixture) -
 async def test_a_backfill_of_an_item_this_source_never_had_is_not_an_error(
     fixture: _Fixture,
 ) -> None:
-    """A queued job outliving the media item it names -- an operator removed
-    the source, or the review queue re-resolved it. Quiet, because the
-    alternative is a parked job an operator has to dismiss by hand."""
+    """A queued job outliving the media item it names.
+
+    an operator removed the source, or the review queue re-resolved it.
+
+    Quiet, because the alternative is a parked job an operator has to dismiss by hand.
+    """
     assert (
         await fixture.service.backfill_one(
             fixture.source, fixture.adapter, external_id="never-existed", user_id=fixture.user_id
@@ -704,9 +767,11 @@ async def test_a_backfill_of_an_item_this_source_never_had_is_not_an_error(
 async def test_the_backfill_asks_the_source_only_about_items_it_can_store(
     fixture: _Fixture,
 ) -> None:
-    """The cheap check before the expensive one. PRD 01 measures a
-    single-item request at 1-5 s; resolving the target first is one indexed
-    read, and an unmatched item has nowhere for the answer to land."""
+    """The cheap check before the expensive one.
+
+    PRD 01 measures a single-item request at 1-5 s; resolving the target first is one
+    indexed read, and an unmatched item has nowhere for the answer to land.
+    """
     fixture.adapter.seed(_item("orphan-1"), T0)
     before = fixture.adapter.authentications
     assert (
@@ -719,15 +784,17 @@ async def test_the_backfill_asks_the_source_only_about_items_it_can_store(
 
 
 async def test_the_backfill_sweep_terminates(fixture: _Fixture) -> None:
-    """**The convergence claim, run rather than argued.** Seven played items
-    whose history the walk could not report, drained three at a time: the
-    population has to empty, and it has to empty in the number of passes the
-    arithmetic predicts rather than eventually.
+    """**The convergence claim.
+
+    run rather than argued.** Seven played items whose history the walk could not
+    report, drained three at a time: the population has to empty, and it has to empty in
+    the number of passes the arithmetic predicts rather than eventually.
 
     The loop is bounded so a non-converging predicate fails the case instead
     of hanging the suite -- which is exactly what a backfill that wrote
     nothing (a stale `observed_at`), or one that never moved a row out of
-    `played AND play_count = 0`, would do in production."""
+    `played AND play_count = 0`, would do in production.
+    """
     for index in range(7):
         await fixture.given_matched(f"movie-{index}")
         fixture.adapter.seed_state(
@@ -757,15 +824,17 @@ async def test_the_backfill_sweep_terminates(fixture: _Fixture) -> None:
 async def test_a_source_that_cannot_answer_leaves_the_sweep_rotating_not_stuck(
     fixture: _Fixture,
 ) -> None:
-    """The honest other half of the convergence claim. Emby's own `POST
-    .../PlayedItems/{item}` never leaves a played item at `PlayCount: 0`, so
-    the predicate empties -- but that is a property of the *source*, not of
-    this code, and a source that cannot say leaves rows matching forever.
+    """The honest other half of the convergence claim.
+
+    Emby's own `POST .../PlayedItems/{item}` never leaves a played item at `PlayCount:
+    0`, so the predicate empties -- but that is a property of the *source*, not of this
+    code, and a source that cannot say leaves rows matching forever.
 
     What this file can guarantee is that such a row costs one request per
     pass and does not starve the others: `list_needing_history` is
     oldest-first and a merge moves the row's `updated_at`, so the third pass
-    is looking at different rows from the first."""
+    is looking at different rows from the first.
+    """
 
     class _AlsoLossyOnTheItemRoute(_LossySourceAdapter):
         async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
@@ -790,10 +859,10 @@ async def test_a_source_that_cannot_answer_leaves_the_sweep_rotating_not_stuck(
 
 
 async def test_the_backfill_writes_to_each_rows_own_user(fixture: _Fixture) -> None:
-    """`list_needing_history` reports the owner of every row it returns, and
-    a backfill that wrote them all to one user would move a second
-    household member's history onto the first -- silently, and only once
-    there were two of them.
+    """`list_needing_history` reports the owner of every row it returns.
+
+    and a backfill that wrote them all to one user would move a second household
+    member's history onto the first -- silently, and only once there were two of them.
 
     Two rows, two users, deliberately: with one row in the sweep every
     reading of "whose row is this" agrees, and a backfill that took the
@@ -838,10 +907,11 @@ async def test_the_backfill_writes_to_each_rows_own_user(fixture: _Fixture) -> N
 async def test_an_episodes_history_is_backfilled_through_its_own_file(
     fixture: _Fixture,
 ) -> None:
-    """989,827 episodes: the backfill's reverse lookup is dominated by this
-    case, not by movies. A title-keyed reverse lookup would answer an
-    episode's row with its series' `external_id` and backfill 24 episodes
-    from one number."""
+    """989,827 episodes: the backfill's reverse lookup is dominated by this case, not by movies.
+
+    A title-keyed reverse lookup would answer an episode's row with its series'
+    `external_id` and backfill 24 episodes from one number.
+    """
     episode_id = await fixture.given_matched("episode-1", episode=True)
     fixture.adapter.seed_state(
         SourceWatchState(external_id="episode-1", position_seconds=0, played=True, play_count=2)
@@ -875,10 +945,12 @@ async def test_a_run_is_recorded_and_checkpointed_per_batch(fixture: _Fixture) -
 async def test_a_walk_that_raises_keeps_the_batches_it_already_merged(
     fixture: _Fixture,
 ) -> None:
-    """The same trap `ReconcileService` documents, one lane over: `SyncRun`
-    is frozen and the per-batch checkpoint is an evolved copy, so a failure
-    handler that evolves its own pre-walk binding writes `items_seen = 0`
-    over a checkpoint that recorded four."""
+    """The same trap `ReconcileService` documents, one lane over.
+
+    `SyncRun` is frozen and the per-batch checkpoint is an evolved copy, so a failure
+    handler that evolves its own pre-walk binding writes `items_seen = 0` over a
+    checkpoint that recorded four.
+    """
     fixture.service._batch_size = 2
     for index in range(6):
         await fixture.given_matched(f"movie-{index}")
@@ -899,8 +971,10 @@ async def test_a_walk_that_raises_keeps_the_batches_it_already_merged(
 async def test_a_run_that_could_not_reach_the_source_is_recorded_not_raised(
     fixture: _Fixture,
 ) -> None:
-    """`usher sync` across three sources needs the second and third to run
-    when the first is unreachable."""
+    """`usher sync` across three sources needs the second and third to run when the first is.
+
+    unreachable.
+    """
     fixture.adapter.go_offline()
     run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
     assert run.status is SyncRunStatus.FAILED
@@ -908,8 +982,7 @@ async def test_a_run_that_could_not_reach_the_source_is_recorded_not_raised(
 
 
 async def test_sync_never_raises_a_port_error(fixture: _Fixture) -> None:
-    """Every `UsherPortError` subclass, not just the one the offline case
-    happens to produce."""
+    """Every `UsherPortError` subclass, not just the one the offline case happens to produce."""
 
     class _Boom(UsherPortError):
         pass
@@ -930,8 +1003,10 @@ async def test_sync_never_raises_a_port_error(fixture: _Fixture) -> None:
 
 
 async def test_a_bug_is_not_recorded_as_an_upstream_failure(fixture: _Fixture) -> None:
-    """A `ZeroDivisionError` is a bug in this process. Recording it as a
-    failed *sync* hides it behind an operational-looking row."""
+    """A `ZeroDivisionError` is a bug in this process.
+
+    Recording it as a failed *sync* hides it behind an operational-looking row.
+    """
 
     async def _explode(*args: object, **kwargs: object) -> None:
         raise ZeroDivisionError("a bug, not an outage")
@@ -946,11 +1021,13 @@ async def test_a_bug_is_not_recorded_as_an_upstream_failure(fixture: _Fixture) -
 
 
 async def test_a_second_run_resumes_from_the_last_completed_one(fixture: _Fixture) -> None:
-    """The watch-state lane owns its own cursor: it walks a different method
-    under a different upstream filter (`MinDateLastSavedForUser`, measured as
-    genuinely different from `MinDateLastSaved` -- 29,005 vs 28,934 items over
-    the same window), so resuming from an item-lane run would skip whatever
-    changed in between."""
+    """The watch-state lane owns its own cursor.
+
+    it walks a different method under a different upstream filter
+    (`MinDateLastSavedForUser`, measured as genuinely different from `MinDateLastSaved`
+    -- 29,005 vs 28,934 items over the same window), so resuming from an item-lane run
+    would skip whatever changed in between.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-1", position_seconds=1, played=False)
@@ -967,8 +1044,7 @@ async def test_a_second_run_resumes_from_the_last_completed_one(fixture: _Fixtur
 
 
 async def test_a_failed_run_does_not_advance_the_cursor(fixture: _Fixture) -> None:
-    """Resuming from a run that failed halfway skips everything it never
-    reached, silently."""
+    """Resuming from a run that failed halfway skips everything it never reached, silently."""
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(external_id="movie-1", position_seconds=1, played=False)
@@ -1009,9 +1085,11 @@ async def test_the_sync_span_is_a_child_of_whatever_is_active(
 
 
 def test_the_service_never_imports_a_storage_or_transport_library() -> None:
-    """ADR-0009 and PRD 01's layering rule, at module level. `import-linter`
-    already forbids `usher.services -> usher.db`; this catches the other
-    half, which no contract expresses."""
+    """ADR-0009 and PRD 01's layering rule, at module level.
+
+    `import-linter` already forbids `usher.services -> usher.db`; this catches the other
+    half, which no contract expresses.
+    """
     import usher.services.watch_sync as module
 
     source = (module.__file__ or "").replace(".pyc", ".py")
@@ -1024,11 +1102,14 @@ def test_the_service_never_imports_a_storage_or_transport_library() -> None:
 async def test_the_walk_is_the_only_thing_that_needs_a_source_user_map(
     fixture: _Fixture,
 ) -> None:
-    """`SourceWatchState.source_user_id` is carried and deliberately not
-    consulted: M4 has one user (PRD 01's authentication seam) and mapping a
-    source's user ids onto Usher's is M5's problem. What must not happen
-    quietly is a *second* source user's state landing on the singleton, so
-    the value being ignored is recorded here rather than discovered later."""
+    """`SourceWatchState.source_user_id` is carried and deliberately not consulted.
+
+    M4 has one user (PRD 01's authentication seam) and mapping a source's user ids onto
+    Usher's is M5's problem.
+
+    What must not happen quietly is a *second* source user's state landing on the
+    singleton, so the value being ignored is recorded here rather than discovered later.
+    """
     await fixture.given_matched("movie-1")
     fixture.adapter.seed_state(
         SourceWatchState(
@@ -1050,7 +1131,7 @@ async def test_the_walk_is_the_only_thing_that_needs_a_source_user_map(
 async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_chain_does(
     fixture: _Fixture,
 ) -> None:
-    """**Deliberate, and it is a scale decision rather than an omission.**
+    """**Deliberate, and it is a scale decision rather than an omission.**.
 
     A walk merges up to 1,126,789 states; one `watchstate.updated` per merged
     row is a fan-out per row per night to every connected client, and every
@@ -1100,16 +1181,20 @@ async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_cha
 
 
 def test_the_walk_has_no_event_publisher_to_publish_through() -> None:
-    """The tripwire on the first step of the change above. There is no
-    publisher on this service at all, so a reader who wanted a
-    `watchstate.updated` per merged row has to add one here before anything
-    else -- and this is the line that says why not to."""
+    """The tripwire on the first step of the change above.
+
+    There is no publisher on this service at all, so a reader who wanted a
+    `watchstate.updated` per merged row has to add one here before anything else -- and
+    this is the line that says why not to.
+    """
     assert "events" not in inspect.signature(WatchStateSyncService.__init__).parameters
 
 
 def _no_ingest() -> IngestService:
-    """`PushApplyService` needs one and this case never reaches an item
-    event; built rather than stubbed so the service is the real one."""
+    """`PushApplyService` needs one and this case never reaches an item event.
+
+    built rather than stubbed so the service is the real one.
+    """
     titles = FakeTitleRepository()
     matching = FakeTitleMatchRepository(titles)
     queue = FakeJobQueue()
@@ -1128,9 +1213,12 @@ def _no_ingest() -> IngestService:
 async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
     fixture_batched: _Fixture,
 ) -> None:
-    """**Issue #41.** A crashed walk left no completed run, so the next one
-    had no cursor and re-walked the whole library -- for ~5,688 pages, which
-    is where the next transient failure came from. It resumes instead.
+    """**Issue #41.** A crashed walk left no completed run.
+
+    so the next one had no cursor and re-walked the whole library -- for ~5,688 pages,
+    which is where the next transient failure came from.
+
+    It resumes instead.
 
     Batched at 2 deliberately: at the default 1,000 a six-item walk that
     fails part-way has committed *nothing*, so the position it resumes from
@@ -1167,8 +1255,11 @@ async def test_a_failed_walk_is_resumed_from_the_position_it_committed(
 
 
 async def test_a_walk_whose_newest_run_completed_starts_fresh(fixture: _Fixture) -> None:
-    """The other half: a completed walk is followed by a delta from its
-    `started_at`, at position zero, not by a resume."""
+    """The other half.
+
+    a completed walk is followed by a delta from its `started_at`, at position zero, not
+    by a resume.
+    """
     await fixture.given_matched("movie-0")
     done = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
     assert done.status is SyncRunStatus.COMPLETED
@@ -1182,9 +1273,11 @@ async def test_a_walk_whose_newest_run_completed_starts_fresh(fixture: _Fixture)
 
 
 async def test_the_position_advances_per_committed_batch(fixture_batched: _Fixture) -> None:
-    """`position` is committed progress, never the batch in flight: a crash
-    re-walks exactly the uncommitted batch, which the merge's idempotent
-    upsert makes free."""
+    """`position` is committed progress, never the batch in flight.
+
+    a crash re-walks exactly the uncommitted batch, which the merge's idempotent upsert
+    makes free.
+    """
     for index in range(5):
         await fixture_batched.given_matched(f"movie-{index}")
 
@@ -1202,9 +1295,10 @@ async def test_the_position_advances_per_committed_batch(fixture_batched: _Fixtu
 async def test_a_failed_walk_keeps_the_position_it_reached(
     fixture_batched: _Fixture,
 ) -> None:
-    """`_Progress`' reason, extended to the resume point: a failure handler
-    holding the pre-walk run reports `position = 0` for an attempt that
-    committed two.
+    """`_Progress`' reason, extended to the resume point.
+
+    a failure handler holding the pre-walk run reports `position = 0` for an attempt
+    that committed two.
 
     ⚠️ **What this case can still catch narrowed while the branch was in
     review, and the assertions below say which half is which.** It was
@@ -1256,8 +1350,10 @@ class _DuplicatingSourceAdapter(_LossySourceAdapter):
 async def test_the_resume_point_is_the_position_and_not_the_counter(
     fixture_batched: _Fixture,
 ) -> None:
-    """**`position` and `items_seen` are two statements, and the migration that added the
-    first is what makes a row carrying both reachable.**
+    """**`position` and `items_seen` are two statements.
+
+    and the migration that added the first is what makes a row carrying both
+    reachable.**.
     """
     dupes = _DuplicatingSourceAdapter(fixture_batched.source)
     for index in range(3):
@@ -1288,7 +1384,7 @@ async def test_the_resume_point_is_the_position_and_not_the_counter(
 async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
     fixture_batched: _Fixture,
 ) -> None:
-    """**`RUNNING` is the designed trace of a hard kill, not an anomaly.**"""
+    """**`RUNNING` is the designed trace of a hard kill, not an anomaly.**."""
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
     abandoned = SyncRun(
@@ -1332,10 +1428,12 @@ async def test_a_running_run_left_by_a_killed_process_is_reclaimed_not_orphaned(
 async def test_each_failed_attempt_resumes_further_in_than_the_last(
     fixture_batched: _Fixture,
 ) -> None:
-    """**Three attempts, because two cannot tell a walk that converges from one that is
-    stuck.** Every other case in this file either completes or fails exactly once, and a
-    walk that resumes at the right page *once* and then never advances again satisfies
-    all of them: its `items_seen` still climbs attempt after attempt, so every counter
+    """**Three attempts.
+
+    because two cannot tell a walk that converges from one that is stuck.** Every other
+    case in this file either completes or fails exactly once, and a walk that resumes at
+    the right page *once* and then never advances again satisfies all of them: its
+    `items_seen` still climbs attempt after attempt, so every counter.
     """
     for index in range(8):
         await fixture_batched.given_matched(f"movie-{index}")
@@ -1368,15 +1466,17 @@ async def test_each_failed_attempt_resumes_further_in_than_the_last(
 async def test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs(
     fixture_batched: _Fixture,
 ) -> None:
-    """**The reclaimed `started_at` is the cursor's, and it must not become
-    the merge's.** PRD 03 settles a conflict on "latest `updated_at` wins",
-    and `watch_states` has a `BEFORE UPDATE` trigger that stamps the *write*
-    instant -- so a row the push lane touched an hour ago reads back an
-    `updated_at` of an hour ago, and a resumed walk merging under a run that
-    began *days* ago loses to it. The walk that exists to repair those rows
-    would write nothing to exactly the rows most recently in play, and the
-    rows it *creates* would be stamped days in the past, which reorders
-    `list_needing_history`'s oldest-first drain and leaves the taste
+    """**The reclaimed `started_at` is the cursor's.
+
+    and it must not become the merge's.** PRD 03 settles a conflict on "latest
+    `updated_at` wins", and `watch_states` has a `BEFORE UPDATE` trigger that stamps the
+    *write* instant -- so a row the push lane touched an hour ago reads back an
+    `updated_at` of an hour ago, and a resumed walk merging under a run that began
+    *days* ago loses to it.
+
+    The walk that exists to repair those rows would write nothing to exactly the rows
+    most recently in play, and the rows it *creates* would be stamped days in the past,
+    which reorders `list_needing_history`'s oldest-first drain and leaves the taste
     watermark motionless.
 
     One instant per attempt rather than per batch, which is the property
@@ -1420,10 +1520,13 @@ async def test_a_resumed_attempt_merges_at_its_own_start_not_the_reclaimed_runs(
 async def test_the_span_records_the_page_the_walk_resumed_from(
     fixture_batched: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """The one number that separates a converging resume from a stuck one,
-    and the only place it is legible without reading `sync_runs`. Emitted
-    since ADR-0042 and asserted here, because an attribute nothing reads is
-    an attribute nothing notices the loss of."""
+    """The one number that separates a converging resume from a stuck one.
+
+    and the only place it is legible without reading `sync_runs`.
+
+    Emitted since ADR-0042 and asserted here, because an attribute nothing reads is an
+    attribute nothing notices the loss of.
+    """
     for index in range(6):
         await fixture_batched.given_matched(f"movie-{index}")
     await fixture_batched.runs.add(

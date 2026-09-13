@@ -31,10 +31,12 @@ def _response_models() -> list[type[BaseModel]]:
 
 
 def test_the_package_actually_has_response_models() -> None:
-    """Positive control. Without it, a broken discovery walk (a renamed
-    package, a changed suffix convention) would make every assertion below
-    vacuously true -- the failure mode of every "assert nothing matches"
-    test."""
+    """Positive control.
+
+    Without it, a broken discovery walk (a renamed package, a changed suffix convention)
+    would make every assertion below vacuously true -- the failure mode of every "assert
+    nothing matches" test.
+    """
     names = {model.__name__ for model in _response_models()}
     assert {"LivenessResponse", "ReadinessResponse", "SourceResponse"} <= names
 
@@ -46,9 +48,11 @@ def test_no_response_dto_declares_a_credential_field() -> None:
 
 
 def test_no_response_dto_declares_a_secret_typed_field() -> None:
-    """A `SecretStr` on a *request* model is right (it is what keeps a
-    parsed credential out of a log line); on a response model it is a
-    credential on the wire that merely looks redacted in a traceback."""
+    """A `SecretStr` on a *request* model is right (it is what keeps a parsed credential out of.
+
+    a log line); on a response model it is a credential on the wire that merely looks
+    redacted in a traceback.
+    """
     for model in _response_models():
         for field_name, field in model.model_fields.items():
             annotations = (field.annotation, *get_args(field.annotation))

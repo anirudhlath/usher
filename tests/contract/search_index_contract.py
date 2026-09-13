@@ -38,9 +38,11 @@ def _document(
     vector: tuple[float, ...] | None = None,
     credits: tuple[str, ...] = (),
 ) -> SearchDocument:
-    """One synthetic document. Every name in this file is invented; nothing
-    here is a row from any third-party dataset (see
-    tests/unit/test_no_third_party_data.py)."""
+    """One synthetic document.
+
+    Every name in this file is invented; nothing here is a row from any third-party
+    dataset (see tests/unit/test_no_third_party_data.py).
+    """
     return SearchDocument(
         title_id=new_id(),
         kind=kind,
@@ -91,10 +93,11 @@ class SearchIndexContract:
         raise NotImplementedError
 
     async def index_all(self, index: SearchIndex, documents: Sequence[SearchDocument]) -> None:
-        """Every arrangement goes through here, so no case can forget the
-        hook. A case that indexed directly would pass against the fake and
-        fail against Postgres on a foreign key, which is a suite that only
-        runs in one place."""
+        """Every arrangement goes through here, so no case can forget the hook.
+
+        A case that indexed directly would pass against the fake and fail against
+        Postgres on a foreign key, which is a suite that only runs in one place.
+        """
         for document in documents:
             await self.given_title_row(document)
         await index.index_many(documents)
@@ -117,8 +120,9 @@ class SearchIndexContract:
     async def test_a_cast_match_ranks_below_a_name_match_and_above_an_overview_match(
         self, index: SearchIndex
     ) -> None:
-        """Weight class B, and **`test_a_name_match_outranks_an_overview_match` is not
-        enough to pin it.**
+        """Weight class B.
+
+        and **`test_a_name_match_outranks_an_overview_match` is not enough to pin it.**.
         """
         # **Creation order is the load-bearing half, and it is the id order rather than
         # the list order that matters** -- `_document` mints a UUIDv7 when it is
@@ -139,8 +143,9 @@ class SearchIndexContract:
         ]
 
     async def test_a_name_match_outranks_an_overview_match(self, index: SearchIndex) -> None:
-        """**The milestone's central retrieval claim**, and the one no membership assertion
-        can see.
+        """**The milestone's central retrieval claim**.
+
+        and the one no membership assertion can see.
         """
         mentioned = _document(
             "Harbour Lights",
@@ -160,7 +165,7 @@ class SearchIndexContract:
     async def test_a_title_named_exactly_the_query_leads_a_longer_document_repeating_it(
         self, index: SearchIndex
     ) -> None:
-        """**Issue #25, in the lane that decides it.**"""
+        """**Issue #25, in the lane that decides it.**."""
         essay = _document(
             "Vacuum for Realists (aka Reviewing Vacuum in Terms of One Cypher)",
             overview="A vacuum, reviewed at length, in a vacuum.",
@@ -187,8 +192,7 @@ class SearchIndexContract:
     async def test_only_the_title_named_exactly_the_query_is_flagged_as_an_exact_name(
         self, index: SearchIndex
     ) -> None:
-        """The flag the blend reads, and **the mutation that matters is the
-        generous one.**
+        """The flag the blend reads, and **the mutation that matters is the generous one.**.
 
         `SearchService._dense_ranks` groups by `(exact_name, score)`, so a flag
         set on every hit alike is indistinguishable from no flag at all -- the
@@ -216,10 +220,10 @@ class SearchIndexContract:
         assert flagged == {named.title_id}
 
     async def test_a_filter_the_backend_cannot_express_raises(self, index: SearchIndex) -> None:
-        """An implementation that silently ignores a filter it does not
-        understand and returns a **larger** result set -- which reads as
-        working, and is how a two-backend vocabulary drifts into two
-        meanings for the same word.
+        """An implementation that silently ignores a filter it does not understand and returns a.
+
+        **larger** result set -- which reads as working, and is how a two-backend
+        vocabulary drifts into two meanings for the same word.
 
         The first half runs everywhere and is what keeps this case from
         being a no-op against an implementation that expresses the whole
@@ -248,10 +252,11 @@ class SearchIndexContract:
     async def test_indexing_the_same_document_twice_is_one_document(
         self, index: SearchIndex
     ) -> None:
-        """A non-idempotent `index_many` that appends, so a redelivery
-        doubles every result. PRD 08 makes redelivery safe-by-construction a
-        rule *because* the job queue will redeliver -- `requeue_running`
-        exists precisely to hand a claimed job to a second worker.
+        """A non-idempotent `index_many` that appends, so a redelivery doubles every result.
+
+        PRD 08 makes redelivery safe-by-construction a rule *because* the job queue will
+        redeliver -- `requeue_running` exists precisely to hand a claimed job to a
+        second worker.
 
         Two seeded titles, not one: with a single row, "one hit" and "the
         implementation returned exactly one thing" are the same observation.
@@ -266,9 +271,10 @@ class SearchIndexContract:
         assert ranked.count(other.title_id) == 1
 
     async def test_a_removed_document_is_not_returned(self, index: SearchIndex) -> None:
-        """A `remove` that drops one half of a title's index state and leaves
-        the other, so a deleted title keeps appearing with a stale score --
-        which is why `remove` is one method rather than two.
+        """A `remove` that drops one half of a title's index state and leaves the other.
+
+        so a deleted title keeps appearing with a stale score -- which is why `remove`
+        is one method rather than two.
 
         **Which half is asserted depends on which half the backend owns**,
         and neither driver is let off. A document store owns both, so this
@@ -309,11 +315,13 @@ class SearchIndexContract:
     # --- semantic ----------------------------------------------------------
 
     async def test_semantic_search_uses_the_supplied_query_vector(self, index: SearchIndex) -> None:
-        """An implementation that re-embeds the query itself -- which is the
-        whole reason `query_vector` moved onto the request. A backend doing
-        its own embedding is a backend with its own model, its own prefix
-        convention (see `Embedder`'s -0.0663) and its own drift, and nothing
-        in the stale predicate can see any of it.
+        """An implementation that re-embeds the query itself.
+
+        which is the whole reason `query_vector` moved onto the request.
+
+        A backend doing its own embedding is a backend with its own model, its own
+        prefix convention (see `Embedder`'s -0.0663) and its own drift, and nothing in
+        the stale predicate can see any of it.
 
         **Two searches with the identical query string and opposite
         vectors.** An implementation that embedded the string cannot produce
@@ -342,10 +350,11 @@ class SearchIndexContract:
     async def test_a_title_with_no_vector_is_absent_from_semantic_results_not_last(
         self, index: SearchIndex
     ) -> None:
-        """The trap in point 3 of "the one thing this milestone must not get
-        wrong": an implementation that treats a missing vector as a **zero
-        vector**, which makes every unembedded title a mediocre match for
-        every query instead of a non-candidate.
+        """The trap in point 3 of "the one thing this milestone must not get wrong".
+
+        an implementation that treats a missing vector as a **zero vector**, which makes
+        every unembedded title a mediocre match for every query instead of a non-
+        candidate.
 
         Arranged so that failure is *first place*, not last. The query
         vector is orthogonal to the embedded title, so it scores 0.0 -- and
@@ -375,9 +384,10 @@ class SearchIndexContract:
     async def test_coverage_is_answerable_before_a_query_vector_exists(
         self, index: SearchIndex
     ) -> None:
-        """**The number `search` reports, askable without a search** -- which
-        is what makes it usable as a guard in front of the embed rather than
-        only as a report after it (issue #16).
+        """**The number `search` reports, askable without a search**.
+
+        which is what makes it usable as a guard in front of the embed rather than only
+        as a report after it (issue #16).
 
         Two claims, and the second is the one an implementation can get wrong
         while looking right. First, it takes **filters and no vector**: PRD
@@ -412,10 +422,11 @@ class SearchIndexContract:
     async def test_fusion_produces_an_order_neither_input_produced(
         self, index: SearchIndex
     ) -> None:
-        """An implementation whose `FUSED` mode returns one lane and ignores
-        the other -- indistinguishable from working unless the seeded lanes
-        disagree, which is why this case runs both lanes first and asserts
-        what each returns before fusing them.
+        """An implementation whose `FUSED` mode returns one lane and ignores the other.
+
+        indistinguishable from working unless the seeded lanes disagree, which is why
+        this case runs both lanes first and asserts what each returns before fusing
+        them.
 
         The winner is first in **neither** lane: `text` wins full-text and
         appears nowhere in the vector lane (it has no vector at all),
@@ -462,7 +473,7 @@ class SearchIndexContract:
     async def test_fusion_puts_an_exact_name_match_first_even_when_it_fuses_lower(
         self, index: SearchIndex
     ) -> None:
-        """**The exact-name key survives fusion, and RRF is exactly what would lose it.**"""
+        """**The exact-name key survives fusion, and RRF is exactly what would lose it.**."""
         if not self.supports_semantic:
             pytest.skip("this implementation cannot express a supplied query vector")
         named = _document("Vacuum", popularity=1.0)
@@ -490,8 +501,9 @@ class SearchIndexContract:
     async def test_fusion_does_not_add_scores_from_different_scales(
         self, index: SearchIndex
     ) -> None:
-        """Weighted score addition wearing RRF's name. ADR-0002: fuse by
-        rank, "never by adding scores from incompatible scales".
+        """Weighted score addition wearing RRF's name.
+
+        ADR-0002: fuse by rank, "never by adding scores from incompatible scales".
 
         Seeded so the two rules give **opposite** answers. `strong` is the
         vector lane's clear winner (cosine 1.0) and is not a text candidate

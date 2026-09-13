@@ -20,10 +20,10 @@ class TestEmbyAdapter(SourceAdapterContract):
 
 
 def test_both_implementations_run_the_same_assertions() -> None:
-    """A contract suite is only evidence if both subclasses actually run all
-    of it. Nothing stops a subclass from overriding a case with a weaker one
-    -- so this asserts neither does, and that the count is not silently
-    drifting as cases are added.
+    """A contract suite is only evidence if both subclasses actually run all of it.
+
+    Nothing stops a subclass from overriding a case with a weaker one -- so this asserts
+    neither does, and that the count is not silently drifting as cases are added.
 
     **The count has to move in the same commit as the cases**, or the suite
     stays red -- which is the design of this guard rather than friction with

@@ -22,8 +22,9 @@ def _title(**rest: Any) -> Title:
 
 
 def test_the_fingerprint_is_the_md5_of_the_text_that_gets_embedded() -> None:
-    """The milestone's central mechanism, asserted against the *string*
-    rather than against itself.
+    """The milestone's central mechanism.
+
+    asserted against the *string* rather than against itself.
 
     Fails: a fingerprint over anything but `document.text` -- `title.name`, a
     `model_dump()`, the text before a `strip()`, the parts before they were
@@ -44,9 +45,10 @@ def test_the_fingerprint_is_the_md5_of_the_text_that_gets_embedded() -> None:
 
 
 def test_two_titles_differing_only_in_overview_get_different_fingerprints() -> None:
-    """The half that makes re-enrichment re-index. An implementation
-    fingerprinting only identity fields passes the case above and fails this
-    one -- and in production it means a title enriched from a skeleton keeps
+    """The half that makes re-enrichment re-index.
+
+    An implementation fingerprinting only identity fields passes the case above and
+    fails this one -- and in production it means a title enriched from a skeleton keeps
     the skeleton's vector for good.
     """
     assert (
@@ -79,10 +81,11 @@ def test_a_whitespace_only_document_is_refused_and_still_carries_a_fingerprint()
 
 
 def test_a_refused_title_gets_a_new_fingerprint_the_moment_it_has_content() -> None:
-    """Convergence, asserted rather than hoped for. An implementation
-    fingerprinting every refusal to one constant (`md5("")`, a literal)
-    satisfies the case above, writes a row, and then never re-claims the
-    title however much enrichment gives it.
+    """Convergence, asserted rather than hoped for.
+
+    An implementation fingerprinting every refusal to one constant (`md5("")`, a
+    literal) satisfies the case above, writes a row, and then never re-claims the title
+    however much enrichment gives it.
     """
     refused = compose_document(_title(name=" ", sort_name=" ", year=None))
     repaired = compose_document(_title(overview="A caretaker counts the rooms."))
@@ -92,10 +95,10 @@ def test_a_refused_title_gets_a_new_fingerprint_the_moment_it_has_content() -> N
 
 
 def test_a_name_only_skeleton_is_not_degenerate() -> None:
-    """The threshold is about *empty*, not *thin*, and this is what stops it
-    drifting. Measured: unrelated name-only documents sit at 0.5867 pairwise
-    and a skeleton retrieves its own enriched form at 0.7638 against a 0.4751
-    cross-title mean.
+    """The threshold is about *empty*, not *thin*, and this is what stops it drifting.
+
+    Measured: unrelated name-only documents sit at 0.5867 pairwise and a skeleton
+    retrieves its own enriched form at 0.7638 against a 0.4751 cross-title mean.
 
     Fails: a minimum word count or minimum length -- the obvious
     "improvement" the first time someone reads the refusal. It also fails the
@@ -110,11 +113,12 @@ def test_a_name_only_skeleton_is_not_degenerate() -> None:
 
 
 def test_the_document_is_deterministic_and_ordered_by_the_provider() -> None:
-    """`genres` and `keywords` are tuples in a provider's order, not ours. An
-    implementation iterating a `set` produces a different string -- and a
-    different fingerprint -- per process, which is `PYTHONHASHSEED` making the
-    backfill never drain. Same family as the `hash()` trap the fake embedder
-    documents. Four elements, not two: a two-element `set` round-trips.
+    """`genres` and `keywords` are tuples in a provider's order, not ours.
+
+    An implementation iterating a `set` produces a different string -- and a different
+    fingerprint -- per process, which is `PYTHONHASHSEED` making the backfill never
+    drain. Same family as the `hash()` trap the fake embedder documents. Four elements,
+    not two: a two-element `set` round-trips.
     """
     keywords = ("house", "ledger", "attic", "inventory")
 
@@ -125,12 +129,13 @@ def test_the_document_is_deterministic_and_ordered_by_the_provider() -> None:
 
 
 def test_the_assembly_is_positional_so_a_missing_field_is_an_empty_segment() -> None:
-    """**The property that makes the Python composer and `_FINGERPRINT_SQL`
-    the same function.** The predicate is spelled with `coalesce(..., '')` on
-    every nullable field and no conditionals at all, so it emits seven
-    segments for every title in the catalog -- seven since M7 filled weight
-    class B, and the seventh is `credit_names`, which is empty for the great
-    majority of them and is an **empty segment** rather than an absent one.
+    """**The property that makes the Python composer and `_FINGERPRINT_SQL` the same function.**.
+
+    The predicate is spelled with `coalesce(..., '')` on every nullable field and no
+    conditionals at all, so it emits seven segments for every title in the catalog --
+    seven since M7 filled weight class B, and the seventh is `credit_names`, which is
+    empty for the great majority of them and is an **empty segment** rather than an
+    absent one.
 
     Fails: the obvious composer, which appends a section only when the field
     is populated. That one reads better, embeds slightly cleaner text, and
@@ -191,9 +196,10 @@ def test_the_year_is_not_in_the_document_because_the_predicate_has_no_year() -> 
 
 
 def test_array_fields_join_on_a_single_space_as_usher_array_text_does() -> None:
-    """`usher_array_text(text[])` is `array_to_string($1, ' ')`, and it is the
-    same wrapper the generated column uses -- one definition of "an array as
-    text" in this schema rather than two.
+    """`usher_array_text(text[])` is `array_to_string($1.
+
+    ' ')`, and it is the same wrapper the generated column uses -- one definition of "an
+    array as text" in this schema rather than two.
 
     Fails: `", ".join(...)`, which is the natural Python spelling and which
     produces a fingerprint the SQL predicate cannot reproduce for any title
@@ -207,8 +213,7 @@ def test_array_fields_join_on_a_single_space_as_usher_array_text_does() -> None:
 
 
 def test_the_credits_segment_sits_at_position_three_and_not_at_the_end() -> None:
-    """`test_credits_are_accepted_and_are_empty_in_m6` was deleted here, and
-    this replaced it.
+    """`test_credits_are_accepted_and_are_empty_in_m6` was deleted here, and this replaced it.
 
     That case existed *"to make visible"* the obligation that M7 move both
     spellings in one commit or neither, and the thing it was making visible
@@ -239,11 +244,13 @@ def test_the_credits_segment_sits_at_position_three_and_not_at_the_end() -> None
 
 
 def test_a_credit_moves_the_fingerprint() -> None:
-    """ADR-0020's scheme, at the field M7 added. A title that gains a cast
-    gains a different document, so it is re-embedded exactly once -- and a
-    composer that accepted `credits` and ignored them would leave weight class
-    B populated in the tsvector while the vector was computed without it, with
-    nothing to say so."""
+    """ADR-0020's scheme, at the field M7 added.
+
+    A title that gains a cast gains a different document, so it is re-embedded exactly
+    once -- and a composer that accepted `credits` and ignored them would leave weight
+    class B populated in the tsvector while the vector was computed without it, with
+    nothing to say so.
+    """
     assert (
         compose_document(_title(), credits=("Marlow Vance",)).fingerprint
         != compose_document(_title()).fingerprint

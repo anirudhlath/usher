@@ -1,4 +1,7 @@
-"""PRD 03 stage 3, against port fakes. No database, no network."""
+"""PRD 03 stage 3, against port fakes.
+
+No database, no network.
+"""
 
 import uuid
 from collections.abc import Sequence
@@ -117,11 +120,13 @@ async def test_enriching_promotes_a_skeleton_to_enriched(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
     """The case that actually catches `if new_state > title.enrichment_state`.
-    `EnrichmentState` is a `StrEnum`, so `"enriched" > "skeleton"` and
-    `"enriched" > "stub"` are **both** `False` -- a direct comparison does not
-    downgrade anything, it simply never promotes at all (ADR-0008). The plan's
-    own mutation table pointed this at a "never downgrades" case, which cannot
-    see it: `ENRICHED` is the top rung, so that case passes either way."""
+
+    `EnrichmentState` is a `StrEnum`, so `"enriched" > "skeleton"` and `"enriched" >
+    "stub"` are **both** `False` -- a direct comparison does not downgrade anything, it
+    simply never promotes at all (ADR-0008). The plan's own mutation table pointed this
+    at a "never downgrades" case, which cannot see it: `ENRICHED` is the top rung, so
+    that case passes either way.
+    """
     title = await _given(titles, state=EnrichmentState.SKELETON)
     await service.enrich(title.id)
     stored = await titles.get(title.id)
@@ -145,9 +150,11 @@ async def test_the_provider_fills_in_what_the_source_only_guessed_at(
 async def test_field_provenance_records_which_provider_supplied_what(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
-    """PRD 02: "so a second metadata provider can be added later without
-    ambiguity". The service merges the provider's own provenance rather than
-    replacing the stored map, so an earlier provider's claims survive."""
+    """PRD 02: "so a second metadata provider can be added later without ambiguity".
+
+    The service merges the provider's own provenance rather than replacing the stored
+    map, so an earlier provider's claims survive.
+    """
     title = await _given(
         titles, state=EnrichmentState.SKELETON, field_provenance={"imdb_id": "imdb"}
     )
@@ -161,10 +168,12 @@ async def test_field_provenance_records_which_provider_supplied_what(
 async def test_a_field_the_provider_did_not_supply_is_left_alone(
     service: EnrichService, titles: FakeTitleRepository, provider: FakeMetadataProvider
 ) -> None:
-    """A payload TMDb has not filled in must not blank what the source
-    already knew. This is the failure `test_enrichment_never_downgrades_a_tier`
-    is really about -- the tier is structurally safe because `ENRICHED` is the
-    top rung, and the *data* is what a partial payload can destroy."""
+    """A payload TMDb has not filled in must not blank what the source already knew.
+
+    This is the failure `test_enrichment_never_downgrades_a_tier` is really about -- the
+    tier is structurally safe because `ENRICHED` is the top rung, and the *data* is what
+    a partial payload can destroy.
+    """
     title = await _given(titles, state=EnrichmentState.STUB, overview="What the source said")
     provider.return_partial()
     await service.enrich(title.id)
@@ -177,11 +186,12 @@ async def test_a_field_the_provider_did_not_supply_is_left_alone(
 async def test_a_genre_the_provider_s_vocabulary_cannot_express_survives_enrichment(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
-    """**Issue #30's larger half, and it is measured rather than inferred.**
-    `genres` is in `_ENRICHABLE`, so a provider that supplies any genre at all
-    replaced the whole array -- and IMDb's `Biography`, `Film-Noir`,
-    `Game-Show`, `Musical`, `Short`, `Sport` and `Adult` have **no TMDb
-    equivalent in either id space**, so enrichment did not re-spell them, it
+    """**Issue #30's larger half.
+
+    and it is measured rather than inferred.** `genres` is in `_ENRICHABLE`, so a
+    provider that supplies any genre at all replaced the whole array -- and IMDb's
+    `Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`, `Sport` and `Adult` have
+    **no TMDb equivalent in either id space**, so enrichment did not re-spell them, it
     deleted them.
 
     Measured against the real `title.basics.tsv.gz` and the live catalog on
@@ -213,10 +223,13 @@ async def test_a_genre_the_provider_s_vocabulary_cannot_express_survives_enrichm
 async def test_a_provider_that_supplied_no_genre_at_all_still_blanks_nothing(
     service: EnrichService, titles: FakeTitleRepository, provider: FakeMetadataProvider
 ) -> None:
-    """The pre-existing rule this change must not disturb: `_changes` skips an
-    empty tuple, so a payload with no genres leaves every label alone --
-    including the ones TMDb *could* have expressed. 1,581 of the live
-    catalog's enriched titles are in exactly that state."""
+    """The pre-existing rule this change must not disturb.
+
+    `_changes` skips an empty tuple, so a payload with no genres leaves every label
+    alone -- including the ones TMDb *could* have expressed.
+
+    1,581 of the live catalog's enriched titles are in exactly that state.
+    """
     title = await _given(titles, state=EnrichmentState.SKELETON, genres=("Sci-Fi", "Biography"))
     provider.return_partial()
 
@@ -230,9 +243,11 @@ async def test_a_provider_that_supplied_no_genre_at_all_still_blanks_nothing(
 async def test_the_service_commits_what_it_wrote(
     service: EnrichService, titles: FakeTitleRepository, commits: list[int]
 ) -> None:
-    """`JobWorker` completes a job and commits *after* the handler returns, so
-    an uncommitted enrichment would be rolled back by the next failure in the
-    same session -- and the queue would report the work done."""
+    """`JobWorker` completes a job and commits *after* the handler returns.
+
+    so an uncommitted enrichment would be rolled back by the next failure in the same
+    session -- and the queue would report the work done.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
     assert commits
@@ -248,11 +263,11 @@ async def test_a_failed_enrichment_records_the_error_and_keeps_the_tier(
     provider: FakeMetadataProvider,
     tier: EnrichmentState,
 ) -> None:
-    """ADR-0008: "failure does not consume or reset a rung on the ladder". A
-    skeleton title whose enrichment failed is still a perfectly usable
-    skeleton -- genres, ratings and runtime did not stop being true because
-    the next attempt failed -- and a retry needs to know which tier it is
-    working from.
+    """ADR-0008: "failure does not consume or reset a rung on the ladder".
+
+    A skeleton title whose enrichment failed is still a perfectly usable skeleton --
+    genres, ratings and runtime did not stop being true because the next attempt failed
+    -- and a retry needs to know which tier it is working from.
 
     **Every tier, not just `SKELETON`.** Found by mutation: a failure handler
     that writes `enrichment_state=SKELETON` alongside the error is invisible
@@ -273,9 +288,11 @@ async def test_a_failed_enrichment_records_the_error_and_keeps_the_tier(
 async def test_a_failure_re_raises_so_the_worker_decides_backoff_or_park(
     service: EnrichService, titles: FakeTitleRepository, provider: FakeMetadataProvider
 ) -> None:
-    """Swallowing it would complete the job. `JobWorker` is the only thing
-    that knows `PortDataMalformed` parks immediately and everything else backs
-    off, and it learns which by catching the exception."""
+    """Swallowing it would complete the job.
+
+    `JobWorker` is the only thing that knows `PortDataMalformed` parks immediately and
+    everything else backs off, and it learns which by catching the exception.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     provider.fail_with(PortDataMalformed("TMDb has no entity at this reference"))
     with pytest.raises(PortDataMalformed):
@@ -288,9 +305,11 @@ async def test_a_failed_enrichment_is_committed_before_it_re_raises(
     provider: FakeMetadataProvider,
     commits: list[int],
 ) -> None:
-    """`JobWorker._fail` commits after `queue.fail`, but the session it
-    commits is the one this service left the error on -- so an uncommitted
-    error row is a job that parks with its reason recorded nowhere."""
+    """`JobWorker._fail` commits after `queue.fail`.
+
+    but the session it commits is the one this service left the error on -- so an
+    uncommitted error row is a job that parks with its reason recorded nowhere.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     provider.fail_with(PortUnavailable("TMDb is down"))
     with pytest.raises(PortUnavailable):
@@ -301,8 +320,10 @@ async def test_a_failed_enrichment_is_committed_before_it_re_raises(
 async def test_a_successful_enrichment_clears_a_previous_error(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
-    """A stale `enrichment_error` on an enriched title reads as "this is
-    broken" on every dashboard that renders it."""
+    """A stale `enrichment_error` on an enriched title reads as "this is broken" on every.
+
+    dashboard that renders it.
+    """
     title = await _given(titles, state=EnrichmentState.SKELETON, enrichment_error="TMDb is down")
     await service.enrich(title.id)
     stored = await titles.get(title.id)
@@ -322,7 +343,9 @@ async def test_a_title_with_no_provider_id_parks_rather_than_retrying(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
     """There is nothing to fetch and no amount of waiting changes that.
-    `PortDataMalformed` is what `JobWorker` parks on immediately."""
+
+    `PortDataMalformed` is what `JobWorker` parks on immediately.
+    """
     title = await _given(titles, state=EnrichmentState.SKELETON, tmdb_id=None)
     with pytest.raises(PortDataMalformed):
         await service.enrich(title.id)
@@ -331,8 +354,10 @@ async def test_a_title_with_no_provider_id_parks_rather_than_retrying(
 async def test_a_title_with_no_provider_id_still_records_why(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
-    """Otherwise the only evidence is a parked job, and PRD 02's enrichment
-    dashboard reads `enrichment_error`, not the queue."""
+    """Otherwise the only evidence is a parked job.
+
+    and PRD 02's enrichment dashboard reads `enrichment_error`, not the queue.
+    """
     title = await _given(titles, state=EnrichmentState.SKELETON, tmdb_id=None)
     with pytest.raises(PortDataMalformed):
         await service.enrich(title.id)
@@ -348,9 +373,12 @@ async def test_a_title_with_no_provider_id_still_records_why(
 async def test_the_provider_payload_is_cached_verbatim(
     service: EnrichService, titles: FakeTitleRepository, payloads: FakeRawPayloadStore
 ) -> None:
-    """What makes deferring Person/Credit/Collection/Image to M7 and M9
-    honest: they re-derive from this without a second network call. PRD 02's
-    stated purpose for `raw_payloads`, and ADR-0016."""
+    """What makes deferring Person/Credit/Collection/Image to M7 and M9 honest.
+
+    they re-derive from this without a second network call.
+
+    PRD 02's stated purpose for `raw_payloads`, and ADR-0016.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
     cached = await payloads.get("tmdb", "movie", "90000550")
@@ -361,9 +389,11 @@ async def test_the_provider_payload_is_cached_verbatim(
 async def test_the_cache_key_names_the_id_space(
     service: EnrichService, titles: FakeTitleRepository, payloads: FakeRawPayloadStore
 ) -> None:
-    """ADR-0011 in the cache: TMDb's movie and series id spaces overlap on
-    26,968 ids, so a key of `(provider, reference)` alone would serve a
-    series the film's cached payload."""
+    """ADR-0011 in the cache.
+
+    TMDb's movie and series id spaces overlap on 26,968 ids, so a key of `(provider,
+    reference)` alone would serve a series the film's cached payload.
+    """
     movie = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(movie.id)
     assert await payloads.get("tmdb", "movie", "90000550") is not None
@@ -375,9 +405,11 @@ async def test_a_cached_payload_within_the_ceiling_is_not_refetched(
     titles: FakeTitleRepository,
     provider: FakeMetadataProvider,
 ) -> None:
-    """TMDb's caching term is a *ceiling*, not a target. Refetching every
-    title on every enrichment attempt is what turns a retry storm into a rate
-    limit."""
+    """TMDb's caching term is a *ceiling*, not a target.
+
+    Refetching every title on every enrichment attempt is what turns a retry storm into
+    a rate limit.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
     provider.reset_calls()
@@ -391,9 +423,11 @@ async def test_a_payload_older_than_the_ceiling_is_refetched(
     payloads: FakeRawPayloadStore,
     provider: FakeMetadataProvider,
 ) -> None:
-    """The other half. A cache with no expiry is a catalog that never learns
-    a film got a sequel, and TMDb's terms cap re-fetching at six months
-    rather than forbidding it."""
+    """The other half.
+
+    A cache with no expiry is a catalog that never learns a film got a sequel, and
+    TMDb's terms cap re-fetching at six months rather than forbidding it.
+    """
 
     async def commit() -> None:
         return None
@@ -432,13 +466,14 @@ async def test_a_series_gets_its_seasons_and_episodes(
 async def test_every_episode_lands_on_the_season_row_the_store_actually_holds(
     service: EnrichService, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The defect no port fake can see on its own, and the reason this is
-    asserted directly. The mapper mints a fresh UUIDv7 per `Season`; a season
-    the catalog already holds keeps the id it was inserted with, so an
-    episode carrying the *minted* id names no row and fails on
-    `fk_episodes_season_id_seasons` -- on the **second** enrichment, not the
-    first. `IngestService._ensure_seasons` re-reads for exactly this reason
-    and the plan's Task 22 does not mention it."""
+    """The defect no port fake can see on its own, and the reason this is asserted directly.
+
+    The mapper mints a fresh UUIDv7 per `Season`; a season the catalog already holds
+    keeps the id it was inserted with, so an episode carrying the *minted* id names no
+    row and fails on `fk_episodes_season_id_seasons` -- on the **second** enrichment,
+    not the first. `IngestService._ensure_seasons` re-reads for exactly this reason and
+    the plan's Task 22 does not mention it.
+    """
     title = await _given(
         titles, state=EnrichmentState.STUB, kind=TitleKind.SERIES, tmdb_id=_SERIES_TMDB_ID
     )
@@ -453,11 +488,14 @@ async def test_every_episode_lands_on_the_season_row_the_store_actually_holds(
 async def test_enriching_a_series_does_not_blank_an_episode_a_source_named(
     service: EnrichService, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Ingest creates an episode from the source's own numbers and name;
-    enrichment fills the rest. Neither may blank the other's fields -- and
-    the nightly walk runs after every enrichment, so the failure is a daily
-    one. `upsert_episodes` owns the rule; this is the case that would notice
-    if enrichment stopped relying on it."""
+    """Ingest creates an episode from the source's own numbers and name.
+
+    enrichment fills the rest.
+
+    Neither may blank the other's fields -- and the nightly walk runs after every
+    enrichment, so the failure is a daily one. `upsert_episodes` owns the rule; this is
+    the case that would notice if enrichment stopped relying on it.
+    """
     from usher.domain.episode import Episode, Season
 
     title = await _given(
@@ -487,9 +525,11 @@ async def test_enriching_a_series_does_not_blank_an_episode_a_source_named(
 async def test_a_movie_writes_no_seasons_or_episodes(
     service: EnrichService, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Not a tautology: the guard being absent means two round trips per
-    movie against 94,438 of them, plus an `upsert_seasons([])` statement per
-    title on a catalog that is two thirds films."""
+    """Not a tautology.
+
+    the guard being absent means two round trips per movie against 94,438 of them, plus
+    an `upsert_seasons([])` statement per title on a catalog that is two thirds films.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     episodes.reset_calls()
     await service.enrich(title.id)
@@ -502,9 +542,10 @@ async def test_a_movie_writes_no_seasons_or_episodes(
 async def test_a_successful_enrichment_publishes_title_updated(
     service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
 ) -> None:
-    """PRD 03's read-through loop, closed: "Completion publishes a
-    `title.updated` event on a Server-Sent Events channel; clients patch in
-    place. No polling on either side of the system."
+    """PRD 03's read-through loop, closed.
+
+    "Completion publishes a `title.updated` event on a Server-Sent Events
+    channel; clients patch in place. No polling on either side of the system."
     """
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
@@ -519,10 +560,11 @@ async def test_a_failed_enrichment_publishes_nothing(
     provider: FakeMetadataProvider,
     events: FakeEventPublisher,
 ) -> None:
-    """A failure records `enrichment_error` and leaves the tier exactly where
-    it was (ADR-0008). Telling a client "this changed" would make it refetch
-    an identical stub, and it would do so on every attempt of a backoff
-    schedule."""
+    """A failure records `enrichment_error` and leaves the tier exactly where it was (ADR-0008).
+
+    Telling a client "this changed" would make it refetch an identical stub, and it
+    would do so on every attempt of a backoff schedule.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     provider.fail_with(PortUnavailable("TMDb is down"))
     with pytest.raises(PortUnavailable):
@@ -572,10 +614,13 @@ async def test_a_successful_enrichment_drops_the_cached_rows_holding_the_title(
     events: FakeEventPublisher,
     queue: FakeJobQueue,
 ) -> None:
-    """`title.updated` is a statement to a *client*, and the console's own
-    handler is colour-only by design -- patterns.md §7, "it does not refetch".
-    So the frame cannot be what repairs a shelf built before the artwork
-    landed; the cache this process serves from has to be told as well.
+    """`title.updated` is a statement to a *client*.
+
+    and the console's own handler is colour-only by design -- patterns.md §7, "it does
+    not refetch".
+
+    So the frame cannot be what repairs a shelf built before the artwork landed; the
+    cache this process serves from has to be told as well.
     """
     title = await _given(titles, state=EnrichmentState.SKELETON)
     cache, user_id = _cache_holding(title)
@@ -604,11 +649,15 @@ async def test_a_failed_enrichment_drops_no_cached_row(
     events: FakeEventPublisher,
     queue: FakeJobQueue,
 ) -> None:
-    """ADR-0008: a failure leaves the tier exactly where it was, so nothing on
-    the card moved and the shelf is still correct. Dropping it would make a
-    provider outage a cache flush on every attempt of a backoff schedule --
-    the same argument `test_a_failed_enrichment_publishes_nothing` makes about
-    the frame, one collaborator over."""
+    """ADR-0008.
+
+    a failure leaves the tier exactly where it was, so nothing on the card moved and the
+    shelf is still correct.
+
+    Dropping it would make a provider outage a cache flush on every attempt of a backoff
+    schedule -- the same argument `test_a_failed_enrichment_publishes_nothing` makes
+    about the frame, one collaborator over.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     cache, user_id = _cache_holding(title)
     provider.fail_with(PortUnavailable("TMDb is down"))
@@ -629,11 +678,14 @@ async def test_a_failed_enrichment_drops_no_cached_row(
 async def test_a_composition_root_that_serves_no_screens_passes_no_cache(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
-    """`None` is `usher work` and `usher sync` -- composition roots that
-    compose no screens, on `build_push_applier`'s recorded terms: a service
-    holding a cache nobody serves from would invalidate a dict with no reader.
-    The `service` fixture is built without one, so this asserts the default
-    arm enriches rather than raising on an absent collaborator."""
+    """`None` is `usher work` and `usher sync`.
+
+    composition roots that compose no screens, on `build_push_applier`'s recorded terms:
+    a service holding a cache nobody serves from would invalidate a dict with no reader.
+
+    The `service` fixture is built without one, so this asserts the default arm enriches
+    rather than raising on an absent collaborator.
+    """
     title = await _given(titles, state=EnrichmentState.SKELETON)
 
     await service.enrich(title.id)
@@ -644,10 +696,12 @@ async def test_a_composition_root_that_serves_no_screens_passes_no_cache(
 async def test_the_published_event_names_the_fields_that_changed(
     service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
 ) -> None:
-    """PRD 07: "`title.updated` | Title id + changed fields | Patch in
-    place." A client that had to refetch the whole title to find out what
-    moved is a client polling, one request later -- so `["*"]` is the answer
-    this case exists to reject."""
+    """PRD 07.
+
+    "`title.updated` | Title id + changed fields | Patch in place." A client that had to
+    refetch the whole title to find out what moved is a client polling, one request
+    later -- so `["*"]` is the answer this case exists to reject.
+    """
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
     fields = events.published[0].data["fields"]
@@ -663,7 +717,7 @@ async def test_the_published_event_names_the_fields_that_changed(
 async def test_no_domain_only_field_name_reaches_the_wire(
     service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
 ) -> None:
-    """**The case ADR-0040's rename needed and this file did not have.**
+    """**The case ADR-0040's rename needed and this file did not have.**.
 
     `title.updated`'s payload is the one place in the system where a field
     *name* travels as data rather than as a key, so no DTO, no response model
@@ -703,9 +757,10 @@ async def test_no_domain_only_field_name_reaches_the_wire(
 async def test_a_title_that_does_not_exist_publishes_nothing(
     service: EnrichService, events: FakeEventPublisher
 ) -> None:
-    """The one failure that happens *before* a `Title` is loaded, so it
-    cannot even name an id. Parked rather than retried (`PortDataMalformed`),
-    and silent."""
+    """The one failure that happens *before* a `Title` is loaded, so it cannot even name an id.
+
+    Parked rather than retried (`PortDataMalformed`), and silent.
+    """
     with pytest.raises(PortDataMalformed):
         await service.enrich(uuid.uuid4())
     assert events.published == []
@@ -717,9 +772,10 @@ async def test_the_event_is_published_after_the_commit(
     payloads: FakeRawPayloadStore,
     provider: FakeMetadataProvider,
 ) -> None:
-    """A client patches by refetching the fields the event names, so a
-    publish that preceded the commit races it to a row this transaction has
-    not written.
+    """A client patches by refetching the fields the event names.
+
+    so a publish that preceded the commit races it to a row this transaction has not
+    written.
 
     Asserted as an *order*, not as a read, and the difference is worth
     stating: a port fake has no transaction, so the data consequence is
@@ -788,8 +844,7 @@ async def test_a_finished_enrichment_enqueues_one_index_job(
 async def test_enrichment_enqueues_index_and_derive_in_one_call(
     titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
 ) -> None:
-    """Two requests, **one call**, and the call count is the assertion that
-    matters.
+    """Two requests, **one call**, and the call count is the assertion that matters.
 
     `JobQueue.enqueue` is a staged write -- a temp DDL, a COPY and one
     `INSERT ... SELECT ... ON CONFLICT` -- so a second `await
@@ -827,10 +882,11 @@ async def test_a_demand_enrichment_carries_its_follow_ups_to_its_own_rung(
     queue: FakeJobQueue,
     rung: JobPriority,
 ) -> None:
-    """`DERIVE` is what writes `images`, so a title a client is looking at
-    right now gets its text promptly and its artwork whenever the background
-    sweep reaches it -- which on this catalog was **130,653 enriched titles
-    carrying no image row at all** (measured 2026-08-26).
+    """`DERIVE` is what writes `images`.
+
+    so a title a client is looking at right now gets its text promptly and its artwork
+    whenever the background sweep reaches it -- which on this catalog was **130,653
+    enriched titles carrying no image row at all** (measured 2026-08-26).
 
     Parametrised over both demand rungs rather than `DEMAND` alone: they reach
     the enqueue through one expression, and a spelling that hard-codes
@@ -852,8 +908,9 @@ async def test_a_demand_enrichment_carries_its_follow_ups_to_its_own_rung(
 async def test_an_ingested_titles_follow_ups_stay_at_backfill(
     titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
 ) -> None:
-    """**The regression guard on the rung above, and the reason inheritance is
-    clamped rather than plain.**
+    """**The regression guard on the rung above.
+
+    and the reason inheritance is clamped rather than plain.**.
 
     `IngestService` enqueues every newly seen title's `enrich` at
     `JobPriority.NEW` (`services/ingest.py:298`), so an unclamped
@@ -876,11 +933,13 @@ async def test_an_ingested_titles_follow_ups_stay_at_backfill(
 async def test_the_index_job_is_enqueued_at_backfill_priority(
     titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
 ) -> None:
-    """Nothing a client renders depends on a search document, so this must
-    never sit in front of a `match` or a demand-promoted `enrich`. It is also
-    the priority the sweep uses, and `enqueue`'s `WHERE jobs.priority <
-    excluded.priority` is why that matters: at the same priority the second
-    producer writes nothing rather than rewriting the row.
+    """Nothing a client renders depends on a search document.
+
+    so this must never sit in front of a `match` or a demand-promoted `enrich`.
+
+    It is also the priority the sweep uses, and `enqueue`'s `WHERE jobs.priority <
+    excluded.priority` is why that matters: at the same priority the second producer
+    writes nothing rather than rewriting the row.
 
     Fails: the `JobRequest` default (`JobPriority.NEW`), which on a first walk
     puts one background job per enriched title ahead of every match.
@@ -902,11 +961,14 @@ async def test_a_failed_enrichment_enqueues_nothing(
     queue: FakeJobQueue,
     state: EnrichmentState,
 ) -> None:
-    """ADR-0008: a failed attempt records `enrichment_error` and leaves the
-    tier exactly where it was. The text did not change, so the fingerprint did
-    not change, so the job would find the row already current and complete
-    without embedding -- one claim and one staging round trip per attempt of a
-    backoff schedule.
+    """ADR-0008.
+
+    a failed attempt records `enrichment_error` and leaves the tier exactly where it
+    was.
+
+    The text did not change, so the fingerprint did not change, so the job would find
+    the row already current and complete without embedding -- one claim and one staging
+    round trip per attempt of a backoff schedule.
 
     Parametrised over all three rungs, for the reason this file already
     parametrises its failure cases: a handler that reset the tier is invisible
@@ -966,11 +1028,11 @@ async def test_the_enqueue_happens_after_the_commit(
 async def test_enrichment_publishes_no_second_event_for_the_index(
     titles: FakeTitleRepository, service: EnrichService, events: FakeEventPublisher
 ) -> None:
-    """Boundary call 5, pinned rather than left to a comment. PRD 09 asks M6
-    to publish `title.updated` "rather than inventing a channel", and it is
-    published three lines up already. A second one would be an event with no
-    consumer, which `ports/events.py` calls out by name: "no member nothing
-    emits".
+    """Boundary call 5, pinned rather than left to a comment.
+
+    PRD 09 asks M6 to publish `title.updated` "rather than inventing a channel", and it
+    is published three lines up already. A second one would be an event with no
+    consumer, which `ports/events.py` calls out by name: "no member nothing emits".
 
     This case exists because the obvious "improvement" is to add one, and it
     would look like satisfying the roadmap.

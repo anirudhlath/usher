@@ -55,7 +55,10 @@ class IngestService:
     async def ingest_batch(
         self, source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
     ) -> IngestResult:
-        """Match, store, attach episodes, enqueue follow-up work. Idempotent."""
+        """Match, store, attach episodes, enqueue follow-up work.
+
+        Idempotent.
+        """
         with _tracer.start_as_current_span("ingest.item") as span:
             span.set_attribute("usher.source_id", str(source_id))
             span.set_attribute("usher.batch.items", len(items))
@@ -95,8 +98,9 @@ class IngestService:
         items: Sequence[SourceItem],
         outcomes: dict[str, MatchOutcome],
     ) -> dict[str, MatchOutcome]:
-        """Resolve each episode item's series, create its season and episode
-        rows, and rewrite its outcome to carry both ids.
+        """Resolve each episode item's series.
+
+        create its season and episode rows, and rewrite its outcome to carry both ids.
 
         Four writes and one read for the whole batch, never per episode. The
         per-episode spelling reads more clearly and is a scale defect: at

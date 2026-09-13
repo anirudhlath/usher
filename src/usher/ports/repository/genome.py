@@ -20,8 +20,10 @@ class GenomeVectorRow:
 
 
 class GenomeRepository(ABC):
-    """Read access to the stored MovieLens tag genome — the per-title vectors
-    (`genome_scores`) and the vocabulary that names their lanes (`genome_tags`).
+    """Read access to the stored MovieLens tag genome.
+
+    the per-title vectors (`genome_scores`) and the vocabulary that names their lanes
+    (`genome_tags`).
     """
 
     @abstractmethod
@@ -42,8 +44,10 @@ class GenomeRepository(ABC):
     async def get_pair(
         self, left: uuid.UUID, right: uuid.UUID
     ) -> tuple[GenomeVectorRow, GenomeVectorRow] | None:
-        """Both vectors, or `None` if either is missing **or if the two were
-        computed from different releases**.
+        """Both vectors.
+
+        or `None` if either is missing **or if the two were computed from different
+        releases**.
 
         The second half is what `genome_revision` exists for: a vector is
         only comparable to another built from the same 1,128 tags in the same
@@ -62,6 +66,8 @@ class GenomeRepository(ABC):
 
     @abstractmethod
     async def vocabulary(self, revision: str) -> tuple[str, ...] | None:
-        """The tag names in lane order for `revision` — `result[i]` names
-        `GenomeVectorRow.relevance[i]` — or `None` if no vocabulary is stored at all.
+        """The tag names in lane order for `revision`.
+
+        `result[i]` names `GenomeVectorRow.relevance[i]` — or `None` if no vocabulary is
+        stored at all.
         """

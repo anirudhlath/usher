@@ -38,8 +38,10 @@ class TestLiveLLMClient(LLMClientContract):
 
 
 async def test_the_endpoint_was_really_reached() -> None:
-    """The control, without which every case above could be satisfied by a
-    client that answered from a cache.
+    """The control.
+
+    without which every case above could be satisfied by a client that answered from a
+    cache.
 
     A non-zero `tokens_in` cannot be produced by a misconfigured base URL, by
     a fake, or by a skipped run — and a skipped run does not reach here at

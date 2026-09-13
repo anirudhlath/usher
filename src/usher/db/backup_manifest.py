@@ -102,8 +102,9 @@ class BackupEntry:
 
     @property
     def rebuild_commands(self) -> tuple[str, ...]:
-        """`rebuilt_by` split into its steps, in run order; empty when there
-        is no rebuild command, which is every class but `REBUILDABLE`.
+        """`rebuilt_by` split into its steps, in run order.
+
+        empty when there is no rebuild command, which is every class but `REBUILDABLE`.
         """
         return tuple(step for step in self.rebuilt_by.split(REBUILD_STEP) if step.strip())
 

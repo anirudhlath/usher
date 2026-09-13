@@ -1,4 +1,7 @@
-"""How much of a source Usher would retract if it swept right now. One request."""
+"""How much of a source Usher would retract if it swept right now.
+
+One request.
+"""
 
 from __future__ import annotations
 
@@ -68,7 +71,9 @@ class Drift:
 
 
 async def live_total(session: object, user_id: str) -> int:
-    """`TotalRecordCount` for the scope the adapter walks. **One request.**
+    """`TotalRecordCount` for the scope the adapter walks.
+
+    **One request.**
 
     The same `Recursive`/`IncludeItemTypes` the walk sends, so the denominator
     is the population the sweep is actually about -- and `Limit=1` with

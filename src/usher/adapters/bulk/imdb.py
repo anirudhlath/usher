@@ -56,8 +56,11 @@ AKAS_NAME_MAX_CHARS = SEARCH_NAME_MAX_CHARS
 
 
 def _optional(value: str) -> str | None:
-    r"""IMDb's own null sentinel. `\N` is the documented marker; an empty
-    field is treated the same way because a trailing tab produces one."""
+    r"""IMDb's own null sentinel.
+
+    `\N` is the documented marker; an empty field is treated the same way
+    because a trailing tab produces one.
+    """
     return None if value in (r"\N", "") else value
 
 
@@ -360,8 +363,9 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
         """Parse one line, or return None for a header or filtered row."""
 
     def group_of(self, row: RowT) -> str | None:
-        """The id whose rows must reach one writer call together, or `None` when any batch
-        boundary is safe.
+        """The id whose rows must reach one writer call together.
+
+        or `None` when any batch boundary is safe.
         """
         return None
 
@@ -467,8 +471,7 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
         return None
 
     def local_lines(self, *, skip: int = 0) -> Iterator[str]:
-        """Escape hatch for tests and diagnostics: iterate the cached file
-        with no HTTP at all."""
+        """Escape hatch for tests and diagnostics: iterate the cached file with no HTTP at all."""
         return self._file.lines(skip=skip)
 
 

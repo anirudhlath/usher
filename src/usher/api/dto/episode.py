@@ -1,5 +1,6 @@
-"""The series hierarchy on the wire (PRD 07): `GET /series/{id}/seasons`, `GET
-/seasons/{id}/episodes` and `GET /episodes/{id}`.
+"""The series hierarchy on the wire (PRD 07).
+
+`GET /series/{id}/seasons`, `GET /seasons/{id}/episodes` and `GET /episodes/{id}`.
 """
 
 import uuid

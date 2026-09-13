@@ -1,4 +1,7 @@
-"""Wikidata SPARQL -> `IdCrosswalkPair`. CC0, and no download."""
+"""Wikidata SPARQL -> `IdCrosswalkPair`.
+
+CC0, and no download.
+"""
 
 import datetime as dt
 import re

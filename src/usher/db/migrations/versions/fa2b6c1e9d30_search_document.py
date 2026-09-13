@@ -1,4 +1,4 @@
-"""the search document: extensions, an immutable wrapper, a generated column"""
+"""The search document: extensions, an immutable wrapper, a generated column."""
 
 from collections.abc import Sequence
 

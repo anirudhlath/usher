@@ -17,7 +17,9 @@ __all__ = [
 
 
 class SyncRunRepository(ABC):
-    """Per-source sync history. Flushes, never commits.
+    """Per-source sync history.
+
+    Flushes, never commits.
 
     One row per attempt, not one per source -- contrast `ImportRunRepository`,
     which is a checkpoint updated in place. PRD 10's dashboard 3 plots run
@@ -34,11 +36,17 @@ class SyncRunRepository(ABC):
 
     @abstractmethod
     async def add(self, run: SyncRun) -> None:
-        """Insert. A duplicate id raises `RepositoryConflict`."""
+        """Insert.
+
+        A duplicate id raises `RepositoryConflict`.
+        """
 
     @abstractmethod
     async def save(self, run: SyncRun) -> None:
-        """Update an existing run. An unknown id raises `RepositoryNotFound`."""
+        """Update an existing run.
+
+        An unknown id raises `RepositoryNotFound`.
+        """
 
     @abstractmethod
     async def get(self, run_id: uuid.UUID) -> SyncRun | None:
@@ -48,8 +56,7 @@ class SyncRunRepository(ABC):
     async def latest_completed_cursor(
         self, source_id: uuid.UUID, kind: SyncRunKind
     ) -> AwareDatetime | None:
-        """`started_at` of the newest run of this kind that **completed**, or
-        `None` if none has.
+        """`started_at` of the newest run of this kind that **completed**, or `None` if none has.
 
         Deliberately not "the newest run": a delta walk resuming from a run
         that failed halfway would skip everything that run never reached, and
@@ -66,9 +73,11 @@ class SyncRunRepository(ABC):
     async def latest_incomplete_run(
         self, source_id: uuid.UUID, kind: SyncRunKind
     ) -> SyncRun | None:
-        """The newest run of this kind, **iff it did not complete** -- the
-        walk a resumed run continues. `None` when the newest one completed,
-        and when there is none at all.
+        """The newest run of this kind, **iff it did not complete**.
+
+        the walk a resumed run continues.
+
+        `None` when the newest one completed, and when there is none at all.
 
         **"The newest, and only if it is not completed", never "the newest
         one that is not completed."** The second spelling hands back an old
@@ -82,9 +91,11 @@ class SyncRunRepository(ABC):
 
     @abstractmethod
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
-        """Newest first, with `id` as a tiebreak so paging is stable. PRD 10's
-        dashboard 3 ("sync run outcomes and duration") and the CLI's
-        `sync-status`."""
+        """Newest first, with `id` as a tiebreak so paging is stable.
+
+        PRD 10's dashboard 3 ("sync run outcomes and duration") and the CLI's `sync-
+        status`.
+        """
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,9 +172,13 @@ class RawPayloadStore(ABC):
 
     @abstractmethod
     async def oldest_fetched_at(self, provider: str) -> AwareDatetime | None:
-        """The compliance query: the oldest cache entry for a provider, which
-        is what PRD 10's dashboard-5 panel plots against TMDb's 6-month
-        ceiling. `None` when the provider has no entries at all."""
+        """The compliance query.
+
+        the oldest cache entry for a provider, which is what PRD 10's dashboard-5 panel
+        plots against TMDb's 6-month ceiling.
+
+        `None` when the provider has no entries at all.
+        """
 
     @abstractmethod
     async def count(self, provider: str) -> int:

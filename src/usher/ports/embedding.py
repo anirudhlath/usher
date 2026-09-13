@@ -5,7 +5,10 @@ from collections.abc import Sequence
 
 
 class Embedder(ABC):
-    """Turns text into vectors. Implementations are expected to batch."""
+    """Turns text into vectors.
+
+    Implementations are expected to batch.
+    """
 
     @property
     @abstractmethod
@@ -40,4 +43,7 @@ class Embedder(ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Release held resources (e.g. a GPU-resident model)."""
+        """Release held resources (e.g.
+
+        a GPU-resident model).
+        """

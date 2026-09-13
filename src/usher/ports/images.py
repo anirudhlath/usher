@@ -53,16 +53,15 @@ UNSERVABLE_PATH_SUFFIXES: frozenset[str] = frozenset({".svg"})
 
 
 def is_servable_path(provider_path: str) -> bool:
-    """Whether `GET /images/{id}` can ever answer for an image stored at this provider
-    path.
-    """
+    """Whether `GET /images/{id}` can ever answer for an image stored at this provider path."""
     return not provider_path.lower().endswith(tuple(UNSERVABLE_PATH_SUFFIXES))
 
 
 def clamp_to_ladder(width: int | None) -> int:
-    """The rung a requested width is served at: the smallest rung at or above
-    it, the top rung for anything larger, and `DEFAULT_IMAGE_WIDTH` for
-    `None`.
+    """The rung a requested width is served at.
+
+    the smallest rung at or above it, the top rung for anything larger, and
+    `DEFAULT_IMAGE_WIDTH` for `None`.
 
     **Up, and ADR-0032 states the cost rather than implying it.** A client
     asking for 512 px gets `w780`, which is 2.0-2.2x the bytes an exact `w500`
@@ -152,8 +151,7 @@ class ImageCacheKey:
     width: int
 
     def digest(self) -> str:
-        """The `sha256` an on-disk name is derived from — **never** anything a
-        client sent.
+        """The `sha256` an on-disk name is derived from — **never** anything a client sent.
 
         `?w=` reaches this through `clamp_to_ladder`, so the only widths that
         can appear are four integers written in `src/`; `provider` and
@@ -188,8 +186,11 @@ class FetchedImage:
 
 @dataclass(frozen=True, slots=True)
 class StoredImage:
-    """A cache entry, read back. `data` is whole because the ceiling bounds it
-    and because C5 needs an ETag over the served bytes."""
+    """A cache entry, read back.
+
+    `data` is whole because the ceiling bounds it and because C5 needs an ETag over the
+    served bytes.
+    """
 
     content_type: str
     data: bytes

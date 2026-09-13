@@ -69,8 +69,9 @@ class StoredEmbedding:
 
 @dataclass(frozen=True, slots=True)
 class NeighborSeed:
-    """One embedded title, carrying the tag sets the blend needs — so a page
-    read answers the seed half in one statement rather than ids here plus a
+    """One embedded title, carrying the tag sets the blend needs.
+
+    so a page read answers the seed half in one statement rather than ids here plus a
     second `list_by_ids` pulling 31 columns per row for two of them.
 
     **`has_genome` is not read by the blend**, and that is deliberate rather
@@ -124,8 +125,7 @@ class ScoredNeighbor:
 
 
 class TitleEmbeddingRepository(ABC):
-    """Persistence for the semantic half, and the home of the one predicate
-    three consumers share.
+    """Persistence for the semantic half, and the predicate three consumers share.
 
     Unlike the search document — a stored generated column PostgreSQL keeps
     correct inside every write of its inputs — an embedding needs a model,
@@ -207,8 +207,9 @@ class TitleEmbeddingRepository(ABC):
 
     @abstractmethod
     async def count_refused(self, model_name: str) -> int:
-        """How many titles are current *and* have no vector — the composer
-        refused their document as degenerate.
+        """How many titles are current *and* have no vector.
+
+        the composer refused their document as degenerate.
 
         **This must not overlap `count_stale`.** Spelled as a bare
         `embedding IS NULL` it would also count rows refused under an older
@@ -331,6 +332,8 @@ class TitleNeighborRepository(ABC):
 
     @abstractmethod
     async def resume_cursor(self, *, blend_fingerprint: str) -> uuid.UUID | None:
-        """Where an interrupted rebuild should pick its keyset walk back up — the `after` a
-        resumed `list_embedded` starts from, or `None` for *"start at the beginning"*.
+        """Where an interrupted rebuild should pick its keyset walk back up.
+
+        the `after` a resumed `list_embedded` starts from, or `None` for *"start at the
+        beginning"*.
         """

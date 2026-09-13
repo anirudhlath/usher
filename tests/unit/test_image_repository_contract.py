@@ -1,4 +1,7 @@
-"""The image contract against the in-memory double. No Docker."""
+"""The image contract against the in-memory double.
+
+No Docker.
+"""
 
 import uuid
 
@@ -44,11 +47,12 @@ class TestFakeImageRepository(ImageRepositoryContract):
 
 
 async def test_a_whole_shelf_costs_one_statement() -> None:
-    """**Counted, not timed.** The port's promise is one statement per shelf
-    whatever the shelf's length, and it is the whole reason
-    `primary_for_titles` takes a sequence: a shelf is up to thirty cards and
-    `GET /home` composes ten of them, so the per-card shape is three hundred
-    round trips a screen.
+    """**Counted.
+
+    not timed.** The port's promise is one statement per shelf whatever the shelf's
+    length, and it is the whole reason `primary_for_titles` takes a sequence: a shelf is
+    up to thirty cards and `GET /home` composes ten of them, so the per-card shape is
+    three hundred round trips a screen.
 
     A timing assertion here would measure a Python dict —
     `rows-and-genome.md`'s four-reads finding — so the fake counts its own

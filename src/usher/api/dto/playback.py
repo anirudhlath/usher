@@ -50,7 +50,10 @@ class PlayTargetResponse(BaseModel):
 
     @classmethod
     def of(cls, resolved: PlaybackTarget) -> Self:
-        """Field by field, deliberately. See the module docstring."""
+        """Field by field, deliberately.
+
+        See the module docstring.
+        """
         target = resolved.target
         return cls(
             kind=target.kind,

@@ -103,7 +103,9 @@ class DeriveService:
         self._commit = commit
 
     async def derive_all(self, *, page_size: int = 500, limit: int = 0) -> DerivationReport:
-        """Walk the whole cache, one page per transaction. `limit` of 0 drains.
+        """Walk the whole cache, one page per transaction.
+
+        `limit` of 0 drains.
 
         The one-shot backfill, and it exists because M7 arrives after a
         catalog is already enriched: those titles were enriched by M4/M5/M6,
@@ -136,8 +138,9 @@ class DeriveService:
             return report
 
     async def derive(self, title_id: uuid.UUID) -> None:
-        """One title, from the one cache row that holds it. Raises
-        `UsherPortError`.
+        """One title, from the one cache row that holds it.
+
+        Raises `UsherPortError`.
 
         The `derive` job's unit of work, and what makes it a `JobKind` at all:
         everything this reads is one `raw_payloads` row found by one key, and
@@ -170,8 +173,7 @@ class DeriveService:
             await self._commit()
 
     async def _resolve(self, page: Sequence[CachedPayload]) -> list[tuple[uuid.UUID, Any]]:
-        """Cached rows -> `(title_id, payload)` pairs, in **one read per id
-        space**.
+        """Cached rows -> `(title_id, payload)` pairs, in **one read per id space**.
 
         The kind comes from the cache row, never from the payload, and never
         from the integer: `CachedPayload.kind` is half the key the row was
@@ -206,8 +208,10 @@ class DeriveService:
         return resolved
 
     async def _apply(self, resolved: Sequence[tuple[uuid.UUID, Any]]) -> DerivationReport:
-        """Map, upsert people, re-point credits, link collections, replace, and
-        replace the artwork.
+        """Map.
+
+        upsert people, re-point credits, link collections, replace, and replace the
+        artwork.
 
         The order is a dependency chain and not a preference. People must
         exist before a credit may name one (`credits.person_id` is a real

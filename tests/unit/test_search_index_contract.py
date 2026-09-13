@@ -1,4 +1,7 @@
-"""`FakeSearchIndex` against the shared `SearchIndex` contract. No Docker."""
+"""`FakeSearchIndex` against the shared `SearchIndex` contract.
+
+No Docker.
+"""
 
 import pytest
 
@@ -22,6 +25,9 @@ class TestFakeSearchIndex(SearchIndexContract):
         return FakeSearchIndex()
 
     async def given_title_row(self, document: SearchDocument) -> None:
-        """Nothing to arrange: there is no foreign key onto a `titles` row
-        this dict has never heard of, and no generated column to seed."""
+        """Nothing to arrange.
+
+        there is no foreign key onto a `titles` row this dict has never heard of, and no
+        generated column to seed.
+        """
         return None

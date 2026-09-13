@@ -57,8 +57,9 @@ def artifact(tmp_path: Path) -> Path:
 
 @pytest_asyncio.fixture
 async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
-    """One row in each of the seven precious tables, the `media_items` links,
-    and one row in each of the three rebuildable tables above.
+    """One row in each of the seven precious tables.
+
+    the `media_items` links, and one row in each of the three rebuildable tables above.
 
     Raw `INSERT`s rather than repositories, which is this directory's habit
     (`test_watch_state_repository.py` seeds `users` the same way): the
@@ -285,8 +286,9 @@ def _carried(rows: Sequence[Mapping[str, Any]], table: str) -> list[Mapping[str,
 async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """🔴 **The case this file shipped without, and the reason the command exists rather
-    than `pg_dump`.**
+    """🔴 **The case this file shipped without.
+
+    and the reason the command exists rather than `pg_dump`.**.
     """
     # The premises, and they are the case. An equality is only a statement
     # about the field it names if a wrong field would give a different answer.
@@ -352,8 +354,9 @@ async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
 async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_code_expects(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """🔴 **`schema_revision` is the stamp K4 refuses on, and nothing could tell it from the
-    code's own head.**
+    """🔴 **`schema_revision` is the stamp K4 refuses on.
+
+    and nothing could tell it from the code's own head.**.
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -379,7 +382,8 @@ async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_
 async def test_every_carried_table_is_ordered_by_its_key_rather_than_by_the_heap(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """The port promises a stable order *"because a diff between two nights' artifacts is a
+    """The port promises a stable order *"because a diff between two nights' artifacts is a.
+
     thing an operator will do"*, and deleting the whole `ORDER BY` clause passed all
     5,891 cases: the one place order was observable was a `set` comparison.
     """
@@ -443,12 +447,14 @@ async def test_the_artifact_carries_every_precious_table_and_no_rebuildable_one(
 async def test_the_header_stamps_the_revision_the_code_expects_and_counts_what_it_wrote(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """K4 refuses a `schema_revision` mismatch, which is the refusal
-    `api/routers/health.py::_check_migrations` already makes -- so the stamp
-    is read through `database_revision` and compared here against
-    `code_head_revision()` rather than against a literal. The plan for this
-    task spelled `m09f`; `m10a` landed since, and a case naming either would
-    need editing at `m10b`.
+    """K4 refuses a `schema_revision` mismatch.
+
+    which is the refusal `api/routers/health.py::_check_migrations` already makes -- so
+    the stamp is read through `database_revision` and compared here against
+    `code_head_revision()` rather than against a literal.
+
+    The plan for this task spelled `m09f`; `m10a` landed since, and a case naming either
+    would need editing at `m10b`.
     """
     header, rows = await _write(session, artifact)
 
@@ -467,8 +473,9 @@ async def test_the_header_stamps_the_revision_the_code_expects_and_counts_what_i
 
 
 def _uuids(value: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], uuid.UUID]]:
-    """Every value anywhere in an emitted object that parses as a UUID, with
-    the key path it was found at.
+    """Every value anywhere in an emitted object that parses as a UUID.
+
+    with the key path it was found at.
 
     Grammar-based rather than key-name based on purpose: a scan looking for
     keys called `*_id` cannot see an id that arrived under a new name, which
@@ -491,8 +498,9 @@ def _uuids(value: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, 
 async def test_no_carried_row_holds_a_title_id_that_is_not_a_declared_raw_id_fallback(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """No title UUID survives a bootstrap boundary, so the only place one may
-    appear is K2's third rung.
+    """No title UUID survives a bootstrap boundary.
+
+    so the only place one may appear is K2's third rung.
 
     `RESOLUTION_ORDER` is `("imdb_id", "kind+tmdb_id", "id")` and the third
     entry is a *check on the target* rather than a key: restore accepts it if
@@ -557,10 +565,12 @@ def _at(row: Mapping[str, Any], path: Sequence[str]) -> Mapping[str, Any]:
 async def test_the_media_item_rows_carry_their_natural_key_and_only_the_two_links(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """`media_items` is the manifest's one `PARTIAL` entry: every other column
-    is rebuilt by the next source walk, and carrying them would take the
-    artifact from kilobytes to the whole table. The columns carried are read
-    off the manifest entry, so this cannot drift from K1.
+    """`media_items` is the manifest's one `PARTIAL` entry.
+
+    every other column is rebuilt by the next source walk, and carrying them would take
+    the artifact from kilobytes to the whole table.
+
+    The columns carried are read off the manifest entry, so this cannot drift from K1.
 
     **Two counts of this table are in circulation and they are about two
     populations**, which is worth one sentence because this file stated the

@@ -112,10 +112,12 @@ class FakeSourceAdapter(SourceAdapter):
         self._fail_after = count
 
     def clear_failure(self) -> None:
-        """Undo `fail_after`. `ReconcileService`'s cursor case needs a run
-        that failed *followed by* one that succeeds, which is the only way to
-        show that a delta walk resumes from the last run that completed
-        rather than from the last run that happened."""
+        """Undo `fail_after`.
+
+        `ReconcileService`'s cursor case needs a run that failed *followed by* one that
+        succeeds, which is the only way to show that a delta walk resumes from the last
+        run that completed rather than from the last run that happened.
+        """
         self._fail_after = None
 
     def reject_credentials(self) -> None:
@@ -150,8 +152,10 @@ class FakeSourceAdapter(SourceAdapter):
         self._push_queue.put_nowait(event)
 
     def silence_push(self) -> None:
-        """Deliver nothing more, including whatever is already queued. The
-        connection stays open, which is the whole point."""
+        """Deliver nothing more, including whatever is already queued.
+
+        The connection stays open, which is the whole point.
+        """
         self._push_silent = True
         while not self._push_queue.empty():
             self._push_queue.get_nowait()
@@ -320,10 +324,13 @@ class FakeSourceAdapter(SourceAdapter):
             yielded += 1
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
-        """Authoritative, which for a fake means "the same thing the walk
-        returns" -- see the module docstring. `None` for an unknown id,
-        matching `get_item`, and `_ready()` first so a closed or offline
-        adapter raises `PortUnavailable` rather than answering."""
+        """Authoritative, which for a fake means "the same thing the walk returns".
+
+        see the module docstring.
+
+        `None` for an unknown id, matching `get_item`, and `_ready()` first so a closed
+        or offline adapter raises `PortUnavailable` rather than answering.
+        """
         await self._ready()
         if external_id not in self._items:
             return None
@@ -403,10 +410,13 @@ class FakeSourceAdapter(SourceAdapter):
             yield event
 
     def _silent_for(self) -> float:
-        """Seconds since anything arrived, measured from the open when
-        nothing has -- `PushHealth.silent_for`'s rule, re-derived. That
-        fallback is what makes a channel that has *never* delivered become
-        stale, which is the one failure the watchdog exists for."""
+        """Seconds since anything arrived, measured from the open when nothing has.
+
+        `PushHealth.silent_for`'s rule, re-derived.
+
+        That fallback is what makes a channel that has *never* delivered become stale,
+        which is the one failure the watchdog exists for.
+        """
         since = self._push_last_message_at
         if since is None:
             since = self._push_opened_at
@@ -487,10 +497,13 @@ class FakeSourceHarness(SourceHarness):
         return self._adapter.push_stale_after
 
     def can_disable_push(self) -> bool:
-        """The only harness that can. `EmbyAdapter` has no state in which
-        `events()` raises `SourceNotSupported`, so it declines instead --
-        which is why `test_events_raises_source_not_supported_when_push_is_
-        unavailable` skips there rather than being deleted."""
+        """The only harness that can.
+
+        `EmbyAdapter` has no state in which `events()` raises `SourceNotSupported`, so
+        it declines instead -- which is why
+        `test_events_raises_source_not_supported_when_push_is_ unavailable` skips there
+        rather than being deleted.
+        """
         return True
 
     async def disable_push(self) -> None:

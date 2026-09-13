@@ -1,5 +1,6 @@
-"""The push lane, whole: a socket's event into catalog state and out to a client,
-against real Postgres -- and what it costs.
+"""The push lane, whole.
+
+a socket's event into catalog state and out to a client, against real Postgres -- and
 """
 
 import asyncio
@@ -81,10 +82,12 @@ def queue(session: AsyncSession) -> PostgresJobQueue:
 def applier(
     session: AsyncSession, bus: InMemoryEventBus, queue: PostgresJobQueue
 ) -> PushApplyService:
-    """The real chain M4 owns, on real repositories, publishing to the real
-    bus. `session.flush`, not `commit`: the integration fixture owns one
-    connection-bound transaction it rolls back, and what is under test is
-    the SQL and the fan-out rather than durability."""
+    """The real chain M4 owns, on real repositories, publishing to the real bus.
+
+    `session.flush`, not `commit`: the integration fixture owns one connection-bound
+    transaction it rolls back, and what is under test is the SQL and the fan-out rather
+    than durability.
+    """
     media_items = PostgresMediaItemRepository(session)
     matching = PostgresTitleMatchRepository(session)
     return PushApplyService(
@@ -111,12 +114,15 @@ def applier(
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every statement SQLAlchemy issues, captured off
-    `before_cursor_execute` rather than transcribed -- M4 replaced two tasks
-    that asserted on a hand-copied lookalike, because the copy drifts from
-    the repository and then reads like coverage. A `COPY` is invisible here
-    (it runs on the raw asyncpg connection), which is the point: it is one
-    command however many records stream through it."""
+    """Every statement SQLAlchemy issues.
+
+    captured off `before_cursor_execute` rather than transcribed -- M4 replaced two
+    tasks that asserted on a hand-copied lookalike, because the copy drifts from the
+    repository and then reads like coverage.
+
+    A `COPY` is invisible here (it runs on the raw asyncpg connection), which is the
+    point: it is one command however many records stream through it.
+    """
     seen: list[str] = []
 
     def record(
@@ -180,7 +186,7 @@ async def test_a_pushed_watch_state_lands_and_is_published(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """**The milestone in one case, through the lane's own loop.**
+    """**The milestone in one case, through the lane's own loop.**.
 
     A `PushSupervisor` holds a channel, an event arrives on it, and the
     position lands in `watch_states` *and* reaches a subscriber on the bus
@@ -256,8 +262,10 @@ async def test_a_pushed_played_item_enqueues_exactly_one_history_backfill(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """`(kind, key)` is unique, so a film paused and resumed six times is
-    **one** `watch_history` job rather than six.
+    """`(kind.
+
+    key)` is unique, so a film paused and resumed six times is **one** `watch_history`
+    job rather than six.
 
     A `UserDataChanged` entry carries no play history anybody has measured,
     so ADR-0014 makes the adapter report `play_count=None` and every pushed
@@ -296,7 +304,7 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """**The measurement shaped so a quadratic would show.**
+    """**The measurement shaped so a quadratic would show.**.
 
     The candidate defect is a per-item database round trip inside an event,
     so the **event count** is held fixed at 20 and the items per event are

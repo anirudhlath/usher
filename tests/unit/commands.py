@@ -23,8 +23,9 @@ def dispatched(
     monkeypatch: pytest.MonkeyPatch, *, arm: str, argv: list[str]
 ) -> list[dict[str, Any]]:
     """Run `main(argv)` with `usher.cli.<arm>` recording and the server fatal.
-    Returns the keywords of every call the arm took, so a caller asserts the
-    **whole** shape rather than the one key it remembered.
+
+    Returns the keywords of every call the arm took, so a caller asserts the **whole**
+    shape rather than the one key it remembered.
 
     **`_dispatch`'s `else` arm is `serve`**, so a subcommand that parses and
     has no arm of its own does not fail -- it silently starts the HTTP server

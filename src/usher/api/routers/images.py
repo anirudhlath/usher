@@ -140,8 +140,7 @@ async def get_image(
 
 
 def _representation_of(request: Request, image_id: uuid.UUID, rung: int) -> str:
-    """`/images/<id>?w=<rung>` -- the URI of the representation actually
-    served.
+    """`/images/<id>?w=<rung>` -- the URI of the representation actually served.
 
     **Built from the route table and two values this process owns**, never from
     `request.url`: `image_id` is a `uuid.UUID` FastAPI already parsed (so its

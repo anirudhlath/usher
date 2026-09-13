@@ -91,10 +91,12 @@ _EMPTY_GENOME_RESULT = GenomeWriteResult(inserted=0, updated=0, unmatched=0)
 
 
 def _genome(movie_id: int, imdb_id: str, lead: float) -> GenomeVector:
-    """One full-width vector whose first lane is `lead` and whose rest is
-    zero. Full width because `halfvec(1128)` rejects anything else, and only
-    the first lane is ever asserted on -- the cases here are about *which
-    key* the vector lands under, not about its contents."""
+    """One full-width vector whose first lane is `lead` and whose rest is zero.
+
+    Full width because `halfvec(1128)` rejects anything else, and only the first lane is
+    ever asserted on -- the cases here are about *which key* the vector lands under, not
+    about its contents.
+    """
     return GenomeVector(
         movie_id=movie_id,
         imdb_id=imdb_id,
@@ -148,10 +150,12 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_titles_inserts_then_reports_no_change_on_replay(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The property the whole resume design rests on. If a replayed
-        batch reported inserts, a crash-and-resume would duplicate rows;
-        if it reported updates, every no-op re-import would fire the
-        set_updated_at trigger across the catalog."""
+        """The property the whole resume design rests on.
+
+        If a replayed batch reported inserts, a crash-and-resume would duplicate rows;
+        if it reported updates, every no-op re-import would fire the set_updated_at
+        trigger across the catalog.
+        """
         first = await repo.upsert_titles([SHAWSHANK, THRONES])
         assert (first.inserted, first.updated) == (2, 0)
         second = await repo.upsert_titles([SHAWSHANK, THRONES])
@@ -173,13 +177,15 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_titles_never_discards_enrichment_set_by_a_different_pass(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """ "a re-import ... must never downgrade an enriched title" is this
-        method's headline safety property (its own port docstring) --
-        nothing previously exercised it. An implementation that replaces
-        the whole stored row on update, rather than touching only the
-        IMDb-supplied columns, would discard tmdb_id/popularity a *later*
-        crosswalk or TMDb pass wrote; this only pins the two fields this
-        port itself can read back."""
+        """The headline safety property this port states and nothing exercised.
+
+        "a re-import ... must never downgrade an enriched title", from the
+        method's own port docstring. An implementation that replaces the whole
+        stored row on update, rather than touching only the IMDb-supplied
+        columns, would discard tmdb_id/popularity a *later* crosswalk or TMDb
+        pass wrote; this only pins the two fields this port itself can read
+        back.
+        """
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
             [TmdbId(tmdb_id=90000020, kind=TitleKind.MOVIE, original_name="x", popularity=12.5)]
@@ -196,10 +202,12 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_titles_deduplicates_within_one_batch(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Postgres raises CardinalityViolationError ("ON CONFLICT DO UPDATE
-        command cannot affect row a second time") when one statement hits
-        the same conflict target twice — verified directly. A fake that
-        happily accepted both would let a service ship a batch the real
+        """Postgres raises CardinalityViolationError ("ON CONFLICT DO UPDATE command cannot.
+
+        affect row a second time") when one statement hits the same conflict target
+        twice — verified directly.
+
+        A fake that happily accepted both would let a service ship a batch the real
         implementation rejects.
 
         The winner is not incidental: the real implementation generates
@@ -208,7 +216,8 @@ class BulkCatalogRepositoryContract:
         imdb_id, id`, so the *first* occurrence in the caller's list
         survives, not the last -- a fake that happened to produce the
         right counts while keeping the other row's data would still be
-        wrong for anything that reads a field back."""
+        wrong for anything that reads a field back.
+        """
         first_seen = dataclasses.replace(SHAWSHANK, name="First seen")
         duplicate = dataclasses.replace(SHAWSHANK, name="Dup", year=1995)
         result = await repo.upsert_titles([first_seen, duplicate])
@@ -222,9 +231,13 @@ class BulkCatalogRepositoryContract:
     async def test_apply_ratings_only_touches_titles_that_exist(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """title.ratings.tsv.gz covers titleTypes this milestone drops, so
-        most of its rows have no title. They must be skipped, never
-        inserted: a rating with no name is not a catalog entry."""
+        """Title.ratings.tsv.gz covers titleTypes this milestone drops.
+
+        so most of its rows have no title.
+
+        They must be skipped, never inserted: a rating with no name is not a catalog
+        entry.
+        """
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
@@ -246,13 +259,15 @@ class BulkCatalogRepositoryContract:
     async def test_apply_ratings_deduplicates_within_one_batch(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Same hard requirement as upsert_titles (one statement may not
-        hit the same conflict target twice), but *not* the same
-        determinism: the real implementation's in-batch dedup is `DISTINCT
-        ON (imdb_id) ... ORDER BY imdb_id`, with no secondary tie-break
-        column, so which of two same-imdb_id ratings wins is
-        planner-dependent. Only pins what is actually guaranteed --
-        exactly one survives -- not which."""
+        """Same hard requirement as upsert_titles (one statement may not hit the same conflict.
+
+        target twice), but *not* the same determinism: the real implementation's in-
+        batch dedup is `DISTINCT ON (imdb_id) ...
+
+        ORDER BY imdb_id`, with no secondary tie-break column, so which of two same-
+        imdb_id ratings wins is planner-dependent. Only pins what is actually guaranteed
+        -- exactly one survives -- not which.
+        """
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
@@ -263,8 +278,11 @@ class BulkCatalogRepositoryContract:
         assert applied == 1
 
     async def test_upsert_tmdb_ids_keeps_both_namespaces(self, repo: BulkCatalogRepository) -> None:
-        """ADR-0011 again, on the other table: TMDb movie 1 and TMDb series
-        1 are different works, and 26,968 such collisions are live."""
+        """ADR-0011 again, on the other table.
+
+        TMDb movie 1 and TMDb series 1 are different works, and 26,968 such collisions
+        are live.
+        """
         written = await repo.upsert_tmdb_ids(
             [
                 TmdbId(tmdb_id=1, kind=TitleKind.MOVIE, original_name="A Film", popularity=1.0),
@@ -276,8 +294,10 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_tmdb_ids_deduplicates_within_one_batch_keeping_highest_popularity(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`ORDER BY tmdb_id, kind, popularity DESC` -- the highest
-        popularity in the batch wins, not the last row supplied."""
+        """`ORDER BY tmdb_id, kind, popularity DESC`.
+
+        the highest popularity in the batch wins, not the last row supplied.
+        """
         written = await repo.upsert_tmdb_ids(
             [
                 TmdbId(tmdb_id=1, kind=TitleKind.MOVIE, original_name="low", popularity=1.0),
@@ -293,13 +313,15 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_tmdb_ids_reports_rows_written_not_rows_changed(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Unlike upsert_titles/apply_ratings, there is no IS DISTINCT FROM
-        guard on this upsert -- every conflicting row is written
-        unconditionally, so a replay of an unchanged batch reports the
-        same count again, not zero. The class docstring's "every method
-        ... reports inserted=0 on the second pass" does not hold for this
-        one; this method doesn't even return a type with an `inserted`
-        field to hold that claim."""
+        """Unlike upsert_titles/apply_ratings, there is no IS DISTINCT FROM guard on this upsert.
+
+        every conflicting row is written unconditionally, so a replay of an unchanged
+        batch reports the same count again, not zero.
+
+        The class docstring's "every method ... reports inserted=0 on the second pass"
+        does not hold for this one; this method doesn't even return a type with an
+        `inserted` field to hold that claim.
+        """
         row = TmdbId(tmdb_id=1, kind=TitleKind.MOVIE, original_name="A Film", popularity=1.0)
         assert await repo.upsert_tmdb_ids([row]) == 1
         assert await repo.upsert_tmdb_ids([row]) == 1
@@ -307,9 +329,11 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_crosswalk_never_blanks_a_column_another_pass_filled(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The three SPARQL joins run as three separate passes, each
-        carrying one column. Without COALESCE on the stored side, the
-        P4983 pass would wipe every tmdb_movie_id the P4947 pass wrote."""
+        """The three SPARQL joins run as three separate passes, each carrying one column.
+
+        Without COALESCE on the stored side, the P4983 pass would wipe every
+        tmdb_movie_id the P4947 pass wrote.
+        """
         await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)])
         await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tvdb_series_id=999)])
         await repo.upsert_titles([SHAWSHANK])
@@ -322,13 +346,15 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_crosswalk_deduplicates_within_one_batch_keeping_the_smallest_id(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Postgres can't hit id_crosswalk's `imdb_id` conflict target
-        twice in one statement, so a batch with a genuine duplicate --
-        reachable, since Task 12's SPARQL loader appends every binding
-        with no DISTINCT -- needs a deterministic winner. `ORDER BY
-        imdb_id, tmdb_movie_id NULLS LAST, ...` picks the *smallest* id,
-        not the last row in the batch (here, deliberately last so the two
-        rules disagree on the answer)."""
+        """Postgres can't hit id_crosswalk's `imdb_id` conflict target twice in one statement.
+
+        so a batch with a genuine duplicate -- reachable, since Task 12's SPARQL loader
+        appends every binding with no DISTINCT -- needs a deterministic winner.
+
+        `ORDER BY imdb_id, tmdb_movie_id NULLS LAST, ...` picks the *smallest* id, not
+        the last row in the batch (here, deliberately last so the two rules disagree on
+        the answer).
+        """
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_crosswalk(
             [
@@ -342,8 +368,10 @@ class BulkCatalogRepositoryContract:
     async def test_upsert_crosswalk_reports_rows_written_not_rows_changed(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Same absence of an IS DISTINCT FROM guard as upsert_tmdb_ids --
-        a replay reports the same count again, not zero."""
+        """Same absence of an IS DISTINCT FROM guard as upsert_tmdb_ids.
+
+        a replay reports the same count again, not zero.
+        """
         pair = IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)
         assert await repo.upsert_crosswalk([pair]) == 1
         assert await repo.upsert_crosswalk([pair]) == 1
@@ -351,10 +379,12 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_links_both_tmdb_namespaces_at_once(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The measurement that forced ADR-0011, exercised end to end: a
-        movie and a series legitimately claiming the same TMDb integer both
-        get it. Under M1's single-column unique index one of these two was
-        silently dropped."""
+        """The measurement that forced ADR-0011, exercised end to end.
+
+        a movie and a series legitimately claiming the same TMDb integer both get it.
+
+        Under M1's single-column unique index one of these two was silently dropped.
+        """
         await repo.upsert_titles([SLEEPER, TOP_GEAR])
         await repo.upsert_crosswalk(
             [
@@ -366,13 +396,14 @@ class BulkCatalogRepositoryContract:
         assert result.linked == 2
 
     async def test_link_crosswalk_is_idempotent(self, repo: BulkCatalogRepository) -> None:
-        """Checks all three counters on the replay, not just `linked`: a
-        mutation check found that dropping the "already linked" short
-        circuit still left `linked == 0` on the second call (the row falls
-        through to the `claimed` check instead and is counted as
-        `conflicted`) -- silently inflating `conflicted`, the one field
-        `CrosswalkLinkResult` documents as a real data-quality signal an
-        operator watches, on every idempotent re-run."""
+        """Checks all three counters on the replay, not just `linked`.
+
+        a mutation check found that dropping the "already linked" short circuit still
+        left `linked == 0` on the second call (the row falls through to the `claimed`
+        check instead and is counted as `conflicted`) -- silently inflating
+        `conflicted`, the one field `CrosswalkLinkResult` documents as a real data-
+        quality signal an operator watches, on every idempotent re-run.
+        """
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)])
         first = await repo.link_crosswalk()
@@ -383,17 +414,19 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_never_overwrites_an_existing_tmdb_id(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """ "Only fills a tmdb_id ... that is currently NULL" (this method's
-        own port docstring) is a precondition on the *target* row, not just
-        "does the incoming pair agree with what's stored" -- a title that
-        already carries a *different* id must not be silently retargeted
-        when the crosswalk changes its mind. Reachable through the port
-        alone: link, then a later crosswalk pass supplies a different id
-        for the same imdb_id, then link again. Measured directly against a
-        Postgres implementation missing the `WHERE t.tmdb_id IS NULL`
-        guard: it reports this second call as a *link*, not a *conflict*,
-        and overwrites both tmdb_id and popularity -- corrupting M4's
-        enrichment data, not merely miscounting."""
+        """The NULL precondition is on the target row, not on the incoming pair.
+
+        "Only fills a tmdb_id ... that is currently NULL" (this method's own
+        port docstring), not just "does the incoming pair agree with what's
+        stored" -- a title that already carries a *different* id must not be
+        silently retargeted when the crosswalk changes its mind. Reachable
+        through the port alone: link, then a later crosswalk pass supplies a
+        different id for the same imdb_id, then link again. Measured directly
+        against a Postgres implementation missing the `WHERE t.tmdb_id IS
+        NULL` guard: it reports this second call as a *link*, not a
+        *conflict*, and overwrites both tmdb_id and popularity -- corrupting
+        M4's enrichment data, not merely miscounting.
+        """
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
             [
@@ -416,9 +449,11 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_counts_pairs_with_no_catalog_title(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Most crosswalk pairs point at IMDb ids this milestone does not
-        retain. Reporting them beats discarding them silently — an operator
-        seeing `unmatched` near zero knows the crosswalk is stale."""
+        """Most crosswalk pairs point at IMDb ids this milestone does not retain.
+
+        Reporting them beats discarding them silently — an operator seeing `unmatched`
+        near zero knows the crosswalk is stale.
+        """
         await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000160", tmdb_movie_id=1)])
         result = await repo.link_crosswalk()
         assert result.linked == 0
@@ -427,16 +462,16 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_treats_a_kind_mismatch_as_unmatched(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """ADR-0011's failure mode from the other side. Wikidata's P4983
-        (TMDb *TV series* id) can point at an IMDb id the adapter
-        classified MOVIE (e.g. a `tvMovie`) -- stamping a series id onto a
-        movie title would be precisely the id-space collision ADR-0011
-        exists to prevent, so a kind mismatch must count as unmatched, not
-        linked. No existing test reaches this: the two-namespace test
-        above uses two different imdb_ids, so an implementation whose join
-        omits `AND t.kind = x.kind` still matches the right rows by
-        accident and passes anyway -- verified directly against exactly
-        such an implementation."""
+        """ADR-0011's failure mode from the other side.
+
+        Wikidata's P4983 (TMDb *TV series* id) can point at an IMDb id the adapter
+        classified MOVIE (e.g. a `tvMovie`) -- stamping a series id onto a movie title
+        would be precisely the id-space collision ADR-0011 exists to prevent, so a kind
+        mismatch must count as unmatched, not linked. No existing test reaches this: the
+        two-namespace test above uses two different imdb_ids, so an implementation whose
+        join omits `AND t.kind = x.kind` still matches the right rows by accident and
+        passes anyway -- verified directly against exactly such an implementation.
+        """
         await repo.upsert_titles([SHAWSHANK])  # MOVIE
         await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_series_id=999)])
         result = await repo.link_crosswalk()
@@ -447,8 +482,10 @@ class BulkCatalogRepositoryContract:
         self, repo: BulkCatalogRepository
     ) -> None:
         """569 TMDb ids are claimed by more than one IMDb id (measured).
-        Only one can win; the loser is counted, not raised, because raising
-        would abort a bootstrap over ordinary upstream data quality."""
+
+        Only one can win; the loser is counted, not raised, because raising would abort
+        a bootstrap over ordinary upstream data quality.
+        """
         await repo.upsert_titles([SHAWSHANK, SLEEPER])
         await repo.upsert_crosswalk(
             [
@@ -487,16 +524,18 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_enforces_a_global_unique_tvdb_id(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`ix_titles_tvdb_id` is a unique partial index -- two different
-        titles both ending up with the same tvdb_id is a state Postgres
-        physically cannot hold, the same "fake ignores provider-id
-        uniqueness" class `title_repository_contract.py`'s own
-        `test_add_rejects_a_duplicate_tvdb_id` exists to catch on
-        `TitleRepository`. Wikidata can associate one tvdb id with more
-        than one imdb_id; the real implementation resolves that by keeping
-        the lexicographically smallest imdb_id (`DISTINCT ON
-        (tvdb_series_id) ... ORDER BY tvdb_series_id, imdb_id`), and the
-        loser is left unlinked rather than raising."""
+        """`ix_titles_tvdb_id` is a unique partial index.
+
+        two different titles both ending up with the same tvdb_id is a state Postgres
+        physically cannot hold, the same "fake ignores provider-id uniqueness" class
+        `title_repository_contract.py`'s own `test_add_rejects_a_duplicate_tvdb_id`
+        exists to catch on `TitleRepository`.
+
+        Wikidata can associate one tvdb id with more than one imdb_id; the real
+        implementation resolves that by keeping the lexicographically smallest imdb_id
+        (`DISTINCT ON (tvdb_series_id) ... ORDER BY tvdb_series_id, imdb_id`), and the
+        loser is left unlinked rather than raising.
+        """
         await repo.upsert_titles([THRONES, TOP_GEAR])  # both SERIES
         await repo.upsert_crosswalk(
             [
@@ -513,9 +552,11 @@ class BulkCatalogRepositoryContract:
     async def test_bulk_load_window_is_reentrant_and_transparent(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Whatever the implementation suspends, writes inside the window
-        must behave identically and the window must survive being entered
-        twice in a row — the CLI opens one per phase."""
+        """Whatever the implementation suspends.
+
+        writes inside the window must behave identically and the window must survive
+        being entered twice in a row — the CLI opens one per phase.
+        """
         async with repo.bulk_load_window():
             assert (await repo.upsert_titles([SHAWSHANK])).inserted == 1
         async with repo.bulk_load_window():
@@ -576,8 +617,9 @@ class BulkCatalogRepositoryContract:
     async def test_a_genome_row_for_an_imdb_id_the_catalog_does_not_hold_is_counted_not_written(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`links.csv` holds 86,537 movies and the catalog holds whatever
-        IMDb's dump retained; the difference is real and expected.
+        """`links.csv` holds 86,537 movies and the catalog holds whatever IMDb's dump retained.
+
+        the difference is real and expected.
 
         Kills an implementation that inserts an orphan row -- the foreign key
         would reject it, loudly, aborting the batch -- and one that drops it
@@ -625,9 +667,11 @@ class BulkCatalogRepositoryContract:
     async def test_a_replayed_batch_reports_updates_rather_than_inserts(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Trap 3. Rowcount reports the sum, so without `xmax = 0` a
-        re-import is indistinguishable from a first run -- and "did this
-        phase do anything" is the question this phase exists to answer.
+        """Trap 3.
+
+        Rowcount reports the sum, so without `xmax = 0` a re-import is indistinguishable
+        from a first run -- and "did this phase do anything" is the question this phase
+        exists to answer.
 
         The second call also carries a *different* value, so this doubles as
         the case that a replay actually rewrites rather than being skipped:
@@ -653,8 +697,9 @@ class BulkCatalogRepositoryContract:
     async def test_a_genome_vector_never_lands_on_a_series(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The genome is movies-only, so a vector on a series is a fact the
-        dataset never asserted.
+        """The genome is movies-only.
+
+        so a vector on a series is a fact the dataset never asserted.
 
         `imdb_id` is unique per title regardless of kind, so `AND t.kind =
         'movie'` changes nothing against today's data -- which is exactly why
@@ -672,12 +717,14 @@ class BulkCatalogRepositoryContract:
     async def test_an_empty_genome_batch_writes_nothing_and_does_not_raise(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """A dataset yields a row-less batch to advance the cursor past a run
-        of movies its own filtering dropped -- `BulkDataset.batches`' contract
-        permits exactly that, and every genome movie absent from `links.csv`
-        produces one. Kills an implementation that stages an empty `COPY` and
-        then runs an `INSERT ... SELECT` over nothing, which is two
-        statements and a temp table for no rows."""
+        """A dataset yields a row-less batch to advance the cursor past a run of movies its own.
+
+        filtering dropped -- `BulkDataset.batches`' contract permits exactly that, and
+        every genome movie absent from `links.csv` produces one.
+
+        Kills an implementation that stages an empty `COPY` and then runs an `INSERT ...
+        SELECT` over nothing, which is two statements and a temp table for no rows.
+        """
         assert await repo.upsert_genome_vectors([], revision=GENOME_RELEASE_A) == (
             _EMPTY_GENOME_RESULT
         )
@@ -687,9 +734,9 @@ class BulkCatalogRepositoryContract:
     async def test_the_vocabulary_is_stored_lane_by_lane_under_the_revision_it_was_given(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The ordinary path, and the control every refusal case below needs:
-        without it an implementation that writes nothing at all passes each of
-        them.
+        """The ordinary path, and the control every refusal case below needs.
+
+        without it an implementation that writes nothing at all passes each of them.
 
         Asserted with asymmetric names in a deliberately non-alphabetical
         order, because both of the wrong implementations here produce a
@@ -763,9 +810,10 @@ class BulkCatalogRepositoryContract:
     async def test_a_vocabulary_that_is_not_one_to_n_is_refused_before_anything_is_written(
         self, repo: BulkCatalogRepository, tags: Sequence[GenomeTag], why: str
     ) -> None:
-        """`tag_id` is a lane index and the vector is built **by index**, so a
-        gap does not lose one name -- it moves every later one, permanently,
-        on the one table whose entire purpose is to say what a lane means.
+        """`tag_id` is a lane index and the vector is built **by index**.
+
+        so a gap does not lose one name -- it moves every later one, permanently, on the
+        one table whose entire purpose is to say what a lane means.
 
         Its control is the case immediately below, which is where a *set*
         check and a *sequence* check come apart. Without it, "refuses anything
@@ -817,7 +865,7 @@ class BulkCatalogRepositoryContract:
     async def test_three_more_vocabularies_that_cannot_mean_anything_are_refused(
         self, repo: BulkCatalogRepository, tags: Sequence[GenomeTag], revision: str
     ) -> None:
-        """Each has its own damage and none of them raises anywhere else:
+        """Each has its own damage and none of them raises anywhere else:.
 
         - **No tags at all** would make an empty table mean two things --
           never loaded, and loaded as nothing -- and `vocabulary()` answers
@@ -838,8 +886,7 @@ class BulkCatalogRepositoryContract:
     async def test_a_refused_vocabulary_leaves_the_stored_one_intact(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """ "Before writing anything" is a claim about the `DELETE`, and it is
-        the reason the check is not simply at the top of the `INSERT`.
+        """The "before writing anything" claim is about the `DELETE`, not the `INSERT`.
 
         **Observable on the fake arm only, and that is recorded rather than
         claimed away.** `PostgresBulkCatalogRepository` wraps the delete and
@@ -895,11 +942,13 @@ class BulkCatalogRepositoryContract:
     async def test_genome_coverage_reports_every_release_present(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """A table carrying two releases is a correctness problem
-        `GenomeRepository.get_pair` is already refusing to blend across, and
-        an operator needs to be able to see it -- a killed re-import against
-        a new upload is exactly how it happens. Kills an implementation that
-        reports only the newest revision, or only a count of distinct ones.
+        """A table carrying two releases is a correctness problem `GenomeRepository.get_pair` is.
+
+        already refusing to blend across, and an operator needs to be able to see it --
+        a killed re-import against a new upload is exactly how it happens.
+
+        Kills an implementation that reports only the newest revision, or only a count
+        of distinct ones.
         """
         await repo.upsert_titles([SHAWSHANK, SLEEPER])
         await repo.upsert_genome_vectors(
@@ -918,10 +967,12 @@ class BulkCatalogRepositoryContract:
     async def test_a_skeleton_title_gains_the_names_imdb_credits_it_with(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The deliverable. `credit_names` is `search_document`'s weight class
-        B and is empty for every title TMDb enrichment has not reached --
-        **0 of 1,271,138 on the measured catalog**, because `DeriveService` is
-        the only writer and it walks `raw_payloads`.
+        """The deliverable.
+
+        `credit_names` is `search_document`'s weight class B and is empty for every
+        title TMDb enrichment has not reached -- **0 of 1,271,138 on the measured
+        catalog**, because `DeriveService` is the only writer and it walks
+        `raw_payloads`.
 
         The premise is asserted rather than assumed: the title has to be
         empty *first*, or a fill that did nothing reads exactly like this.
@@ -939,12 +990,15 @@ class BulkCatalogRepositoryContract:
     async def test_an_imdb_fill_never_overwrites_the_names_the_tmdb_path_derived(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**Two writers, one column, and TMDb wins every title it has
-        touched.** `CreditRepository.replace_for_titles` writes
-        `credit_names` from the TMDb-derived `credits`, in the same statement
-        and the same transaction as the table itself, and its docstring says
-        why: *"the array and the table are two spellings of one fact ... the
-        symptom is a full-text hit on a name `credits` no longer holds."*
+        """**Two writers.
+
+        one column, and TMDb wins every title it has touched.**
+        `CreditRepository.replace_for_titles` writes `credit_names` from the TMDb-
+        derived `credits`, in the same statement and the same transaction as the table
+        itself, and its docstring says why: *"the array and the table are two spellings
+        of one fact ...
+
+        the symptom is a full-text hit on a name `credits` no longer holds."*
 
         This port cannot join that transaction -- it writes no `credits` row
         at all -- so it must not touch a title that path owns. The predicate
@@ -968,7 +1022,8 @@ class BulkCatalogRepositoryContract:
     async def test_a_title_imdb_filled_is_still_the_tmdb_paths_to_take_over(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """The mirror, and it is the half a one-directional case misses:
+        """The mirror, and it is the half a one-directional case misses.
+
         precedence has to be *monotonic*, not merely first-write-wins.
 
         A skeleton IMDb filled is later enriched and derived; TMDb's names
@@ -997,10 +1052,13 @@ class BulkCatalogRepositoryContract:
     async def test_a_replayed_fill_writes_nothing_and_reports_nothing_filled(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`titles` carries two GIN indexes and a stored generated column, so
-        a dead row version per title per pass is not free -- and the whole
-        catalog is 1.19M rows. Same `IS DISTINCT FROM` guard, and the same
-        reason, as `upsert_titles` and `apply_ratings` one method up.
+        """`titles` carries two GIN indexes and a stored generated column.
+
+        so a dead row version per title per pass is not free -- and the whole catalog is
+        1.19M rows.
+
+        Same `IS DISTINCT FROM` guard, and the same reason, as `upsert_titles` and
+        `apply_ratings` one method up.
         """
         await repo.upsert_titles([SHAWSHANK])
         first = await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
@@ -1013,12 +1071,12 @@ class BulkCatalogRepositoryContract:
     async def test_a_batch_naming_one_title_twice_keeps_the_first_rather_than_failing(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """One statement may not hit the same conflict target twice, and an
-        `UPDATE ... FROM` with two matching staged rows picks whichever the
-        planner reached first. `IMDbCreditNamesDataset` groups by `tconst` and
-        never emits a title twice, so this is a guard on the *port*, not a
-        modelled property of its caller -- and first-seen is chosen because it
-        is what `upsert_titles` already does.
+        """One statement may not hit the same conflict target twice, and an `UPDATE ...
+
+        FROM` with two matching staged rows picks whichever the planner reached first.
+        `IMDbCreditNamesDataset` groups by `tconst` and never emits a title twice, so
+        this is a guard on the *port*, not a modelled property of its caller -- and
+        first-seen is chosen because it is what `upsert_titles` already does.
         """
         await repo.upsert_titles([SHAWSHANK])
 
@@ -1035,12 +1093,14 @@ class BulkCatalogRepositoryContract:
     async def test_a_title_the_catalog_does_not_hold_is_counted_not_written(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`title.principals` covers **11,491,032 titles** and the retained
-        catalog holds 1.27M of them, so a staged row matching nothing is the
-        overwhelming majority case rather than an anomaly. Counted, the way
-        `GenomeWriteResult.unmatched` and `CrosswalkLinkResult.unmatched` are:
-        a join that matched almost nothing must not look identical to one that
-        matched everything.
+        """`title.principals` covers **11,491,032 titles** and the retained catalog holds 1.27M.
+
+        of them, so a staged row matching nothing is the overwhelming majority case
+        rather than an anomaly.
+
+        Counted, the way `GenomeWriteResult.unmatched` and
+        `CrosswalkLinkResult.unmatched` are: a join that matched almost nothing must not
+        look identical to one that matched everything.
         """
         await repo.upsert_titles([SHAWSHANK])
 
@@ -1063,12 +1123,15 @@ class BulkCatalogRepositoryContract:
     async def test_the_names_keep_the_ranking_they_arrived_in(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**The order is the ranking**, top-billed first, which is what makes
-        the class-B lexemes the ones a viewer would search for. An array
-        rebuilt in any other order reads identically to every assertion that
-        checks membership, so this case carries the premise that the ranking
-        disagrees with both orders a careless implementation would produce:
-        alphabetical, and reversed.
+        """**The order is the ranking**.
+
+        top-billed first, which is what makes the class-B lexemes the ones a viewer
+        would search for.
+
+        An array rebuilt in any other order reads identically to every assertion that
+        checks membership, so this case carries the premise that the ranking disagrees
+        with both orders a careless implementation would produce: alphabetical, and
+        reversed.
         """
         ranked = ("Zoe Synthetic", "Ada Synthetic", "Mel Synthetic")
         assert list(ranked) != sorted(ranked), "the premise: rank order is not name order"
@@ -1084,8 +1147,9 @@ class BulkCatalogRepositoryContract:
     async def test_replacing_a_titles_aliases_is_scoped_to_that_title(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**The scoping bug `CreditRepository.replace_for_titles`' docstring
-        already names as "the one row shape a re-derivation cannot repair".**
+        """**The scoping bug `CreditRepository.replace_for_titles`' docstring already names as.
+
+        "the one row shape a re-derivation cannot repair".**.
 
         A second title's aliases are seeded first and asserted present, then a
         replace naming only the first title runs. A delete that forgot its
@@ -1117,9 +1181,10 @@ class BulkCatalogRepositoryContract:
     async def test_an_alias_equal_to_the_titles_own_name_is_not_stored(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**75.5% of retained akas rows are this**, measured over 7,536,366
-        rows against a real 1,271,138-title catalog — 5,693,570 of them
-        casefold-equal the title's own `name` or `original_name`.
+        """**75.5% of retained akas rows are this**.
+
+        measured over 7,536,366 rows against a real 1,271,138-title catalog — 5,693,570
+        of them casefold-equal the title's own `name` or `original_name`.
 
         Storing them reproduces exactly the one-row-per-title duplication M6's
         boundary call 3 refused the table for, and it would reverse a boundary
@@ -1149,10 +1214,11 @@ class BulkCatalogRepositoryContract:
     async def test_an_alias_equal_to_the_titles_original_name_is_not_stored(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """Both names, not just `name`. IMDb's own `originalTitle` is what
-        `titles.original_name` holds, and an aka restating it is the same
-        non-alias as one restating the display name — measured together,
-        because the 75.5% figure is against *either* of the two.
+        """Both names, not just `name`.
+
+        IMDb's own `originalTitle` is what `titles.original_name` holds, and an aka
+        restating it is the same non-alias as one restating the display name — measured
+        together, because the 75.5% figure is against *either* of the two.
 
         `SHAWSHANK` is the fixture carrying an `original_name` at all
         (`THRONES` has none), which is asserted here rather than assumed: a
@@ -1174,11 +1240,13 @@ class BulkCatalogRepositoryContract:
     async def test_the_canonical_comparison_is_case_normalised_the_way_the_index_reads_it(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`ix_titles_name_lower_prefix` is a btree over **`lower(name)`**, so
-        two names differing only in case are one entry to the tier-1 probe.
-        An alias kept because its capitalisation differs is therefore a row
-        that can never be reached by a prefix the canonical name does not
-        already answer — the duplication with an extra step.
+        """`ix_titles_name_lower_prefix` is a btree over **`lower(name)`**.
+
+        so two names differing only in case are one entry to the tier-1 probe.
+
+        An alias kept because its capitalisation differs is therefore a row that can
+        never be reached by a prefix the canonical name does not already answer — the
+        duplication with an extra step.
 
         The premise is carried: the alias and the title's own name must differ
         as strings, or a plain `=` comparison passes this case for the wrong
@@ -1197,10 +1265,11 @@ class BulkCatalogRepositoryContract:
         assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == ()
 
     async def test_the_fold_is_lower_and_not_casefold(self, repo: BulkCatalogRepository) -> None:
-        """**The measurement this write was taken with is not the rule this write applies,
+        """**The measurement this write was taken with is not the rule this write applies.
+
         and one character in the dump can tell them apart.** T3 and T5 measured the
         alias population with Python `str.casefold()`; `replace_aliases` compares under
-        `lower()`, because that is the function `ix_titles_name_lower_prefix` is built
+        `lower()`, because that is the function `ix_titles_name_lower_prefix` is built.
         """
         shouted = "Eine Synthetische STRASSE"
         assert shouted.casefold() == SHARP_S.name.casefold(), "the premise: casefold folds these"
@@ -1220,9 +1289,10 @@ class BulkCatalogRepositoryContract:
     async def test_region_and_language_are_stored_rather_than_dropped(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**The two columns `m09a` added for this loader**, and the reason
-        they exist: without them a French and a Brazilian alias of one film are
-        indistinguishable rows.
+        """**The two columns `m09a` added for this loader**, and the reason they exist.
+
+        without them a French and a Brazilian alias of one film are indistinguishable
+        rows.
 
         Both are independently optional and NULL means "not specific to a
         region", which is a different fact from any code — measured over the
@@ -1253,10 +1323,11 @@ class BulkCatalogRepositoryContract:
     async def test_a_title_whose_aliases_all_disappeared_upstream_loses_its_stale_rows(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**The whole reason the scope is a separate argument.** A title whose
-        akas IMDb has withdrawn contributes no rows at all, so a scope derived
-        from `rows` cannot name it and its stale aliases stand forever, with
-        nothing anywhere able to report that they are stale.
+        """**The whole reason the scope is a separate argument.** A title whose akas IMDb has.
+
+        withdrawn contributes no rows at all, so a scope derived from `rows` cannot name
+        it and its stale aliases stand forever, with nothing anywhere able to report
+        that they are stale.
 
         Same argument and same shape as `replace_for_titles`' `title_ids`
         parameter one port over.
@@ -1278,11 +1349,13 @@ class BulkCatalogRepositoryContract:
     async def test_a_replayed_batch_stores_the_same_rows_rather_than_doubling_them(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`title_search_names` has **no unique constraint** — `m09a` says so
-        in the migration and states the condition that would reverse it (a
-        writer that upserts). So nothing in the database stops a replay
-        doubling every alias; the delete is what makes the write idempotent,
-        and a resume replays a batch by design.
+        """`title_search_names` has **no unique constraint**.
+
+        `m09a` says so in the migration and states the condition that would reverse it
+        (a writer that upserts).
+
+        So nothing in the database stops a replay doubling every alias; the delete is
+        what makes the write idempotent, and a resume replays a batch by design.
         """
         batch = [
             _aka(SHAWSHANK.imdb_id, 1, "Un Long Métrage Synthétique", region="FR", language="fr")
@@ -1301,9 +1374,10 @@ class BulkCatalogRepositoryContract:
     async def test_two_akas_of_one_name_are_one_row_and_the_lowest_ordering_wins(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**The dedupe is 9.7% of what survives the canonical filter** —
-        1,842,796 rows down to 1,663,364 on the measured catalog — because one
-        name is legitimately listed for several regions.
+        """**The dedupe is 9.7% of what survives the canonical filter**.
+
+        1,842,796 rows down to 1,663,364 on the measured catalog — because one name is
+        legitimately listed for several regions.
 
         The winner is the lowest `ordering`, which is the only per-title
         sequence the dump supplies and the reason `ImdbAka` carries it at all.
@@ -1336,12 +1410,14 @@ class BulkCatalogRepositoryContract:
     async def test_a_scoped_title_the_catalog_does_not_hold_is_counted_not_written(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`title.akas` covers **1,270,074 of 1,271,138 catalog titles** but
-        the file itself names far more than the catalog retains, so a scoped id
-        matching nothing is routine rather than anomalous. Counted, the way
-        `CreditNamesFillResult.unmatched` and `GenomeWriteResult.unmatched`
-        are: a join that matched almost nothing must not look identical to one
-        that matched everything.
+        """`title.akas` covers **1,270,074 of 1,271,138 catalog titles** but the file itself.
+
+        names far more than the catalog retains, so a scoped id matching nothing is
+        routine rather than anomalous.
+
+        Counted, the way `CreditNamesFillResult.unmatched` and
+        `GenomeWriteResult.unmatched` are: a join that matched almost nothing must not
+        look identical to one that matched everything.
 
         **`unmatched` counts the scope and not the rows**, which is a real
         distinction rather than a spelling: the third id here is in scope, has
@@ -1368,11 +1444,13 @@ class BulkCatalogRepositoryContract:
     async def test_a_row_outside_the_scope_is_refused_before_anything_is_written(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """An alias whose title the scope does not name would be **inserted and
-        never deletable** — the next pass over that title deletes by a scope
-        this row is not in, so it survives every re-import and every upstream
-        withdrawal. That is the one row shape a re-derivation cannot repair,
-        so it is a `ValueError` from the caller rather than a row.
+        """An alias whose title the scope does not name would be **inserted and never deletable**.
+
+        the next pass over that title deletes by a scope this row is not in, so it
+        survives every re-import and every upstream withdrawal.
+
+        That is the one row shape a re-derivation cannot repair, so it is a `ValueError`
+        from the caller rather than a row.
 
         `ValueError` rather than `PortDataMalformed` or `RepositoryConflict`,
         following `replace_genome_tags` two methods up: this is a
@@ -1410,12 +1488,13 @@ class BulkCatalogRepositoryContract:
     async def test_an_alias_write_leaves_a_credited_persons_rows_alone(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """**The mirror of B1's own case, from the other writer.**
-        `title_search_names` has two writers inside one milestone —
-        `CreditRepository.replace_for_titles` owns `kind = 'person'` and this
-        call owns `kind = 'alias'` — and a delete scoped by `title_id` alone
-        makes them mutually destructive, whichever runs second erasing the
-        other's rows with nothing raised and nothing logged.
+        """**The mirror of B1's own case.
+
+        from the other writer.** `title_search_names` has two writers inside one
+        milestone — `CreditRepository.replace_for_titles` owns `kind = 'person'` and
+        this call owns `kind = 'alias'` — and a delete scoped by `title_id` alone makes
+        them mutually destructive, whichever runs second erasing the other's rows with
+        nothing raised and nothing logged.
 
         `replace_for_titles` scopes its delete by `title_ids` **and** `kind`
         and seeds an alias row by hand to prove it. This is the same assertion
@@ -1442,10 +1521,11 @@ class BulkCatalogRepositoryContract:
     async def test_an_empty_alias_batch_with_an_empty_scope_writes_nothing_and_does_not_raise(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """`BulkDataset.batches`' contract permits a batch that exists only to
-        advance the cursor, and `_ImdbDataset` yields no batch at all for a
-        trailing run of filtered lines — so the caller reaching this with
-        nothing on either side is routine."""
+        """`BulkDataset.batches`' contract permits a batch that exists only to advance the cursor.
+
+        and `_ImdbDataset` yields no batch at all for a trailing run of filtered lines —
+        so the caller reaching this with nothing on either side is routine.
+        """
         assert await repo.replace_aliases([], imdb_ids=[]) == AliasWriteResult(
             written=0, unmatched=0, canonical=0, duplicate=0
         )
@@ -1453,9 +1533,10 @@ class BulkCatalogRepositoryContract:
     async def seed_person_search_name(
         self, repo: BulkCatalogRepository, imdb_id: str, name: str
     ) -> None:
-        """Leave behind exactly what `CreditRepository.replace_for_titles`
-        leaves behind for one credited person: a `title_search_names` row at
-        `kind = 'person'`, with `region` and `language` NULL.
+        """Leave behind exactly what `CreditRepository.replace_for_titles` leaves behind for one.
+
+        credited person: a `title_search_names` row at `kind = 'person'`, with `region`
+        and `language` NULL.
 
         A hook rather than a call to that port, for `derive_credit_names`'
         reason one method down: it is a *different port*, and making this
@@ -1467,8 +1548,9 @@ class BulkCatalogRepositoryContract:
     async def search_names_of(
         self, repo: BulkCatalogRepository, imdb_id: str
     ) -> tuple[tuple[str, str, str | None, str | None], ...]:
-        """Every `title_search_names` row for a title, as
-        `(kind, name, region, language)` ascending.
+        """Every `title_search_names` row for a title.
+
+        as `(kind, name, region, language)` ascending.
 
         A test affordance rather than a port method, for `popularity_of`'s
         reason: nothing in production reads this table through
@@ -1485,31 +1567,37 @@ class BulkCatalogRepositoryContract:
     async def credit_names_of(
         self, repo: BulkCatalogRepository, imdb_id: str
     ) -> tuple[str, ...] | None:
-        """How this implementation reads back `titles.credit_names`. Same
-        not-on-the-port reasoning as `popularity_of`: nothing in production
-        reads it through *this* port -- `TitleRepository.credit_names_for` is
-        what `services/index.py:116` calls."""
+        """How this implementation reads back `titles.credit_names`.
+
+        Same not-on-the-port reasoning as `popularity_of`: nothing in production reads
+        it through *this* port -- `TitleRepository.credit_names_for` is what
+        `services/index.py:116` calls.
+        """
         raise NotImplementedError
 
     async def derive_credit_names(
         self, repo: BulkCatalogRepository, imdb_id: str, names: tuple[str, ...]
     ) -> None:
-        """Leave a title in the state `DeriveService` leaves it in: off the
-        skeleton tier, with `credit_names` derived from TMDb's `credits`.
+        """Leave a title in the state `DeriveService` leaves it in.
+
+        off the skeleton tier, with `credit_names` derived from TMDb's `credits`.
 
         A hook rather than a call to `CreditRepository.replace_for_titles`,
         for the reason `genome_tags_of` gives one method down: that is a
         *different port*, and making these cases pass or fail on a second
         implementation's correctness would test the wrong thing. What the two
         arms must agree on is the precedence rule, and the rule is stated in
-        terms of the state that path leaves behind."""
+        terms of the state that path leaves behind.
+        """
         raise NotImplementedError
 
     async def title_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> uuid.UUID | None:
-        """The `titles.id` an IMDb id resolved to. A test affordance, not a
-        port method: `BulkCatalogRepository` deliberately exposes no per-row
-        read, and the whole point of the case above is that the *stored key*
-        is this id."""
+        """The `titles.id` an IMDb id resolved to.
+
+        A test affordance, not a port method: `BulkCatalogRepository` deliberately
+        exposes no per-row read, and the whole point of the case above is that the
+        *stored key* is this id.
+        """
         raise NotImplementedError
 
     async def genome_of(
@@ -1519,47 +1607,61 @@ class BulkCatalogRepositoryContract:
         raise NotImplementedError
 
     async def genome_keys(self, repo: BulkCatalogRepository) -> set[object]:
-        """Every key `genome_scores` is stored under. Read as a set of
-        opaque objects so the case that a `movieId` is *not* among them can
-        be written without either arm having to pretend an integer is a
-        UUID."""
+        """Every key `genome_scores` is stored under.
+
+        Read as a set of opaque objects so the case that a `movieId` is *not* among them
+        can be written without either arm having to pretend an integer is a UUID.
+        """
         raise NotImplementedError
 
     async def enrich(self, repo: BulkCatalogRepository, imdb_id: str) -> None:
-        """Move a title off the skeleton tier. Nothing on this port writes
-        `enrichment_state`, and the enriched-tier coverage fraction is the
-        one number that matters, so the suite needs a way to create one."""
+        """Move a title off the skeleton tier.
+
+        Nothing on this port writes `enrichment_state`, and the enriched-tier coverage
+        fraction is the one number that matters, so the suite needs a way to create one.
+        """
         raise NotImplementedError
 
     async def popularity_of(self, repo: BulkCatalogRepository, imdb_id: str) -> float | None:
-        """How this implementation reads back a title's popularity. Not on
-        the port: nothing in production needs it, and adding a read method
-        to satisfy a test would widen the port for no caller."""
+        """How this implementation reads back a title's popularity.
+
+        Not on the port: nothing in production needs it, and adding a read method to
+        satisfy a test would widen the port for no caller.
+        """
         raise NotImplementedError
 
     async def tmdb_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> int | None:
-        """How this implementation reads back a title's tmdb_id. Same
-        not-on-the-port reasoning as `popularity_of`."""
+        """How this implementation reads back a title's tmdb_id.
+
+        Same not-on-the-port reasoning as `popularity_of`.
+        """
         raise NotImplementedError
 
     async def tvdb_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> int | None:
-        """How this implementation reads back a title's tvdb_id. Same
-        not-on-the-port reasoning as `popularity_of`."""
+        """How this implementation reads back a title's tvdb_id.
+
+        Same not-on-the-port reasoning as `popularity_of`.
+        """
         raise NotImplementedError
 
     async def name_of(self, repo: BulkCatalogRepository, imdb_id: str) -> str | None:
         """How this implementation reads back a title's IMDb-supplied name.
-        Same not-on-the-port reasoning as `popularity_of`."""
+
+        Same not-on-the-port reasoning as `popularity_of`.
+        """
         raise NotImplementedError
 
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
-        """Whether whatever `bulk_load_window` suspended is back. Trivially
-        True for a fake that suspends nothing."""
+        """Whether whatever `bulk_load_window` suspended is back.
+
+        Trivially True for a fake that suspends nothing.
+        """
         raise NotImplementedError
 
     async def genome_tags_of(self, repo: BulkCatalogRepository) -> tuple[tuple[int, str, str], ...]:
-        """The whole stored vocabulary as `(tag_id, tag, genome_revision)`,
-        ascending by `tag_id`.
+        """The whole stored vocabulary as `(tag_id.
+
+        tag, genome_revision)`, ascending by `tag_id`.
 
         A hook rather than `GenomeRepository.vocabulary`, for two reasons that
         both matter here. That method is on a *different port*, so using it

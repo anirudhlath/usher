@@ -1,5 +1,6 @@
-"""M9's whole schema in one revision: `images`, `search_queries`,
-`row_provider_settings`, `title_search_names`, and the two tier-1 prefix indexes.
+"""M9's whole schema in one revision.
+
+`images`, `search_queries`, `row_provider_settings`, `title_search_names`, and the two
 """
 
 import sqlalchemy as sa

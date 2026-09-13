@@ -248,8 +248,9 @@ def test_the_fake_declares_the_columns_the_real_repository_does() -> None:
 
 
 async def test_a_decoded_reference_holds_the_values_the_line_carried(tmp_path: Path) -> None:
-    """🔴 **The case K3's equivalent did not have, and the one three
-    corruptions of the natural key survived.**
+    """🔴 **The case K3's equivalent did not have.
+
+    and the one three corruptions of the natural key survived.**.
 
     Decoding is this module's construction step: the artifact carries four
     JSON keys and a `TitleReference` comes out. Every other assertion in this
@@ -313,7 +314,8 @@ async def test_a_decoded_reference_holds_the_values_the_line_carried(tmp_path: P
 
 
 async def test_the_ciphertext_survives_the_round_trip_as_bytes(tmp_path: Path) -> None:
-    """`source_credentials.ciphertext` is `bytea` and JSON has no byte string,
+    """`source_credentials.ciphertext` is `bytea` and JSON has no byte string.
+
     so `_encode` base64s it and this reads it back.
 
     The value asserted is the *bytes*, against the literal they were encoded
@@ -351,7 +353,7 @@ async def test_the_ciphertext_survives_the_round_trip_as_bytes(tmp_path: Path) -
 async def test_the_schema_mismatch_names_both_revisions_and_follows_the_database(
     tmp_path: Path,
 ) -> None:
-    """🔴 **The refusal, and the half that makes it falsifiable.**
+    """🔴 **The refusal, and the half that makes it falsifiable.**.
 
     A case asserting the header's revision against the same function that
     produced it is satisfied by any implementation -- K3 shipped exactly that
@@ -382,9 +384,9 @@ async def test_the_schema_mismatch_names_both_revisions_and_follows_the_database
 async def test_an_unknown_table_is_refused_before_the_first_row_is_applied(
     tmp_path: Path,
 ) -> None:
-    """A `table` key the manifest does not classify is what an artifact from a
-    later schema looks like, and continuing would mean writing rows this code
-    has no merge rule for.
+    """A `table` key the manifest does not classify is what an artifact from a later schema.
+
+    looks like, and continuing would mean writing rows this code has no merge rule for.
 
     The refusal is over the *whole* file rather than as each table comes up:
     the unknown table here is named by the **last** line and the known one by
@@ -432,8 +434,9 @@ async def test_a_damaged_line_is_one_refusal_rather_than_a_stack(
 
 
 async def test_the_damaged_line_is_named_by_its_position_in_the_file(tmp_path: Path) -> None:
-    """⚠️ **`JSONDecodeError.lineno` is 1 for every line in this file**, which
-    is the trap the message avoids.
+    """⚠️ **`JSONDecodeError.lineno` is 1 for every line in this file**.
+
+    which is the trap the message avoids.
 
     Each line is decompressed and parsed on its own, so that attribute counts
     lines *inside the one-line string* handed to `json.loads` and is always 1.
@@ -463,8 +466,7 @@ async def test_the_damaged_line_is_named_by_its_position_in_the_file(tmp_path: P
 async def test_a_gzip_member_that_ends_early_is_refused_rather_than_crashing(
     tmp_path: Path,
 ) -> None:
-    """⚠️ **`EOFError` is not an `OSError`**, which is the whole reason this
-    case exists.
+    """⚠️ **`EOFError` is not an `OSError`**, which is the whole reason this case exists.
 
     `gzip.BadGzipFile` subclasses `OSError` and would have reached
     `cli.OPERATOR_ERRORS` on its own; a file cut off *inside* a member raises
@@ -491,8 +493,7 @@ async def test_a_gzip_member_that_ends_early_is_refused_rather_than_crashing(
 
 
 async def test_a_row_that_lost_a_column_is_refused_rather_than_bound(tmp_path: Path) -> None:
-    """The truncated-*row* half of refusal 1: a row missing a column is still
-    valid JSON.
+    """The truncated-*row* half of refusal 1: a row missing a column is still valid JSON.
 
     It is safe to compare the key set exactly because the stamp has already
     been checked, so two databases at one revision have one column set and a
@@ -528,8 +529,7 @@ async def test_a_json_object_no_encoder_writes_is_refused_rather_than_passed_thr
 
 
 async def test_a_clean_run_commits_once_after_the_last_table(tmp_path: Path) -> None:
-    """One commit, after everything, which is the whole of the transaction
-    claim.
+    """One commit, after everything, which is the whole of the transaction claim.
 
     `events == ["commit"]` rather than `"commit" in events`: a service that
     committed per table produces the same membership and a different count,
@@ -671,8 +671,10 @@ async def test_a_value_the_column_will_not_take_is_a_refusal_and_not_a_stack(
 
 
 async def test_the_report_separates_every_bucket_per_table(tmp_path: Path) -> None:
-    """Five counts, because *"restored 9 rows"* over an artifact holding 50
-    is the failure this whole command exists to make visible.
+    """Five counts.
+
+    because *"restored 9 rows"* over an artifact holding 50 is the failure this whole
+    command exists to make visible.
 
     All five are asserted as different numbers over one run: a report that
     summed any bucket into another, or dropped refused from the total, answers
@@ -724,10 +726,12 @@ async def test_the_report_separates_every_bucket_per_table(tmp_path: Path) -> No
 async def test_an_empty_file_is_refused_rather_than_reported_as_a_clean_run(
     tmp_path: Path,
 ) -> None:
-    """A zero-byte gzip member decompresses to nothing at all, and *"0 written,
-    0 skipped, 0 refused, committed"* is the most misleading answer available:
-    it is exactly what a successful restore of an artifact holding nothing
-    looks like."""
+    """A zero-byte gzip member decompresses to nothing at all.
+
+    and *"0 written, 0 skipped, 0 refused, committed"* is the most misleading answer
+    available: it is exactly what a successful restore of an artifact holding nothing
+    looks like.
+    """
     empty = tmp_path / "empty.jsonl.gz"
     with gzip.open(empty, "wt", encoding="utf-8") as handle:
         handle.write("")
@@ -740,9 +744,10 @@ async def test_an_empty_file_is_refused_rather_than_reported_as_a_clean_run(
 
 
 async def test_a_first_line_that_is_not_a_header_is_refused(tmp_path: Path) -> None:
-    """A file whose first object carries no `schema_revision` is not an
-    artifact `usher backup` wrote, and reading its second line as a row would
-    silently drop the first one."""
+    """A file whose first object carries no `schema_revision` is not an artifact `usher backup`.
+
+    wrote, and reading its second line as a row would silently drop the first one.
+    """
     service, _ = _service(FakeRestoreRepository())
     path = _artifact(
         tmp_path / "x.jsonl.gz", [("users", _user_row())], header={"manifest_version": 1}
@@ -753,8 +758,9 @@ async def test_a_first_line_that_is_not_a_header_is_refused(tmp_path: Path) -> N
 
 
 async def test_a_body_shorter_than_its_header_is_refused(tmp_path: Path) -> None:
-    """🔴 **The check two files in `src/` described in the present tense for a
-    milestone before it existed.**
+    """🔴 **The check two files in `src/` described in the present tense for a milestone before.
+
+    it existed.**.
 
     `services/backup.py` said the counts are what *"lets K4 read a short table
     as a truncated file rather than as a race"*, and
@@ -799,8 +805,7 @@ async def test_a_body_shorter_than_its_header_is_refused(tmp_path: Path) -> None
 
 
 async def test_a_body_matching_its_header_is_not_refused(tmp_path: Path) -> None:
-    """The positive control, and it is what stops the check being *"refuse
-    every artifact"*.
+    """The positive control, and it is what stops the check being *"refuse every artifact"*.
 
     It also pins the writer's deliberate omission: `usher backup` leaves a
     zero-row table out of the header entirely (*"a `llm_calls: 0` in the header
@@ -853,8 +858,10 @@ async def test_a_header_with_no_counts_at_all_is_refused_rather_than_skipped(
 async def test_the_skip_flag_reaches_the_repository_and_is_off_by_default(
     tmp_path: Path,
 ) -> None:
-    """The default is the guarantee, so it is asserted as the value the
-    repository was *handed* rather than as a behaviour the fake could fake.
+    """The default is the guarantee.
+
+    so it is asserted as the value the repository was *handed* rather than as a
+    behaviour the fake could fake.
 
     A service that accepted `skip_unresolvable` and never forwarded it would
     pass every report assertion in this file -- the fake's answer is scripted
@@ -879,8 +886,9 @@ async def test_the_skip_flag_reaches_the_repository_and_is_off_by_default(
 async def test_rows_skipped_as_unresolvable_do_not_hold_back_the_commit(
     tmp_path: Path,
 ) -> None:
-    """A row the operator asked to drop is not a refusal, and treating it as
-    one would make the flag a slower way of doing nothing.
+    """A row the operator asked to drop is not a refusal.
+
+    and treating it as one would make the flag a slower way of doing nothing.
 
     The distinction is the whole design: `refused` withholds the commit and
     `unresolved` does not, so a run with 304 dropped links and no refusals

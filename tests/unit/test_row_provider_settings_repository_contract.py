@@ -1,4 +1,7 @@
-"""The row-provider-settings contract against the in-memory double. No Docker."""
+"""The row-provider-settings contract against the in-memory double.
+
+No Docker.
+"""
 
 import pytest
 

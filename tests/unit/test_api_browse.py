@@ -1,6 +1,4 @@
-"""`GET /browse` on the wire: the keyset walk, and the facet key the measurement
-decided.
-"""
+"""`GET /browse` on the wire: the keyset walk, and the facet key the measurement decided."""
 
 import ast
 import inspect
@@ -86,8 +84,9 @@ async def _seed(titles: FakeTitleRepository, name: str, **changes: object) -> Ti
 async def test_a_second_page_follows_the_cursor_the_first_returned(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """Page 2 is disjoint from page 1 and the two concatenated are the whole
-    seeded population, in the order that was asked for.
+    """Page 2 is disjoint from page 1 and the two concatenated are the whole seeded population.
+
+    in the order that was asked for.
 
     Seeded **backwards** -- "Zulu" first, "Alpha" last -- so that `ORDER BY id`
     and `ORDER BY sort_name` disagree, and the disagreement is asserted as this
@@ -122,8 +121,7 @@ async def test_a_second_page_follows_the_cursor_the_first_returned(
 async def test_an_empty_screen_is_a_two_hundred_and_never_a_404(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """A filter nothing matches is a fact about the catalog, not a missing
-    resource.
+    """A filter nothing matches is a fact about the catalog, not a missing resource.
 
     The catalog is deliberately **not** empty -- one title that the filter
     excludes -- so this is "the screen is empty" rather than "the database
@@ -175,8 +173,9 @@ async def test_the_walk_terminates_and_the_last_page_carries_a_null_cursor(
 async def test_a_cursor_minted_under_another_sort_is_refused_rather_than_reinterpreted(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """A cursor read under the wrong ordering is a plausible, complete, wrong
-    page, so it is a `400 invalid_cursor` rather than a page.
+    """A cursor read under the wrong ordering is a plausible.
+
+    complete, wrong page, so it is a `400 invalid_cursor` rather than a page.
 
     The refusal is A3's codec at the router and never the port -- the digest is
     over the sort name and the filter state, both values this client sent.
@@ -215,8 +214,9 @@ async def test_a_cursor_minted_under_another_sort_is_refused_rather_than_reinter
 async def test_a_cursor_minted_under_another_filter_is_refused_too(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """The same refusal one parameter over, because the digest covers the
-    filters and not only the sort.
+    """The same refusal one parameter over.
+
+    because the digest covers the filters and not only the sort.
 
     Without this the sort case alone is satisfied by a digest over `sort`, and
     a cursor minted over `genre=horror` would resume a page of comedies from a
@@ -238,8 +238,9 @@ async def test_a_cursor_minted_under_another_filter_is_refused_too(
 async def test_facets_are_absent_and_say_so_rather_than_answering_an_empty_map(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """The default request computes no counts, and the response says which of
-    the two reasons applies.
+    """The default request computes no counts.
+
+    and the response says which of the two reasons applies.
 
     **An empty map and "nobody counted" are two different facts**, so the maps
     are absent rather than `{}`: a client reading `genres` gets a `KeyError` it
@@ -262,9 +263,10 @@ async def test_facets_are_absent_and_say_so_rather_than_answering_an_empty_map(
 async def test_an_unpredicated_request_for_facets_is_refused_by_its_own_reason(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """Asking for facets over the whole catalog is the 330.81 ms request, so it
-    is declined -- and declined with a *different* reason from "you did not
-    ask", because the two have different fixes.
+    """Asking for facets over the whole catalog is the 330.81 ms request, so it is declined.
+
+    and declined with a *different* reason from "you did not ask", because the two have
+    different fixes.
 
     One reason for both would make `facets=true` over an unfiltered browse
     indistinguishable from a client that forgot the parameter.
@@ -337,8 +339,7 @@ async def test_a_computed_facet_map_that_is_empty_is_present_and_empty(
 async def test_every_sort_pages_and_every_sort_has_a_cursor_type(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """All four sorts mint a decodable cursor, and the type table is
-    exhaustive.
+    """All four sorts mint a decodable cursor, and the type table is exhaustive.
 
     The structural half is not decoration: a fifth `BrowseSort` member with no
     `_KEYSET_TYPES` entry is a `KeyError` **inside a route**, i.e. a 500 for a
@@ -403,8 +404,9 @@ async def test_a_page_boundary_inside_the_unkeyed_group_resumes_from_it(
 async def test_the_openapi_document_describes_the_cursor_as_an_opaque_string(
     client: httpx.AsyncClient,
 ) -> None:
-    """Nothing client-side can be built on decoding the cursor, so the schema
-    says `string` and nothing else.
+    """Nothing client-side can be built on decoding the cursor.
+
+    so the schema says `string` and nothing else.
 
     A documented structure is a contract: the day a keyset gains a component,
     a client that read the shape out of `/openapi.json` breaks, and ADR-0034's
@@ -424,9 +426,10 @@ async def test_the_openapi_document_describes_the_cursor_as_an_opaque_string(
 
 
 def test_the_facet_response_carries_every_field_of_its_own_model() -> None:
-    """`response_model_exclude_unset=True` is a rule about **every** field, so
-    a field added to the model and forgotten in a constructor silently vanishes
-    from the wire rather than failing.
+    """`response_model_exclude_unset=True` is a rule about **every** field.
+
+    so a field added to the model and forgotten in a constructor silently vanishes from
+    the wire rather than failing.
 
     B9 paid for this once already on `GET /titles/{id}`. The expected key set
     is derived from `model_fields` rather than written out, so it grows with
@@ -501,10 +504,11 @@ def _without_prose(tree: ast.Module) -> ast.Module:
 async def test_browsing_a_page_of_skeletons_promotes_them_to_visible(
     client: httpx.AsyncClient, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """`/browse` is the screen with the most to gain and had nothing wired:
-    1,139,982 of 1,273,313 titles were `skeleton` on 2026-08-26, so ~89% of
-    what this route can return is a name and a year, and paging past it was the
-    one interaction guaranteed never to improve it.
+    """`/browse` is the screen with the most to gain and had nothing wired.
+
+    1,139,982 of 1,273,313 titles were `skeleton` on 2026-08-26, so ~89% of what this
+    route can return is a name and a year, and paging past it was the one interaction
+    guaranteed never to improve it.
 
     Asserted through a real `create_app()` with the queue overridden rather
     than on a service in isolation, because the defect this closes is a route
@@ -524,10 +528,14 @@ async def test_browsing_a_page_of_skeletons_promotes_them_to_visible(
 async def test_browsing_a_fully_enriched_page_enqueues_nothing(
     client: httpx.AsyncClient, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """The premise the case above rests on, asserted rather than assumed: the
-    promotion is a statement about the *tier* of what was drawn, not something
-    the route does on every request. Without this, a router that promoted every
-    row it returned passes the case above unchanged."""
+    """The premise the case above rests on, asserted rather than assumed.
+
+    the promotion is a statement about the *tier* of what was drawn, not something the
+    route does on every request.
+
+    Without this, a router that promoted every row it returned passes the case above
+    unchanged.
+    """
     await _seed(titles, "Already done", enrichment_state=EnrichmentState.ENRICHED)
 
     response = await client.get("/browse")

@@ -56,8 +56,7 @@ RETRACTION_ERROR_CODE = "availability_ceiling"
 
 
 def _recorded_failure(exc: UsherPortError) -> tuple[str, str | None]:
-    """The sentence and the kind `sync_runs` holds for a failure this service
-    absorbed.
+    """The sentence and the kind `sync_runs` holds for a failure this service absorbed.
 
     Returned together so the two cannot be written apart: a `str(exc)` with no
     code beside it is a refusal the CLI stops offering its flag for, and the
@@ -129,7 +128,10 @@ class ReconcileService:
         *,
         max_items: int = 0,
     ) -> SyncRun:
-        """Walk `source` and reconcile it. Never raises a `UsherPortError`."""
+        """Walk `source` and reconcile it.
+
+        Never raises a `UsherPortError`.
+        """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.reconcile") as span:
             span.set_attribute("usher.source", source.name)
@@ -240,8 +242,9 @@ class ReconcileService:
         )
 
     async def cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
-        """`None` for a full walk; the newest completed item-lane run's start instant for a
-        delta.
+        """`None` for a full walk.
+
+        the newest completed item-lane run's start instant for a delta.
         """
         if kind is not SyncRunKind.DELTA:
             return None
@@ -260,8 +263,10 @@ class ReconcileService:
         cursor: AwareDatetime | None,
         max_items: int,
     ) -> bool:
-        """Walk the source into the catalog. `True` when it stopped at
-        `max_items` with the source still holding more."""
+        """Walk the source into the catalog.
+
+        `True` when it stopped at `max_items` with the source still holding more.
+        """
         batch: list[SourceItem] = []
         pulled = 0
         truncated = False
@@ -331,8 +336,7 @@ class ReconcileService:
         )
 
     async def _sweep(self, run: SyncRun, kind: SyncRunKind, source_name: str) -> SyncRun:
-        """Retract availability -- full walks only, and only after one
-        finished.
+        """Retract availability -- full walks only, and only after one finished.
 
         `source_name` is carried in for the metric's label rather than read off
         the run, which holds only a `source_id`: `usher.sync.run.duration`

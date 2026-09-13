@@ -1,4 +1,7 @@
-"""IR scoring. **The only module in this project that imports `ranx`.**"""
+"""IR scoring.
+
+**The only module in this project that imports `ranx`.**
+"""
 
 import importlib.metadata
 from collections import Counter
@@ -18,7 +21,10 @@ NO_RESULT = "__no_result__"
 
 @dataclass(frozen=True, slots=True)
 class Ranking:
-    """What one query returned, best first. Empty is a legitimate answer."""
+    """What one query returned, best first.
+
+    Empty is a legitimate answer.
+    """
 
     query_id: str
     ranked_ids: tuple[str, ...]
@@ -35,9 +41,11 @@ class Ranking:
 
 
 def library_version() -> str:
-    """`ranx.__version__` does not exist. Recorded in every run's provenance
-    so a metric that moves can be attributed to a library rather than to the
-    system under test."""
+    """`ranx.__version__` does not exist.
+
+    Recorded in every run's provenance so a metric that moves can be attributed to a
+    library rather than to the system under test.
+    """
     return importlib.metadata.version("ranx")
 
 

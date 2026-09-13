@@ -26,8 +26,11 @@ class EventPublisherContract:
     async def test_publish_accepts_an_event_with_no_subscribers(
         self, publisher: EventPublisher
     ) -> None:
-        """The normal state of a household's server. `EnrichService`
-        finishing a title at 04:00 must not care that nobody is watching."""
+        """The normal state of a household's server.
+
+        `EnrichService` finishing a title at 04:00 must not care that nobody is
+        watching.
+        """
         await publisher.publish(ClientEvent(kind=ClientEventKind.TITLE_UPDATED))
 
     async def test_publish_never_raises_for_a_subscriber_that_cannot_keep_up(
@@ -47,14 +50,14 @@ class EventPublisherContract:
         it. The sweep recorded HUNG rather than KILLED, which is a mutation
         no case observed rather than one every case caught.
         """
-
         await publish_all(publisher, (_progress(index) for index in range(_BURST)))
 
     async def test_publish_is_not_a_suspension_point_a_caller_can_be_starved_on(
         self, publisher: EventPublisher
     ) -> None:
-        """Bounded *and* measured, because the failure this rules out is a
-        block rather than a wrong answer.
+        """Bounded *and* measured.
+
+        because the failure this rules out is a block rather than a wrong answer.
 
         `asyncio.wait_for` is what makes a blocking implementation fail this
         case instead of hanging the suite; the elapsed-window assertion is
@@ -146,8 +149,9 @@ BusFactory = Callable[..., SubscribingPublisher]
 
 
 class EventBusContract:
-    """What an `EventPublisher` that *also* offers subscription must
-    guarantee to one client's stream.
+    """What an `EventPublisher` that *also* offers subscription must guarantee to one client's.
+
+    stream.
 
     Separate from `EventPublisherContract` because `FakeEventPublisher` has
     no subscribers, and a suite it "passed" by having nothing to check would
@@ -163,9 +167,11 @@ class EventBusContract:
     async def test_a_subscriber_that_overflows_is_told_to_resync(
         self, make_bus: BusFactory
     ) -> None:
-        """PRD 07's exact requirement. Dropping events silently leaves a
-        client confidently stale, which is worse than telling it to refetch:
-        it has no way to find out."""
+        """PRD 07's exact requirement.
+
+        Dropping events silently leaves a client confidently stale, which is worse than
+        telling it to refetch: it has no way to find out.
+        """
         bus = make_bus(queue_size=3)
         async with bus.subscribe() as stream:
             await publish_all(bus, (_progress(index) for index in range(10)))
@@ -176,9 +182,11 @@ class EventBusContract:
     async def test_replay_resumes_after_the_last_event_the_client_saw(
         self, make_bus: BusFactory
     ) -> None:
-        """The reconnect PRD 07 designed for. Without it a client that
-        dropped its connection for two seconds during a walk loses whatever
-        landed in them, with nothing to say so."""
+        """The reconnect PRD 07 designed for.
+
+        Without it a client that dropped its connection for two seconds during a walk
+        loses whatever landed in them, with nothing to say so.
+        """
         bus = make_bus()
         for index in (1, 2, 3):
             await bus.publish(_progress(index))
@@ -191,9 +199,11 @@ class EventBusContract:
     async def test_a_last_event_id_older_than_the_buffer_is_told_to_resync(
         self, make_bus: BusFactory
     ) -> None:
-        """Replaying whatever is still in the ring and calling it a resume is
-        the failure: the client silently misses the events that fell off the
-        front and has no way to learn it."""
+        """Replaying whatever is still in the ring and calling it a resume is the failure.
+
+        the client silently misses the events that fell off the front and has no way to
+        learn it.
+        """
         bus = make_bus(buffer_size=3)
         await publish_all(bus, (_progress(index) for index in range(10)))
         async with bus.subscribe(last_event_id=f"{bus.epoch}-1") as stream:
@@ -204,11 +214,14 @@ class EventBusContract:
     async def test_a_last_event_id_from_a_previous_process_is_told_to_resync(
         self, make_bus: BusFactory
     ) -> None:
-        """**The one that is impossible without the epoch.** The ring is
-        in-memory, so ids restart at 1 with the process. A client
-        reconnecting with `Last-Event-ID: 40` after a restart would be
-        replayed events 41+ of a completely different sequence -- a
-        plausible-looking stream that is silently wrong."""
+        """**The one that is impossible without the epoch.** The ring is in-memory.
+
+        so ids restart at 1 with the process.
+
+        A client reconnecting with `Last-Event-ID: 40` after a restart would be replayed
+        events 41+ of a completely different sequence -- a plausible-looking stream that
+        is silently wrong.
+        """
         bus = make_bus()
         await bus.publish(_progress(1))
         async with bus.subscribe(last_event_id="deadbeef-40") as stream:

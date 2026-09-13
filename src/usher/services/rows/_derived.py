@@ -1,6 +1,4 @@
-"""The "run `usher derive`" warning, said once per process rather than once per
-composed screen.
-"""
+"""The "run `usher derive`" warning, said once per process rather than once per composed screen."""
 
 from loguru import logger
 

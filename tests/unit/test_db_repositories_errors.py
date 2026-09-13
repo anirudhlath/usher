@@ -20,7 +20,7 @@ from usher.ports.errors import RepositoryConflict, UsherPortError
 
 
 class _DriverError(Exception):
-    """asyncpg's own exception, in the two fields `_errors.py` reads off it.
+    """Asyncpg's own exception, in the two fields `_errors.py` reads off it.
 
     Both are read through `exc.orig.__cause__` -- SQLAlchemy wraps the driver's
     exception and chains the original onto the wrapper -- so the fake has to be
@@ -123,10 +123,12 @@ async def test_the_body_runs_in_a_savepoint_with_autoflush_suppressed() -> None:
 
 
 async def test_a_refused_row_is_translated_and_carries_its_constraint() -> None:
-    """SQLSTATE class 23, the shape every constraint on these three tables
-    produces, and the message is the caller's rather than the helper's -- three
-    tables refusing a row for three different reasons say three different
-    things to a service."""
+    """SQLSTATE class 23.
+
+    the shape every constraint on these three tables produces, and the message is the
+    caller's rather than the helper's -- three tables refusing a row for three different
+    reasons say three different things to a service.
+    """
     recorded, session = _session()
     refusal = _refusal("23503", "fk_curated_rows_user_id_users")
 
@@ -149,9 +151,11 @@ async def test_a_refused_row_is_translated_and_carries_its_constraint() -> None:
 
 
 async def test_a_value_the_column_cannot_hold_is_translated_without_a_name() -> None:
-    """SQLSTATE class 22 -- `curated_rows."position"` at `2**31` and
-    `llm_calls.cost_usd` above `$9,999.99999999` -- which is the pair that made
-    `except IntegrityError` the wrong clause for these three callers.
+    """SQLSTATE class 22.
+
+    `curated_rows."position"` at `2**31` and `llm_calls.cost_usd` above
+    `$9,999.99999999` -- which is the pair that made `except IntegrityError` the wrong
+    clause for these three callers.
 
     `constraint` is `None` and that is the honest answer: a column's declared
     width refusing a value is not a named constraint firing.
@@ -166,8 +170,10 @@ async def test_a_value_the_column_cannot_hold_is_translated_without_a_name() -> 
 
 
 async def test_a_plain_integrity_error_is_still_a_refusal() -> None:
-    """No SQLSTATE on the chain at all, which is how a refusal arrives when
-    any layer of the best-effort accessor is not what was expected.
+    """No SQLSTATE on the chain at all.
+
+    which is how a refusal arrives when any layer of the best-effort accessor is not
+    what was expected.
 
     It must still translate: degrading to "propagate" would let an integrity
     violation cross the port boundary raw, which is the one thing ADR-0009
@@ -184,8 +190,10 @@ async def test_a_plain_integrity_error_is_still_a_refusal() -> None:
 
 
 async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
-    """Class 42 -- an undefined table, standing in for the dropped connection
-    and the statement timeout that are not deterministic enough to write.
+    """Class 42.
+
+    an undefined table, standing in for the dropped connection and the statement timeout
+    that are not deterministic enough to write.
 
     Captured rather than `pytest.raises(DBAPIError)`: under the mutation this
     kills the helper raises `RepositoryConflict`, which is not a `DBAPIError`,
@@ -220,8 +228,7 @@ _SCANNED = (
 
 
 def _dbapi_handlers() -> list[tuple[str, str, ast.ExceptHandler]]:
-    """Every `except DBAPIError` in the packages that translate, with the
-    method it is in."""
+    """Every `except DBAPIError` in the packages that translate, with the method it is in."""
     found: list[tuple[str, str, ast.ExceptHandler]] = []
     for directory in _SCANNED:
         for path in sorted(directory.rglob("*.py")):
@@ -274,8 +281,9 @@ def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
 
 
 def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
-    """The invariant `except DBAPIError` buys its width with, checked once across every
-    site instead of once per site.
+    """The invariant `except DBAPIError` buys its width with.
+
+    checked once across every site instead of once per site.
     """
     handlers = _dbapi_handlers()
     assert {(module, method) for module, method, _ in handlers} == set(WIDENED_SITES), (

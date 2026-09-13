@@ -200,10 +200,11 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
     async def test_a_negative_billing_order_is_a_port_error(
         self, repository: PostgresCreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
-        """`ck_credits_billing_order_non_negative`, which fires at the
-        `INSERT ... SELECT` rather than during the `COPY` -- the staging table
-        carries no constraints, deliberately, so the violation surfaces one
-        statement later where SQLAlchemy can translate it.
+        """`ck_credits_billing_order_non_negative`, which fires at the `INSERT ...
+
+        SELECT` rather than during the `COPY` -- the staging table carries no
+        constraints, deliberately, so the violation surfaces one statement later where
+        SQLAlchemy can translate it.
 
         Constructed by bypassing the model, because `Credit`'s own `ge=0`
         refuses it first -- which is exactly why the CHECK exists: the bulk
@@ -219,11 +220,12 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
     async def test_the_session_survives_a_conflicting_batch(
         self, repository: PostgresCreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
-        """The SAVEPOINT. `DeriveService` commits credits together with its
-        job checkpoint, so a caught conflict must leave the session usable --
-        without `begin_nested()` the next unrelated call raises
-        `PendingRollbackError` and the failure is attributed to whatever ran
-        next.
+        """The SAVEPOINT.
+
+        `DeriveService` commits credits together with its job checkpoint, so a caught
+        conflict must leave the session usable -- without `begin_nested()` the next
+        unrelated call raises `PendingRollbackError` and the failure is attributed to
+        whatever ran next.
         """
         with pytest.raises(RepositoryConflict):
             await repository.replace_for_titles(
@@ -282,8 +284,9 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         title_id: uuid.UUID,
         lead_person: uuid.UUID,
     ) -> None:
-        """`ck_title_search_names_name_within_btree_bound`, which is a **named**
-        CHECK precisely so this refusal is classifiable.
+        """`ck_title_search_names_name_within_btree_bound`.
+
+        which is a **named** CHECK precisely so this refusal is classifiable.
 
         `titles.credit_names` is a `text[]` and holds any string at all, so the
         bound is the one place the two spellings of this fact can disagree --

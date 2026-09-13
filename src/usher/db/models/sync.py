@@ -25,8 +25,10 @@ from usher.domain.sync import SyncRunKind, SyncRunStatus
 
 
 class SyncRunRow(Base):
-    """One attempt at reconciling a source. A history, not a checkpoint --
-    contrast `ImportRunRow`, which is exactly one row per dataset.
+    """One attempt at reconciling a source.
+
+    A history, not a checkpoint -- contrast `ImportRunRow`, which is exactly one row per
+    dataset.
 
     **`position` is the one column that half-excepts that**, and only for
     the `watch_state` kind: ADR-0042 has a run of that kind reuse its own

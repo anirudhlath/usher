@@ -100,8 +100,9 @@ class _Seeded:
 
 
 async def _household() -> _Seeded:
-    """A household that fires three rows, chosen so **score order and alphabetical order
-    disagree**.
+    """A household that fires three rows.
+
+    chosen so **score order and alphabetical order disagree**.
     """
     library = Library()
     seeded = _Seeded(library)
@@ -196,10 +197,12 @@ async def library_only() -> AsyncIterator[httpx.AsyncClient]:
 
 
 async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -> None:
-    """**The one thing every other case in this file overrides away**, and the gap M8 Task
-    15's mutation sweep found: `_app` replaces `get_row_context` with a `Library`'s, so
-    nothing in the unit suite has ever built the real one -- and `curated=None` in it
-    survived all 2,743 cases while being perfectly type-annotated at the call site.
+    """**The one thing every other case in this file overrides away**.
+
+    and the gap M8 Task 15's mutation sweep found: `_app` replaces `get_row_context`
+    with a `Library`'s, so nothing in the unit suite has ever built the real one -- and
+    `curated=None` in it survived all 2,743 cases while being perfectly type-annotated
+    at the call site.
     """
     library = Library()
     taste = TasteService(
@@ -240,7 +243,8 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
 
 
 async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it() -> None:
-    """**The genre-affinity read used to happen before the screen cache could answer**,
+    """**The genre-affinity read used to happen before the screen cache could answer**.
+
     because `RowContext.affinities` was a value this dependency computed rather than a
     callable a provider awaits.
     """
@@ -292,9 +296,10 @@ async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_i
 async def test_the_screen_is_rows_in_the_order_the_server_composed_them(
     client: httpx.AsyncClient, seeded: _Seeded
 ) -> None:
-    """ADR-0006: "clients render them in order". The order is the product, so a
-    response carrying the same rows in a different order is a different screen
-    -- and `set(...)` or `in` assertions cannot tell them apart.
+    """ADR-0006: "clients render them in order".
+
+    The order is the product, so a response carrying the same rows in a different order
+    is a different screen -- and `set(...)` or `in` assertions cannot tell them apart.
 
     `continue-watching` is **pinned**, and `recently-added` outscores it
     (`RECENTLY_ADDED_SCORE_CEILING` is below `CONTINUE_WATCHING_SCORE`, but the
@@ -312,10 +317,11 @@ async def test_the_screen_is_rows_in_the_order_the_server_composed_them(
 async def test_the_response_carries_an_etag_and_a_private_cache_control_header(
     client: httpx.AsyncClient,
 ) -> None:
-    """The conditional-GET helper (`usher.api.caching`), over the *real*
-    composer rather than over the minimal fixtures `test_api_caching.py`
-    builds its own cases from -- this is what proves the header lands on the
-    screen nine providers actually produced, not only on a one-title stub.
+    """The conditional-GET helper (`usher.api.caching`).
+
+    over the *real* composer rather than over the minimal fixtures `test_api_caching.py`
+    builds its own cases from -- this is what proves the header lands on the screen nine
+    providers actually produced, not only on a one-title stub.
     """
     response = await client.get("/home")
 
@@ -337,10 +343,13 @@ async def test_a_row_carries_a_slug_a_title_a_reason_and_a_display_hint(
 
 
 def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_string() -> None:
-    """PRD 06: the `reason` "is already written to be spoken aloud, not just displayed" --
-    so it is a sentence, and `null` rather than `""` when a row has none. An empty
-    string is a subtitle a client renders as a blank line, and it cannot be told from a
-    row that had something to say and said nothing. Kills `reason: str = ""` on the DTO.
+    """PRD 06: the `reason` "is already written to be spoken aloud, not just displayed".
+
+    so it is a sentence, and `null` rather than `""` when a row has none.
+
+    An empty string is a subtitle a client renders as a blank line, and it cannot be
+    told from a row that had something to say and said nothing. Kills `reason: str = ""`
+    on the DTO.
     """
     row = BuiltRow(
         slug="a-row-with-nothing-to-say",
@@ -357,9 +366,10 @@ def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_st
 async def test_a_card_carries_the_artwork_the_row_asked_for_and_not_the_other_kind(
     client: httpx.AsyncClient, seeded: _Seeded
 ) -> None:
-    """**M7's boundary call 3, on the day it named.** The field arrives
-    populated because C2 built the table and C3 filled it; the refusal was
-    conditional on there being nothing to put in it.
+    """**M7's boundary call 3.
+
+    on the day it named.** The field arrives populated because C2 built the table and C3
+    filled it; the refusal was conditional on there being nothing to put in it.
 
     Asserted end to end through the route, over the one title on this screen
     that appears on a `landscape` row *and* carries both kinds -- so the plant
@@ -397,8 +407,9 @@ async def test_a_card_carries_the_artwork_the_row_asked_for_and_not_the_other_ki
 async def test_a_card_for_a_title_with_no_artwork_carries_null(
     empty_client: httpx.AsyncClient,
 ) -> None:
-    """The other arm, and on a real screen it is the common one: a catalog that
-    has been synced and never derived holds no `images` row at all.
+    """The other arm, and on a real screen it is the common one.
+
+    a catalog that has been synced and never derived holds no `images` row at all.
 
     Written against a household whose titles have no artwork rather than
     against a missing key, because `null` and absent are the distinction this
@@ -421,9 +432,13 @@ async def test_a_card_for_a_title_with_no_artwork_carries_null(
 
 
 async def test_the_response_carries_no_cursor(client: httpx.AsyncClient) -> None:
-    """ADR-0006 composes a *screen*; PRD 07's endpoint table gives `/browse` a
-    cursor and gives `/home` none. A cursor here would be a client paging
-    through rows, which is a browse under a screen's name."""
+    """ADR-0006 composes a *screen*.
+
+    PRD 07's endpoint table gives `/browse` a cursor and gives `/home` none.
+
+    A cursor here would be a client paging through rows, which is a browse under a
+    screen's name.
+    """
     body = (await client.get("/home")).json()
 
     assert set(body) == {"rows"}
@@ -432,8 +447,11 @@ async def test_the_response_carries_no_cursor(client: httpx.AsyncClient) -> None
 async def test_every_display_hint_is_one_of_adr_0006s_four_names(
     client: httpx.AsyncClient,
 ) -> None:
-    """ADR-0006's only concrete vocabulary. A fifth value invented by a provider
-    reaches every client at once and renders as nothing."""
+    """ADR-0006's only concrete vocabulary.
+
+    A fifth value invented by a provider reaches every client at once and renders as
+    nothing.
+    """
     body = (await client.get("/home")).json()
 
     assert {row["display_hint"] for row in body["rows"]} <= {
@@ -445,10 +463,12 @@ async def test_every_display_hint_is_one_of_adr_0006s_four_names(
 
 
 async def test_a_row_carries_a_hint_and_never_a_layout(client: httpx.AsyncClient) -> None:
-    """ADR-0006: "Rows carry a display *hint* ... but never a layout." A hint is
-    what a card is shaped like; a layout is how many fit and what happens at
-    320 px. Kills a well-meant `columns` or `card_width` added because one
-    client asked."""
+    """ADR-0006: "Rows carry a display *hint* ...
+
+    but never a layout." A hint is what a card is shaped like; a layout is how many fit
+    and what happens at 320 px. Kills a well-meant `columns` or `card_width` added
+    because one client asked.
+    """
     row = (await client.get("/home")).json()["rows"][0]
 
     assert {"columns", "card_width", "rows_visible", "layout"} & set(row) == set()
@@ -457,7 +477,7 @@ async def test_a_row_carries_a_hint_and_never_a_layout(client: httpx.AsyncClient
 async def test_an_empty_database_answers_two_hundred_with_no_rows(
     empty_client: httpx.AsyncClient,
 ) -> None:
-    """**Not a 500, not a 404, and deliberately not padded.**
+    """**Not a 500, not a 404, and deliberately not padded.**.
 
     Nothing raised -- there was nothing to compute. `/home` is a screen rather
     than a resource, so a screen with nothing on it is a fact about the
@@ -476,19 +496,24 @@ async def test_an_empty_database_answers_two_hundred_with_no_rows(
 async def test_a_library_with_no_watch_state_still_answers_recently_added(
     library_only: httpx.AsyncClient,
 ) -> None:
-    """The case that separates "no signal" from "no data", and the one that
-    makes the empty response above readable as "nothing here yet" rather than as
-    "composition is broken". `media_items.added_at` exists, so a synced library
-    with nobody having watched anything is one row, not zero."""
+    """The case that separates "no signal" from "no data".
+
+    and the one that makes the empty response above readable as "nothing here yet"
+    rather than as "composition is broken".
+
+    `media_items.added_at` exists, so a synced library with nobody having watched
+    anything is one row, not zero.
+    """
     body = (await library_only.get("/home")).json()
 
     assert [row["slug"] for row in body["rows"]] == ["recently-added"]
 
 
 async def test_the_route_never_loads_an_embedding_model(client: httpx.AsyncClient) -> None:
-    """`create_app`'s lifespan builds the embedder **only when
-    `worker_enabled`**, so a route that reached for one would work in
-    development and 500 in exactly the push-only deployment PRD 08 describes.
+    """`create_app`'s lifespan builds the embedder **only when `worker_enabled`**.
+
+    so a route that reached for one would work in development and 500 in exactly the
+    push-only deployment PRD 08 describes.
 
     This app is built with `worker_enabled=False`, so `app.state` holds no
     model at all -- and the screen still composes. Every row here reads a
@@ -500,10 +525,12 @@ async def test_the_route_never_loads_an_embedding_model(client: httpx.AsyncClien
 
 
 def test_the_home_service_and_every_provider_hold_no_source_adapter() -> None:
-    """PRD 08's "never fails a request local state can answer" as a *structural* property:
+    """PRD 08's "never fails a request local state can answer" as a *structural* property.
+
     with no adapter reachable there is no call to fail, so there is no 503 and nothing
-    for an RFC 9457 `code` to name. "It did not raise" is also what a service that
-    swallowed everything would produce.
+    for an RFC 9457 `code` to name.
+
+    "It did not raise" is also what a service that swallowed everything would produce.
     """
     modules: list[type] = [HomeService, *(type(provider) for provider in ROW_PROVIDERS)]
     assert len(modules) == 11, "the sweep lost providers, so it proves nothing"
@@ -527,11 +554,13 @@ def test_the_home_service_and_every_provider_hold_no_source_adapter() -> None:
 async def test_the_response_carries_no_source_specific_concept(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 07's first line. **The assertion is against the source's own item id,
-    never against the word "emby"** -- M5 found that rule out the hard way,
-    because `availability[].source` is an operator-typed name and "Living Room
-    Emby" is a correct value for it. A rule that forbids the substring forbids
-    the feature."""
+    """PRD 07's first line.
+
+    **The assertion is against the source's own item id, never against the word "emby"**
+    -- M5 found that rule out the hard way, because `availability[].source` is an
+    operator-typed name and "Living Room Emby" is a correct value for it. A rule that
+    forbids the substring forbids the feature.
+    """
     body = (await client.get("/home")).text
 
     assert "external_id" not in body
@@ -548,10 +577,13 @@ async def test_the_response_carries_no_credential(client: httpx.AsyncClient) -> 
 async def test_the_schema_describes_real_shapes_rather_than_a_bare_object(
     client: httpx.AsyncClient,
 ) -> None:
-    """The repository's established rule: typed DTOs so `/openapi.json`
-    describes real shapes and clients codegen typed models. `/events` is the one
-    route where that is not true, and its DTO says why -- a `StreamingResponse`
-    is bytes and FastAPI's serializer never sees it.
+    """The repository's established rule.
+
+    typed DTOs so `/openapi.json` describes real shapes and clients codegen typed
+    models.
+
+    `/events` is the one route where that is not true, and its DTO says why -- a
+    `StreamingResponse` is bytes and FastAPI's serializer never sees it.
 
     The `display_hint` enum is asserted here rather than only through the data,
     because a `display_hint: str` passes every response case above until a
@@ -568,9 +600,10 @@ async def test_the_schema_describes_real_shapes_rather_than_a_bare_object(
 async def test_a_second_request_inside_the_window_is_served_from_the_apps_own_cache(
     seeded: _Seeded,
 ) -> None:
-    """**The cache is the one `create_app` built, not a fresh one per
-    request.** Overriding `get_row_cache` here would hide exactly the mutation
-    this case exists for: a request-scoped cache caches nothing and every
+    """**The cache is the one `create_app` built.
+
+    not a fresh one per request.** Overriding `get_row_cache` here would hide exactly
+    the mutation this case exists for: a request-scoped cache caches nothing and every
     screen is composed again, correctly, with no symptom at all -- and
     `usher.cache.hits` is M9's, so there is no metric to notice it either.
 
@@ -593,10 +626,13 @@ async def test_a_second_request_inside_the_window_is_served_from_the_apps_own_ca
 
 
 async def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
-    """`get_row_cache` off `app.state`, not a fresh one per request -- a
-    request-scoped cache caches nothing, exactly as a request-scoped bus fans
-    out to nobody. Asserted through the real `create_app` because the override
-    in every other case here would hide it.
+    """`get_row_cache` off `app.state`, not a fresh one per request.
+
+    a request-scoped cache caches nothing, exactly as a request-scoped bus fans out to
+    nobody.
+
+    Asserted through the real `create_app` because the override in every other case here
+    would hide it.
 
     **And the same for the stale-key queue**, where the consequence is sharper:
     a request-scoped `RefreshQueue` deduplicates nothing and is drained by
@@ -646,9 +682,11 @@ async def test_the_composition_root_composes_the_registry_minus_what_is_disabled
 
 
 def _visibility() -> VisibilityService:
-    """A promoter over fakes. `/home` promotes the skeletons it drew (#73), so
-    the composition root takes one; what it *promotes* is asserted in
-    `tests/unit/test_services_home.py`."""
+    """A promoter over fakes.
+
+    `/home` promotes the skeletons it drew (#73), so the composition root takes one;
+    what it *promotes* is asserted in `tests/unit/test_services_home.py`.
+    """
     return VisibilityService(FakeJobQueue(), FakeTitleRepository())
 
 

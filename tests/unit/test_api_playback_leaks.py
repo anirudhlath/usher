@@ -1,6 +1,6 @@
-"""D5 -- the leak pins ADR-0012 names and says nothing tests: an RFC 9457 `detail`,
-`RowCache`, and the success body itself now that D3 has substituted a ticket for
-every source URL.
+"""D5.
+
+the leak pins ADR-0012 names and says nothing tests: an RFC 9457 `detail`, `RowCache`,
 """
 
 import ast
@@ -60,10 +60,12 @@ DIRECT_URL = f"https://e/a.mkv?api_key={TOKEN}"
 
 
 class _ScriptedAdapter(FakeSourceAdapter):
-    """A `FakeSourceAdapter` whose `stream_targets` is scripted outright, or
-    which raises whatever it was scripted with -- the module docstring's
-    tiny-URL discipline needs a target this file wrote, not one the fake's
-    own URL construction produced."""
+    """A `FakeSourceAdapter` whose `stream_targets` is scripted outright.
+
+    or which raises whatever it was scripted with -- the module docstring's tiny-URL
+    discipline needs a target this file wrote, not one the fake's own URL construction
+    produced.
+    """
 
     def __init__(
         self, source: Source, targets: Sequence[StreamTarget], error: Exception | None
@@ -97,9 +99,11 @@ class _ScriptedFactory(SourceAdapterFactory):
 
 
 class _Household:
-    """The five ports the playback graph reads. Trimmed from
-    `test_api_playback.py`'s own fixture of the same name -- this file needs
-    no episodes and only ever one copy per case."""
+    """The five ports the playback graph reads.
+
+    Trimmed from `test_api_playback.py`'s own fixture of the same name -- this file
+    needs no episodes and only ever one copy per case.
+    """
 
     def __init__(self) -> None:
         self.titles = FakeTitleRepository()
@@ -168,10 +172,11 @@ def settings() -> Settings:
 
 @pytest.fixture
 def app(household: _Household, settings: Settings) -> FastAPI:
-    """The shipped app, with the playback ports replaced by `household` and
-    `GET /home` wired over an otherwise-empty `Library` -- the row-cache pin
-    needs both routers live in one app so `RowCache` can be observed across
-    both.
+    """The shipped app.
+
+    with the playback ports replaced by `household` and `GET /home` wired over an
+    otherwise-empty `Library` -- the row-cache pin needs both routers live in one app so
+    `RowCache` can be observed across both.
 
     `get_row_cache` is deliberately **not** overridden: `app.state.row_cache`
     is the one this file reads back, which is what makes the structural sweep
@@ -219,8 +224,9 @@ def _direct_target(url: str = DIRECT_URL) -> StreamTarget:
 async def test_the_503_detail_never_carries_the_upstream_messages_own_token(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """ADR-0012's first named leak surface: an RFC 9457 `detail` built from
-    an upstream's own message.
+    """ADR-0012's first named leak surface.
+
+    an RFC 9457 `detail` built from an upstream's own message.
 
     The fake raises `PortUnavailable` whose message *contains* the tiny URL,
     deliberately -- exactly what a real transport error does when it quotes
@@ -280,11 +286,11 @@ def _cache_shaped_dicts(app: FastAPI) -> list[tuple[str, dict[object, object]]]:
 async def test_the_row_cache_never_stores_a_token_or_a_ticket(
     client: httpx.AsyncClient, household: _Household, app: FastAPI
 ) -> None:
-    """ADR-0012's second named leak surface, scoped to the cache this
-    application actually holds: `RowCache` (`services/rows/cache.py:94`), a
-    two-dict store of built rows and composed screens -- not a group-A HTTP
-    cache over `GET /titles/{id}`, which does not exist (group A declines
-    conditional GET there).
+    """ADR-0012's second named leak surface, scoped to the cache this application actually holds.
+
+    `RowCache` (`services/rows/cache.py:94`), a two-dict store of built rows and
+    composed screens -- not a group-A HTTP cache over `GET /titles/{id}`, which does not
+    exist (group A declines conditional GET there).
 
     Warms the cache through `GET /home` first -- the positive control is
     that `RowCache.size` actually grew and a screen entry exists for this
@@ -331,13 +337,13 @@ async def test_the_row_cache_never_stores_a_token_or_a_ticket(
 async def test_the_success_body_never_carries_the_source_url_the_ticket_replaced(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """The load-bearing fourth pin. ADR-0012 was written when `/play`'s
-    response *was* a serialization of `StreamTarget` and the token in the
-    body was the point -- with D3's ticket that is no longer true, and "the
-    body carries no source URL" is now a property a regression could quietly
-    reverse with nothing else noticing (an unsubstituted target still
-    round-trips through every DTO field, still 200s, still looks like a
-    working response).
+    """The load-bearing fourth pin.
+
+    ADR-0012 was written when `/play`'s response *was* a serialization of `StreamTarget`
+    and the token in the body was the point -- with D3's ticket that is no longer true,
+    and "the body carries no source URL" is now a property a regression could quietly
+    reverse with nothing else noticing (an unsubstituted target still round-trips
+    through every DTO field, still 200s, still looks like a working response).
     """
     title_id = await household.add_title()
     source = await household.add_source()
@@ -374,9 +380,11 @@ async def test_the_success_body_never_carries_the_source_url_the_ticket_replaced
 
 def _without_docstrings(tree: ast.Module) -> ast.Module:
     """`tree` with every docstring removed, so a name scan reads code only.
-    Same helper as `tests/unit/test_api_rows.py`'s `_without_prose`, kept as
-    its own copy here for the reason that file's own docstring gives for not
-    sharing one: independence from a sibling test file's own scan."""
+
+    Same helper as `tests/unit/test_api_rows.py`'s `_without_prose`, kept as its own
+    copy here for the reason that file's own docstring gives for not sharing one:
+    independence from a sibling test file's own scan.
+    """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             continue
@@ -391,15 +399,17 @@ def _without_docstrings(tree: ast.Module) -> ast.Module:
 
 
 def test_the_playback_dto_module_names_no_bulk_serializer() -> None:
-    """ADR-0012 measured six bulk-dump paths -- `dataclasses.asdict`,
-    `astuple`, `__dict__`, `vars()`, `json.dumps(asdict(...))`, and pydantic's
-    `TypeAdapter(StreamTarget).dump_json`/`dump_python` -- all returning
-    `StreamTarget.url` verbatim. `api/dto/playback.py`'s own module docstring
-    argues at length that every field is named one at a time for exactly this
-    reason, which is what makes a raw substring scan worthless here: the
-    docstring itself names every one of these words. Scanned with docstrings
-    stripped via `ast.unparse`, so a scan that would pass by "fixing" the
-    explanation instead of the code fails honestly.
+    """ADR-0012 measured six bulk-dump paths.
+
+    `dataclasses.asdict`, `astuple`, `__dict__`, `vars()`, `json.dumps(asdict(...))`,
+    and pydantic's `TypeAdapter(StreamTarget).dump_json`/`dump_python` -- all returning
+    `StreamTarget.url` verbatim.
+
+    `api/dto/playback.py`'s own module docstring argues at length that every field is
+    named one at a time for exactly this reason, which is what makes a raw substring
+    scan worthless here: the docstring itself names every one of these words. Scanned
+    with docstrings stripped via `ast.unparse`, so a scan that would pass by "fixing"
+    the explanation instead of the code fails honestly.
     """
     source = inspect.getsource(playback_dto)
     tree = ast.parse(source)

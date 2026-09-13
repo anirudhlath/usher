@@ -11,16 +11,18 @@ __all__ = ["ImageRepository"]
 
 
 class ImageRepository(ABC):
-    """Persistence for `images` — PRD 02's `Image`, and the last of the four entities
-    `raw_payloads` was kept for.
+    """Persistence for `images`.
+
+    PRD 02's `Image`, and the last of the four entities `raw_payloads` was kept for.
     """
 
     @abstractmethod
     async def replace_for_titles(
         self, title_ids: Sequence[uuid.UUID], images: Sequence[Image]
     ) -> int:
-        """Make `title_ids`' stored artwork exactly `images`, keeping the id of every
-        `(provider, provider_path)` that survived.
+        """Make `title_ids`' stored artwork exactly `images`.
+
+        keeping the id of every `(provider, provider_path)` that survived.
         """
 
     @abstractmethod

@@ -75,8 +75,9 @@ class PushApplyService:
     async def apply(
         self, source: Source, adapter: SourceAdapter, event: SourceEvent, *, user_id: uuid.UUID
     ) -> PushOutcome:
-        """Apply one push event. Commits once, and never raises for a
-        missing item.
+        """Apply one push event.
+
+        Commits once, and never raises for a missing item.
 
         The span is a child of whatever the lane has active, which is
         nothing -- a push lane has no request above it -- so this is a root
@@ -141,8 +142,9 @@ class PushApplyService:
         return PushOutcome(states_merged=outcome.rows_written)
 
     async def _invalidate_rows(self, user_id: uuid.UUID) -> None:
-        """Drop this household's watch-state rows and its composed screen, and
-        tell every connected client which rows to refetch.
+        """Drop this household's watch-state rows and its composed screen.
+
+        and tell every connected client which rows to refetch.
 
         **Trap 5, on the right side of it.** The nightly walk merges up to
         1,126,789 states and invalidates *nothing*: one invalidation per merged
@@ -293,8 +295,9 @@ class PushSupervisor:
         self._jitter = jitter
 
     async def run(self, source: Source, adapter: SourceAdapter) -> None:
-        """Hold this source's push channel until it stops being worth
-        holding. Returns; never raises a `UsherPortError`.
+        """Hold this source's push channel until it stops being worth holding.
+
+        Returns; never raises a `UsherPortError`.
 
         Returns rather than looping forever, and that is PRD 08: "after N
         failures mark `supports_push = false` and lean on the nightly walk."

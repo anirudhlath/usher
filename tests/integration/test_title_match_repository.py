@@ -1,6 +1,4 @@
-"""The shared contract against real Postgres, plus the one thing no fake can see: the
-plan.
-"""
+"""The shared contract against real Postgres, plus the one thing no fake can see: the plan."""
 
 import uuid
 from collections.abc import Iterator
@@ -75,13 +73,13 @@ class TestPostgresTitleMatchRepository(TitleMatchRepositoryContract):
 async def test_a_batch_mixing_providers_does_not_cast_an_imdb_id_to_an_integer(
     repository: PostgresTitleMatchRepository, catalog: TitleCatalog
 ) -> None:
-    """The plan's own single-join spelling, refuted. One `unnest` joined
-    against `titles` with an `OR` over the three providers has to write
-    `p.value::integer` for the TMDb and TVDB arms, and Postgres does not
-    guarantee to evaluate the provider test first -- so a batch carrying
-    `('imdb', 'tt99000020')` alongside any TMDb ref answers
-    `invalid input syntax for type integer: "tt99000020"` and the whole page
-    of 5,000 items fails.
+    """The plan's own single-join spelling, refuted.
+
+    One `unnest` joined against `titles` with an `OR` over the three providers has to
+    write `p.value::integer` for the TMDb and TVDB arms, and Postgres does not guarantee
+    to evaluate the provider test first -- so a batch carrying `('imdb', 'tt99000020')`
+    alongside any TMDb ref answers `invalid input syntax for type integer: "tt99000020"`
+    and the whole page of 5,000 items fails.
 
     A fake cannot reach this at all: Python never casts a value it did not
     ask to cast. Splitting by provider is what makes the mixed batch below
@@ -135,10 +133,12 @@ async def test_a_batch_costs_a_bounded_number_of_statements(
     session: AsyncSession,
     statement_counter: list[str],
 ) -> None:
-    """The whole reason this port exists. `TitleRepository.get_by_tmdb_id`
-    answers one question and a walk asks 1,126,674 of them; at ~0.1 ms per
-    indexed point lookup that is minutes of pure round trips per sync -- and
-    the name+year tier extrapolates to ~600 ms per item unindexed."""
+    """The whole reason this port exists.
+
+    `TitleRepository.get_by_tmdb_id` answers one question and a walk asks 1,126,674 of
+    them; at ~0.1 ms per indexed point lookup that is minutes of pure round trips per
+    sync -- and the name+year tier extrapolates to ~600 ms per item unindexed.
+    """
     for index in range(200):
         await catalog.given_title(
             kind=TitleKind.MOVIE, tmdb_id=index, name=f"Movie {index}", year=2000
@@ -169,9 +169,12 @@ async def test_name_year_matching_uses_the_expression_index(
     catalog: TitleCatalog,
     analyze: Analyze,
 ) -> None:
-    """A query that lowercases the *probe* instead of the column cannot use an expression
-    index on `lower(name)` at all, and the fake -- which matches on `name.lower()` in
-    Python -- agrees with either spelling. Only the plan tells them apart.
+    """A query that lowercases the *probe* instead of the column cannot use an expression index.
+
+    on `lower(name)` at all, and the fake -- which matches on `name.lower()` in Python
+    -- agrees with either spelling.
+
+    Only the plan tells them apart.
     """
     for index in range(_PLAN_ROWS):
         await catalog.given_title(
@@ -198,10 +201,13 @@ async def test_provider_id_matching_uses_the_namespaced_index(
     catalog: TitleCatalog,
     analyze: Analyze,
 ) -> None:
-    """`ix_titles_tmdb_id_kind` is unique and partial (`WHERE tmdb_id IS NOT
-    NULL`), and `t.tmdb_id = p.value` is what lets Postgres prove the
-    predicate and use it. A `COALESCE` or an `IS NOT DISTINCT FROM` in that
-    join condition would return the same rows off a seq scan of 1,271,138."""
+    """`ix_titles_tmdb_id_kind` is unique and partial (`WHERE tmdb_id IS NOT NULL`).
+
+    and `t.tmdb_id = p.value` is what lets Postgres prove the predicate and use it.
+
+    A `COALESCE` or an `IS NOT DISTINCT FROM` in that join condition would return the
+    same rows off a seq scan of 1,271,138.
+    """
     for index in range(_PLAN_ROWS):
         await catalog.given_title(
             kind=TitleKind.MOVIE, name=f"Movie {index}", tmdb_id=index, year=2000

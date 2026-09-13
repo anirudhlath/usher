@@ -1,5 +1,6 @@
-"""The series hierarchy on the wire: `GET /series/{id}/seasons`, `GET
-/seasons/{id}/episodes` and `GET /episodes/{id}`.
+"""The series hierarchy on the wire.
+
+`GET /series/{id}/seasons`, `GET /seasons/{id}/episodes` and `GET /episodes/{id}`.
 """
 
 import uuid
@@ -102,9 +103,9 @@ async def _episodes(
 async def test_a_series_lists_its_seasons_in_order_and_specials_are_one_of_them(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Season 0 is a season of the series here, and `next_up` still excludes
-    it -- the divergence is argued at both call sites and pinned in one
-    contract case.
+    """Season 0 is a season of the series here, and `next_up` still excludes it.
+
+    the divergence is argued at both call sites and pinned in one contract case.
 
     Seeded in descending order so the minted UUIDv7s descend with the season
     numbers: without that, `ORDER BY id` and `ORDER BY season_number` return
@@ -133,8 +134,10 @@ async def test_a_series_lists_its_seasons_in_order_and_specials_are_one_of_them(
 async def test_a_movie_answers_200_with_no_seasons_and_an_unknown_id_answers_404(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """The two are distinguishable, and one case says so because either one
-    alone is satisfied by an implementation that got the other wrong.
+    """The two are distinguishable.
+
+    and one case says so because either one alone is satisfied by an implementation that
+    got the other wrong.
 
     A movie having no seasons is a fact about the title, so it is a `200` with
     an empty list -- the same argument `api/dto/title.py` makes for absence
@@ -187,8 +190,7 @@ async def test_a_season_that_exists_and_holds_nothing_answers_200_and_an_unknown
 async def test_a_season_pages_by_episode_number_and_the_pages_abut(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Five episodes at `limit=2`, walked to exhaustion through the wire
-    cursor.
+    """Five episodes at `limit=2`, walked to exhaustion through the wire cursor.
 
     The cursor is A3's codec at the router and the port took typed keyset
     values, which is ADR-0034's first decision: nothing below `api/` ever sees
@@ -217,8 +219,9 @@ async def test_a_season_pages_by_episode_number_and_the_pages_abut(
 async def test_a_page_that_exactly_exhausts_the_season_carries_no_next_cursor(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The off-by-one ADR-0034's over-fetch exists to remove, and it is
-    invisible outside `count % limit == 0`.
+    """The off-by-one ADR-0034's over-fetch exists to remove.
+
+    and it is invisible outside `count % limit == 0`.
 
     With the naive *"the page is full, so there is more"* spelling this fails
     and the partition case above -- five episodes at `limit=2` -- stays green,
@@ -276,9 +279,11 @@ async def test_a_cursor_minted_for_another_season_is_refused_rather_than_answere
 async def test_a_cursor_that_is_not_a_cursor_is_a_400_and_never_a_500(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Every refusal is a `400 invalid_cursor` problem document -- never a 500,
-    and never a pydantic 422, which would echo the rejected cursor back under
-    `input`."""
+    """Every refusal is a `400 invalid_cursor` problem document.
+
+    never a 500, and never a pydantic 422, which would echo the rejected cursor back
+    under `input`.
+    """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
     await _episodes(episodes, series.id, season, [1, 2])
@@ -292,9 +297,10 @@ async def test_a_cursor_that_is_not_a_cursor_is_a_400_and_never_a_500(
 async def test_an_episode_carries_the_ids_a_client_climbs_back_up_with_and_no_provider_id(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """`title_id` and `season_id` on the episode, so a client that opened one
-    from a search result can reach its season and its series without a second
-    search.
+    """`title_id` and `season_id` on the episode.
+
+    so a client that opened one from a search result can reach its season and its series
+    without a second search.
 
     And no `tmdb_id`, no `imdb_id` and no source concept: PRD 07's first line
     is *"Nothing in this surface mentions a media server"*, and CLAUDE.md's
@@ -332,10 +338,12 @@ async def test_an_episode_carries_the_ids_a_client_climbs_back_up_with_and_no_pr
 async def test_an_episode_id_no_episode_carries_is_a_404_problem_document(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The control comes first and it is what makes this a case at all: a path
-    the app does not route answers `404 not_found` in the identical envelope,
-    because `create_app` registers the Starlette handler app-wide. So a bare
-    404 assertion here would pass against a route that was never written --
+    """The control comes first and it is what makes this a case at all.
+
+    a path the app does not route answers `404 not_found` in the identical envelope,
+    because `create_app` registers the Starlette handler app-wide.
+
+    So a bare 404 assertion here would pass against a route that was never written --
     which it did, when this file was first run red.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
@@ -355,8 +363,7 @@ async def test_an_episode_id_no_episode_carries_is_a_404_problem_document(
 async def test_the_episodes_route_reads_once_per_page_and_never_once_per_episode(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The N+1 `resolve_episodes` and `next_up` both exist to prevent,
-    arriving at a route.
+    """The N+1 `resolve_episodes` and `next_up` both exist to prevent, arriving at a route.
 
     The page size is what varies and the season is what is held fixed, which
     is the shape a statement-count assertion needs: a read per episode is
@@ -384,9 +391,10 @@ async def test_the_episodes_route_reads_once_per_page_and_never_once_per_episode
 async def test_the_seasons_route_reads_once_for_the_series_whatever_it_holds(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """One read on `EpisodeRepository` for the whole hierarchy, and it is
-    never `list_for_title` -- that read returns the entire tree, 20,001 rows
-    for the one measured pathological series, to render a season list.
+    """One read on `EpisodeRepository` for the whole hierarchy, and it is never `list_for_title`.
+
+    that read returns the entire tree, 20,001 rows for the one measured pathological
+    series, to render a season list.
 
     The title's own existence read is a `TitleRepository` statement and is not
     counted here; the integration file counts both, against real Postgres.
@@ -414,8 +422,10 @@ async def test_the_seasons_route_reads_once_for_the_series_whatever_it_holds(
 async def test_a_limit_above_the_ceiling_is_refused_without_echoing_it(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """A2's control, on this route's own query string: the 422 carries the
-    stripped error list and never the submitted value."""
+    """A2's control, on this route's own query string.
+
+    the 422 carries the stripped error list and never the submitted value.
+    """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
 

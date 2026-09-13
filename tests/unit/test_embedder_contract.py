@@ -1,5 +1,6 @@
-"""Every `Embedder` in this repository against the shared contract, plus the properties
-that belong to one implementation rather than to the port.
+"""Every `Embedder` in this repository against the shared contract.
+
+plus the properties that belong to one implementation rather than to the port.
 """
 
 import json
@@ -39,7 +40,7 @@ class TestFakeEmbedder(EmbedderContract):
 
 
 def test_the_fake_is_deterministic_across_processes() -> None:
-    """**The one case that would catch `hash()` in place of `hashlib`.**
+    """**The one case that would catch `hash()` in place of `hashlib`.**.
 
     The `np.random.default_rng(abs(hash(text)))` spelling passes every case
     in `EmbedderContract` -- norms, width, batch order, same-text
@@ -78,11 +79,14 @@ def test_the_fake_is_deterministic_across_processes() -> None:
 
 @pytest.mark.parametrize("theta", [0.0, math.pi / 6, math.pi / 3, math.pi / 2])
 def test_a_planted_angle_is_exact(theta: float) -> None:
-    """A helper nothing checks is a helper that drifts, and this one is the
-    reason similarity tests in this milestone are allowed to state a number.
-    Measured exact to 2.22e-16 -- one ulp -- so the tolerance below is
-    generous by four orders of magnitude and still fails anything that
-    stopped being orthonormal."""
+    """A helper nothing checks is a helper that drifts.
+
+    and this one is the reason similarity tests in this milestone are allowed to state a
+    number.
+
+    Measured exact to 2.22e-16 -- one ulp -- so the tolerance below is generous by four
+    orders of magnitude and still fails anything that stopped being orthonormal.
+    """
     first, planted = planted_pair(theta)
     cosine = sum(one * other for one, other in zip(first, planted, strict=True))
     assert cosine == pytest.approx(math.cos(theta), abs=1e-12)
@@ -181,8 +185,9 @@ class TestOpenAICompatEmbedder(EmbedderContract):
     async def test_this_arm_drives_the_shipped_adapter_over_the_transport(
         self, embedder: Embedder
     ) -> None:
-        """**A contract arm that exercises nothing reads as coverage in the
-        summary line**, and two ways for this one to do so are cheap to close.
+        """**A contract arm that exercises nothing reads as coverage in the summary line**.
+
+        and two ways for this one to do so are cheap to close.
 
         The five cases above are inherited, so not one of them names
         `OpenAICompatEmbedder`: a fixture handing back a `FakeEmbedder` would
@@ -216,9 +221,10 @@ class TestOpenAICompatEmbedder(EmbedderContract):
     async def test_the_endpoint_answers_per_text_and_out_of_arrival_order(
         self, embedder: Embedder
     ) -> None:
-        """**The premises the five inherited cases rest on, read off the bytes
-        the transport really served** rather than off the literal the handler
-        was built from.
+        """**The premises the five inherited cases rest on.
+
+        read off the bytes the transport really served** rather than off the literal the
+        handler was built from.
 
         Four claims, and without each of them some case above is satisfied by
         an implementation doing something else: the response arrived in an

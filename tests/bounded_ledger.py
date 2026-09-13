@@ -38,8 +38,7 @@ def audit_module() -> ModuleType:
 
 
 def drift() -> list[str]:
-    """`--check`'s own answer, empty when the ledger agrees with what
-    ADR-0044 publishes.
+    """`--check`'s own answer, empty when the ledger agrees with what ADR-0044 publishes.
 
     Deliberately `_drift()` rather than a bucket assertion of the test's own.
     An earlier draft of ADR-0044 specified F9's guard as *"assert the
@@ -56,8 +55,10 @@ def drift() -> list[str]:
 
 
 def ledger_columns(*buckets: str) -> frozenset[tuple[str, str]]:
-    """`(table, column)` for every bounded column in the named buckets, under
-    the reading ADR-0044 adopts.
+    """`(table.
+
+    column)` for every bounded column in the named buckets, under the reading ADR-0044
+    adopts.
 
     Raises on an unknown bucket name rather than answering the empty set: a
     parametrisation that collected nothing reads exactly like one that

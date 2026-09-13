@@ -138,8 +138,11 @@ class PersonRepository(ABC):
 
     @abstractmethod
     async def count(self) -> int:
-        """How many people the catalog holds. `usher derive`'s report, and the
-        one number that tells an operator a derivation ran at all."""
+        """How many people the catalog holds.
+
+        `usher derive`'s report, and the one number that tells an operator a derivation
+        ran at all.
+        """
 
     @abstractmethod
     async def list_recurring_for_user(
@@ -149,8 +152,7 @@ class PersonRepository(ABC):
 
 
 class CreditRepository(ABC):
-    """Persistence for `credits` -- the join that makes "more from this
-    director" a lookup.
+    """Persistence for `credits` -- the join that makes "more from this director" a lookup.
 
     **And for the two denormalisations of it that no generated column can
     reach**: `titles.credit_names`, which is weight class B's input, and the
@@ -177,9 +179,10 @@ class CreditRepository(ABC):
         *,
         credit_names: Mapping[uuid.UUID, Sequence[str]],
     ) -> int:
-        """Replace every stored credit for `title_ids` with `credits`, and write
-        `titles.credit_names` **and the credited-person half of `title_search_names`**
-        for the same scope in the same call.
+        """Replace every stored credit for `title_ids` with `credits`.
+
+        and write `titles.credit_names` **and the credited-person half of
+        `title_search_names`** for the same scope in the same call.
         """
 
     @abstractmethod

@@ -13,8 +13,9 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class TitleReference:
-    """A title named the way a backup artifact names one: by natural key, with its own id
-    as the last rung rather than the first.
+    """A title named the way a backup artifact names one.
+
+    by natural key, with its own id as the last rung rather than the first.
     """
 
     kind: TitleKind
@@ -25,8 +26,9 @@ class TitleReference:
 
 @dataclass(frozen=True, slots=True)
 class EpisodeReference:
-    """An episode named the way a backup artifact names one: its series' natural key, plus
-    the two numbers.
+    """An episode named the way a backup artifact names one.
+
+    its series' natural key, plus the two numbers.
     """
 
     title: TitleReference

@@ -23,11 +23,12 @@ _START = dt.datetime(2026, 8, 4, 12, 0, tzinfo=dt.UTC)
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """`usher.cache.hits`/`.misses`' own file (`test_telemetry_cache.py`) is
-    where the metric is exercised in depth; this fixture is here only for the
-    one boundary case below, so the expiry habit `stale_after` teaches is
-    checked against the metric too, in the same place it is checked against
-    the returned value."""
+    """`usher.cache.hits`/`.misses`' own file (`test_telemetry_cache.py`) is where the metric is.
+
+    exercised in depth; this fixture is here only for the one boundary case below, so
+    the expiry habit `stale_after` teaches is checked against the metric too, in the
+    same place it is checked against the returned value.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -109,7 +110,7 @@ def _screen(name: str) -> tuple[BuiltRow, ...]:
 
 
 def test_two_users_never_share_a_composed_screen(clock: _Clock) -> None:
-    """**Unreachable at one user, and unreachable is not impossible.**
+    """**Unreachable at one user, and unreachable is not impossible.**.
 
     v1 mints one user, so a key that omitted `user_id` would work today and
     serve one household's screen to another the day PRD 07's authentication
@@ -138,8 +139,10 @@ def test_a_row_cache_key_carries_both_the_user_and_the_slug(clock: _Clock) -> No
 
 
 def test_an_expired_entry_is_recomputed_rather_than_served(clock: _Clock) -> None:
-    """A TTL that never expires serves a screen from last week and nothing
-    anywhere reports it. The mutation is one deleted branch."""
+    """A TTL that never expires serves a screen from last week and nothing anywhere reports it.
+
+    The mutation is one deleted branch.
+    """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_screen(user, _screen("old"), ttl=_TTL)
 
@@ -151,7 +154,7 @@ def test_an_expired_entry_is_recomputed_rather_than_served(clock: _Clock) -> Non
 def test_an_entry_exactly_at_its_expiry_is_expired(
     clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """**Steps the clock *onto* the boundary, not past it.**
+    """**Steps the clock *onto* the boundary, not past it.**.
 
     M5's mutation sweep recorded the `stale_after` `<=` -> `<` mutation
     surviving for precisely this reason: every case in that file stepped past
@@ -183,7 +186,7 @@ def test_an_entry_exactly_at_its_expiry_is_expired(
 def test_a_stale_serve_is_a_hit_labelled_stale(
     clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """**The label a served-stale read gets, and the argument for it.**
+    """**The label a served-stale read gets, and the argument for it.**.
 
     A **hit**, because the request was served out of the cache and paid no
     rebuild: counting it a miss would make `usher.cache.hits` say a compose
@@ -215,8 +218,9 @@ def test_a_stale_serve_is_a_hit_labelled_stale(
 def test_the_screen_read_has_three_states_and_the_grace_is_the_callers(
     clock: _Clock,
 ) -> None:
-    """Fresh, stale-inside-`grace`, absent -- and **the grace is a parameter,
-    not a property of the dict.**
+    """Fresh, stale-inside-`grace`, absent.
+
+    and **the grace is a parameter, not a property of the dict.**.
 
     The only reader entitled to a stale answer is one that can arrange for the
     entry to be replaced, which is what makes `HomeService`'s "no refresher,
@@ -242,7 +246,7 @@ def test_the_screen_read_has_three_states_and_the_grace_is_the_callers(
 
 
 def test_an_entry_exactly_at_the_end_of_its_grace_is_a_hard_miss(clock: _Clock) -> None:
-    """**Stepped exactly onto the second boundary, not past it.**
+    """**Stepped exactly onto the second boundary, not past it.**.
 
     `TTL + grace` is the instant a stale entry stops being servable, and `>=`
     against `>` there is the same one-keystroke mutation M5's sweep recorded
@@ -266,11 +270,12 @@ def test_an_entry_exactly_at_the_end_of_its_grace_is_a_hard_miss(clock: _Clock) 
 def test_the_grace_is_read_at_the_read_and_not_baked_in_at_the_write(
     clock: _Clock,
 ) -> None:
-    """A grace applied at `put_screen` -- folded into the stored
-    `expires_at` -- reads identically at every assertion above and is a
-    different feature: the entry would then be *fresh* for `TTL + grace`, so
-    nothing would ever be stale, no refresh would ever be scheduled, and the
-    screen a household sees would simply live 90 s instead of 30.
+    """A grace applied at `put_screen`.
+
+    folded into the stored `expires_at` -- reads identically at every assertion above
+    and is a different feature: the entry would then be *fresh* for `TTL + grace`, so
+    nothing would ever be stale, no refresh would ever be scheduled, and the screen a
+    household sees would simply live 90 s instead of 30.
 
     What distinguishes the two is a reader with **no** grace looking at the
     same entry a second before the TTL expires and a second after.
@@ -295,11 +300,15 @@ def test_a_live_entry_is_served_without_recomputing(clock: _Clock) -> None:
 def test_the_row_cache_is_bounded_because_its_key_space_is_the_catalog(
     clock: _Clock,
 ) -> None:
-    """`because-you-watched-<seed>` is one slug per seed, so an unevicted dict
-    keyed by `(user_id, slug)` grows with the household's watch history -- and
-    expired entries are only *read* past, never removed, so the TTL reclaims
-    nothing. Same cardinality hazard as the `provider` metric label, one layer
-    over, and here it is a leak."""
+    """`because-you-watched-<seed>` is one slug per seed.
+
+    so an unevicted dict keyed by `(user_id, slug)` grows with the household's watch
+    history -- and expired entries are only *read* past, never removed, so the TTL
+    reclaims nothing.
+
+    Same cardinality hazard as the `provider` metric label, one layer over, and here it
+    is a leak.
+    """
     cache, user = RowCache(clock=clock, max_entries=64), uuid.uuid4()
 
     for index in range(500):
@@ -309,10 +318,11 @@ def test_the_row_cache_is_bounded_because_its_key_space_is_the_catalog(
 
 
 def test_eviction_takes_the_soonest_to_expire_first(clock: _Clock) -> None:
-    """A ceiling that evicted the *newest* entry would leave a cache that
-    never serves anything it was just asked to store -- bounded, and useless,
-    with no symptom but a miss rate nothing in M7 measures
-    (`usher.cache.hits` is M9's)."""
+    """A ceiling that evicted the *newest* entry would leave a cache that never serves anything.
+
+    it was just asked to store -- bounded, and useless, with no symptom but a miss rate
+    nothing in M7 measures (`usher.cache.hits` is M9's).
+    """
     cache, user = RowCache(clock=clock, max_entries=2), uuid.uuid4()
 
     cache.put_row(user, "expires-first", _row("a"), ttl=dt.timedelta(seconds=1))
@@ -337,10 +347,13 @@ def test_invalidating_a_user_leaves_another_users_entries_alone(clock: _Clock) -
 
 
 def test_invalidating_a_row_also_drops_the_screen_that_contained_it(clock: _Clock) -> None:
-    """The composed screen is a *composition of rows*, so a row whose inputs
-    moved leaves the screen carrying a stale copy of it. Dropping the row and
-    keeping the screen is the subtle half of this bug: the next request is a
-    screen cache hit and the invalidation had no visible effect at all."""
+    """The composed screen is a *composition of rows*.
+
+    so a row whose inputs moved leaves the screen carrying a stale copy of it.
+
+    Dropping the row and keeping the screen is the subtle half of this bug: the next
+    request is a screen cache hit and the invalidation had no visible effect at all.
+    """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_row(user, "continue-watching", _row("old"), ttl=_TTL)
     cache.put_screen(user, _screen("old"), ttl=_TTL)
@@ -352,9 +365,10 @@ def test_invalidating_a_row_also_drops_the_screen_that_contained_it(clock: _Cloc
 
 
 def test_enriching_a_title_drops_every_cached_row_that_names_it(clock: _Clock) -> None:
-    """A row is built from titles, so a title that changed leaves every row
-    holding it stale -- the card carries `name`, `year`, `enrichment_state` and
-    `artwork`, and enrichment rewrites all four.
+    """A row is built from titles, so a title that changed leaves every row holding it stale.
+
+    the card carries `name`, `year`, `enrichment_state` and `artwork`, and enrichment
+    rewrites all four.
 
     The household that never cached the title keeps both halves, which is what
     makes this a statement about the *title* rather than a `clear()` wearing a
@@ -376,11 +390,12 @@ def test_enriching_a_title_drops_every_cached_row_that_names_it(clock: _Clock) -
 
 
 def test_an_enrichment_reaches_every_household_that_cached_the_title(clock: _Clock) -> None:
-    """`invalidate` takes a household because a play button is one household's
-    act. Enrichment is a **catalog** write -- the same title is stale on every
-    screen holding it at once -- so this one takes no `user_id`, and a
-    per-household spelling would leave the second household serving the first's
-    already-repaired staleness for the rest of its TTL.
+    """`invalidate` takes a household because a play button is one household's act.
+
+    Enrichment is a **catalog** write -- the same title is stale on every screen holding
+    it at once -- so this one takes no `user_id`, and a per-household spelling would
+    leave the second household serving the first's already-repaired staleness for the
+    rest of its TTL.
     """
     cache = RowCache(clock=clock)
     for user in (uuid.uuid4(), uuid.uuid4()):
@@ -395,11 +410,12 @@ def test_an_enrichment_reaches_every_household_that_cached_the_title(clock: _Clo
 def test_a_screen_naming_the_title_goes_even_when_its_row_was_never_cached(
     clock: _Clock,
 ) -> None:
-    """Both halves are scanned, not just the row half. A screen is stored whole
-    (`put_screen` takes the composed tuple), so a row can reach a screen without
-    ever being written to the row half -- and dropping only the row half would
-    leave the next request a screen cache hit carrying the stale card, which is
-    `invalidate`'s own recorded subtle bug arriving through the other door.
+    """Both halves are scanned, not just the row half.
+
+    A screen is stored whole (`put_screen` takes the composed tuple), so a row can reach
+    a screen without ever being written to the row half -- and dropping only the row
+    half would leave the next request a screen cache hit carrying the stale card, which
+    is `invalidate`'s own recorded subtle bug arriving through the other door.
     """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_screen(user, _screen("enriched"), ttl=_TTL)
@@ -410,10 +426,12 @@ def test_a_screen_naming_the_title_goes_even_when_its_row_was_never_cached(
 
 
 def test_invalidating_no_titles_drops_nothing(clock: _Clock) -> None:
-    """The premise that keeps the three cases above about titles: an empty
-    batch is the shape a job with nothing enriched hands over, and a `clear()`
-    behind this name would satisfy every assertion of theirs while emptying a
-    cache no write had staled."""
+    """The premise that keeps the three cases above about titles.
+
+    an empty batch is the shape a job with nothing enriched hands over, and a `clear()`
+    behind this name would satisfy every assertion of theirs while emptying a cache no
+    write had staled.
+    """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_row(user, "because-you-watched", _row("enriched"), ttl=_TTL)
     cache.put_screen(user, _screen("enriched"), ttl=_TTL)
@@ -425,8 +443,11 @@ def test_invalidating_no_titles_drops_nothing(clock: _Clock) -> None:
 
 
 def test_clearing_empties_both_halves(clock: _Clock) -> None:
-    """`usher home --repeat` clears between runs, because a repeat that
-    measured cache hits would report a number near zero and mean nothing."""
+    """`usher home --repeat` clears between runs.
+
+    because a repeat that measured cache hits would report a number near zero and mean
+    nothing.
+    """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_row(user, "continue-watching", _row("x"), ttl=_TTL)
     cache.put_screen(user, _screen("x"), ttl=_TTL)
@@ -461,8 +482,10 @@ def _builds(provider: FakeRowProvider) -> int:
 async def test_a_second_compose_inside_the_window_rebuilds_nothing(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """The screen cache doing its job, asserted through the composer rather
-    than through the dict -- a cache nothing reads is a dict."""
+    """The screen cache doing its job, asserted through the composer rather than through the dict.
+
+    a cache nothing reads is a dict.
+    """
     cache = RowCache(clock=clock)
     provider = _provider("recently-added", score=0.9)
     service = HomeService(providers=[provider], cache=cache)
@@ -478,9 +501,10 @@ async def test_a_second_compose_inside_the_window_rebuilds_nothing(
 async def test_a_compose_after_the_screen_expires_builds_again(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """The other half, and the one that fails against a TTL that never
-    expires: without it the case above is satisfied by a cache that never
-    lets go."""
+    """The other half, and the one that fails against a TTL that never expires.
+
+    without it the case above is satisfied by a cache that never lets go.
+    """
     cache = RowCache(clock=clock)
     provider = _provider("recently-added", score=0.9)
     service = HomeService(providers=[provider], cache=cache)
@@ -495,10 +519,14 @@ async def test_a_compose_after_the_screen_expires_builds_again(
 async def test_a_row_survives_the_screen_expiring_because_its_own_ttl_is_longer(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """PRD 06 caches at two layers, and this is why: the screen is ~30 s and a
-    similarity row is hours. A composer that only cached the screen would
-    rebuild every row on every screen miss, which is the expensive half of the
-    work done on a 30 s cycle for rows whose inputs move in days."""
+    """PRD 06 caches at two layers, and this is why.
+
+    the screen is ~30 s and a similarity row is hours.
+
+    A composer that only cached the screen would rebuild every row on every screen miss,
+    which is the expensive half of the work done on a 30 s cycle for rows whose inputs
+    move in days.
+    """
     cache = RowCache(clock=clock)
     provider = FakeRowProvider(
         proposals=(

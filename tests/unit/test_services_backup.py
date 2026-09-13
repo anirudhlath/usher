@@ -110,8 +110,9 @@ def _installed_version() -> str:
 
 
 async def test_the_counts_in_the_header_are_what_was_written(tmp_path: Path) -> None:
-    """The counts are a truncation check for K4, so they have to be `len()`
-    of the body rather than a number taken beside it.
+    """The counts are a truncation check for K4.
+
+    so they have to be `len()` of the body rather than a number taken beside it.
 
     Both halves are asserted: the header's map, and the body counted back
     out. A case asserting only the first passes against a service that
@@ -247,8 +248,10 @@ async def test_money_and_ciphertext_survive_the_encoding(tmp_path: Path) -> None
 
 
 async def test_a_boolean_stays_a_boolean(tmp_path: Path) -> None:
-    """`isinstance(True, int)` is true, so a narrower `int` arm ahead of
-    `bool` would write every `played`, `enabled` and `ok` as `1`.
+    """`isinstance(True.
+
+    int)` is true, so a narrower `int` arm ahead of `bool` would write every `played`,
+    `enabled` and `ok` as `1`.
 
     Asserted with `is` rather than `==`, because `1 == True` in Python and
     an `==` assertion cannot see the defect it is written for.
@@ -327,8 +330,9 @@ def test_the_default_name_is_utc_whatever_the_clock_s_offset_is() -> None:
 async def test_a_directory_that_does_not_exist_is_an_oserror_before_the_read(
     tmp_path: Path,
 ) -> None:
-    """The family `cli.OPERATOR_ERRORS` already carries, and it fires before
-    the carried set is read.
+    """The family `cli.OPERATOR_ERRORS` already carries.
+
+    and it fires before the carried set is read.
 
     ADR-0026 predicted that a milestone adding a filesystem writer would add
     a family to that tuple. It does not: `OSError` has been in it since M7,
@@ -358,8 +362,9 @@ async def test_a_directory_that_does_not_exist_is_an_oserror_before_the_read(
 
 
 async def test_a_read_that_fails_leaves_no_file_at_all(tmp_path: Path) -> None:
-    """Everything is read before anything is opened, so a database that goes
-    away mid-read leaves no artifact rather than a short one.
+    """Everything is read before anything is opened.
+
+    so a database that goes away mid-read leaves no artifact rather than a short one.
 
     That ordering is the reason: gzip decompresses a truncated stream
     happily up to the point it stops, so a half-written artifact is a file
@@ -400,11 +405,14 @@ _FAILS_MID_WRITE: Mapping[str, Sequence[Mapping[str, object]]] = {
 
 
 async def test_the_compression_does_not_run_on_the_event_loop(tmp_path: Path) -> None:
-    """gzip over the carried set is seconds of CPU, and a service that spends
-    them on the loop stalls every other coroutine in the process -- which is
-    the difference between a CLI command and the route a later milestone makes
-    this. Asserted on the thread the encoding actually runs in, because
-    *"`to_thread` was called"* is satisfied by a call that awaits nothing.
+    """Gzip over the carried set is seconds of CPU.
+
+    and a service that spends them on the loop stalls every other coroutine in the
+    process -- which is the difference between a CLI command and the route a later
+    milestone makes this.
+
+    Asserted on the thread the encoding actually runs in, because *"`to_thread` was
+    called"* is satisfied by a call that awaits nothing.
     """
     encoded_on: list[int] = []
 
@@ -430,9 +438,9 @@ async def test_the_compression_does_not_run_on_the_event_loop(tmp_path: Path) ->
 async def test_a_failure_part_way_through_the_write_leaves_no_artifact_behind(
     tmp_path: Path,
 ) -> None:
-    """🔴 **The write phase had the failure the read phase was defended
-    against**, and `write`'s own docstring claimed otherwise until a review
-    measured it.
+    """🔴 **The write phase had the failure the read phase was defended against**.
+
+    and `write`'s own docstring claimed otherwise until a review measured it.
 
     `gzip.open(path, "wt")` truncates the destination at open and the `with`
     block writes a valid gzip trailer on the way out of an exception, so a
@@ -465,8 +473,9 @@ async def test_a_failure_part_way_through_the_write_leaves_no_artifact_behind(
 
 
 async def test_a_failed_run_does_not_destroy_the_previous_artifact(tmp_path: Path) -> None:
-    """**The half that matters for a cron entry**, and the reason the repair
-    is `os.replace` rather than an `unlink` in a `finally`.
+    """**The half that matters for a cron entry**.
+
+    and the reason the repair is `os.replace` rather than an `unlink` in a `finally`.
 
     A nightly `usher backup --output nightly.jsonl.gz` writes to one path
     forever. Under the truncating spelling, the *first failing run* replaced
@@ -505,8 +514,7 @@ def test_the_credential_warning_names_the_setting_and_the_consequence() -> None:
 
 
 def test_the_projection_built_reference_is_the_one_backup_identity_builds() -> None:
-    """The one duplication K3 accepts, pinned across the two files that hold
-    it.
+    """The one duplication K3 accepts, pinned across the two files that hold it.
 
     `PostgresBackupRepository._titles` builds a `TitleReference` from a
     four-column projection rather than calling

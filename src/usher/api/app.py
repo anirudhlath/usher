@@ -59,8 +59,9 @@ from usher.telemetry import configure_telemetry, register_push_gauges, register_
 
 
 class UsherAPI(FastAPI):
-    """`FastAPI` with one override: `/openapi.json` tells the truth about the
-    media type of a problem document.
+    """`FastAPI` with one override.
+
+    `/openapi.json` tells the truth about the media type of a problem document.
 
     A subclass rather than `app.openapi = …`, which is the spelling FastAPI's
     own "Extending OpenAPI" page shows. Two reasons, the first measured:

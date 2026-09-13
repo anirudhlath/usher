@@ -1,5 +1,6 @@
-"""`GET /search/suggest` -- two tiers on one route, the tier that answered, and the
-prefix length below which tier 1 does not run.
+"""`GET /search/suggest`.
+
+two tiers on one route, the tier that answered, and the prefix length below which tier 1
 """
 
 import uuid
@@ -53,11 +54,13 @@ _TYPO = "kestrek"
 
 
 class _DeadIndex(SearchIndex):
-    """Present because `SearchService` takes one. `GET /search/suggest` never
-    reaches it -- the suggest path has no `SearchIndex` in it at all, which is
-    ADR-0021's port split showing up as an object this file never asks
-    anything. It raises rather than answering `SearchOutcome()`, because an
-    empty answer is what a wrongly-wired route would also produce."""
+    """Present because `SearchService` takes one.
+
+    `GET /search/suggest` never reaches it -- the suggest path has no `SearchIndex` in
+    it at all, which is ADR-0021's port split showing up as an object this file never
+    asks anything. It raises rather than answering `SearchOutcome()`, because an empty
+    answer is what a wrongly-wired route would also produce.
+    """
 
     async def index_many(self, documents: Sequence[SearchDocument]) -> None:
         return None
@@ -117,8 +120,10 @@ class _Kit:
 
 
 async def _kit(*, result_limit: int = 50, suggest_analytics: bool = True) -> _Kit:
-    """One catalog, four readers of it: both tiers, the hydration, and
-    `search_queries` since M10's J2."""
+    """One catalog, four readers of it.
+
+    both tiers, the hydration, and `search_queries` since M10's J2.
+    """
     titles = FakeTitleRepository()
     prefix_tier = _RecordingPrefix()
     fuzzy_tier = _RecordingFuzzy()
@@ -243,8 +248,10 @@ async def client(kit: _Kit) -> AsyncIterator[httpx.AsyncClient]:
 async def test_the_prefix_tier_finds_the_prefix_and_only_the_fuzzy_tier_finds_the_typo(
     client: httpx.AsyncClient,
 ) -> None:
-    """**Both arms in one case, because either alone is green against a route
-    that serves both tiers from one index.**
+    """**Both arms in one case.
+
+    because either alone is green against a route that serves both tiers from one
+    index.**.
 
     `?tier=prefix` asked for a true prefix finds the title and asked for a
     one-character substitution of that same prefix finds nothing -- that is
@@ -289,9 +296,9 @@ async def test_the_response_says_which_tier_answered(client: httpx.AsyncClient, 
 
 
 async def test_the_default_tier_is_the_prefix_tier(client: httpx.AsyncClient, kit: _Kit) -> None:
-    """The keystroke tier is the default, which is the whole point of the
-    split: the trigram path is 33.6 ms p50 and is meant to be debounced behind
-    this one.
+    """The keystroke tier is the default, which is the whole point of the split.
+
+    the trigram path is 33.6 ms p50 and is meant to be debounced behind this one.
 
     Both halves asserted -- the echo *and* which collaborator was actually
     consulted -- because a route that echoed `prefix` while asking tier 2
@@ -306,10 +313,12 @@ async def test_the_default_tier_is_the_prefix_tier(client: httpx.AsyncClient, ki
 async def test_the_tier_reaches_the_openapi_document_as_an_enum_defaulting_to_prefix(
     client: httpx.AsyncClient,
 ) -> None:
-    """`/openapi.json` describes the vocabulary, so a client generator writes
-    two named values rather than a free string. Fails: `tier: str`, which
-    accepts `?tier=fuzy` and answers a 200 from whichever branch the `if`
-    happened to fall through to.
+    """`/openapi.json` describes the vocabulary.
+
+    so a client generator writes two named values rather than a free string.
+
+    Fails: `tier: str`, which accepts `?tier=fuzy` and answers a 200 from whichever
+    branch the `if` happened to fall through to.
     """
     document = (await client.get("/openapi.json")).json()
     parameters = {
@@ -325,9 +334,11 @@ async def test_the_tier_reaches_the_openapi_document_as_an_enum_defaulting_to_pr
 async def test_an_unknown_tier_is_refused_rather_than_served_by_a_default(
     client: httpx.AsyncClient,
 ) -> None:
-    """A 422 through A2's envelope, and it is the enum doing it. Fails: a
-    `tier: str` parameter with an `else` arm -- a typo would then be served
-    silently by one tier while the response echoed the other."""
+    """A 422 through A2's envelope, and it is the enum doing it.
+
+    Fails: a `tier: str` parameter with an `else` arm -- a typo would then be served
+    silently by one tier while the response echoed the other.
+    """
     response = await client.get("/search/suggest", params={"q": _TYPED, "tier": "fuzy"})
     assert response.status_code == 422
     assert response.json()["code"] == "validation_failed"
@@ -339,8 +350,9 @@ async def test_an_unknown_tier_is_refused_rather_than_served_by_a_default(
 async def test_a_prefix_below_the_minimum_never_reaches_the_index_at_all(
     client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """**The saving is a query not issued, so the assertion is on the port
-    call and not on the empty list.**
+    """**The saving is a query not issued.
+
+    so the assertion is on the port call and not on the empty list.**.
 
     An empty `results` is also what a query that ran and matched nothing
     produces, and running it is precisely the 2,707 ms p95 this bound exists
@@ -401,7 +413,7 @@ async def test_the_length_is_measured_after_stripping_so_padding_cannot_buy_a_pr
 async def test_the_fuzzy_tier_is_not_held_to_the_prefix_tiers_minimum(
     client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """**The asymmetry is deliberate and is a statement about evidence.**
+    """**The asymmetry is deliberate and is a statement about evidence.**.
 
     B3 measured tier 1 per prefix length and nobody has measured tier 2 that
     way, so a four-character bound there would be a refusal with no
@@ -422,10 +434,13 @@ async def test_the_fuzzy_tier_is_not_held_to_the_prefix_tiers_minimum(
 async def test_a_blank_q_is_two_hundred_with_no_results_on_both_tiers(
     client: httpx.AsyncClient, kit: _Kit, tier: str, blank: str
 ) -> None:
-    """Not a 422: a search box sends this between keystrokes and on every
-    backspace to zero, and rejecting it would put an error on the wire for
-    every viewer who selected their query and typed over it. `GET /search`
-    makes the identical call one route over.
+    """Not a 422.
+
+    a search box sends this between keystrokes and on every backspace to zero, and
+    rejecting it would put an error on the wire for every viewer who selected their
+    query and typed over it.
+
+    `GET /search` makes the identical call one route over.
 
     **Both tiers, because the two are bounded by different numbers** -- four
     characters and one -- and only the blank case is answered by the same rule
@@ -448,10 +463,14 @@ async def test_a_blank_q_is_two_hundred_with_no_results_on_both_tiers(
 
 @pytest.mark.parametrize("tier", [tier.value for tier in SuggestTier])
 async def test_the_query_is_echoed_as_typed(client: httpx.AsyncClient, tier: str) -> None:
-    """Not stripped, not lower-cased: it is what the pattern was built from,
-    and a client rendering "no matches for ..." needs the string the server
-    used. Fails: an echo of the normalised form, which would report a query
-    the viewer did not type."""
+    """Not stripped, not lower-cased.
+
+    it is what the pattern was built from, and a client rendering "no matches for ..."
+    needs the string the server used.
+
+    Fails: an echo of the normalised form, which would report a query the viewer did not
+    type.
+    """
     response = await client.get("/search/suggest", params={"q": "  KesTrel ", "tier": tier})
     assert response.json()["query"] == "  KesTrel "
 
@@ -459,10 +478,13 @@ async def test_the_query_is_echoed_as_typed(client: httpx.AsyncClient, tier: str
 async def test_a_hydrated_candidate_carries_the_title_fields_a_box_renders(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 05 wants unowned results surfaced "clearly marked", and a
-    type-ahead row is a result -- a client that had to ask a second question
-    per row to render the badge would not render it. Fails: a DTO that carries
-    the id and nothing else, which is a box of UUIDs."""
+    """PRD 05 wants unowned results surfaced "clearly marked", and a type-ahead row is a result.
+
+    a client that had to ask a second question per row to render the badge would not
+    render it.
+
+    Fails: a DTO that carries the id and nothing else, which is a box of UUIDs.
+    """
     row = (await client.get("/search/suggest", params={"q": _TYPED})).json()["results"][0]
     assert row == {
         "title_id": str(_KESTREL),
@@ -476,10 +498,13 @@ async def test_a_hydrated_candidate_carries_the_title_fields_a_box_renders(
 
 
 async def test_the_limit_reaches_the_tier_that_runs() -> None:
-    """Clamped once, at the service, exactly as `GET /search` is: the ceiling
-    lives beside the `Settings` field and this route declares only a floor.
-    Fails: a `le=` here, which is the same number spelled twice, or a route
-    that drops `limit` and always asks for ten."""
+    """Clamped once, at the service, exactly as `GET /search` is.
+
+    the ceiling lives beside the `Settings` field and this route declares only a floor.
+
+    Fails: a `le=` here, which is the same number spelled twice, or a route that drops
+    `limit` and always asks for ten.
+    """
     kit = await _kit(result_limit=20)
     async for client in _client(_app(kit.service)):
         await client.get("/search/suggest", params={"q": _TYPED, "limit": 10_000})
@@ -487,8 +512,10 @@ async def test_the_limit_reaches_the_tier_that_runs() -> None:
 
 
 async def test_a_limit_of_zero_is_refused(client: httpx.AsyncClient) -> None:
-    """`ge=1`, the same floor `GET /search` declares. A zero-result box is a
-    request nobody meant to make."""
+    """`ge=1`, the same floor `GET /search` declares.
+
+    A zero-result box is a request nobody meant to make.
+    """
     response = await client.get("/search/suggest", params={"q": _TYPED, "limit": 0})
     assert response.status_code == 422
 
@@ -496,8 +523,9 @@ async def test_a_limit_of_zero_is_refused(client: httpx.AsyncClient) -> None:
 async def test_the_household_is_a_dependency_and_never_a_query_parameter(
     client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """Since M10's J2 this route resolves a household -- and it does so the way
-    `GET /search` does, which is the half worth pinning.
+    """Since M10's J2 this route resolves a household.
+
+    and it does so the way `GET /search` does, which is the half worth pinning.
 
     **The wire is unchanged and that is a claim, not a side effect.** *"Whose
     search history is this"* is not a client's to choose, so the id arrives
@@ -525,8 +553,9 @@ async def test_the_household_is_a_dependency_and_never_a_query_parameter(
 
 
 async def test_the_household_is_resolved_only_for_a_request_that_writes_a_row() -> None:
-    """One `users` SELECT per keystroke is what a dependency costs; this route
-    pays it where the row is written and nowhere else.
+    """One `users` SELECT per keystroke is what a dependency costs.
+
+    this route pays it where the row is written and nowhere else.
 
     Three arms, because a route that simply stopped resolving one would satisfy
     the first two: a `q` below the tier's minimum returns before the service
@@ -558,7 +587,7 @@ async def test_the_household_is_resolved_only_for_a_request_that_writes_a_row() 
 
 
 async def test_a_tier_the_service_cannot_serve_is_not_reachable_from_the_route() -> None:
-    """**A coverage assertion over the enum, and it needs its own premise.**
+    """**A coverage assertion over the enum, and it needs its own premise.**.
 
     The service selects its collaborator out of a `dict` keyed by
     `SuggestTier`, so a member added to the enum and not to that map is a

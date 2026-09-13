@@ -109,9 +109,7 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
 
     @asynccontextmanager
     async def _bulk_load_window(self) -> AsyncIterator[None]:
-        """Suspends the two non-unique btrees on `titles`, but **only into an empty
-        table**.
-        """
+        """Suspends the two non-unique btrees on `titles`, but **only into an empty table**."""
         suspended: list[str] = []
         if await self.count_titles() == 0:
             for name in _SUSPENDABLE_INDEXES:
@@ -145,9 +143,11 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         await stage_records(self._session, ddl=ddl, table=table, columns=columns, records=records)
 
     async def _rowcount(self, sql: str, *, refused: str) -> int:
-        """`rowcount` lives on `CursorResult`, not the `Result[Any]` `AsyncSession.execute`
-        is typed as returning -- mypy strict rejects `result.rowcount` without this
-        narrowing (verified: `"Result[Any]" has no attribute "rowcount"`).
+        """`rowcount` lives on `CursorResult`.
+
+        not the `Result[Any]` `AsyncSession.execute` is typed as returning -- mypy
+        strict rejects `result.rowcount` without this narrowing (verified:
+        `"Result[Any]" has no attribute "rowcount"`).
         """
         async with refusals_as_conflict(self._session, refused):
             result = await self._session.execute(text(sql))
@@ -669,8 +669,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
 
 
 def _refuse_partial_vocabulary(tags: Sequence[GenomeTag], revision: str) -> None:
-    """The four ways a caller can hand `replace_genome_tags` something that is
-    not a vocabulary, refused before anything is written.
+    """The four ways a caller can hand `replace_genome_tags` something that is not a vocabulary.
+
+    refused before anything is written.
 
     `ValueError` rather than `RepositoryConflict`: nothing has been sent to
     Postgres, and for the first two Postgres would not refuse either --

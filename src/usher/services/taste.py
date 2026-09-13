@@ -223,9 +223,10 @@ class TasteService:
     async def _engaged(
         self, user_id: uuid.UUID, *, at: "_Reading | None" = None
     ) -> Sequence["_Engaged"]:
-        """The recency-ordered engaged window, and the *only* history read in this module
-        -- **read once per household per service, and again only if the household's
-        history moves under it**.
+        """The recency-ordered engaged window, and the *only* history read in this module.
+
+        **read once per household per service, and again only if the household's history
+        moves under it**.
         """
         held = self._engaged_windows.get(user_id)
         if held is not None and (at is None or held.at is None or held.at == at):

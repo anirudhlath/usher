@@ -1,4 +1,7 @@
-"""The credential contract against the in-memory double. No Docker."""
+"""The credential contract against the in-memory double.
+
+No Docker.
+"""
 
 import uuid
 

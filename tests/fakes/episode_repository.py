@@ -55,8 +55,7 @@ class FakeEpisodeRepository(EpisodeRepository):
         played: bool,
         last_played_at: datetime | None = None,
     ) -> None:
-        """A test-double affordance, not a port method -- the same shape
-        `reset_calls` is."""
+        """A test-double affordance, not a port method -- the same shape `reset_calls` is."""
         self._watch[(user_id, target_id)] = (played, last_played_at)
 
     async def upsert_seasons(self, seasons: Sequence[Season]) -> BulkWriteResult:
@@ -239,10 +238,13 @@ class FakeEpisodeRepository(EpisodeRepository):
 def _kept(
     incoming: Season | Episode, stored: Season | Episode, fields: Sequence[str]
 ) -> dict[str, object]:
-    """The `COALESCE` rule, spelled for Python: an incoming `None` means "this
-    read did not know", never "blank it". Ingest creates a season or an
-    episode from a source's numbers alone and enrichment fills the rest in;
-    the next nightly walk must not undo that."""
+    """The `COALESCE` rule, spelled for Python.
+
+    an incoming `None` means "this read did not know", never "blank it".
+
+    Ingest creates a season or an episode from a source's numbers alone and enrichment
+    fills the rest in; the next nightly walk must not undo that.
+    """
     return {
         field: (
             value if (value := getattr(incoming, field)) is not None else getattr(stored, field)

@@ -84,10 +84,12 @@ def build_prompt(candidates: Sequence[Title], history: Sequence[str], *, min_car
 
 
 def instructions(pool_size: int, *, min_cards: int) -> list[str]:
-    """The rules, with the three numbers that have to agree with something else
-    rendered rather than written: `pool_size` is the bound the validator
-    checks, `min_cards` is the floor it enforces, and `MAX_REASON_CHARS` is the
-    length it discards a whole row over."""
+    """The rules.
+
+    with the three numbers that have to agree with something else rendered rather than
+    written: `pool_size` is the bound the validator checks, `min_cards` is the floor it
+    enforces, and `MAX_REASON_CHARS` is the length it discards a whole row over.
+    """
     return [
         "Answer with JSON in exactly this shape and nothing else:",
         _SHAPE,
@@ -121,8 +123,10 @@ def history_lines(recent: Sequence[RecentWatch], catalog: Mapping[uuid.UUID, Tit
 
 
 def described(title: Title) -> str:
-    """`Name (Year)`, on one line. See `_SEPARATOR` for why the collapse
-    matters."""
+    """`Name (Year)`, on one line.
+
+    See `_SEPARATOR` for why the collapse matters.
+    """
     year = f" ({title.year})" if title.year is not None else ""
     return f"{one_line(title.name)}{year}"
 
@@ -132,10 +136,13 @@ def _genres(title: Title) -> str:
 
 
 def _engagement(entry: RecentWatch) -> str:
-    """PRD 06's *"recent watch history with ratings"*, with the substitution
-    this schema forces: there is no rating column and M7 declined to invent
-    one, so the engagement signal `watch_states` actually carries is the
-    rewatch. A single viewing says nothing extra and costs tokens to say."""
+    """PRD 06's *"recent watch history with ratings"*, with the substitution this schema forces.
+
+    there is no rating column and M7 declined to invent one, so the engagement signal
+    `watch_states` actually carries is the rewatch.
+
+    A single viewing says nothing extra and costs tokens to say.
+    """
     return f", watched {entry.play_count} times" if entry.play_count >= 2 else ""
 
 

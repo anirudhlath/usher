@@ -133,9 +133,11 @@ _ID_POSITIONS = (
 
 
 def _every_text_file() -> list[Path]:
-    """The whole repository, minus caches, the venv, and the gitignored
-    dataset directory. Binary files are skipped by decode failure rather
-    than by extension, so a new text format is covered the day it appears."""
+    """The whole repository, minus caches, the venv, and the gitignored dataset directory.
+
+    Binary files are skipped by decode failure rather than by extension, so a new text
+    format is covered the day it appears.
+    """
     found: list[Path] = []
     for path in _REPO.rglob("*"):
         if not path.is_file() or _NEVER_SCANNED & set(path.relative_to(_REPO).parts):
@@ -268,8 +270,9 @@ def test_every_imdb_id_is_in_the_reserved_synthetic_band() -> None:
 
 
 def test_every_id_in_a_fixture_is_synthetic() -> None:
-    """Every entity id in a committed fixture is above the synthetic floor
-    (or zero-filled, for the two opaque id shapes).
+    """Every entity id in a committed fixture is above the synthetic floor (or zero-filled.
+
+    for the two opaque id shapes).
 
     A TMDb/TVDb id has no shape to validate, so the floor is the check: at
     `_SYNTHETIC_ID_FLOOR` it is two orders of magnitude clear of every live

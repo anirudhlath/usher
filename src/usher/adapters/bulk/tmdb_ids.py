@@ -1,4 +1,7 @@
-"""TMDb's daily ID export -> `TmdbId`. No API key, no auth."""
+"""TMDb's daily ID export -> `TmdbId`.
+
+No API key, no auth.
+"""
 
 import datetime as dt
 import json
@@ -27,8 +30,11 @@ _MAX_DAYS_BACK = 7
 
 
 class TMDbIdDataset(BulkDataset[TmdbId]):
-    """One export file. Instantiated twice -- once per `TitleKind` -- because
-    movies and series are separate files with different field names."""
+    """One export file.
+
+    Instantiated twice -- once per `TitleKind` -- because movies and series are separate
+    files with different field names.
+    """
 
     def __init__(
         self,
@@ -62,9 +68,10 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
         return f"{self._base_url}{self._stem}_{day.strftime('%m_%d_%Y')}.json.gz"
 
     async def _newest_available(self) -> tuple[dt.date, CachedDatasetFile, str]:
-        """Walk backward from `today`, returning the first day whose export
-        exists, its `CachedDatasetFile`, and the ETag that day's own `HEAD`
-        already returned.
+        """Walk backward from `today`.
+
+        returning the first day whose export exists, its `CachedDatasetFile`, and the
+        ETag that day's own `HEAD` already returned.
 
         The ETag is captured and returned rather than discarded: the loop
         below already calls `candidate.revision()` to find out whether the

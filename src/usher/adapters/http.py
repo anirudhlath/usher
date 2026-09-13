@@ -94,8 +94,9 @@ def failure_detail(exc: BaseException) -> str:
 
 
 def retry_after_seconds(value: str | None) -> float | None:
-    """Parse a `Retry-After` header value into seconds from now, or `None`
-    if there was no header or it couldn't be parsed at all.
+    """Parse a `Retry-After` header value into seconds from now.
+
+    or `None` if there was no header or it couldn't be parsed at all.
 
     RFC 9110 permits `Retry-After` to be *either* an integer number of
     seconds *or* an HTTP-date -- `float(value)` alone raises `ValueError`
@@ -140,8 +141,9 @@ def decode_json(
 def port_error_for(
     response: httpx.Response, *, what: str, request_line: str, detail: str | None = None
 ) -> UsherPortError | None:
-    """The status-code ladder `TmdbClient` and `OpenAICompatibleClient` share, or `None`
-    when the status is not an error at all.
+    """The status-code ladder `TmdbClient` and `OpenAICompatibleClient` share.
+
+    or `None` when the status is not an error at all.
     """
     status = response.status_code
     if status == 429:
@@ -166,10 +168,14 @@ def port_error_for(
 
 
 class _MinInterval:
-    """A minimum-interval outbound gate: one source's calls spaced `1/rate` seconds apart,
-    with **no burst credit**, under a lock held *across* the wait. The proactive half
-    PRD 01 promised and this module never had -- every other rate concept here
-    (`retry_after_seconds`, `port_error_for`'s 429 arm) is about a limit already hit.
+    """A minimum-interval outbound gate.
+
+    one source's calls spaced `1/rate` seconds apart, with **no burst credit**, under a
+    lock held *across* the wait.
+
+    The proactive half PRD 01 promised and this module never had -- every other rate
+    concept here (`retry_after_seconds`, `port_error_for`'s 429 arm) is about a limit
+    already hit.
     """
 
     def __init__(

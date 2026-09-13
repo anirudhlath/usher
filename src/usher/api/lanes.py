@@ -131,7 +131,9 @@ class LaneSupervisor:
     # -- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
-        """Create the lanes' tasks. Awaits nothing, connects to nothing.
+        """Create the lanes' tasks.
+
+        Awaits nothing, connects to nothing.
 
         `async` despite never suspending because `stop()` is, because a
         future lane may need to, and because a lifespan calling one of a
@@ -202,11 +204,14 @@ class LaneSupervisor:
         )
 
     def crashed_sources(self) -> list[str]:
-        """Lanes whose task has finished, which is not a state a healthy
-        lane reaches: `PushSupervisor.run` returns only after the failure
-        ceiling, and `_guard` catches everything else. Reported so a case
-        can tell "the lane crashed" from "the lane was never started", which
-        `running_sources()` alone cannot."""
+        """Lanes whose task has finished, which is not a state a healthy lane reaches.
+
+        `PushSupervisor.run` returns only after the failure ceiling, and `_guard`
+        catches everything else.
+
+        Reported so a case can tell "the lane crashed" from "the lane was never
+        started", which `running_sources()` alone cannot.
+        """
         return sorted(
             self._names[source_id] for source_id, task in self._lanes.items() if task.done()
         )
@@ -229,8 +234,9 @@ class LaneSupervisor:
         return self._scheduler is not None and self._scheduler.running()
 
     def recovered_claims(self) -> int | None:
-        """The total `JobWorker.recover()` has returned in this process, or
-        `None` if it has never asked.
+        """The total `JobWorker.recover()` has returned in this process.
+
+        or `None` if it has never asked.
 
         Three values, three statements -- `None` *not probed*, `0` *asked and
         found none*, non-zero *took some back* -- on the terms
@@ -242,8 +248,10 @@ class LaneSupervisor:
         return self._recovered_claims
 
     def recovered_at(self) -> datetime | None:
-        """When the last recovery pass that *found something* ran -- see
-        `LaneReport` for why it is not "when recovery last ran"."""
+        """When the last recovery pass that *found something* ran.
+
+        see `LaneReport` for why it is not "when recovery last ran".
+        """
         return self._recovered_at
 
     def _note_recovery(self, recovered: int) -> None:
@@ -292,18 +300,21 @@ class LaneSupervisor:
         }
 
     def push_available(self, source_id: uuid.UUID) -> bool | None:
-        """What `GET /admin/sources/{id}/status` reports, or `None` when no
-        lane is running for that source -- "not probed", which is a
-        different answer from "push is broken" and is the honest one."""
+        """What `GET /admin/sources/{id}/status` reports.
+
+        or `None` when no lane is running for that source -- "not probed", which is a
+        different answer from "push is broken" and is the honest one.
+        """
         adapter = self._open_adapters.get(source_id)
         return None if adapter is None else adapter.supports_push
 
     # -- the push lanes --------------------------------------------------
 
     async def refresh(self) -> None:
-        """Start a lane for every enabled source that has none, drop the lanes of sources
-        that have gone or been disabled, and **release the adapter of a lane that has
-        finished** without restarting it.
+        """Start a lane for every enabled source that has none.
+
+        drop the lanes of sources that have gone or been disabled, and **release the
+        adapter of a lane that has finished** without restarting it.
         """
         async with self._work() as pipeline:
             wanted = {source.id: source for source in await selected_sources(pipeline)}
@@ -323,8 +334,11 @@ class LaneSupervisor:
                     await self._start_lane(pipeline, source)
 
     async def _refresh_loop(self) -> None:
-        """Refresh, then sleep -- in that order, so the first lane set is
-        built by this task rather than by `start()`."""
+        """Refresh, then sleep.
+
+        in that order, so the first lane set is built by this task rather than by
+        `start()`.
+        """
         while True:
             try:
                 await self.refresh()

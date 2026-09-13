@@ -4,7 +4,9 @@ from enum import StrEnum
 
 
 class Verdict(StrEnum):
-    """A run's outcome. `Judgement`'s four members plus the run-level two.
+    """A run's outcome.
+
+    `Judgement`'s four members plus the run-level two.
 
     `SKIPPED` and `BASELINE_INVALID` exit **0**: a surface whose preconditions
     are unmet and a catalog that moved under the baseline are both "this
@@ -31,5 +33,8 @@ _FAILING = frozenset({Verdict.FAIL})
 
 
 def exit_code_for(verdict: Verdict) -> int:
-    """The process exit code for a run's verdict. CI gates on this."""
+    """The process exit code for a run's verdict.
+
+    CI gates on this.
+    """
     return 1 if verdict in _FAILING else 0

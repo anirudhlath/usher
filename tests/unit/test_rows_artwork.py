@@ -1,5 +1,6 @@
-"""`BaseRow`'s artwork hook -- the fourth read every shelf makes, and the one decision
-on a card that no client could make for itself.
+"""`BaseRow`'s artwork hook.
+
+the fourth read every shelf makes, and the one decision on a card that no client could
 """
 
 import uuid
@@ -59,9 +60,10 @@ class _Shelf(BaseRow):
 
 
 async def test_the_hint_decides_the_kind_and_a_poster_is_not_a_backdrop() -> None:
-    """**The headline, and the one wrong implementation a shelf cannot show
-    you.** One title, both kinds of artwork, two shelves over it that differ in
-    nothing but `display_hint`.
+    """**The headline.
+
+    and the one wrong implementation a shelf cannot show you.** One title, both kinds of
+    artwork, two shelves over it that differ in nothing but `display_hint`.
 
     Under the swap both rows still carry an id for the card, both render, and
     the only symptom is a 16:9 image in a 2:3 slot -- which is why the premise
@@ -122,9 +124,9 @@ async def test_every_hint_in_the_vocabulary_takes_the_kind_it_was_given(
 
 
 def test_the_hint_to_kind_mapping_is_total_over_the_vocabulary() -> None:
-    """`DisplayHint` is closed at four and `ARTWORK_FOR_HINT` has to stay in
-    step with it, which is a fact about two vocabularies rather than about any
-    row.
+    """`DisplayHint` is closed at four and `ARTWORK_FOR_HINT` has to stay in step with it.
+
+    which is a fact about two vocabularies rather than about any row.
 
     The behavioural case above covers today's four; this one fails the day a
     fifth hint is added without a kind, which is a `KeyError` inside `hydrate`
@@ -136,7 +138,7 @@ def test_the_hint_to_kind_mapping_is_total_over_the_vocabulary() -> None:
 
 
 async def test_a_title_with_no_artwork_carries_none_beside_cards_that_have_some() -> None:
-    """**The `None` arm, on a shelf where it is not the only answer.**
+    """**The `None` arm, on a shelf where it is not the only answer.**.
 
     A catalog that has never been derived has no artwork at all, so a case
     seeding nothing would pass against an implementation that never reads
@@ -179,8 +181,9 @@ async def test_a_title_whose_only_artwork_is_a_logo_carries_none() -> None:
 
 
 async def test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none() -> None:
-    """The state the case above says a `kind` filter makes unreachable, and
-    which nothing in this code actually excludes.
+    """The state the case above says a `kind` filter makes unreachable.
+
+    and which nothing in this code actually excludes.
 
     *"A card is never handed a logo"* is true and is not the whole claim. That
     a **poster** is never published as `.svg` is an empirical property of the
@@ -218,8 +221,7 @@ async def test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none() -> No
 
 
 async def test_the_flagged_image_wins_over_the_one_that_was_seen_first() -> None:
-    """`(is_primary DESC, id)`, and the fixture is arranged so `ORDER BY id`
-    disagrees.
+    """`(is_primary DESC, id)`, and the fixture is arranged so `ORDER BY id` disagrees.
 
     `Image.id` is a UUIDv7, so first-sighting order *is* id order, and a
     fixture seeding the flagged image first would be satisfied by an
@@ -246,8 +248,10 @@ async def test_the_flagged_image_wins_over_the_one_that_was_seen_first() -> None
 
 
 async def test_a_whole_shelf_costs_one_artwork_read_whatever_its_length() -> None:
-    """**Counted, not timed** -- a timing assertion against an in-memory dict
-    measures the dict (`rows-and-genome.md`'s four-reads finding).
+    """**Counted, not timed**.
+
+    a timing assertion against an in-memory dict measures the dict (`rows-and-
+    genome.md`'s four-reads finding).
 
     Asserted **equal** at two lengths rather than `== 1` once: `== 1` is also
     what an implementation answering the first title only produces, and two
@@ -278,10 +282,11 @@ async def test_a_whole_shelf_costs_one_artwork_read_whatever_its_length() -> Non
 
 
 async def test_a_composed_screen_costs_one_artwork_read_per_shelf_and_no_more() -> None:
-    """**`+1 per shelf`, counted against fakes rather than timed** -- the honest
-    unit for this task's cost, because the home path's p95 is a property of the
-    household and not of the composer (the 5,200-copy and 1,277,878-copy
-    figures differ by 30x, `rows-and-genome.md`).
+    """**`+1 per shelf`, counted against fakes rather than timed**.
+
+    the honest unit for this task's cost, because the home path's p95 is a property of
+    the household and not of the composer (the 5,200-copy and 1,277,878-copy figures
+    differ by 30x, `rows-and-genome.md`).
 
     Asserted **equal to the number of shelves the composer actually built**,
     derived from the screen rather than written as a literal, so the case says
@@ -305,9 +310,10 @@ async def test_a_composed_screen_costs_one_artwork_read_per_shelf_and_no_more() 
 
 
 async def test_a_shelf_with_no_titles_reads_no_artwork_at_all() -> None:
-    """`hydrate` returns `()` before it asks anything, and the composer drops
-    empty rows -- so a fourth port call made anyway would be one statement per
-    *dropped* shelf, on every screen, for a row nobody sees.
+    """`hydrate` returns `()` before it asks anything, and the composer drops empty rows.
+
+    so a fourth port call made anyway would be one statement per *dropped* shelf, on
+    every screen, for a row nobody sees.
 
     The premise is the second half: the same fixture with one id, and the read
     appears. Without it `0 == 0` is also what an implementation that never

@@ -26,7 +26,10 @@ class WatchStateResponse(BaseModel):
 
 
 class AvailabilityResponse(BaseModel):
-    """One badge. Present whether or not the copy is currently available."""
+    """One badge.
+
+    Present whether or not the copy is currently available.
+    """
 
     source_id: uuid.UUID
     # `source`, not `source_name`: PRD 07's own example spells it this way,

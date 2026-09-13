@@ -80,8 +80,9 @@ async def _link(
     available: bool = True,
     as_episode: bool = False,
 ) -> None:
-    """The `titles.collection_id` link and any `media_items` row -- what
-    `CollectionRepository.get` reads.
+    """The `titles.collection_id` link and any `media_items` row.
+
+    what `CollectionRepository.get` reads.
 
     **Separate from `_film` so a case can make the two stores disagree about
     order**, which is the only way to tell "rendered `collection.title_ids`"
@@ -171,10 +172,14 @@ async def test_a_member_card_carries_what_a_franchise_page_renders(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """Hydrated from `TitleRepository.list_by_ids`, so the card is the
-    catalog's answer about the film. `enrichment_state` rides along because a
-    franchise is exactly where a skeleton member shows up -- the household owns
-    two of seven and the other five were never enriched."""
+    """Hydrated from `TitleRepository.list_by_ids`.
+
+    so the card is the catalog's answer about the film.
+
+    `enrichment_state` rides along because a franchise is exactly where a skeleton
+    member shows up -- the household owns two of seven and the other five were never
+    enriched.
+    """
     collection_id = await _seed_collection(collections)
     film = await _member(collections, titles, collection_id, name="A Member Film", year=1984)
 
@@ -196,9 +201,10 @@ async def test_a_franchise_the_household_owns_none_of_is_a_200_with_a_zero(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """`owned_count: 0` is a real, renderable fact -- "you own 0 of 3" is
-    exactly what a client following a link from a film it does own needs to be
-    told.
+    """`owned_count: 0` is a real, renderable fact.
+
+    "you own 0 of 3" is exactly what a client following a link from a film it does own
+    needs to be told.
 
     The wrong implementation this kills is a 404 for it, which collapses "the
     catalog does not hold this franchise" and "the household owns none of it"
@@ -222,9 +228,10 @@ async def test_an_unavailable_copy_and_an_episode_level_one_are_not_owned(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """`owned` is B6's predicate unchanged -- `episode_id IS NULL` **and**
-    `available` -- and this is that agreement asserted on the wire rather than
-    only in the repository contract.
+    """`owned` is B6's predicate unchanged.
+
+    `episode_id IS NULL` **and** `available` -- and this is that agreement asserted on
+    the wire rather than only in the repository contract.
 
     Both wrong implementations overstate, which is the direction nobody checks:
     a retracted copy on an unmounted drive and an episode-level row both read
@@ -249,9 +256,12 @@ async def test_an_unavailable_copy_and_an_episode_level_one_are_not_owned(
 
 
 async def test_an_unknown_collection_is_a_404_in_the_envelope(client: httpx.AsyncClient) -> None:
-    """V1's generic `not_found`, never a `collection_not_found`: RFC 9457's
-    `instance` already carries the path. Kept thin -- the envelope itself is
-    asserted in `tests/unit/test_api_problem.py`."""
+    """V1's generic `not_found`, never a `collection_not_found`.
+
+    RFC 9457's `instance` already carries the path.
+
+    Kept thin -- the envelope itself is asserted in `tests/unit/test_api_problem.py`.
+    """
     collection_id = uuid.uuid4()
     response = await client.get(f"/collections/{collection_id}")
     assert response.status_code == 404
@@ -265,8 +275,7 @@ async def test_the_members_keep_the_repositorys_order_rather_than_the_owned_ones
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """`OwnedCollection.title_ids` is release order and the response is that
-    order unchanged.
+    """`OwnedCollection.title_ids` is release order and the response is that order unchanged.
 
     Two wrong implementations, and the fixture has to be built for the second
     or it cannot see it.
@@ -306,9 +315,10 @@ async def test_a_member_the_catalog_no_longer_holds_leaves_both_counts_agreeing(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """`list_by_ids` returns fewer rows than it was asked for -- the port says
-    so -- and the counts are `len()` over what is **rendered**, so the client
-    can count the list and get the same numbers.
+    """`list_by_ids` returns fewer rows than it was asked for.
+
+    the port says so -- and the counts are `len()` over what is **rendered**, so the
+    client can count the list and get the same numbers.
 
     The wrong implementations this kills are a `KeyError` on the missing row
     (a 500 where the honest answer is a shorter list) and counts taken from
@@ -358,8 +368,10 @@ async def test_the_counts_are_the_length_of_the_lists_they_count(
 
 
 async def test_the_route_is_in_the_schema_under_its_own_tag(app: FastAPI) -> None:
-    """A route that answers correctly and is absent from `/openapi.json` is a
-    route no generated client can call."""
+    """A route that answers correctly and is absent from `/openapi.json` is a route no generated.
+
+    client can call.
+    """
     paths = app.openapi()["paths"]
     assert "/collections/{collection_id}" in paths
     assert paths["/collections/{collection_id}"]["get"]["tags"] == ["collections"]

@@ -52,10 +52,11 @@ class FakeCuratedRowRepository(CuratedRowRepository):
 
 
 def _refuse_disagreement(user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> None:
-    """The port's two refusals, modelled rather than diverged -- see the
-    module docstring. Kept identical to
-    `usher.db.repositories.curation._refuse_disagreement`; the contract suite
-    is what holds the two together."""
+    """The port's two refusals, modelled rather than diverged -- see the module docstring.
+
+    Kept identical to `usher.db.repositories.curation._refuse_disagreement`; the
+    contract suite is what holds the two together.
+    """
     for row in rows:
         if row.user_id != user_id:
             raise ValueError("a curated row cannot be written to another household's screen")

@@ -1,4 +1,7 @@
-"""`TmdbClient` over `httpx.MockTransport`. No network, no real clock."""
+"""`TmdbClient` over `httpx.MockTransport`.
+
+No network, no real clock.
+"""
 
 import asyncio
 from typing import Any
@@ -72,11 +75,13 @@ async def test_a_v3_key_is_sent_as_the_api_key_query_parameter() -> None:
 
 
 async def test_a_v4_read_access_token_is_sent_as_a_bearer_header_instead() -> None:
-    """Not cosmetic. A query-parameter credential lands in every URL, and
-    `HTTPXClientInstrumentor` records the full URL as a span attribute, so
-    the v3 form writes the key into telemetry on every request. TMDb accepts
-    the bearer token on v3 endpoints, so an operator who configures one gets
-    that leak closed with no code change."""
+    """Not cosmetic.
+
+    A query-parameter credential lands in every URL, and `HTTPXClientInstrumentor`
+    records the full URL as a span attribute, so the v3 form writes the key into
+    telemetry on every request. TMDb accepts the bearer token on v3 endpoints, so an
+    operator who configures one gets that leak closed with no code change.
+    """
     transport = _transport()
     client, http = _client(transport, api_key=_V4_TOKEN)
     async with http:
@@ -87,10 +92,11 @@ async def test_a_v4_read_access_token_is_sent_as_a_bearer_header_instead() -> No
 
 
 async def test_the_key_never_reaches_a_transport_failure_message() -> None:
-    """PRD 08's "credentials are never logged", enforced rather than
-    asserted. `EmbySession` interpolates the httpx exception into its own
-    message safely because an Emby URL carries no credential; a TMDb v3 URL
-    does, so this client may not."""
+    """PRD 08's "credentials are never logged", enforced rather than asserted.
+
+    `EmbySession` interpolates the httpx exception into its own message safely because
+    an Emby URL carries no credential; a TMDb v3 URL does, so this client may not.
+    """
 
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
@@ -107,11 +113,13 @@ async def test_the_key_never_reaches_a_transport_failure_message() -> None:
 
 
 async def test_a_404_is_malformed_data_not_an_outage() -> None:
-    """The branch that makes `JobWorker`'s park-immediately path fire in
-    production. A TMDb id the catalog holds that TMDb no longer serves is a
-    wrong answer, not an outage -- and the catalog holds 291,737 TMDb ids
-    from a bulk export that ages. Translating it to `PortUnavailable` spends
-    five rate-limited retries before parking with the wrong reason."""
+    """The branch that makes `JobWorker`'s park-immediately path fire in production.
+
+    A TMDb id the catalog holds that TMDb no longer serves is a wrong answer, not an
+    outage -- and the catalog holds 291,737 TMDb ids from a bulk export that ages.
+    Translating it to `PortUnavailable` spends five rate-limited retries before parking
+    with the wrong reason.
+    """
     client, http = _client(
         _transport(status=404, body={"success": False, "status_code": 34, "status_message": "x"})
     )
@@ -138,8 +146,10 @@ async def test_a_429_carries_the_retry_after_hint() -> None:
 
 async def test_a_429_with_an_http_date_retry_after_is_still_a_hint() -> None:
     """RFC 9110 permits either form and `float(value)` raises on the second.
-    `usher.adapters.http.retry_after_seconds` is shared for exactly this;
-    the bug it fixes existed in two places."""
+
+    `usher.adapters.http.retry_after_seconds` is shared for exactly this; the bug it
+    fixes existed in two places.
+    """
     client, http = _client(
         _transport(status=429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})
     )
@@ -208,11 +218,12 @@ async def test_a_rejected_request_is_malformed_data_not_an_outage(status: int, b
 
 
 async def test_a_request_timeout_is_still_an_outage() -> None:
-    """The one 4xx that is *not* the caller's fault. TMDb itself has never
-    been observed to send it, but `Settings.tmdb_base_url` exists precisely
-    so a household can put a proxy in front of TMDb, and a proxy that gives
-    up waiting is exactly the transient failure the queue's backoff is
-    for."""
+    """The one 4xx that is *not* the caller's fault.
+
+    TMDb itself has never been observed to send it, but `Settings.tmdb_base_url` exists
+    precisely so a household can put a proxy in front of TMDb, and a proxy that gives up
+    waiting is exactly the transient failure the queue's backoff is for.
+    """
     client, http = _client(_transport(status=408))
     async with http:
         with pytest.raises(PortUnavailable):
@@ -220,9 +231,11 @@ async def test_a_request_timeout_is_still_an_outage() -> None:
 
 
 async def test_a_non_json_body_is_malformed() -> None:
-    """A reverse proxy or a captive portal serving HTML with status 200. A
-    raw `json.JSONDecodeError` escaping the port is not something a caller
-    written against `usher.ports.errors` can catch."""
+    """A reverse proxy or a captive portal serving HTML with status 200.
+
+    A raw `json.JSONDecodeError` escaping the port is not something a caller written
+    against `usher.ports.errors` can catch.
+    """
 
     def html(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html>nope</html>")
@@ -244,9 +257,10 @@ async def test_a_json_array_body_is_malformed() -> None:
 
 
 async def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None:
-    """The defect M8 found and fixed in the LLM adapter, reaching this one --
-    which is the point of `usher.adapters.http.decode_json` being one function
-    rather than three copies.
+    """The defect M8 found and fixed in the LLM adapter, reaching this one.
+
+    which is the point of `usher.adapters.http.decode_json` being one function rather
+    than three copies.
 
     `json.loads` raises `RecursionError` past a nesting depth of 9,999 (9,998
     parses, measured on CPython 3.13 at the default recursion limit), and
@@ -273,10 +287,12 @@ async def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None
 
 
 async def test_the_throttle_holds_requests_to_the_configured_rate() -> None:
-    """PRD 10's dashboard 3 plots "TMDb requests/sec against the ~40
-    ceiling"; TMDb's own documentation says the limits "sit somewhere in the
-    40 requests per second range" and to "respect the 429 if you receive
-    one". Asserted against an injected clock rather than by sleeping.
+    """PRD 10's dashboard 3 plots "TMDb requests/sec against the ~40 ceiling".
+
+    TMDb's own documentation says the limits "sit somewhere in the 40 requests per
+    second range" and to "respect the 429 if you receive one".
+
+    Asserted against an injected clock rather than by sleeping.
 
     Six requests at two per second: the first two spend the bucket's burst
     and the remaining four wait half a second each.
@@ -290,9 +306,11 @@ async def test_the_throttle_holds_requests_to_the_configured_rate() -> None:
 
 
 async def test_the_throttle_survives_concurrency() -> None:
-    """A per-call check with no lock lets N coroutines all read the same
-    token count and all decide they may go -- which is a burst of N against
-    a limit of one, and the failure only appears under concurrency."""
+    """A per-call check with no lock lets N coroutines all read the same token count and all.
+
+    decide they may go -- which is a burst of N against a limit of one, and the failure
+    only appears under concurrency.
+    """
     clock = _Clock()
     client, http = _client(_transport(), requests_per_second=2.0, clock=clock, sleep=clock.sleep)
     async with http:
@@ -301,8 +319,10 @@ async def test_the_throttle_survives_concurrency() -> None:
 
 
 async def test_a_burst_within_the_budget_does_not_wait() -> None:
-    """A throttle that slept before every request would halve the throughput
-    of a walk that is already under the ceiling."""
+    """A throttle that slept before every request would halve the throughput of a walk that is.
+
+    already under the ceiling.
+    """
     clock = _Clock()
     client, http = _client(_transport(), requests_per_second=10.0, clock=clock, sleep=clock.sleep)
     async with http:

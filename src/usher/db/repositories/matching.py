@@ -70,10 +70,12 @@ class PostgresTitleMatchRepository(TitleMatchRepository):
 
     @staticmethod
     def name_year_sql() -> str:
-        """The literal name+year statement, for `EXPLAIN` in the integration
-        suite. A plan assertion against a hand-copied lookalike drifts from
-        the statement that actually runs, and the whole point of this one is
-        that a wrong spelling returns identical rows."""
+        """The literal name+year statement, for `EXPLAIN` in the integration suite.
+
+        A plan assertion against a hand-copied lookalike drifts from the statement that
+        actually runs, and the whole point of this one is that a wrong spelling returns
+        identical rows.
+        """
         return _MATCH_NAME_YEAR
 
     async def match_by_provider_ids(
@@ -160,9 +162,11 @@ class PostgresTitleMatchRepository(TitleMatchRepository):
 
 
 def _as_int(value: str) -> int | None:
-    """A source is free to report `ProviderIds.Tmdb: "unknown"`. That is a
-    matching failure, not a pipeline failure -- and casting it in SQL would
-    abort a whole batch of 5,000 items over one bad string."""
+    """A source is free to report `ProviderIds.Tmdb: "unknown"`.
+
+    That is a matching failure, not a pipeline failure -- and casting it in SQL would
+    abort a whole batch of 5,000 items over one bad string.
+    """
     try:
         return int(value)
     except ValueError:

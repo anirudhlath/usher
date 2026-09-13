@@ -35,10 +35,11 @@ MAX_REASON_CHARS = 1000
 
 
 class DropReason(StrEnum):
-    """`usher.curation.dropped`'s `reason` label. Closed, because a metric
-    dimension built from free-form strings is a cardinality footgun -- the same
-    argument `LLMPurpose` makes one module over. The table in this module's
-    docstring is why each member earns its place, and what unit each counts.
+    """`usher.curation.dropped`'s `reason` label.
+
+    Closed, because a metric dimension built from free-form strings is a cardinality
+    footgun -- the same argument `LLMPurpose` makes one module over. The table in this
+    module's docstring is why each member earns its place, and what unit each counts.
     """
 
     NOT_IN_POOL = "not_in_pool"
@@ -50,9 +51,11 @@ class DropReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CurationKept:
-    """A generation that produced something. **`rows` is never empty** -- see
-    `__post_init__`, and `CurationRejected` for the other half of why a caller
-    cannot mistake zero rows for a success."""
+    """A generation that produced something.
+
+    **`rows` is never empty** -- see `__post_init__`, and `CurationRejected` for the
+    other half of why a caller cannot mistake zero rows for a success.
+    """
 
     rows: tuple[CuratedRow, ...]
     dropped: Mapping[DropReason, int]
@@ -168,9 +171,11 @@ def _row(
     position: int,
     width: int,
 ) -> CuratedRow | None:
-    """One row, or `None` if it is discarded -- **whole, and never padded from
-    the pool**, which would be a fabricated recommendation wearing a model's
-    reason string (ADR-0014, ADR-0028)."""
+    """One row, or `None` if it is discarded.
+
+    **whole, and never padded from the pool**, which would be a fabricated
+    recommendation wearing a model's reason string (ADR-0014, ADR-0028).
+    """
     if not isinstance(entry, Mapping):
         dropped[DropReason.ROW_UNUSABLE] += 1
         return None
@@ -255,8 +260,12 @@ def _cards(
 
 
 def _handle(value: Any) -> str | None:
-    """`str(value).strip()` for the two JSON types that can carry a handle, and
-    `None` for everything else. The module docstring's table is the argument."""
+    """`str(value).strip()` for the two JSON types that can carry a handle.
+
+    and `None` for everything else.
+
+    The module docstring's table is the argument.
+    """
     if isinstance(value, bool):
         # First, because `isinstance(True, int)` is `True`. A bool where a
         # handle was asked for is a shape failure, not the index `1`.
@@ -271,8 +280,10 @@ def _handle(value: Any) -> str | None:
 
 
 def _prose(value: Any, *, limit: int) -> str | None:
-    """The stripped string, or `None` if this is not prose this row can be
-    shown with. Never coerced: see the module docstring."""
+    """The stripped string, or `None` if this is not prose this row can be shown with.
+
+    Never coerced: see the module docstring.
+    """
     if not isinstance(value, str):
         return None
     stripped = value.strip()
@@ -282,15 +293,18 @@ def _prose(value: Any, *, limit: int) -> str | None:
 
 
 def _tally(dropped: Counter[DropReason]) -> Mapping[DropReason, int]:
-    """Every reason, zeros included -- a reason absent from the map is indistinguishable
-    from a reason nobody counts.
+    """Every reason, zeros included.
+
+    a reason absent from the map is indistinguishable from a reason nobody counts.
     """
     return MappingProxyType({reason: dropped[reason] for reason in DropReason})
 
 
 def _summary(dropped: Counter[DropReason]) -> str:
-    """The non-zero counts, for `llm_calls.error`. Numbers and label names
-    only; nothing the model wrote."""
+    """The non-zero counts, for `llm_calls.error`.
+
+    Numbers and label names only; nothing the model wrote.
+    """
     return ", ".join(
         f"{reason.value}={dropped[reason]}" for reason in DropReason if dropped[reason]
     )

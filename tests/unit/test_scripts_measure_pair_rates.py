@@ -1,6 +1,4 @@
-"""`scripts/measure_pair_rates.py`'s accumulator, against the counter it must agree
-with.
-"""
+"""`scripts/measure_pair_rates.py`'s accumulator, against the counter it must agree with."""
 
 import importlib.util
 import math

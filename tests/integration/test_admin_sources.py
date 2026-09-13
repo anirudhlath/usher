@@ -176,8 +176,7 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def log_lines(app: FastAPI) -> Iterator[list[str]]:
-    """Everything the app logs, captured after `create_app` has configured
-    loguru.
+    """Everything the app logs, captured after `create_app` has configured loguru.
 
     Depends on `app` deliberately: `configure_telemetry` calls
     `logger.remove()`, so a sink added before the app is built is discarded
@@ -227,9 +226,11 @@ async def test_creating_a_source_returns_it_without_the_credential(
     client: AsyncClient,
 ) -> None:
     """PRD 08: "Credentials are never returned by any API, including admin.
-    Write-only." Asserted against the whole serialized body, not against a
-    field list -- a field added later that happens to carry the password
-    fails this without anyone having to remember to update it."""
+
+    Write-only." Asserted against the whole serialized body, not against a field list --
+    a field added later that happens to carry the password fails this without anyone
+    having to remember to update it.
+    """
     response = await client.post("/admin/sources", json=_payload())
     assert response.status_code == 201
     body = response.json()
@@ -240,9 +241,12 @@ async def test_creating_a_source_returns_it_without_the_credential(
 
 
 async def test_the_device_id_is_visible_and_stable(client: AsyncClient) -> None:
-    """Not a secret, and genuinely useful: it is how an operator finds
-    Usher's session in Emby's own dashboard. Stable across reads is the
-    durable-client property, seen from the outside."""
+    """Not a secret, and genuinely useful.
+
+    it is how an operator finds Usher's session in Emby's own dashboard.
+
+    Stable across reads is the durable-client property, seen from the outside.
+    """
     created = (await client.post("/admin/sources", json=_payload())).json()
     listed = (await client.get("/admin/sources")).json()
     assert created["device_id"]
@@ -261,9 +265,10 @@ async def test_listing_sources_never_carries_a_credential(client: AsyncClient) -
 async def test_the_credential_is_encrypted_and_stored_outside_sources(
     client: AsyncClient, app: FastAPI
 ) -> None:
-    """The reason `source_credentials` is a separate table (PRD 08, and
-    `usher.ports.credentials`'s module docstring): `SELECT * FROM sources`
-    must not be able to return ciphertext, let alone plaintext.
+    """The reason `source_credentials` is a separate table (PRD 08.
+
+    and `usher.ports.credentials`'s module docstring): `SELECT * FROM sources` must not
+    be able to return ciphertext, let alone plaintext.
 
     The decrypt at the end is the positive control. Without it, a store
     that wrote a constant would pass every absence assertion here.
@@ -305,11 +310,13 @@ async def test_status_reports_a_healthy_source(client: AsyncClient) -> None:
 async def test_status_reports_the_running_lanes_push_health(
     app: FastAPI, client: AsyncClient
 ) -> None:
-    """The route's `push_available` comes from the **lane's** adapter, not
-    from the throwaway one `verify()` built -- which opens no socket and can
-    therefore only ever answer `null`. This is the wiring end to end:
-    `get_source_service` -> `SourceService._with_lane_push_health` ->
-    response body.
+    """The route's `push_available` comes from the **lane's** adapter.
+
+    not from the throwaway one `verify()` built -- which opens no socket and can
+    therefore only ever answer `null`.
+
+    This is the wiring end to end: `get_source_service` ->
+    `SourceService._with_lane_push_health` -> response body.
 
     Overridden rather than started, because a real lane here would open a
     WebSocket to `https://emby.invalid`; the case above already pins the
@@ -361,9 +368,11 @@ async def _no_user() -> uuid.UUID:
 async def test_status_distinguishes_bad_credentials_from_unreachable(
     client: AsyncClient, server: FakeEmbyServer
 ) -> None:
-    """The provisional marker in PRD 07, closed. Both states are 200 with a
-    body an admin UI renders -- a bad password is not a server error and
-    must not be a 5xx."""
+    """The provisional marker in PRD 07, closed.
+
+    Both states are 200 with a body an admin UI renders -- a bad password is not a
+    server error and must not be a 5xx.
+    """
     created = (await client.post("/admin/sources", json=_payload())).json()
     server.reject_credentials()
     rejected = await client.get(f"/admin/sources/{created['id']}/status")
@@ -387,9 +396,10 @@ async def test_status_never_leaks_the_credential_into_its_detail(
 async def test_status_renders_an_undecryptable_credential(
     client: AsyncClient, app: FastAPI
 ) -> None:
-    """A rotated `USHER_SECRET_KEY`, or a row restored from a backup taken
-    under a different one, against the real Fernet store rather than a fake
-    that raises on command.
+    """A rotated `USHER_SECRET_KEY`.
+
+    or a row restored from a backup taken under a different one, against the real Fernet
+    store rather than a fake that raises on command.
 
     This route is the screen an operator would open to *find out* why a
     source stopped working, so it has to answer -- and before the guard in
@@ -416,8 +426,11 @@ async def test_status_renders_an_undecryptable_credential(
 
 
 async def test_status_of_an_unknown_source_is_404(client: AsyncClient) -> None:
-    """404 in PRD 07's RFC 9457 envelope since M9, against the real route
-    rather than only against the unit app that overrides its service."""
+    """404 in PRD 07's RFC 9457 envelope since M9.
+
+    against the real route rather than only against the unit app that overrides its
+    service.
+    """
     response = await client.get("/admin/sources/01936f2a-0000-7000-8000-000000000000/status")
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
@@ -434,8 +447,10 @@ async def test_status_of_an_unknown_source_is_404(client: AsyncClient) -> None:
 async def test_deleting_a_source_removes_its_credential_row(
     client: AsyncClient, app: FastAPI
 ) -> None:
-    """Not just the 204: the encrypted row must be gone, or a deployment
-    accumulates orphaned secrets nothing can attribute.
+    """Not just the 204.
+
+    the encrypted row must be gone, or a deployment accumulates orphaned secrets nothing
+    can attribute.
 
     What this proves is the *deployment* guarantee, not the service's
     delete call. Two independent mechanisms enforce it and both fire here:
@@ -460,10 +475,12 @@ async def test_deleting_a_source_removes_its_credential_row(
 async def test_a_blank_name_is_rejected_before_anything_is_written(
     client: AsyncClient, app: FastAPI
 ) -> None:
-    """`Source.name` has `min_length=1` and the table has a CHECK. Catching
-    it at the DTO turns a 500 from a constraint violation into a 422 with a
-    field name -- and, since registration writes the source before the
-    credential, a rejected request must leave neither behind."""
+    """`Source.name` has `min_length=1` and the table has a CHECK.
+
+    Catching it at the DTO turns a 500 from a constraint violation into a 422 with a
+    field name -- and, since registration writes the source before the credential, a
+    rejected request must leave neither behind.
+    """
     payload = _payload()
     payload["name"] = ""
     assert (await client.post("/admin/sources", json=payload)).status_code == 422
@@ -477,8 +494,12 @@ async def test_a_blank_name_is_rejected_before_anything_is_written(
 async def test_a_rejected_request_does_not_echo_the_credential_it_carried(
     client: AsyncClient,
 ) -> None:
-    """PRD 08: credentials are never returned by any API, and never appear in "error paths
-    and request dumps". A 422 is both.
+    """PRD 08.
+
+    credentials are never returned by any API, and never appear in "error paths and
+    request dumps".
+
+    A 422 is both.
     """
     incomplete = _payload()
     del incomplete["base_url"]
@@ -500,9 +521,12 @@ async def test_a_rejected_request_does_not_echo_the_credential_it_carried(
 async def test_no_route_logs_a_credential(
     client: AsyncClient, server: FakeEmbyServer, log_lines: list[str]
 ) -> None:
-    """PRD 08: "Credentials are never logged, including in error paths and
-    request dumps." Every route, in every state it can report, against the
-    whole serialized log stream rather than one expected line."""
+    """PRD 08.
+
+    "Credentials are never logged, including in error paths and request dumps." Every
+    route, in every state it can report, against the whole serialized log stream rather
+    than one expected line.
+    """
     await _exercise_every_route(client, server)
     assert log_lines, "nothing was logged at all -- the sink is not attached"
     assert_carries_no_credential("\n".join(log_lines), where="the log stream")
@@ -511,10 +535,12 @@ async def test_no_route_logs_a_credential(
 async def test_no_span_carries_a_credential(
     client: AsyncClient, server: FakeEmbyServer, spans: InMemorySpanExporter
 ) -> None:
-    """PRD 08 again, and ADR-0012's "never a span attribute". Checked
-    against each span's full JSON -- name, attributes, events, status -- so
-    a credential bound anywhere on a span fails this, not only one set as a
-    known attribute key."""
+    """PRD 08 again, and ADR-0012's "never a span attribute".
+
+    Checked against each span's full JSON -- name, attributes, events, status -- so a
+    credential bound anywhere on a span fails this, not only one set as a known
+    attribute key.
+    """
     await _exercise_every_route(client, server)
     recorded = spans.get_finished_spans()
     assert recorded, "no spans were exported -- the provider is not installed"
@@ -525,9 +551,10 @@ async def test_no_span_carries_a_credential(
 async def test_the_openapi_schema_has_no_password_in_a_response(
     client: AsyncClient,
 ) -> None:
-    """A generated client is built from this document. A response schema
-    that declared a password field would put one in every generated model,
-    whether or not the server ever populates it.
+    """A generated client is built from this document.
+
+    A response schema that declared a password field would put one in every generated
+    model, whether or not the server ever populates it.
 
     The positive half matters as much as the three absences: `SecretStr`
     makes pydantic emit `"writeOnly": true` on the request schema, which is
@@ -549,9 +576,11 @@ async def test_the_openapi_schema_has_no_password_in_a_response(
 
 
 async def _never_resolves(_: str) -> None:
-    """A `match`/`watch_history` resolver a `sync`-only worker must never
-    call: nothing enqueues either kind in these cases, so reaching this
-    would mean `run_once` claimed a kind it should not have."""
+    """A `match`/`watch_history` resolver a `sync`-only worker must never call.
+
+    nothing enqueues either kind in these cases, so reaching this would mean `run_once`
+    claimed a kind it should not have.
+    """
     return None
 
 
@@ -559,9 +588,10 @@ async def _never_resolves(_: str) -> None:
 async def _drained_pipeline(
     app: FastAPI, worker_factory: SourceAdapterFactory, *, user_id: uuid.UUID
 ) -> AsyncIterator[Pipeline]:
-    """Claim and run exactly the worker's registered kinds, once, over a
-    fresh session -- the same shape `usher work --once` drives, with the
-    adapter factory swapped for one pointed at the in-memory server.
+    """Claim and run exactly the worker's registered kinds, once, over a fresh session.
+
+    the same shape `usher work --once` drives, with the adapter factory swapped for one
+    pointed at the in-memory server.
 
     Yields the `Pipeline` while its session is still open, so a case can
     read back what the run wrote without a second round trip losing the
@@ -597,11 +627,12 @@ async def _drained_pipeline(
 async def test_a_claimed_sync_job_walks_items_then_watch_state_and_closes_the_adapter(
     client: AsyncClient, app: FastAPI, server: FakeEmbyServer
 ) -> None:
-    """The end-to-end walk: one claimed `sync` job produces a `sync_runs`
-    row for the item lane and one for the watch lane, driven against the
-    real `EmbyAdapter` over a real `FakeEmbyServer` -- the identical stack
-    `test_status_reports_a_healthy_source` already exercises, one route
-    over -- and the adapter is closed afterwards.
+    """The end-to-end walk.
+
+    one claimed `sync` job produces a `sync_runs` row for the item lane and one for the
+    watch lane, driven against the real `EmbyAdapter` over a real `FakeEmbyServer` --
+    the identical stack `test_status_reports_a_healthy_source` already exercises, one
+    route over -- and the adapter is closed afterwards.
 
     `EmbyAdapter.aclose()` never touches the injected client (the fixture
     owns that), so the only way to see it ran is the port's own contract:
@@ -646,12 +677,14 @@ async def test_a_claimed_sync_job_walks_items_then_watch_state_and_closes_the_ad
 async def test_the_adapter_closes_even_when_the_item_lanes_walk_raises(
     client: AsyncClient, app: FastAPI, server: FakeEmbyServer
 ) -> None:
-    """`ReconcileService.reconcile` never lets a `UsherPortError` escape --
-    it records a `FAILED` run instead -- so the property worth pinning
-    against a real adapter is not "the handler survives a raise" but "the
-    connection pool is released whether the walk that raised inside it was
-    caught three layers down or not". `aclose()` in a `finally` is what
-    buys that, and it is invisible to every assertion above the walk.
+    """`ReconcileService.reconcile` never lets a `UsherPortError` escape.
+
+    it records a `FAILED` run instead -- so the property worth pinning against a real
+    adapter is not "the handler survives a raise" but "the connection pool is released
+    whether the walk that raised inside it was caught three layers down or not".
+
+    `aclose()` in a `finally` is what buys that, and it is invisible to every assertion
+    above the walk.
     """
     created = (await client.post("/admin/sources", json=_payload())).json()
     source_id = uuid.UUID(created["id"])
@@ -684,11 +717,12 @@ async def test_the_adapter_closes_even_when_the_item_lanes_walk_raises(
 async def test_a_sync_job_completes_rather_than_parks_when_the_credential_row_has_gone(
     client: AsyncClient, app: FastAPI, server: FakeEmbyServer
 ) -> None:
-    """`composition.open_adapter` answers `None` for exactly this, and PRD
-    08 reserves parking for work a human must look at -- an operator with
-    three sources needs the second and third to run when the first's
-    credential has gone missing, and a parked `sync` job would put that
-    problem on the wrong screen."""
+    """`composition.open_adapter` answers `None` for exactly this.
+
+    and PRD 08 reserves parking for work a human must look at -- an operator with three
+    sources needs the second and third to run when the first's credential has gone
+    missing, and a parked `sync` job would put that problem on the wrong screen.
+    """
     created = (await client.post("/admin/sources", json=_payload())).json()
     source_id = uuid.UUID(created["id"])
 

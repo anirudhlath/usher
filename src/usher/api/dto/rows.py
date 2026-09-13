@@ -6,8 +6,11 @@ from usher.domain.jobs import JobKind
 
 
 class RegenerateResponse(BaseModel):
-    """The enqueued job's identity. See the module docstring for what is
-    deliberately absent, and why each of those would misstate the queue."""
+    """The enqueued job's identity.
+
+    See the module docstring for what is deliberately absent, and why each of those
+    would misstate the queue.
+    """
 
     kind: JobKind
     key: str

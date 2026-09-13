@@ -1,4 +1,5 @@
-"""FakeTitleRepository against the shared TitleRepository contract (see
+"""FakeTitleRepository against the shared TitleRepository contract (see.
+
 tests/contract/title_repository_contract.py).
 """
 
@@ -26,8 +27,10 @@ class TestFakeTitleRepository(TitleRepositoryContract):
 
 
 class TestFakeTitleRepositoryOwned(TitleRepositoryOwnedContract):
-    """`list_owned_by_tag` against the fake. The Postgres half is
-    `tests/integration/test_title_repository.py`."""
+    """`list_owned_by_tag` against the fake.
+
+    The Postgres half is `tests/integration/test_title_repository.py`.
+    """
 
     @pytest.fixture
     def repo(self) -> FakeTitleRepository:
@@ -43,10 +46,12 @@ class TestFakeTitleRepositoryOwned(TitleRepositoryOwnedContract):
 
 
 class TestFakeTitleRepositoryCandidates(TitleRepositoryCandidateContract):
-    """`list_unwatched_candidates` against the fake. The Postgres half is
-    `tests/integration/test_title_repository.py`, and it is the one that can
-    fail on the `NOT EXISTS` roll-up, on `NULLS LAST` and on the `&&`
-    operator -- all three of which this arm reproduces in Python."""
+    """`list_unwatched_candidates` against the fake.
+
+    The Postgres half is `tests/integration/test_title_repository.py`, and it is the one
+    that can fail on the `NOT EXISTS` roll-up, on `NULLS LAST` and on the `&&` operator
+    -- all three of which this arm reproduces in Python.
+    """
 
     @pytest.fixture
     def repo(self) -> FakeTitleRepository:
@@ -91,8 +96,11 @@ class TestFakeTitleRepositoryCandidates(TitleRepositoryCandidateContract):
 
     @pytest.fixture
     def user_id(self) -> uuid.UUID:
-        """A bare id: there is no `users` table here, which is a recorded
-        divergence rather than an oversight."""
+        """A bare id.
+
+        there is no `users` table here, which is a recorded divergence rather than an
+        oversight.
+        """
         return new_id()
 
     @pytest.fixture
@@ -101,10 +109,12 @@ class TestFakeTitleRepositoryCandidates(TitleRepositoryCandidateContract):
 
 
 class TestFakeTitleRepositoryBrowse(TitleRepositoryBrowseContract):
-    """`browse`/`browse_facets` against the fake. The Postgres half is
-    `tests/integration/test_title_repository.py`, and it is the one that can
-    fail on the keyset's `IS NOT DISTINCT FROM` arm, on `NULLS LAST`, on `@>`
-    and on `unnest`."""
+    """`browse`/`browse_facets` against the fake.
+
+    The Postgres half is `tests/integration/test_title_repository.py`, and it is the one
+    that can fail on the keyset's `IS NOT DISTINCT FROM` arm, on `NULLS LAST`, on `@>`
+    and on `unnest`.
+    """
 
     @pytest.fixture
     def repo(self) -> FakeTitleRepository:
@@ -126,10 +136,11 @@ class TestFakeTitleRepositoryBrowse(TitleRepositoryBrowseContract):
 
 
 class TestFakeTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
-    """`list_genres_page` and `replace_genres` against the fake. The Postgres
-    half is `tests/integration/test_title_repository.py`, and it is the one
-    that can fail on the `UPDATE ... FROM (VALUES ...)` guard and on
-    `rowcount`."""
+    """`list_genres_page` and `replace_genres` against the fake.
+
+    The Postgres half is `tests/integration/test_title_repository.py`, and it is the one
+    that can fail on the `UPDATE ... FROM (VALUES ...)` guard and on `rowcount`.
+    """
 
     @pytest.fixture
     def repo(self) -> FakeTitleRepository:
@@ -137,11 +148,12 @@ class TestFakeTitleRepositoryGenreSweep(TitleRepositoryGenreSweepContract):
 
 
 class TestFakeTitleRepositoryNaturalKeys(TitleRepositoryNaturalKeyContract):
-    """`resolve_natural_keys` against the fake. The Postgres half is
-    `tests/integration/test_title_repository.py`, and it is the one that can
-    fail on `WITH ORDINALITY`, on the three rungs' `COALESCE` precedence, and on
-    the "one statement per call" promise -- a dict has no round trip to
-    count."""
+    """`resolve_natural_keys` against the fake.
+
+    The Postgres half is `tests/integration/test_title_repository.py`, and it is the one
+    that can fail on `WITH ORDINALITY`, on the three rungs' `COALESCE` precedence, and
+    on the "one statement per call" promise -- a dict has no round trip to count.
+    """
 
     @pytest.fixture
     def repo(self) -> FakeTitleRepository:

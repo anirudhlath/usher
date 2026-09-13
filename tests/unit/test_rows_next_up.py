@@ -24,7 +24,7 @@ async def _mid_season_two(library: Library) -> uuid.UUID:
 
 
 async def test_next_up_returns_the_episode_after_the_last_played_one() -> None:
-    """**The milestone's opening example.**
+    """**The milestone's opening example.**.
 
     S02E04 was the last played, so the card is S02E05. The first-episode
     implementation returns S01E01: unplayed, plausible, correctly hydrated, and
@@ -42,7 +42,9 @@ async def test_next_up_returns_the_episode_after_the_last_played_one() -> None:
 
 
 async def test_the_next_episode_after_a_season_finale_is_the_next_seasons_premiere() -> None:
-    """S01E10 played, season one complete, S02E01 exists. The card is S02E01.
+    """S01E10 played, season one complete, S02E01 exists.
+
+    The card is S02E01.
 
     Here rather than in Task 15 because a provider that re-derived "next" from
     what the repository returned can get this right for one series and wrong
@@ -77,8 +79,9 @@ async def test_a_fully_watched_series_never_wraps_back_to_its_first_episode() ->
 
 
 async def test_a_series_the_household_has_never_started_offers_no_next_episode() -> None:
-    """*"S01E01 of everything unstarted" is the whole unwatched library wearing
-    a personalised row's title.*
+    """*"S01E01 of everything unstarted" is the whole unwatched library wearing a personalised.
+
+    row's title.*.
 
     A series never started has a *first* episode, not a next one. Seeded with
     twenty untouched series against one real one, so the wrong implementation
@@ -97,7 +100,7 @@ async def test_a_series_the_household_has_never_started_offers_no_next_episode()
 
 
 async def test_an_unowned_next_episode_is_omitted_rather_than_shown_unplayable() -> None:
-    """**The one filter this provider owns rather than the repository.**
+    """**The one filter this provider owns rather than the repository.**.
 
     "Next up" that cannot be played is worse than absent. Seeded so the
     unowned series is the *more recently watched* of two, which is where a
@@ -142,9 +145,9 @@ async def test_next_up_costs_the_same_calls_against_three_series_and_thirty() ->
 
 
 async def test_the_row_is_ordered_by_what_the_household_watched_most_recently() -> None:
-    """A `dict` from a batch read is in whatever order the statement produced,
-    and this row's order is the answer -- the show watched last night belongs
-    first.
+    """A `dict` from a batch read is in whatever order the statement produced.
+
+    and this row's order is the answer -- the show watched last night belongs first.
 
     Seeded so insertion order is the reverse of watch order, because
     `watch_states.id` is a UUIDv7 and a fixture seeded newest-first is
@@ -166,8 +169,11 @@ async def test_the_row_is_ordered_by_what_the_household_watched_most_recently() 
 
 
 async def test_a_household_that_has_watched_nothing_gets_no_row_at_all() -> None:
-    """The popular-titles fallback, refused. A library full of series and no
-    history is a fresh install, and the correct contribution is nothing."""
+    """The popular-titles fallback, refused.
+
+    A library full of series and no history is a fresh install, and the correct
+    contribution is nothing.
+    """
     library = Library()
     for index in range(10):
         series = await library.series(f"Show {index}")
@@ -192,8 +198,10 @@ async def test_an_empty_catalog_gets_no_row_rather_than_raising() -> None:
 
 
 async def test_the_card_names_the_series_and_carries_the_episode_it_can_play() -> None:
-    """`title_id` is the **series** -- every other field on the card describes
-    the series -- and the chapter rides alongside.
+    """`title_id` is the **series**.
+
+    every other field on the card describes the series -- and the chapter rides
+    alongside.
 
     `episode_id` is what makes the card playable: without it a Next Up card can
     only navigate to the series page, which is one more click than this row

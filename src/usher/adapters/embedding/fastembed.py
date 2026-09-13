@@ -123,16 +123,23 @@ class FastEmbedEmbedder(Embedder):
         return vectors
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
-        """The blocking half. `fastembed` yields numpy arrays; the port
-        promises `list[float]`, and a caller comparing two vectors with `==`
-        must not be handed something whose `==` returns an array."""
+        """The blocking half.
+
+        `fastembed` yields numpy arrays; the port promises `list[float]`, and a caller
+        comparing two vectors with `==` must not be handed something whose `==` returns
+        an array.
+        """
         return [[float(value) for value in vector] for vector in self._model.embed(texts)]
 
     async def aclose(self) -> None:
-        """Nothing to release: `fastembed`'s ONNX session has no close, and
-        the model is freed with this object. Present because the port
-        declares it and because a future GPU-resident implementation will
-        have something to do here."""
+        """Nothing to release.
+
+        `fastembed`'s ONNX session has no close, and the model is freed with this
+        object.
+
+        Present because the port declares it and because a future GPU-resident
+        implementation will have something to do here.
+        """
         return None
 
 

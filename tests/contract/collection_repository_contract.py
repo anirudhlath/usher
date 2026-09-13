@@ -13,8 +13,11 @@ def collection(tmdb_id: int | None, name: str, **changes: object) -> Collection:
 
 
 class CollectionSeeder(ABC):
-    """Titles and ownership -- the two things `CollectionRepository` cannot
-    write and every `list_owned` case needs."""
+    """Titles and ownership.
+
+    the two things `CollectionRepository` cannot write and every `list_owned` case
+    needs.
+    """
 
     @abstractmethod
     async def movie(self) -> uuid.UUID:
@@ -22,9 +25,12 @@ class CollectionSeeder(ABC):
 
     @abstractmethod
     async def series(self) -> uuid.UUID:
-        """A series, returning its title id. Only one case needs one, and it
-        is the case that matters: `belongs_to_collection` is movies-only, so a
-        series carrying a collection id is a defect."""
+        """A series, returning its title id.
+
+        Only one case needs one, and it is the case that matters:
+        `belongs_to_collection` is movies-only, so a series carrying a collection id is
+        a defect.
+        """
 
     @abstractmethod
     async def own(
@@ -39,16 +45,17 @@ class CollectionSeeder(ABC):
 
     @abstractmethod
     async def collection_of(self, title_id: uuid.UUID) -> uuid.UUID | None:
-        """Read `titles.collection_id` back. A test affordance, not a port
-        method: `OwnedCollection` answers `FranchiseProvider` in one statement,
-        and reading a *link* back is not what `get` does -- `get` answers a
-        whole franchise and its ownership, which is a different question from
-        "which collection is this title in"."""
+        """Read `titles.collection_id` back.
+
+        A test affordance, not a port method: `OwnedCollection` answers
+        `FranchiseProvider` in one statement, and reading a *link* back is not what
+        `get` does -- `get` answers a whole franchise and its ownership, which is a
+        different question from "which collection is this title in".
+        """
 
     @abstractmethod
     async def force_collection(self, title_id: uuid.UUID, collection_id: uuid.UUID) -> None:
-        """Link a title to a collection **without** going through
-        `attach_titles`.
+        """Link a title to a collection **without** going through `attach_titles`.
 
         Exists for exactly one case, and it is the one that matters: the
         `kind = 'movie'` filter lives in `attach_titles`, so a case that seeded
@@ -65,11 +72,11 @@ class CollectionRepositoryContract:
     async def test_a_collection_is_updated_rather_than_duplicated_on_a_second_pass(
         self, repository: CollectionRepository
     ) -> None:
-        """The wrong implementation this kills: an upsert keyed on
-        `Collection.id`. The derivation mints a fresh UUIDv7 per sighting, so
-        that grows a duplicate franchise per pass -- and a batch names one
-        collection **once per member film**, so the duplicate arrives inside a
-        single call rather than only across two.
+        """The wrong implementation this kills: an upsert keyed on `Collection.id`.
+
+        The derivation mints a fresh UUIDv7 per sighting, so that grows a duplicate
+        franchise per pass -- and a batch names one collection **once per member film**,
+        so the duplicate arrives inside a single call rather than only across two.
         """
         first = await repository.upsert_many([collection(98_000_010, "An Invented Collection")])
         again = await repository.upsert_many([collection(98_000_010, "A Renamed Collection")])
@@ -80,11 +87,14 @@ class CollectionRepositoryContract:
     async def test_a_duplicate_collection_inside_one_batch_is_tolerated(
         self, repository: CollectionRepository
     ) -> None:
-        """Required rather than defensive, and for a sharper reason than
-        `people`'s: a batch names one franchise once per member film, so a
-        two-film collection is already a duplicate before anything unusual has
-        happened. Without `SELECT DISTINCT ON` the real implementation answers
-        `CardinalityViolationError`."""
+        """Required rather than defensive, and for a sharper reason than `people`'s.
+
+        a batch names one franchise once per member film, so a two-film collection is
+        already a duplicate before anything unusual has happened.
+
+        Without `SELECT DISTINCT ON` the real implementation answers
+        `CardinalityViolationError`.
+        """
         result = await repository.upsert_many(
             [collection(98_000_011, "First Name"), collection(98_000_011, "Last Name")]
         )
@@ -93,10 +103,12 @@ class CollectionRepositoryContract:
     async def test_resolve_omits_ids_it_does_not_have(
         self, repository: CollectionRepository
     ) -> None:
-        """Absent means "no such collection", never "not asked". A resolve
-        that mints an id for an unknown `tmdb_id` hands the derivation a
-        `collection_id` no row carries -- accepted silently by a dict, and a
-        foreign-key violation one statement later in Postgres."""
+        """Absent means "no such collection", never "not asked".
+
+        A resolve that mints an id for an unknown `tmdb_id` hands the derivation a
+        `collection_id` no row carries -- accepted silently by a dict, and a foreign-key
+        violation one statement later in Postgres.
+        """
         await repository.upsert_many([collection(98_000_012, "An Invented Collection")])
         resolved = await repository.resolve_tmdb_ids([98_000_012, 98_000_013])
         assert set(resolved) == {98_000_012}
@@ -104,9 +116,9 @@ class CollectionRepositoryContract:
     async def test_attaching_a_collection_to_a_series_is_refused(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """The front matter's fourth named wrong implementation: writes
-        `collection_id` onto a *series* from a movie's
-        `belongs_to_collection`.
+        """The front matter's fourth named wrong implementation.
+
+        writes `collection_id` onto a *series* from a movie's `belongs_to_collection`.
 
         **Both halves are asserted, in one batch, and that is the point.** An
         implementation that refuses the whole batch when it sees a series also
@@ -151,9 +163,11 @@ class CollectionRepositoryContract:
     async def test_attaching_does_not_clear_links_outside_the_batch(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """The wrong implementation this kills: a scoped write that is not
-        scoped -- one that NULLs every title it was not given, which unlinks
-        the whole catalog the first time the derivation runs over one page."""
+        """The wrong implementation this kills: a scoped write that is not scoped.
+
+        one that NULLs every title it was not given, which unlinks the whole catalog the
+        first time the derivation runs over one page.
+        """
         await repository.upsert_many(
             [collection(98_000_016, "First Franchise"), collection(98_000_017, "Second Franchise")]
         )
@@ -169,8 +183,9 @@ class CollectionRepositoryContract:
     async def test_a_collection_with_one_owned_member_is_absent(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """The front matter's per-provider distractor for Franchise: "a
-        collection with exactly one owned member".
+        """The front matter's per-provider distractor for Franchise.
+
+        "a collection with exactly one owned member".
 
         A franchise you own one of is not a franchise row -- it is a single
         film with a subtitle. The wrong implementation this kills is `>= 1` in
@@ -197,8 +212,9 @@ class CollectionRepositoryContract:
     async def test_owned_collections_are_ranked_by_how_much_of_them_is_owned(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """`ORDER BY e.owned_count DESC` -- and deleting it **survived the
-        whole suite** until this case existed.
+        """`ORDER BY e.owned_count DESC`.
+
+        and deleting it **survived the whole suite** until this case existed.
 
         Every other case in this class returns at most one eligible
         collection, so the sort had nothing to order and `ORDER BY c.id` was
@@ -243,9 +259,9 @@ class CollectionRepositoryContract:
     async def test_owned_counts_only_available_title_level_items(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """Two wrong implementations at once, both of which read as working:
-        a join on `media_items.title_id` alone, and one that ignores
-        `available`.
+        """Two wrong implementations at once, both of which read as working.
+
+        a join on `media_items.title_id` alone, and one that ignores `available`.
 
         An unavailable film reads as owned under the second, so "you own 2 of
         4" is wrong in the direction nobody checks -- it overstates. And
@@ -274,9 +290,10 @@ class CollectionRepositoryContract:
     async def test_a_collection_reports_members_it_does_not_own(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """The wrong implementation this kills: `title_ids` filtered to the
-        owned subset, so "you own 2 of 4" reads "2 of 2" -- a completeness
-        signal that always reads complete, which is a signal that says
+        """The wrong implementation this kills.
+
+        `title_ids` filtered to the owned subset, so "you own 2 of 4" reads "2 of 2" --
+        a completeness signal that always reads complete, which is a signal that says
         nothing.
 
         `OwnedCollection` carries the two lists rather than two counts for
@@ -301,9 +318,10 @@ class CollectionRepositoryContract:
     async def test_a_collection_the_household_owns_one_of_is_still_readable_by_id(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """`list_owned` and `get` answer two different questions, and this is
-        the case that makes them different rather than one being the other with
-        a filter.
+        """`list_owned` and `get` answer two different questions.
+
+        and this is the case that makes them different rather than one being the other
+        with a filter.
 
         `min_owned` defaults to 2 because a franchise you own one of is not a
         franchise **row** -- it is a single film with a subtitle, and the home
@@ -363,9 +381,10 @@ class CollectionRepositoryContract:
     async def test_a_scoped_read_counts_only_available_title_level_items(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """`owned` means an **available, title-level** media item here too, and
-        the clause is written into this statement rather than inherited from
-        `list_owned`'s.
+        """`owned` means an **available.
+
+        title-level** media item here too, and the clause is written into this statement
+        rather than inherited from `list_owned`'s.
 
         Two wrong implementations at once, both of which read as working: a
         join on `media_items.title_id` alone, and one that ignores `available`.
@@ -400,8 +419,7 @@ class CollectionRepositoryContract:
     async def test_a_series_that_got_a_collection_id_anyway_is_not_a_member(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:
-        """The front matter's **fourth** wrong implementation, killed at a
-        second call site.
+        """The front matter's **fourth** wrong implementation, killed at a second call site.
 
         `attach_titles` filters `kind = 'movie'` and
         `test_attaching_a_collection_to_a_series_is_refused` proves it -- but
@@ -432,11 +450,14 @@ class CollectionRepositoryContract:
         assert found.owned_title_ids == frozenset({movie_id})
 
     async def test_an_unknown_collection_id_is_none(self, repository: CollectionRepository) -> None:
-        """`None` rather than an empty `OwnedCollection`, because the route
-        above turns the two into different status codes: a 404 for a franchise
-        the catalog does not hold, and a 200 with `owned_count: 0` for one it
-        holds and the household owns none of. An implementation answering an
-        empty shell for both collapses them into one 200 about nothing.
+        """`None` rather than an empty `OwnedCollection`.
+
+        because the route above turns the two into different status codes: a 404 for a
+        franchise the catalog does not hold, and a 200 with `owned_count: 0` for one it
+        holds and the household owns none of.
+
+        An implementation answering an empty shell for both collapses them into one 200
+        about nothing.
         """
         assert await repository.get(new_id()) is None
 

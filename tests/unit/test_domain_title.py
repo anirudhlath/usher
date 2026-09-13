@@ -17,11 +17,14 @@ def test_title_requires_only_kind_and_name() -> None:
 
 
 def test_sort_name_may_differ_from_name() -> None:
-    """sort_name has no normalization contract (see the field's comment in
-    title.py) but it is a distinct field, not a mirror of name — e.g. an
-    article-first display name sorts under a different letter than it
-    displays under. The rest of this file's fixtures set sort_name equal
-    to name for brevity; this test exists so that never reads as a rule."""
+    """Sort_name has no normalization contract (see the field's comment in title.py) but it is a.
+
+    distinct field, not a mirror of name — e.g.
+
+    an article-first display name sorts under a different letter than it displays under.
+    The rest of this file's fixtures set sort_name equal to name for brevity; this test
+    exists so that never reads as a rule.
+    """
     title = Title(kind=TitleKind.MOVIE, name="The Matrix", sort_name="Matrix, The")
     assert title.name == "The Matrix"
     assert title.sort_name == "Matrix, The"
@@ -61,9 +64,11 @@ def test_title_is_immutable() -> None:
 
 
 def test_extra_fields_are_rejected() -> None:
-    """Adapters hand-map dozens of provider fields onto Title by keyword; a
-    typo'd field name must fail loudly at construction instead of being
-    silently discarded — the same standard usher.config.Settings holds."""
+    """Adapters hand-map dozens of provider fields onto Title by keyword.
+
+    a typo'd field name must fail loudly at construction instead of being silently
+    discarded — the same standard usher.config.Settings holds.
+    """
     with pytest.raises(ValidationError):
         Title(
             kind=TitleKind.MOVIE,
@@ -85,9 +90,12 @@ def test_evolve_returns_a_changed_validated_copy() -> None:
 
 
 def test_evolve_rejects_what_model_copy_would_silently_accept() -> None:
-    """model_copy(update=...) is the write path the whole system must
-    avoid: it applies a change with no validation at all. evolve() is the
-    replacement — same shape, but it re-validates."""
+    """Model_copy(update=...) is the write path the whole system must avoid.
+
+    it applies a change with no validation at all.
+
+    evolve() is the replacement — same shape, but it re-validates.
+    """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
 
     unsafe = title.model_copy(update={"tmdb_id": "not-an-int"})
@@ -137,18 +145,25 @@ def test_tuple_fields_are_immutable(field: str) -> None:
 
 
 def test_field_provenance_dict_is_still_mutable_despite_frozen() -> None:
-    """frozen=True blocks rebinding `title.field_provenance = ...`, not
-    mutating a mutable value already inside it. This is exactly why Title,
-    alone among the five domain models, is unhashable — see below."""
+    """Frozen=True blocks rebinding `title.field_provenance = ...`.
+
+    not mutating a mutable value already inside it.
+
+    This is exactly why Title, alone among the five domain models, is unhashable — see
+    below.
+    """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     title.field_provenance["name"] = "tmdb"
     assert title.field_provenance == {"name": "tmdb"}
 
 
 def test_title_is_not_hashable() -> None:
-    """field_provenance is a dict, which poisons the generated __hash__
-    even though the model is frozen. Failure is a loud TypeError, not
-    silent corruption. See DomainModel's docstring."""
+    """Field_provenance is a dict.
+
+    which poisons the generated __hash__ even though the model is frozen.
+
+    Failure is a loud TypeError, not silent corruption. See DomainModel's docstring.
+    """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     with pytest.raises(TypeError):
         hash(title)
@@ -208,8 +223,10 @@ def test_empty_sort_name_is_rejected() -> None:
 
 
 def test_imdb_id_rejects_person_ids() -> None:
-    """ "nm..." identifies a person, not a title — a plausible copy-paste
-    mistake that must not land on Title.imdb_id."""
+    """An `nm...` id identifies a person, not a title.
+
+    A plausible copy-paste mistake that must not land on Title.imdb_id.
+    """
     with pytest.raises(ValidationError):
         Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="nm99000001")
 
@@ -228,8 +245,10 @@ def test_imdb_id_accepts_seven_and_eight_digit_forms() -> None:
 
 
 def test_production_status_includes_pilot_and_rumored() -> None:
-    """TMDb actually returns these; a closed enum missing them would force
-    an adapter to drop the field or raise."""
+    """TMDb actually returns these.
+
+    a closed enum missing them would force an adapter to drop the field or raise.
+    """
     Title(kind=TitleKind.SERIES, name="X", sort_name="X", status=ProductionStatus.PILOT)
     Title(kind=TitleKind.MOVIE, name="X", sort_name="X", status=ProductionStatus.RUMORED)
 
@@ -238,8 +257,10 @@ def test_production_status_includes_pilot_and_rumored() -> None:
 
 
 def test_enrichment_error_is_independent_of_enrichment_state() -> None:
-    """Setting enrichment_error must not move enrichment_state — a failed
-    enrichment attempt on a skeleton Title stays a skeleton Title."""
+    """Setting enrichment_error must not move enrichment_state.
+
+    a failed enrichment attempt on a skeleton Title stays a skeleton Title.
+    """
     title = Title(
         kind=TitleKind.MOVIE,
         name="Dune",
@@ -277,11 +298,13 @@ def test_title_serialization_round_trips() -> None:
 
 
 def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
-    """`ge=0` alone does not refuse `inf` — `float("inf") >= 0` is `True` — and
-    neither does the column: `titles.tmdb_popularity` is `double precision`,
-    where IEEE `Infinity` is legal and satisfies
-    `ck_titles_tmdb_popularity_non_negative`. `DomainModel`'s
-    `allow_inf_nan=False` is the only layer that says no.
+    """`ge=0` alone does not refuse `inf`.
+
+    `float("inf") >= 0` is `True` — and neither does the column:
+    `titles.tmdb_popularity` is `double precision`, where IEEE `Infinity` is legal and
+    satisfies `ck_titles_tmdb_popularity_non_negative`.
+
+    `DomainModel`'s `allow_inf_nan=False` is the only layer that says no.
 
     `1e400` is well-formed JSON and `json.loads` maps it onto `inf`, so this is
     the value a TMDb payload actually delivers rather than a constructed one.
@@ -292,9 +315,13 @@ def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
 
 
 def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
-    """The control for the case above: `allow_inf_nan=False` must refuse the
-    two non-finite values and nothing else. Without this, "refuses infinity"
-    is also satisfied by a field that refuses every float."""
+    """The control for the case above.
+
+    `allow_inf_nan=False` must refuse the two non-finite values and nothing else.
+
+    Without this, "refuses infinity" is also satisfied by a field that refuses every
+    float.
+    """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_popularity=1739.421)
     assert title.tmdb_popularity == 1739.421
     bare = Title(kind=TitleKind.MOVIE, name="D", sort_name="D", tmdb_popularity=0.0)
@@ -303,7 +330,8 @@ def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
 
 @pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
 def test_a_rating_refuses_a_non_finite_value(field: str) -> None:
-    """`DomainModel`'s `allow_inf_nan=False` refuses these, not the `le=10` —
+    """`DomainModel`'s `allow_inf_nan=False` refuses these, not the `le=10`.
+
     the ceiling is pinned by
     `test_a_rating_rejects_values_outside_the_zero_to_ten_scale` instead.
     """

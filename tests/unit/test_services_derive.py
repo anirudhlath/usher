@@ -83,8 +83,7 @@ def harness() -> _Harness:
 async def test_a_series_payload_does_not_attach_its_cast_to_a_movie_with_the_same_tmdb_id(
     harness: _Harness,
 ) -> None:
-    """**This task's central case, and the only one that fails against the
-    defect it names.**
+    """**This task's central case, and the only one that fails against the defect it names.**.
 
     `raw_payloads` has no `title_id` and no foreign key to `titles`, so the
     join back is `(provider, kind, reference)` -- and the payload's own `id`
@@ -130,9 +129,9 @@ async def test_a_series_payload_does_not_attach_its_cast_to_a_movie_with_the_sam
 
 
 async def test_a_series_never_receives_a_collection_id(harness: _Harness) -> None:
-    """`belongs_to_collection` is a field of `/movie/{id}` with no `/tv/{id}`
-    counterpart, so a series row carrying one is a defect wherever it came
-    from.
+    """`belongs_to_collection` is a field of `/movie/{id}` with no `/tv/{id}` counterpart.
+
+    so a series row carrying one is a defect wherever it came from.
 
     **The movie is seeded in the same page on purpose**: a series derived
     alone passes trivially, because there is no collection anywhere to attach.
@@ -161,9 +160,10 @@ async def test_a_series_never_receives_a_collection_id(harness: _Harness) -> Non
 
 
 async def test_deriving_twice_leaves_one_row_per_credit(harness: _Harness) -> None:
-    """PRD 08's redelivery rule, and `JobWorker.recover()` requeues a claim
-    its worker stopped heartbeating, so this is ordinary rather than
-    hypothetical.
+    """PRD 08's redelivery rule.
+
+    and `JobWorker.recover()` requeues a claim its worker stopped heartbeating, so this
+    is ordinary rather than hypothetical.
 
     Idempotence comes from two mechanisms and this case sees both: people
     dedupe on `tmdb_id` (never on `Person.id`, which the derivation mints
@@ -191,8 +191,7 @@ async def test_deriving_twice_leaves_one_row_per_credit(harness: _Harness) -> No
 async def test_a_credit_dropped_from_a_refreshed_payload_is_dropped_from_the_table(
     harness: _Harness,
 ) -> None:
-    """The case that kills the `ON CONFLICT DO NOTHING` implementation, and
-    nothing else does.
+    """The case that kills the `ON CONFLICT DO NOTHING` implementation, and nothing else does.
 
     An upsert is idempotent and it never deletes, so a miscredited actor
     corrected upstream survives in `credits` forever -- and therefore in
@@ -242,8 +241,9 @@ async def test_a_credit_dropped_from_a_refreshed_payload_is_dropped_from_the_tab
 async def test_a_title_whose_credits_all_disappeared_is_cleared_not_skipped(
     harness: _Harness,
 ) -> None:
-    """The row shape a re-derivation cannot repair, and the reason the delete
-    scope is `title_ids` rather than the rows being written.
+    """The row shape a re-derivation cannot repair.
+
+    and the reason the delete scope is `title_ids` rather than the rows being written.
 
     A title that contributes *no* rows is invisible to a scope derived from
     the batch, so its stale credits and its stale `credit_names` survive every
@@ -313,8 +313,11 @@ async def test_credit_names_holds_the_top_ten_billed_and_not_the_whole_cast(
 
 
 async def test_credit_names_puts_crew_after_the_billed_cast(harness: _Harness) -> None:
-    """Order is the ranking. Cast first, in billing order, then crew -- a
-    director ahead of the lead actor is a class-B ordering nobody chose."""
+    """Order is the ranking.
+
+    Cast first, in billing order, then crew -- a director ahead of the lead actor is a
+    class-B ordering nobody chose.
+    """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000610)
     await harness.given_payload(
         TitleKind.MOVIE,
@@ -349,9 +352,10 @@ async def test_credit_names_puts_crew_after_the_billed_cast(harness: _Harness) -
 async def test_a_payload_naming_no_title_in_the_catalog_is_skipped_rather_than_raising(
     harness: _Harness,
 ) -> None:
-    """`raw_payloads` outlives `titles` -- there is no foreign key between
-    them -- so a payload for a title deleted since the fetch is ordinary, not
-    poison.
+    """`raw_payloads` outlives `titles`.
+
+    there is no foreign key between them -- so a payload for a title deleted since the
+    fetch is ordinary, not poison.
 
     Same call `IndexService` makes: *a job for work that has since become
     impossible completes rather than parks*. An implementation that raised
@@ -462,8 +466,10 @@ async def test_deriving_writes_images_and_makes_no_provider_fetch(harness: _Harn
 async def test_re_deriving_keeps_every_image_id_so_a_cached_reference_stays_valid(
     harness: _Harness,
 ) -> None:
-    """**The property `Cache-Control: immutable` rests on**, asserted through
-    the whole walk rather than at the repository.
+    """**The property `Cache-Control.
+
+    immutable` rests on**, asserted through the whole walk rather than at the
+    repository.
 
     The mapper mints a fresh UUIDv7 per sighting -- it has to, since an image
     has no provider integer id to re-point through the way `Person` and
@@ -514,11 +520,11 @@ async def test_re_deriving_keeps_every_image_id_so_a_cached_reference_stays_vali
 async def test_a_title_whose_artwork_all_disappeared_has_its_images_cleared(
     harness: _Harness,
 ) -> None:
-    """The delete's scope is the page's titles, never the rows being written
-    -- `test_a_title_whose_credits_all_disappeared_is_cleared_not_skipped`'s
-    argument arriving at a third table, and it needs its own case because the
-    two writes take two scopes that a wrong implementation can spell
-    differently.
+    """The delete's scope is the page's titles, never the rows being written.
+
+    `test_a_title_whose_credits_all_disappeared_is_cleared_not_skipped`'s argument
+    arriving at a third table, and it needs its own case because the two writes take two
+    scopes that a wrong implementation can spell differently.
 
     A title contributing no image rows is invisible to a scope derived from
     the batch, so its stale artwork survives every future derivation -- and a
@@ -547,9 +553,13 @@ async def test_a_title_whose_artwork_all_disappeared_has_its_images_cleared(
 async def test_deriving_an_empty_cache_writes_nothing_and_reports_zero(
     harness: _Harness,
 ) -> None:
-    """PRD 08's rule at the service rather than at the CLI: *every one of them
-    has to work against an empty database*. The report is all zeroes and
-    nothing raises -- and no page is committed, because there was no page."""
+    """PRD 08's rule at the service rather than at the CLI.
+
+    *every one of them has to work against an empty database*.
+
+    The report is all zeroes and nothing raises -- and no page is committed, because
+    there was no page.
+    """
     report = await harness.service.derive_all()
 
     assert report.payloads_read == 0
@@ -581,9 +591,11 @@ async def test_a_page_is_one_transaction_and_a_walk_is_several(harness: _Harness
 
 
 async def test_a_limit_stops_the_walk_without_draining_the_cache(harness: _Harness) -> None:
-    """`usher derive --backfill --limit N` is an operator bounding a run on a
-    box they care about, and a limit that only bounded the *report* would be a
-    flag that reads like a bound and is not."""
+    """`usher derive --backfill --limit N` is an operator bounding a run on a box they care about.
+
+    and a limit that only bounded the *report* would be a flag that reads like a bound
+    and is not.
+    """
     for index in range(6):
         await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000660 + index)
         await harness.given_payload(
@@ -641,10 +653,13 @@ async def test_deriving_one_title_reads_one_key_and_not_the_whole_cache(
 async def test_deriving_a_title_with_no_cached_payload_completes_rather_than_raising(
     harness: _Harness,
 ) -> None:
-    """A title enriched before `credits` joined `*_APPEND_TO_RESPONSE`, or one
-    whose cache entry was never written. Nothing to derive is not a failure --
-    parking it would need a human to release work whose only problem is that
-    there is none."""
+    """A title enriched before `credits` joined `*_APPEND_TO_RESPONSE`.
+
+    or one whose cache entry was never written.
+
+    Nothing to derive is not a failure -- parking it would need a human to release work
+    whose only problem is that there is none.
+    """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000680)
     await harness.service.derive(title_id)
     assert await harness.credits.list_for_title(title_id) == []
@@ -653,16 +668,21 @@ async def test_deriving_a_title_with_no_cached_payload_completes_rather_than_rai
 async def test_deriving_a_title_the_catalog_no_longer_holds_completes(
     harness: _Harness,
 ) -> None:
-    """`handlers.py`'s standing rule, at the third kind that needs it: a job
-    for work that has since become impossible completes rather than parks."""
+    """`handlers.py`'s standing rule, at the third kind that needs it.
+
+    a job for work that has since become impossible completes rather than parks.
+    """
     await harness.service.derive(uuid.uuid4())
 
 
 async def test_deriving_a_title_with_no_tmdb_id_completes(harness: _Harness) -> None:
-    """A stub minted from an Emby item carrying only an IMDb id has no TMDb
-    reference at all, so there is no cache key to read. 979,401 of the one
-    measured catalog's 1,271,138 titles carry no `tmdb_id`; this is the common
-    case, not the odd one."""
+    """A stub minted from an Emby item carrying only an IMDb id has no TMDb reference at all.
+
+    so there is no cache key to read.
+
+    979,401 of the one measured catalog's 1,271,138 titles carry no `tmdb_id`; this is
+    the common case, not the odd one.
+    """
     title = Title(kind=TitleKind.MOVIE, name="A Stub", sort_name="A Stub")
     await harness.titles.add(title)
     await harness.service.derive(title.id)

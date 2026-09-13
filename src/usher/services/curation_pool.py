@@ -66,8 +66,10 @@ def _reranked(
     centroid: Centroid,
     vectors: Mapping[uuid.UUID, tuple[float, ...]],
 ) -> list[Title]:
-    """A **new** list: `pool` with its comparable members permuted by
-    proximity, each staying inside the set of positions they already held.
+    """A **new** list.
+
+    `pool` with its comparable members permuted by proximity, each staying inside the
+    set of positions they already held.
 
     Nothing is mutated -- `pool` is untouched and the answer is a fresh list --
     and the docstring says so because "in place" is the phrase this function

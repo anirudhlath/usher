@@ -109,8 +109,9 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, from every engine in the
-    process -- including the app's own, which is the one under measurement.
+    """Every SQL statement SQLAlchemy issues, from every engine in the process.
+
+    including the app's own, which is the one under measurement.
 
     Captured off `before_cursor_execute` rather than transcribed: M4
     replaced two tasks that asserted on a hand-copied lookalike of a query,
@@ -213,8 +214,9 @@ async def _jobs(sessions: async_sessionmaker[AsyncSession]) -> Sequence[tuple[st
 async def test_opening_a_stub_commits_the_promotion(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`get_session` is the request's commit boundary, and the promotion is
-    the first write any client-facing route in this project makes.
+    """`get_session` is the request's commit boundary.
+
+    and the promotion is the first write any client-facing route in this project makes.
 
     Read back on a **different connection**, which is the whole assertion: a
     handler that enqueued and never committed passes every unit case (a fake
@@ -234,8 +236,9 @@ async def test_opening_a_stub_commits_the_promotion(
 async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Two real `sources` rows, two real foreign keys, and a retraction that
-    a real `UPDATE` produced.
+    """Two real `sources` rows.
+
+    two real foreign keys, and a retraction that a real `UPDATE` produced.
 
     PRD 08's rule is that a degraded source narrows the answer rather than
     failing it, and what "narrowed" means on the wire is a badge still
@@ -275,9 +278,10 @@ async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
 async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`watch_states` has a `num_nonnulls(title_id, episode_id) = 1` CHECK,
-    so an episode's progress and its series' progress are separate rows that
-    a dict cannot keep apart by constraint -- and `list_for_title`'s
+    """`watch_states` has a `num_nonnulls(title_id.
+
+    episode_id) = 1` CHECK, so an episode's progress and its series' progress are
+    separate rows that a dict cannot keep apart by constraint -- and `list_for_title`'s
     `episode_id IS NULL` is the whole of the bound on the availability half.
 
     Rendered: a series a user has watched one episode of reports
@@ -344,8 +348,10 @@ async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
 async def test_the_images_key_renders_real_rows_and_leaks_no_provider_url(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`images` end to end: rows a real `replace_for_titles` wrote, ordered by
-    a real `ORDER BY`, rendered by the DTO, over a real request.
+    """`images` end to end.
+
+    rows a real `replace_for_titles` wrote, ordered by a real `ORDER BY`, rendered by
+    the DTO, over a real request.
 
     Two things only this level can say. The order is the *statement's* --
     against the fake it is a Python key function, and a deleted `ORDER BY
@@ -402,11 +408,15 @@ async def test_the_images_key_renders_real_rows_and_leaks_no_provider_url(
 async def test_a_title_whose_only_artwork_is_declined_carries_no_images_key(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The filter's residual through a real request: the row is in Postgres,
-    the response has no `images` key at all, and the two are only reconcilable
-    through `usher.images.references`. Asserted here as well as in the unit
-    file because `response_model_exclude_unset` is a route-level flag, so the
-    key's absence is a property of the request rather than of the DTO."""
+    """The filter's residual through a real request.
+
+    the row is in Postgres, the response has no `images` key at all, and the two are
+    only reconcilable through `usher.images.references`.
+
+    Asserted here as well as in the unit file because `response_model_exclude_unset` is
+    a route-level flag, so the key's absence is a property of the request rather than of
+    the DTO.
+    """
     title = await _given_title(sessions, "A Film With Only A Logo", state=EnrichmentState.ENRICHED)
     async with sessions() as session:
         await PostgresImageRepository(session).replace_for_titles(
@@ -436,7 +446,7 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
     sessions: async_sessionmaker[AsyncSession],
     statement_counter: list[str],
 ) -> None:
-    """**The shape that would catch a quadratic, on the read path.**
+    """**The shape that would catch a quadratic, on the read path.**.
 
     `TitleReadService.detail` is seven reads and a promotion, and none of
     them may be per copy, per source, per credit, per person or per image: a
@@ -496,9 +506,10 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
 async def test_the_route_answers_with_the_source_down(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 08's governing rule at the boundary, against real infrastructure:
-    the source row and its credential are intact, the host does not exist,
-    and the read is unaffected -- because nothing on this path calls it.
+    """PRD 08's governing rule at the boundary, against real infrastructure.
+
+    the source row and its credential are intact, the host does not exist, and the read
+    is unaffected -- because nothing on this path calls it.
 
     `https://emby.invalid` is a reserved TLD that cannot resolve, so an
     implementation that *did* reach for the adapter fails loudly here rather
@@ -543,8 +554,9 @@ async def _given_default_household(sessions: async_sessionmaker[AsyncSession]) -
 async def _given_search(
     sessions: async_sessionmaker[AsyncSession], *, user_id: uuid.UUID
 ) -> uuid.UUID:
-    """One committed `search_queries` row, written through the shipped
-    repository rather than by hand.
+    """One committed `search_queries` row.
+
+    written through the shipped repository rather than by hand.
 
     Through `PostgresSearchQueryRepository.record` because the two outcome
     columns start as **literals it writes** (`NULL`, `false`) rather than as
@@ -570,8 +582,10 @@ async def _given_search(
 async def _outcome(
     sessions: async_sessionmaker[AsyncSession], query_id: uuid.UUID
 ) -> tuple[uuid.UUID | None, bool]:
-    """`(clicked_title_id, played)` as the table holds it, on a connection of
-    its own -- the route's write is only real if a second session can see it."""
+    """`(clicked_title_id, played)` as the table holds it, on a connection of its own.
+
+    the route's write is only real if a second session can see it.
+    """
     async with sessions() as session:
         row = (
             await session.execute(
@@ -587,9 +601,11 @@ async def _outcome(
 
 
 async def _given_household(sessions: async_sessionmaker[AsyncSession], name: str) -> uuid.UUID:
-    """A second, real `users` row -- `search_queries.user_id` has a foreign
-    key, so the household the scope refuses has to be one this schema
-    accepts."""
+    """A second, real `users` row.
+
+    `search_queries.user_id` has a foreign key, so the household the scope refuses has
+    to be one this schema accepts.
+    """
     user_id = new_id()
     async with sessions() as session:
         await session.execute(
@@ -603,8 +619,10 @@ async def _given_household(sessions: async_sessionmaker[AsyncSession], name: str
 async def test_opening_a_result_records_the_click_durably_against_the_real_row(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """**The click, through a real request against a real `search_queries`
-    row, read back on a different connection.**
+    """**The click.
+
+    through a real request against a real `search_queries` row, read back on a different
+    connection.**.
 
     That last clause is the whole reason this case exists beside the unit
     one: `get_session` is the request's commit boundary, and a handler that
@@ -659,9 +677,11 @@ async def test_another_households_row_survives_a_real_request_and_the_owners_lan
 async def test_an_unknown_search_id_is_served_normally_against_a_real_schema(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A stale id -- an operator's retention `DELETE` is PRD 10's pruning
-    story -- reaches a real `UPDATE` that matches nothing, and the response
-    is byte-identical to the one without the parameter.
+    """A stale id.
+
+    an operator's retention `DELETE` is PRD 10's pruning story -- reaches a real
+    `UPDATE` that matches nothing, and the response is byte-identical to the one without
+    the parameter.
 
     Only this level can say the no-op is the statement's rather than a guard
     in front of it, and that the transaction the route committed was still a
@@ -679,13 +699,15 @@ async def test_an_unknown_search_id_is_served_normally_against_a_real_schema(
 
 
 async def test_an_unknown_id_is_a_404_against_a_real_schema(client: AsyncClient) -> None:
-    """PRD 07's RFC 9457 envelope, from a read that really went to Postgres
-    and really found nothing -- `usher.ports.errors` draws the line this
-    rests on: absence is not `PortUnavailable`.
+    """PRD 07's RFC 9457 envelope.
+
+    from a read that really went to Postgres and really found nothing --
+    `usher.ports.errors` draws the line this rests on: absence is not `PortUnavailable`.
 
     It read `== {"detail": "title not found"}` until M9. Changing a 4xx body
     is a client-visible break, so the cases that pinned the old shape move in
-    the commit that changes it rather than quietly afterwards."""
+    the commit that changes it rather than quietly afterwards.
+    """
     title_id = new_id()
     response = await client.get(f"/titles/{title_id}")
     assert response.status_code == 404

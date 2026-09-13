@@ -1,4 +1,7 @@
-"""`OpenAICompatibleClient` over `httpx.MockTransport`. No network."""
+"""`OpenAICompatibleClient` over `httpx.MockTransport`.
+
+No network.
+"""
 
 import inspect
 import json
@@ -169,8 +172,11 @@ async def test_the_credential_is_a_header_and_never_reaches_the_url() -> None:
 
 
 async def test_no_credential_configured_sends_no_authorization_header() -> None:
-    """A local vLLM or Ollama needs none, and sending `Bearer None` is how a
-    client fails against the deployment this project is actually for."""
+    """A local vLLM or Ollama needs none.
+
+    and sending `Bearer None` is how a client fails against the deployment this project
+    is actually for.
+    """
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -182,9 +188,11 @@ async def test_no_credential_configured_sends_no_authorization_header() -> None:
 
 
 async def test_the_purpose_is_telemetry_and_does_not_reach_the_provider() -> None:
-    """`LLMPurpose` is `llm_calls.purpose`, a column in this project's own
-    ledger. A client that put it in the request body would be inventing a
-    field for somebody else's API."""
+    """`LLMPurpose` is `llm_calls.purpose`, a column in this project's own ledger.
+
+    A client that put it in the request body would be inventing a field for somebody
+    else's API.
+    """
     seen: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -229,15 +237,19 @@ async def test_a_fenced_body_parses(wrapped: str) -> None:
 
 async def test_content_that_is_not_json_is_malformed_not_unavailable() -> None:
     """A model that answered in prose is a permanent property of that prompt.
-    Retrying five times reaches the same sentence."""
+
+    Retrying five times reaches the same sentence.
+    """
     with pytest.raises(PortDataMalformed):
         await _complete(_client(body=_completion("I'm afraid I can't do that.")))
 
 
 async def test_a_json_array_is_refused_because_the_port_promises_an_object() -> None:
-    """`complete_json` is annotated `-> tuple[dict[str, Any], LLMUsage]`, and
-    a list that reached a caller would fail on `body["rows"]` several frames
-    away from the thing that was wrong."""
+    """`complete_json` is annotated `-> tuple[dict[str.
+
+    Any], LLMUsage]`, and a list that reached a caller would fail on `body["rows"]`
+    several frames away from the thing that was wrong.
+    """
     with pytest.raises(PortDataMalformed):
         await _complete(_client(body=_completion('[{"ok": true}]')))
 
@@ -248,22 +260,24 @@ async def test_a_response_with_no_choices_is_malformed() -> None:
 
 
 async def test_a_null_content_is_malformed() -> None:
-    """Some providers return `content: null` alongside a tool call. Nothing
-    here asks for tools, so a null is an answer this client cannot use --
-    and `json.loads(None)` raises `TypeError`, which is not a
-    `UsherPortError` and would take the worker down instead of parking one
-    job."""
+    """Some providers return `content: null` alongside a tool call.
+
+    Nothing here asks for tools, so a null is an answer this client cannot use -- and
+    `json.loads(None)` raises `TypeError`, which is not a `UsherPortError` and would
+    take the worker down instead of parking one job.
+    """
     with pytest.raises(PortDataMalformed):
         await _complete(_client(body=_completion(None)))  # type: ignore[arg-type]
 
 
 async def test_deeply_nested_content_is_malformed_not_a_recursion_error() -> None:
-    """Same family as the `content: null` case above, and missed for the same
-    reason it was caught: `json.loads` raises `RecursionError` past a nesting
-    depth of 9,999, and `RecursionError` subclasses `RuntimeError`, **not**
-    `ValueError` -- so `_parse`'s `except ValueError` does not see it, it is
-    not a `UsherPortError`, and it escapes `CurationService`'s
-    `except UsherPortError` to take the worker down instead of parking one job.
+    """Same family as the `content.
+
+    null` case above, and missed for the same reason it was caught: `json.loads` raises
+    `RecursionError` past a nesting depth of 9,999, and `RecursionError` subclasses
+    `RuntimeError`, **not** `ValueError` -- so `_parse`'s `except ValueError` does not
+    see it, it is not a `UsherPortError`, and it escapes `CurationService`'s `except
+    UsherPortError` to take the worker down instead of parking one job.
 
     The depth is measured, not guessed: 9,998 parses and 9,999 raises on
     CPython 3.13 at the default recursion limit. `_DEEP` clears it with room
@@ -330,11 +344,13 @@ async def test_a_truncated_completion_is_refused_and_names_the_cap() -> None:
 
 
 async def test_usage_is_read_from_the_response() -> None:
-    """`latency_ms` is deliberately **not** asserted here: it is the one field
-    of `LLMUsage` that is measured rather than read, so it belongs with the
-    clock below. The `>= 0` bound this case used to carry could not fail --
-    `max(0, ...)` clamps it -- and was the only assertion about latency
-    anywhere in the repository.
+    """`latency_ms` is deliberately **not** asserted here.
+
+    it is the one field of `LLMUsage` that is measured rather than read, so it belongs
+    with the clock below.
+
+    The `>= 0` bound this case used to carry could not fail -- `max(0, ...)` clamps it
+    -- and was the only assertion about latency anywhere in the repository.
     """
     _body, usage = await _complete(_client())
     assert usage.tokens_in == 1200
@@ -343,8 +359,7 @@ async def test_usage_is_read_from_the_response() -> None:
 
 
 async def test_cost_is_computed_from_the_configured_prices_in_decimal() -> None:
-    """Kills float arithmetic and kills reading a cost field that does not
-    exist.
+    """Kills float arithmetic and kills reading a cost field that does not exist.
 
     Measured against a live endpoint: `usage` carries `prompt_tokens`,
     `completion_tokens` and `total_tokens` and **no cost field at all**, so
@@ -368,11 +383,15 @@ async def test_the_default_prices_are_zero_which_is_honest_for_a_local_model() -
 
 
 async def test_a_response_with_no_usage_reports_zeros_rather_than_failing() -> None:
-    """A provider that omits `usage` has still answered, and failing the whole
-    generation over a bookkeeping gap would trade good rows for an accurate
-    ledger. The zeros are visible as zeros -- a real completion with a real
-    latency and no tokens is obviously wrong on the dashboard -- and this is
-    recorded in the module docstring rather than hidden."""
+    """A provider that omits `usage` has still answered.
+
+    and failing the whole generation over a bookkeeping gap would trade good rows for an
+    accurate ledger.
+
+    The zeros are visible as zeros -- a real completion with a real latency and no
+    tokens is obviously wrong on the dashboard -- and this is recorded in the module
+    docstring rather than hidden.
+    """
     _body, usage = await _complete(_client(body=_completion(json.dumps({"ok": True}), usage=None)))
     assert usage.tokens_in == 0
     assert usage.tokens_out == 0
@@ -380,9 +399,12 @@ async def test_a_response_with_no_usage_reports_zeros_rather_than_failing() -> N
 
 
 async def test_the_reported_model_falls_back_to_the_configured_one() -> None:
-    """`usage.model` is what PRD 10 groups spend by, so an empty string
-    collapses every model into one bar. A provider that echoes no `model` is
-    still serving the one that was asked for."""
+    """`usage.model` is what PRD 10 groups spend by.
+
+    so an empty string collapses every model into one bar.
+
+    A provider that echoes no `model` is still serving the one that was asked for.
+    """
     body = _completion(json.dumps({"ok": True}))
     del body["model"]
     _b, usage = await _complete(_client(body=body))
@@ -394,7 +416,7 @@ async def test_the_reported_model_falls_back_to_the_configured_one() -> None:
 
 
 async def test_the_latency_is_the_whole_send_and_not_what_was_left_after_it() -> None:
-    """**The success path's latency, pinned to the millisecond.**"""
+    """**The success path's latency, pinned to the millisecond.**."""
     clock = _Clock()
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -461,9 +483,11 @@ async def test_a_permanent_4xx_is_malformed_not_unavailable(status: int) -> None
 
 
 async def test_a_408_stays_retryable() -> None:
-    """The one 4xx that really does mean "send this again". A household may
-    put a proxy in front of a hosted provider, and a proxy that gives up
-    waiting is exactly what the queue's backoff is for."""
+    """The one 4xx that really does mean "send this again".
+
+    A household may put a proxy in front of a hosted provider, and a proxy that gives up
+    waiting is exactly what the queue's backoff is for.
+    """
     with pytest.raises(PortUnavailable):
         await _complete(_client(status=408, body={}))
 
@@ -483,11 +507,13 @@ async def test_a_transport_failure_is_unavailable() -> None:
 
 
 async def test_no_failure_message_carries_the_credential_or_the_url() -> None:
-    """PRD 08: credentials are never logged, including in error paths -- and
-    an httpx transport exception's own text frequently includes the request
-    URL. `EmbySession` interpolates one and explains why that is safe there;
-    it is not safe here, because a household may be pointed at a provider
-    whose URL carries a token in a path segment.
+    """PRD 08: credentials are never logged, including in error paths.
+
+    and an httpx transport exception's own text frequently includes the request URL.
+
+    `EmbySession` interpolates one and explains why that is safe there; it is not safe
+    here, because a household may be pointed at a provider whose URL carries a token in
+    a path segment.
     """
     secret = _KEY.get_secret_value()
 
@@ -507,8 +533,10 @@ async def test_no_failure_message_carries_the_credential_or_the_url() -> None:
 
 
 async def test_a_rejected_request_does_not_echo_the_prompt() -> None:
-    """PRD 08: a rejected request never echoes the body it rejected -- and
-    here that body is the household's watch history."""
+    """PRD 08: a rejected request never echoes the body it rejected.
+
+    and here that body is the household's watch history.
+    """
     client = _client(status=400, body={"error": {"message": "bad request"}})
     with pytest.raises(PortDataMalformed) as raised:
         await client.complete_json(

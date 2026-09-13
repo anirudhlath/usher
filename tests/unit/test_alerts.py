@@ -1,5 +1,6 @@
-"""An alert can be green, valid, loaded, and unable to fire, and this module is the
-checks that close the ways it gets there.
+"""An alert can be green.
+
+valid, loaded, and unable to fire, and this module is the checks that close the ways it
 """
 
 import ast
@@ -532,8 +533,12 @@ def test_the_stored_spelling_derivation_matches_this_hosts_prometheus() -> None:
 
 
 def test_the_ingest_stalled_rule_reaches_a_lane_that_has_never_settled_a_job() -> None:
-    """🔴 The headline: the rule must fire on a *zero* completions count and on an *absent*
-    one, and `and ... == 0` only does the first.
+    """🔴 The headline.
+
+    the rule must fire on a *zero* completions count and on an *absent* one, and `and
+    ...
+
+    == 0` only does the first.
     """
     expr = str(_rule("Ingest stalled")["expr"])
     assert "usher_jobs_queued_ratio" in expr and "usher_jobs_duration_seconds_count" in expr, (
@@ -823,8 +828,9 @@ def disk_growth_sql() -> str:
 
 
 def test_the_postgres_rule_is_not_in_the_directory_prometheus_globs() -> None:
-    """🔴 A Grafana provisioning file beside `usher.yml` disarms the other five rules, and
-    the directory layout is the whole of the defence.
+    """🔴 A Grafana provisioning file beside `usher.yml` disarms the other five rules.
+
+    and the directory layout is the whole of the defence.
     """
     prometheus_directory = _ALERTS.parent
     globbed = sorted(path.name for path in prometheus_directory.glob("*.yml"))
@@ -885,8 +891,9 @@ def test_the_postgres_rule_names_only_tables_and_columns_this_schema_holds() -> 
 
 
 def test_the_cost_anomaly_statement_carries_its_floor_its_window_and_stays_in_numeric() -> None:
-    """🔴 The four decisions the task text calls "properties of that query", each spelled so
-    that deleting it is red here.
+    """🔴 The four decisions the task text calls "properties of that query".
+
+    each spelled so that deleting it is red here.
     """
     sql = cost_anomaly_sql()
 
@@ -922,8 +929,9 @@ def test_the_cost_anomaly_statement_carries_its_floor_its_window_and_stays_in_nu
 
 
 def test_the_cost_anomaly_rule_hands_grafana_exactly_one_numeric_column() -> None:
-    """🔴 The Postgres-side twin of "a metric nobody stores reads healthy
-    forever", and it fails in the opposite, louder direction.
+    """🔴 The Postgres-side twin of "a metric nobody stores reads healthy forever".
+
+    and it fails in the opposite, louder direction.
 
     Grafana's SQL-to-alerting conversion turns every **numeric** column of a
     table frame into a series the condition is evaluated over and every
@@ -977,8 +985,9 @@ def test_the_cost_anomaly_rule_hands_grafana_exactly_one_numeric_column() -> Non
 
 
 def test_the_cost_anomaly_summary_survives_an_undefined_ratio() -> None:
-    """🔴 The one label on this rule that is sometimes a **sentence**, and the
-    page has to stay a sentence when it is.
+    """🔴 The one label on this rule that is sometimes a **sentence**.
+
+    and the page has to stay a sentence when it is.
 
     `spend_ratio` is `round(today / nullif(median, 0), 4)` with a
     `coalesce(..., 'undefined (zero trailing median)')` behind it, because a
@@ -1017,8 +1026,9 @@ def test_the_cost_anomaly_summary_survives_an_undefined_ratio() -> None:
 def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and_its_panel() -> (
     None
 ):
-    """A page has to land somewhere, and this one has two things to explain that the
-    Prometheus three do not.
+    """A page has to land somewhere.
+
+    and this one has two things to explain that the Prometheus three do not.
     """
     rule = _grafana_rule("Cost anomaly")
     description = " ".join(str(rule["annotations"]["description"]).split())
@@ -1156,8 +1166,10 @@ def test_the_disk_growth_rule_hands_grafana_exactly_one_numeric_column() -> None
 
 
 def test_no_grafana_rule_carries_a_zero_width_relative_time_range() -> None:
-    """D14 measured that Grafana rejects `from: 0, to: 0`, and that a rejected
-    file provisions **no** rules at all rather than one bad one.
+    """D14 measured that Grafana rejects `from.
+
+    0, to: 0`, and that a rejected file provisions **no** rules at all rather than one
+    bad one.
 
     So the failure is not "this rule is missing" -- it is *every* rule in the
     file, including the one that was there first. That makes it worth a check
@@ -1368,8 +1380,9 @@ def test_the_prd_alert_table_parse_is_falsifiable() -> None:
 
 
 def test_the_declaration_walk_does_not_read_the_prose_that_answers_it() -> None:
-    """`telemetry.py` argues about `create_observable_gauge` in a comment and in
-    a docstring, and a text scan reads both as declarations.
+    """`telemetry.py` argues about `create_observable_gauge` in a comment and in a docstring.
+
+    and a text scan reads both as declarations.
 
     Measured 2026-09-11: `source.find("create_observable_gauge(")` over
     `src/usher/` reports two more gauges than exist, and one of the two supplies

@@ -55,8 +55,9 @@ def _bars(tmp_path: Path, body: str) -> BarSet:
 
 
 def test_the_shipped_bar_file_loads() -> None:
-    """The file `usher eval` will actually read, read through the loader that
-    will actually read it.
+    """The file `usher eval` will actually read.
+
+    read through the loader that will actually read it.
 
     A bars file is data, so every other case in this module builds its own --
     and a module of cases over synthetic files passes just as happily against
@@ -100,8 +101,9 @@ def test_the_registered_numbers_are_the_ones_that_were_registered() -> None:
 
 
 def test_the_three_pending_suggest_bars_are_three_bars_and_not_one_found_three_times() -> None:
-    """The shipped file holds three bars that agree on surface, tier and
-    metric and differ only in `stratum`, which is what makes it the file that
+    """The shipped file holds three bars that agree on surface.
+
+    tier and metric and differ only in `stratum`, which is what makes it the file that
     can tell a four-key lookup from a three-key one.
 
     A `find` that ignored `stratum` would answer the `all` bar for every one
@@ -124,8 +126,11 @@ def test_the_three_pending_suggest_bars_are_three_bars_and_not_one_found_three_t
 
 
 def test_the_hash_changes_when_the_file_changes(tmp_path: Path) -> None:
-    """The hash is the whole mechanism. If it did not move with the content,
-    a bar edited after seeing a number would be invisible."""
+    """The hash is the whole mechanism.
+
+    If it did not move with the content, a bar edited after seeing a number would be
+    invisible.
+    """
     one = tmp_path / "one.toml"
     one.write_text(_bar(kind="floor", low=0.5))
     first = load_bars(one).sha256
@@ -136,8 +141,7 @@ def test_the_hash_changes_when_the_file_changes(tmp_path: Path) -> None:
 def test_the_hash_is_over_the_bytes_so_a_comment_edited_after_the_fact_moves_it(
     tmp_path: Path,
 ) -> None:
-    """A digest over the *parsed* document passes the case above and is still
-    the wrong digest.
+    """A digest over the *parsed* document passes the case above and is still the wrong digest.
 
     The claim the hash makes is "these are the bars that run faced, and this
     is the argument that was written beside them". A comment is where that
@@ -171,9 +175,11 @@ def test_the_hash_is_over_the_bytes_so_a_comment_edited_after_the_fact_moves_it(
 
 
 def test_a_window_fails_in_both_directions(tmp_path: Path) -> None:
-    """A window exists because *movement either way* means the thing measured
-    is not the thing that was measured before, so a window checked on one side
-    is a floor wearing a window's name."""
+    """A window exists because *movement either way* means the thing measured is not the thing.
+
+    that was measured before, so a window checked on one side is a floor wearing a
+    window's name.
+    """
     bars = _bars(tmp_path, _bar(kind="window", low=0.016, high=0.022))
     assert (
         bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.019) is Judgement.PASS
@@ -187,8 +193,7 @@ def test_a_window_fails_in_both_directions(tmp_path: Path) -> None:
 
 
 def test_a_window_admits_the_two_bounds_it_names(tmp_path: Path) -> None:
-    """`[low, high]` is closed at both ends, and only a value *at* a bound can
-    say so.
+    """`[low, high]` is closed at both ends, and only a value *at* a bound can say so.
 
     Every other case in this module sits comfortably inside or outside, so
     `<` for `<=` on either end -- the likeliest single-character defect in the
@@ -207,18 +212,23 @@ def test_a_window_admits_the_two_bounds_it_names(tmp_path: Path) -> None:
 
 
 def test_a_floor_fails_only_below(tmp_path: Path) -> None:
-    """The comparison inverted -- a floor that refuses everything above it --
-    is the other single-character defect, and this is what sees it."""
+    """The comparison inverted.
+
+    a floor that refuses everything above it -- is the other single-character defect,
+    and this is what sees it.
+    """
     bars = _bars(tmp_path, _bar(kind="floor", low=0.5))
     assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.9) is Judgement.PASS
     assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.4) is Judgement.FAIL
 
 
 def test_a_floor_with_a_ceiling_fails_above_it(tmp_path: Path) -> None:
-    """The shipped latency bar is spelled this way -- a floor of 0.0 with a
-    ceiling of 10.0, because the failure direction is slow -- so a `high` the
-    floor branch ignores would leave the one bar in the file that gates on a
-    latency gating on nothing."""
+    """The shipped latency bar is spelled this way.
+
+    a floor of 0.0 with a ceiling of 10.0, because the failure direction is slow -- so a
+    `high` the floor branch ignores would leave the one bar in the file that gates on a
+    latency gating on nothing.
+    """
     bars = _bars(tmp_path, _bar(kind="floor", low=0.0, high=10.0))
     assert bars.judge(surface="s", tier="t", metric="m", stratum="all", value=4.0) is Judgement.PASS
     assert (
@@ -227,8 +237,10 @@ def test_a_floor_with_a_ceiling_fails_above_it(tmp_path: Path) -> None:
 
 
 def test_a_floor_admits_the_floor_itself_and_the_ceiling_itself(tmp_path: Path) -> None:
-    """The boundary case for the other kind, because a wrong implementation is
-    free to branch on `kind` and spell one comparison strictly.
+    """The boundary case for the other kind.
+
+    because a wrong implementation is free to branch on `kind` and spell one comparison
+    strictly.
 
     `>= low` and `<= high` are what the file's own header claims, and a value
     landing exactly on a registered bound is not hypothetical: the latency
@@ -249,8 +261,10 @@ def test_a_floor_admits_the_floor_itself_and_the_ceiling_itself(tmp_path: Path) 
 
 
 def test_a_pending_bar_never_gates(tmp_path: Path) -> None:
-    """No number is wrong against a bar that does not exist yet. Reporting
-    PENDING rather than PASS keeps a run from claiming a bar it never faced."""
+    """No number is wrong against a bar that does not exist yet.
+
+    Reporting PENDING rather than PASS keeps a run from claiming a bar it never faced.
+    """
     bars = _bars(tmp_path, _bar(kind="pending"))
     assert (
         bars.judge(surface="s", tier="t", metric="m", stratum="all", value=0.0) is Judgement.PENDING
@@ -261,8 +275,10 @@ def test_a_pending_bar_never_gates(tmp_path: Path) -> None:
 
 
 def test_the_four_judgements_are_four_different_strings_and_pending_is_not_spelled_pass() -> None:
-    """The verdicts are values on the wire -- a report line, a ledger row, an exit code --
-    so what they *are* matters as much as which one is returned.
+    """The verdicts are values on the wire.
+
+    a report line, a ledger row, an exit code -- so what they *are* matters as much as
+    which one is returned.
     """
     assert [one.value for one in Judgement] == ["pass", "fail", "pending", "unbarred"]
     assert len({Judgement.PASS, Judgement.FAIL, Judgement.PENDING, Judgement.UNBARRED}) == 4, (
@@ -273,8 +289,10 @@ def test_the_four_judgements_are_four_different_strings_and_pending_is_not_spell
 
 
 def test_an_unbarred_metric_is_unbarred_rather_than_passing(tmp_path: Path) -> None:
-    """A metric nobody wrote a bar for must not read as green. That is how a
-    surface gets added and silently gates on nothing."""
+    """A metric nobody wrote a bar for must not read as green.
+
+    That is how a surface gets added and silently gates on nothing.
+    """
     bars = _bars(tmp_path, _bar(kind="pending"))
     assert (
         bars.judge(surface="s", tier="t", metric="other", stratum="all", value=0.9)
@@ -294,8 +312,9 @@ def test_an_unbarred_metric_is_unbarred_rather_than_passing(tmp_path: Path) -> N
 def test_a_bar_is_found_by_all_four_of_its_keys(
     tmp_path: Path, surface: str, tier: str, metric: str, stratum: str
 ) -> None:
-    """A lookup that compared three of the four keys would answer this bar for
-    a question it was not registered against.
+    """A lookup that compared three of the four keys would answer this bar for a question it was.
+
+    not registered against.
 
     That is not a hypothetical shape in this file: `bars.toml` holds three
     bars agreeing on surface, tier and metric and differing only in stratum,
@@ -351,8 +370,10 @@ def test_the_four_lookup_keys_cannot_be_handed_over_positionally() -> None:
 
 
 def test_the_bar_and_the_verdict_come_from_one_lookup() -> None:
-    """A ledger row carries both -- the verdict, and the `kind`/`low`/`high` of
-    the bar it was reached against -- so the two have to be about the same bar.
+    """A ledger row carries both.
+
+    the verdict, and the `kind`/`low`/`high` of the bar it was reached against -- so the
+    two have to be about the same bar.
 
     The obvious way to fill such a row in is `find` and then `judge`, which
     scans the bars twice and re-derives the key. That agrees today and is one
@@ -391,8 +412,9 @@ def test_the_bar_and_the_verdict_come_from_one_lookup() -> None:
 def test_a_window_missing_a_bound_is_refused_at_load(
     tmp_path: Path, low: float | None, high: float | None
 ) -> None:
-    """A window with no `high` silently degrades to a floor -- the failure
-    direction the window existed to catch stops being caught, and nothing
+    """A window with no `high` silently degrades to a floor.
+
+    the failure direction the window existed to catch stops being caught, and nothing
     says so.
 
     Both ends, because a check written against the missing `high` alone -- the
@@ -420,9 +442,10 @@ def test_a_floor_with_no_floor_is_refused_at_load(tmp_path: Path) -> None:
 def test_a_pending_bar_carrying_a_number_is_refused_at_load(
     tmp_path: Path, low: float | None, high: float | None
 ) -> None:
-    """`pending` means *no prior measurement exists*, so a pending bar with a
-    number beside it is the exact failure the design names -- a bar
-    reverse-engineered from the number it judges is not a bar.
+    """`pending` means *no prior measurement exists*.
+
+    so a pending bar with a number beside it is the exact failure the design names -- a
+    bar reverse-engineered from the number it judges is not a bar.
 
     It is refused rather than tolerated, and that also settles the precedence
     question by making it unreachable: with a pending bar that carries bounds
@@ -470,8 +493,10 @@ def test_a_bar_whose_bounds_are_transposed_is_refused_at_load(
 def test_two_bars_sharing_all_four_keys_are_refused_rather_than_one_shadowing_the_other(
     tmp_path: Path,
 ) -> None:
-    """`find` returns the first match, so a second bar on the same four keys is dead weight
-    that still reads as a registered bar.
+    """`find` returns the first match.
+
+    so a second bar on the same four keys is dead weight that still reads as a
+    registered bar.
     """
     shadowed = _bar(kind="pending", metric="recall_at_5") + _bar(
         kind="floor", metric="recall_at_5", low=0.7014
@@ -504,8 +529,7 @@ def test_a_bar_file_holding_no_bars_is_refused_rather_than_judging_nothing(
 
 
 def test_an_absent_bar_file_is_loud_rather_than_an_empty_bar_set(tmp_path: Path) -> None:
-    """`bars.toml` is data this code reads, so the question is what happens
-    when it is not there.
+    """`bars.toml` is data this code reads, so the question is what happens when it is not there.
 
     A loader carrying a built-in default -- or answering an empty `BarSet` --
     would make a missing, moved or mistyped path read exactly like a file

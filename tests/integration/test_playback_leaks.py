@@ -49,10 +49,12 @@ MOVIE_EXTERNAL_ID = "movie-playback-leaks-0"
 
 
 class _FakeServerFactory(SourceAdapterFactory):
-    """Builds the *real* `EmbyAdapter`, over `FakeEmbyServer`. Same shape as
-    `test_playback_route.py`'s own factory -- kept as an independent copy
-    rather than imported, matching this repo's habit of not sharing fixture
-    internals across files that pin different things."""
+    """Builds the *real* `EmbyAdapter`, over `FakeEmbyServer`.
+
+    Same shape as `test_playback_route.py`'s own factory -- kept as an independent copy
+    rather than imported, matching this repo's habit of not sharing fixture internals
+    across files that pin different things.
+    """
 
     def __init__(self, server: FakeEmbyServer) -> None:
         self._server = server
@@ -106,10 +108,12 @@ class _EmbyLoopbackHandler(http.server.BaseHTTPRequestHandler):
     do_DELETE = _serve
 
     def log_message(self, format: str, *args: object) -> None:
-        """Quiet. The default writes one line per request to stderr, which
-        this suite's "clean stdout" discipline (`.claude/rules/testing-
-        discipline.md`'s httpx-INFO-line finding, one library over) argues
-        against for the identical reason."""
+        """Quiet.
+
+        The default writes one line per request to stderr, which this suite's "clean
+        stdout" discipline (`.claude/rules/testing- discipline.md`'s httpx-INFO-line
+        finding, one library over) argues against for the identical reason.
+        """
 
 
 class _LoopbackEmbyServer(http.server.ThreadingHTTPServer):
@@ -161,9 +165,11 @@ def loopback(server: FakeEmbyServer) -> Iterator[_LoopbackEmbyServer]:
 
 
 class _LoopbackFactory(SourceAdapterFactory):
-    """The real `EmbyAdapter`, over httpx's real default transport --
-    deliberately **no** `transport=` override, so `HTTPXClientInstrumentor`'s
-    wrapped `AsyncHTTPTransport` is the one actually carrying the request."""
+    """The real `EmbyAdapter`, over httpx's real default transport.
+
+    deliberately **no** `transport=` override, so `HTTPXClientInstrumentor`'s wrapped
+    `AsyncHTTPTransport` is the one actually carrying the request.
+    """
 
     def __init__(self) -> None:
         self.clients: list[httpx.AsyncClient] = []
@@ -176,14 +182,17 @@ class _LoopbackFactory(SourceAdapterFactory):
 
 @pytest.fixture
 def span_exporter() -> InMemorySpanExporter:
-    """Installed *before* `create_app`, so `configure_tracing`'s `isinstance`
-    idempotency guard leaves this provider in place. Both instrumentors are
-    uninstrumented first: `SQLAlchemyInstrumentor` resolves its tracer once,
-    eagerly, into a `wrapt` closure bound to whatever provider is global at
-    that instant (`test_pipeline_spans.py`'s own finding), and
-    `HTTPXClientInstrumentor` -- the one this file's pin 3 actually needs --
-    follows the identical `BaseInstrumentor` shape, so the same defence is
-    applied to both rather than assumed safe for the one nobody had measured.
+    """Installed *before* `create_app`.
+
+    so `configure_tracing`'s `isinstance` idempotency guard leaves this provider in
+    place.
+
+    Both instrumentors are uninstrumented first: `SQLAlchemyInstrumentor` resolves its
+    tracer once, eagerly, into a `wrapt` closure bound to whatever provider is global at
+    that instant (`test_pipeline_spans.py`'s own finding), and `HTTPXClientInstrumentor`
+    -- the one this file's pin 3 actually needs -- follows the identical
+    `BaseInstrumentor` shape, so the same defence is applied to both rather than assumed
+    safe for the one nobody had measured.
     """
     SQLAlchemyInstrumentor().uninstrument()
     HTTPXClientInstrumentor().uninstrument()
@@ -227,9 +236,10 @@ async def _seed(
     base_url: str,
     with_uncredentialed_source: bool,
 ) -> _Seeded:
-    """The shared seeding both fixtures below build on: one working source
-    with a real encrypted credential and a movie it holds a copy of, plus --
-    when asked -- a **second** source over the same movie with no stored
+    """The shared seeding both fixtures below build on.
+
+    one working source with a real encrypted credential and a movie it holds a copy of,
+    plus -- when asked -- a **second** source over the same movie with no stored
     credential at all.
 
     The second source is what makes pin 5's positive control real rather
@@ -295,8 +305,10 @@ async def _seed(
 async def seeded(
     sessions: async_sessionmaker[AsyncSession], server: FakeEmbyServer
 ) -> AsyncIterator[_Seeded]:
-    """Pin 5's household: a working source plus the uncredentialed one its
-    positive control needs."""
+    """Pin 5's household.
+
+    a working source plus the uncredentialed one its positive control needs.
+    """
     fixture = await _seed(
         sessions, server, base_url="https://emby.invalid", with_uncredentialed_source=True
     )
@@ -312,9 +324,12 @@ async def loopback_seeded(
     server: FakeEmbyServer,
     loopback: _LoopbackEmbyServer,
 ) -> AsyncIterator[_Seeded]:
-    """Pin 3's household: the one working source, pointed at the real
-    loopback server rather than the placeholder `https://emby.invalid` --
-    `EmbyAdapter` really dials this URL, over a real socket."""
+    """Pin 3's household.
+
+    the one working source, pointed at the real loopback server rather than the
+    placeholder `https://emby.invalid` -- `EmbyAdapter` really dials this URL, over a
+    real socket.
+    """
     fixture = await _seed(
         sessions, server, base_url=loopback.base_url, with_uncredentialed_source=False
     )
@@ -387,8 +402,11 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def loopback_app(
     settings: Settings, span_exporter: InMemorySpanExporter
 ) -> AsyncIterator[FastAPI]:
-    """Pin 3's app: the `_LoopbackFactory`, so the adapter's httpx client
-    carries the real transport `HTTPXClientInstrumentor` patches."""
+    """Pin 3's app.
+
+    the `_LoopbackFactory`, so the adapter's httpx client carries the real transport
+    `HTTPXClientInstrumentor` patches.
+    """
     application = create_app(settings)
     factory = _LoopbackFactory()
     application.dependency_overrides[get_source_adapter_factory] = lambda: factory
@@ -416,8 +434,7 @@ async def test_no_exported_span_attribute_carries_the_token(
     server: FakeEmbyServer,
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """ADR-0012's third named leak surface: a telemetry attribute built with
-    `model_dump`.
+    """ADR-0012's third named leak surface: a telemetry attribute built with `model_dump`.
 
     Positive control: a `playback.resolve` span exists, carrying
     `usher.title_id` and the resolved target count -- proving the span
@@ -489,8 +506,9 @@ async def test_no_exported_span_attribute_carries_the_token(
 async def test_the_debug_log_sink_never_carries_the_token_across_a_play_then_redeem_cycle(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """ADR-0012's log-sink handling rules, over a whole play-then-redeem
-    cycle rather than over one rendered `StreamTarget`.
+    """ADR-0012's log-sink handling rules.
+
+    over a whole play-then-redeem cycle rather than over one rendered `StreamTarget`.
 
     See the module docstring for why the positive control is a `WARNING`
     (the second, uncredentialed source's existing "no stored credentials"

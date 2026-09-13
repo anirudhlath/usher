@@ -53,9 +53,11 @@ async def _seed_person(session: AsyncSession) -> uuid.UUID:
 
 
 async def _seed_episode(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
-    """A series title plus one episode hanging off it. Returns both ids
-    because `images.episode_id` needs the episode and the cascade case needs
-    the title above it."""
+    """A series title plus one episode hanging off it.
+
+    Returns both ids because `images.episode_id` needs the episode and the cascade case
+    needs the title above it.
+    """
     title_id = new_id()
     season_id = new_id()
     episode_id = new_id()
@@ -145,10 +147,11 @@ async def test_the_title_search_names_table_and_its_primary_key_exist(
 async def test_search_queries_carries_prd_tens_columns_and_no_others(
     session: AsyncSession,
 ) -> None:
-    """`requested_mode` is wire-only. PRD 10 assigns this table to M9 *whole*
-    because a half-populated analytics table is worse than an empty metric --
-    a dashboard reading it cannot tell a real zero from a column nobody
-    filled -- and the other half of "whole" is that nothing is added to it
+    """`requested_mode` is wire-only.
+
+    PRD 10 assigns this table to M9 *whole* because a half-populated analytics table is
+    worse than an empty metric -- a dashboard reading it cannot tell a real zero from a
+    column nobody filled -- and the other half of "whole" is that nothing is added to it
     speculatively either.
 
     **Nine until `m10c`, eleven now**, and the list stays closed rather than
@@ -181,14 +184,17 @@ async def test_search_queries_carries_prd_tens_columns_and_no_others(
 async def test_search_queries_ships_one_index_beyond_its_primary_key(
     session: AsyncSession,
 ) -> None:
-    """`genome_tags`' precedent held until `m10c` and the exception is the
-    thing that makes it a rule: an index whose reader is a later milestone is
-    `ix_titles_popularity` again, and `ix_search_queries_at`'s reader is
-    written out verbatim in PRD 10 today -- `DELETE FROM search_queries WHERE
-    at < now() - interval '90 days'`, an operator's own SQL. That the
-    statement plans onto it is asserted in
-    `tests/integration/test_m10_schema.py`; that no *second* index appeared
-    alongside it is asserted here."""
+    """`genome_tags`' precedent held until `m10c` and the exception is the thing that makes it a.
+
+    rule: an index whose reader is a later milestone is `ix_titles_popularity` again,
+    and `ix_search_queries_at`'s reader is written out verbatim in PRD 10 today --
+    `DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an operator's
+    own SQL.
+
+    That the statement plans onto it is asserted in
+    `tests/integration/test_m10_schema.py`; that no *second* index appeared alongside it
+    is asserted here.
+    """
     result = await session.execute(
         text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = :t"),
         {"t": "search_queries"},
@@ -202,17 +208,20 @@ async def test_search_queries_ships_one_index_beyond_its_primary_key(
 async def test_the_three_image_foreign_keys_carry_the_delete_rule_they_were_given(
     session: AsyncSession,
 ) -> None:
-    """All three CASCADE, and the reason is not "artwork is cheap" -- it is
-    that `ck_images_exactly_one_owner` makes SET NULL *unavailable*. Nulling
-    the one non-null owner column leaves `num_nonnulls(...) = 0`, which the
-    CHECK refuses, so the parent delete would fail with a constraint violation
-    naming a table the operator never touched. RESTRICT would make deleting a
-    title fail because somebody cached a poster for it.
+    """All three CASCADE, and the reason is not "artwork is cheap".
+
+    it is that `ck_images_exactly_one_owner` makes SET NULL *unavailable*.
+
+    Nulling the one non-null owner column leaves `num_nonnulls(...) = 0`, which the
+    CHECK refuses, so the parent delete would fail with a constraint violation naming a
+    table the operator never touched. RESTRICT would make deleting a title fail because
+    somebody cached a poster for it.
 
     Read off `pg_constraint`, not off `Base.metadata`: `confdeltype` is what
     Postgres will actually do. `confdeltype::text` is not decoration -- the
     column's type is `"char"`, which asyncpg hands back as `bytes`, so the
-    uncast comparison fails against `b'c'`. `c` is CASCADE."""
+    uncast comparison fails against `b'c'`. `c` is CASCADE.
+    """
     result = await session.execute(
         text(
             "SELECT conname, confdeltype::text FROM pg_constraint "
@@ -229,12 +238,14 @@ async def test_the_three_image_foreign_keys_carry_the_delete_rule_they_were_give
 async def test_the_search_queries_foreign_keys_carry_two_different_delete_rules(
     session: AsyncSession,
 ) -> None:
-    """The asymmetry is the content. `clicked_title_id` is SET NULL (`n`) --
-    a deleted title must not delete the row recording what somebody searched
-    for, because the search happened and the attribution is a separate fact.
-    `user_id` is RESTRICT (`r`) -- a household's search history is user state,
-    which is the side of ADR-0010's asymmetry
-    `fk_watch_states_episode_id_episodes` already sits on."""
+    """The asymmetry is the content.
+
+    `clicked_title_id` is SET NULL (`n`) -- a deleted title must not delete the row
+    recording what somebody searched for, because the search happened and the
+    attribution is a separate fact. `user_id` is RESTRICT (`r`) -- a household's search
+    history is user state, which is the side of ADR-0010's asymmetry
+    `fk_watch_states_episode_id_episodes` already sits on.
+    """
     result = await session.execute(
         text(
             "SELECT conname, confdeltype::text FROM pg_constraint "
@@ -248,9 +259,11 @@ async def test_the_search_queries_foreign_keys_carry_two_different_delete_rules(
 
 
 async def test_the_title_search_names_foreign_key_cascades(session: AsyncSession) -> None:
-    """CASCADE, `title_embeddings`' case rather than `watch_states`'. A search
-    name protects no user state and is fully re-derivable from the title plus
-    a loader."""
+    """CASCADE, `title_embeddings`' case rather than `watch_states`'.
+
+    A search name protects no user state and is fully re-derivable from the title plus a
+    loader.
+    """
     result = await session.execute(
         text(
             "SELECT conname, confdeltype::text FROM pg_constraint "
@@ -265,7 +278,8 @@ async def test_the_title_search_names_foreign_key_cascades(session: AsyncSession
 async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
     session: AsyncSession,
 ) -> None:
-    """Postgres implements ON DELETE CASCADE by finding referencing rows *by that column*,
+    """Postgres implements ON DELETE CASCADE by finding referencing rows *by that column*.
+
     so a CASCADE without a lookup index sequentially scans the child table on every
     parent delete.
     """
@@ -302,10 +316,13 @@ async def test_an_image_with_no_owner_is_refused_by_a_named_constraint(
 async def test_an_image_with_two_owners_is_refused_by_the_same_constraint(
     session: AsyncSession,
 ) -> None:
-    """The other half of `= 1`, and the half a `num_nonnulls(...) >= 1`
-    spelling would let through. An image belonging to both a title and a
-    person is not a poster with two homes, it is a row two readers will
-    disagree about."""
+    """The other half of `= 1`.
+
+    and the half a `num_nonnulls(...) >= 1` spelling would let through.
+
+    An image belonging to both a title and a person is not a poster with two homes, it
+    is a row two readers will disagree about.
+    """
     title_id = await _seed_title(session)
     person_id = await _seed_person(session)
     with pytest.raises(IntegrityError) as caught:
@@ -319,10 +336,12 @@ async def test_an_image_with_two_owners_is_refused_by_the_same_constraint(
 async def test_an_image_round_trips_through_each_owner_column(
     session: AsyncSession, owner: str
 ) -> None:
-    """Parametrised over all three, because a CHECK naming
-    `num_nonnulls(title_id, episode_id, person_id)` is satisfied by exactly
-    one of them and a migration that misspelled one column name would still
-    pass a case that only ever exercises `title_id`."""
+    """Parametrised over all three.
+
+    because a CHECK naming `num_nonnulls(title_id, episode_id, person_id)` is satisfied
+    by exactly one of them and a migration that misspelled one column name would still
+    pass a case that only ever exercises `title_id`.
+    """
     if owner == "person_id":
         owner_id = await _seed_person(session)
     elif owner == "episode_id":
@@ -354,7 +373,8 @@ async def test_deleting_a_title_cascades_into_its_images(session: AsyncSession) 
 async def test_a_search_name_longer_than_the_btree_bound_is_refused_by_a_constraint(
     session: AsyncSession,
 ) -> None:
-    """The ordering-of-two-refusals argument
+    """The ordering-of-two-refusals argument.
+
     `test_the_genome_tag_id_column_is_wide_enough_that_a_constraint_refuses_it_first`
     already makes for `genome_tags.tag_id`, arriving at a text column.
 
@@ -367,7 +387,8 @@ async def test_a_search_name_longer_than_the_btree_bound_is_refused_by_a_constra
 
     The arithmetic is in the migration docstring; this case pins that one
     character over the bound is refused, which is where the two spellings
-    (`<=` and `<`) differ."""
+    (`<=` and `<`) differ.
+    """
     title_id = await _seed_title(session)
     with pytest.raises(IntegrityError) as caught:
         await session.execute(
@@ -383,11 +404,13 @@ async def test_a_search_name_longer_than_the_btree_bound_is_refused_by_a_constra
 async def test_a_search_name_at_exactly_the_bound_is_stored_and_indexed(
     session: AsyncSession,
 ) -> None:
-    """The premise of the case above: the bound is a bound and not an
-    off-by-one, and -- the half that matters -- a name of exactly that length
-    goes into the `text_pattern_ops` index without Postgres refusing the entry.
-    A CHECK that let the index refuse first would fail here rather than
-    there."""
+    """The premise of the case above: the bound is a bound and not an off-by-one, and.
+
+    the half that matters -- a name of exactly that length goes into the
+    `text_pattern_ops` index without Postgres refusing the entry.
+
+    A CHECK that let the index refuse first would fail here rather than there.
+    """
     title_id = await _seed_title(session)
     row_id = new_id()
     await session.execute(
@@ -405,12 +428,15 @@ async def test_a_search_name_at_exactly_the_bound_is_stored_and_indexed(
 
 
 async def test_row_provider_settings_is_created_empty(session: AsyncSession) -> None:
-    """**Not seeded with ten slugs.** An absent row means enabled, which is
-    what "providers are enabled by registration in code" already means. A
-    migration hard-coding the registry would be a second copy of
-    `services/rows/__init__.py` with nothing anywhere to detect drift --
-    the exact shape `_SUSPENDABLE_INDEXES`' literal strings needed a dedicated
-    round-trip case to stop. Reconciliation belongs to the admin task."""
+    """**Not seeded with ten slugs.** An absent row means enabled.
+
+    which is what "providers are enabled by registration in code" already means.
+
+    A migration hard-coding the registry would be a second copy of
+    `services/rows/__init__.py` with nothing anywhere to detect drift -- the exact shape
+    `_SUSPENDABLE_INDEXES`' literal strings needed a dedicated round-trip case to stop.
+    Reconciliation belongs to the admin task.
+    """
     result = await session.execute(text("SELECT count(*) FROM row_provider_settings"))
     assert result.scalar_one() == 0
 
@@ -418,10 +444,14 @@ async def test_row_provider_settings_is_created_empty(session: AsyncSession) -> 
 async def test_a_row_provider_setting_round_trips_on_its_natural_key(
     session: AsyncSession,
 ) -> None:
-    """`RowProvider.slug_prefix` is the natural key -- "declared rather than
-    derived" and "bounded at ten", which its own port docstring says. A
-    surrogate id would permit two rows for one provider, a state no admin
-    route could interpret."""
+    """`RowProvider.slug_prefix` is the natural key.
+
+    "declared rather than derived" and "bounded at ten", which its own port docstring
+    says.
+
+    A surrogate id would permit two rows for one provider, a state no admin route could
+    interpret.
+    """
     await session.execute(
         text(
             "INSERT INTO row_provider_settings (slug_prefix, enabled, updated_at) "
@@ -450,16 +480,19 @@ async def test_a_row_provider_setting_round_trips_on_its_natural_key(
 async def test_both_tier_one_indexes_carry_text_pattern_ops(
     session: AsyncSession, index_name: str, table: str
 ) -> None:
-    """Asserted off `pg_indexes.indexdef` -- what Postgres actually built --
-    rather than off `Base.metadata`, because an opclass is exactly the kind of
-    thing `compare_metadata` does not diff on an expression index.
+    """Asserted off `pg_indexes.indexdef`.
+
+    what Postgres actually built -- rather than off `Base.metadata`, because an opclass
+    is exactly the kind of thing `compare_metadata` does not diff on an expression
+    index.
 
     Measured on a real 1,271,138-title catalog: p50 0.6 ms, p95 1.0 ms, max
     10 ms, 44 MB, building in 0.559 s
     (`.claude/rules/search-and-embeddings.md`). One index goes on `titles`,
     which is what answers canonical-name prefixes on day one; one goes on
     `title_search_names`, which is free on an empty table and is what the
-    alias and people halves will read."""
+    alias and people halves will read.
+    """
     result = await session.execute(
         text("SELECT indexdef FROM pg_indexes WHERE indexname = :name AND tablename = :table"),
         {"name": index_name, "table": table},
@@ -473,13 +506,15 @@ async def test_both_tier_one_indexes_carry_text_pattern_ops(
 async def test_the_existing_lower_name_index_has_the_default_opclass(
     session: AsyncSession,
 ) -> None:
-    """The premise of the case below, stated as its own assertion rather than
-    left implicit. `ix_titles_name_lower_year` has been on `titles` since M1
-    and is `Index("ix_titles_name_lower_year", text("lower(name)"), "year")`
-    -- a btree over `lower(name)` with no opclass named, which under this
-    database's collation is `text_ops`. So "there is already a btree on
-    `lower(name)`" is true and is not the same index, which is the thing the
-    planner probe below exists to prove rather than assert."""
+    """The premise of the case below, stated as its own assertion rather than left implicit.
+
+    `ix_titles_name_lower_year` has been on `titles` since M1 and is
+    `Index("ix_titles_name_lower_year", text("lower(name)"), "year")` -- a btree over
+    `lower(name)` with no opclass named, which under this database's collation is
+    `text_ops`. So "there is already a btree on `lower(name)`" is true and is not the
+    same index, which is the thing the planner probe below exists to prove rather than
+    assert.
+    """
     result = await session.execute(
         text("SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_titles_name_lower_year'")
     )
@@ -491,8 +526,9 @@ async def test_the_existing_lower_name_index_has_the_default_opclass(
 async def test_the_tier_one_index_serves_a_prefix_the_existing_index_cannot(
     session: AsyncSession,
 ) -> None:
-    """The case with teeth, and the one that makes "two indexes, not one" a
-    measurement instead of a claim.
+    """The case with teeth.
+
+    and the one that makes "two indexes, not one" a measurement instead of a claim.
 
     An index-exists assertion is a membership assertion, and a membership
     assertion is not a relevance test. `enable_seqscan = off` forces the
@@ -506,7 +542,8 @@ async def test_the_tier_one_index_serves_a_prefix_the_existing_index_cannot(
     even with seq scans disabled, so `ix_titles_name_lower_year` is not merely
     not-chosen for a `LIKE 'pre%'`, it is not choosable. That is what the
     default opclass costs under a non-`C` collation, and it is why
-    `ix_titles_name_lower_prefix` is a second index rather than a rename."""
+    `ix_titles_name_lower_prefix` is a second index rather than a rename.
+    """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     result = await session.execute(
         text("EXPLAIN SELECT id FROM titles WHERE lower(name) LIKE 'pre%'")
@@ -519,9 +556,11 @@ async def test_the_tier_one_index_serves_a_prefix_the_existing_index_cannot(
 async def test_the_tier_one_index_on_the_narrow_table_serves_the_same_prefix(
     session: AsyncSession,
 ) -> None:
-    """The alias and people halves read this one. Free on an empty table
-    today, and asserted now because the task that fills it is not the task
-    that would notice the index was never usable."""
+    """The alias and people halves read this one.
+
+    Free on an empty table today, and asserted now because the task that fills it is not
+    the task that would notice the index was never usable.
+    """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     result = await session.execute(
         text("EXPLAIN SELECT title_id FROM title_search_names WHERE lower(name) LIKE 'pre%'")

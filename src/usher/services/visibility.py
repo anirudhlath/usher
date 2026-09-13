@@ -32,8 +32,9 @@ class VisibilityService:
         self._titles = titles
 
     async def seen(self, titles: Iterable[Title]) -> int:
-        """Enqueue one `enrich` at `VISIBLE` per unfinished title. Returns how
-        many were promoted.
+        """Enqueue one `enrich` at `VISIBLE` per unfinished title.
+
+        Returns how many were promoted.
 
         The guard is `ENRICHMENT_RANK`, never `state is SKELETON`: there are
         three rungs and the direct spelling strands every `stub` on a screen

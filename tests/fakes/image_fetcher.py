@@ -1,4 +1,7 @@
-"""In-memory `ImageFetcher`. Opens no socket and cannot."""
+"""In-memory `ImageFetcher`.
+
+Opens no socket and cannot.
+"""
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager

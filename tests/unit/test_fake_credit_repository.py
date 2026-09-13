@@ -15,8 +15,7 @@ from usher.domain.title import Title
 
 
 class _FakeSearchNames(SearchNameProbe):
-    """`title_search_names` as the fake stores it: a dict keyed by
-    `(title_id, kind)`.
+    """`title_search_names` as the fake stores it: a dict keyed by `(title_id, kind)`.
 
     **Which makes two of the contract's five search-name cases structurally
     true here**, and that is the sixth entry in `tests/fakes/
@@ -43,11 +42,12 @@ class _FakeSearchNames(SearchNameProbe):
 
 
 async def _seed_title(titles: FakeTitleRepository, name: str) -> uuid.UUID:
-    """A real row, because the contract requires every id it is handed to
-    name one -- `credit_names_for` distinguishes "exists with no credits"
-    (an empty tuple) from "does not exist" (absent), and a bare `new_id()`
-    silently exercises the second where the integration driver exercises the
-    first."""
+    """A real row, because the contract requires every id it is handed to name one.
+
+    `credit_names_for` distinguishes "exists with no credits" (an empty tuple) from
+    "does not exist" (absent), and a bare `new_id()` silently exercises the second where
+    the integration driver exercises the first.
+    """
     title = Title(kind=TitleKind.MOVIE, name=name, sort_name=name)
     await titles.add(title)
     return title.id
@@ -85,8 +85,7 @@ class TestFakeCreditRepository(CreditRepositoryContract):
 
     @pytest_asyncio.fixture
     async def _seeded_people(self, people: FakePersonRepository) -> dict[str, uuid.UUID]:
-        """The four people every case names, written through the port that
-        owns them.
+        """The four people every case names, written through the port that owns them.
 
         Real rows rather than bare ids because `CreditedPerson` carries a
         name: a fake that invented one would make

@@ -1,4 +1,4 @@
-"""title_embeddings and title_neighbors, with the HNSW index"""
+"""Title_embeddings and title_neighbors, with the HNSW index."""
 
 from collections.abc import Sequence
 

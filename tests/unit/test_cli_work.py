@@ -72,8 +72,11 @@ def _substituted(monkeypatch: pytest.MonkeyPatch, worker: _Worker) -> None:
 
 
 async def _until(predicate: Callable[[], bool], *, bound: float = 2.0) -> None:
-    """Poll rather than sleep a fixed interval: a fixed sleep is either flaky
-    or slow, and this loop's whole subject is how many passes happened."""
+    """Poll rather than sleep a fixed interval.
+
+    a fixed sleep is either flaky or slow, and this loop's whole subject is how many
+    passes happened.
+    """
     for _ in range(int(bound / 0.001)):
         if predicate():
             return
@@ -134,8 +137,9 @@ async def test_a_pass_that_crashes_costs_the_pass_rather_than_the_daemon(
 async def test_one_pass_keeps_its_exit_code_rather_than_logging_and_returning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The positive control for the case above, and a decision in its own
-    right: `--once` is not a daemon and must not inherit the daemon's arm.
+    """The positive control for the case above, and a decision in its own right.
+
+    `--once` is not a daemon and must not inherit the daemon's arm.
 
     `usher work --once` is what a cron entry and `docker compose exec` run,
     and what they read is the exit code. A guard around the whole command

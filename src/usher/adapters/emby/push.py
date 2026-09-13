@@ -54,8 +54,7 @@ def socket_logger() -> logging.Logger:
 
 @dataclass(slots=True)
 class PushHealth:
-    """What is known about a push channel, from messages rather than from a
-    socket.
+    """What is known about a push channel, from messages rather than from a socket.
 
     Mutable on purpose: it is a ledger the channel writes and the adapter
     reads, and the adapter holds the *same* object across reconnects so
@@ -77,7 +76,10 @@ class PushHealth:
     reconnects: int = 0
 
     def record_open(self, *, now: float) -> None:
-        """A connection is up. Says nothing about whether it works."""
+        """A connection is up.
+
+        Says nothing about whether it works.
+        """
         if self.opened_at is not None:
             self.reconnects += 1
         self.connected = True
@@ -118,8 +120,7 @@ class PushHealth:
         )
 
     def silent_for(self, *, now: float) -> float:
-        """Seconds since anything last arrived, measured from the open when
-        nothing has.
+        """Seconds since anything last arrived, measured from the open when nothing has.
 
         Zero before a connection exists. That branch is unreachable from the
         loop that calls this (it runs only while a connection is open), and
@@ -142,7 +143,10 @@ class PushConnection(ABC):
 
     @abstractmethod
     async def send(self, message: str) -> None:
-        """Send one text frame. Raises `PortUnavailable` on any failure."""
+        """Send one text frame.
+
+        Raises `PortUnavailable` on any failure.
+        """
 
     @abstractmethod
     async def recv(self, timeout: float) -> str:
@@ -164,7 +168,10 @@ class PushConnection(ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Release the connection. Idempotent, and never raises."""
+        """Release the connection.
+
+        Idempotent, and never raises.
+        """
 
 
 _clock = time.monotonic
@@ -257,8 +264,7 @@ class SessionLike(Protocol):
 
 
 class EmbyPushChannel:
-    """One `/embywebsocket` connection, and the ledger that says whether it
-    is working.
+    """One `/embywebsocket` connection, and the ledger that says whether it is working.
 
     Reuses `EmbySession` rather than authenticating: PRD 03's durable-client
     property comes from authenticating *once* with a stable `DeviceId`, and
@@ -295,8 +301,9 @@ class EmbyPushChannel:
         return self._health
 
     async def _socket_url(self) -> str:
-        """`/embywebsocket?api_key=<token>&deviceId=<id>`, built and handed
-        straight to the connector.
+        """`/embywebsocket?api_key=<token>&deviceId=<id>`.
+
+        built and handed straight to the connector.
 
         **Never stored on the instance, never returned to a caller outside
         this module, never logged, never interpolated into an exception,
@@ -403,8 +410,7 @@ class EmbyPushChannel:
 
 
 class _WebsocketsConnection(PushConnection):
-    """`websockets.asyncio.client.ClientConnection`, behind this adapter's
-    own three methods.
+    """`websockets.asyncio.client.ClientConnection`, behind this adapter's own three methods.
 
     The wrapper exists so that **no `websockets` exception ever crosses into
     `usher.ports.errors` carrying its own message.**

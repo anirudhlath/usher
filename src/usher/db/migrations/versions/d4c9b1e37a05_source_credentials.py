@@ -1,4 +1,4 @@
-"""source credentials"""
+"""Source credentials."""
 
 from collections.abc import Sequence
 

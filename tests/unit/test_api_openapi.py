@@ -102,8 +102,10 @@ _NOT_A_PROBLEM_DOCUMENT: Final[tuple[tuple[str, str, str | None, str], ...]] = (
 
 
 def _settings() -> Settings:
-    """`tests/unit/test_api_health.py`'s DSN: nothing listens on port 1, so
-    the app builds and never reaches Postgres."""
+    """`tests/unit/test_api_health.py`'s DSN.
+
+    nothing listens on port 1, so the app builds and never reaches Postgres.
+    """
     return Settings(
         database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
         secret_key="0123456789abcdef0123456789abcdef",
@@ -131,8 +133,7 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 
 def _normalise(path: str) -> str:
-    """A path as both sides can be compared on: no query string, no parameter
-    names."""
+    """A path as both sides can be compared on: no query string, no parameter names."""
     return _PARAMETER.sub("{}", path.split("?", 1)[0])
 
 
@@ -146,8 +147,7 @@ def _spellings(text: str) -> set[tuple[str, str]]:
 
 
 def _tabled() -> set[tuple[str, str]]:
-    """The endpoint tables' own spellings, and nothing from the prose between
-    them."""
+    """The endpoint tables' own spellings, and nothing from the prose between them."""
     lines = _PRD.read_text().splitlines()
     begin = lines.index(_TABLES_BEGIN)
     end = lines.index(_TABLES_END)
@@ -219,8 +219,7 @@ def _status_of(node: ast.expr | None) -> int | None:
 def _raised(
     module_name: str, function_name: str, seen: set[tuple[str, str]] | None = None
 ) -> set[tuple[int, str | None]]:
-    """Every `(status, code)` a `ProblemException` reachable from this function
-    carries.
+    """Every `(status, code)` a `ProblemException` reachable from this function carries.
 
     A call graph rather than a single function body, because three routers
     raise through a module-level helper (`series._not_found`,
@@ -371,7 +370,8 @@ def test_every_path_the_app_publishes_is_spelled_somewhere_in_prd_07(
 async def test_the_schema_route_answers_rather_than_being_exempted_silently(
     client: httpx.AsyncClient, document: Mapping[str, Any]
 ) -> None:
-    """`GET /openapi.json` is in PRD 07's Meta table and is not an `APIRoute`,
+    """`GET /openapi.json` is in PRD 07's Meta table and is not an `APIRoute`.
+
     so it cannot be in `app.openapi()["paths"]` and direction 1 drops it.
 
     Dropping it is only honest if it answers, and only meaningful if it was
@@ -395,8 +395,9 @@ async def test_the_schema_route_answers_rather_than_being_exempted_silently(
 def test_every_status_a_route_can_raise_is_described_as_a_problem_document(
     app: FastAPI, document: Mapping[str, Any]
 ) -> None:
-    """A route that can fail and documents only its 200 is a client writing
-    its error handling against the wrong body.
+    """A route that can fail and documents only its 200 is a client writing its error handling.
+
+    against the wrong body.
 
     The expected set is harvested from each handler's own call graph rather
     than listed here, so it cannot go stale: a route that grows a failure and
@@ -468,8 +469,9 @@ def test_every_failure_the_schema_describes_is_a_problem_document(
 def test_the_rewrite_registers_its_component_and_leaves_every_other_body_alone(
     document: Mapping[str, Any],
 ) -> None:
-    """The two arms the media-type case below cannot state, both of them
-    positive controls over `UsherAPI.openapi`'s rewrite.
+    """The two arms the media-type case below cannot state.
+
+    both of them positive controls over `UsherAPI.openapi`'s rewrite.
 
     **`ProblemResponse` has to still be a *component*.** The spelling a reader
     reaches for is `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref":
@@ -675,8 +677,9 @@ def test_the_code_enum_in_the_schema_is_the_vocabulary_as_a_set(
 
 
 def test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it(app: FastAPI) -> None:
-    """ADR-0030's Consequences hand this task the inversion V1 opened, and the
-    measurement settles it: **nothing is deleted.**
+    """ADR-0030's Consequences hand this task the inversion V1 opened.
+
+    and the measurement settles it: **nothing is deleted.**.
 
     V1 closed the vocabulary before the read-route fan-out landed, so a member
     was allowed to sit with no emitting route for the length of M9, and

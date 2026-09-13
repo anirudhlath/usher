@@ -133,8 +133,9 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         repository: PostgresSearchQueryRepository,
         ledger: PostgresSearchQueryLedger,
     ) -> None:
-        """`fk_search_queries_user_id_users`, reached through the repository
-        rather than through raw SQL.
+        """`fk_search_queries_user_id_users`.
+
+        reached through the repository rather than through raw SQL.
 
         The wrong implementation this kills: a `record()` that catches only
         the numeric-overflow shape and lets an ordinary foreign-key violation
@@ -154,9 +155,11 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """`ck_search_queries_query_not_empty`, reached through the
-        repository. An analytics row carrying no query text answers no
-        question a dashboard could ask of it."""
+        """`ck_search_queries_query_not_empty`, reached through the repository.
+
+        An analytics row carrying no query text answers no question a dashboard could
+        ask of it.
+        """
         blank = search_query_record(user_id=user_id, query="")
 
         with pytest.raises(RepositoryConflict) as raised:
@@ -171,8 +174,9 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The case the whole error contract rests on**, and Postgres-only because a
-        Python `int` has no ceiling to hit.
+        """**The case the whole error contract rests on**.
+
+        and Postgres-only because a Python `int` has no ceiling to hit.
         """
         too_large = search_query_record(user_id=user_id, latency_ms=2**31)
 
@@ -188,9 +192,11 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """`fk_search_queries_clicked_title_id_titles`, reached through
-        `record_outcome`. A stale or forged title id from a client must not
-        silently attribute a search to nothing storable."""
+        """`fk_search_queries_clicked_title_id_titles`, reached through `record_outcome`.
+
+        A stale or forged title id from a client must not silently attribute a search to
+        nothing storable.
+        """
         record = search_query_record(user_id=user_id)
         await repository.record(record)
 
@@ -212,11 +218,11 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The SAVEPOINT.** The wrong implementation this kills: a
-        `record()` with no nested transaction, whose refused `INSERT` aborts
-        the caller's whole transaction so the very next statement raises
-        `PendingRollbackError` -- turning a failed analytics write into a
-        lost request.
+        """**The SAVEPOINT.** The wrong implementation this kills.
+
+        a `record()` with no nested transaction, whose refused `INSERT` aborts the
+        caller's whole transaction so the very next statement raises
+        `PendingRollbackError` -- turning a failed analytics write into a lost request.
 
         Three assertions, in the order the damage would arrive: the earlier
         row is still there, the refused row is not, and a subsequent
@@ -240,14 +246,16 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
     async def test_search_queries_carries_no_updated_at_trigger(
         self, session: AsyncSession
     ) -> None:
-        """M1's second ruling: outcome columns are updated in place on the
-        row `record()` wrote, and first write wins, so no row is ever
-        touched more than twice in its whole life -- `llm_calls`' shape
-        rather than `watch_states`'. Mechanically required as well as
-        argued: `test_migration_creates_the_updated_at_triggers` asserts the
-        trigger set exactly, so a trigger here would be a failing case in
-        another file; this is the same fact from the side that would notice
-        it first.
+        """M1's second ruling.
+
+        outcome columns are updated in place on the row `record()` wrote, and first
+        write wins, so no row is ever touched more than twice in its whole life --
+        `llm_calls`' shape rather than `watch_states`'.
+
+        Mechanically required as well as argued:
+        `test_migration_creates_the_updated_at_triggers` asserts the trigger set
+        exactly, so a trigger here would be a failing case in another file; this is the
+        same fact from the side that would notice it first.
         """
         triggers = (
             await session.execute(
@@ -267,11 +275,12 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         session: AsyncSession,
         user_id: uuid.UUID,
     ) -> None:
-        """The other side of the error contract: a dropped connection, a
-        statement timeout or a missing table must not arrive at a caller as
-        "this row is not storable" -- the one distinction ADR-0009 requires a
-        caller be able to make, since a bad row is a bug in the analytics
-        write and a transport that is gone is something a retry fixes.
+        """The other side of the error contract.
+
+        a dropped connection, a statement timeout or a missing table must not arrive at
+        a caller as "this row is not storable" -- the one distinction ADR-0009 requires
+        a caller be able to make, since a bad row is a bug in the analytics write and a
+        transport that is gone is something a retry fixes.
 
         SQLSTATE `42P01` (undefined table) is class 42, outside the `22`/`23`
         classes this repository's SAVEPOINT translates, and deterministic

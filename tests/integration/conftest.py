@@ -24,14 +24,16 @@ _ALEMBIC_INI = _THIS_DIR.parent.parent / "alembic.ini"
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Every test collected under tests/integration/ needs Docker (this
-    directory's whole reason to exist -- see the module docstring). Marking
-    it here, once, means Task 10's own literal test functions below don't
-    each need a hand-applied `@pytest.mark.integration`, and neither will
-    any test a future task adds to this directory. `pytest -m integration`
-    / `pytest -m "not integration"` then work as a marker-based equivalent
-    of the tests/unit vs tests/integration directory split, for tooling
-    (Group F/G's CI) that would rather filter by `-m` than by path.
+    """Every test collected under tests/integration/ needs Docker (this directory's whole reason.
+
+    to exist -- see the module docstring).
+
+    Marking it here, once, means Task 10's own literal test functions below don't each
+    need a hand-applied `@pytest.mark.integration`, and neither will any test a future
+    task adds to this directory. `pytest -m integration` / `pytest -m "not integration"`
+    then work as a marker-based equivalent of the tests/unit vs tests/integration
+    directory split, for tooling (Group F/G's CI) that would rather filter by `-m` than
+    by path.
 
     `pytest_collection_modifyitems` is *not* directory-scoped the way a
     fixture would be -- pytest calls every conftest.py's implementation of
@@ -49,17 +51,19 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 def _upgrade_head(database_url: str) -> None:
-    """Runs the real migration chain against a freshly-started container --
-    see the module docstring. `env.py` (deliberately -- see its own
-    docstring) reads the URL from `usher.config.get_settings()`, never from
-    `alembic.ini`, so driving it here means setting the env vars a real
-    `alembic upgrade head` invocation would have had, exactly as far as
-    `Settings` needs: `USHER_DATABASE_URL` and `USHER_SECRET_KEY` (both
-    required, neither has a default). Every `USHER_*`/`OTEL_*` variable is
-    saved and restored around the call -- the same isolation
-    `tests/conftest.py`'s `clean_environment` gives every test, which
-    doesn't help here since this fixture (session scope) runs before that
-    one (function scope) ever does for the first test that needs it.
+    """Runs the real migration chain against a freshly-started container.
+
+    see the module docstring.
+
+    `env.py` (deliberately -- see its own docstring) reads the URL from
+    `usher.config.get_settings()`, never from `alembic.ini`, so driving it here means
+    setting the env vars a real `alembic upgrade head` invocation would have had,
+    exactly as far as `Settings` needs: `USHER_DATABASE_URL` and `USHER_SECRET_KEY`
+    (both required, neither has a default). Every `USHER_*`/`OTEL_*` variable is saved
+    and restored around the call -- the same isolation `tests/conftest.py`'s
+    `clean_environment` gives every test, which doesn't help here since this fixture
+    (session scope) runs before that one (function scope) ever does for the first test
+    that needs it.
     """
     saved = {key: value for key, value in os.environ.items() if key.startswith(("USHER_", "OTEL_"))}
     for key in saved:
@@ -169,7 +173,8 @@ async def _restore_the_statistics(conn: AsyncConnection, tables: frozenset[str])
 async def _tables_pg_class_is_wrong_about(
     conn: AsyncConnection, forgiven: frozenset[str]
 ) -> dict[str, tuple[int, int]]:
-    """Each public table whose `reltuples` disagrees with its `count(*)`,
+    """Each public table whose `reltuples` disagrees with its `count(*)`.
+
     against what it really holds.
 
     Cheap on purpose: one query, and it returns nothing at all unless
@@ -206,8 +211,9 @@ async def _assert_pg_class_still_describes_this_database(
     expected: frozenset[str],
     inherited: frozenset[str],
 ) -> None:
-    """The property every test in this directory is entitled to assume: `pg_class`
-    describes the database it is about to plan against.
+    """The property every test in this directory is entitled to assume.
+
+    `pg_class` describes the database it is about to plan against.
     """
     lying = await _tables_pg_class_is_wrong_about(conn, forgiven)
     if lying:
@@ -230,8 +236,10 @@ async def _assert_pg_class_still_describes_this_database(
 
 @pytest.fixture
 def _analyzed_tables() -> set[str]:
-    """The tables this test told the planner about, shared by reference
-    between `analyze` and `session` so the restore needs no global."""
+    """The tables this test told the planner about.
+
+    shared by reference between `analyze` and `session` so the restore needs no global.
+    """
     return set()
 
 
@@ -243,8 +251,9 @@ class Analyze(Protocol):
 
 @pytest.fixture
 def analyze(session: AsyncSession, _analyzed_tables: set[str]) -> Analyze:
-    """`ANALYZE`, for a test whose subject is a *plan*, with the cleanup the
-    rollback does not do.
+    """`ANALYZE`.
+
+    for a test whose subject is a *plan*, with the cleanup the rollback does not do.
 
     **A test that asserts a plan establishes its own statistics.** Without
     them the planner sizes the relation off an empty `pg_class`, every
@@ -302,8 +311,9 @@ def total_cost(plan: str) -> float:
 
 @asynccontextmanager
 async def index_suspended(session: AsyncSession, index: str) -> AsyncIterator[None]:
-    """Hide one index from the planner, so a plan assertion can measure what
-    the *alternative* costs.
+    """Hide one index from the planner.
+
+    so a plan assertion can measure what the *alternative* costs.
 
     **"The planner chose the index I meant" is not a property of the schema
     unless the runner-up is materially worse**, and at fixture scale it
@@ -413,7 +423,10 @@ async def column_set(url: str, table: str) -> set[str]:
 
 
 async def index_set(url: str) -> set[str]:
-    """Every index name in the public schema. `column_set`'s sibling."""
+    """Every index name in the public schema.
+
+    `column_set`'s sibling.
+    """
     engine = build_engine(url)
     try:
         async with engine.connect() as conn:
@@ -426,7 +439,9 @@ async def index_set(url: str) -> set[str]:
 
 
 async def scratch_database(postgres_url: str, prefix: str) -> tuple[str, str, str]:
-    """Create a throwaway database. Returns `(admin_url, name, url)`.
+    """Create a throwaway database.
+
+    Returns `(admin_url, name, url)`.
 
     What a case needs when its subject is a migration's effect on rows that
     existed before it ran, or the pre-migration schema as a control arm --

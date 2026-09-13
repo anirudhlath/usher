@@ -1,5 +1,6 @@
-"""`COPY` into a **temporary** staging table -- the one path every bulk write in this
-project takes.
+"""`COPY` into a **temporary** staging table.
+
+the one path every bulk write in this project takes.
 """
 
 from collections.abc import Sequence

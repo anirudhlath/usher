@@ -1,4 +1,4 @@
-"""ingest pipeline: seasons, episodes, jobs, sync_runs, raw_payloads"""
+"""Ingest pipeline: seasons, episodes, jobs, sync_runs, raw_payloads."""
 
 from collections.abc import Sequence
 

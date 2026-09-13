@@ -69,8 +69,9 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, from every engine in the process
-    -- including the app's own, which is the one under measurement.
+    """Every SQL statement SQLAlchemy issues, from every engine in the process.
+
+    including the app's own, which is the one under measurement.
 
     Captured off `before_cursor_execute` rather than transcribed: M4 replaced
     two tasks that asserted on a hand-copied lookalike of a query, because the
@@ -108,8 +109,10 @@ async def _given_title(
 async def _given_seasons(
     sessions: async_sessionmaker[AsyncSession], title_id: uuid.UUID, numbers: Sequence[int]
 ) -> dict[int, uuid.UUID]:
-    """Seeded in the order given, so a caller can make the minted UUIDv7s
-    disagree with the season numbers on purpose."""
+    """Seeded in the order given.
+
+    so a caller can make the minted UUIDv7s disagree with the season numbers on purpose.
+    """
     async with sessions() as session:
         repository = PostgresEpisodeRepository(session)
         await repository.upsert_seasons(
@@ -146,8 +149,7 @@ async def _given_episodes(
 async def test_a_series_answers_its_seasons_ordered_by_postgres(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The `ORDER BY season_number` is the real statement's, not a `sorted`
-    call in a fake.
+    """The `ORDER BY season_number` is the real statement's, not a `sorted` call in a fake.
 
     Seeded in descending order so the minted UUIDv7s descend with the season
     numbers, and the premise says so: without that, `ORDER BY id` returns the
@@ -244,9 +246,11 @@ async def test_an_episode_reads_back_with_the_ids_a_client_climbs_with(
 async def test_a_movie_answers_200_and_an_id_no_title_carries_answers_404(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The distinguishability case, against a real `titles` table -- the fake
-    arm cannot tell a missing row from a title with no seasons any better than
-    this one, but only here is the existence read a real statement."""
+    """The distinguishability case, against a real `titles` table.
+
+    the fake arm cannot tell a missing row from a title with no seasons any better than
+    this one, but only here is the existence read a real statement.
+    """
     movie = await _given_title(sessions, "A Film", kind=TitleKind.MOVIE)
 
     empty = await client.get(f"/series/{movie.id}/seasons")
@@ -330,8 +334,10 @@ async def test_the_episode_route_costs_one_statement(
     sessions: async_sessionmaker[AsyncSession],
     statement_counter: list[str],
 ) -> None:
-    """`list_by_ids([id])` in one round trip, and never `list_for_title`,
-    which would read 20,000 rows to find one."""
+    """`list_by_ids([id])` in one round trip.
+
+    and never `list_for_title`, which would read 20,000 rows to find one.
+    """
     series = await _given_title(sessions, "Single Episode Series")
     seasons = await _given_seasons(sessions, series.id, [1])
     await _given_episodes(sessions, series.id, seasons[1], 1, list(range(1, 21)))

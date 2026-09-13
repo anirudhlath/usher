@@ -40,8 +40,9 @@ _requests = _meter.create_counter(
 
 
 def _is_v4_token(secret: str) -> bool:
-    """Whether the configured secret is a v4 read access token (a JWT)
-    rather than a classic v3 key.
+    """Whether the configured secret is a v4 read access token (a JWT) rather than a classic v3.
+
+    key.
 
     A v3 key is 32 hexadecimal characters and can never match; a JWT has
     three dot-separated base64url segments and its header begins `eyJ`.

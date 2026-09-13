@@ -49,8 +49,11 @@ CHANGED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 def _capture(
     predicate: Callable[[str], bool],
 ) -> tuple[list[tuple[str, Sequence[object]]], Callable[[], None]]:
-    """Record (statement, parameters) for statements matching `predicate`,
-    and the callable that stops recording."""
+    """Record (statement.
+
+    parameters) for statements matching `predicate`, and the callable that stops
+    recording.
+    """
     seen: list[tuple[str, Sequence[object]]] = []
 
     def record(
@@ -70,10 +73,12 @@ def _capture(
 
 @contextmanager
 def counted() -> Iterator[list[str]]:
-    """Every statement SQLAlchemy issues. A `COPY` is invisible here --
-    `copy_records_to_table` runs on the raw asyncpg connection -- which is
-    the point: a `COPY` is one command however many records stream through
-    it."""
+    """Every statement SQLAlchemy issues.
+
+    A `COPY` is invisible here -- `copy_records_to_table` runs on the raw asyncpg
+    connection -- which is the point: a `COPY` is one command however many records
+    stream through it.
+    """
     seen: list[str] = []
 
     def record(
@@ -285,8 +290,9 @@ async def _plan_of(session: AsyncSession, statement: str, parameters: Sequence[o
 
 
 async def scale(rows: int) -> None:
-    """The four scale risks Groups A-E flagged and could not measure, at the
-    scale that makes them real.
+    """The four scale risks Groups A-E flagged and could not measure.
+
+    at the scale that makes them real.
 
     Each seeds its own population directly (a `generate_series` insert, not a
     walk -- the point is the read, not how the rows got there) and then plans

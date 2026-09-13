@@ -1,5 +1,6 @@
-"""`PostgresSearchIndex` against real Postgres: real `websearch_to_tsquery`, the real
-analyzer, real `ts_rank_cd`, the real generated column.
+"""`PostgresSearchIndex` against real Postgres.
+
+real `websearch_to_tsquery`, the real analyzer, real `ts_rank_cd`, the real generated
 """
 
 import dataclasses
@@ -151,15 +152,18 @@ async def _insert_title(
 
 
 async def _ctids(session: AsyncSession) -> dict[uuid.UUID, str]:
-    """Every visible title's physical location, so a rewrite can be shown to
-    have actually moved one."""
+    """Every visible title's physical location.
+
+    so a rewrite can be shown to have actually moved one.
+    """
     rows = await session.execute(text("SELECT id, ctid::text FROM titles"))
     return {uuid.UUID(str(title_id)): str(ctid) for title_id, ctid in rows}
 
 
 async def _own(session: AsyncSession, title_id: uuid.UUID, *, copies: int = 1) -> None:
-    """`copies` `media_items` rows pointing at one title, which is what makes
-    `owned_only` a real question.
+    """`copies` `media_items` rows pointing at one title.
+
+    which is what makes `owned_only` a real question.
 
     `media_items.title_id` carries the *series'* id on every episode row, so
     one owned series is many rows -- 20,000 of them on one measured series.
@@ -269,7 +273,7 @@ class TestPostgresSearchIndex(SearchIndexContract):
 async def test_a_renamed_title_is_findable_under_its_new_name_without_reindexing(
     session: AsyncSession,
 ) -> None:
-    """**The generated column, asserted from the adapter's side.**
+    """**The generated column, asserted from the adapter's side.**.
 
     Fails an implementation that has started maintaining its own copy of the
     text -- a `title_search_documents` side table, a trigger, an `index` job
@@ -338,8 +342,7 @@ async def test_remove_drops_the_vector_and_leaves_the_catalog_alone(
 
 @pytest.mark.integration
 async def test_deleting_the_title_removes_it_from_full_text(session: AsyncSession) -> None:
-    """The other half of `owns_document_lifecycle = False`, asserted rather
-    than waived.
+    """The other half of `owns_document_lifecycle = False`, asserted rather than waived.
 
     The contract's removal case cannot make this claim on this backend, so
     it is made here through the mechanism that owns it. Fails a schema in
@@ -443,8 +446,10 @@ async def test_min_enrichment_is_a_rank_and_not_a_string_comparison(
 
 
 def test_the_translator_table_covers_every_filter_the_vocabulary_has() -> None:
-    """The failure this backend can actually reach: a member added to
-    `SearchFilters` in a later milestone that nothing here was taught about.
+    """The failure this backend can actually reach.
+
+    a member added to `SearchFilters` in a later milestone that nothing here was taught
+    about.
 
     An untranslated member is silently dropped, and a dropped filter returns
     *more* rows than were asked for, which reads as working -- exactly the
@@ -459,8 +464,9 @@ def test_the_translator_table_covers_every_filter_the_vocabulary_has() -> None:
 
 
 def test_an_untranslated_filter_raises_rather_than_being_ignored() -> None:
-    """The same guard from the other side, so the table's *behaviour* is
-    pinned and not just its keys.
+    """The same guard from the other side.
+
+    so the table's *behaviour* is pinned and not just its keys.
 
     Fails an implementation whose loop `continue`s past a name it does not
     recognise. Driven through a stand-in dataclass carrying one unknown
@@ -544,17 +550,21 @@ class TestPostgresSuggestIndex(TypoTolerantSuggestIndexContract):
         self._session = session
 
     async def given_title(self, index: SuggestIndex, *, name: str, popularity: float) -> uuid.UUID:
-        """The port has no write method (ADR-0021) and this implementation
-        writes nothing at all -- it reads `titles`. So the arrangement is an
-        insert into a table somebody else owns, which is the honest shape of
-        a read-only port and the reason this is a hook."""
+        """The port has no write method (ADR-0021) and this implementation writes nothing at all.
+
+        it reads `titles`.
+
+        So the arrangement is an insert into a table somebody else owns, which is the
+        honest shape of a read-only port and the reason this is a hook.
+        """
         document = _doc(name, popularity=popularity)
         await _insert_title(self._session, document)
         return document.title_id
 
     async def rerank_candidates(self, index: SuggestIndex) -> int:
-        """How many rows `levenshtein` actually ran over, read out of the
-        plan of the statement the implementation issues.
+        """How many rows `levenshtein` actually ran over.
+
+        read out of the plan of the statement the implementation issues.
 
         **The constant is imported, never transcribed.** A hand-copied
         lookalike drifts from the shipped SQL and then reads like coverage;
@@ -574,8 +584,7 @@ class TestPostgresSuggestIndex(TypoTolerantSuggestIndexContract):
 
 @pytest.mark.integration
 async def test_the_candidate_predicate_uses_the_trigram_index(session: AsyncSession) -> None:
-    """An implementation whose predicate is `similarity(name, :p) > :t`
-    rather than `name % :p`.
+    """An implementation whose predicate is `similarity(name, :p) > :t` rather than `name % :p`.
 
     The two are equivalent in *meaning* and not in *plan*: only the `%`
     operator has a `gin_trgm_ops` operator class behind it, so the
@@ -609,7 +618,7 @@ async def test_the_candidate_predicate_uses_the_trigram_index(session: AsyncSess
 
 @pytest.mark.integration
 async def test_a_high_trigram_floor_destroys_fuzzy_recall(session: AsyncSession) -> None:
-    """**The cliff, demonstrated rather than described.**
+    """**The cliff, demonstrated rather than described.**.
 
     Measured on this host against the very fixtures the shared contract
     seeds: `similarity('Vane', 'vame') = 0.25` and
@@ -652,10 +661,10 @@ async def test_the_threshold_does_not_leak_into_the_next_statement(postgres_url:
 
 @pytest.mark.integration
 async def test_a_very_long_name_does_not_abort_the_suggest(session: AsyncSession) -> None:
-    """`fuzzystrmatch`'s `levenshtein` refuses inputs longer than 255
-    characters -- measured, `levenshtein argument exceeds maximum length of
-    255 characters` -- and the catalog is bulk-loaded from a dump nobody has
-    audited for its longest name.
+    """`fuzzystrmatch`'s `levenshtein` refuses inputs longer than 255 characters.
+
+    measured, `levenshtein argument exceeds maximum length of 255 characters` -- and the
+    catalog is bulk-loaded from a dump nobody has audited for its longest name.
 
     Same rule as `usher.services.matching._as_imdb`: nothing a source can put
     in a payload may abort a walk, and here the walk is a keystroke. Seeds a
@@ -720,8 +729,9 @@ async def test_a_null_popularity_does_not_take_the_first_row(session: AsyncSessi
 async def test_vote_count_orders_the_box_when_every_popularity_is_null(
     session: AsyncSession,
 ) -> None:
-    """**The catalog is not "mostly" NULL-popularity. It is entirely so**, and that is what
-    this case exists for.
+    """**The catalog is not "mostly" NULL-popularity.
+
+    It is entirely so**, and that is what this case exists for.
     """
     voteless = _doc("Vane Alpha", popularity=None)
     await _insert_title(session, voteless, vote_count=None)
@@ -890,7 +900,7 @@ def _series_request(query_vector: tuple[float, ...]) -> SearchRequest:
 async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
     session: AsyncSession,
 ) -> None:
-    """**The case that catches a missing `hnsw.iterative_scan`.**
+    """**The case that catches a missing `hnsw.iterative_scan`.**.
 
     With the GUC at its default `off`, a request for 10 results under a
     2%-selective filter returns **0.88 rows on average** at 50,000 rows --
@@ -934,8 +944,10 @@ async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
 async def test_the_default_guc_is_what_makes_that_fail(
     session: AsyncSession,
 ) -> None:
-    """The control, and the reason the case above is evidence rather than an
-    assertion that happens to pass.
+    """The control.
+
+    and the reason the case above is evidence rather than an assertion that happens to
+    pass.
 
     Same fixture, same queries, the same shipped statement, with
     `hnsw.iterative_scan` forced back to `off` for the transaction. Asserts
@@ -1056,7 +1068,7 @@ async def test_the_owned_path_does_not_use_the_ann_index(
 async def test_coverage_does_not_count_skeletons_it_was_never_going_to_embed(
     session: AsyncSession,
 ) -> None:
-    """**The denominator, which is a decision and not a detail.**
+    """**The denominator, which is a decision and not a detail.**.
 
     Counting every filtered title would put 1,271,138 skeletons under a
     numerator of ~10,000 and report 0.008 coverage on a perfectly healthy
@@ -1096,8 +1108,7 @@ async def test_coverage_does_not_count_skeletons_it_was_never_going_to_embed(
 async def test_a_document_indexed_through_the_port_is_still_stale(
     session: AsyncSession,
 ) -> None:
-    """Task 16's write half, asserted now that there is a vector lane to see
-    it with.
+    """Task 16's write half, asserted now that there is a vector lane to see it with.
 
     `index_many` writes a sentinel `model_name` and `source_fingerprint`, so
     the row is `IS DISTINCT FROM` every real model name and the backfill
@@ -1180,7 +1191,7 @@ async def test_the_hnsw_gucs_do_not_outlive_the_transaction(postgres_url: str) -
 async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
     session: AsyncSession,
 ) -> None:
-    """**Trap 1: the missing `COALESCE`, which inverts the entire ordering.**
+    """**Trap 1: the missing `COALESCE`, which inverts the entire ordering.**.
 
     A row in one lane only scores `NULL + 1/(60+r)` = `NULL`, and Postgres
     defaults to `NULLS FIRST` under `ORDER BY ... DESC`. So every single-lane
@@ -1240,7 +1251,7 @@ async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
 
 @pytest.mark.integration
 async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession) -> None:
-    """**Trap 2: `INNER JOIN` in place of `FULL OUTER JOIN`.**
+    """**Trap 2: `INNER JOIN` in place of `FULL OUTER JOIN`.**.
 
     Measured: 1 fused row where 5 were correct. It is not a ranking defect,
     it is a search that answers only when two independent retrieval methods
@@ -1300,7 +1311,7 @@ async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession
 async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
     session: AsyncSession,
 ) -> None:
-    """**Trap 3: ties are pervasive, not occasional.**"""
+    """**Trap 3: ties are pervasive, not occasional.**."""
     # **The vector-lane titles are minted first, and that is the whole of what makes
     # this case bite.** Every id is a UUIDv7, so creation order is id order; the join
     # emits the lexical lane's rows first, and PostgreSQL's small-N sort is stable.
@@ -1366,7 +1377,7 @@ async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
 async def test_fusion_against_a_catalog_with_no_embeddings_degrades_and_says_so(
     session: AsyncSession,
 ) -> None:
-    """**Point 3 of "the one thing this milestone must not get wrong".**
+    """**Point 3 of "the one thing this milestone must not get wrong".**.
 
     With no embeddings at all, `FUSED` returns exactly the full-text order
     wearing a blended-looking score, and nothing in the result set says the
@@ -1415,8 +1426,9 @@ async def test_fusion_against_a_catalog_with_no_embeddings_degrades_and_says_so(
 async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
     session: AsyncSession,
 ) -> None:
-    """`_LANE_MULTIPLIER = 1`, which is trap 2 arriving through a constant
-    instead of through a `JOIN`.
+    """`_LANE_MULTIPLIER = 1`.
+
+    which is trap 2 arriving through a constant instead of through a `JOIN`.
 
     A lane window equal to the result limit can only ever *re-order* what
     both lanes already had in their own top `limit` -- so the title that is

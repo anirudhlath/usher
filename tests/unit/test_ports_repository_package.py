@@ -1,5 +1,6 @@
-"""`usher.ports.repository` is a package mirroring `usher.db.repositories` module for
-module, and these cases are what keep it one.
+"""`usher.ports.repository` is a package mirroring `usher.db.repositories` module for module.
+
+and these cases are what keep it one.
 """
 
 import ast
@@ -84,10 +85,11 @@ def _public_objects(namespace: ModuleType) -> dict[str, type]:
 
 
 def test_every_postgres_repository_module_has_a_port_module_of_the_same_name() -> None:
-    """**The invariant the split exists for.** Every `PostgresThingRepository`
-    in `usher.db.repositories.thing` implements a `ThingRepository` declared in
-    `usher.ports.repository.thing` -- same module name, both sides, no
-    exceptions beyond the two named above.
+    """**The invariant the split exists for.** Every `PostgresThingRepository` in.
+
+    `usher.db.repositories.thing` implements a `ThingRepository` declared in
+    `usher.ports.repository.thing` -- same module name, both sides, no exceptions beyond
+    the two named above.
 
     Nineteen such pairs exist across sixteen modules; three modules hold two
     ports each (`people`, `search`, `sync`), which is why the mirror is stated
@@ -127,12 +129,15 @@ def test_every_postgres_repository_module_has_a_port_module_of_the_same_name() -
 
 
 def test_the_package_re_exports_every_public_object_its_modules_declare() -> None:
-    """`__init__.__all__` is the whole compatibility story: 99 files import
-    `from usher.ports.repository import ...` and not one of them changed for
-    the split. Under mypy's `no_implicit_reexport` a name missing from `__all__`
-    is not importable at all, so a module added without its `__all__` entry
-    breaks every call site rather than the one file that forgot -- which is why
-    the completeness check is a test and not a review habit.
+    """`__init__.__all__` is the whole compatibility story.
+
+    99 files import `from usher.ports.repository import ...` and not one of them changed
+    for the split.
+
+    Under mypy's `no_implicit_reexport` a name missing from `__all__` is not importable
+    at all, so a module added without its `__all__` entry breaks every call site rather
+    than the one file that forgot -- which is why the completeness check is a test and
+    not a review habit.
     """
     declared: dict[str, str] = {}
     for namespace in _package_modules():
@@ -156,10 +161,11 @@ def test_the_package_re_exports_every_public_object_its_modules_declare() -> Non
 
 
 def test_the_independence_contract_names_every_aggregate_port_module() -> None:
-    """The tenth `import-linter` contract holds the same invariant as the case
-    below, as a graph property rather than as one file's AST scan -- and **its
-    module list is the whole contract**, so a port module that lands unlisted is
-    a port module nothing constrains while the gate still reports 10 kept.
+    """The tenth `import-linter` contract holds the same invariant as the case below.
+
+    as a graph property rather than as one file's AST scan -- and **its module list is
+    the whole contract**, so a port module that lands unlisted is a port module nothing
+    constrains while the gate still reports 10 kept.
 
     `pyproject.toml` already records that failure mode about its own
     `forbidden_modules` list one contract up (*"a seventh adapter package left
@@ -196,7 +202,7 @@ def test_the_independence_contract_names_every_aggregate_port_module() -> None:
 
 
 def test_no_aggregate_module_imports_another_aggregate_module() -> None:
-    """**The cycle the private `_results` module exists to prevent.**
+    """**The cycle the private `_results` module exists to prevent.**.
 
     `BulkWriteResult` is returned by six ports across six modules. Homing it in
     `bulk.py` and importing it back the other way resolves perfectly well today
@@ -243,13 +249,15 @@ def test_no_aggregate_module_imports_another_aggregate_module() -> None:
 
 
 def test_every_port_and_abstract_method_in_the_package_carries_a_docstring() -> None:
-    """A docstring lost in a 3,434-line move is invisible to every other test in
-    this repository: strip the docstrings from `ports/repository.py` and
-    `ast.unparse` leaves **619 of 3,434 lines**, so roughly four lines in five
-    are the prose the ports are mostly *for*. Nothing here can prove the move
-    preserved a docstring's wording -- `getsource` did that, once, against
-    `git show HEAD:` -- but this is what stops the next port arriving without
-    one, and what would have caught a whole class quietly dropped.
+    """A docstring lost in a 3,434-line move is invisible to every other test in this repository.
+
+    strip the docstrings from `ports/repository.py` and `ast.unparse` leaves **619 of
+    3,434 lines**, so roughly four lines in five are the prose the ports are mostly
+    *for*.
+
+    Nothing here can prove the move preserved a docstring's wording -- `getsource` did
+    that, once, against `git show HEAD:` -- but this is what stops the next port
+    arriving without one, and what would have caught a whole class quietly dropped.
 
     The counts are floors and the constants say what they were measured at. A
     dataclass with no docstring of its own inherits a synthesised

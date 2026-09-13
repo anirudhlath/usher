@@ -123,8 +123,10 @@ async def _given_title(sessions: async_sessionmaker[AsyncSession], name: str) ->
 async def _given_episode(
     sessions: async_sessionmaker[AsyncSession], title_id: uuid.UUID
 ) -> uuid.UUID:
-    """One real episode of `title_id`, which needs a real season: both foreign
-    keys are `NOT NULL` and `media_items.episode_id` is itself one."""
+    """One real episode of `title_id`, which needs a real season.
+
+    both foreign keys are `NOT NULL` and `media_items.episode_id` is itself one.
+    """
     season = Season(title_id=title_id, season_number=1)
     episode = Episode(
         title_id=title_id, season_id=season.id, season_number=1, episode_number=1, name="Pilot"
@@ -219,9 +221,13 @@ async def test_a_page_that_exactly_exhausts_the_queue_carries_no_next_cursor(
 async def test_resolving_an_item_commits_the_row_and_the_queue_no_longer_holds_it(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Durable, not a flush the response outlives: read back on a second
-    session, after the request's own transaction is gone. `get_session` is the
-    request's commit boundary and this is the one write in this task."""
+    """Durable, not a flush the response outlives.
+
+    read back on a second session, after the request's own transaction is gone.
+
+    `get_session` is the request's commit boundary and this is the one write in this
+    task.
+    """
     source_id = await _given_source(sessions, "resolve")
     seeded = await _given_items(sessions, source_id, {"orphan": None})
     title = await _given_title(sessions, "A Resolved Film")

@@ -180,9 +180,12 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         return title
 
     def forget_title(self, title_id: uuid.UUID) -> None:
-        """Drop a title from the *catalog* while leaving its neighbour rows
-        alone -- which is what a delete does to a stale artefact nothing
-        re-runs. Not a port method."""
+        """Drop a title from the *catalog* while leaving its neighbour rows alone.
+
+        which is what a delete does to a stale artefact nothing re-runs.
+
+        Not a port method.
+        """
         self.titles = [title for title in self.titles if title.id != title_id]
         self.rows.pop(title_id, None)
         if self._catalog is not None:
@@ -287,7 +290,9 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         return sorted({row.model_name for row in self.rows.values() if row.embedding is not None})
 
     def embedded_ids(self) -> list[uuid.UUID]:
-        """The seed population, in id order. **Not a port method.**
+        """The seed population, in id order.
+
+        **Not a port method.**
 
         `FakeTitleNeighborRepository.resume_cursor` needs it, because the real
         statement is a join across both tables and this pair of fakes is the
@@ -312,7 +317,7 @@ def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
 
 
 def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
-    """pgvector's `<=>`, which is cosine *distance* -- `1 - similarity`.
+    """Pgvector's `<=>`, which is cosine *distance* -- `1 - similarity`.
 
     Spelled out rather than inlined, because the direction is exactly what
     `NeighborCandidate.cosine`'s docstring warns about: a signal list whose

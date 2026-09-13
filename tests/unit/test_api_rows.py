@@ -75,8 +75,10 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 async def test_a_regeneration_is_accepted_and_names_the_row_it_enqueued(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """The whole route: one `(curate, <household>)` job at `DEMAND`, and a body
-    carrying the two columns that locate it.
+    """The whole route.
+
+    one `(curate, <household>)` job at `DEMAND`, and a body carrying the two columns
+    that locate it.
 
     `kind` and `key` are the queue's own identity -- `(kind, key)` is unique --
     so the pair is what an operator pastes into `SELECT * FROM jobs WHERE kind
@@ -118,8 +120,9 @@ async def test_nothing_but_the_curate_job_is_enqueued(
 async def test_asking_again_is_accepted_again_and_leaves_one_job(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"* is `(kind, key)`
-    doing the work, and the 202 is unconditional on it.
+    """PRD 06's *"one modest completion per user per day"* is `(kind.
+
+    key)` doing the work, and the 202 is unconditional on it.
 
     Both halves matter. The second request must not answer 409, 204 or 200 --
     an operator pressing the button twice has not made a mistake, and the queue
@@ -144,8 +147,9 @@ async def test_asking_again_is_accepted_again_and_leaves_one_job(
 async def test_a_parked_generation_is_accepted_and_left_parked(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """PRD 08: *"Re-enqueueing does not un-park... and a parked job's priority
-    is not promoted behind their back either."*
+    """PRD 08: *"Re-enqueueing does not un-park...
+
+    and a parked job's priority is not promoted behind their back either."*
 
     A household whose pool cannot be served parks, and asking again does not
     release it -- measured against real Postgres at every priority including
@@ -177,10 +181,11 @@ async def test_a_parked_generation_is_accepted_and_left_parked(
 async def test_the_request_that_asked_for_the_regeneration_is_on_the_job(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """PRD 10's *"why did the title I just opened take 45 seconds"*, for the
-    one job kind whose answer is measured in dollars: the worker's span carries
-    a `Link` back to this request, minutes later, and `jobs.traceparent` is the
-    only thing that joins them.
+    """PRD 10's *"why did the title I just opened take 45 seconds"*.
+
+    for the one job kind whose answer is measured in dollars: the worker's span carries
+    a `Link` back to this request, minutes later, and `jobs.traceparent` is the only
+    thing that joins them.
 
     A real SDK provider is already installed -- `create_app` calls
     `configure_telemetry`, which installs one unconditionally, and
@@ -218,8 +223,9 @@ async def test_the_request_that_asked_for_the_regeneration_is_on_the_job(
 async def test_no_shape_of_request_is_refused_or_degraded(
     client: httpx.AsyncClient, content: bytes | None, headers: dict[str, str], query: str
 ) -> None:
-    """**No input produces a 503**, and the strongest way to say that is that
-    no input produces anything but a 202.
+    """**No input produces a 503**.
+
+    and the strongest way to say that is that no input produces anything but a 202.
 
     The route declares no body, no query and no path parameter, so there is
     nothing for a client to get wrong and nothing for FastAPI to reject -- an
@@ -274,9 +280,10 @@ async def test_an_unreachable_queue_is_not_translated_into_a_503(unreachable: Fa
 
 
 def test_the_regenerate_module_holds_no_llm_client_and_has_no_503_to_give() -> None:
-    """**The two structural claims this task exists for**, asserted on the module rather
-    than on its behaviour, because "it did not raise" and "it did not answer 503" are
-    also what a route that swallowed everything produces.
+    """**The two structural claims this task exists for**.
+
+    asserted on the module rather than on its behaviour, because "it did not raise" and
+    "it did not answer 503" are also what a route that swallowed everything produces.
     """
     source = pathlib.Path(inspect.getfile(rows)).read_text()
     tree = ast.parse(source)
@@ -305,10 +312,10 @@ def test_the_regenerate_module_holds_no_llm_client_and_has_no_503_to_give() -> N
 
 
 def test_the_route_is_in_the_schema_as_a_202_under_the_admin_tag(app: FastAPI) -> None:
-    """A route that answers correctly and is absent from `/openapi.json` is a
-    route no generated client can call -- PRD 07 lists the schema as part of
-    the surface, and this endpoint has been in its admin table since M3 with
-    nothing behind it.
+    """A route that answers correctly and is absent from `/openapi.json` is a route no generated.
+
+    client can call -- PRD 07 lists the schema as part of the surface, and this endpoint
+    has been in its admin table since M3 with nothing behind it.
 
     `202` and not `200` is the part worth pinning here rather than only on a
     response: FastAPI's default is 200, so `status_code=` is what puts the
@@ -399,10 +406,11 @@ def _screen(slug: str) -> tuple[BuiltRow, ...]:
 async def test_every_registered_provider_is_listed_and_a_virgin_table_disables_none(
     toggler: httpx.AsyncClient,
 ) -> None:
-    """**The wrong default, caught at the wire.** `row_provider_settings` ships
-    empty, so this is the response every deployment gets on day one -- and a
-    route reading `.get(slug, False)` answers ten entries, correctly shaped,
-    every one of them off.
+    """**The wrong default.
+
+    caught at the wire.** `row_provider_settings` ships empty, so this is the response
+    every deployment gets on day one -- and a route reading `.get(slug, False)` answers
+    ten entries, correctly shaped, every one of them off.
 
     The slug set is compared against `{p.slug_prefix for p in ROW_PROVIDERS}`
     and never against a literal, which is the acceptance criterion: an eleventh
@@ -423,8 +431,7 @@ async def test_every_registered_provider_is_listed_and_a_virgin_table_disables_n
 async def test_disabling_a_provider_answers_the_entry_and_the_next_read_agrees(
     toggler: httpx.AsyncClient, provider_settings: FakeRowProviderSettingsRepository
 ) -> None:
-    """The write, read back three ways: the `PUT`'s own body, the table, and a
-    second `GET`.
+    """The write, read back three ways: the `PUT`'s own body, the table, and a second `GET`.
 
     The third is the one with teeth. A route that answered a correct-looking
     entry built from the request and never called `set_enabled` passes the
@@ -446,8 +453,9 @@ async def test_disabling_a_provider_answers_the_entry_and_the_next_read_agrees(
 async def test_re_enabling_writes_the_row_rather_than_deleting_it(
     toggler: httpx.AsyncClient, provider_settings: FakeRowProviderSettingsRepository
 ) -> None:
-    """An operator who changes their mind has not left the provider in a third
-    state, and the table records the action rather than reverting to absence.
+    """An operator who changes their mind has not left the provider in a third state.
+
+    and the table records the action rather than reverting to absence.
 
     Both spellings of *enabled* -- never touched, and touched back on -- render
     identically, which is the read half; the write half is that `True` is still
@@ -467,7 +475,7 @@ async def test_re_enabling_writes_the_row_rather_than_deleting_it(
 async def test_a_slug_the_registry_does_not_hold_is_refused_and_writes_no_row(
     toggler: httpx.AsyncClient, provider_settings: FakeRowProviderSettingsRepository
 ) -> None:
-    """**404 in V1's envelope, and the table is read back to prove it.**
+    """**404 in V1's envelope, and the table is read back to prove it.**.
 
     *"It answered 404"* is also what a route that wrote the row and then failed
     a lookup produces, so the assertion that matters is `overrides() == {}`. An
@@ -552,7 +560,8 @@ async def test_a_refused_toggle_leaves_the_cached_screens_alone(
 async def test_a_body_that_is_not_a_boolean_is_refused_by_the_envelope(
     toggler: httpx.AsyncClient, provider_settings: FakeRowProviderSettingsRepository
 ) -> None:
-    """`enabled` is the whole request body, so the two ways to get it wrong --
+    """`enabled` is the whole request body, so the two ways to get it wrong.
+
     absent, and not a boolean -- are the only shapes a client can send.
 
     422 in A2's envelope rather than a coerced write: `"maybe"` is not
@@ -568,9 +577,9 @@ async def test_a_body_that_is_not_a_boolean_is_refused_by_the_envelope(
 
 
 def test_the_provider_routes_are_in_the_schema_under_the_admin_tag(toggling: FastAPI) -> None:
-    """PRD 07's acceptance criterion is *every endpoint in its four tables
-    answers*, and a route absent from `/openapi.json` is one no generated
-    client can call.
+    """PRD 07's acceptance criterion is *every endpoint in its four tables answers*.
+
+    and a route absent from `/openapi.json` is one no generated client can call.
 
     `enabled` is asserted as a plain boolean in both directions: a client
     branching on this field is the entire point of the endpoint, and a `str`

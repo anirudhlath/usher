@@ -1,5 +1,6 @@
-"""`GET /titles/{id}/similar` -- PRD 05's precomputed neighbours, over
-`SimilarityService` (`services/similar.py`).
+"""`GET /titles/{id}/similar`.
+
+PRD 05's precomputed neighbours, over `SimilarityService` (`services/similar.py`).
 """
 
 import uuid
@@ -16,12 +17,13 @@ __all__ = ["SimilarResponse", "SimilarTitleResponse"]
 
 class SimilarTitleResponse(BaseModel):
     """One neighbour, in the **stored order** -- `SimilarityService.
-    neighbors_of` already reads `title_neighbors` back by its own stamped
-    `rank`, best first, ties broken by id (`ports/repository/search.py`'s
-    `TitleNeighborRepository.list_for`), and this DTO never re-sorts on
-    `score`. Reproducing the order from the score works only up to float
-    ties, and a tie broken differently on two reads would show a client two
-    different "most similar" titles for the same catalog.
+
+    neighbors_of` already reads `title_neighbors` back by its own stamped `rank`, best
+    first, ties broken by id (`ports/repository/search.py`'s
+    `TitleNeighborRepository.list_for`), and this DTO never re-sorts on `score`.
+    Reproducing the order from the score works only up to float ties, and a tie broken
+    differently on two reads would show a client two different "most similar" titles for
+    the same catalog.
     """
 
     id: uuid.UUID
@@ -42,10 +44,11 @@ class SimilarTitleResponse(BaseModel):
 
 
 class SimilarResponse(BaseModel):
-    """Neighbours, plus both of `title_neighbors`' staleness signals -- reported rather
-    than implied, because a client that could not see either one would be shown
-    yesterday's neighbours (or none at all) with no way to tell that from "this title
-    genuinely has nothing like it".
+    """Neighbours, plus both of `title_neighbors`' staleness signals.
+
+    reported rather than implied, because a client that could not see either one would
+    be shown yesterday's neighbours (or none at all) with no way to tell that from "this
+    title genuinely has nothing like it".
     """
 
     neighbors: list[SimilarTitleResponse]

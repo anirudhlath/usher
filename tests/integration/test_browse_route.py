@@ -75,8 +75,9 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, from every engine in the process
-    -- including the app's own, which is the one under measurement.
+    """Every SQL statement SQLAlchemy issues, from every engine in the process.
+
+    including the app's own, which is the one under measurement.
 
     Captured off `before_cursor_execute` rather than transcribed: M4 replaced
     two tasks that asserted on a hand-copied lookalike of a query, because the
@@ -161,8 +162,9 @@ async def test_a_page_boundary_inside_the_unkeyed_group_keeps_the_rest_of_it(
 async def test_the_whole_population_is_walked_once_across_pages(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Four rows at `limit=2` -- exact exhaustion -- against the real
-    statement, and no page is empty.
+    """Four rows at `limit=2`.
+
+    exact exhaustion -- against the real statement, and no page is empty.
 
     Seeded so that `sort_name` order is the reverse of id order, and that is
     asserted as the case's own premise: UUIDv7 makes `ORDER BY id` and
@@ -198,8 +200,10 @@ async def test_the_whole_population_is_walked_once_across_pages(
 async def test_a_predicated_browse_carries_real_counts_from_the_two_aggregates(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The facet block, computed by B6's `unnest`/`GROUP BY` and its year
-    aggregate rather than by a dict comprehension.
+    """The facet block.
+
+    computed by B6's `unnest`/`GROUP BY` and its year aggregate rather than by a dict
+    comprehension.
 
     **Each facet drops its own predicate**, and that is what this asserts: with
     `year` active, the *year* facet still counts both years, while the genre

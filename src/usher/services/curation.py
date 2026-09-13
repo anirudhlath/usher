@@ -95,8 +95,7 @@ class CurationReport:
 
 
 class CurationService:
-    """One completion per household per run, and the only writer of
-    `curated_rows`.
+    """One completion per household per run, and the only writer of `curated_rows`.
 
     **The client is required, never `LLMClient | None`.** A deployment with
     `USHER_LLM_ENABLED=false` has no client, and `composition.llm_client`
@@ -151,7 +150,9 @@ class CurationService:
         self._clock = clock
 
     async def generate(self, user_id: uuid.UUID) -> CurationReport:
-        """One generation for one household. Raises `UsherPortError`.
+        """One generation for one household.
+
+        Raises `UsherPortError`.
 
         Deliberately re-raises rather than absorbing, and the exception type is
         the whole of what `JobWorker` has to work with: `PortDataMalformed`
@@ -257,8 +258,9 @@ class CurationService:
     # ------------------------------------------------------------- assemble
 
     async def _history(self, user_id: uuid.UUID) -> list[str]:
-        """The two reads behind the prompt's history, rendered by
-        `curation_prompt.history_lines`.
+        """The two reads behind the prompt's history.
+
+        rendered by `curation_prompt.history_lines`.
 
         **The read is at this layer and the rendering is not**, which is the
         seam: this method is the only thing here that touches a port, and
@@ -338,8 +340,9 @@ class CurationService:
 
 
 def _nothing_to_curate(found: int, min_cards: int) -> str:
-    """What `generate` raises when the pool cannot fill one row, and what
-    `usher curate` prints as its whole message.
+    """What `generate` raises when the pool cannot fill one row.
+
+    and what `usher curate` prints as its whole message.
 
     **Two sentences from one guard, because they are two diagnoses.** A pool of
     zero is *"there is nothing here"* -- most often a deployment that has not

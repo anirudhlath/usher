@@ -140,8 +140,7 @@ class WatchStateMerge:
 
 @dataclass(frozen=True, slots=True)
 class WatchStateWrite:
-    """One client-originated watch write, on its way to
-    `WatchStateRepository.set_from_client`.
+    """One client-originated watch write, on its way to `WatchStateRepository.set_from_client`.
 
     The other direction from `WatchStateMerge`, immediately above. No
     `observed_at`: `merge_from_source`'s conflict rule exists to answer "did
@@ -188,8 +187,9 @@ class SweepResult:
 
 
 class AvailabilitySweepRefused(UsherPortError):
-    """The sweep would have retracted more of a source than the configured
-    ceiling permits, so it retracted nothing.
+    """The sweep would have retracted more of a source than the configured ceiling permits.
+
+    so it retracted nothing.
 
     `SourceAdapter.list_items`' contract already guarantees a walk raises
     rather than truncating, and `ReconcileService` already refuses to sweep

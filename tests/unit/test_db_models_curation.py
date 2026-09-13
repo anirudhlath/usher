@@ -1,5 +1,6 @@
-"""The 1:1 correspondence rule for M8's two tables, and the five schema decisions their
-column lists do not show.
+"""The 1:1 correspondence rule for M8's two tables.
+
+and the five schema decisions their column lists do not show.
 """
 
 from typing import cast
@@ -27,18 +28,20 @@ def test_curated_row_and_curated_row_row_have_matching_field_sets() -> None:
 
 
 def test_llm_call_and_llm_call_row_have_matching_field_sets() -> None:
-    """Same rule. The two tempting divergences are both additions:
-    a `user_id` (which PRD 10's column list deliberately omits — spend is
-    attributed to an outcome by joining `curated_rows` on `generation_id`),
-    and a `created_at` beside `at` (which would be the same instant twice).
+    """Same rule.
+
+    The two tempting divergences are both additions: a `user_id` (which PRD 10's column
+    list deliberately omits — spend is attributed to an outcome by joining
+    `curated_rows` on `generation_id`), and a `created_at` beside `at` (which would be
+    the same instant twice).
     """
     assert {c.name for c in LLMCallRow.__table__.columns} == set(LLMCall.model_fields)
 
 
 def test_neither_table_carries_a_created_at_or_an_updated_at() -> None:
-    """Both tables are write-once artefacts, so their one timestamp is the
-    domain's own: `generated_at` is the generation's instant and `at` is the
-    call's.
+    """Both tables are write-once artefacts, so their one timestamp is the domain's own.
+
+    `generated_at` is the generation's instant and `at` is the call's.
 
     Asserted rather than commented because the tempting edit is to add
     `created_at`/`updated_at` "for consistency", and an `updated_at` silently
@@ -54,8 +57,7 @@ def test_neither_table_carries_a_created_at_or_an_updated_at() -> None:
 
 
 def test_generated_at_and_at_have_no_server_default() -> None:
-    """Unlike every other timestamp in this schema, and the reason is the
-    read.
+    """Unlike every other timestamp in this schema, and the reason is the read.
 
     `generated_at` is *one instant per generation*, minted once by
     `CurationService` and written identically onto every row of that
@@ -71,8 +73,9 @@ def test_generated_at_and_at_have_no_server_default() -> None:
 
 
 def test_card_title_ids_is_an_ordered_uuid_array_and_not_text() -> None:
-    """`ARRAY(Text)` is the only array prior art in this schema
-    (`titles.genres` and friends), so the tempting spelling is to copy it.
+    """`ARRAY(Text)` is the only array prior art in this schema (`titles.genres` and friends).
+
+    so the tempting spelling is to copy it.
 
     It would store a UUID as its 36-character rendering, cost 36 bytes an id
     instead of 16, and — the part that matters — silently accept any string
@@ -87,9 +90,7 @@ def test_card_title_ids_is_an_ordered_uuid_array_and_not_text() -> None:
 
 
 def test_cost_usd_is_numeric_with_a_scale_that_cannot_round_a_cheap_call_away() -> None:
-    """`Float` is the wrong implementation this kills, and a too-small scale is the subtler
-    one.
-    """
+    """`Float` is the wrong implementation this kills, and a too-small scale is the subtler one."""
     column_type = LLMCallRow.__table__.c.cost_usd.type
     assert isinstance(column_type, Numeric)
     assert column_type.asdecimal is True
@@ -97,8 +98,9 @@ def test_cost_usd_is_numeric_with_a_scale_that_cannot_round_a_cheap_call_away() 
 
 
 def test_purpose_is_an_enum_column_wide_enough_for_its_longest_member() -> None:
-    """`enum_column` compiles to `VARCHAR(length)`, so the length is a real
-    bound rather than documentation.
+    """`enum_column` compiles to `VARCHAR(length)`.
+
+    so the length is a real bound rather than documentation.
 
     **The lower bound is not this case's to defend, and asserting it here was
     a check that could not fail.** SQLAlchemy's `Enum.__init__` refuses a
@@ -125,9 +127,10 @@ def test_purpose_is_an_enum_column_wide_enough_for_its_longest_member() -> None:
 
 
 def test_curated_rows_check_constraint_names() -> None:
-    """The Pydantic bounds on `CuratedRow`, mirrored as CHECKs — this
-    schema's standing convention, because nothing stops a hand-written
-    `INSERT` from bypassing the model.
+    """The Pydantic bounds on `CuratedRow`, mirrored as CHECKs.
+
+    this schema's standing convention, because nothing stops a hand-written `INSERT`
+    from bypassing the model.
 
     `cards_not_empty` is the load-bearing one and it is
     `CuratedRow.card_title_ids`'s `min_length=1` in SQL: an empty curated row
@@ -155,13 +158,13 @@ def test_curated_rows_check_constraint_names() -> None:
 
 def test_llm_calls_check_constraint_names() -> None:
     """`ok_error_agree` is the one worth reading twice.
-    `LLMCall._ok_and_error_must_agree` already refuses both halves, and its
-    docstring says the model is the right place *"rather than as a CHECK
-    alone"* — alone being the operative word, and the more so because it is a
-    `model_validator(mode="after")`, which `model_construct` skips entirely.
-    A row where `ok` is true and `error` is set reads as a failure in every
-    `WHERE error IS NOT NULL` anybody will write against this ledger, and the
-    ledger outlives the process that wrote it.
+
+    `LLMCall._ok_and_error_must_agree` already refuses both halves, and its docstring
+    says the model is the right place *"rather than as a CHECK alone"* — alone being the
+    operative word, and the more so because it is a `model_validator(mode="after")`,
+    which `model_construct` skips entirely. A row where `ok` is true and `error` is set
+    reads as a failure in every `WHERE error IS NOT NULL` anybody will write against
+    this ledger, and the ledger outlives the process that wrote it.
     """
     table = cast(Table, LLMCallRow.__table__)
     names = {c.name for c in table.constraints if c.name is not None}
@@ -176,11 +179,12 @@ def test_llm_calls_check_constraint_names() -> None:
 
 
 def test_the_curated_read_index_leads_with_user_id_and_descends_generated_at() -> None:
-    """`ix_curated_rows_user_newest` is the whole of this table's index set,
-    and its two columns serve three readers: `list_for_user`'s
-    `WHERE user_id = :user_id`, `replace_for_user`'s `DELETE` by the same
-    column, and the `ON DELETE CASCADE` from `users`, which Postgres performs
-    as a lookup *by the referencing column*.
+    """`ix_curated_rows_user_newest` is the whole of this table's index set.
+
+    and its two columns serve three readers: `list_for_user`'s `WHERE user_id =
+    :user_id`, `replace_for_user`'s `DELETE` by the same column, and the `ON DELETE
+    CASCADE` from `users`, which Postgres performs as a lookup *by the referencing
+    column*.
 
     The direction is asserted here off `Base.metadata` and again off
     `pg_indexes.indexdef` in `tests/integration/test_migrations.py`, because
@@ -210,10 +214,10 @@ def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None
 
 
 def test_the_user_foreign_key_cascades_and_llm_calls_has_none() -> None:
-    """A curated row protects no user state and is fully re-derivable by
-    running the generation again, which is `user_taste`'s case rather than
-    `watch_states`' — ADR-0010 makes `watch_states.user_id` RESTRICT because
-    a watch record *is* the thing worth keeping.
+    """A curated row protects no user state and is fully re-derivable by running the generation.
+
+    again, which is `user_taste`'s case rather than `watch_states`' — ADR-0010 makes
+    `watch_states.user_id` RESTRICT because a watch record *is* the thing worth keeping.
 
     `llm_calls` has no foreign key at all, in either direction, and that is
     the second half of the same decision: it has no `user_id` to cascade, and

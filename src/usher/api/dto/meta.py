@@ -1,6 +1,4 @@
-"""Response DTO for `GET /meta/attribution` (PRD 04's hard rule 4, PRD 07's Meta
-table).
-"""
+"""Response DTO for `GET /meta/attribution` (PRD 04's hard rule 4, PRD 07's Meta table)."""
 
 from pydantic import BaseModel
 

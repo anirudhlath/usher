@@ -85,9 +85,11 @@ def _called_names(tree: ast.AST) -> list[str]:
 
 
 def test_a_token_minted_under_the_credential_subkey_does_not_redeem_as_a_ticket() -> None:
-    """`credentials.py`'s docstring promised this subkey was "domain-separated from any
-    other use a later milestone makes of `USHER_SECRET_KEY`". This is that later
-    milestone, and this is where the promise becomes a measurement.
+    """`credentials.py`'s docstring promised this subkey was "domain-separated from any other.
+
+    use a later milestone makes of `USHER_SECRET_KEY`".
+
+    This is that later milestone, and this is where the promise becomes a measurement.
     """
     credential_cipher = build_cipher(_SECRET)
     ticket_cipher = playback_ticket.build_ticket_cipher(_SECRET)
@@ -110,8 +112,10 @@ def test_a_token_minted_under_the_credential_subkey_does_not_redeem_as_a_ticket(
 
 
 def test_a_ticket_does_not_decrypt_under_the_credential_stores_own_cipher() -> None:
-    """The mirror arm. One arm alone is satisfied by a cipher that decrypts
-    nothing at all, which is why the separation is asserted from both sides.
+    """The mirror arm.
+
+    One arm alone is satisfied by a cipher that decrypts nothing at all, which is why
+    the separation is asserted from both sides.
     """
     credential_cipher = build_cipher(_SECRET)
     ticket_cipher = playback_ticket.build_ticket_cipher(_SECRET)
@@ -127,10 +131,11 @@ def test_a_ticket_does_not_decrypt_under_the_credential_stores_own_cipher() -> N
 
 
 def test_one_secret_always_derives_the_same_ticket_cipher() -> None:
-    """Without this, the two separation cases above could pass because
-    `build_ticket_cipher` is nondeterministic rather than because the `info`
-    string separates anything -- a cipher freshly randomised per call refuses
-    every foreign token for the wrong reason.
+    """Without this.
+
+    the two separation cases above could pass because `build_ticket_cipher` is
+    nondeterministic rather than because the `info` string separates anything -- a
+    cipher freshly randomised per call refuses every foreign token for the wrong reason.
     """
     first = playback_ticket.build_ticket_cipher(_SECRET)
     second = playback_ticket.build_ticket_cipher(SecretStr(_SECRET.get_secret_value()))
@@ -156,10 +161,12 @@ def test_one_secret_always_derives_the_same_ticket_cipher() -> None:
     ],
 )
 def test_the_subkey_derivation_is_pinned_by_a_known_answer(secret: str, expected_key: str) -> None:
-    """**Without this, the whole derivation is unpinned.** Found by the sweep, refuting the
-    plan's prediction that changing `salt=None` to a literal salt "fails the round-
-    trip": it survives all 3,007 unit cases, because every case builds *both* the cipher
-    and the token through `build_ticket_cipher`, so a consistently-applied change to the
+    """**Without this.
+
+    the whole derivation is unpinned.** Found by the sweep, refuting the plan's
+    prediction that changing `salt=None` to a literal salt "fails the round- trip": it
+    survives all 3,007 unit cases, because every case builds *both* the cipher and the
+    token through `build_ticket_cipher`, so a consistently-applied change to the.
     """
     pinned = Fernet(expected_key)
 
@@ -172,7 +179,8 @@ def test_the_subkey_derivation_is_pinned_by_a_known_answer(secret: str, expected
 
 
 def test_a_different_secret_redeems_nothing() -> None:
-    """PRD 08's rotation consequence, as a property rather than a docstring:
+    """PRD 08's rotation consequence, as a property rather than a docstring.
+
     rotating `USHER_SECRET_KEY` invalidates every outstanding ticket.
     """
     minted = playback_ticket.build_ticket_cipher(_SECRET)
@@ -190,8 +198,9 @@ def test_a_different_secret_redeems_nothing() -> None:
 
 
 def test_a_ticket_is_redeemable_one_second_inside_its_ttl_and_not_one_second_outside() -> None:
-    """Both sides of the boundary, positive first -- an implementation that
-    redeems nothing must not be able to pass the expiry half.
+    """Both sides of the boundary, positive first.
+
+    an implementation that redeems nothing must not be able to pass the expiry half.
 
     `ttl_seconds` is passed explicitly because `redeem` has no default for it:
     this module does not get an opinion about how long a client takes to press
@@ -209,10 +218,12 @@ def test_a_ticket_is_redeemable_one_second_inside_its_ttl_and_not_one_second_out
 
 
 def test_the_ttl_is_measured_from_when_the_ticket_was_minted() -> None:
-    """Kills a `mint` that stamps the token with the wrong instant -- the
-    stamp is inside the authenticated envelope, so nothing else can observe
-    it. Two tickets for the same URL, minted an hour apart, read at one
-    instant under one TTL: the older is expired and the newer is not.
+    """Kills a `mint` that stamps the token with the wrong instant.
+
+    the stamp is inside the authenticated envelope, so nothing else can observe it.
+
+    Two tickets for the same URL, minted an hour apart, read at one instant under one
+    TTL: the older is expired and the newer is not.
     """
     cipher = playback_ticket.build_ticket_cipher(_SECRET)
     old = playback_ticket.mint(cipher, _URL, minted_at=_MINTED_AT - timedelta(hours=1))
@@ -232,11 +243,12 @@ def test_the_ttl_is_measured_from_when_the_ticket_was_minted() -> None:
     ["garbage", "truncated", "expired", "empty", "non-ascii", "another-secret"],
 )
 def test_redeem_answers_none_rather_than_raising(shape: str) -> None:
-    """Expired and forged are deliberately indistinguishable. `Fernet.
-    extract_timestamp` verifies the signature *before* handing back the
-    timestamp, so the distinction is genuinely available and is not taken:
-    "this ticket expired" confirms to a holder that the string was a real
-    Usher-minted ticket, and the client's next move is identical either way.
+    """Expired and forged are deliberately indistinguishable.
+
+    `Fernet. extract_timestamp` verifies the signature *before* handing back the
+    timestamp, so the distinction is genuinely available and is not taken: "this ticket
+    expired" confirms to a holder that the string was a real Usher-minted ticket, and
+    the client's next move is identical either way.
 
     `non-ascii` is the arm the plan did not name and it is the one with teeth.
     Measured on cryptography 49.0.0: `Fernet.decrypt_at_time` raises a bare
@@ -272,10 +284,10 @@ def test_redeem_answers_none_rather_than_raising(shape: str) -> None:
 
 
 def test_the_module_never_asks_whether_a_ticket_merely_expired() -> None:
-    """Pins the no-oracle decision structurally rather than leaving it in
-    prose. Scanned over a docstring-stripped tree, so the paragraph above
-    explaining why `extract_timestamp` is not used cannot answer the scan on
-    the code's behalf.
+    """Pins the no-oracle decision structurally rather than leaving it in prose.
+
+    Scanned over a docstring-stripped tree, so the paragraph above explaining why
+    `extract_timestamp` is not used cannot answer the scan on the code's behalf.
     """
     source = ast.unparse(_module_tree(strip_docstrings=True))
 
@@ -288,8 +300,10 @@ def test_the_module_never_asks_whether_a_ticket_merely_expired() -> None:
 
 
 def test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op() -> None:
-    """**The plan's measurement is right at one length and wrong as a rule, and D3's deep-
-    link assertion is the thing that would have been ratified by the difference.**
+    """**The plan's measurement is right at one length and wrong as a rule.
+
+    and D3's deep- link assertion is the thing that would have been ratified by the
+    difference.**.
     """
     cipher = playback_ticket.build_ticket_cipher(_SECRET)
     alphabet = set(string.ascii_letters + string.digits + "-_=")
@@ -331,9 +345,10 @@ def test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op() 
 
 @pytest.mark.parametrize("call", ["mint", "redeem"])
 def test_a_naive_datetime_is_refused_rather_than_read_as_local_time(call: str) -> None:
-    """`encrypt_at_time` takes `int` seconds. A naive `datetime.timestamp()`
-    silently means "local time", which would put a ticket's stamp hours from
-    where the caller meant -- so the conversion refuses one.
+    """`encrypt_at_time` takes `int` seconds.
+
+    A naive `datetime.timestamp()` silently means "local time", which would put a
+    ticket's stamp hours from where the caller meant -- so the conversion refuses one.
 
     The `redeem` arm doubles as the case that pins *where* the conversion
     happens: `redeem` swallows `ValueError` to turn a non-ASCII token into
@@ -352,11 +367,11 @@ def test_a_naive_datetime_is_refused_rather_than_read_as_local_time(call: str) -
 
 
 def test_the_secret_is_unwrapped_once_and_never_bound_to_a_name() -> None:
-    """CLAUDE.md's rule, and `credentials.py:28-32`'s, as a structural
-    assertion: `get_secret_value()` is called exactly once in the whole
-    module, inside `build_ticket_cipher`, and its result is an argument rather
-    than an assignment -- so no plaintext copy of `USHER_SECRET_KEY` outlives
-    the derivation.
+    """CLAUDE.md's rule, and `credentials.py:28-32`'s, as a structural assertion.
+
+    `get_secret_value()` is called exactly once in the whole module, inside
+    `build_ticket_cipher`, and its result is an argument rather than an assignment -- so
+    no plaintext copy of `USHER_SECRET_KEY` outlives the derivation.
     """
     whole = _module_tree(strip_docstrings=True)
     unwraps = [name for name in _called_names(whole) if name.endswith("get_secret_value")]
@@ -386,10 +401,11 @@ def test_the_secret_is_unwrapped_once_and_never_bound_to_a_name() -> None:
 
 
 def test_mint_stamps_the_token_and_redeem_checks_the_stamp() -> None:
-    """The two `_at_time` primitives are what make every expiry case above
-    deterministic. A `mint` that reached for `encrypt` would still round-trip
-    and would silently stamp the token with the wall clock, which no fixture
-    could then place either side of a boundary.
+    """The two `_at_time` primitives are what make every expiry case above deterministic.
+
+    A `mint` that reached for `encrypt` would still round-trip and would silently stamp
+    the token with the wall clock, which no fixture could then place either side of a
+    boundary.
     """
     assert "encrypt_at_time" in " ".join(_called_names(_function("mint")))
     assert "decrypt_at_time" in " ".join(_called_names(_function("redeem")))
@@ -399,11 +415,11 @@ def test_mint_stamps_the_token_and_redeem_checks_the_stamp() -> None:
 
 
 def test_no_case_in_this_file_sleeps_or_patches_a_clock() -> None:
-    """The acceptance criterion, as a check rather than as a habit. Every
-    expiry case takes its instant as an argument, so nothing here needs to
-    wait for one or to lie about one -- and a future case that reached for
-    either would be re-introducing the nondeterminism `encrypt_at_time` exists
-    to remove.
+    """The acceptance criterion, as a check rather than as a habit.
+
+    Every expiry case takes its instant as an argument, so nothing here needs to wait
+    for one or to lie about one -- and a future case that reached for either would be
+    re-introducing the nondeterminism `encrypt_at_time` exists to remove.
     """
     tree = ast.parse(pathlib.Path(__file__).read_text())
     called = _called_names(tree)
@@ -422,9 +438,11 @@ def test_no_case_in_this_file_sleeps_or_patches_a_clock() -> None:
 
 
 def test_the_ticket_cipher_is_a_fernet_over_a_thirty_two_byte_subkey() -> None:
-    """`Fernet` refuses a key that is not 32 url-safe-base64-encoded bytes, so
-    `length=32` is load-bearing at construction rather than at use. Pinned by
-    building the key the module builds and handing it to `Fernet` directly.
+    """`Fernet` refuses a key that is not 32 url-safe-base64-encoded bytes.
+
+    so `length=32` is load-bearing at construction rather than at use.
+
+    Pinned by building the key the module builds and handing it to `Fernet` directly.
     """
     cipher = playback_ticket.build_ticket_cipher(_SECRET)
     assert isinstance(cipher, Fernet)

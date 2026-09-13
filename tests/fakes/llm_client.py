@@ -1,5 +1,6 @@
-"""A scripted `LLMClient`, for every test that is about what the *service* does with a
-completion rather than about how one is fetched.
+"""A scripted `LLMClient`.
+
+for every test that is about what the *service* does with a completion rather than about
 """
 
 from collections import deque
@@ -35,8 +36,10 @@ def usage(
     cost_usd: Decimal = Decimal("0"),
     latency_ms: int = 5,
 ) -> LLMUsage:
-    """An `LLMUsage` with plausible defaults, so a case that is not about
-    usage does not have to name five fields."""
+    """An `LLMUsage` with plausible defaults.
+
+    so a case that is not about usage does not have to name five fields.
+    """
     return LLMUsage(
         model=model,
         tokens_in=tokens_in,

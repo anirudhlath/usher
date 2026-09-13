@@ -1,5 +1,6 @@
-"""`usher curate` -- its argument surface, the report it prints, and the one arm that
-answers before it opens anything.
+"""`usher curate`.
+
+its argument surface, the report it prints, and the one arm that answers before it opens
 """
 
 import contextlib
@@ -84,16 +85,21 @@ def test_curate_takes_no_arguments_at_all() -> None:
 
 
 def test_curate_is_advertised_by_the_parser() -> None:
-    """A subcommand `build_parser` does not declare is a command
-    `test_cli_errors.py`'s boundary sweep never runs."""
+    """A subcommand `build_parser` does not declare is a command `test_cli_errors.py`'s boundary.
+
+    sweep never runs.
+    """
     assert build_parser().parse_args(["curate"]).command == "curate"
 
 
 def test_curate_dispatches_to_curate_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured: deleting the `curate` arm from `_dispatch` survived the whole
-    selection M8 swept until this case was written."""
+    """Measured.
+
+    deleting the `curate` arm from `_dispatch` survived the whole selection M8 swept
+    until this case was written.
+    """
     configured(monkeypatch)
 
     calls = dispatched(monkeypatch, arm="_curate", argv=["curate"])
@@ -106,8 +112,7 @@ def test_curate_dispatches_to_curate_and_not_to_the_server(
 def test_the_report_prints_the_pool_it_chose_from_and_not_the_rows_it_kept(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The number that cannot be recomputed**, which is why
-    `CurationReport` carries it.
+    """**The number that cannot be recomputed**, which is why `CurationReport` carries it.
 
     A CLI that asked the pool service again would be building a *second*
     pool -- a second `list_unwatched_candidates`, a second centroid read, and
@@ -128,9 +133,10 @@ def test_the_report_prints_the_pool_it_chose_from_and_not_the_rows_it_kept(
 
 
 def test_the_report_names_every_row_it_kept(capsys: pytest.CaptureFixture[str]) -> None:
-    """The shelves are the product, so they are the answer -- a report that
-    printed only counts would leave an operator unable to tell a generation
-    that worked from one that produced three shelves of the same thing.
+    """The shelves are the product, so they are the answer.
+
+    a report that printed only counts would leave an operator unable to tell a
+    generation that worked from one that produced three shelves of the same thing.
 
     Each row's own card count too, because `min_cards` is a floor and a row
     sitting exactly on it is the signal that the pool is running out of
@@ -154,7 +160,7 @@ def test_the_report_names_every_row_it_kept(capsys: pytest.CaptureFixture[str]) 
 def test_the_report_prints_all_five_reasons_including_the_zeros(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Zeros included, and the report says why.**
+    """**Zeros included, and the report says why.**.
 
     `usher.curation.dropped` records every reason every time for exactly this
     argument one layer down: *a reason absent from a tally is
@@ -180,8 +186,9 @@ def test_the_report_prints_all_five_reasons_including_the_zeros(
 def test_the_two_row_reasons_count_rows_and_the_three_card_reasons_count_cards(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The unit split is the load-bearing half of the five**, and a report
-    that printed a bare number beside each would invite the one arithmetic
+    """**The unit split is the load-bearing half of the five**.
+
+    and a report that printed a bare number beside each would invite the one arithmetic
     the vocabulary exists to forbid: summing across the label.
 
     `row_unusable` and `row_too_short` count *rows*; `not_in_pool`,
@@ -245,10 +252,11 @@ def test_a_tally_of_one_does_not_read_as_a_tally_of_several(
 def test_the_report_prints_the_tokens_and_the_model_that_answered(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`LLMUsage.model` is *what answered*, not what this deployment asked
-    for, and that is the one worth printing: PRD 10 groups spend by model,
-    and a proxy silently serving a different one is exactly the state
-    `curated_rows.model_name` exists to make queryable.
+    """`LLMUsage.model` is *what answered*.
+
+    not what this deployment asked for, and that is the one worth printing: PRD 10
+    groups spend by model, and a proxy silently serving a different one is exactly the
+    state `curated_rows.model_name` exists to make queryable.
 
     The token counts are printed separately rather than summed, because they
     are priced separately -- `USHER_LLM_PRICE_IN_PER_MTOK` and
@@ -277,11 +285,12 @@ def test_the_report_prints_the_tokens_and_the_model_that_answered(
 def test_the_generation_id_is_printed_because_it_is_the_only_join_key(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`llm_calls` carries no `user_id`. `generation_id` is its only
-    correlation key and PRD 10's dashboard 5 is
-    `llm_calls JOIN curated_rows USING (generation_id)` -- so an operator who
-    wants to see what this run cost, after the fact, has nothing else to
-    select on."""
+    """`llm_calls` carries no `user_id`.
+
+    `generation_id` is its only correlation key and PRD 10's dashboard 5 is `llm_calls
+    JOIN curated_rows USING (generation_id)` -- so an operator who wants to see what
+    this run cost, after the fact, has nothing else to select on.
+    """
     _print_curation_report(_report())
 
     assert str(_GENERATION) in capsys.readouterr().out
@@ -290,8 +299,9 @@ def test_the_generation_id_is_printed_because_it_is_the_only_join_key(
 def test_the_cost_is_rendered_from_the_decimal_and_never_through_a_float(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**`cost_usd` is a `Decimal` all the way to the screen**, and this is the input that
-    says so.
+    """**`cost_usd` is a `Decimal` all the way to the screen**.
+
+    and this is the input that says so.
     """
     _print_curation_report(
         _report(
@@ -313,8 +323,10 @@ def test_the_cost_is_rendered_from_the_decimal_and_never_through_a_float(
 async def test_a_deployment_with_no_llm_says_so_instead_of_curating_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**The disabled deployment, which is a configuration fact rather than a failure**,
-    and the one arm of this command that answers before anything is opened.
+    """**The disabled deployment.
+
+    which is a configuration fact rather than a failure**, and the one arm of this
+    command that answers before anything is opened.
     """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
@@ -351,8 +363,9 @@ async def test_a_deployment_with_no_llm_says_so_instead_of_curating_nothing(
 async def test_a_pool_too_small_for_one_row_reaches_the_operator_as_a_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`git diff src/usher/cli.py` is empty for M9 Task G4, and this is what makes that a
-    claim rather than an omission.**
+    """**`git diff src/usher/cli.py` is empty for M9 Task G4.
+
+    and this is what makes that a claim rather than an omission.**.
     """
     sentence = curation._nothing_to_curate(DEFAULT_MIN_CARDS - 1, DEFAULT_MIN_CARDS)
     assert str(DEFAULT_MIN_CARDS) in sentence, sentence

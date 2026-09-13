@@ -16,11 +16,14 @@ SLUG_PREFIX = "curated"
 
 
 class LLMPurpose(StrEnum):
-    """`llm_calls.purpose` (PRD 10) -- a closed vocabulary so it stays a
-    usable telemetry dimension instead of a cardinality footgun. PRD 10's own
-    text marks this open-ended ("curation | query_expansion | ..."): a new
-    call site adds a member here and to PRD 10 in the same change, never a
-    free-form string.
+    """`llm_calls.purpose` (PRD 10).
+
+    a closed vocabulary so it stays a usable telemetry dimension instead of a
+    cardinality footgun.
+
+    PRD 10's own text marks this open-ended ("curation | query_expansion | ..."): a new
+    call site adds a member here and to PRD 10 in the same change, never a free-form
+    string.
 
     **Declared here in M8 rather than in `ports/llm.py`, where M1 put it, and
     the move is forced by the layering rather than chosen.** `LLMCall` below
@@ -91,10 +94,13 @@ class LLMCall(DomainModel):
 
     @model_validator(mode="after")
     def _ok_and_error_must_agree(self) -> Self:
-        """A failed call with no error is a row an operator cannot act on, and a successful
-        call carrying one reads as a failure in every `WHERE error IS NOT NULL` anybody
-        will write. Enforced here rather than as a CHECK alone, because the model is
-        what the service constructs and the CHECK would report it one layer too late.
+        """A failed call with no error is a row an operator cannot act on.
+
+        and a successful call carrying one reads as a failure in every `WHERE error IS
+        NOT NULL` anybody will write.
+
+        Enforced here rather than as a CHECK alone, because the model is what the
+        service constructs and the CHECK would report it one layer too late.
         """
         if self.ok and self.error is not None:
             raise ValueError("a successful call carries no error")

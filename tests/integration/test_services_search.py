@@ -141,7 +141,8 @@ async def _seed_copy(
 async def _seed_episode_copy(
     session: AsyncSession, *, source_id: uuid.UUID, series_id: uuid.UUID, external_id: str
 ) -> uuid.UUID:
-    """One `media_items` row shaped the way `IngestService` writes an episode:
+    """One `media_items` row shaped the way `IngestService` writes an episode.
+
     the *series'* `title_id` **and** the episode's own `episode_id`.
 
     Written through raw SQL rather than through `upsert_many` because
@@ -217,9 +218,10 @@ def _record_statements(session: AsyncSession, sink: list[str]) -> Iterator[None]
 async def test_a_search_costs_the_same_statements_at_5_hits_and_at_50(
     session: AsyncSession,
 ) -> None:
-    """The N+1 this task's two port additions exist to delete, asserted the way
-    M4's ingest cases assert it: hold the *shape* fixed and vary the thing that
-    would multiply.
+    """The N+1 this task's two port additions exist to delete.
+
+    asserted the way M4's ingest cases assert it: hold the *shape* fixed and vary the
+    thing that would multiply.
 
     Fails: `titles.get(hit.title_id)` per hit, and `media_items.list_for_title`
     per hit. The second is worse than N+1 -- a read on `media_items.title_id`
@@ -252,10 +254,11 @@ async def test_a_search_costs_the_same_statements_at_5_hits_and_at_50(
 
 @pytest.mark.integration
 async def test_ownership_counts_a_retracted_copy(session: AsyncSession, source: Source) -> None:
-    """PRD 02's soft-delete availability. A copy the nightly sweep marked
-    unavailable is still a copy you have, and a ranking that flips because a
-    source went down moves search results for a reason unconnected to the
-    query.
+    """PRD 02's soft-delete availability.
+
+    A copy the nightly sweep marked unavailable is still a copy you have, and a ranking
+    that flips because a source went down moves search results for a reason unconnected
+    to the query.
 
     This is also the case that pins the *shared* definition: the same predicate
     backs `SearchFilters.owned_only` in `PostgresSearchIndex`, and two
@@ -290,12 +293,13 @@ async def test_ownership_counts_a_retracted_copy(session: AsyncSession, source: 
 async def test_a_series_owned_only_through_its_episodes_is_read_once(
     session: AsyncSession, source: Source
 ) -> None:
-    """The bound named rather than implied. `owned_title_ids` carries
-    `AND episode_id IS NULL`, so a library that reported episodes but never
-    their series row reads as not-owned for that series -- the same bound
-    `resolve_external_ids`' title branch already accepts, and the alternative
-    is the 20,001-row read above. Asserted so the trade is visible if anyone
-    later calls it a bug.
+    """The bound named rather than implied.
+
+    `owned_title_ids` carries `AND episode_id IS NULL`, so a library that reported
+    episodes but never their series row reads as not-owned for that series -- the same
+    bound `resolve_external_ids`' title branch already accepts, and the alternative is
+    the 20,001-row read above. Asserted so the trade is visible if anyone later calls it
+    a bug.
 
     Both sides again: the boost's read and the `owned_only` filter must give
     the same answer for this row shape, or a series appears in a filtered list
@@ -345,8 +349,10 @@ async def test_the_two_owned_predicates_are_the_same_string(session: AsyncSessio
 async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
     session: AsyncSession, source: Source
 ) -> None:
-    """Hydration through the real repository, where a `Title` is 31 columns and
-    `search_document` is a deferred generated column the read must not touch.
+    """Hydration through the real repository.
+
+    where a `Title` is 31 columns and `search_document` is a deferred generated column
+    the read must not touch.
 
     Fails: a `list_by_ids` whose `defer(..., raiseload=True)` reaches
     `_to_domain` -- which would be a `MissingGreenlet` rather than a wrong
@@ -399,8 +405,9 @@ async def test_a_household_costs_exactly_two_more_statements_and_it_names_them(
 async def test_a_stored_centroid_ranks_a_search_on_a_process_that_holds_no_model(
     session: AsyncSession,
 ) -> None:
-    """PRD 05's sixth term end to end, over the two `halfvec` round trips no fake can
-    express — the centroid's and the candidates'.
+    """PRD 05's sixth term end to end, over the two `halfvec` round trips no fake can express.
+
+    the centroid's and the candidates'.
     """
     near = await _seed_title(session, "Vacuum Study Alpha")
     far = await _seed_title(session, "Vacuum Study Beta")
@@ -527,10 +534,12 @@ async def test_a_watched_episode_lifts_its_series_in_a_search(
 
 @pytest.mark.integration
 async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSession) -> None:
-    """The empty-candidate guard, where it is observable. Fails: a `_rank` that
-    issues `list_by_ids([])` and `owned_title_ids([])` anyway -- two statements
-    per keystroke on a search box whose query has not matched yet, which is
-    most keystrokes."""
+    """The empty-candidate guard, where it is observable.
+
+    Fails: a `_rank` that issues `list_by_ids([])` and `owned_title_ids([])` anyway --
+    two statements per keystroke on a search box whose query has not matched yet, which
+    is most keystrokes.
+    """
     await _seed_title(session, "The Quiet Vacuum")
     await session.flush()
     service = _service(session)
@@ -547,7 +556,7 @@ async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSe
 async def test_the_analytics_row_is_committed_and_a_second_session_can_read_it(
     postgres_url: str,
 ) -> None:
-    """**The commit, observed from outside the transaction that made it.**"""
+    """**The commit, observed from outside the transaction that made it.**."""
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     household = new_id()

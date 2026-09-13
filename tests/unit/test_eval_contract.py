@@ -81,10 +81,11 @@ def _contracts() -> list[dict[str, Any]]:
 
 
 def test_the_eval_package_is_named_by_an_import_contract() -> None:
-    """The allowlist note in `[tool.importlinter]` says a new top-level package must be
-    named by some contract or it escapes all of them -- and **the contract's
-    `source_modules` list is the whole contract**, so a top-level name that lands
-    unlisted is a module free to import a dev-only extra while the gate still reports 11
+    """The allowlist note in `[tool.importlinter]` says a new top-level package must be named by.
+
+    some contract or it escapes all of them -- and **the contract's `source_modules`
+    list is the whole contract**, so a top-level name that lands unlisted is a module
+    free to import a dev-only extra while the gate still reports 11.
     """
     naming = [one for one in _contracts() if "usher.eval" in one.get("forbidden_modules", [])]
     assert len(naming) == 1, (
@@ -264,10 +265,11 @@ def test_the_ranx_contract_names_every_module_that_may_not_import_it() -> None:
 
 
 def test_only_the_ir_module_inside_the_metrics_package_names_ranx() -> None:
-    """The one inch of the twelfth contract's claim that the contract cannot
-    reach, held by a scan for M8 Task 17's recorded reason -- *prefer a graph
-    property wherever one is expressible*, and cover what it cannot with the
-    other kind of check, because neither subsumes the other.
+    """The one inch of the twelfth contract's claim that the contract cannot reach.
+
+    held by a scan for M8 Task 17's recorded reason -- *prefer a graph property wherever
+    one is expressible*, and cover what it cannot with the other kind of check, because
+    neither subsumes the other.
 
     A `forbidden` contract's `source_modules` cover a module **and all its
     descendants**, so `usher.eval.metrics` cannot be a source with `ir` carved
@@ -354,10 +356,11 @@ def _statements(sql: str) -> list[str]:
 
 
 def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
-    """ADR-0041. A migration would create these tables in every deployment,
-    for a harness those deployments cannot run because the `eval` extra is
-    not installed -- and a dev-only branch is the standard way `alembic
-    heads` stops being one head.
+    """ADR-0041.
+
+    A migration would create these tables in every deployment, for a harness those
+    deployments cannot run because the `eval` extra is not installed -- and a dev-only
+    branch is the standard way `alembic heads` stops being one head.
 
     Asserted structurally because the failure is silent: a migration added
     later still leaves every eval test green, and the harness's own
@@ -383,13 +386,13 @@ def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
 
 
 def test_no_orm_model_puts_a_table_in_the_eval_schema() -> None:
-    """The second way a migration arrives, and the file scan above cannot see
-    it: `alembic revision --autogenerate` mints migrations from
-    `Base.metadata`, so a model declaring
-    `__table_args__ = {"schema": "eval"}` puts the eval schema into the chain
-    the next time anybody generates one -- with no migration file naming it
-    until that moment, and the harness's own `schema.sql` then a second,
-    diverging definition of the same tables.
+    """The second way a migration arrives, and the file scan above cannot see it.
+
+    `alembic revision --autogenerate` mints migrations from `Base.metadata`, so a model
+    declaring `__table_args__ = {"schema": "eval"}` puts the eval schema into the chain
+    the next time anybody generates one -- with no migration file naming it until that
+    moment, and the harness's own `schema.sql` then a second, diverging definition of
+    the same tables.
     """
     tables = Base.metadata.tables
     assert len(tables) >= 20, (
@@ -432,8 +435,10 @@ def test_the_migration_chain_still_has_exactly_one_head() -> None:
 
 
 def test_the_schema_sql_ships_beside_the_module() -> None:
-    """It is read at runtime. A file that exists in the tree and not in the
-    wheel fails only on an installed copy, which is the copy CI runs.
+    """It is read at runtime.
+
+    A file that exists in the tree and not in the wheel fails only on an installed copy,
+    which is the copy CI runs.
 
     **The path is resolved from `usher.eval.__file__` and not from the
     repository root**, which is the only difference between this case and one

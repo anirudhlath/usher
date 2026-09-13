@@ -108,7 +108,10 @@ class MatchService:
         )
 
     async def match(self, items: Sequence[SourceItem]) -> list[MatchOutcome]:
-        """Resolve a batch. Returns one outcome per item, in order."""
+        """Resolve a batch.
+
+        Returns one outcome per item, in order.
+        """
         with _tracer.start_as_current_span("match.title") as span:
             span.set_attribute("usher.batch.items", len(items))
             refs = {item.external_id: self._refs_for(item) for item in items}
@@ -226,8 +229,10 @@ class MatchService:
         )
 
     async def _create_stub(self, item: SourceItem, usable: dict[str, int | str]) -> uuid.UUID:
-        """PRD 03's stub-on-sight: a canonical title from the source's own
-        metadata, `enrichment_state = stub`, queryable immediately.
+        """PRD 03's stub-on-sight.
+
+        a canonical title from the source's own metadata, `enrichment_state = stub`,
+        queryable immediately.
 
         `usable` is already filtered to values `Title` will accept, so this
         never fabricates a title from a bare name and never raises a
@@ -372,9 +377,11 @@ def _usable_ids(refs: Sequence[tuple[ProviderRef, MatchMethod]]) -> dict[str, in
 
 
 def _as_int(value: int | str | None) -> int | None:
-    """A source is free to report `ProviderIds.Tmdb: "unknown"`. That is a
-    matching failure, not a pipeline failure, and it must not abort a batch
-    of 5,000 items."""
+    """A source is free to report `ProviderIds.Tmdb: "unknown"`.
+
+    That is a matching failure, not a pipeline failure, and it must not abort a batch of
+    5,000 items.
+    """
     if value is None:
         return None
     try:
@@ -384,9 +391,11 @@ def _as_int(value: int | str | None) -> int | None:
 
 
 def _as_imdb(value: int | str | None) -> str | None:
-    """`Title.imdb_id` is pattern-validated, so an id that is not one is
-    dropped here rather than raising a `ValidationError` the reconciler
-    re-raises."""
+    """`Title.imdb_id` is pattern-validated.
+
+    so an id that is not one is dropped here rather than raising a `ValidationError` the
+    reconciler re-raises.
+    """
     if not isinstance(value, str) or not _IMDB_ID.match(value):
         return None
     return value

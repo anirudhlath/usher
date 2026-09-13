@@ -104,8 +104,9 @@ class _Progress:
 
 
 def _watch_target(target: MediaItemTarget) -> MediaItemTarget | None:
-    """Collapse what a `MediaItem` is matched to into what a watch state may
-    carry, or `None` if it is matched to nothing.
+    """Collapse what a `MediaItem` is matched to into what a watch state may carry.
+
+    or `None` if it is matched to nothing.
 
     An episode's row holds its series' `title_id` **and** its `episode_id`,
     because a client browsing a season wants both. `watch_states` permits
@@ -143,8 +144,9 @@ class WatchStateSyncService:
         self._batch_size = batch_size
 
     async def sync(self, source: Source, adapter: SourceAdapter, *, user_id: uuid.UUID) -> SyncRun:
-        """Walk this source's watch state into the catalog. Never raises a
-        `UsherPortError`.
+        """Walk this source's watch state into the catalog.
+
+        Never raises a `UsherPortError`.
         """
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
@@ -258,8 +260,9 @@ class WatchStateSyncService:
     async def backfill_history(
         self, source: Source, adapter: SourceAdapter, *, limit: int = 500
     ) -> int:
-        """One bounded pass over the rows that are played with no known count. Returns how
-        many were recovered.
+        """One bounded pass over the rows that are played with no known count.
+
+        Returns how many were recovered.
         """
         rows = await self._watch_states.list_needing_history(limit=limit)
         if not rows:
@@ -292,8 +295,10 @@ class WatchStateSyncService:
         user_id: uuid.UUID,
         observed_at: AwareDatetime,
     ) -> None:
-        """The nightly walk. **It invalidates no rows and publishes no `row.invalidated`,
-        and this is the place somebody would add both.**
+        """The nightly walk.
+
+        **It invalidates no rows and publishes no `row.invalidated`, and this is the
+        place somebody would add both.**
         """
         batch: list[SourceWatchState] = []
         seen = start_index = progress.run.position
@@ -322,7 +327,10 @@ class WatchStateSyncService:
         user_id: uuid.UUID,
         observed_at: AwareDatetime,
     ) -> MergeOutcome:
-        """Merge a batch of inbound watch state. **Does not commit.**"""
+        """Merge a batch of inbound watch state.
+
+        **Does not commit.**
+        """
         # One resolve for the batch, never one per state: `watch_state()`
         # yields one record per item and this deployment has 1,126,674.
         targets = await self._media_items.resolve_targets(
@@ -418,8 +426,7 @@ class WatchStateSyncService:
         )
 
     async def _enqueue_backfills(self, external_ids: Sequence[str]) -> None:
-        """One `enqueue` per batch for the played items whose count the walk
-        could not report.
+        """One `enqueue` per batch for the played items whose count the walk could not report.
 
         `BACKFILL` priority, so recovering history never overtakes work a
         client is waiting on. `(kind, key)` is unique, so an item seen by

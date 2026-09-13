@@ -30,9 +30,11 @@ class SourceEventKind(StrEnum):
 
 
 class SourceItemKind(StrEnum):
-    """A source's own idea of what kind of thing an item is — narrower
-    than `usher.domain.enums.TitleKind` because sources address individual
-    episodes directly, unlike `Title`."""
+    """A source's own idea of what kind of thing an item is.
+
+    narrower than `usher.domain.enums.TitleKind` because sources address individual
+    episodes directly, unlike `Title`.
+    """
 
     MOVIE = "movie"
     SERIES = "series"
@@ -159,7 +161,10 @@ def wrap_deep_link(inner_url: str) -> str:
 # `repr=False` is load-bearing, not stylistic -- see `__repr__` below.
 @dataclass(frozen=True, repr=False)
 class StreamTarget:
-    """How to play an item. Clients choose between the returned targets."""
+    """How to play an item.
+
+    Clients choose between the returned targets.
+    """
 
     kind: StreamTargetKind
     url: str
@@ -173,8 +178,9 @@ class StreamTarget:
     resume_position_seconds: int | None = None
 
     def __repr__(self) -> str:
-        """The generated `repr` with `url` redacted — see the class
-        docstring for why this is a security property rather than taste.
+        """The generated `repr` with `url` redacted.
+
+        see the class docstring for why this is a security property rather than taste.
 
         Both halves fail safe. `@dataclass(repr=False)` means deleting this
         method yields `object.__repr__` (`<StreamTarget object at 0x…>`),
@@ -267,8 +273,10 @@ class SourceAdapter(ABC):
     @property
     @abstractmethod
     def supports_push(self) -> bool:
-        """Whether this adapter has a live push channel right now, **and the answer must be
-        grounded in messages received rather than in a socket being open.**
+        """Whether this adapter has a live push channel right now.
+
+        **and the answer must be grounded in messages received rather than in a socket
+        being open.**.
         """
 
     @abstractmethod
@@ -340,10 +348,11 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
-        """Push channel. Adapters without one raise `SourceNotSupported`;
-        the reconciler covers them. See `supports_push` for the one-way
-        relationship between the two — offering a channel is not a claim
-        that it is delivering.
+        """Push channel.
+
+        Adapters without one raise `SourceNotSupported`; the reconciler covers them. See
+        `supports_push` for the one-way relationship between the two — offering a
+        channel is not a claim that it is delivering.
 
         One connection per call, not a cached one: a supervisor calls this
         once per reconnect, and a cached channel hands back a closed socket
@@ -407,9 +416,10 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Release held resources — connection pools, and (from M5) the
-        push WebSocket. Called when a source is deleted (`DELETE
-        /admin/sources/{id}`, PRD 07) or the process shuts down.
+        """Release held resources — connection pools, and (from M5) the push WebSocket.
+
+        Called when a source is deleted (`DELETE /admin/sources/{id}`, PRD 07) or the
+        process shuts down.
 
         Idempotent: calling it twice is not an error, because a shutdown
         path and a delete path can both reach it. Afterwards every other
@@ -434,7 +444,9 @@ class SourceAdapterFactory(ABC):
 
     @abstractmethod
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
-        """Construct an adapter. The caller owns it and must `aclose()` it.
+        """Construct an adapter.
+
+        The caller owns it and must `aclose()` it.
 
         Raises `SourceNotSupported` for a `Source.kind` this factory has no
         implementation for.

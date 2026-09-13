@@ -92,8 +92,10 @@ class TitleEmbeddingRow(Base):
 
 
 class TitleNeighborRow(Base):
-    """A precomputed "more like this" list -- one row per (title, neighbour)
-    pair, produced wholesale by a batch and read as a lookup.
+    """A precomputed "more like this" list.
+
+    one row per (title, neighbour) pair, produced wholesale by a batch and read as a
+    lookup.
 
     The whole point is that M9's `GET /titles/{id}/similar` is an index scan
     rather than a similarity computation. That means the freshness of these
@@ -158,8 +160,9 @@ class TitleNeighborRow(Base):
 
 
 class TitleSearchNameRow(Base):
-    """The narrow name table M6 refused and M7 restated the refusal of -- **created here,
-    never extended, because it has never existed.**
+    """The narrow name table M6 refused and M7 restated the refusal of.
+
+    **created here, never extended, because it has never existed.**.
     """
 
     __tablename__ = "title_search_names"

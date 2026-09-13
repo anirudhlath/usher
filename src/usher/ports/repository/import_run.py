@@ -32,7 +32,10 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def save(self, run: ImportRun) -> None:
-        """Persist a run's progress. Flushes, never commits."""
+        """Persist a run's progress.
+
+        Flushes, never commits.
+        """
 
     @abstractmethod
     async def get(self, dataset: str) -> ImportRun | None:
@@ -40,5 +43,7 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def list_runs(self) -> list[ImportRun]:
-        """Every stored run, most recent activity first — what the CLI's
-        `bootstrap-status` prints."""
+        """Every stored run, most recent activity first.
+
+        what the CLI's `bootstrap-status` prints.
+        """

@@ -1,5 +1,6 @@
-"""TMDb's <=6-month caching term, which is the one dashboard panel in PRD 10 whose
-failure is a **licence breach** rather than a blind spot.
+"""TMDb's <=6-month caching term.
+
+which is the one dashboard panel in PRD 10 whose failure is a **licence breach** rather
 """
 
 import pytest
@@ -48,8 +49,10 @@ def _executable(statement: str) -> str:
 
 
 async def _explain(session: AsyncSession, statement: str) -> str:
-    """`EXPLAIN` in **text** format, because `total_cost` reads the root node's
-    cost off the first line."""
+    """`EXPLAIN` in **text** format.
+
+    because `total_cost` reads the root node's cost off the first line.
+    """
     rows = (await session.execute(text(f"EXPLAIN {_executable(statement)}"))).scalars().all()
     return "\n".join(rows)
 
@@ -57,10 +60,11 @@ async def _explain(session: AsyncSession, statement: str) -> str:
 async def test_the_cache_age_panel_counts_the_rows_past_the_ceiling(
     session: AsyncSession,
 ) -> None:
-    """**The boundary row is not past the ceiling**, which is what makes `<`
-    versus `<=` a decision rather than a detail: TMDb's term is *<=6 months*, so
-    a payload cached exactly six months ago is still in term and a panel that
-    counts it is reporting a breach that has not happened.
+    """**The boundary row is not past the ceiling**.
+
+    which is what makes `<` versus `<=` a decision rather than a detail: TMDb's term is
+    *<=6 months*, so a payload cached exactly six months ago is still in term and a
+    panel that counts it is reporting a breach that has not happened.
 
     The sweep target this arm exists for is the ceiling respelled as
     `interval '180 days'`. Measured on `pgvector/pgvector:pg17` over the 1,461
@@ -116,8 +120,9 @@ async def test_the_cache_age_panel_counts_the_rows_past_the_ceiling(
 async def test_the_cache_age_panel_plans_onto_the_fetched_at_index(
     session: AsyncSession, analyze: Analyze
 ) -> None:
-    """`ix_raw_payloads_fetched_at` is ascending **because the question asks for the
-    minimum**, and this is what proves it is asked that way.
+    """`ix_raw_payloads_fetched_at` is ascending **because the question asks for the minimum**.
+
+    and this is what proves it is asked that way.
     """
     statements = compliance_panel_sql()
     await session.execute(

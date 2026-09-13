@@ -92,8 +92,7 @@ def _vector(text: str, dimension: int) -> list[float]:
 
 
 def planted_pair(theta: float, *, dimension: int = _DIMENSION) -> tuple[list[float], list[float]]:
-    """Two unit vectors at exactly `theta` radians, for tests that need a
-    *known* similarity.
+    """Two unit vectors at exactly `theta` radians, for tests that need a *known* similarity.
 
     `v = cos(theta)*a + sin(theta)*b` with `a` and `b` orthonormal, so
     `dot(a, v) == cos(theta)` exactly -- verified to 2.22e-16, i.e. one ulp.

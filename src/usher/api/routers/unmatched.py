@@ -1,6 +1,4 @@
-"""PRD 07's review queue: `GET /admin/unmatched` and `POST
-/admin/unmatched/{id}/resolve`.
-"""
+"""PRD 07's review queue: `GET /admin/unmatched` and `POST /admin/unmatched/{id}/resolve`."""
 
 import datetime as dt
 import uuid

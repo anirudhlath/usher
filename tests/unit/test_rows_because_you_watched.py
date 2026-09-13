@@ -62,9 +62,9 @@ async def _seed_with_neighbours(
 
 
 async def test_the_first_row_is_about_the_most_recently_finished_title() -> None:
-    """**The front matter's distractor.** Four engaged titles spanning three
-    years, each with its own neighbours; `_MAX_SEEDS` is 3, so the oldest is
-    not a seed at all.
+    """**The front matter's distractor.** Four engaged titles spanning three years.
+
+    each with its own neighbours; `_MAX_SEEDS` is 3, so the oldest is not a seed at all.
 
     The rows are asserted *in order*, and the oldest title's neighbour is
     asserted to appear in no row. A membership assertion cannot see this: the
@@ -141,8 +141,9 @@ async def test_three_similarity_rows_are_ordered_by_seed_recency_not_alphabetica
 
 
 async def test_the_cards_of_one_row_are_ordered_by_neighbour_rank() -> None:
-    """The row's order *is* the answer, and `list_for`'s rank is the only
-    ordering this provider has.
+    """The row's order *is* the answer.
+
+    and `list_for`'s rank is the only ordering this provider has.
 
     The neighbours are minted so that **id order is the exact reverse of rank
     order**, which is what an implementation that re-sorted the repository's
@@ -163,11 +164,12 @@ async def test_the_cards_of_one_row_are_ordered_by_neighbour_rank() -> None:
 
 
 async def test_a_series_watched_only_through_its_episodes_is_a_seed() -> None:
-    """**Trap 7, and it is this provider's by name.** An episode's watch state
-    carries `title_id IS NULL`, so a seed list read off `watch_states.title_id`
-    returns nothing at all for a television household -- and the row is then
-    permanently absent on a library that is 89% episodes, which renders
-    identically to a household with no history.
+    """**Trap 7.
+
+    and it is this provider's by name.** An episode's watch state carries `title_id IS
+    NULL`, so a seed list read off `watch_states.title_id` returns nothing at all for a
+    television household -- and the row is then permanently absent on a library that is
+    89% episodes, which renders identically to a household with no history.
 
     The distractor is a *film* finished earlier, so the wrong implementation
     still proposes one row and still looks right; what it cannot do is put the
@@ -199,8 +201,9 @@ async def test_a_series_watched_only_through_its_episodes_is_a_seed() -> None:
 
 
 async def test_the_reason_does_not_claim_taste_when_the_neighbours_are_metadata_only() -> None:
-    """`reason` is written to be spoken aloud (PRD 06's Alfred section), and
-    "Because you watched Dune" is a claim about *why*.
+    """`reason` is written to be spoken aloud (PRD 06's Alfred section).
+
+    and "Because you watched Dune" is a claim about *why*.
 
     With no embedder the neighbours are genre and keyword overlap -- M6's blend
     drops the cosine term entirely rather than zeroing it -- so the spoken
@@ -220,9 +223,10 @@ async def test_the_reason_does_not_claim_taste_when_the_neighbours_are_metadata_
 
 
 async def test_a_never_built_neighbour_table_names_the_command_that_fixes_it() -> None:
-    """`computed_at()` is `None` when the batch has **never run**, and M6 built
-    that distinction specifically so a consumer would not *"tell an operator
-    that a film has nothing like it when the truth is that nothing has run"*.
+    """`computed_at()` is `None` when the batch has **never run**.
+
+    and M6 built that distinction specifically so a consumer would not *"tell an
+    operator that a film has nothing like it when the truth is that nothing has run"*.
 
     The provider returns `[]` either way -- it is a home screen, not a
     diagnostic -- but a deployment where this row silently never fires is
@@ -250,9 +254,11 @@ async def test_a_never_built_neighbour_table_names_the_command_that_fixes_it() -
 
 
 async def test_a_household_that_has_watched_nothing_proposes_no_similarity_rows() -> None:
-    """**No seed means no row -- never a "popular titles" seed.** A seed chosen
-    for the household is the entire content of the claim `reason` makes, so a
-    fallback seed produces a sentence that is false about a real person.
+    """**No seed means no row.
+
+    never a "popular titles" seed.** A seed chosen for the household is the entire
+    content of the claim `reason` makes, so a fallback seed produces a sentence that is
+    false about a real person.
 
     The catalog is fully populated and **every owned title carries enough
     neighbours to make a real row**, which is what makes the fallback available
@@ -274,9 +280,10 @@ async def test_a_household_that_has_watched_nothing_proposes_no_similarity_rows(
 
 
 async def test_a_seed_whose_neighbours_repeat_an_earlier_row_is_not_proposed_again() -> None:
-    """Two seeds from one franchise produce two rows with largely the same
-    cards, which reads as a bug to a viewer and is invisible to any per-row
-    assertion -- every row is internally correct.
+    """Two seeds from one franchise produce two rows with largely the same cards.
+
+    which reads as a bug to a viewer and is invisible to any per-row assertion -- every
+    row is internally correct.
 
     The overlapping seed is the *more recent* of the two, so this cannot pass
     by accident on a recency ordering: the row that survives is the newest, the
@@ -301,10 +308,12 @@ async def test_a_seed_whose_neighbours_repeat_an_earlier_row_is_not_proposed_aga
 
 
 async def test_a_neighbour_deleted_since_the_rebuild_is_dropped_rather_than_raised() -> None:
-    """`title_neighbors` is a stale artefact by construction, so a neighbour
-    the catalog no longer holds is ordinary. A `KeyError` here is a 500 on a
-    home screen because one film went away between two statements of one
-    request -- `SimilarityService.neighbors_of`'s precedent.
+    """`title_neighbors` is a stale artefact by construction.
+
+    so a neighbour the catalog no longer holds is ordinary.
+
+    A `KeyError` here is a 500 on a home screen because one film went away between two
+    statements of one request -- `SimilarityService.neighbors_of`'s precedent.
     """
     library = Library()
     seed_id = await library.title("Stalker")
@@ -319,9 +328,11 @@ async def test_a_neighbour_deleted_since_the_rebuild_is_dropped_rather_than_rais
 
 
 async def test_the_similarity_row_names_its_family_so_the_composer_can_space_it() -> None:
-    """PRD 06's diversity constraint is stated in families -- "no three
-    consecutive similarity rows" -- and this is the provider that can produce
-    all three of them."""
+    """PRD 06's diversity constraint is stated in families.
+
+    "no three consecutive similarity rows" -- and this is the provider that can produce
+    all three of them.
+    """
     library = Library()
     await _seed_with_neighbours(library, "Annihilation", at=5)
 
@@ -332,9 +343,11 @@ async def test_the_similarity_row_names_its_family_so_the_composer_can_space_it(
 
 
 async def test_a_seed_with_too_few_neighbours_is_skipped_rather_than_shown_thin() -> None:
-    """A "more like this" shelf of one card is a list, not a shelf -- and the
-    seed it would have spent is one a real row could have used, so the next
-    seed is promoted rather than the screen being one row shorter."""
+    """A "more like this" shelf of one card is a list, not a shelf.
+
+    and the seed it would have spent is one a real row could have used, so the next seed
+    is promoted rather than the screen being one row shorter.
+    """
     library = Library()
     thin = await library.title("Thin")
     await library.finished(thin, at=days_ago(1))
@@ -347,9 +360,11 @@ async def test_a_seed_with_too_few_neighbours_is_skipped_rather_than_shown_thin(
 
 
 async def test_the_unbuilt_warning_is_said_once_per_process_not_once_per_propose() -> None:
-    """The similarity half of CLAUDE.md's "a per-process fact logged in a
-    per-pass function" finding. `test_rows_franchise.py`'s twin carries the
-    arithmetic.
+    """The similarity half of CLAUDE.md's "a per-process fact logged in a per-pass function".
+
+    finding.
+
+    `test_rows_franchise.py`'s twin carries the arithmetic.
 
     Three passes on **one** provider instance: a single pass cannot tell
     "once" from "once per pass", which is why M5's equivalent case drains

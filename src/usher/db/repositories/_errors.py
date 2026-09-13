@@ -17,9 +17,10 @@ ROW_REFUSED_SQLSTATE_CLASSES = frozenset({"22", "23"})
 
 
 def is_row_refusal(exc: DBAPIError) -> bool:
-    """Whether the backing store refused *this row* rather than the connection
-    or the statement -- see `ROW_REFUSED_SQLSTATE_CLASSES` for the measurements behind the
-    two SQLSTATE classes.
+    """Whether the backing store refused *this row* rather than the connection or the statement.
+
+    see `ROW_REFUSED_SQLSTATE_CLASSES` for the measurements behind the two SQLSTATE
+    classes.
 
     `IntegrityError` is honoured directly as well as by its SQLSTATE, and that
     is not redundancy for its own sake: the sqlstate is read off the same
@@ -35,7 +36,8 @@ def is_row_refusal(exc: DBAPIError) -> bool:
 
 
 def constraint_name(exc: DBAPIError) -> str | None:
-    """The Postgres constraint name straight from asyncpg's own structured error fields --
+    """The Postgres constraint name straight from asyncpg's own structured error fields.
+
     not parsed out of the exception message text, which is dialect- and locale-dependent
     and was never meant to be machine-read.
     """
@@ -44,7 +46,8 @@ def constraint_name(exc: DBAPIError) -> str | None:
 
 @asynccontextmanager
 async def refusals_as_conflict(session: AsyncSession, message: str) -> AsyncIterator[None]:
-    """Runs a repository's own statements so that a refused *row* reaches the caller as a
+    """Runs a repository's own statements so that a refused *row* reaches the caller as a.
+
     `RepositoryConflict` and nothing else is disturbed.
     """
     try:

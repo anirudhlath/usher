@@ -73,8 +73,10 @@ class ProviderCdnImageFetcher(ImageFetcher):
             ) from exc
 
     def _url(self, provider_path: str, width: int) -> str:
-        """`{base}{rung}{path}`, which is the whole mechanism the ladder rests
-        on and the reason `images` stores a path rather than a URL.
+        """`{base}{rung}{path}`.
+
+        which is the whole mechanism the ladder rests on and the reason `images` stores
+        a path rather than a URL.
 
         The leading slash is supplied rather than assumed: every path the
         provider publishes carries one, and a base and a path that both lack it

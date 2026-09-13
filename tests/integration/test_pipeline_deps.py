@@ -138,8 +138,11 @@ async def probe(postgres_url: str) -> AsyncIterator[AsyncClient]:
 
 
 async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient) -> None:
-    """One request per provider. A `Depends` graph that cannot be satisfied
-    is a 500 here and a green unit test everywhere else."""
+    """One request per provider.
+
+    A `Depends` graph that cannot be satisfied is a 500 here and a green unit test
+    everywhere else.
+    """
     for name in _PROVIDERS:
         response = await probe.get(f"/_probe/{name}")
         assert response.status_code == 200, f"{name}: {response.text}"
@@ -162,11 +165,14 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
 
 
 async def test_the_providers_answer_with_a_live_session(probe: AsyncClient) -> None:
-    """The repositories are built against `get_session`, which is the
-    request's commit/rollback boundary -- so a provider that had reached for
-    `app.state` or built its own engine would still return an object and
-    would silently be outside the request's transaction. Resolving through
-    the real graph is what makes that observable at all."""
+    """The repositories are built against `get_session`.
+
+    which is the request's commit/rollback boundary -- so a provider that had reached
+    for `app.state` or built its own engine would still return an object and would
+    silently be outside the request's transaction.
+
+    Resolving through the real graph is what makes that observable at all.
+    """
     response = await probe.get("/_probe/media_items")
     assert response.json()["built"] == "PostgresMediaItemRepository"
 
@@ -174,7 +180,7 @@ async def test_the_providers_answer_with_a_live_session(probe: AsyncClient) -> N
 async def test_the_row_context_carries_the_stored_user_and_not_a_fresh_one(
     postgres_url: str,
 ) -> None:
-    """**A constructor default is one keystroke from an empty home screen.**
+    """**A constructor default is one keystroke from an empty home screen.**.
 
     `User.id` is `default_factory=new_id`, so `User(name="default",
     is_default=True)` built in `get_row_context` would validate, type-check and
@@ -218,8 +224,9 @@ async def test_the_row_context_carries_the_stored_user_and_not_a_fresh_one(
 async def test_a_request_resolves_the_default_user_and_writes_the_row(
     postgres_url: str,
 ) -> None:
-    """The singleton `users` row exists on the *server* path, not only after `usher work`
-    has run.
+    """The singleton `users` row exists on the *server* path.
+
+    not only after `usher work` has run.
     """
     app = create_app(
         Settings(
@@ -269,11 +276,13 @@ async def test_a_request_resolves_the_default_user_and_writes_the_row(
 async def test_the_reconcile_service_carries_this_deployments_tuning(
     postgres_url: str,
 ) -> None:
-    """`sync_batch_size`/`sync_max_retract_fraction` reach the service from
-    `app.state.settings`, never from `get_settings()`. M3 found the
-    difference the hard way -- a `Depends(get_settings)` re-reads
-    `os.environ`, which `tests/conftest.py` strips, and failed 13 of 15
-    tests."""
+    """`sync_batch_size`/`sync_max_retract_fraction` reach the service from `app.state.settings`.
+
+    never from `get_settings()`.
+
+    M3 found the difference the hard way -- a `Depends(get_settings)` re-reads
+    `os.environ`, which `tests/conftest.py` strips, and failed 13 of 15 tests.
+    """
     settings = Settings(
         database_url=postgres_url,
         secret_key="0" * 32,
@@ -301,8 +310,9 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
 async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
     postgres_url: str,
 ) -> None:
-    """**A `Depends` graph that resolves is not a graph that wired the right objects, and
-    the two suggest tiers are the case where those come apart.**
+    """**A `Depends` graph that resolves is not a graph that wired the right objects.
+
+    and the two suggest tiers are the case where those come apart.**.
     """
     app = create_app(
         Settings(
@@ -334,7 +344,7 @@ async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
 async def test_the_search_service_the_graph_resolves_writes_search_queries_over_this_session(
     postgres_url: str,
 ) -> None:
-    """**PRD 10's analytics row, on the root that would lose it silently.**"""
+    """**PRD 10's analytics row, on the root that would lose it silently.**."""
     app = create_app(
         Settings(
             database_url=postgres_url,

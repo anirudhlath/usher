@@ -1,4 +1,7 @@
-"""The source-repository contract against the in-memory double. No Docker."""
+"""The source-repository contract against the in-memory double.
+
+No Docker.
+"""
 
 import pytest
 

@@ -76,9 +76,7 @@ _ID_NAMES: Mapping[str, str] = {
 
 
 def redact_path(path: str) -> str:
-    """An Emby request path with every identifier replaced by a placeholder naming what it
-    was.
-    """
+    """An Emby request path with every identifier replaced by a placeholder naming what it was."""
     segments = path.split("/")
     out: list[str] = []
     previous = ""
@@ -201,7 +199,10 @@ class EmbySession:
             )
 
     async def _authenticate_locked(self) -> tuple[str, str]:
-        """Mint a session. Caller must hold `self._lock`."""
+        """Mint a session.
+
+        Caller must hold `self._lock`.
+        """
         response = await self._send(
             "POST",
             AUTHENTICATE_PATH,
@@ -278,8 +279,11 @@ class EmbySession:
             return user_id
 
     async def access_token(self) -> str:
-        """The current session token. Used only to build direct-play URLs
-        -- see ADR-0012 for why a playback URL carries one at all."""
+        """The current session token.
+
+        Used only to build direct-play URLs -- see ADR-0012 for why a playback URL
+        carries one at all.
+        """
         self._raise_if_closed()
         token, _ = await self._session()
         return token
@@ -417,7 +421,9 @@ class EmbySession:
         return decode_json(response, path)
 
     async def aclose(self) -> None:
-        """Mark the session closed. The `httpx.AsyncClient` belongs to
-        whoever constructed it -- `EmbyAdapter` closes the one it created
-        and leaves an injected one alone."""
+        """Mark the session closed.
+
+        The `httpx.AsyncClient` belongs to whoever constructed it -- `EmbyAdapter`
+        closes the one it created and leaves an injected one alone.
+        """
         self._closed = True

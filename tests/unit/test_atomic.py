@@ -9,9 +9,11 @@ from usher.atomic import scratch_beside, write_atomically
 
 
 def test_the_scratch_file_is_a_hidden_sibling_and_never_the_destination(tmp_path: Path) -> None:
-    """A sibling because `os.replace` is atomic only within one filesystem,
-    and hidden so a process killed before its cleanup leaves something an
-    operator will not mistake for the file they asked for."""
+    """A sibling because `os.replace` is atomic only within one filesystem.
+
+    and hidden so a process killed before its cleanup leaves something an operator will
+    not mistake for the file they asked for.
+    """
     final = tmp_path / "artifact.jsonl.gz"
     scratch = scratch_beside(final)
 
@@ -23,8 +25,9 @@ def test_the_scratch_file_is_a_hidden_sibling_and_never_the_destination(tmp_path
 def test_two_writers_aimed_at_one_destination_get_different_scratch_files(
     tmp_path: Path,
 ) -> None:
-    """The suffix is random rather than derived from the process, because two
-    writers that shared a scratch name would interleave into a file that is
+    """The suffix is random rather than derived from the process.
+
+    because two writers that shared a scratch name would interleave into a file that is
     neither of theirs -- and a PID is shared by a process and its own re-exec.
     """
     final = tmp_path / "artifact.jsonl.gz"
@@ -35,11 +38,12 @@ def test_two_writers_aimed_at_one_destination_get_different_scratch_files(
 def test_both_the_bytes_and_the_new_name_are_flushed_around_the_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rename is atomic against other processes and not against a power
-    cut, and closing that needs two flushes in the right places: the file's
-    before the rename, or the name survives pointing at contents that were
-    never written, and the directory's after it, or the contents survive under
-    the old name because the rename was the thing still in cache.
+    """The rename is atomic against other processes and not against a power cut.
+
+    and closing that needs two flushes in the right places: the file's before the
+    rename, or the name survives pointing at contents that were never written, and the
+    directory's after it, or the contents survive under the old name because the rename
+    was the thing still in cache.
 
     Asserted as an *order* over two distinguishable targets rather than as a
     call count, because a flush of the wrong object, or of the right one after
@@ -72,8 +76,10 @@ def test_both_the_bytes_and_the_new_name_are_flushed_around_the_rename(
 def test_a_body_that_raises_leaves_neither_a_destination_nor_a_scratch_file(
     tmp_path: Path,
 ) -> None:
-    """The whole point of the scratch sibling: a failed run must cost the
-    previous file nothing, and must not litter the directory it failed in.
+    """The whole point of the scratch sibling.
+
+    a failed run must cost the previous file nothing, and must not litter the directory
+    it failed in.
     """
     final = tmp_path / "x"
     final.write_bytes(b"last night's copy")
@@ -90,9 +96,11 @@ def test_a_body_that_raises_leaves_neither_a_destination_nor_a_scratch_file(
 
 
 def test_a_cancelled_write_cleans_up_too(tmp_path: Path) -> None:
-    """`BaseException` rather than `Exception`: stopping a long write with a
-    keyboard interrupt is ordinary, and it must not be the one path that
-    leaves a fragment behind."""
+    """`BaseException` rather than `Exception`.
+
+    stopping a long write with a keyboard interrupt is ordinary, and it must not be the
+    one path that leaves a fragment behind.
+    """
     final = tmp_path / "x"
 
     def interrupted(handle: IO[bytes]) -> None:

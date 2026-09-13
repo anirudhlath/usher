@@ -16,14 +16,18 @@ class ImportRunRepositoryContract:
         assert run.status is ImportRunStatus.RUNNING
 
     async def test_start_persists_immediately(self, runs: ImportRunRepository) -> None:
-        """A crash before the first batch must still leave a visible run, or
-        `bootstrap-status` reports nothing at all for a job that did start."""
+        """A crash before the first batch must still leave a visible run.
+
+        or `bootstrap-status` reports nothing at all for a job that did start.
+        """
         await runs.start("imdb.title.basics", "etag-1")
         assert await runs.get("imdb.title.basics") is not None
 
     async def test_start_resumes_when_the_revision_matches(self, runs: ImportRunRepository) -> None:
-        """The whole point. `position` survives, so the dataset skips what
-        was already committed."""
+        """The whole point.
+
+        `position` survives, so the dataset skips what was already committed.
+        """
         run = await runs.start("imdb.title.basics", "etag-1")
         await runs.save(run.evolve(position=4200, rows_seen=900, rows_written=880))
         resumed = await runs.start("imdb.title.basics", "etag-1")
@@ -34,7 +38,9 @@ class ImportRunRepositoryContract:
         self, runs: ImportRunRepository
     ) -> None:
         """Line 4200 of yesterday's dump is not line 4200 of today's.
-        Restarting is slow; splicing two snapshots is wrong."""
+
+        Restarting is slow; splicing two snapshots is wrong.
+        """
         run = await runs.start("imdb.title.basics", "etag-1")
         await runs.save(run.evolve(position=4200, rows_seen=900, rows_written=880))
         restarted = await runs.start("imdb.title.basics", "etag-2")
@@ -42,8 +48,10 @@ class ImportRunRepositoryContract:
         assert restarted.revision == "etag-2"
 
     async def test_start_clears_a_previous_failure(self, runs: ImportRunRepository) -> None:
-        """A retry that inherited `status=failed` and a stale `error` would
-        report a successful run as failed forever."""
+        """A retry that inherited `status=failed` and a stale `error` would report a successful.
+
+        run as failed forever.
+        """
         run = await runs.start("imdb.title.basics", "etag-1")
         await runs.save(run.evolve(status=ImportRunStatus.FAILED, error="WDQS returned HTTP 504"))
         retried = await runs.start("imdb.title.basics", "etag-1")
@@ -73,10 +81,12 @@ class ImportRunRepositoryContract:
     async def test_list_runs_orders_most_recent_activity_first(
         self, runs: ImportRunRepository
     ) -> None:
-        """The port promises "most recent activity first" (its own
-        docstring, and what `bootstrap-status` prints) -- a set comparison
-        can't tell an implementation that reversed the sort from a correct
-        one, so this checks the actual returned order."""
+        """The port promises "most recent activity first" (its own docstring.
+
+        and what `bootstrap-status` prints) -- a set comparison can't tell an
+        implementation that reversed the sort from a correct one, so this checks the
+        actual returned order.
+        """
         old = await runs.start("imdb.title.basics", "etag-1")
         await runs.save(old.evolve(heartbeat_at=datetime(2020, 1, 1, tzinfo=UTC)))
         new = await runs.start("wikidata.crosswalk", "2026-07-30")

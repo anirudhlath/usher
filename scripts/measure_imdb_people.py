@@ -139,9 +139,9 @@ async def _fetch_pinned(cache_dir: Path, pin_path: Path, name: str) -> CachedDat
 
 
 def _rows(cached: CachedDatasetFile) -> Iterator[list[str]]:
-    """Every line as its tab-split fields, header first.
+    r"""Every line as its tab-split fields, header first.
 
-    `line.split("\\t")` and never `csv.reader` -- see the module docstring.
+    `line.split("\t")` and never `csv.reader` -- see the module docstring.
     """
     for line in cached.lines():
         yield line.split("\t")
@@ -619,8 +619,11 @@ SELECT (SELECT count(*) FROM t3_akas_raw)                              AS retain
 
 
 async def _report_sizes(engine: AsyncEngine) -> int:
-    """Print (A) and (B), and hand (A)'s full-column figure back for the
-    trimmed variant to be compared against in the same run."""
+    """Print (A) and (B).
+
+    and hand (A)'s full-column figure back for the trimmed variant to be compared
+    against in the same run.
+    """
     async with engine.connect() as conn:
         counts = {name: rows for name, rows in (await conn.execute(text(_ROW_COUNTS))).all()}
         sizes = {

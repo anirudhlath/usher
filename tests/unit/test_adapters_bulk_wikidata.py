@@ -24,9 +24,10 @@ def _bindings(*pairs: tuple[str, str]) -> dict[str, object]:
 
 
 def _wdqs(responses: dict[tuple[str, str], dict[str, object]]) -> httpx.MockTransport:
-    """Answers each (property, prefix) pair from `responses`, empty
-    otherwise. Both are recoverable from the query text, which is what the
-    real adapter sends."""
+    """Answers each (property, prefix) pair from `responses`, empty otherwise.
+
+    Both are recoverable from the query text, which is what the real adapter sends.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         query = request.url.params["query"]
@@ -38,8 +39,11 @@ def _wdqs(responses: dict[tuple[str, str], dict[str, object]]) -> httpx.MockTran
 
 
 async def test_each_property_fills_exactly_one_column() -> None:
-    """The three joins run as three passes, and upsert_crosswalk COALESCEs
-    precisely because of this: a P4983 pass must not blank a P4947 value."""
+    """The three joins run as three passes.
+
+    and upsert_crosswalk COALESCEs precisely because of this: a P4983 pass must not
+    blank a P4947 value.
+    """
     transport = _wdqs(
         {
             ("P4947", "tt9"): _bindings(("tt99000020", "90000020")),
@@ -61,9 +65,11 @@ async def test_each_property_fills_exactly_one_column() -> None:
 
 
 async def test_skips_values_that_cannot_be_a_valid_mapping() -> None:
-    """Wikidata is openly editable. A vandalised value must not abort a
-    bootstrap -- and an over-long imdb_id would fail id_crosswalk's
-    String(16) during COPY, which is a much worse place to find out."""
+    """Wikidata is openly editable.
+
+    A vandalised value must not abort a bootstrap -- and an over-long imdb_id would fail
+    id_crosswalk's String(16) during COPY, which is a much worse place to find out.
+    """
     transport = _wdqs(
         {
             ("P4947", "tt9"): _bindings(
@@ -81,12 +87,14 @@ async def test_skips_values_that_cannot_be_a_valid_mapping() -> None:
 
 
 async def test_skips_a_digit_that_isdigit_accepts_but_int_cannot_parse() -> None:
-    """`"²".isdigit()` (superscript two) is `True`, but `int("²")`
-    raises `ValueError` -- a real Python gotcha an `isdigit()` pre-check
-    would miss entirely, since it never actually attempts the conversion it
-    is meant to be gatekeeping. Wikidata is openly editable, so this input
-    class is exactly the kind of value a vandalised or malformed statement
-    could contain; skipping it must not raise."""
+    """`"²".isdigit()` (superscript two) is `True`, but `int("²")` raises `ValueError`.
+
+    a real Python gotcha an `isdigit()` pre-check would miss entirely, since it never
+    actually attempts the conversion it is meant to be gatekeeping.
+
+    Wikidata is openly editable, so this input class is exactly the kind of value a
+    vandalised or malformed statement could contain; skipping it must not raise.
+    """
     transport = _wdqs({("P4947", "tt9"): _bindings(("tt99000020", "²"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
@@ -95,10 +103,12 @@ async def test_skips_a_digit_that_isdigit_accepts_but_int_cannot_parse() -> None
 
 
 async def test_skips_a_value_too_large_for_the_int4_column() -> None:
-    """`"99999999999999".isdigit()` is `True` and used to be accepted
-    outright, but id_crosswalk's provider-id columns are a plain Postgres
-    Integer (int4, max 2147483647) -- a value past that would abort the
-    whole COPY batch on the far side rather than just this one row."""
+    """`"99999999999999".isdigit()` is `True` and used to be accepted outright.
+
+    but id_crosswalk's provider-id columns are a plain Postgres Integer (int4, max
+    2147483647) -- a value past that would abort the whole COPY batch on the far side
+    rather than just this one row.
+    """
     transport = _wdqs({("P4947", "tt9"): _bindings(("tt99000020", "99999999999999"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
@@ -107,15 +117,17 @@ async def test_skips_a_value_too_large_for_the_int4_column() -> None:
 
 
 async def test_a_large_work_unit_is_split_into_batch_size_chunks() -> None:
-    """Measured up to 160,849 rows (~300MB in practice) for the largest real
-    work unit (tt0/P4947) -- unchunked, that is a single COPY+upsert
-    transaction on the far side. `batch_size` bounds the write side; only
-    the fetch itself is still whole-unit (WDQS has no cheap way to
-    paginate a single query deterministically).
+    """Measured up to 160,849 rows (~300MB in practice) for the largest real work unit.
+
+    (tt0/P4947) -- unchunked, that is a single COPY+upsert transaction on the far side.
+
+    `batch_size` bounds the write side; only the fetch itself is still whole-unit (WDQS
+    has no cheap way to paginate a single query deterministically).
 
     The fixture drives the `tt9` shard rather than `tt0`, because every
     synthetic id in this repository lives in the reserved `tt99`-prefixed
-    band -- see tests/fixtures/README.md."""
+    band -- see tests/fixtures/README.md.
+    """
     pairs = tuple((f"tt99{n:06d}", str(n)) for n in range(1, 12))  # 11 pairs
     transport = _wdqs({("P4947", "tt9"): _bindings(*pairs)})
     async with httpx.AsyncClient(transport=transport) as client:
@@ -133,11 +145,14 @@ async def test_a_large_work_unit_is_split_into_batch_size_chunks() -> None:
 
 
 async def test_a_429_with_an_http_date_retry_after_does_not_crash() -> None:
-    """RFC 9110 permits `Retry-After` to be an HTTP-date, not just a plain
-    integer -- `float(retry_after)` alone raises `ValueError` on one, which
-    used to escape uncaught from exactly the code path that fires when
-    upstream is asking for backoff. Uses a relative offset rather than a
-    fixed date so the test is not itself time-bound."""
+    """RFC 9110 permits `Retry-After` to be an HTTP-date, not just a plain integer.
+
+    `float(retry_after)` alone raises `ValueError` on one, which used to escape uncaught
+    from exactly the code path that fires when upstream is asking for backoff.
+
+    Uses a relative offset rather than a fixed date so the test is not itself time-
+    bound.
+    """
     target = email.utils.format_datetime(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=45))
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -152,12 +167,15 @@ async def test_a_429_with_an_http_date_retry_after_does_not_crash() -> None:
 
 
 async def test_yields_a_row_less_batch_to_advance_past_every_empty_unit() -> None:
-    """`BulkDataset.batches` explicitly allows this -- "an implementation
-    may yield a row-less batch solely to advance the cursor" -- and an
-    earlier draft of this adapter read the contract backwards, skipping the
-    yield for an empty unit instead. All 30 units are empty here, so all 30
-    still yield their own (row-less) batch, each advancing the cursor by
-    exactly one."""
+    """`BulkDataset.batches` explicitly allows this.
+
+    "an implementation may yield a row-less batch solely to advance the cursor" -- and
+    an earlier draft of this adapter read the contract backwards, skipping the yield for
+    an empty unit instead.
+
+    All 30 units are empty here, so all 30 still yield their own (row-less) batch, each
+    advancing the cursor by exactly one.
+    """
     async with httpx.AsyncClient(transport=_wdqs({})) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         batches = [batch async for batch in dataset.batches()]
@@ -167,11 +185,12 @@ async def test_yields_a_row_less_batch_to_advance_past_every_empty_unit() -> Non
 
 
 async def test_the_cursor_advances_past_empty_units() -> None:
-    """A mid-stream empty unit still yields its own row-less batch (see
-    `test_yields_a_row_less_batch_to_advance_past_every_empty_unit`); this
-    covers the case where a *later* unit has rows, confirming the row-less
-    batches in between don't disturb `rows_seen`'s running total or the
-    final unit's own position."""
+    """A mid-stream empty unit still yields its own row-less batch (see.
+
+    `test_yields_a_row_less_batch_to_advance_past_every_empty_unit`); this covers the
+    case where a *later* unit has rows, confirming the row-less batches in between don't
+    disturb `rows_seen`'s running total or the final unit's own position.
+    """
     transport = _wdqs({("P4835", "tt9"): _bindings(("tt99000030", "91000030"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
@@ -184,14 +203,17 @@ async def test_the_cursor_advances_past_empty_units() -> None:
 
 
 async def test_a_resume_after_a_fully_empty_tail_reissues_no_queries() -> None:
-    """The stall this fixes: if the cursor only ever advanced past
-    *non-empty* units, a trailing run of structurally-empty ones (real for
-    several of these property/prefix combinations) never got checkpointed,
-    so a same-day resume re-queried all of them again -- every time,
-    forever, against a rate-limited endpoint, and the run could never reach
-    a checkpoint reflecting that it was actually done. Resuming from the
-    position a full run actually finished at must issue zero further
-    queries."""
+    """The stall this fixes.
+
+    if the cursor only ever advanced past *non-empty* units, a trailing run of
+    structurally-empty ones (real for several of these property/prefix combinations)
+    never got checkpointed, so a same-day resume re-queried all of them again -- every
+    time, forever, against a rate-limited endpoint, and the run could never reach a
+    checkpoint reflecting that it was actually done.
+
+    Resuming from the position a full run actually finished at must issue zero further
+    queries.
+    """
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -238,9 +260,11 @@ async def test_resuming_skips_completed_units() -> None:
 
 
 async def test_rows_seen_accumulates_across_a_normal_resume() -> None:
-    """Distinct from the empty-tail resume test: an ordinary resume that
-    finds more rows must add them to the stored rows_seen, not reset or
-    ignore it."""
+    """Distinct from the empty-tail resume test.
+
+    an ordinary resume that finds more rows must add them to the stored rows_seen, not
+    reset or ignore it.
+    """
     transport = _wdqs({("P4835", "tt9"): _bindings(("tt99000030", "91000030"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
@@ -256,9 +280,10 @@ async def test_rows_seen_accumulates_across_a_normal_resume() -> None:
 
 
 async def test_a_cursor_from_another_day_restarts() -> None:
-    """`revision` is the UTC date, because a live endpoint has no snapshot
-    token. A run resumed the same day continues; the next day starts over
-    against fresh data."""
+    """`revision` is the UTC date, because a live endpoint has no snapshot token.
+
+    A run resumed the same day continues; the next day starts over against fresh data.
+    """
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -277,10 +302,13 @@ async def test_a_cursor_from_another_day_restarts() -> None:
 
 
 async def test_a_504_is_unavailable_not_malformed() -> None:
-    """WDQS's own query-timeout shape: HTTP 504, text/plain "upstream
-    request timeout", no Retry-After (verified). The same query may succeed
-    when WDQS is less loaded, so the caller should back off -- parking it as
-    malformed would strand the crosswalk."""
+    """WDQS's own query-timeout shape.
+
+    HTTP 504, text/plain "upstream request timeout", no Retry-After (verified).
+
+    The same query may succeed when WDQS is less loaded, so the caller should back off
+    -- parking it as malformed would strand the crosswalk.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(504, text="upstream request timeout")
@@ -292,11 +320,12 @@ async def test_a_504_is_unavailable_not_malformed() -> None:
 
 
 async def test_a_timed_out_wdqs_query_names_the_failure_and_the_budget() -> None:
-    """Issue #35's defect, in the third place it lives, and the one where the
-    distinction matters most: WDQS answering **504** already means "the query
-    took too long at their end" and is translated as such, so a
-    `ReadTimeout` here is the *other* failure -- ours gave up first -- and
-    `f"WDQS request failed: {exc}"` recorded neither, because every httpx
+    """Issue #35's defect.
+
+    in the third place it lives, and the one where the distinction matters most: WDQS
+    answering **504** already means "the query took too long at their end" and is
+    translated as such, so a `ReadTimeout` here is the *other* failure -- ours gave up
+    first -- and `f"WDQS request failed: {exc}"` recorded neither, because every httpx
     timeout stringifies to the empty string.
 
     The 90 s is `_TIMEOUT_SECONDS`, this module's own constant, passed per
@@ -329,8 +358,7 @@ async def test_a_429_becomes_port_rate_limited_with_its_hint() -> None:
 
 
 async def test_a_200_that_is_not_sparql_results_is_malformed() -> None:
-    """Retrying will not fix a body of the wrong shape, so this is parked
-    rather than backed off."""
+    """Retrying will not fix a body of the wrong shape, so this is parked rather than backed off."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"unexpected": "shape"})
@@ -342,8 +370,10 @@ async def test_a_200_that_is_not_sparql_results_is_malformed() -> None:
 
 
 async def test_sends_the_descriptive_user_agent_wdqs_requires() -> None:
-    """WDQS's user-agent policy blocks default library agents. A blocked
-    bootstrap fails with a 403 that looks like nothing in particular."""
+    """WDQS's user-agent policy blocks default library agents.
+
+    A blocked bootstrap fails with a 403 that looks like nothing in particular.
+    """
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -364,13 +394,15 @@ async def test_name_and_attribution() -> None:
 
 
 async def test_batches_honours_an_explicitly_passed_revision_over_recomputing() -> None:
-    """The port's `revision` parameter must be authoritative, not just a
-    hint that `batches()` may re-derive anyway. `WikidataCrosswalkDataset
-    .revision()` is a free local computation (today's UTC date), so passing
-    it through saves no network call -- but a caller's already-resolved
-    value still has to win over a fresh internal recompute, or a resume
-    started just before a UTC-midnight rollover could silently disagree
-    with the value the caller checkpointed and restart from zero instead.
+    """The port's `revision` parameter must be authoritative.
+
+    not just a hint that `batches()` may re-derive anyway.
+
+    `WikidataCrosswalkDataset .revision()` is a free local computation (today's UTC
+    date), so passing it through saves no network call -- but a caller's already-
+    resolved value still has to win over a fresh internal recompute, or a resume started
+    just before a UTC-midnight rollover could silently disagree with the value the
+    caller checkpointed and restart from zero instead.
 
     Pinning a revision far from the real one proves it: if `batches()`
     ignored the argument and recomputed today's actual date internally, the

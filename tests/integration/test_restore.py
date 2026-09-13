@@ -392,7 +392,7 @@ async def test_a_watch_state_whose_title_is_missing_refuses_the_whole_file_and_w
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The failing test this task was written around.**
+    """🔴 **The failing test this task was written around.**.
 
     Two watch states: one for a title the rebuilt catalog holds, one for
     `tt99000599` which it does not. The refusal has to name the missing key,
@@ -455,8 +455,9 @@ async def test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The refusal fires and names both values, and **that is all this case says** -- which
-    is less than its first version claimed.
+    """The refusal fires and names both values, and **that is all this case says**.
+
+    which is less than its first version claimed.
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -537,8 +538,9 @@ async def test_a_dry_run_reports_what_a_real_run_would_and_commits_nothing(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """`--dry-run` is the identical path with the commit withheld, so the two
-    reports have to be equal in every count.
+    """`--dry-run` is the identical path with the commit withheld.
+
+    so the two reports have to be equal in every count.
 
     Asserted by running the *same file* twice against the *same* target -- dry
     first, then for real -- and comparing the two reports field by field. That
@@ -690,7 +692,7 @@ async def test_a_second_source_under_the_same_name_is_refused_rather_than_insert
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **The refusal the schema cannot make, which is why it needs a case.**
+    """⚠️ **The refusal the schema cannot make, which is why it needs a case.**.
 
     Measured on the live schema 2026-08-25: `pg_constraint` for `sources`
     holds only `pk_sources PRIMARY KEY (id)`, and the count of unique indexes
@@ -760,8 +762,11 @@ _INSERT_SOURCE = (
 
 
 async def _seed_source(session: AsyncSession, source_id: uuid.UUID) -> None:
-    """The source a walk would have created, with the same values the artifact
-    carries so a case about a *name* collision is not also about a value."""
+    """The source a walk would have created.
+
+    with the same values the artifact carries so a case about a *name* collision is not
+    also about a value.
+    """
     row = _source(identifier=source_id)
     await session.execute(
         text(_INSERT_SOURCE),
@@ -889,8 +894,9 @@ async def test_a_search_query_whose_clicked_title_is_missing_is_written_with_a_n
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The one table whose unresolved rule is `NULL` rather than `REFUSE`, and
-    the contrast with `watch_states` is the case.
+    """The one table whose unresolved rule is `NULL` rather than `REFUSE`.
+
+    and the contrast with `watch_states` is the case.
 
     `backup_identity.UNRESOLVED_RULE` makes the argument per table:
     `search_queries.clicked_title_id` is already `ON DELETE SET NULL`, so a
@@ -937,8 +943,9 @@ async def test_a_household_the_target_already_has_keeps_its_own_id(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """`users` merges on the name, and every reference in the file adopts the
-    id the target already holds.
+    """`users` merges on the name.
+
+    and every reference in the file adopts the id the target already holds.
 
     This is the ordinary shape of a restore onto a rebuilt catalog:
     `ensure_default_user` has already run, so a household exists, and the
@@ -993,8 +1000,10 @@ async def test_an_artifact_this_projects_own_backup_wrote_restores_into_a_rebuil
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The loop closed: `usher backup` writes it, `usher restore` reads
-    it, and the ids in between are different.**
+    """🔴 **The loop closed.
+
+    `usher backup` writes it, `usher restore` reads it, and the ids in between are
+    different.**.
 
     Every other case in this file hand-builds the artifact, which is what lets
     them plant a stale revision and an unknown table -- and which leaves them
@@ -1121,8 +1130,9 @@ async def test_the_artifact_columns_are_what_a_backup_writes(session: AsyncSessi
 async def test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes(
     session: AsyncSession, artifact_path: Path
 ) -> None:
-    """🔴 **The mismatch is against `database_revision`, and only a database that disagrees
-    with the code can say so.**
+    """🔴 **The mismatch is against `database_revision`.
+
+    and only a database that disagrees with the code can say so.**.
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -1154,8 +1164,9 @@ async def test_two_sources_in_one_artifact_under_one_name_land_once_and_refuse_o
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The bug the first version of this merge shipped: the refusal read the target
-    once and never saw its own writes.**
+    """🔴 **The bug the first version of this merge shipped.
+
+    the refusal read the target once and never saw its own writes.**.
     """
     first, second = new_id(), new_id()
     assert first != second
@@ -1203,8 +1214,10 @@ async def test_a_watch_state_the_target_already_holds_adopts_the_artifacts_value
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The artifact wins on a conflict, and `DO NOTHING` in place of the
-    `DO UPDATE SET` passes every other case in this file.**
+    """🔴 **The artifact wins on a conflict.
+
+    and `DO NOTHING` in place of the `DO UPDATE SET` passes every other case in this
+    file.**.
 
     This is the operational shape of the whole command. Emby resets a title to
     unwatched, `usher sync` writes `played=false, play_count=0,
@@ -1287,8 +1300,9 @@ async def test_a_row_provider_setting_the_target_holds_adopts_the_artifacts_choi
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The other upsert, and the same defect: `DO NOTHING` here passes
-    everything else in this file.
+    """The other upsert, and the same defect.
+
+    `DO NOTHING` here passes everything else in this file.
 
     `row_provider_settings` is one operator decision per row -- *"do not show
     me this shelf"* -- and it is the one carried table with no id in it at
@@ -1342,8 +1356,9 @@ async def test_an_episode_media_item_link_carries_the_episode_and_not_only_the_s
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **No case anywhere restored an episode link**, so `episode_id`
-    could be written `NULL` with the whole suite green.
+    """🔴 **No case anywhere restored an episode link**.
+
+    so `episode_id` could be written `NULL` with the whole suite green.
 
     `media_items` carries two link columns and every other case in this file
     exercises one of them: a movie's row names a title and nothing else. An
@@ -1417,8 +1432,9 @@ async def test_a_credential_whose_source_is_not_in_this_database_is_refused(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The branch a hand-edited artifact reaches, disclosed as untested at the
-    first commit and closed here.
+    """The branch a hand-edited artifact reaches.
+
+    disclosed as untested at the first commit and closed here.
 
     `fk_source_credentials_source_id_sources` would answer a credential whose
     source is absent with an `IntegrityError` -- a `RepositoryConflict`, which
@@ -1464,8 +1480,7 @@ async def test_a_watch_state_naming_a_household_this_database_does_not_hold_is_r
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The other branch disclosed as untested, and the reason it cannot be a
-    `NULL`.
+    """The other branch disclosed as untested, and the reason it cannot be a `NULL`.
 
     `watch_states.user_id` and `search_queries.user_id` are both `NOT NULL`,
     so the per-table `NULL` rule that `search_queries.clicked_title_id` uses
@@ -1508,8 +1523,10 @@ async def test_the_flag_skips_the_unresolvable_rows_and_commits_everything_else(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **K5's drill: a correctly rebuilt catalog refused the whole file on rows the
-    manifest calls re-derivable.**
+    """🔴 **K5's drill.
+
+    a correctly rebuilt catalog refused the whole file on rows the manifest calls re-
+    derivable.**.
     """
     unfindable = {"kind": "series", "id": str(new_id()), "imdb_id": None, "tmdb_id": None}
     async with sessions() as probe:
@@ -1579,7 +1596,7 @@ async def test_the_flag_does_not_skip_a_household_the_target_does_not_hold(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **The line the flag draws, and it is narrower than its name.**
+    """⚠️ **The line the flag draws, and it is narrower than its name.**.
 
     `--skip-unresolvable` is for references the **importers rebuild**: a title
     stub is re-derived by the next `usher sync` and losing its link costs
@@ -1647,8 +1664,9 @@ async def test_the_flag_composes_with_dry_run(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The two flags together are how an operator finds out what the trade
-    costs before taking it.
+    """The two flags together are how an operator finds out what the trade costs before taking.
+
+    it.
 
     A dry run under `--skip-unresolvable` reports the rows that *would* be
     dropped and the rows that *would* land, and commits nothing -- which is the
@@ -1704,8 +1722,9 @@ async def test_an_artifact_whose_header_over_counts_its_body_is_refused(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 The check `services/backup.py` and `ports/repository/backup.py` both
-    described in the present tense before it existed, against a real schema.
+    """🔴 The check `services/backup.py` and `ports/repository/backup.py` both described in the.
+
+    present tense before it existed, against a real schema.
 
     K5's drill restored an artifact whose header claimed `media_items: 10819`
     over a body holding **10,515** and got **0 refusals and exit 0** -- a
@@ -1738,8 +1757,9 @@ async def test_two_artifact_rows_on_one_conflict_target_land_as_one_row(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **Unexecuted at the commit that wrote it**: `tests/integration/`
-    shares one container and the suite was not run.
+    """⚠️ **Unexecuted at the commit that wrote it**.
+
+    `tests/integration/` shares one container and the suite was not run.
 
     The source's `uq_watch_states_user_title` makes two rows on one
     `(household, title)` unwritable *there*, and resolution is what can
@@ -1798,8 +1818,7 @@ async def test_an_over_length_enum_value_is_refused_rather_than_silently_truncat
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **Unexecuted at the commit that wrote it**, for the case above's
-    reason.
+    """⚠️ **Unexecuted at the commit that wrote it**, for the case above's reason.
 
     🔴 **An explicit cast to a bounded character type truncates in silence.**
     `search_queries.surface` is `VARCHAR(8)` under

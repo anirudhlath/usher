@@ -1,5 +1,6 @@
-"""`GET /search` and `GET /search/suggest` — PRD 07's `### Screens`, over the retrieval
-M6 finished.
+"""`GET /search` and `GET /search/suggest`.
+
+PRD 07's `### Screens`, over the retrieval M6 finished.
 """
 
 from typing import Annotated, Any, Final

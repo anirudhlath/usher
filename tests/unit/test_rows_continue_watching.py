@@ -10,7 +10,7 @@ from usher.services.rows.continue_watching import ContinueWatchingProvider
 
 
 async def test_a_title_finished_last_night_is_absent_from_continue_watching() -> None:
-    """**The headline distractor, corrected.**
+    """**The headline distractor, corrected.**.
 
     The finished title carries the most recent `last_played_at` in the
     household *and keeps its resume position*, so it varies exactly one thing:
@@ -36,8 +36,7 @@ async def test_a_title_finished_last_night_is_absent_from_continue_watching() ->
 
 
 async def test_a_title_never_started_is_absent_from_continue_watching() -> None:
-    """The *other* half of the predicate, alone: `position_seconds = 0` with
-    `played = False`.
+    """The *other* half of the predicate, alone: `position_seconds = 0` with `played = False`.
 
     Without `position_seconds > 0` the row is the entire unwatched library.
     This case seeds twenty such titles against one real resume, so the wrong
@@ -58,9 +57,10 @@ async def test_a_title_never_started_is_absent_from_continue_watching() -> None:
 
 
 async def test_continue_watching_is_ordered_by_recency_and_not_by_insertion() -> None:
-    """Seeded so that insertion order is a *permutation* of watch order in both
-    directions, because `watch_states.id` is a UUIDv7 and a fixture seeded
-    newest-first is satisfied by `ORDER BY id` forever.
+    """Seeded so that insertion order is a *permutation* of watch order in both directions.
+
+    because `watch_states.id` is a UUIDv7 and a fixture seeded newest-first is satisfied
+    by `ORDER BY id` forever.
 
     Asserts the whole sequence rather than the head: an implementation that got
     only the first card right by luck passes a `cards[0]` assertion.
@@ -80,7 +80,7 @@ async def test_continue_watching_is_ordered_by_recency_and_not_by_insertion() ->
 
 
 async def test_a_household_that_has_watched_nothing_gets_no_row_at_all() -> None:
-    """**The popular-titles fallback is the bug, not a nicety.**
+    """**The popular-titles fallback is the bug, not a nicety.**.
 
     A fresh install has a full library and no history. The correct contribution
     from this provider is *nothing at all* -- an absent row, not an empty one
@@ -102,8 +102,7 @@ async def test_an_empty_catalog_gets_no_row_rather_than_raising() -> None:
 
 
 async def test_the_card_carries_the_progress_pair_rather_than_a_fraction() -> None:
-    """`position_seconds` and `runtime_seconds` as two facts, never one
-    fraction.
+    """`position_seconds` and `runtime_seconds` as two facts, never one fraction.
 
     `RowCard.runtime_seconds` is `int | None` because `WatchState.runtime_
     seconds` is, and a fraction of an unknown total is a number that merely
@@ -124,8 +123,11 @@ async def test_the_card_carries_the_progress_pair_rather_than_a_fraction() -> No
 
 
 async def test_a_state_whose_runtime_the_source_never_reported_carries_none() -> None:
-    """ADR-0014 on the card. Zero is not "no runtime" -- it is a divisor that
-    renders every partially-watched title as finished."""
+    """ADR-0014 on the card.
+
+    Zero is not "no runtime" -- it is a divisor that renders every partially-watched
+    title as finished.
+    """
     library = Library()
     resuming = await library.title("Resuming")
     await library.watched(
@@ -139,9 +141,13 @@ async def test_a_state_whose_runtime_the_source_never_reported_carries_none() ->
 
 
 async def test_a_title_deleted_between_the_read_and_the_hydrate_is_dropped() -> None:
-    """`SimilarityService.neighbors_of`'s precedent: a `KeyError` here is a 500
-    on a home screen because one film went away between two statements of one
-    request. The card is dropped; the row still builds."""
+    """`SimilarityService.neighbors_of`'s precedent.
+
+    a `KeyError` here is a 500 on a home screen because one film went away between two
+    statements of one request.
+
+    The card is dropped; the row still builds.
+    """
     library = Library()
     surviving = await library.title("Surviving")
     vanishing = await library.title("Vanishing")
@@ -156,11 +162,13 @@ async def test_a_title_deleted_between_the_read_and_the_hydrate_is_dropped() -> 
 
 
 async def test_a_row_whose_every_card_vanished_builds_empty_rather_than_raising() -> None:
-    """`BuiltRow` is constructible with no cards on purpose, and this is the
-    state it exists for: a proposal that was true when it was made and has
-    nothing left to show. `HomeService` drops it (PRD 06: *"drops any that
-    build empty"*), and "built and had nothing" stays distinguishable from
-    "never proposed"."""
+    """`BuiltRow` is constructible with no cards on purpose, and this is the state it exists for.
+
+    a proposal that was true when it was made and has nothing left to show.
+
+    `HomeService` drops it (PRD 06: *"drops any that build empty"*), and "built and had
+    nothing" stays distinguishable from "never proposed".
+    """
     library = Library()
     vanishing = await library.title("Vanishing")
     await library.in_progress(vanishing, at=days_ago(1))
@@ -174,7 +182,7 @@ async def test_a_row_whose_every_card_vanished_builds_empty_rather_than_raising(
 
 
 async def test_continue_watching_proposes_exactly_one_pinned_row() -> None:
-    """**PRD 06's "1 row, always ranked first" is `pinned`, not a score.**
+    """**PRD 06's "1 row, always ranked first" is `pinned`, not a score.**.
 
     Group A settled it: "always first" is a *positional* guarantee, and a
     guarantee expressed as "a score high enough to win" is one another
@@ -195,9 +203,10 @@ async def test_continue_watching_proposes_exactly_one_pinned_row() -> None:
 
 
 async def test_the_row_describes_itself_for_a_client_and_for_alfred() -> None:
-    """The reason is *spoken aloud* rather than merely displayed (PRD 06's
-    Alfred section states that as a constraint on the field), so it is a
-    sentence rather than a scoring expression.
+    """The reason is *spoken aloud* rather than merely displayed (PRD 06's Alfred section states.
+
+    that as a constraint on the field), so it is a sentence rather than a scoring
+    expression.
 
     `display_hint` is landscape because this is the only family where the
     card's **progress** is the point, and a poster hint loses the bar. The TTL
@@ -218,9 +227,11 @@ async def test_the_row_describes_itself_for_a_client_and_for_alfred() -> None:
 
 
 async def test_the_provider_degrades_with_no_embedder_no_genome_and_no_credits() -> None:
-    """None of the four optional signals is read, so none of them can break
-    this row. Asserted rather than assumed, because "unaffected" is the kind of
-    claim that stops being true one refactor after it is written."""
+    """None of the four optional signals is read, so none of them can break this row.
+
+    Asserted rather than assumed, because "unaffected" is the kind of claim that stops
+    being true one refactor after it is written.
+    """
     library = Library()
     resuming = await library.title("Resuming")
     await library.in_progress(resuming, at=days_ago(1))
@@ -235,8 +246,10 @@ async def test_the_provider_degrades_with_no_embedder_no_genome_and_no_credits()
 async def test_the_row_is_bounded_so_one_household_cannot_claim_the_screen(
     limit: int,
 ) -> None:
-    """A household mid-way through two hundred titles is a real state, and an
-    unbounded row is a response whose size is the household's own history."""
+    """A household mid-way through two hundred titles is a real state.
+
+    and an unbounded row is a response whose size is the household's own history.
+    """
     library = Library()
     for index in range(30):
         title_id = await library.title(f"Resuming {index}")
@@ -249,7 +262,7 @@ async def test_the_row_is_bounded_so_one_household_cannot_claim_the_screen(
 
 
 async def test_an_episode_left_half_watched_appears_as_its_series() -> None:
-    """**Trap 7, and a film-only suite ratifies the bug.**
+    """**Trap 7, and a film-only suite ratifies the bug.**.
 
     An episode's `watch_states` row carries `episode_id` and a **NULL**
     `title_id` -- and `list_in_progress` is the one M7 read that deliberately

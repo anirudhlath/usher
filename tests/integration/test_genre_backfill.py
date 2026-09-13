@@ -66,8 +66,11 @@ async def _wipe(session: AsyncSession) -> None:
 
 @pytest_asyncio.fixture
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """This module commits for real: `_genres` opens its own engine, so a
-    rolled-back fixture transaction would be invisible to it."""
+    """This module commits for real.
+
+    `_genres` opens its own engine, so a rolled-back fixture transaction would be
+    invisible to it.
+    """
     async with sessions() as session:
         await _wipe(session)
     yield
@@ -94,8 +97,10 @@ async def _seed(sessions: async_sessionmaker[AsyncSession], *titles: Title) -> N
 
 @pytest_asyncio.fixture
 async def anchor(sessions: async_sessionmaker[AsyncSession], clean: None) -> uuid.UUID:
-    """One already-canonical title, committed before anything else this case
-    seeds, whose id every sweep below resumes after.
+    """One already-canonical title.
+
+    committed before anything else this case seeds, whose id every sweep below resumes
+    after.
 
     Ids are UUIDv7 and therefore time-ordered, so a row committed first sorts
     first — but that is a property of a dependency rather than of this test,
@@ -107,9 +112,10 @@ async def anchor(sessions: async_sessionmaker[AsyncSession], clean: None) -> uui
 
 
 async def _embed(sessions: async_sessionmaker[AsyncSession], title: Title) -> None:
-    """Store the vector *and* the fingerprint the composer computes for this
-    title as it stands, which is what makes the title current rather than
-    merely present."""
+    """Store the vector *and* the fingerprint the composer computes for this title as it stands.
+
+    which is what makes the title current rather than merely present.
+    """
     async with sessions() as session:
         await PostgresTitleEmbeddingRepository(session).upsert_many(
             [
@@ -136,7 +142,8 @@ async def _sweep(
 
     `asyncio.wait_for` for `test_index_backfill.py::_sweep`'s reason: the
     failure a sweep has is non-termination, and a hang reads in a log like a
-    mutation nothing observed rather than one everything caught."""
+    mutation nothing observed rather than one everything caught.
+    """
     await asyncio.wait_for(
         _genres(settings, backfill=backfill, batch_size=batch_size, limit=limit, after=after),
         timeout=60.0,
@@ -173,8 +180,9 @@ async def test_the_rewrite_stales_the_embedding_through_the_shipped_fingerprint(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The load-bearing case.** A rewritten genre must make `usher index`
-    claim the title, through `_FINGERPRINT_SQL` and nothing else.
+    """**The load-bearing case.** A rewritten genre must make `usher index` claim the title.
+
+    through `_FINGERPRINT_SQL` and nothing else.
 
     **The premise is the first assertion, not a comment.** A title embedded
     from its own document is *not* stale — without that, a fingerprint that
@@ -212,9 +220,10 @@ async def test_the_backfill_reports_the_embeddings_it_staled(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The count an operator reads is the *stale predicate's* own difference,
-    so a rewrite over a title carrying no vector reports zero rather than one
-    — which is what makes the live figure 304 rather than 79,913.
+    """The count an operator reads is the *stale predicate's* own difference.
+
+    so a rewrite over a title carrying no vector reports zero rather than one — which is
+    what makes the live figure 304 rather than 79,913.
     """
     embedded = _title("The Quiet Vacuum", "Sci-Fi")
     unembedded = _title("Ninth Harbour", "Reality-TV")
@@ -238,12 +247,15 @@ async def test_a_second_backfill_rewrites_nothing_and_stales_nothing(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Re-runnability, against the statement rather than against the
-    caller.** `replace_genres` guards with `IS DISTINCT FROM`, so even a
-    caller that handed back every row would write nothing; the report an
-    operator reads is `rowcount`, which is what makes "it already ran" a fact
-    rather than a hope. This is the property an Alembic migration cannot have,
-    and it is why this is a command.
+    """**Re-runnability.
+
+    against the statement rather than against the caller.** `replace_genres` guards with
+    `IS DISTINCT FROM`, so even a caller that handed back every row would write nothing;
+    the report an operator reads is `rowcount`, which is what makes "it already ran" a
+    fact rather than a hope.
+
+    This is the property an Alembic migration cannot have, and it is why this is a
+    command.
     """
     title = _title("The Quiet Vacuum", "Sci-Fi")
     await _seed(sessions, title)
@@ -275,9 +287,11 @@ async def test_the_bare_form_reports_without_writing(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`usher genres` with no `--backfill` is the read-only bargain `usher
-    index` and `usher derive` already take, and this is the case that fails if
-    the dry run ever reaches the `UPDATE`."""
+    """`usher genres` with no `--backfill` is the read-only bargain `usher index` and `usher.
+
+    derive` already take, and this is the case that fails if the dry run ever reaches
+    the `UPDATE`.
+    """
     title = _title("The Quiet Vacuum", "Sci-Fi")
     await _seed(sessions, title)
     capsys.readouterr()
@@ -295,9 +309,11 @@ async def test_a_bounded_run_resumes_from_the_cursor_it_printed(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """1.27M rows is a run an operator interrupts. `--limit` bounds it and
-    `--after` continues it, and the two must compose into exactly one pass over
-    the population."""
+    """1.27M rows is a run an operator interrupts.
+
+    `--limit` bounds it and `--after` continues it, and the two must compose into
+    exactly one pass over the population.
+    """
     titles = [_title(f"Title {index}", "Sci-Fi") for index in range(4)]
     await _seed(sessions, *titles)
     ordered = sorted(title.id for title in titles)

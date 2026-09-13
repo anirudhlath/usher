@@ -1,5 +1,6 @@
-"""`usher.http.server.duration` -- the positive control behind PRD 10's correction
-rather than a new instrument.
+"""`usher.http.server.duration`.
+
+the positive control behind PRD 10's correction rather than a new instrument.
 """
 
 from collections.abc import AsyncIterator, Iterator
@@ -19,11 +20,13 @@ from usher.domain.ids import new_id
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """Installed *before* `create_app()`, so `configure_metrics`'s own
-    `isinstance` idempotency guard (see its docstring) leaves this provider in
-    place instead of replacing it with one exporting nowhere -- the same
-    pattern `test_pipeline_spans.py`'s `span_exporter` fixture uses for
-    tracing, one signal over."""
+    """Installed *before* `create_app()`.
+
+    so `configure_metrics`'s own `isinstance` idempotency guard (see its docstring)
+    leaves this provider in place instead of replacing it with one exporting nowhere --
+    the same pattern `test_pipeline_spans.py`'s `span_exporter` fixture uses for
+    tracing, one signal over.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader

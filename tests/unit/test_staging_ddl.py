@@ -35,7 +35,10 @@ def _close_paren(text: str, opened_at: int) -> int:
 
 
 def _staging_ddls() -> list[tuple[Path, str, str]]:
-    """Every `CREATE ... TABLE stg_*` in `src/`, whitespace-normalised."""
+    """Every `CREATE ...
+
+    TABLE stg_*` in `src/`, whitespace-normalised.
+    """
     found: list[tuple[Path, str, str]] = []
     for path in sorted(_SRC.rglob("*.py")):
         text = path.read_text()
@@ -63,8 +66,9 @@ def test_the_scan_finds_the_staging_ddl_it_is_scanning_for() -> None:
 
 
 def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
-    """The wrong implementation: `CREATE UNLOGGED TABLE stg_jobs`, which is what every one
-    of these was until M6.
+    """The wrong implementation.
+
+    `CREATE UNLOGGED TABLE stg_jobs`, which is what every one of these was until M6.
     """
     wrong = [
         (path.name, name, statement)
@@ -91,10 +95,11 @@ _NEVER_EXISTED_IN_PUBLIC = {
 
 
 def test_the_leftover_migration_names_every_staging_table() -> None:
-    """Migration `fc6d2b81a794` drops the `public.stg_*` tables a release
-    predating the temporary ones may have left behind, and it enumerates them
-    rather than globbing `pg_class` -- a wildcard over someone else's schema
-    is a migration that destroys data it was never told about.
+    """Migration `fc6d2b81a794` drops the `public.stg_*` tables a release predating the.
+
+    temporary ones may have left behind, and it enumerates them rather than globbing
+    `pg_class` -- a wildcard over someone else's schema is a migration that destroys
+    data it was never told about.
 
     So the list has to stay complete, and nothing else makes it. **This does
     not kill "delete the loop body"**, and that is deliberate rather than a

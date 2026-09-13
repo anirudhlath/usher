@@ -53,8 +53,9 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_a_cost_the_column_cannot_hold_is_a_port_error(
         self, repository: PostgresLLMCallRepository, ledger: PostgresLLMCallLedger
     ) -> None:
-        """**The case the whole error contract rests on**, and Postgres-only because a
-        Python `Decimal` has no ceiling to hit.
+        """**The case the whole error contract rests on**.
+
+        and Postgres-only because a Python `Decimal` has no ceiling to hit.
         """
         priced_a_million_times_over = llm_call(
             generation_id=new_id(), cost_usd=Decimal("36000.00000000")
@@ -80,8 +81,9 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         ledger: PostgresLLMCallLedger,
         overrides: dict[str, object],
     ) -> None:
-        """`ck_llm_calls_ok_error_agree`, reached through the repository rather than
-        through raw SQL.
+        """`ck_llm_calls_ok_error_agree`.
+
+        reached through the repository rather than through raw SQL.
         """
         valid = llm_call(generation_id=new_id())
         refused = valid.model_construct(**{**valid.model_dump(), **overrides})
@@ -95,8 +97,7 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_a_refused_call_leaves_the_earlier_rows_and_the_session_usable(
         self, repository: PostgresLLMCallRepository, ledger: PostgresLLMCallLedger
     ) -> None:
-        """**The SAVEPOINT**, and it buys more on this port than on its
-        siblings.
+        """**The SAVEPOINT**, and it buys more on this port than on its siblings.
 
         The wrong implementation this kills: a `record()` with no nested
         transaction. The refused `INSERT` aborts the caller's transaction, so
@@ -133,8 +134,9 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         ledger: PostgresLLMCallLedger,
         session: AsyncSession,
     ) -> None:
-        """The other side of the error contract, and the case that makes the SQLSTATE
-        filter load-bearing rather than decorative.
+        """The other side of the error contract.
+
+        and the case that makes the SQLSTATE filter load-bearing rather than decorative.
         """
         raised: Exception | None = None
         await session.execute(text("ALTER TABLE llm_calls RENAME TO llm_calls_moved_away"))
@@ -159,11 +161,11 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_the_cost_lands_in_the_numeric_column_at_its_declared_scale(
         self, repository: PostgresLLMCallRepository, session: AsyncSession
     ) -> None:
-        """The contract's `test_a_cost_is_stored_exactly` compares two
-        `Decimal`s and this reads the column's own rendering, which is a
-        different claim: `0.00000002` and `0.00000002000` compare equal, so
-        equality alone cannot say the value landed at scale 8 rather than
-        being carried by something wider that happened to agree.
+        """The contract's `test_a_cost_is_stored_exactly` compares two `Decimal`s and this reads.
+
+        the column's own rendering, which is a different claim: `0.00000002` and
+        `0.00000002000` compare equal, so equality alone cannot say the value landed at
+        scale 8 rather than being carried by something wider that happened to agree.
 
         The wrong implementation this kills: a write routed through a column
         or a cast this table does not have. Measured while writing this task,

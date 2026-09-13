@@ -70,11 +70,13 @@ async def test_two_subscribers_both_receive_it() -> None:
 
 
 async def test_a_subscriber_scoped_to_titles_is_not_woken_by_unrelated_churn() -> None:
-    """PRD 07: "Subscriptions are scoped by query (`?titles=id1,id2`) so a
-    detail screen isn't woken by unrelated churn." A nightly walk publishes
-    a `sync.progress` per batch -- 1,127 of them against the one measured
-    library -- and a detail screen that re-rendered on each is the reason
-    this filter exists rather than being a nicety."""
+    """PRD 07.
+
+    "Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
+    woken by unrelated churn." A nightly walk publishes a `sync.progress` per batch --
+    1,127 of them against the one measured library -- and a detail screen that re-
+    rendered on each is the reason this filter exists rather than being a nicety.
+    """
     wanted, other = uuid.uuid4(), uuid.uuid4()
     bus = InMemoryEventBus()
     async with bus.subscribe(titles=frozenset({wanted})) as stream:
@@ -86,9 +88,10 @@ async def test_a_subscriber_scoped_to_titles_is_not_woken_by_unrelated_churn() -
 
 
 async def test_an_unfiltered_subscriber_receives_everything() -> None:
-    """An admin UI wants `sync.progress`, which belongs to no title. The
-    filter is opt-in, and its absence means "everything" rather than
-    "nothing"."""
+    """An admin UI wants `sync.progress`, which belongs to no title.
+
+    The filter is opt-in, and its absence means "everything" rather than "nothing".
+    """
     bus = InMemoryEventBus()
     async with bus.subscribe() as stream:
         await bus.publish(_event(1, title_id=uuid.uuid4()))
@@ -99,9 +102,10 @@ async def test_an_unfiltered_subscriber_receives_everything() -> None:
 
 
 async def test_an_episode_event_reaches_a_subscriber_scoped_to_its_series() -> None:
-    """A client watching a series has the series' title id and no episode
-    ids until it fetches a season, so the filter matches on `title_id` and
-    an episode event carries both."""
+    """A client watching a series has the series' title id and no episode ids until it fetches a.
+
+    season, so the filter matches on `title_id` and an episode event carries both.
+    """
     series = uuid.uuid4()
     bus = InMemoryEventBus()
     async with bus.subscribe(titles=frozenset({series})) as stream:
@@ -118,8 +122,7 @@ async def test_an_episode_event_reaches_a_subscriber_scoped_to_its_series() -> N
 
 
 async def test_publish_never_suspends_when_a_subscribers_queue_is_full() -> None:
-    """**The property this component exists for, decided rather than
-    timed.**
+    """**The property this component exists for, decided rather than timed.**.
 
     One `send(None)` into the raw coroutine: a `publish` that never awaits
     finishes in that one step and raises `StopIteration`; a `publish` that
@@ -210,10 +213,12 @@ async def test_publishing_does_not_block_on_a_subscriber_that_is_not_reading() -
 
 
 async def test_a_cancelled_subscriber_is_removed() -> None:
-    """An SSE client disconnecting is the common case, not the exception --
-    a browser tab close, a phone locking, a proxy timing out. A bus that
-    kept the queue would grow one per connection for the life of the
-    process."""
+    """An SSE client disconnecting is the common case, not the exception.
+
+    a browser tab close, a phone locking, a proxy timing out.
+
+    A bus that kept the queue would grow one per connection for the life of the process.
+    """
     bus = InMemoryEventBus()
     async with bus.subscribe():
         assert bus.subscribers == 1
@@ -229,8 +234,10 @@ async def test_a_subscriber_removed_by_an_exception_is_still_removed() -> None:
 
 
 async def test_an_overflowed_subscriber_gets_exactly_one_resync() -> None:
-    """A queue that re-filled behind the resync would hand the client a
-    second one the moment it read the first, forever."""
+    """A queue that re-filled behind the resync would hand the client a second one the moment it.
+
+    read the first, forever.
+    """
     bus = InMemoryEventBus(queue_size=2)
     async with bus.subscribe() as stream:
         # `publish_all`, never a bare loop: 50 publishes into a queue of two
@@ -255,8 +262,10 @@ async def test_replay_honours_the_subscribers_title_filter() -> None:
 
 
 async def test_an_unparseable_last_event_id_is_told_to_resync() -> None:
-    """A client sends back whatever it last saw, and a proxy or a bad client
-    can mangle it. Raising would answer a reconnect with a 500."""
+    """A client sends back whatever it last saw, and a proxy or a bad client can mangle it.
+
+    Raising would answer a reconnect with a 500.
+    """
     bus = InMemoryEventBus()
     async with bus.subscribe(last_event_id="not-an-id") as stream:
         sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
@@ -264,9 +273,11 @@ async def test_an_unparseable_last_event_id_is_told_to_resync() -> None:
 
 
 async def test_a_last_event_id_at_the_head_replays_nothing_and_waits() -> None:
-    """Also the off-by-one case: `>= seen` in place of `> seen` replays the
-    very event the client told us it already has, which is a duplicate on
-    every reconnect rather than a visible failure."""
+    """Also the off-by-one case.
+
+    `>= seen` in place of `> seen` replays the very event the client told us it already
+    has, which is a duplicate on every reconnect rather than a visible failure.
+    """
     bus = InMemoryEventBus()
     await bus.publish(_event(1))
     async with bus.subscribe(last_event_id=f"{bus.epoch}-1") as stream:
@@ -275,8 +286,9 @@ async def test_a_last_event_id_at_the_head_replays_nothing_and_waits() -> None:
 
 
 async def test_replay_does_not_redeliver_what_the_queue_already_holds() -> None:
-    """**A subscriber's two sources are the same `publish` calls, and the
-    plan's shape overlapped them.**
+    """**A subscriber's two sources are the same `publish` calls.
+
+    and the plan's shape overlapped them.**.
 
     A replay resolved lazily, at the first `__anext__`, re-reads a ring that
     has meanwhile grown -- and everything published since `subscribe`
@@ -330,10 +342,13 @@ async def test_a_deferred_publish_reaches_the_inner_publisher_only_on_the_flush(
 
 
 async def test_a_flush_offers_what_was_held_in_the_order_it_was_raised() -> None:
-    """`title.updated` then `watchstate.updated` is a client patching a card
-    and then its progress; the reverse is a progress bar on a card that has
-    not been rewritten yet. The port promises order *within* one subscriber's
-    stream, and a buffer is a place to lose it."""
+    """`title.updated` then `watchstate.updated` is a client patching a card and then its.
+
+    progress; the reverse is a progress bar on a card that has not been rewritten yet.
+
+    The port promises order *within* one subscriber's stream, and a buffer is a place to
+    lose it.
+    """
     bus = InMemoryEventBus()
     deferred = DeferredEventPublisher(bus)
     async with bus.subscribe() as stream:
@@ -349,9 +364,12 @@ async def test_a_flush_offers_what_was_held_in_the_order_it_was_raised() -> None
 
 
 async def test_a_discard_offers_nothing_and_a_later_flush_offers_nothing_either() -> None:
-    """Both halves, because a `discard` that only marked the buffer would
-    pass the first and re-deliver a rolled-back job's frames on the next
-    job's commit -- which is the defect, one caller up."""
+    """Both halves.
+
+    because a `discard` that only marked the buffer would pass the first and re-deliver
+    a rolled-back job's frames on the next job's commit -- which is the defect, one
+    caller up.
+    """
     bus = InMemoryEventBus()
     deferred = DeferredEventPublisher(bus)
     async with bus.subscribe() as stream:
@@ -367,10 +385,11 @@ async def test_a_discard_offers_nothing_and_a_later_flush_offers_nothing_either(
 
 
 async def test_a_flush_that_meets_a_raising_publisher_still_empties_the_buffer() -> None:
-    """`publish` never raises is the port's contract, so this is a case about
-    an implementation breaking it -- and the caller is `JobWorker`, on a path
-    where the job is already complete and committed and there is nothing left
-    to undo.
+    """`publish` never raises is the port's contract.
+
+    so this is a case about an implementation breaking it -- and the caller is
+    `JobWorker`, on a path where the job is already complete and committed and there is
+    nothing left to undo.
 
     The second frame is what makes it more than "it did not raise": a flush
     that abandoned the loop on the first failure would hold the rest until
@@ -410,11 +429,14 @@ async def test_a_deferred_publish_is_not_a_suspension_point_either() -> None:
 
 
 async def test_a_flush_with_nothing_held_offers_nothing() -> None:
-    """`JobWorker` flushes after every completed job and most handlers
-    publish nothing at all -- `match`, `derive`, `index`, `curate` and
-    `watch_writeback` are five of the seven kinds. A flush that offered a
-    sentinel, or re-offered the last job's frames, would wake every
-    subscriber on the box once per claimed job."""
+    """`JobWorker` flushes after every completed job and most handlers publish nothing at all.
+
+    `match`, `derive`, `index`, `curate` and `watch_writeback` are five of the seven
+    kinds.
+
+    A flush that offered a sentinel, or re-offered the last job's frames, would wake
+    every subscriber on the box once per claimed job.
+    """
     offered: list[ClientEvent] = []
 
     class _Counting(NullEventPublisher):
@@ -429,8 +451,11 @@ async def test_a_flush_with_nothing_held_offers_nothing() -> None:
 
 
 class _Suspending(NullEventPublisher):
-    """A publisher that parks, standing in for the `LISTEN/NOTIFY` transport
-    `ports/events.py` names as the second implementation."""
+    """A publisher that parks.
+
+    standing in for the `LISTEN/NOTIFY` transport `ports/events.py` names as the second
+    implementation.
+    """
 
     async def publish(self, event: ClientEvent) -> None:
         await asyncio.sleep(0)
@@ -491,8 +516,7 @@ class TestInMemoryEventBus(EventPublisherContract, EventBusContract):
     async def _one_subscriber_that_never_reads(
         self, publisher: InMemoryEventBus
     ) -> AsyncIterator[None]:
-        """The shared suite runs against a bus with a subscriber attached and
-        nobody reading it.
+        """The shared suite runs against a bus with a subscriber attached and nobody reading it.
 
         Without this it exercises the *empty* bus, which every implementation
         satisfies trivially -- and the guarantee the port states is about a

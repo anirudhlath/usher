@@ -18,9 +18,10 @@ class FakeImageBlobStore(ImageBlobStore):
         self.puts = 0
 
     def keys(self) -> list[ImageCacheKey]:
-        """Every entry's key, for a case asserting *which* entries exist rather
-        than how many — two rungs of one image and two images at one rung are
-        both "two entries"."""
+        """Every entry's key, for a case asserting *which* entries exist rather than how many.
+
+        two rungs of one image and two images at one rung are both "two entries".
+        """
         return list(self._entries)
 
     async def get(self, key: ImageCacheKey) -> StoredImage | None:

@@ -112,8 +112,9 @@ async def sync_source(
     queue: JobQueueDep,
     kind: Literal["full", "delta"] = "delta",
 ) -> SyncTriggerResponse:
-    """Ask for one source to be walked again. Enqueues `JobKind.SYNC` and returns before
-    anything runs.
+    """Ask for one source to be walked again.
+
+    Enqueues `JobKind.SYNC` and returns before anything runs.
     """
     source = await sources.get(source_id)
     if source is None:

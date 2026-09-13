@@ -167,12 +167,14 @@ class _ScriptedIndex(SearchIndex):
         return self.outcome
 
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        """**Derived from the scripted outcome rather than scripted
-        separately**, because it is the same question asked a moment earlier:
-        what fraction of the filtered population has a vector. Two knobs would
-        let a case arrange a service whose probe and whose answer disagree --
-        a deployment that cannot exist -- and every expansion case in this file
-        would then be silently about whichever of the two the implementation
+        """**Derived from the scripted outcome rather than scripted separately**.
+
+        because it is the same question asked a moment earlier: what fraction of the
+        filtered population has a vector.
+
+        Two knobs would let a case arrange a service whose probe and whose answer
+        disagree -- a deployment that cannot exist -- and every expansion case in this
+        file would then be silently about whichever of the two the implementation
         happened to read.
 
         The consequence is that `SearchOutcome()`'s default `0.0` means *no
@@ -260,9 +262,10 @@ def _finished(title_id: uuid.UUID, *, user_id: uuid.UUID) -> WatchStateMerge:
 
 
 class _Expander:
-    """A real `QueryExpansionService` over a scripted client, plus the two
-    things a case asserts on: how many completions were bought, and what landed
-    in the ledger.
+    """A real `QueryExpansionService` over a scripted client.
+
+    plus the two things a case asserts on: how many completions were bought, and what
+    landed in the ledger.
 
     Deliberately **not** a stubbed expander. The property under test is *how
     many completions one search buys*, and a stub that recorded a call would
@@ -298,9 +301,11 @@ class _CountingTitles(FakeTitleRepository):
 
 
 class _CountingMediaItems(FakeMediaItemRepository):
-    """The same, for the ownership read. `FakeMediaItemRepository.calls` exists
-    already and does **not** cover `owned_title_ids`, so counting through it
-    would be a count of writes."""
+    """The same, for the ownership read.
+
+    `FakeMediaItemRepository.calls` exists already and does **not** cover
+    `owned_title_ids`, so counting through it would be a count of writes.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -354,8 +359,7 @@ class _CountingTaste(FakeTasteRepository):
 
 
 class _CountingEmbeddings(FakeTitleEmbeddingRepository):
-    """The vector read, counted -- and the `model_name` it was scoped by
-    recorded beside it.
+    """The vector read, counted -- and the `model_name` it was scoped by recorded beside it.
 
     The scope is the half a count cannot see: an unscoped read answers with a
     vector from *some* checkpoint and the blend then reports a confident cosine
@@ -423,8 +427,7 @@ class _Clock:
 
 
 class _RefusingQueries(FakeSearchQueryRepository):
-    """A `search_queries` writer that raises whatever it was given, and counts
-    the attempts.
+    """A `search_queries` writer that raises whatever it was given, and counts the attempts.
 
     The count is what makes *"the search still answered"* a statement about the
     `except` arm rather than about a collaborator that was never reached: a
@@ -443,8 +446,7 @@ class _RefusingQueries(FakeSearchQueryRepository):
 
 
 class _Recorder:
-    """`search_queries`' retrieval half over the fake, with the commits counted
-    beside it.
+    """`search_queries`' retrieval half over the fake, with the commits counted beside it.
 
     **The count is half the subject.** A row written into a session nobody
     commits is rolled back when the read's session closes -- `cli._session_for`
@@ -583,10 +585,12 @@ async def _service(
 
 
 async def test_the_service_embeds_the_query_and_the_index_never_does() -> None:
-    """Defect 4 of the search port's own 🔶, from the caller's side. Fails: an
-    index that embeds for itself -- a backend with its own model has its own
-    prefix convention, its own checkpoint and its own drift, and nothing above
-    it can see any of the three."""
+    """Defect 4 of the search port's own 🔶, from the caller's side.
+
+    Fails: an index that embeds for itself -- a backend with its own model has its own
+    prefix convention, its own checkpoint and its own drift, and nothing above it can
+    see any of the three.
+    """
     embedder = FakeEmbedder()
     index = _ScriptedIndex(SearchOutcome())
     service = await _service(index, embedder=embedder)
@@ -595,14 +599,18 @@ async def test_the_service_embeds_the_query_and_the_index_never_does() -> None:
 
 
 async def test_the_query_is_embedded_exactly_as_typed_with_no_instruction_prefix() -> None:
-    """**The embedding port's 🔶 3 settlement, asserted where a caller could
-    break it.** `ports/embedding.py` used to say "callers are responsible for
-    any query-side instruction prefix" and this service is the caller it meant.
-    The documented BGE prefix moves MRR -0.0028, CI [-0.0259, +0.0203]; applied
-    to both sides -- which one symmetric loop plus that instruction produces --
-    it is -0.0663, CI [-0.1013, -0.0330]. `compose_document` applies none on
-    the document side, so anything added here is one of those two conditions
-    and nothing else in this repository could detect it."""
+    """**The embedding port's 🔶 3 settlement.
+
+    asserted where a caller could break it.** `ports/embedding.py` used to say "callers
+    are responsible for any query-side instruction prefix" and this service is the
+    caller it meant.
+
+    The documented BGE prefix moves MRR -0.0028, CI [-0.0259, +0.0203]; applied to both
+    sides -- which one symmetric loop plus that instruction produces -- it is -0.0663,
+    CI [-0.1013, -0.0330]. `compose_document` applies none on the document side, so
+    anything added here is one of those two conditions and nothing else in this
+    repository could detect it.
+    """
     embedder = FakeEmbedder()
     service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder)
     await service.search("an empty room", mode=SearchMode.SEMANTIC)
@@ -610,13 +618,15 @@ async def test_the_query_is_embedded_exactly_as_typed_with_no_instruction_prefix
 
 
 async def test_a_blank_query_never_reaches_the_model() -> None:
-    """The degenerate-document trap, on the query side. Every whitespace-only
-    input embeds to the *identical* vector -- cos = 1.0000 exactly -- and that
-    vector is perfectly valid, so a blank semantic query returns a confident
-    ranked list of whatever sits nearest a degenerate point, with no error and
-    no empty result to say the query was empty. `compose_document` refuses a
-    degenerate document; this refuses a degenerate query. Empty rather than a
-    raise: a search box sends this between keystrokes."""
+    """The degenerate-document trap, on the query side.
+
+    Every whitespace-only input embeds to the *identical* vector -- cos = 1.0000 exactly
+    -- and that vector is perfectly valid, so a blank semantic query returns a confident
+    ranked list of whatever sits nearest a degenerate point, with no error and no empty
+    result to say the query was empty. `compose_document` refuses a degenerate document;
+    this refuses a degenerate query. Empty rather than a raise: a search box sends this
+    between keystrokes.
+    """
     embedder = FakeEmbedder()
     index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),)))
     service = await _service(index, embedder=embedder)
@@ -628,15 +638,18 @@ async def test_a_blank_query_never_reaches_the_model() -> None:
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
 async def test_a_blank_prefix_never_reaches_the_suggest_index(tier: SuggestTier) -> None:
-    """The same refusal on the type-ahead path, which is where a search box
-    actually sends whitespace. Fails: a `suggest` that forwards it, which on
-    the real backend is a trigram probe with an empty needle against every
-    name in a 1,271,138-row table -- or, on tier 1, `LIKE '%'` over the same
-    1,271,138 rows collected, de-duplicated and sorted.
+    """The same refusal on the type-ahead path.
+
+    which is where a search box actually sends whitespace.
+
+    Fails: a `suggest` that forwards it, which on the real backend is a trigram probe
+    with an empty needle against every name in a 1,271,138-row table -- or, on tier 1,
+    `LIKE '%'` over the same 1,271,138 rows collected, de-duplicated and sorted.
 
     Parametrised over both tiers because the guard is written once above the
     tier selection: a spelling that moved it inside one branch would leave the
-    other forwarding whitespace, and one arm cannot see that."""
+    other forwarding whitespace, and one arm cannot see that.
+    """
     suggestions = _ScriptedSuggest((SearchHit(title_id=_QUIET, score=1.0),))
     service = await _service(_ScriptedIndex(SearchOutcome()), suggestions=suggestions, tier=tier)
     assert await service.suggest("  ", tier=tier) == ()
@@ -649,12 +662,14 @@ async def test_a_blank_prefix_never_reaches_the_suggest_index(tier: SuggestTier)
 
 
 async def test_the_expansion_is_what_gets_embedded_and_the_answer_reports_it() -> None:
-    """**Both halves of the clause, in one case, because either alone is the
-    defect.** Embedding the rewrite without reporting it is a viewer who
-    searched for one thing, got results for another, and has nothing to tell a
-    good expansion from a bad one -- and neither has an operator reading their
-    bug report. Reporting a rewrite that was not embedded is the same lie from
-    the other side.
+    """**Both halves of the clause.
+
+    in one case, because either alone is the defect.** Embedding the rewrite without
+    reporting it is a viewer who searched for one thing, got results for another, and
+    has nothing to tell a good expansion from a bad one -- and neither has an operator
+    reading their bug report.
+
+    Reporting a rewrite that was not embedded is the same lie from the other side.
 
     The distractor is that `query` is *also* a plausible value for
     `expanded_query`: a service that reported the typed string would pass any
@@ -677,9 +692,10 @@ async def test_the_expansion_is_what_gets_embedded_and_the_answer_reports_it() -
 
 
 async def test_the_full_text_lane_still_sees_the_words_the_viewer_typed() -> None:
-    """**Only the vector is computed from the rewrite.** Under RRF the lexical
-    lane goes on matching the viewer's own words while the semantic lane
-    matches the paraphrase, which is strictly more signal than either alone.
+    """**Only the vector is computed from the rewrite.** Under RRF the lexical lane goes on.
+
+    matching the viewer's own words while the semantic lane matches the paraphrase,
+    which is strictly more signal than either alone.
 
     Fails: substituting the rewrite into `SearchRequest.query` as well, which
     leaves *no* lane holding the original -- so a rewrite that drifted turns an
@@ -696,11 +712,14 @@ async def test_the_full_text_lane_still_sees_the_words_the_viewer_typed() -> Non
 
 
 async def test_with_no_expander_the_query_is_embedded_as_typed_and_nothing_is_reported() -> None:
-    """**The shipped default, byte for byte.** `USHER_LLM_ENABLED` is `false`,
-    so `composition.llm_client` answers `(None, no-op)`, no expander is built,
-    and this path has to be exactly M6's. Fails: an `expanded_query` populated
-    with the typed string, which would print a line on every search of every
-    deployment for a completion nobody bought."""
+    """**The shipped default.
+
+    byte for byte.** `USHER_LLM_ENABLED` is `false`, so `composition.llm_client` answers
+    `(None, no-op)`, no expander is built, and this path has to be exactly M6's.
+
+    Fails: an `expanded_query` populated with the typed string, which would print a line
+    on every search of every deployment for a completion nobody bought.
+    """
     embedder = FakeEmbedder()
     service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder)
 
@@ -711,8 +730,10 @@ async def test_with_no_expander_the_query_is_embedded_as_typed_and_nothing_is_re
 
 
 async def test_an_expansion_that_produced_nothing_leaves_the_query_as_typed() -> None:
-    """PRD 08's degradation rule reaching the caller: the endpoint is down, the
-    attempt is billed, and the search is served on the words the viewer typed.
+    """PRD 08's degradation rule reaching the caller.
+
+    the endpoint is down, the attempt is billed, and the search is served on the words
+    the viewer typed.
 
     Fails twice over -- a `SearchService` that let the `UsherPortError` out
     would fail a search over an optional enhancement, and one that reported an
@@ -732,10 +753,13 @@ async def test_an_expansion_that_produced_nothing_leaves_the_query_as_typed() ->
 
 
 async def test_one_search_buys_exactly_one_completion() -> None:
-    """`FakeLLMClient` repeats its last scripted response forever, so a second
-    call is invisible to every assertion about *what* came back. One completion
-    per unit of work is the milestone's cost argument and the count is the only
-    thing that states it."""
+    """`FakeLLMClient` repeats its last scripted response forever.
+
+    so a second call is invisible to every assertion about *what* came back.
+
+    One completion per unit of work is the milestone's cost argument and the count is
+    the only thing that states it.
+    """
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(
         _ScriptedIndex(SearchOutcome(semantic_coverage=1.0)),
@@ -750,10 +774,11 @@ async def test_one_search_buys_exactly_one_completion() -> None:
 
 
 async def test_a_full_text_search_buys_no_completion() -> None:
-    """The call sits in front of the *embed*, so a lane with no embed has no
-    call in front of it. Fails: an expansion at the top of `search`, which
-    bills every `--mode full-text` run -- the mode a deployment with no
-    embedding extra uses for everything."""
+    """The call sits in front of the *embed*, so a lane with no embed has no call in front of it.
+
+    Fails: an expansion at the top of `search`, which bills every `--mode full-text` run
+    -- the mode a deployment with no embedding extra uses for everything.
+    """
     embedder = FakeEmbedder()
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder, expander=expander)
@@ -767,9 +792,11 @@ async def test_a_full_text_search_buys_no_completion() -> None:
 
 async def test_a_blank_query_buys_no_completion() -> None:
     """The blank-query refusal is *before* the model and therefore before this.
-    A search box sends one between every keystroke, so an expansion above that
-    guard is a completion per keypress -- the exact inverse of this milestone's
-    cost argument, arriving on its most frequent path."""
+
+    A search box sends one between every keystroke, so an expansion above that guard is
+    a completion per keypress -- the exact inverse of this milestone's cost argument,
+    arriving on its most frequent path.
+    """
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(
         _ScriptedIndex(SearchOutcome()), embedder=FakeEmbedder(), expander=expander
@@ -783,9 +810,11 @@ async def test_a_blank_query_buys_no_completion() -> None:
 
 async def test_a_fused_search_with_no_embedder_buys_no_completion() -> None:
     """Nothing is going to be embedded, so there is nothing to expand *for*.
-    Fails: an expansion in front of the `embedder is None` branch, which buys a
-    rewrite and then throws it away -- billed, on every fused search of a
-    deployment that has no model at all, which is the shipped default."""
+
+    Fails: an expansion in front of the `embedder is None` branch, which buys a rewrite
+    and then throws it away -- billed, on every fused search of a deployment that has no
+    model at all, which is the shipped default.
+    """
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),)))
     service = await _service(index, embedder=None, expander=expander)
@@ -798,10 +827,12 @@ async def test_a_fused_search_with_no_embedder_buys_no_completion() -> None:
 
 
 async def test_a_semantic_search_with_no_embedder_buys_no_completion() -> None:
-    """The other arm of the same branch. `SemanticSearchUnavailable` is raised
-    before anything is spent, because a deployment configured without a model
-    has not failed -- it said so once, at startup -- and charging it for the
-    sentence would be spend an operator has to explain away."""
+    """The other arm of the same branch.
+
+    `SemanticSearchUnavailable` is raised before anything is spent, because a deployment
+    configured without a model has not failed -- it said so once, at startup -- and
+    charging it for the sentence would be spend an operator has to explain away.
+    """
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(_ScriptedIndex(SearchOutcome()), embedder=None, expander=expander)
 
@@ -816,11 +847,12 @@ async def test_a_semantic_search_with_no_embedder_buys_no_completion() -> None:
 async def test_a_search_over_a_population_with_no_vectors_buys_no_completion(
     mode: SearchMode,
 ) -> None:
-    """**Issue #16.** The guard used to be `embedder is None` rather than
-    *"anything is embedded"*, so a deployment that had configured a model and
-    not yet backfilled bought a completion, embedded the rewrite, and got
-    `semantic_coverage=0.000` back -- the warning arriving after the money, on
-    every semantic or fused search until the backfill drained.
+    """**Issue #16.** The guard used to be `embedder is None` rather than *"anything is.
+
+    embedded"*, so a deployment that had configured a model and not yet backfilled
+    bought a completion, embedded the rewrite, and got `semantic_coverage=0.000` back --
+    the warning arriving after the money, on every semantic or fused search until the
+    backfill drained.
 
     **The probe is the number the answer already reports**, asked one statement
     earlier: `SearchIndex.semantic_coverage` takes filters and no vector, which
@@ -871,11 +903,14 @@ async def test_the_shipped_default_probes_nothing_before_embedding() -> None:
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
 async def test_type_ahead_buys_no_completion(tier: SuggestTier) -> None:
-    """**The one that would hurt.** `suggest` is what a client calls per
-    keystroke; it has no semantic lane at all, so it has no embed for an
-    expansion to sit in front of. Fails: an expansion factored to the top of
-    the service and shared by both entry points, which is the tidy-looking
-    version and is a completion per keypress."""
+    """**The one that would hurt.** `suggest` is what a client calls per keystroke.
+
+    it has no semantic lane at all, so it has no embed for an expansion to sit in front
+    of.
+
+    Fails: an expansion factored to the top of the service and shared by both entry
+    points, which is the tidy-looking version and is a completion per keypress.
+    """
     suggestions = _ScriptedSuggest((SearchHit(title_id=_QUIET, score=1.0),))
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(
@@ -894,25 +929,31 @@ async def test_type_ahead_buys_no_completion(tier: SuggestTier) -> None:
 
 
 async def test_semantic_with_no_embedder_is_an_error_not_a_full_text_fallback() -> None:
-    """Fails: a silent fallback to full-text, which returns a plausible ranked
-    list for a query whose whole point was that full-text could not answer it
-    ("movies about isolation in space" against a `tsquery` for four words).
-    PRD 08's rule is that a degraded subsystem *narrows*; SEMANTIC minus its
-    only lane is not narrower, it is a different question answered without
-    saying so."""
+    """Fails.
+
+    a silent fallback to full-text, which returns a plausible ranked list for a query
+    whose whole point was that full-text could not answer it ("movies about isolation in
+    space" against a `tsquery` for four words).
+
+    PRD 08's rule is that a degraded subsystem *narrows*; SEMANTIC minus its only lane
+    is not narrower, it is a different question answered without saying so.
+    """
     service = await _service(_ScriptedIndex(SearchOutcome()), embedder=None)
     with pytest.raises(SemanticSearchUnavailable):
         await service.search("an empty room", mode=SearchMode.SEMANTIC)
 
 
 async def test_fused_with_no_embedder_narrows_to_full_text_and_says_which() -> None:
-    """The other half of the asymmetry, and the half that must not raise --
-    FUSED minus its semantic lane is still full-text, an honest answer local
-    state can give. Two wrong implementations; the second is the dangerous
-    one. Raising fails a request local state can answer. **Degrading silently**
-    returns the right rows under the label the caller asked for, so an operator
-    running `--mode fused` without the embedding extra sees a working hybrid
-    search forever."""
+    """The other half of the asymmetry, and the half that must not raise.
+
+    FUSED minus its semantic lane is still full-text, an honest answer local state can
+    give.
+
+    Two wrong implementations; the second is the dangerous one. Raising fails a request
+    local state can answer. **Degrading silently** returns the right rows under the
+    label the caller asked for, so an operator running `--mode fused` without the
+    embedding extra sees a working hybrid search forever.
+    """
     index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),)))
     service = await _service(index, embedder=None)
     answer = await service.search("vacuum", mode=SearchMode.FUSED)
@@ -925,9 +966,10 @@ async def test_fused_with_no_embedder_narrows_to_full_text_and_says_which() -> N
 
 
 async def test_an_undegraded_search_does_not_claim_to_be_degraded() -> None:
-    """The mirror of the case above, and without it `degraded` could be `True`
-    unconditionally -- a warning printed on every search, which an operator
-    learns to ignore inside a week."""
+    """The mirror of the case above, and without it `degraded` could be `True` unconditionally.
+
+    a warning printed on every search, which an operator learns to ignore inside a week.
+    """
     index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),)))
     service = await _service(index)
     answer = await service.search("vacuum")
@@ -937,11 +979,13 @@ async def test_an_undegraded_search_does_not_claim_to_be_degraded() -> None:
 
 
 async def test_semantic_coverage_is_passed_through_rather_than_recomputed() -> None:
-    """Point 3 of "the one thing this milestone must not get wrong". Fails: a
-    service computing coverage from its own hits, which reads 1.0 whenever
-    every returned hit had a vector -- precisely the case a green test seeds --
-    while the real question is what fraction of the *filtered population* had
-    one. The two agree exactly in the easy case."""
+    """Point 3 of "the one thing this milestone must not get wrong".
+
+    Fails: a service computing coverage from its own hits, which reads 1.0 whenever
+    every returned hit had a vector -- precisely the case a green test seeds -- while
+    the real question is what fraction of the *filtered population* had one. The two
+    agree exactly in the easy case.
+    """
     index = _ScriptedIndex(
         SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),), semantic_coverage=0.25)
     )
@@ -954,13 +998,16 @@ async def test_semantic_coverage_is_passed_through_rather_than_recomputed() -> N
 
 
 async def test_an_unowned_match_still_appears_and_still_outranks_an_owned_one() -> None:
-    """**PRD 05's "boosted but not exclusive", and the wrong implementation is
-    an attractive one.** A ranking that filters to owned returns nothing
-    incorrect -- every row on the screen is right, the catalog is just quietly
-    smaller. The unowned title is the *stronger* match (index rank 0), so this
-    fails a filter **and** a boost big enough to invert the top of the list.
-    Position, not membership: `_UNOWNED in ids` passes against an
-    implementation that returns the whole table in physical order.
+    """**PRD 05's "boosted but not exclusive".
+
+    and the wrong implementation is an attractive one.** A ranking that filters to owned
+    returns nothing incorrect -- every row on the screen is right, the catalog is just
+    quietly smaller.
+
+    The unowned title is the *stronger* match (index rank 0), so this fails a filter
+    **and** a boost big enough to invert the top of the list. Position, not membership:
+    `_UNOWNED in ids` passes against an implementation that returns the whole table in
+    physical order.
     """
     index = _ScriptedIndex(
         SearchOutcome(
@@ -977,7 +1024,8 @@ async def test_an_unowned_match_still_appears_and_still_outranks_an_owned_one() 
 
 
 async def test_an_owned_title_outranks_an_unowned_one_at_equal_relevance() -> None:
-    """The mirror, and without it a boost of **zero** passes the case above --
+    """The mirror, and without it a boost of **zero** passes the case above.
+
     a term declared in the weight table and never applied to anything.
 
     Equal *scores* from the index, so both hits take the same dense rank and
@@ -1003,13 +1051,15 @@ async def test_an_owned_title_outranks_an_unowned_one_at_equal_relevance() -> No
 
 
 async def test_a_strong_match_is_not_displaced_by_a_popular_weak_one() -> None:
-    """**The incompatible-scale failure, in application code.** Fails: a blend
-    adding `hit.score` raw (a `ts_rank` around 0.06) to a popularity term in
-    [0, 1), and equally a relevance term spelled `1 / (search_rrf_k + rank)` --
-    at k = 60 the whole relevance term is nearly flat while popularity spans
-    the unit interval, so the list is popularity-ordered wearing RRF's
-    respectable name. ADR-0002 forbids exactly this one layer down; nothing
-    catches it one layer up except this case.
+    """**The incompatible-scale failure, in application code.** Fails.
+
+    a blend adding `hit.score` raw (a `ts_rank` around 0.06) to a popularity term in [0,
+    1), and equally a relevance term spelled `1 / (search_rrf_k + rank)` -- at k = 60
+    the whole relevance term is nearly flat while popularity spans the unit interval, so
+    the list is popularity-ordered wearing RRF's respectable name.
+
+    ADR-0002 forbids exactly this one layer down; nothing catches it one layer up except
+    this case.
     """
     index = _ScriptedIndex(
         SearchOutcome(
@@ -1025,13 +1075,14 @@ async def test_a_strong_match_is_not_displaced_by_a_popular_weak_one() -> None:
 
 
 async def test_an_unknown_popularity_is_not_a_popularity_of_zero() -> None:
-    """ADR-0014 in a fourth place. `titles.tmdb_popularity` is `None` for every
-    title TMDb has never described -- most of 1,271,138 rows. Fails:
-    `popularity or 0.0` and its SQL twin `coalesce(popularity, 0)`, which rank
-    a title nobody measured identically to one measured as unpopular and bury
-    the un-enriched catalog beneath the enriched tier while looking like
-    arithmetic. The two hits are at equal relevance and equal ownership, so the
-    only thing that can separate them is whether absence was scored or excluded.
+    """ADR-0014 in a fourth place.
+
+    `titles.tmdb_popularity` is `None` for every title TMDb has never described -- most
+    of 1,271,138 rows. Fails: `popularity or 0.0` and its SQL twin `coalesce(popularity,
+    0)`, which rank a title nobody measured identically to one measured as unpopular and
+    bury the un-enriched catalog beneath the enriched tier while looking like
+    arithmetic. The two hits are at equal relevance and equal ownership, so the only
+    thing that can separate them is whether absence was scored or excluded.
 
     `_ZERO_POP < _NO_POP` as ids, so both wrong implementations -- scoring the
     absence, and renormalising by the full weight sum -- tie the pair and the
@@ -1051,8 +1102,9 @@ async def test_an_unknown_popularity_is_not_a_popularity_of_zero() -> None:
 
 
 async def test_a_played_title_outranks_an_unplayed_one_at_equal_relevance() -> None:
-    """PRD 05's watch-state term, and **the direction is the decision**: played
-    is a small boost, never a demotion.
+    """PRD 05's watch-state term, and **the direction is the decision**.
+
+    played is a small boost, never a demotion.
 
     A search is overwhelmingly a re-find intent -- somebody typing a title's
     name usually wants that title -- so a demotion buries the exact film they
@@ -1126,8 +1178,9 @@ async def test_two_households_that_disagree_about_one_title_get_different_orders
 
 
 async def test_a_ranked_search_for_a_household_with_no_centroid_makes_exactly_four_reads() -> None:
-    """`list_by_ids`, `owned_title_ids`, `played_title_ids`, `latest` -- one
-    each, whatever the hit count, and **`list_for_titles` not at all**.
+    """`list_by_ids`, `owned_title_ids`, `played_title_ids`, `latest`.
+
+    one each, whatever the hit count, and **`list_for_titles` not at all**.
 
     This is the shipped default and therefore the number that matters: no
     worker has run, `user_taste` is empty, and the taste term costs exactly one
@@ -1193,9 +1246,10 @@ async def test_a_ranked_search_for_a_household_with_a_centroid_makes_exactly_fiv
 
 
 async def test_a_stored_refusal_costs_the_probe_and_not_the_vector_read() -> None:
-    """A household below `TasteService._MIN_TITLES` has a **written refusal** —
-    a `user_taste` row whose `centroid` is NULL — and that is a readable row
-    rather than an absence.
+    """A household below `TasteService._MIN_TITLES` has a **written refusal**.
+
+    a `user_taste` row whose `centroid` is NULL — and that is a readable row rather than
+    an absence.
 
     Fails: `if stored is not None` as the gate on the vector read, which is the
     obvious spelling and which pays a `WHERE title_id IN (...)` over every
@@ -1221,9 +1275,10 @@ async def test_a_stored_refusal_costs_the_probe_and_not_the_vector_read() -> Non
 
 
 async def test_a_ranked_search_with_no_household_makes_exactly_two() -> None:
-    """The other side, and it is not tidiness: `played_title_ids` and `latest`
-    both need a `user_id`, so a service that asked anyway would have to invent
-    one.
+    """The other side, and it is not tidiness.
+
+    `played_title_ids` and `latest` both need a `user_id`, so a service that asked
+    anyway would have to invent one.
 
     Fails: a household read issued with a placeholder id, which costs two
     statements per search on every caller that has no household and answers
@@ -1266,9 +1321,11 @@ async def test_the_household_read_is_bounded_by_the_hits() -> None:
 
 
 async def test_a_search_that_matched_nothing_asks_no_household_anything() -> None:
-    """The empty-candidate guard, on the read this task adds. Fails: a `_rank`
-    that reads before it checks, which is a statement per keystroke on a search
-    box whose query has not matched yet -- most keystrokes."""
+    """The empty-candidate guard, on the read this task adds.
+
+    Fails: a `_rank` that reads before it checks, which is a statement per keystroke on
+    a search box whose query has not matched yet -- most keystrokes.
+    """
     ports = _Ports()
     service = await _service(_ScriptedIndex(SearchOutcome()), ports=ports)
 
@@ -1306,9 +1363,10 @@ async def test_an_undated_title_outranks_a_measured_old_one_at_equal_relevance()
 
 
 async def test_a_newer_title_outranks_an_older_one_at_equal_relevance() -> None:
-    """The other half, without which a recency term of **zero** passes the case
-    above -- absence would still beat a measured zero and nothing would say the
-    term does any work between two dated rows.
+    """The other half, without which a recency term of **zero** passes the case above.
+
+    absence would still beat a measured zero and nothing would say the term does any
+    work between two dated rows.
 
     Both rows are dated, unowned and unmeasured for popularity, so recency is
     the only signal that can separate them.
@@ -1328,8 +1386,9 @@ async def test_a_newer_title_outranks_an_older_one_at_equal_relevance() -> None:
 
 
 async def test_a_title_near_the_household_centroid_outranks_a_far_one_at_equal_relevance() -> None:
-    """PRD 05's sixth ranking term, and **the angle is planted rather than hoped for out of
-    the hashing fake**.
+    """PRD 05's sixth ranking term.
+
+    and **the angle is planted rather than hoped for out of the hashing fake**.
     """
     axis, near_vector = planted_pair(math.pi / 3)
     _, far_vector = planted_pair(math.pi / 2)
@@ -1410,8 +1469,10 @@ async def test_a_centroid_from_one_model_never_ranks_a_vector_stored_under_anoth
 
 
 async def test_a_hit_with_no_vector_is_not_a_cosine_of_zero() -> None:
-    """ADR-0014 in a sixth place, and here the collapse is uniquely tempting
-    because `0.0` is a *reachable* cosine rather than an impossible one.
+    """ADR-0014 in a sixth place.
+
+    and here the collapse is uniquely tempting because `0.0` is a *reachable* cosine
+    rather than an impossible one.
 
     A measured zero says "these two are orthogonal", which is a claim about two
     vectors; "the backfill has not reached this title" is a claim about a job
@@ -1492,10 +1553,11 @@ async def test_a_negative_cosine_is_no_affinity_and_not_a_penalty() -> None:
 
 
 async def test_the_taste_weight_is_pinned_by_arithmetic_rather_than_by_an_ordering() -> None:
-    """F4's finding, applied to the weight F4 left room for: **a weight table
-    is not pinned by any number of ordering cases.** Re-balancing `owned` from
-    0.15 to 0.10 left all ten of this file's ordering cases green and failed
-    exactly one assertion, the numeric one.
+    """F4's finding, applied to the weight F4 left room for.
+
+    **a weight table is not pinned by any number of ordering cases.** Re-balancing
+    `owned` from 0.15 to 0.10 left all ten of this file's ordering cases green and
+    failed exactly one assertion, the numeric one.
 
     `_UNDATED` has no popularity and no year, so with a household exactly four
     signals are present — relevance, owned, played and taste — and `_blend`
@@ -1531,9 +1593,10 @@ async def test_the_taste_weight_is_pinned_by_arithmetic_rather_than_by_an_orderi
 
 
 def test_no_combination_of_the_other_five_can_displace_an_exact_match() -> None:
-    """PRD 05's *"boosted but not exclusive"* as arithmetic, restated over six
-    signals — and **the reason `taste` is 0.005 rather than the 0.01 of
-    headroom the table appeared to leave.**
+    """PRD 05's *"boosted but not exclusive"* as arithmetic, restated over six signals.
+
+    and **the reason `taste` is 0.005 rather than the 0.01 of headroom the table
+    appeared to leave.**.
 
     A rank-0 hit with every other signal against it against a rank-1 hit with
     every other signal maximally for it. The two present-signal sets are equal,
@@ -1601,7 +1664,7 @@ def test_an_exact_name_match_takes_dense_rank_zero_alone_even_at_an_equal_index_
 
 
 async def test_a_title_named_exactly_the_query_is_not_displaced_by_a_longer_document() -> None:
-    """**Issue #25 end to end, through the blend that produced it.**"""
+    """**Issue #25 end to end, through the blend that produced it.**."""
     hits = (
         SearchHit(title_id=_NAMED, score=_STRONG, exact_name=True),
         SearchHit(title_id=_ESSAY, score=_STRONG),
@@ -1622,9 +1685,10 @@ async def test_a_title_named_exactly_the_query_is_not_displaced_by_a_longer_docu
 
 
 async def test_with_no_household_and_no_year_the_score_is_the_one_m6_computed() -> None:
-    """The numeric pin, and it is numeric rather than an ordering on purpose: a
-    re-weighting that reordered nothing would pass every case above and change
-    every score on the wire.
+    """The numeric pin, and it is numeric rather than an ordering on purpose.
+
+    a re-weighting that reordered nothing would pass every case above and change every
+    score on the wire.
 
     A hit with no popularity, no year and no household has exactly two present
     signals -- relevance and owned -- and `_blend` renormalises over those two,
@@ -1642,10 +1706,11 @@ async def test_with_no_household_and_no_year_the_score_is_the_one_m6_computed() 
 
 
 async def test_equal_scores_are_broken_by_id_so_two_searches_agree() -> None:
-    """Determinism, which is a pagination property before it is a tidiness
-    one. Fails: falling back to whatever order the index returned -- and this
-    repository has already measured that `UPDATE ... RETURNING` hands rows back
-    in heap order on a small table, so "the order it came in" is not an order.
+    """Determinism, which is a pagination property before it is a tidiness one.
+
+    Fails: falling back to whatever order the index returned -- and this repository has
+    already measured that `UPDATE ... RETURNING` hands rows back in heap order on a
+    small table, so "the order it came in" is not an order.
     """
     hits = (
         SearchHit(title_id=_HIGH_ID, score=_STRONG),
@@ -1657,10 +1722,11 @@ async def test_equal_scores_are_broken_by_id_so_two_searches_agree() -> None:
 
 
 async def test_a_hit_whose_title_row_is_gone_is_dropped_rather_than_raising() -> None:
-    """A title deleted between the index write and the read. Fails:
-    `by_id[hit.title_id]`, which is a `KeyError` -- a 500 on a search because
-    one row was removed. The surviving hit is asserted too, so "drop
-    everything" is not a pass.
+    """A title deleted between the index write and the read.
+
+    Fails: `by_id[hit.title_id]`, which is a `KeyError` -- a 500 on a search because one
+    row was removed. The surviving hit is asserted too, so "drop everything" is not a
+    pass.
     """
     index = _ScriptedIndex(
         SearchOutcome(
@@ -1676,10 +1742,11 @@ async def test_a_hit_whose_title_row_is_gone_is_dropped_rather_than_raising() ->
 
 
 async def test_the_limit_is_clamped_to_the_configured_ceiling() -> None:
-    """`search_result_limit` is the most a caller may ask for, not the
-    default. Fails: passing `request.limit` straight through, which makes
-    `--limit 10000` a scan wearing a search's name -- every candidate is a row
-    hydrated into a `SearchResult` in application code.
+    """`search_result_limit` is the most a caller may ask for, not the default.
+
+    Fails: passing `request.limit` straight through, which makes `--limit 10000` a scan
+    wearing a search's name -- every candidate is a row hydrated into a `SearchResult`
+    in application code.
     """
     index = _ScriptedIndex(SearchOutcome())
     service = await _service(index, result_limit=20)
@@ -1688,9 +1755,11 @@ async def test_the_limit_is_clamped_to_the_configured_ceiling() -> None:
 
 
 async def test_a_limit_below_the_ceiling_is_honoured() -> None:
-    """The other side of the clamp, without which `min` could be `max` and
-    every search would ask the index for the ceiling however small a page the
-    caller wanted."""
+    """The other side of the clamp.
+
+    without which `min` could be `max` and every search would ask the index for the
+    ceiling however small a page the caller wanted.
+    """
     index = _ScriptedIndex(SearchOutcome())
     service = await _service(index, result_limit=20)
     await service.search("vacuum", limit=3)
@@ -1698,9 +1767,11 @@ async def test_a_limit_below_the_ceiling_is_honoured() -> None:
 
 
 async def test_the_filters_reach_the_index_unchanged() -> None:
-    """The service ranks; it does not narrow. A filter dropped here returns
-    *more* rows than were asked for, which reads as working -- the same failure
-    `FilterNotSupported` exists to prevent one layer down."""
+    """The service ranks; it does not narrow.
+
+    A filter dropped here returns *more* rows than were asked for, which reads as
+    working -- the same failure `FilterNotSupported` exists to prevent one layer down.
+    """
     index = _ScriptedIndex(SearchOutcome())
     filters = SearchFilters(kinds=(TitleKind.SERIES,), year_from=1999)
     service = await _service(index)
@@ -1754,8 +1825,9 @@ async def test_a_search_records_one_row_carrying_the_mode_that_ran() -> None:
 
 
 async def test_a_fused_request_served_as_full_text_records_full_text() -> None:
-    """`mode` is the mode that **ran**, byte for byte the rule already applied
-    to `usher.search.duration`'s label.
+    """`mode` is the mode that **ran**.
+
+    byte for byte the rule already applied to `usher.search.duration`'s label.
 
     Fails against the naive first draft, which records `requested` and passes
     the case above on its first try: every panel splitting by mode would then
@@ -1781,8 +1853,7 @@ async def test_a_fused_request_served_as_full_text_records_full_text() -> None:
 
 
 async def test_a_blank_query_records_nothing() -> None:
-    """A search box sends one between every character, and a keystroke is not
-    a data point.
+    """A search box sends one between every character, and a keystroke is not a data point.
 
     The argument transfers unchanged from the guard it sits behind: counted,
     blank queries would dominate the table exactly as they would dominate the
@@ -1809,8 +1880,9 @@ async def test_a_blank_query_records_nothing() -> None:
 
 
 async def test_a_search_nobody_is_speaking_for_records_nothing() -> None:
-    """`search_queries.user_id` is `NOT NULL` behind a real foreign key, so a
-    search with no household has no row to write.
+    """`search_queries.user_id` is `NOT NULL` behind a real foreign key.
+
+    so a search with no household has no row to write.
 
     Both shipped callers resolve one (`GET /search` through `DefaultUserIdDep`,
     `usher search` through `ensure_default_user`), so this is unreachable on
@@ -1864,8 +1936,7 @@ async def test_the_latency_is_the_measured_interval_and_not_an_absolute_reading(
 
 
 async def test_a_clock_that_runs_backwards_is_clamped_rather_than_refused() -> None:
-    """`max(0, ...)`, the shape `adapters/llm/openai_compatible.py` already
-    ships.
+    """`max(0, ...)`, the shape `adapters/llm/openai_compatible.py` already ships.
 
     `time.perf_counter` is non-decreasing by contract, so the guard is
     unreachable with the shipped clock and the injected one is the only thing
@@ -1893,8 +1964,9 @@ async def test_a_clock_that_runs_backwards_is_clamped_rather_than_refused() -> N
 
 
 async def test_a_refused_row_still_answers_the_whole_search_and_never_logs_the_query() -> None:
-    """PRD 08's degradation rule, in the one place a bookkeeping failure could
-    cost a household its results.
+    """PRD 08's degradation rule.
+
+    in the one place a bookkeeping failure could cost a household its results.
 
     **"It did not raise" is also what a service that stopped writing entirely
     produces**, so the positive control is in this case rather than in a
@@ -1938,9 +2010,10 @@ async def test_a_refused_row_still_answers_the_whole_search_and_never_logs_the_q
 
 
 async def test_the_answer_carries_the_id_of_the_row_the_search_was_recorded_as() -> None:
-    """**The handle F3's whole funnel hangs off.** A client can only report a
-    click or a play against a row it can name, and `SearchAnswer.search_id`
-    is the only place that name is published.
+    """**The handle F3's whole funnel hangs off.** A client can only report a click or a play.
+
+    against a row it can name, and `SearchAnswer.search_id` is the only place that name
+    is published.
 
     Asserted against the id of the row that was actually stored, not merely
     as "not `None`": a service that minted a fresh id for the answer and a
@@ -1998,9 +2071,10 @@ async def test_a_refused_row_hands_back_no_id_to_attribute_against() -> None:
 
 
 async def test_a_deployment_with_no_analytics_answers_searches_and_names_none_of_them() -> None:
-    """`SearchAnalytics` is optional on the constructor, so `search_id` is
-    `None` on every answer a deployment without one gives -- and the results
-    are unchanged, which is the half worth pinning: analytics is additive.
+    """`SearchAnalytics` is optional on the constructor.
+
+    so `search_id` is `None` on every answer a deployment without one gives -- and the
+    results are unchanged, which is the half worth pinning: analytics is additive.
     """
     index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
     service = await _service(index)
@@ -2097,8 +2171,9 @@ async def test_type_ahead_records_the_surface_and_the_tier_that_answered(
 async def test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration(
     tier: SuggestTier,
 ) -> None:
-    """What `latency_ms` is a measurement *of*, on the one surface where the number it
-    reads carries no information at all.
+    """What `latency_ms` is a measurement *of*.
+
+    on the one surface where the number it reads carries no information at all.
     """
     clock = _Clock()
     recorder = _Recorder()
@@ -2145,8 +2220,9 @@ async def test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration(
 async def test_type_ahead_with_no_household_records_nothing_on_either_tier(
     tier: SuggestTier,
 ) -> None:
-    """PRD 10's *"a search with no household"* exclusion, and the caller it
-    became load-bearing for.
+    """PRD 10's *"a search with no household"* exclusion.
+
+    and the caller it became load-bearing for.
 
     `search_queries.user_id` is `NOT NULL` behind `ON DELETE RESTRICT`, so a
     keystroke nobody is speaking for has no row rather than a row with a hole
@@ -2232,8 +2308,7 @@ class _GatedBatches(_Batches):
 
 
 async def test_flush_waits_for_a_batch_the_drain_has_already_taken() -> None:
-    """`flush` is a barrier: on return nothing is pending **and** nothing is in
-    flight.
+    """`flush` is a barrier: on return nothing is pending **and** nothing is in flight.
 
     Two callers need that and neither can see the difference without it. The
     lifespan flushes before it stops the drain, and a flush that returned early
@@ -2289,8 +2364,9 @@ async def test_aclose_stops_the_drain_and_writes_what_is_still_buffered() -> Non
 async def test_an_answered_keystroke_hands_its_row_over_rather_than_waiting_for_it(
     tier: SuggestTier,
 ) -> None:
-    """An INSERT plus its WAL flush costs more than a tier-1 answer, so a
-    keystroke that waits for its own row is measuring something it caused.
+    """An INSERT plus its WAL flush costs more than a tier-1 answer.
+
+    so a keystroke that waits for its own row is measuring something it caused.
 
     `suggest` returns with the row submitted and nothing written; the drain
     writes it. Both tiers, because a buffer reached on one is a defect a
@@ -2339,9 +2415,10 @@ def _typed(offset: int, query: str) -> SearchQueryRecord:
 
 
 async def test_the_bound_is_characters_as_well_as_rows() -> None:
-    """A row bound alone is not a memory bound: `q` declares no maximum length
-    on either search route and `search_queries.query` is `Text`, so the worst
-    case is the row cap times whatever one caller cares to type.
+    """A row bound alone is not a memory bound.
+
+    `q` declares no maximum length on either search route and `search_queries.query` is
+    `Text`, so the worst case is the row cap times whatever one caller cares to type.
 
     Fails: a capacity check on `len(self._pending)` alone.
     """
@@ -2357,9 +2434,11 @@ async def test_the_bound_is_characters_as_well_as_rows() -> None:
 
 
 async def test_a_run_of_drops_is_reported_once_rather_than_per_keystroke() -> None:
-    """A database that is down drops every keystroke, and this is the route a
-    browser drives per character -- so the line that says so is aggregated:
-    once when the run starts, and once with the count when the buffer empties.
+    """A database that is down drops every keystroke.
+
+    and this is the route a browser drives per character -- so the line that says so is
+    aggregated: once when the run starts, and once with the count when the buffer
+    empties.
 
     Fails: the per-drop report left inside `submit`.
     """
@@ -2380,9 +2459,11 @@ async def test_a_run_of_drops_is_reported_once_rather_than_per_keystroke() -> No
 
 
 async def test_a_full_buffer_refuses_a_row_rather_than_making_a_keystroke_wait() -> None:
-    """Back-pressure on a type-ahead box would let an analytics row slow down
-    the answer, which is the one property this class exists to remove. So the
-    bound is a drop, and it is reported.
+    """Back-pressure on a type-ahead box would let an analytics row slow down the answer.
+
+    which is the one property this class exists to remove.
+
+    So the bound is a drop, and it is reported.
 
     Fails: an unbounded buffer, which grows with a database that is down.
     """
@@ -2490,8 +2571,7 @@ async def test_a_refused_row_still_answers_the_whole_keystroke_and_never_logs_th
 async def test_a_bug_in_the_repository_is_not_absorbed_on_the_suggest_path_either(
     tier: SuggestTier,
 ) -> None:
-    """`except UsherPortError`, deliberately not `except Exception`, on the
-    second writer.
+    """`except UsherPortError`, deliberately not `except Exception`, on the second writer.
 
     The two writers share one guard (`_write_row`), which is why this case and
     its search-path twin are not a duplicated assertion: they say the sharing
@@ -2514,8 +2594,7 @@ async def test_a_bug_in_the_repository_is_not_absorbed_on_the_suggest_path_eithe
 
 
 def test_the_suggest_path_reaches_the_writer_and_the_short_arm_returns_first() -> None:
-    """**Structural, because the behavioural cases above cannot see a third
-    arm.**
+    """**Structural, because the behavioural cases above cannot see a third arm.**.
 
     Two claims a fixture cannot make. That `suggest` reaches the writer *at
     all* -- a `suggest` recording on some other condition (a hit count, a tier
@@ -2576,8 +2655,9 @@ def test_the_suggest_path_reaches_the_writer_and_the_short_arm_returns_first() -
 
 
 def test_a_row_is_a_search_and_never_a_page() -> None:
-    """The rule group A's cursor pagination makes necessary, held by a
-    signature rather than by a guard.
+    """The rule group A's cursor pagination makes necessary.
+
+    held by a signature rather than by a guard.
 
     A request carrying a cursor must write nothing, or the zero-result rate
     PRD 10 exists to compute is diluted by every scroll. `GET /search` and
@@ -2604,11 +2684,13 @@ def test_a_row_is_a_search_and_never_a_page() -> None:
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
 async def test_suggest_hydrates_and_does_not_re_rank(tier: SuggestTier) -> None:
-    """`PostgresSuggestIndex` already ordered by edit distance and then by
-    popularity *inside* the capped candidate set. Fails: a service applying
-    the search blend here, which is popularity counted twice -- once inside the
-    cap and once outside it -- and which reorders a type-ahead list away from
-    the ordering the narrow path exists to produce.
+    """`PostgresSuggestIndex` already ordered by edit distance and then by popularity *inside*.
+
+    the capped candidate set.
+
+    Fails: a service applying the search blend here, which is popularity counted twice
+    -- once inside the cap and once outside it -- and which reorders a type-ahead list
+    away from the ordering the narrow path exists to produce.
 
     The two hits carry the **same** score, so the blend would fall through to
     popularity and put `_POPULAR` first; the suggest index put `_ZERO_POP`
@@ -2625,10 +2707,11 @@ async def test_suggest_hydrates_and_does_not_re_rank(tier: SuggestTier) -> None:
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
 async def test_suggest_marks_an_owned_candidate(tier: SuggestTier) -> None:
-    """PRD 05 wants unowned results surfaced "clearly marked", and a type-ahead
-    row is a result. Fails: a `suggest` that hydrates the title and leaves
-    `owned` at its default, so the badge is absent from the one surface a
-    client renders most often."""
+    """PRD 05 wants unowned results surfaced "clearly marked", and a type-ahead row is a result.
+
+    Fails: a `suggest` that hydrates the title and leaves `owned` at its default, so the
+    badge is absent from the one surface a client renders most often.
+    """
     suggestions = _ScriptedSuggest((SearchHit(title_id=_OWNED, score=1.0),))
     service = await _service(
         _ScriptedIndex(SearchOutcome()),
@@ -2641,8 +2724,11 @@ async def test_suggest_marks_an_owned_candidate(tier: SuggestTier) -> None:
 
 @pytest.mark.parametrize("tier", list(SuggestTier))
 async def test_suggest_clamps_its_limit_too(tier: SuggestTier) -> None:
-    """The same ceiling, on the path a keystroke drives. Fails: an unclamped
-    `suggest`, where the cost of a wrong number is paid on every keypress."""
+    """The same ceiling, on the path a keystroke drives.
+
+    Fails: an unclamped `suggest`, where the cost of a wrong number is paid on every
+    keypress.
+    """
     suggestions = _ScriptedSuggest()
     service = await _service(
         _ScriptedIndex(SearchOutcome()), suggestions=suggestions, tier=tier, result_limit=20
@@ -2696,7 +2782,7 @@ async def test_suggest_hydrates_with_two_reads_whatever_the_tier_and_whatever_th
 
 
 def test_the_hydration_is_written_once_rather_than_once_per_tier() -> None:
-    """**Structural, because the behavioural count above cannot see this.**
+    """**Structural, because the behavioural count above cannot see this.**.
 
     Two reads per tier is what a shared body produces *and* what a body
     duplicated inside an `if tier is ...` produces. The two answer identically

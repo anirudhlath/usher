@@ -147,7 +147,9 @@ class EnrichService:
         self._now = now
 
     async def enrich(self, title_id: uuid.UUID, *, priority: int = JobPriority.BACKFILL) -> Title:
-        """Fill one title in from the provider. Raises `UsherPortError`.
+        """Fill one title in from the provider.
+
+        Raises `UsherPortError`.
 
         Deliberately re-raises rather than absorbing: `JobWorker` is the only
         thing that knows `PortDataMalformed` parks immediately and every other
@@ -253,8 +255,9 @@ class EnrichService:
         )
 
     async def _payload_for(self, ref: ProviderRef) -> dict[str, Any]:
-        """The cached response if it is inside the freshness window, else a
-        fresh fetch, cached on the way through.
+        """The cached response if it is inside the freshness window.
+
+        else a fresh fetch, cached on the way through.
 
         The window is a ceiling under TMDb's six-month caching term rather
         than a target. Both halves matter: never refetching leaves a catalog
@@ -333,8 +336,9 @@ class EnrichService:
         )
 
     async def _store_hierarchy(self, result: EnrichmentResult) -> None:
-        """Seasons then episodes, each in one statement, with the season ids
-        **read back** rather than trusted.
+        """Seasons then episodes.
+
+        each in one statement, with the season ids **read back** rather than trusted.
 
         The read-back is not defensive. `to_result` mints a fresh UUIDv7 per
         `Season`, and a season the catalog already holds keeps the id it was
@@ -372,8 +376,9 @@ class EnrichService:
             await self._episodes.upsert_episodes(rows)
 
     async def _record_failure(self, title: Title, exc: UsherPortError) -> None:
-        """ADR-0008's whole point, in four lines: the error is recorded and
-        the tier is untouched.
+        """ADR-0008's whole point, in four lines.
+
+        the error is recorded and the tier is untouched.
 
         Committed before the caller re-raises, because `JobWorker` parks the
         job on the exception and the reason has to be readable somewhere an

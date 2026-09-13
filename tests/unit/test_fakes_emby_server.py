@@ -83,8 +83,11 @@ class _Driver:
         )
 
     async def report_progress(self, external_id: str, position_seconds: int) -> None:
-        """The route the adapter used to use, kept only so a test can pin
-        that the fake rejects it the way the live server does."""
+        """The route the adapter used to use.
+
+        kept only so a test can pin that the fake rejects it the way the live server
+        does.
+        """
         await self.session.ok(
             "POST",
             f"/Users/{USER_ID}/PlayingItems/{external_id}/Progress",
@@ -136,11 +139,12 @@ async def driver() -> AsyncIterator[_Driver]:
 
 
 async def test_a_seeded_item_round_trips_every_field_it_was_given(driver: _Driver) -> None:
-    """`SourceHarness.given_item`: "It must round-trip every field it is
-    given". Asserted field by field rather than through the handful the
-    contract suite happens to check, because a field the fake invents is
-    one a contract test can assert on without the harness ever having
-    supplied it."""
+    """`SourceHarness.given_item`: "It must round-trip every field it is given".
+
+    Asserted field by field rather than through the handful the contract suite happens
+    to check, because a field the fake invents is one a contract test can assert on
+    without the harness ever having supplied it.
+    """
     driver.server.add_item(MOVIE, T0)
     item = to_source_item(await driver.payload("movie-1"))
     assert item is not None
@@ -163,10 +167,12 @@ async def test_a_seeded_item_round_trips_every_field_it_was_given(driver: _Drive
 
 
 async def test_added_at_round_trips_to_the_microsecond(driver: _Driver) -> None:
-    """The renderer used to emit a hardcoded `.0000000` fraction, so any
-    sub-second part of a seeded `added_at` was silently truncated -- a
-    widening nothing stated and no assertion could see, because the
-    contract only checks that the value is timezone-aware."""
+    """The renderer used to emit a hardcoded `.0000000` fraction.
+
+    so any sub-second part of a seeded `added_at` was silently truncated -- a widening
+    nothing stated and no assertion could see, because the contract only checks that the
+    value is timezone-aware.
+    """
     driver.server.add_item(MOVIE, T0)
     item = to_source_item(await driver.payload("movie-1"))
     assert item is not None
@@ -176,11 +182,14 @@ async def test_added_at_round_trips_to_the_microsecond(driver: _Driver) -> None:
 async def test_an_episode_seeded_without_a_series_place_reads_back_empty(
     driver: _Driver,
 ) -> None:
-    """The template's own values used to show through: the episode fixture
-    carries `SeriesId`/`ParentIndexNumber`/`IndexNumber`, and the renderer
-    only overwrote them when the seeded value was not `None`. An episode
-    seeded with all three empty read back as season 2, episode 5 of a
-    series the harness had never heard of."""
+    """The template's own values used to show through.
+
+    the episode fixture carries `SeriesId`/`ParentIndexNumber`/`IndexNumber`, and the
+    renderer only overwrote them when the seeded value was not `None`.
+
+    An episode seeded with all three empty read back as season 2, episode 5 of a series
+    the harness had never heard of.
+    """
     driver.server.add_item(
         SourceItem(external_id="episode-1", name="Loose Episode", kind=SourceItemKind.EPISODE),
         T0,
@@ -194,10 +203,14 @@ async def test_an_episode_seeded_without_a_series_place_reads_back_empty(
 
 
 async def test_dimensions_survive_an_item_with_no_container(driver: _Driver) -> None:
-    """A folder item has no media source, so the stream-level `Width` and
-    `Height` have nowhere to live -- and Emby carries item-level ones
-    anyway. Without them, seeding an item with dimensions and no container
-    dropped both without a word."""
+    """A folder item has no media source.
+
+    so the stream-level `Width` and `Height` have nowhere to live -- and Emby carries
+    item-level ones anyway.
+
+    Without them, seeding an item with dimensions and no container dropped both without
+    a word.
+    """
     driver.server.add_item(
         SourceItem(
             external_id="series-1",
@@ -218,10 +231,11 @@ async def test_dimensions_survive_an_item_with_no_container(driver: _Driver) -> 
 
 
 async def test_a_seeded_watch_state_round_trips_all_four_facts(driver: _Driver) -> None:
-    """`SourceWatchState` carries four facts, and `_user_data` used to
-    render two of them. With no `LastPlayedDate` key ever emitted, an
-    adapter that dropped `last_played_at` entirely passed every assertion
-    the contract makes."""
+    """`SourceWatchState` carries four facts, and `_user_data` used to render two of them.
+
+    With no `LastPlayedDate` key ever emitted, an adapter that dropped `last_played_at`
+    entirely passed every assertion the contract makes.
+    """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -245,8 +259,9 @@ async def test_a_seeded_watch_state_round_trips_all_four_facts(driver: _Driver) 
 async def test_the_listing_route_omits_the_play_history_the_item_route_carries(
     driver: _Driver,
 ) -> None:
-    """The measurement ADR-0014 rests on, transcribed as an assertion about *this fake*
-    rather than about the adapter.
+    """The measurement ADR-0014 rests on.
+
+    transcribed as an assertion about *this fake* rather than about the adapter.
     """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
@@ -280,11 +295,13 @@ async def test_the_listing_route_omits_the_play_history_the_item_route_carries(
 async def test_reporting_progress_changes_the_position_and_nothing_else(
     driver: _Driver,
 ) -> None:
-    """`POST .../Items/{item}/UserData` writes a position. Emby does not
-    zero `PlayCount` or clear `LastPlayedDate` when it receives one, and a
-    fake that did would let an adapter that destroyed a user's play history
-    on every resume look correct -- `recorded_watch_state` reads back only
-    position and played, so nothing else in the suite can see it."""
+    """`POST .../Items/{item}/UserData` writes a position.
+
+    Emby does not zero `PlayCount` or clear `LastPlayedDate` when it receives one, and a
+    fake that did would let an adapter that destroyed a user's play history on every
+    resume look correct -- `recorded_watch_state` reads back only position and played,
+    so nothing else in the suite can see it.
+    """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -307,12 +324,15 @@ async def test_reporting_progress_changes_the_position_and_nothing_else(
 
 
 async def test_a_user_data_write_that_omits_played_clears_it(driver: _Driver) -> None:
-    """Transcribed from the live server, 2026-07-31: the body deserialises
-    into a DTO whose unset fields take their C# defaults, so a write
-    carrying only `PlaybackPositionTicks` flipped a played item to unplayed
-    -- while leaving `PlayCount` and `LastPlayedDate` intact. The adapter
-    names `Played` on every write because of this; the fake models it so
-    that dropping the field from the adapter fails somewhere."""
+    """Transcribed from the live server, 2026-07-31.
+
+    the body deserialises into a DTO whose unset fields take their C# defaults, so a
+    write carrying only `PlaybackPositionTicks` flipped a played item to unplayed --
+    while leaving `PlayCount` and `LastPlayedDate` intact.
+
+    The adapter names `Played` on every write because of this; the fake models it so
+    that dropping the field from the adapter fails somewhere.
+    """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -333,11 +353,14 @@ async def test_a_user_data_write_that_omits_played_clears_it(driver: _Driver) ->
 
 
 async def test_the_playing_items_progress_route_is_rejected(driver: _Driver) -> None:
-    """`POST /Users/{user}/PlayingItems/{item}/Progress` is session-scoped
-    playback reporting and answers 400 `"Value cannot be null. (Parameter
-    'key')"` on the live server for every body and parameter set tried.
-    Modelled rather than left unrouted so an adapter regressing to it fails
-    with Emby's own rejection instead of a 404 that reads like a gap here."""
+    """`POST /Users/{user}/PlayingItems/{item}/Progress` is session-scoped playback reporting.
+
+    and answers 400 `"Value cannot be null.
+
+    (Parameter 'key')"` on the live server for every body and parameter set tried.
+    Modelled rather than left unrouted so an adapter regressing to it fails with Emby's
+    own rejection instead of a 404 that reads like a gap here.
+    """
     driver.server.add_item(MOVIE, T0)
     with pytest.raises(PortUnavailable, match="400"):
         await driver.report_progress("movie-1", 600)
@@ -346,14 +369,17 @@ async def test_the_playing_items_progress_route_is_rejected(driver: _Driver) -> 
 async def test_marking_played_clears_the_position_and_keeps_the_history(
     driver: _Driver,
 ) -> None:
-    """Emby clears the resume position when an item is marked played --
-    which is why the adapter writes the position first and the played flag
-    last -- and it does not forget when the item was last watched. Verified
-    live: a 300-second position really did read back as 0 after this call.
+    """Emby clears the resume position when an item is marked played.
+
+    which is why the adapter writes the position first and the played flag last -- and
+    it does not forget when the item was last watched.
+
+    Verified live: a 300-second position really did read back as 0 after this call.
 
     `PlayCount` stays where it is rather than incrementing, also verified:
     an already-counted item marked played again came back at 1, not 2. That
-    is what makes the adapter's retry after a partial failure idempotent."""
+    is what makes the adapter's retry after a partial failure idempotent.
+    """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -376,12 +402,15 @@ async def test_marking_played_clears_the_position_and_keeps_the_history(
 
 
 async def test_unmarking_played_destroys_the_position_and_the_history(driver: _Driver) -> None:
-    """`DELETE /Users/{user}/PlayedItems/{item}` is destructive well beyond
-    its name -- verified live on 2026-07-31: `PlayCount` reset to 0,
-    `LastPlayedDate` gone, and a non-zero resume position cleared along with
-    them. That is exactly why the adapter reports an item unplayed through a
-    `UserData` write instead, and why this fake models the destruction
-    rather than the polite behaviour the route's name suggests."""
+    """`DELETE /Users/{user}/PlayedItems/{item}` is destructive well beyond its name.
+
+    verified live on 2026-07-31: `PlayCount` reset to 0, `LastPlayedDate` gone, and a
+    non-zero resume position cleared along with them.
+
+    That is exactly why the adapter reports an item unplayed through a `UserData` write
+    instead, and why this fake models the destruction rather than the polite behaviour
+    the route's name suggests.
+    """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -406,10 +435,11 @@ async def test_unmarking_played_destroys_the_position_and_the_history(driver: _D
 async def test_an_untouched_item_reports_a_zero_state_with_no_last_played_date(
     driver: _Driver,
 ) -> None:
-    """Emby omits `LastPlayedDate` for an item nobody has watched rather
-    than nulling it, and the zero state is emitted rather than the whole
-    `UserData` block being absent -- the difference the port's
-    `watch_state` docstring turns on."""
+    """Emby omits `LastPlayedDate` for an item nobody has watched rather than nulling it.
+
+    and the zero state is emitted rather than the whole `UserData` block being absent --
+    the difference the port's `watch_state` docstring turns on.
+    """
     driver.server.add_item(MOVIE, T0)
     payload = await driver.payload("movie-1")
     assert "LastPlayedDate" not in payload["UserData"]
@@ -422,9 +452,11 @@ async def test_an_untouched_item_reports_a_zero_state_with_no_last_played_date(
 
 
 async def test_writes_to_an_unknown_item_are_not_found(driver: _Driver) -> None:
-    """A file deleted between a walk and its write-back. Answering 200 for
-    an id the server has never seen would let a write-back to the wrong id
-    look successful forever."""
+    """A file deleted between a walk and its write-back.
+
+    Answering 200 for an id the server has never seen would let a write-back to the
+    wrong id look successful forever.
+    """
     with pytest.raises(PortUnavailable, match="404"):
         await driver.write_user_data("never-existed", 600, played=False)
     with pytest.raises(PortUnavailable, match="404"):
@@ -435,12 +467,14 @@ async def test_writes_to_an_unknown_item_are_not_found(driver: _Driver) -> None:
 async def test_every_hdr_format_survives_the_wire(
     driver: _Driver, hdr_format: HdrFormat | None
 ) -> None:
-    """`_HDR_WIRE` renders each canonical format back into the
-    `VideoRange`/`VideoRangeType` pair a real file of that kind carries, so
-    the contract's HDR assertion is answered by a token the mapper has to
-    translate rather than by a value handed straight back. Parametrised
-    over the whole enum: only Dolby Vision is exercised by the contract
-    suite, so a wrong rendering for HLG or HDR10 would sit here unseen."""
+    """`_HDR_WIRE` renders each canonical format back into the `VideoRange`/`VideoRangeType`.
+
+    pair a real file of that kind carries, so the contract's HDR assertion is answered
+    by a token the mapper has to translate rather than by a value handed straight back.
+
+    Parametrised over the whole enum: only Dolby Vision is exercised by the contract
+    suite, so a wrong rendering for HLG or HDR10 would sit here unseen.
+    """
     driver.server.add_item(replace(MOVIE, hdr_format=hdr_format), T0)
     item = to_source_item(await driver.payload("movie-1"))
     assert item is not None
@@ -451,8 +485,12 @@ async def test_every_hdr_format_survives_the_wire(
 
 
 async def test_the_listing_honours_the_sort_fields_it_is_given(driver: _Driver) -> None:
-    """`SortBy=SortName` is obeyed, so the fake is not merely returning
-    insertion order and getting lucky. Seeded out of order on purpose."""
+    """`SortBy=SortName` is obeyed.
+
+    so the fake is not merely returning insertion order and getting lucky.
+
+    Seeded out of order on purpose.
+    """
     for name in ("Charlie", "Alpha", "Bravo"):
         driver.server.add_item(
             replace(MOVIE, external_id=name.lower(), name=name), datetime(2026, 1, 1, tzinfo=UTC)
@@ -520,10 +558,13 @@ async def test_the_listing_supplies_no_tiebreak_it_was_not_asked_for(driver: _Dr
     ],
 )
 def test_a_request_without_a_well_formed_identity_is_refused(authorization: str | None) -> None:
-    """The gate itself, on a route that is not the authentication one --
+    """The gate itself, on a route that is not the authentication one.
+
     the whole point being that the identity rides on *every* request.
-    Checked directly rather than through a session, because a correct
-    `EmbySession` cannot produce any of these headers."""
+
+    Checked directly rather than through a session, because a correct `EmbySession`
+    cannot produce any of these headers.
+    """
     server = FakeEmbyServer()
     headers = {} if authorization is None else {"Authorization": authorization}
     response = server.handle(
@@ -533,10 +574,13 @@ def test_a_request_without_a_well_formed_identity_is_refused(authorization: str 
 
 
 def test_the_public_route_refuses_a_session_token() -> None:
-    """Stricter than the real Emby, on purpose, and therefore worth a test
-    of its own: this is the guard that makes `verify()`'s
-    unreachable-versus-bad-credentials split checkable at all. Without a
-    token the same request is a 200."""
+    """Stricter than the real Emby, on purpose, and therefore worth a test of its own.
+
+    this is the guard that makes `verify()`'s unreachable-versus-bad-credentials split
+    checkable at all.
+
+    Without a token the same request is a 200.
+    """
     server = FakeEmbyServer()
     identity = 'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version="1"'
     url = "https://emby.invalid/System/Info/Public"
@@ -550,8 +594,9 @@ def test_the_public_route_refuses_a_session_token() -> None:
 
 @pytest.mark.parametrize("retry_after", ["120", "Wed, 21 Oct 2026 07:28:00 GMT", None])
 def test_an_armed_rate_limit_answers_one_request_for_one_path(retry_after: str | None) -> None:
-    """`rate_limit` is scoped to its path and consumed by one firing, and both
-    halves are load-bearing rather than tidy.
+    """`rate_limit` is scoped to its path and consumed by one firing.
+
+    and both halves are load-bearing rather than tidy.
 
     A limit that fired for every path would land on `AuthenticateByName`
     instead of on the read a case armed -- `EmbySession` authenticates before
@@ -580,8 +625,9 @@ def test_an_armed_rate_limit_answers_one_request_for_one_path(retry_after: str |
 
 
 def test_a_refused_request_does_not_consume_an_armed_rate_limit() -> None:
-    """The identity gate answers *before* the limiter, which is where
-    `rate_limit`'s docstring says it sits.
+    """The identity gate answers *before* the limiter.
+
+    which is where `rate_limit`'s docstring says it sits.
 
     Without this the placement is prose and the two orderings are
     indistinguishable: a limiter in front of the gate answers 429 here, and the
@@ -605,8 +651,9 @@ def test_a_refused_request_does_not_consume_an_armed_rate_limit() -> None:
 async def test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit(
     driver: _Driver,
 ) -> None:
-    """The limiter sits behind the identity gate and **in front of
-    authentication**, and this is the half of that claim nothing else pins.
+    """The limiter sits behind the identity gate and **in front of authentication**.
+
+    and this is the half of that claim nothing else pins.
 
     The case above pins the first half -- a limiter moved *above* the identity
     gate dies there. The second half was prose until this one existed: moving
@@ -637,11 +684,12 @@ async def test_a_rate_limited_handshake_reaches_the_session_as_a_rate_limit(
 
 
 async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> None:
-    """A fake that answered every unknown path with a 200 would let an
-    adapter calling a route this server has never heard of look correct --
-    which is the residual risk the fake carries anyway (nothing here knows
-    Emby's real routes), so it must at least not be widened by the
-    catch-all."""
+    """A fake that answered every unknown path with a 200 would let an adapter calling a route.
+
+    this server has never heard of look correct -- which is the residual risk the fake
+    carries anyway (nothing here knows Emby's real routes), so it must at least not be
+    widened by the catch-all.
+    """
     with pytest.raises(PortUnavailable, match="404"):
         await driver.session.json_body("GET", "/Users/x/NoSuchThing", op="probe")
 
@@ -651,10 +699,13 @@ async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> 
 
 
 def test_the_push_frames_keep_the_committed_fixtures_shape() -> None:
-    """A renderer that invented its own envelope would make the committed
-    fixtures decorative -- and those fixtures are the only artefact the
-    live capture has to diff against. Asserted on key sets rather than on
-    values, because the values here are deliberately the test's."""
+    """A renderer that invented its own envelope would make the committed fixtures decorative.
+
+    and those fixtures are the only artefact the live capture has to diff against.
+
+    Asserted on key sets rather than on values, because the values here are deliberately
+    the test's.
+    """
     server = FakeEmbyServer()
     for name, frame in (
         ("push_user_data_changed", server.user_data_changed_frame(["90000100"])),
@@ -675,8 +726,10 @@ def test_the_push_frames_keep_the_committed_fixtures_shape() -> None:
 
 
 async def test_a_user_data_changed_frame_carries_the_seeded_state(driver: _Driver) -> None:
-    """The arrangement half of every push contract case, checked against
-    the real mapper rather than only through the adapter."""
+    """The arrangement half of every push contract case.
+
+    checked against the real mapper rather than only through the adapter.
+    """
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -706,16 +759,19 @@ async def test_a_user_data_changed_frame_carries_the_seeded_state(driver: _Drive
 async def test_a_user_data_changed_frame_leaves_no_template_value_showing_through(
     driver: _Driver,
 ) -> None:
-    """The trap this file already fell into once, for `SeriesId` and
-    `IndexNumber`: rendering a field only when it is set leaves the
-    fixture's own invented value in place, and a test then asserts happily
-    on a fact the harness never supplied. `push_user_data_changed.json`'s
-    first entry carries a `LastPlayedDate` and a `PlayCount` of 3.
+    """The trap this file already fell into once, for `SeriesId` and `IndexNumber`.
+
+    rendering a field only when it is set leaves the fixture's own invented value in
+    place, and a test then asserts happily on a fact the harness never supplied.
+
+    `push_user_data_changed.json`'s first entry carries a `LastPlayedDate` and a
+    `PlayCount` of 3.
 
     `ItemId` is the only identity field asserted here, because it is the
     only one a real entry carries: M5's live run found **no `Key`** on any
     `UserDataList` entry, so the fixture and this renderer both stopped
-    inventing one."""
+    inventing one.
+    """
     driver.server.add_item(MOVIE, T0)
     template = load_emby_fixture("push_user_data_changed")["Data"]["UserDataList"][0]
     assert "LastPlayedDate" in template
@@ -730,9 +786,11 @@ async def test_a_user_data_changed_frame_leaves_no_template_value_showing_throug
 
 
 def test_a_library_changed_frame_names_only_the_arrays_it_was_given() -> None:
-    """One event per non-empty array is the mapper's rule, so a frame that
-    left the fixture's own `ItemsAdded` in place would hand every push case
-    an `ITEM_ADDED` nobody arranged."""
+    """One event per non-empty array is the mapper's rule.
+
+    so a frame that left the fixture's own `ItemsAdded` in place would hand every push
+    case an `ITEM_ADDED` nobody arranged.
+    """
     server = FakeEmbyServer()
     fixture = load_emby_fixture("push_library_changed")["Data"]
     assert fixture["ItemsAdded"] and fixture["ItemsRemoved"] and fixture["ItemsUpdated"]
@@ -748,11 +806,14 @@ def test_a_library_changed_frame_names_only_the_arrays_it_was_given() -> None:
 
 
 def test_a_sessions_frame_is_a_message_that_maps_to_no_event() -> None:
-    """The property the whole staleness scheme rests on: an idle library's
-    channel stays measurably alive because `Sessions` keeps arriving, and
-    it produces no event at all. ADR-0004 measured that it arrives
-    *periodically* and never at what interval -- so this renders one frame
-    on demand and the cadence stays a live-verification question."""
+    """The property the whole staleness scheme rests on.
+
+    an idle library's channel stays measurably alive because `Sessions` keeps arriving,
+    and it produces no event at all.
+
+    ADR-0004 measured that it arrives *periodically* and never at what interval -- so
+    this renders one frame on demand and the cadence stays a live-verification question.
+    """
     server = FakeEmbyServer()
     message = json.loads(server.sessions_frame())
     assert message["MessageType"] == "Sessions"

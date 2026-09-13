@@ -55,10 +55,11 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
 
 
 def test_the_row_port_declares_behaviour_and_implements_none() -> None:
-    """`ports/` has zero concrete behaviour today -- every method in `ports/search.py`,
-    `ports/source.py` and `ports/repository.py` is abstract -- and `Row` is the first
-    port with an obvious reason to break that, because PRD 06's sketch puts `hydrate()`
-    and `empty()` on it.
+    """`ports/` has zero concrete behaviour today.
+
+    every method in `ports/search.py`, `ports/source.py` and `ports/repository.py` is
+    abstract -- and `Row` is the first port with an obvious reason to break that,
+    because PRD 06's sketch puts `hydrate()` and `empty()` on it.
     """
     defined = {
         name for name, value in vars(Row).items() if callable(value) and not name.startswith("__")
@@ -71,7 +72,7 @@ def test_the_row_port_declares_behaviour_and_implements_none() -> None:
 
 
 def test_a_row_context_cannot_reach_a_session() -> None:
-    """**Trap 4 and contract three, as a structural property.**"""
+    """**Trap 4 and contract three, as a structural property.**."""
     tree = ast.parse(pathlib.Path(inspect.getfile(RowContext)).read_text())
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -90,9 +91,10 @@ def test_a_row_context_cannot_reach_a_session() -> None:
 
 
 def test_a_row_context_is_frozen_so_a_provider_cannot_stash_state_between_the_two_phases() -> None:
-    """Composition is two phases, and the composer is explicitly allowed to
-    build a row it did not just propose -- out of cache, or after a
-    diversity constraint reordered the set.
+    """Composition is two phases.
+
+    and the composer is explicitly allowed to build a row it did not just propose -- out
+    of cache, or after a diversity constraint reordered the set.
 
     Kills dropping `frozen=True`. A mutable context invites a provider to
     compute in `propose` and read in `build`, which makes every `build`
@@ -108,8 +110,9 @@ def test_a_row_context_is_frozen_so_a_provider_cannot_stash_state_between_the_tw
 
 
 def test_a_row_context_carries_no_centroid_at_all() -> None:
-    """**A field was removed from an ADR-0014 site list, which had not happened before, and
-    this is the pin that records it.**
+    """**A field was removed from an ADR-0014 site list.
+
+    which had not happened before, and this is the pin that records it.**.
     """
     annotations = inspect.get_annotations(RowContext, eval_str=True)
     assert annotations, "the annotation scan found nothing, so it proves nothing"
@@ -120,7 +123,7 @@ def test_a_row_context_carries_no_centroid_at_all() -> None:
 
 
 def test_the_context_carries_the_image_repository_and_never_the_proxys_two_ports() -> None:
-    """**A row names artwork; it does not fetch it.**
+    """**A row names artwork; it does not fetch it.**.
 
     M9 ships three image ports and only one of them belongs here.
     `ImageRepository` answers *which* image, out of this deployment's own
@@ -147,7 +150,7 @@ def test_the_context_carries_the_image_repository_and_never_the_proxys_two_ports
 
 
 async def test_a_provider_with_nothing_to_say_proposes_nothing() -> None:
-    """PRD 06: "A provider returns nothing when it has nothing to say."
+    """PRD 06: "A provider returns nothing when it has nothing to say.".
 
     Kills a base `propose` that raises on an empty signal, and kills one
     that substitutes a default row. The failure this shape exists to refuse
@@ -165,8 +168,9 @@ async def test_a_provider_with_nothing_to_say_proposes_nothing() -> None:
 
 
 def test_propose_has_no_parameter_that_assumes_a_fallback() -> None:
-    """The port cannot prevent a popular-titles fallback. It can refuse to
-    ask for one.
+    """The port cannot prevent a popular-titles fallback.
+
+    It can refuse to ask for one.
 
     Kills adding `min_results`, `limit` or `fallback` to `propose`. A
     signature carrying `min_results` has already decided that a provider
@@ -204,9 +208,9 @@ def test_the_always_first_pin_is_a_typed_flag_on_the_proposal() -> None:
 
 
 async def test_a_row_builds_a_row_that_names_its_own_slug_and_family() -> None:
-    """The proposal and the built row must agree about what they are, or
-    the composer's per-family cap counts one thing and the screen shows
-    another.
+    """The proposal and the built row must agree about what they are.
+
+    or the composer's per-family cap counts one thing and the screen shows another.
 
     Kills a `BuiltRow` assembled from constants inside `build` rather than
     from the row's own properties -- which is invisible on a single-row
@@ -220,8 +224,9 @@ async def test_a_row_builds_a_row_that_names_its_own_slug_and_family() -> None:
 
 
 def test_every_row_context_field_is_read_by_at_least_one_provider() -> None:
-    """**A field with no consumer is what this project deletes, and until this case existed
-    nothing noticed one.**
+    """**A field with no consumer is what this project deletes.
+
+    and until this case existed nothing noticed one.**.
     """
     provider_dir = pathlib.Path(inspect.getfile(RowContext)).parents[1] / "services" / "rows"
     sources = sorted(provider_dir.glob("*.py"))

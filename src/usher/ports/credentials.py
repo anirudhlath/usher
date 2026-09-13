@@ -10,8 +10,9 @@ from pydantic import SecretStr
 
 @dataclass(frozen=True)
 class SourceCredentials:
-    """What a source needs in order to authenticate. Plaintext, in memory
-    only, for the lifetime of one adapter.
+    """What a source needs in order to authenticate.
+
+    Plaintext, in memory only, for the lifetime of one adapter.
 
     A plain dataclass rather than a `DomainModel` for the same reason
     `SourceItem` is one: it crosses a port boundary, it is never persisted
@@ -23,8 +24,9 @@ class SourceCredentials:
 
 
 class CredentialStore(ABC):
-    """Encrypted-at-rest storage for `SourceCredentials`, addressed by an
-    opaque `credentials_ref`.
+    """Encrypted-at-rest storage for `SourceCredentials`.
+
+    addressed by an opaque `credentials_ref`.
 
     The ref is opaque and unguessable rather than derived from the source id
     (`f"source:{id}"` would have worked and been simpler): a derived ref
@@ -48,8 +50,7 @@ class CredentialStore(ABC):
 
     @abstractmethod
     async def get(self, ref: str) -> SourceCredentials | None:
-        """Decrypt and return the credentials at `ref`, or `None` if no such
-        ref exists.
+        """Decrypt and return the credentials at `ref`, or `None` if no such ref exists.
 
         `None` means "nothing is stored here" and nothing else. A stored
         value that cannot be *decrypted* — the key was rotated, the row was
@@ -62,14 +63,17 @@ class CredentialStore(ABC):
 
     @abstractmethod
     async def delete(self, ref: str) -> None:
-        """Remove the credentials at `ref`. Idempotent: deleting a ref that
-        does not exist is not an error, so a partially-failed source
-        deletion can be retried."""
+        """Remove the credentials at `ref`.
+
+        Idempotent: deleting a ref that does not exist is not an error, so a partially-
+        failed source deletion can be retried.
+        """
 
 
 class CredentialCiphertextStore(ABC):
-    """Stored credentials as the ciphertext they are stored as, for `usher rotate-secret`
-    and for nothing else.
+    """Stored credentials as the ciphertext they are stored as.
+
+    for `usher rotate-secret` and for nothing else.
     """
 
     @abstractmethod

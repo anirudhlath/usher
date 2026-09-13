@@ -46,8 +46,10 @@ _HOUSEHOLD = "SELECT id FROM users WHERE is_default ORDER BY created_at LIMIT 1"
 
 
 def _service(session: AsyncSession, settings: Settings) -> SearchService:
-    """`build_search_service` minus its analytics pair. See the module
-    docstring for why the copy exists rather than the call."""
+    """`build_search_service` minus its analytics pair.
+
+    See the module docstring for why the copy exists rather than the call.
+    """
     return SearchService(
         PostgresSearchIndex(
             session, ef_search=settings.search_hnsw_ef_search, rrf_k=settings.search_rrf_k

@@ -1,5 +1,6 @@
-"""Two documentation status tables drift, and the drift has been measured twice — so
-this milestone fixes it with a test rather than with attention.
+"""Two documentation status tables drift, and the drift has been measured twice.
+
+so this milestone fixes it with a test rather than with attention.
 """
 
 import pathlib
@@ -57,8 +58,9 @@ def _table_rows(document: str, heading: str) -> set[str]:
 
 
 def test_every_plan_file_is_named_by_every_status_table() -> None:
-    """Kills adding a milestone's plan and leaving either status table behind, which has
-    happened twice and was repaired by hand both times.
+    """Kills adding a milestone's plan and leaving either status table behind.
+
+    which has happened twice and was repaired by hand both times.
     """
     on_disk = {path.name for path in _PLANS.glob("*.md")} - {"progress.md"}
 
@@ -96,9 +98,11 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
 
 
 def test_a_plan_named_only_in_prose_does_not_satisfy_the_table() -> None:
-    """The scoping above, asserted rather than described -- because H2 measured
-    a documentation check being satisfied by the prose that explained its own
-    repair, and a check that reads a whole document is the same defect waiting.
+    """The scoping above, asserted rather than described.
+
+    because H2 measured a documentation check being satisfied by the prose that
+    explained its own repair, and a check that reads a whole document is the same defect
+    waiting.
 
     The document below carries both spellings of the same plan file: a table row
     for M1, and a prose heading plus a sentence for M9. A whole-document scan
@@ -128,12 +132,13 @@ def test_a_plan_named_only_in_prose_does_not_satisfy_the_table() -> None:
 
 
 def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() -> None:
-    """Pins the widening that let `E1` in, because an unpinned widening is the
-    same defect as an unregistered plan: both are a check that reports success
-    over a file it cannot see.
+    r"""Pins the widening that let `E1` in.
+
+    An unpinned widening is the same defect as an unregistered plan: both are
+    a check that reports success over a file it cannot see.
 
     `2026-08-18-e1-eval-skeleton-and-suggest.md` is a *phase* of a second spec,
-    not a milestone of the first, and the pattern was `-m\\d+-` until this case
+    not a milestone of the first, and the pattern was `-m\d+-` until this case
     existed -- so the plan was on disk, its row was in a table, and the harvest
     of that row was the empty set. The first assertion is the widening.
 
@@ -191,8 +196,9 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
 
 
 def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> None:
-    """The premise the case above is modelled on, stated against the real document so the
-    model is not a hypothetical.
+    """The premise the case above is modelled on.
+
+    stated against the real document so the model is not a hypothetical.
     """
     text = _PROGRESS.read_text()
     tabled = (

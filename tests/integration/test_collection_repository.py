@@ -115,8 +115,9 @@ class PostgresCollectionSeeder(CollectionSeeder):
         )
 
     async def force_collection(self, title_id: uuid.UUID, collection_id: uuid.UUID) -> None:
-        """A raw `UPDATE`, which is what makes this a bypass rather than a
-        second call to the port.
+        """A raw `UPDATE`.
+
+        which is what makes this a bypass rather than a second call to the port.
 
         `titles` deliberately carries no
         `CHECK (collection_id IS NULL OR kind = 'movie')` -- see
@@ -151,9 +152,12 @@ class TestPostgresCollectionRepository(CollectionRepositoryContract):
     async def test_upsert_reports_inserts_and_updates_separately(
         self, repository: PostgresCollectionRepository
     ) -> None:
-        """`xmax = 0` again, and the fake cannot express it: it computes the
-        split from dict membership, which *is* the answer rather than a
-        measurement of it. A mixed batch, so both arms fire in one statement.
+        """`xmax = 0` again, and the fake cannot express it.
+
+        it computes the split from dict membership, which *is* the answer rather than a
+        measurement of it.
+
+        A mixed batch, so both arms fire in one statement.
         """
         await repository.upsert_many([collection(98_000_030, "Already Here")])
         mixed = await repository.upsert_many(
@@ -164,8 +168,9 @@ class TestPostgresCollectionRepository(CollectionRepositoryContract):
     async def test_a_link_to_no_collection_is_a_port_error(
         self, repository: PostgresCollectionRepository, seeder: PostgresCollectionSeeder
     ) -> None:
-        """`fk_titles_collection_id_collections`. Postgres-only: the fake has
-        no foreign keys, so it cannot raise here at all.
+        """`fk_titles_collection_id_collections`.
+
+        Postgres-only: the fake has no foreign keys, so it cannot raise here at all.
 
         This is what `resolve_tmdb_ids`' "absent means no such collection"
         rule protects against -- a resolve that minted an id would land here.
@@ -177,9 +182,9 @@ class TestPostgresCollectionRepository(CollectionRepositoryContract):
     async def test_a_link_to_no_title_is_not_an_error(
         self, repository: PostgresCollectionRepository
     ) -> None:
-        """An `UPDATE` that matches nothing is not a failure, and the port
-        says so: treating it as one would make a concurrent title merge fail a
-        whole derivation.
+        """An `UPDATE` that matches nothing is not a failure, and the port says so.
+
+        treating it as one would make a concurrent title merge fail a whole derivation.
 
         The count is what distinguishes "not an error" from "silently did
         something", so it is asserted rather than the absence of a raise.
@@ -191,10 +196,11 @@ class TestPostgresCollectionRepository(CollectionRepositoryContract):
     async def test_the_member_list_is_ordered_by_release_date(
         self, repository: PostgresCollectionRepository, seeder: PostgresCollectionSeeder
     ) -> None:
-        """`array_agg(... ORDER BY m.release_date NULLS LAST, m.year NULLS
-        LAST, m.title_id)`, which the fake cannot express -- it has no release
-        date and falls back to insertion order, so the contract asserts on the
-        member *set* rather than its sequence.
+        """`array_agg(...
+
+        ORDER BY m.release_date NULLS LAST, m.year NULLS LAST, m.title_id)`, which the
+        fake cannot express -- it has no release date and falls back to insertion order,
+        so the contract asserts on the member *set* rather than its sequence.
 
         A franchise row renders in release order or it renders wrong, and the
         wrong implementation this kills is a bare `array_agg` whose order
@@ -223,10 +229,11 @@ class TestPostgresCollectionRepository(CollectionRepositoryContract):
     async def test_the_scoped_reads_member_list_is_ordered_by_release_date(
         self, repository: PostgresCollectionRepository, seeder: PostgresCollectionSeeder
     ) -> None:
-        """`get`'s own `array_agg(... ORDER BY ...)`, which is a **second copy**
-        of the ordering rather than a share of `list_owned`'s -- so deleting
-        either leaves the other's case green and this one is what covers this
-        statement.
+        """`get`'s own `array_agg(...
+
+        ORDER BY ...)`, which is a **second copy** of the ordering rather than a share
+        of `list_owned`'s -- so deleting either leaves the other's case green and this
+        one is what covers this statement.
 
         The premise is asserted rather than assumed, and it is the one a UUIDv7
         primary key gives away for free: the films are seeded latest-first, so

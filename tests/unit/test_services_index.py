@@ -1,4 +1,7 @@
-"""PRD 03 stage 4's queued half, against port fakes. No database, no model."""
+"""PRD 03 stage 4's queued half, against port fakes.
+
+No database, no model.
+"""
 
 import uuid
 from collections.abc import Sequence
@@ -33,8 +36,11 @@ class _WrongWidthEmbedder(FakeEmbedder):
 
 
 class _TwoVectorEmbedder(FakeEmbedder):
-    """Returns two vectors for one text -- an implementation that expanded a
-    batch internally, which is how title *n*'s vector lands on title *m*."""
+    """Returns two vectors for one text.
+
+    an implementation that expanded a batch internally, which is how title *n*'s vector
+    lands on title *m*.
+    """
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         vectors = await super().embed(texts)
@@ -42,7 +48,10 @@ class _TwoVectorEmbedder(FakeEmbedder):
 
 
 class _UnreachableEmbedder(FakeEmbedder):
-    """The model file is gone, or the process cannot reach it. Retryable."""
+    """The model file is gone, or the process cannot reach it.
+
+    Retryable.
+    """
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         raise PortUnavailable("the model is not loaded")
@@ -91,7 +100,10 @@ def _service(
 
 
 async def _given(titles: FakeTitleRepository, **rest: Any) -> Title:
-    """A synthetic enriched movie in the repository. Every value invented."""
+    """A synthetic enriched movie in the repository.
+
+    Every value invented.
+    """
     fields: dict[str, Any] = {
         "kind": TitleKind.MOVIE,
         "name": "The Quiet Vacuum",
@@ -112,8 +124,7 @@ async def test_indexing_writes_the_vector_the_model_and_the_fingerprint(
     embedder: FakeEmbedder,
     service: IndexService,
 ) -> None:
-    """All three columns, because the vector alone cannot be checked for
-    staleness.
+    """All three columns, because the vector alone cannot be checked for staleness.
 
     Fails: an implementation storing the embedding and leaving
     `model_name`/`source_fingerprint` at their defaults. Every search still
@@ -136,9 +147,12 @@ async def test_indexing_writes_the_vector_the_model_and_the_fingerprint(
 async def test_indexing_commits(
     titles: FakeTitleRepository, service: IndexService, commits: list[int]
 ) -> None:
-    """The handler runs inside `JobWorker`'s transaction and the row has to
-    be durable before `complete` deletes the job. Without this the work is
-    done, the job is gone, and the vector is not there."""
+    """The handler runs inside `JobWorker`'s transaction and the row has to be durable before.
+
+    `complete` deletes the job.
+
+    Without this the work is done, the job is gone, and the vector is not there.
+    """
     title = await _given(titles)
 
     await service.index(title.id)
@@ -152,10 +166,10 @@ async def test_indexing_the_same_title_twice_writes_the_same_row_and_embeds_once
     embedder: FakeEmbedder,
     service: IndexService,
 ) -> None:
-    """PRD 08's "redelivery is safe by construction", plus the half that
-    makes it free. `JobWorker.recover()` requeues an abandoned claim,
-    so a process killed between the handler returning and `complete`
-    committing produces exactly this.
+    """PRD 08's "redelivery is safe by construction", plus the half that makes it free.
+
+    `JobWorker.recover()` requeues an abandoned claim, so a process killed between the
+    handler returning and `complete` committing produces exactly this.
 
     Fails: an implementation that re-embeds on every delivery. It is
     *correct*, and at ~83 texts/s a requeued backfill would re-run the whole
@@ -177,10 +191,13 @@ async def test_a_changed_overview_is_re_embedded(
     embeddings: FakeTitleEmbeddingRepository,
     service: IndexService,
 ) -> None:
-    """The mirror, and why the skip is a fingerprint comparison rather than
-    `if stored is not None: return`. That version passes every idempotence
-    case and then never updates a vector again -- the milestone's own failure
-    mode, a stale index that does not raise, it answers.
+    """The mirror.
+
+    and why the skip is a fingerprint comparison rather than `if stored is not None:
+    return`.
+
+    That version passes every idempotence case and then never updates a vector again --
+    the milestone's own failure mode, a stale index that does not raise, it answers.
     """
     title = await _given(titles)
     await service.index(title.id)
@@ -201,7 +218,7 @@ async def test_a_degenerate_title_is_written_with_a_null_embedding_rather_than_s
     embedder: FakeEmbedder,
     service: IndexService,
 ) -> None:
-    """**The case that catches the non-draining backfill.**
+    """**The case that catches the non-draining backfill.**.
 
     This project has shipped that bug once: the watch-history repair carried
     the walk's `observed_at`, was refused by the very row it existed to
@@ -238,10 +255,10 @@ async def test_a_refused_title_is_re_indexed_once_when_it_gains_content(
     embedder: FakeEmbedder,
     service: IndexService,
 ) -> None:
-    """The other half of the drain: refused is not permanent. An
-    implementation writing a constant fingerprint for every refusal passes
-    the case above and then never re-claims the title however much
-    enrichment gives it.
+    """The other half of the drain: refused is not permanent.
+
+    An implementation writing a constant fingerprint for every refusal passes the case
+    above and then never re-claims the title however much enrichment gives it.
 
     "Once", not "every pass": the third `index` call is the redelivery, and
     it must not embed again.
@@ -264,11 +281,14 @@ async def test_a_refused_title_is_re_indexed_once_when_it_gains_content(
 async def test_a_title_that_no_longer_exists_completes_rather_than_parks(
     embeddings: FakeTitleEmbeddingRepository, embedder: FakeEmbedder, service: IndexService
 ) -> None:
-    """`handlers.py`'s stated rule, and the deliberate divergence from
-    `EnrichService`, which raises `PortDataMalformed` here. An `index` job's
-    other producer is a sweep over the whole enriched tier, so a title
-    deleted between sweep and claim is routine -- and a park per deleted
-    title fills the review list with tombstones.
+    """`handlers.py`'s stated rule.
+
+    and the deliberate divergence from `EnrichService`, which raises `PortDataMalformed`
+    here.
+
+    An `index` job's other producer is a sweep over the whole enriched tier, so a title
+    deleted between sweep and claim is routine -- and a park per deleted title fills the
+    review list with tombstones.
     """
     await service.index(uuid.uuid4())
 
@@ -279,10 +299,12 @@ async def test_a_title_that_no_longer_exists_completes_rather_than_parks(
 async def test_a_wrong_width_vector_parks(
     titles: FakeTitleRepository, embeddings: FakeTitleEmbeddingRepository, commits: list[int]
 ) -> None:
-    """A model swap that silently changes width writes vectors a
-    `halfvec(384)` column rejects, and the rejection arrives one statement
-    later naming a column, not a model. `PortDataMalformed` rather than
-    retryable: no backoff makes a 512-wide model return 384 floats.
+    """A model swap that silently changes width writes vectors a `halfvec(384)` column rejects.
+
+    and the rejection arrives one statement later naming a column, not a model.
+
+    `PortDataMalformed` rather than retryable: no backoff makes a 512-wide model return
+    384 floats.
 
     Tested here rather than through a write because
     `FakeTitleEmbeddingRepository` has no width constraint at all -- that is
@@ -301,10 +323,11 @@ async def test_a_wrong_width_vector_parks(
 async def test_a_batch_that_comes_back_the_wrong_length_parks(
     titles: FakeTitleRepository, embeddings: FakeTitleEmbeddingRepository, commits: list[int]
 ) -> None:
-    """One text in, one vector out. An implementation returning two is one
-    that expanded the batch internally, which is how title *n*'s vector lands
-    on title *m* -- and taking `vectors[0]` regardless would store a vector
-    for the wrong text with nothing raising anywhere.
+    """One text in, one vector out.
+
+    An implementation returning two is one that expanded the batch internally, which is
+    how title *n*'s vector lands on title *m* -- and taking `vectors[0]` regardless
+    would store a vector for the wrong text with nothing raising anywhere.
     """
     service = _service(titles, embeddings, _TwoVectorEmbedder(), commits)
     title = await _given(titles)
@@ -316,10 +339,11 @@ async def test_a_batch_that_comes_back_the_wrong_length_parks(
 async def test_an_unreachable_model_is_retryable_rather_than_parked(
     titles: FakeTitleRepository, embeddings: FakeTitleEmbeddingRepository, commits: list[int]
 ) -> None:
-    """The other column of the disposition table. A model that is not loaded
-    is a `PortUnavailable`, which `JobWorker` backs off rather than parks --
-    retrying genuinely fixes it, and parking would need a human to release
-    work whose only problem was a restart.
+    """The other column of the disposition table.
+
+    A model that is not loaded is a `PortUnavailable`, which `JobWorker` backs off
+    rather than parks -- retrying genuinely fixes it, and parking would need a human to
+    release work whose only problem was a restart.
 
     The service re-raises rather than absorbing: `JobWorker` is the only
     thing that knows which error means which, and it learns by catching.
@@ -338,8 +362,11 @@ async def test_the_handler_converts_the_key(
     embeddings: FakeTitleEmbeddingRepository,
     service: IndexService,
 ) -> None:
-    """`_title_id`, reused rather than reimplemented, so the conversion is in
-    one place for both title-keyed kinds."""
+    """`_title_id`.
+
+    reused rather than reimplemented, so the conversion is in one place for both title-
+    keyed kinds.
+    """
     title = await _given(titles)
 
     await index_handler(service)(Job(kind=JobKind.INDEX, key=str(title.id)))
@@ -348,9 +375,10 @@ async def test_the_handler_converts_the_key(
 
 
 async def test_the_handler_parks_an_unparseable_key(service: IndexService) -> None:
-    """`uuid.UUID("not-a-uuid")` raises `ValueError`, which is not a
-    `UsherPortError`, and `JobWorker` lets those propagate on purpose -- so an
-    unconverted key takes the worker process down instead of parking one job.
+    """`uuid.UUID("not-a-uuid")` raises `ValueError`.
+
+    which is not a `UsherPortError`, and `JobWorker` lets those propagate on purpose --
+    so an unconverted key takes the worker process down instead of parking one job.
     """
     with pytest.raises(PortDataMalformed):
         await index_handler(service)(Job(kind=JobKind.INDEX, key="not-a-uuid"))
@@ -361,8 +389,9 @@ async def test_a_model_swap_re_embeds_a_title_whose_text_did_not_change(
     embeddings: FakeTitleEmbeddingRepository,
     commits: list[int],
 ) -> None:
-    """The `model_name` half of the skip, which the rest of this file cannot
-    see because every other case runs one embedder.
+    """The `model_name` half of the skip.
+
+    which the rest of this file cannot see because every other case runs one embedder.
 
     Measured, and this is why the column exists: the same checkpoint served by
     sentence-transformers and by fastembed produces vectors whose max pairwise

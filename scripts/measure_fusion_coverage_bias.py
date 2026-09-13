@@ -285,7 +285,10 @@ def _bucket(
     cap: int,
     target_returned_rank: int | None,
 ) -> str:
-    """The four-way idiom, one query, one mode. See the module docstring."""
+    """The four-way idiom, one query, one mode.
+
+    See the module docstring.
+    """
     if target_returned_rank == 1:  # pragma: no cover - callers check first
         raise ValueError("a hit has no miss bucket")
     if lexical_rank is None:

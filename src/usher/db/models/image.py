@@ -1,5 +1,6 @@
-"""`images` — [PRD 02](../../../../docs/prd/02-data-model.md)'s `Image`, and the one
-entity on that document's Relationships diagram that had no table.
+"""`images`.
+
+[PRD 02](../../../../docs/prd/02-data-model.md)'s `Image`, and the one entity on that
 """
 
 import uuid
@@ -21,8 +22,7 @@ from usher.domain.enums import ImageKind
 
 
 class ImageRow(Base):
-    """One artwork reference, owned by exactly one of a title, an episode or
-    a person.
+    """One artwork reference, owned by exactly one of a title, an episode or a person.
 
     **Three nullable owner columns and a CHECK, rather than three tables or a
     polymorphic `(owner_kind, owner_id)` pair.** The pair cannot carry a

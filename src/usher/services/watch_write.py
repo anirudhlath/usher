@@ -62,7 +62,10 @@ class WatchWriteService:
     async def set_for_title(
         self, *, user_id: uuid.UUID, title_id: uuid.UUID, position_seconds: int, played: bool
     ) -> WatchState:
-        """`PUT /watch/titles/{id}`. Both fields are written exactly as given."""
+        """`PUT /watch/titles/{id}`.
+
+        Both fields are written exactly as given.
+        """
         return await self._write(
             user_id=user_id,
             title_id=title_id,
@@ -91,7 +94,9 @@ class WatchWriteService:
     async def mark_title_played(
         self, *, user_id: uuid.UUID, title_id: uuid.UUID, played: bool
     ) -> WatchState:
-        """`POST`/`DELETE /watch/titles/{id}/played`. No body, so no position.
+        """`POST`/`DELETE /watch/titles/{id}/played`.
+
+        No body, so no position.
 
         `position_seconds=None` means *keep the one already stored*, which is
         the local half of M3's destructive-route finding. Emby's
@@ -172,8 +177,9 @@ class WatchWriteService:
         )
 
     async def _invalidate_rows(self, user_id: uuid.UUID) -> None:
-        """Drop this household's watch-state rows and its composed screen, and
-        tell every connected client which rows to refetch.
+        """Drop this household's watch-state rows and its composed screen.
+
+        and tell every connected client which rows to refetch.
 
         The same pair the push lane publishes, deliberately identical: a
         client write and a pushed `UserDataChanged` are the same event from

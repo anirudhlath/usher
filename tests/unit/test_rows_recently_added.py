@@ -10,7 +10,7 @@ from usher.services.rows.recently_added import RecentlyAddedProvider
 
 
 async def test_the_most_recently_seen_item_is_not_the_most_recently_added_one() -> None:
-    """**The front matter's distractor.**
+    """**The front matter's distractor.**.
 
     The distractor carries the newest `last_seen_at` in the library and an
     `added_at` two years old. Under the wrong column it is `cards[0]`; under the
@@ -38,8 +38,7 @@ async def test_the_most_recently_seen_item_is_not_the_most_recently_added_one() 
 
 
 async def test_a_library_with_no_recent_additions_proposes_nothing() -> None:
-    """The window's edge, and the popular-titles fallback's most tempting
-    disguise.
+    """The window's edge, and the popular-titles fallback's most tempting disguise.
 
     Fails `ORDER BY added_at DESC LIMIT 20` with no window -- which always
     returns a row, so the provider never has nothing to say, so the home screen
@@ -55,11 +54,12 @@ async def test_a_library_with_no_recent_additions_proposes_nothing() -> None:
 
 
 async def test_an_item_exactly_at_the_window_edge_is_inside_it() -> None:
-    """The boundary, asserted rather than left to a strict inequality nobody
-    chose. `since` is the *caller's* instant precisely so this is testable:
-    `now()` is frozen per transaction, so a statement carrying its own
-    `now() - interval '30 days'` makes "inside the window" and "at its edge"
-    the same fact."""
+    """The boundary, asserted rather than left to a strict inequality nobody chose.
+
+    `since` is the *caller's* instant precisely so this is testable: `now()` is frozen
+    per transaction, so a statement carrying its own `now() - interval '30 days'` makes
+    "inside the window" and "at its edge" the same fact.
+    """
     library = Library()
     at_the_edge = await library.title("At The Edge", added=days_ago(30))
     just_outside = await library.title("Just Outside", added=days_ago(30.1))
@@ -72,9 +72,9 @@ async def test_an_item_exactly_at_the_window_edge_is_inside_it() -> None:
 
 
 async def test_a_stale_import_scores_below_a_fresh_one() -> None:
-    """**The score decays where every other single-row provider's is
-    constant**, because "new" is the one relevance claim that genuinely is a
-    function of time.
+    """**The score decays where every other single-row provider's is constant**.
+
+    because "new" is the one relevance claim that genuinely is a function of time.
 
     A constant pins this row at a fixed screen position whether the household
     imported four hundred films this morning or one three weeks ago -- and a
@@ -97,10 +97,14 @@ async def test_a_stale_import_scores_below_a_fresh_one() -> None:
 
 
 async def test_the_score_is_measured_from_the_newest_arrival_not_the_mean() -> None:
-    """The row's claim is "something arrived", so one film this morning makes
-    it a fresh row even beside twenty from a fortnight ago. A mean would let a
-    large old import bury a small new one, which is the opposite of what the
-    row is for."""
+    """The row's claim is "something arrived".
+
+    so one film this morning makes it a fresh row even beside twenty from a fortnight
+    ago.
+
+    A mean would let a large old import bury a small new one, which is the opposite of
+    what the row is for.
+    """
     library = Library()
     await library.title("This Morning", added=days_ago(0))
     for index in range(20):
@@ -112,7 +116,7 @@ async def test_the_score_is_measured_from_the_newest_arrival_not_the_mean() -> N
 
 
 async def test_recently_added_fires_on_a_household_that_has_watched_nothing() -> None:
-    """**The only provider that does, and deliberately.**
+    """**The only provider that does, and deliberately.**.
 
     It is the honest answer to "what does a fresh install's home screen show?"
     -- and it is *not* a personalisation fallback: it makes a claim about the
@@ -136,8 +140,9 @@ async def test_an_empty_catalog_gets_no_row_rather_than_raising() -> None:
 
 
 async def test_an_item_that_cannot_say_when_it_arrived_is_excluded() -> None:
-    """`media_items.added_at` is nullable, and an undated item is excluded by
-    three-valued logic rather than by a predicate.
+    """`media_items.added_at` is nullable.
+
+    and an undated item is excluded by three-valued logic rather than by a predicate.
 
     Reading a missing `added_at` as "now" would put every undated row at the
     top of this row forever; reading it as the epoch would be a claim the

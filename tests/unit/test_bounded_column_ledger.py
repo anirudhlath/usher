@@ -54,8 +54,10 @@ def test_a_dead_write_site_scan_is_a_failure_and_not_an_empty_ledger(
 
 
 def test_an_unknown_bucket_name_raises_rather_than_answering_nothing() -> None:
-    """`ledger_columns` is what the integration arms are collected from, and a
-    typo in a bucket name must not read as "no columns in that bucket"."""
+    """`ledger_columns` is what the integration arms are collected from.
+
+    and a typo in a bucket name must not read as "no columns in that bucket".
+    """
     with pytest.raises(ValueError, match="unknown ledger bucket"):
         ledger_columns("exposed-sqlalchmey")
 
@@ -239,9 +241,11 @@ def test_a_writer_the_scan_cannot_place_fails_loudly(monkeypatch: pytest.MonkeyP
 
 
 def test_every_orm_writer_in_the_package_resolves_to_a_table() -> None:
-    """The live half of the case above: the eight methods that flush the
-    session are all placed, so the guard is protecting a property that holds
-    rather than one that is aspirational."""
+    """The live half of the case above.
+
+    the eight methods that flush the session are all placed, so the guard is protecting
+    a property that holds rather than one that is aspirational.
+    """
     module = audit_module()
     placed = {(site.module, site.qualname) for site in module.write_sites()}
     assert ("title.py", "add") in placed, "the ORM construction helper is not being followed"
@@ -250,9 +254,10 @@ def test_every_orm_writer_in_the_package_resolves_to_a_table() -> None:
 def test_a_write_site_with_no_refusal_point_is_a_failure_not_a_translated_site(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`min([])` has no answer, and the code used to return the top of the
-    lattice — so a site the translation scan found nothing in read
-    `refusals_as_conflict` on **no evidence**.
+    """`min([])` has no answer, and the code used to return the top of the lattice.
+
+    so a site the translation scan found nothing in read `refusals_as_conflict` on **no
+    evidence**.
 
     The mirror of `test_a_writer_the_scan_cannot_place_fails_loudly`, on the
     other axis. It is reachable rather than theoretical:

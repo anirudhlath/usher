@@ -20,7 +20,7 @@ PushGapClose = Literal["cursored", "always", "never"]
 
 
 def settings_rejection(exc: ValidationError, *, entry_point: str) -> str:
-    """pydantic's diagnosis with every rejected value stripped out."""
+    """Pydantic's diagnosis with every rejected value stripped out."""
     lines = [f"{entry_point}: the settings were rejected"]
     for error in exc.errors():
         where = ".".join(str(part) for part in error["loc"]) or "(settings)"
@@ -393,8 +393,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _query_expansion_needs_a_client(self) -> "Settings":
-        """The one combination of the two LLM switches that cannot mean anything, refused
-        at startup rather than left to mean nothing.
+        """The one combination of the two LLM switches that cannot mean anything.
+
+        refused at startup rather than left to mean nothing.
         """
         if self.query_expansion_enabled and not self.llm_enabled:
             raise ValueError(
@@ -440,9 +441,10 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
-        """An env var that is present but empty (as `.env.example` ships
-        `USHER_TMDB_API_KEY=` and `OTEL_EXPORTER_OTLP_ENDPOINT=`) means
-        "not set", not "set to the empty string" — keep `str | None` honest.
+        """An env var that is present but empty (as `.env.example` ships `USHER_TMDB_API_KEY=`.
+
+        and `OTEL_EXPORTER_OTLP_ENDPOINT=`) means "not set", not "set to the empty
+        string" — keep `str | None` honest.
 
         **`llm_api_key` joined this list because the suite caught it**, and it
         is the one of the three where the empty string is not merely untidy:

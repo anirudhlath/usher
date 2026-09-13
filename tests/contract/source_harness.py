@@ -17,7 +17,10 @@ class SourceHarness(ABC):
     @property
     @abstractmethod
     def adapter(self) -> SourceAdapter:
-        """The adapter under test. The same instance for the whole test."""
+        """The adapter under test.
+
+        The same instance for the whole test.
+        """
 
     @abstractmethod
     async def given_item(self, item: SourceItem, *, changed_at: AwareDatetime) -> None:
@@ -33,8 +36,10 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def recorded_watch_state(self, external_id: str) -> tuple[int, bool] | None:
-        """`(position_seconds, played)` as the source now holds it after a
-        `push_watch_state`, or `None` if nothing was ever written.
+        """`(position_seconds.
+
+        played)` as the source now holds it after a `push_watch_state`, or `None` if
+        nothing was ever written.
 
         Read back from the source's own state, never from a log of calls the
         adapter made -- a harness that recorded "push_watch_state was
@@ -44,15 +49,17 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def go_offline(self) -> None:
-        """Make every subsequent request fail at the transport layer, the
-        way an unplugged server or a dead DNS entry does. Not a 5xx: a
-        transport failure is the case an adapter is most likely to translate
-        wrongly."""
+        """Make every subsequent request fail at the transport layer.
+
+        the way an unplugged server or a dead DNS entry does.
+
+        Not a 5xx: a transport failure is the case an adapter is most likely to
+        translate wrongly.
+        """
 
     @abstractmethod
     async def fail_after_items(self, count: int) -> None:
-        """Serve at least `count` items successfully during a walk, then
-        fail.
+        """Serve at least `count` items successfully during a walk, then fail.
 
         "At least" because upstreams page, and a page boundary rarely lands
         exactly on `count`: an implementation that serves items in pages of
@@ -73,10 +80,10 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def expire_credentials(self) -> None:
-        """Invalidate the adapter's *session*, leaving the stored
-        credentials correct -- the exact failure that motivated this
-        project, where a token in a Home Assistant dashboard silently began
-        returning 401 with no way to renew it.
+        """Invalidate the adapter's *session*, leaving the stored credentials correct.
+
+        the exact failure that motivated this project, where a token in a Home Assistant
+        dashboard silently began returning 401 with no way to renew it.
 
         A source with no expiring session may implement this as a no-op; the
         contract's assertions still hold (the operation succeeds, and no
@@ -85,14 +92,20 @@ class SourceHarness(ABC):
 
     @abstractmethod
     def authentications(self) -> int:
-        """How many times the source has been asked to authenticate since
-        the harness was created. `0` for a source with no authentication
-        step."""
+        """How many times the source has been asked to authenticate since the harness was.
+
+        created.
+
+        `0` for a source with no authentication step.
+        """
 
     def observed_overlap(self) -> int | None:
-        """The greatest number of upstream requests this harness saw in flight at once, or
-        `None` if it cannot tell. Optional: the default is `None`, and a harness with no
-        transport to instrument leaves it there.
+        """The greatest number of upstream requests this harness saw in flight at once.
+
+        or `None` if it cannot tell.
+
+        Optional: the default is `None`, and a harness with no transport to instrument
+        leaves it there.
         """
         return None
 
@@ -142,12 +155,17 @@ class SourceHarness(ABC):
         """
 
     def can_advance_push_clock(self) -> bool:
-        """Whether `advance_push_clock` does anything. Default `False`."""
+        """Whether `advance_push_clock` does anything.
+
+        Default `False`.
+        """
         return False
 
     def push_stale_after(self) -> float:
-        """The adapter's staleness window, so a case can step past it
-        without hard-coding a constant that belongs to the implementation.
+        """The adapter's staleness window.
+
+        so a case can step past it without hard-coding a constant that belongs to the
+        implementation.
 
         Only ever called by a case that has already checked
         `can_advance_push_clock`, which is why this may raise rather than
@@ -156,13 +174,14 @@ class SourceHarness(ABC):
         raise NotImplementedError
 
     def can_disable_push(self) -> bool:
-        """Whether this harness can arrange an adapter with no push channel
-        at all. Default `False`."""
+        """Whether this harness can arrange an adapter with no push channel at all.
+
+        Default `False`.
+        """
         return False
 
     async def disable_push(self) -> None:
-        """Leave the adapter with no push channel, so `events()` raises
-        `SourceNotSupported`.
+        """Leave the adapter with no push channel, so `events()` raises `SourceNotSupported`.
 
         Not every adapter has such a state and `EmbyAdapter` is one that
         does not -- it always has a channel to offer and finds out
@@ -176,6 +195,8 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Tear the harness down. Not the same as `adapter.aclose()` -- the
-        contract closes the adapter itself in some cases, and this must
-        still be safe afterwards."""
+        """Tear the harness down.
+
+        Not the same as `adapter.aclose()` -- the contract closes the adapter itself in
+        some cases, and this must still be safe afterwards.
+        """

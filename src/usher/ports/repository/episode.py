@@ -54,8 +54,7 @@ class EpisodeRepository(ABC):
 
     @abstractmethod
     async def upsert_episodes(self, episodes: Sequence[Episode]) -> BulkWriteResult:
-        """Insert or update, keyed on `(title_id, season_number,
-        episode_number)`.
+        """Insert or update, keyed on `(title_id, season_number, episode_number)`.
 
         Never overwrites a non-null field with a null one: ingest creates an
         episode from a source's own numbers alone (no name, no air date) and
@@ -95,10 +94,10 @@ class EpisodeRepository(ABC):
     async def resolve_episodes(
         self, keys: Sequence[tuple[uuid.UUID, int, int]]
     ) -> dict[tuple[uuid.UUID, int, int], uuid.UUID]:
-        """`(title_id, season_number, episode_number)` -> episode id, in one
-        round trip. 999,827 episodes means this cannot be a lookup per item,
-        and -- for the reason `resolve_seasons` states -- not a lookup per
-        series either.
+        """`(title_id, season_number, episode_number)` -> episode id, in one round trip.
+
+        999,827 episodes means this cannot be a lookup per item, and -- for the reason
+        `resolve_seasons` states -- not a lookup per series either.
 
         `title_id` is part of the key rather than a separate argument because
         every series has an S01E01: a resolve that dropped it hangs one show's
@@ -169,15 +168,16 @@ class EpisodeRepository(ABC):
         limit: int,
         after: EpisodeCursorPosition | None = None,
     ) -> list[Episode]:
-        """One page of one season's episodes, ordered by `(episode_number, id)`, keyset-
-        resumed from `after`.
+        """One page of one season's episodes.
+
+        ordered by `(episode_number, id)`, keyset- resumed from `after`.
         """
 
     @abstractmethod
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
-        """Everything under one series, seasons then episodes, each ordered by
-        its own numbering. Used by enrichment to decide what changed, and by
-        the CLI's report.
+        """Everything under one series, seasons then episodes, each ordered by its own numbering.
+
+        Used by enrichment to decide what changed, and by the CLI's report.
 
         **No route may use this.** It returns the whole tree -- 20,001 rows /
         22.901 ms / 402 buffers for the one measured pathological series -- so

@@ -33,8 +33,7 @@ async def get_collection(
     collections: CollectionRepositoryDep,
     titles: TitleRepositoryDep,
 ) -> CollectionResponse:
-    """A franchise, its members in release order, and how much of it the
-    household owns.
+    """A franchise, its members in release order, and how much of it the household owns.
 
     `owned_count` and `total_count` are the lengths of the rendered list and of
     its owned subset, so a client that counts the cards gets the same numbers.

@@ -1,4 +1,4 @@
-"""people, credits, collections, and the FK titles.collection_id has waited for"""
+"""People, credits, collections, and the FK titles.collection_id has waited for."""
 
 from collections.abc import Sequence
 

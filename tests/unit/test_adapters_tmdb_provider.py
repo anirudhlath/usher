@@ -1,4 +1,7 @@
-"""`TmdbMetadataProvider` over `httpx.MockTransport`. No network."""
+"""`TmdbMetadataProvider` over `httpx.MockTransport`.
+
+No network.
+"""
 
 import datetime as dt
 import uuid
@@ -44,8 +47,10 @@ _NOT_FOUND = {
 
 
 def _season_summary(number: int) -> dict[str, Any]:
-    """One `seasons[]` entry for a season the committed fixture does not
-    carry, shaped exactly like the two it does."""
+    """One `seasons[]` entry for a season the committed fixture does not carry.
+
+    shaped exactly like the two it does.
+    """
     entry = dict(load_tmdb_fixture("series")["seasons"][1])
     entry["season_number"] = number
     entry["id"] = _SEASON_TMDB_ID + number
@@ -259,9 +264,11 @@ async def _per_season_composition(server: _Server, ref: ProviderRef) -> dict[str
 
 
 async def test_a_movie_is_one_request_carrying_the_documented_append_list() -> None:
-    """PRD 03 names the exact list. A provider that made six requests
-    instead of one burns the rate limit six times as fast, on the stage that
-    runs once per title across a 1,271,138-row catalog."""
+    """PRD 03 names the exact list.
+
+    A provider that made six requests instead of one burns the rate limit six times as
+    fast, on the stage that runs once per title across a 1,271,138-row catalog.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -280,10 +287,13 @@ async def test_a_movie_is_one_request_carrying_the_documented_append_list() -> N
 
 
 async def test_a_series_asks_for_content_ratings_and_never_release_dates() -> None:
-    """The divergence that would not merely produce a wrong value: TMDb's TV
-    namespace has no `release_dates` endpoint at all, and it does have
-    `content_ratings`, which the movie namespace does not. One shared append
-    list is a request for something that does not exist."""
+    """The divergence that would not merely produce a wrong value.
+
+    TMDb's TV namespace has no `release_dates` endpoint at all, and it does have
+    `content_ratings`, which the movie namespace does not.
+
+    One shared append list is a request for something that does not exist.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -296,10 +306,11 @@ async def test_a_series_asks_for_content_ratings_and_never_release_dates() -> No
 
 
 async def test_a_series_fetch_composes_its_seasons_own_responses() -> None:
-    """TMDb's series detail lists seasons and carries no episodes, so the
-    hierarchy has to be composed into the detail payload -- `to_result` is a
-    pure function of one document, so a season response fetched later has
-    nowhere to go."""
+    """TMDb's series detail lists seasons and carries no episodes.
+
+    so the hierarchy has to be composed into the detail payload -- `to_result` is a pure
+    function of one document, so a season response fetched later has nowhere to go.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -352,8 +363,10 @@ async def test_the_composed_payload_equals_what_the_per_season_path_produced() -
 
 
 async def test_a_season_block_is_merged_over_its_summary_and_never_under_it() -> None:
-    """The direction, asserted on the payload directly rather than only as a
-    side effect of the identity case's `==`.
+    """The direction.
+
+    asserted on the payload directly rather than only as a side effect of the identity
+    case's `==`.
 
     The season's own response is the authoritative one and the `1+N` spelling
     took it with `dict.update`. Reversing that writes the summary's thinner
@@ -468,8 +481,12 @@ async def test_a_season_listed_outside_the_blind_window_is_fetched_by_a_follow_u
 
 
 async def test_a_window_number_the_series_does_not_have_is_absent_and_not_an_error() -> None:
-    """Measured live 2026-08-01: an unlisted season number appends nothing
-    and the response is still a 200. That is what lets the window be blind."""
+    """Measured live 2026-08-01.
+
+    an unlisted season number appends nothing and the response is still a 200.
+
+    That is what lets the window be blind.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -502,10 +519,14 @@ async def test_a_season_whose_block_never_arrives_still_produces_its_row() -> No
 
 
 async def test_the_composed_payload_still_carries_what_later_milestones_read() -> None:
-    """ADR-0016: `raw_payloads` exists so M7 and M9 re-derive
-    `Person`/`Credit`/`Collection`/`Image` with no second network call. A
-    fetch that returned only the fields M4 maps would make that impossible
-    without anybody noticing until M7."""
+    """ADR-0016.
+
+    `raw_payloads` exists so M7 and M9 re-derive `Person`/`Credit`/`Collection`/`Image`
+    with no second network call.
+
+    A fetch that returned only the fields M4 maps would make that impossible without
+    anybody noticing until M7.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -531,8 +552,10 @@ async def test_a_payload_with_no_id_is_malformed() -> None:
 
 
 async def test_a_404_from_the_detail_route_reaches_the_caller_as_malformed_data() -> None:
-    """Straight through from the client, and it is the branch that makes
-    `JobWorker` park rather than retry."""
+    """Straight through from the client.
+
+    and it is the branch that makes `JobWorker` park rather than retry.
+    """
     server = _Server()
     server.status_for["/3/movie/90000550"] = 404
     provider, http = _provider(server)
@@ -554,10 +577,14 @@ async def test_a_ref_for_another_provider_is_malformed_not_a_request() -> None:
 
 
 async def test_a_kindless_tmdb_ref_is_malformed_rather_than_guessed() -> None:
-    """ADR-0011 at the request layer: 26,968 ids are live in both TMDb
-    spaces, so `GET /movie/{id}` for a ref that meant a series returns a real
-    payload for an unrelated film. Guessing here writes one title's metadata
-    onto another and nothing ever reports an error."""
+    """ADR-0011 at the request layer.
+
+    26,968 ids are live in both TMDb spaces, so `GET /movie/{id}` for a ref that meant a
+    series returns a real payload for an unrelated film.
+
+    Guessing here writes one title's metadata onto another and nothing ever reports an
+    error.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -604,10 +631,14 @@ async def test_to_result_produces_the_hierarchy_for_a_series() -> None:
 
 
 async def test_to_result_never_sets_the_enrichment_tier() -> None:
-    """`EnrichService` owns the tier and only ever raises it through
-    `ENRICHMENT_RANK` (ADR-0008). A provider that stamped `ENRICHED` here
-    could promote a title on a payload carrying nothing but an id -- and one
-    that stamped `SKELETON` would demote a title another provider enriched."""
+    """`EnrichService` owns the tier and only ever raises it through `ENRICHMENT_RANK`.
+
+    (ADR-0008).
+
+    A provider that stamped `ENRICHED` here could promote a title on a payload carrying
+    nothing but an id -- and one that stamped `SKELETON` would demote a title another
+    provider enriched.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -618,8 +649,9 @@ async def test_to_result_never_sets_the_enrichment_tier() -> None:
 
 
 async def test_to_derivation_carries_the_artwork_the_fetch_already_paid_for() -> None:
-    """M4's boundary call 2 for the fourth entity, asserted at the seam where
-    a second request would have to be issued.
+    """M4's boundary call 2 for the fourth entity.
+
+    asserted at the seam where a second request would have to be issued.
 
     `to_derivation` is synchronous and the whole payload is already in hand --
     `images` is one of the six namespaces `MOVIE_APPEND_TO_RESPONSE` asks for,
@@ -651,11 +683,13 @@ async def test_to_derivation_carries_the_artwork_the_fetch_already_paid_for() ->
 
 
 async def test_a_series_derivation_carries_its_primaries_and_no_credits_confusion() -> None:
-    """The per-kind control. `series.json` carries three empty image arrays
-    and a `created_by`, so a derivation that read images out of the same place
-    it reads creators, or that treated an empty array as "no artwork", would
-    leave every series in the catalog with no poster at all -- while the movie
-    case above stayed green."""
+    """The per-kind control.
+
+    `series.json` carries three empty image arrays and a `created_by`, so a derivation
+    that read images out of the same place it reads creators, or that treated an empty
+    array as "no artwork", would leave every series in the catalog with no poster at all
+    -- while the movie case above stayed green.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -685,11 +719,14 @@ async def test_a_movie_search_uses_the_movie_endpoint_and_its_own_year_parameter
 
 
 async def test_a_series_search_uses_the_tv_endpoint_and_first_air_date_year() -> None:
-    """`primary_release_year` is not a `/search/tv` parameter and
-    `first_air_date_year` is not a `/search/movie` one. Sending the wrong one
-    is silently unfiltered rather than an error, so half the catalog would
-    search unfiltered and the caller's ambiguity rule would then reject every
-    result."""
+    """`primary_release_year` is not a `/search/tv` parameter and `first_air_date_year` is not a.
+
+    `/search/movie` one.
+
+    Sending the wrong one is silently unfiltered rather than an error, so half the
+    catalog would search unfiltered and the caller's ambiguity rule would then reject
+    every result.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -700,9 +737,12 @@ async def test_a_series_search_uses_the_tv_endpoint_and_first_air_date_year() ->
 
 
 async def test_an_unscoped_search_asks_both_spaces() -> None:
-    """`/search/multi` labels its results but supports neither year filter,
-    so a caller that does not know the kind pays two requests. That is the
-    cost the port's optional `kind` exists to let a caller avoid."""
+    """`/search/multi` labels its results but supports neither year filter.
+
+    so a caller that does not know the kind pays two requests.
+
+    That is the cost the port's optional `kind` exists to let a caller avoid.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -729,8 +769,9 @@ async def test_a_search_with_no_year_sends_no_year_parameter() -> None:
 async def test_an_empty_year_filtered_search_is_retried_without_the_year(
     kind: TitleKind, path: str, parameter: str
 ) -> None:
-    """TMDb's year filter is exact; the caller's rule is +/-1. Without this
-    retry the tighter of the two silently wins.
+    """TMDb's year filter is exact; the caller's rule is +/-1.
+
+    Without this retry the tighter of the two silently wins.
 
     Measured live 2026-08-01 over 320 names: every one of the 294 candidates
     TMDb returned carried *exactly* the year asked for, so `_confident`'s
@@ -751,13 +792,15 @@ async def test_an_empty_year_filtered_search_is_retried_without_the_year(
 
 
 async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> None:
-    """The retry is a fallback, not a widening. Dropping the year filter
-    outright was measured too and is *worse*: of 133 names that already
-    resolved with it, 6 stopped resolving without it, because "exactly one
-    survivor" across every year at once is harder than within one. So the
-    second request happens only when the first found nothing, which can add
-    matches and cannot remove any -- and costs an extra request on the 8%
-    of probes that came back empty rather than on all of them."""
+    """The retry is a fallback, not a widening.
+
+    Dropping the year filter outright was measured too and is *worse*: of 133 names that
+    already resolved with it, 6 stopped resolving without it, because "exactly one
+    survivor" across every year at once is harder than within one. So the second request
+    happens only when the first found nothing, which can add matches and cannot remove
+    any -- and costs an extra request on the 8% of probes that came back empty rather
+    than on all of them.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -766,9 +809,11 @@ async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> N
 
 
 async def test_an_empty_search_with_no_year_is_not_retried() -> None:
-    """There is nothing to drop, so a retry would be the identical request
-    twice -- one wasted rate-limited call per unmatched item, on the tier
-    PRD 03 already calls a last resort."""
+    """There is nothing to drop, so a retry would be the identical request twice.
+
+    one wasted rate-limited call per unmatched item, on the tier PRD 03 already calls a
+    last resort.
+    """
     server = _Server()
     server.search_finds_nothing = True
     provider, http = _provider(server)
@@ -779,9 +824,11 @@ async def test_an_empty_search_with_no_year_is_not_retried() -> None:
 
 
 async def test_a_search_that_finds_nothing_either_way_asks_exactly_twice() -> None:
-    """The fallback is bounded at one extra request. A provider that kept
-    re-asking would turn every genuinely unknown title into an unbounded
-    loop against a rate-limited API."""
+    """The fallback is bounded at one extra request.
+
+    A provider that kept re-asking would turn every genuinely unknown title into an
+    unbounded loop against a rate-limited API.
+    """
     server = _Server()
     server.search_finds_nothing = True
     provider, http = _provider(server)
@@ -795,9 +842,10 @@ async def test_a_search_that_finds_nothing_either_way_asks_exactly_twice() -> No
 
 
 async def test_the_change_feed_is_resumable_and_walks_both_id_spaces() -> None:
-    """A catalog holding 371,310 series that only re-enriched movies would
-    be half stale, and a page of bare integers could not say which space an
-    id belongs to."""
+    """A catalog holding 371,310 series that only re-enriched movies would be half stale.
+
+    and a page of bare integers could not say which space an id belongs to.
+    """
     server = _Server()
     provider, http = _provider(server)
     since = dt.datetime(2026, 7, 25, tzinfo=dt.UTC)
@@ -818,9 +866,11 @@ async def test_the_change_feed_is_resumable_and_walks_both_id_spaces() -> None:
 
 
 async def test_the_change_window_is_clamped_to_fourteen_days() -> None:
-    """TMDb's own documentation: "You can query this method up to 14 days at
-    a time." A `since` from before an outage would otherwise be rejected by
-    TMDb on the one call the recovery path makes."""
+    """TMDb's own documentation.
+
+    "You can query this method up to 14 days at a time." A `since` from before an outage
+    would otherwise be rejected by TMDb on the one call the recovery path makes.
+    """
     server = _Server()
     provider, http = _provider(server, today=dt.date(2026, 7, 31))
     async with http:
@@ -839,9 +889,12 @@ async def test_a_window_within_the_cap_is_sent_as_asked() -> None:
 
 
 async def test_the_provider_names_itself_the_way_a_provider_ref_spells_it() -> None:
-    """`MetadataProvider.name` is the `provider` half of every ref this
-    adapter produces, and `TitleMatchRepository` matches on that exact
-    string. A display name here silently matches nothing."""
+    """`MetadataProvider.name` is the `provider` half of every ref this adapter produces.
+
+    and `TitleMatchRepository` matches on that exact string.
+
+    A display name here silently matches nothing.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:

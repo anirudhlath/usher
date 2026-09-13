@@ -118,8 +118,10 @@ def _fields_carrying(fingerprint: Fingerprint, needle: str) -> list[str]:
 
 
 def test_the_digest_is_stable_across_two_captures_of_the_same_catalog() -> None:
-    """Two reads of one unchanged catalog have to answer one digest, or the
-    baseline is invalid the moment it is written."""
+    """Two reads of one unchanged catalog have to answer one digest.
+
+    or the baseline is invalid the moment it is written.
+    """
     assert _fingerprint().digest == _fingerprint().digest
 
 
@@ -170,19 +172,23 @@ def test_a_fingerprints_provenance_cannot_be_mutated_after_it_is_built() -> None
 
 
 def test_the_digest_ignores_key_order() -> None:
-    """Two captures that built the mapping in a different order describe the
-    same catalog. A digest over `str(dict)` would disagree."""
+    """Two captures that built the mapping in a different order describe the same catalog.
+
+    A digest over `str(dict)` would disagree.
+    """
     one = Fingerprint(inputs={"a": 1, "b": 2}, provenance={})
     two = Fingerprint(inputs={"b": 2, "a": 1}, provenance={})
     assert one.digest == two.digest
 
 
 def test_the_digest_ignores_the_order_a_nested_mapping_was_built_in() -> None:
-    """The case above is satisfied by sorting the *top level* only --
-    `json.dumps(dict(sorted(inputs.items())))` -- and `pools` is a nested
-    mapping built one band at a time by whichever query answered first. So
-    the two captures below differ in nothing a catalog can see, and a
-    top-level-only sort calls them two different catalogs.
+    """The case above is satisfied by sorting the *top level* only.
+
+    `json.dumps(dict(sorted(inputs.items())))` -- and `pools` is a nested mapping built
+    one band at a time by whichever query answered first.
+
+    So the two captures below differ in nothing a catalog can see, and a top-level-only
+    sort calls them two different catalogs.
     """
     one = Fingerprint(inputs={"pools": {"2-4": 432, "5-7": 2532}}, provenance={})
     two = Fingerprint(inputs={"pools": {"5-7": 2532, "2-4": 432}}, provenance={})
@@ -190,11 +196,13 @@ def test_the_digest_ignores_the_order_a_nested_mapping_was_built_in() -> None:
 
 
 def test_the_digest_reads_the_keys_and_not_only_the_values() -> None:
-    """A digest over `sorted(inputs.values())` passes every ordering case
-    above and every positive control below, because both are satisfied by a
-    function merely *sensitive* to the same numbers. The two captures here
-    carry the identical multiset of values under swapped keys: 432 titles in
-    a catalog of 81,054 shared names is not 81,054 titles in a catalog of 432.
+    """A digest over `sorted(inputs.values())` passes every ordering case above and every.
+
+    positive control below, because both are satisfied by a function merely *sensitive*
+    to the same numbers.
+
+    The two captures here carry the identical multiset of values under swapped keys: 432
+    titles in a catalog of 81,054 shared names is not 81,054 titles in a catalog of 432.
     """
     one = Fingerprint(inputs={"titles": 432, "shared_lower_names": 81_054}, provenance={})
     two = Fingerprint(inputs={"titles": 81_054, "shared_lower_names": 432}, provenance={})
@@ -202,8 +210,10 @@ def test_the_digest_reads_the_keys_and_not_only_the_values() -> None:
 
 
 def test_a_changed_catalog_input_changes_the_digest() -> None:
-    """The positive control. Without it every test here passes for a digest
-    that returns a constant."""
+    """The positive control.
+
+    Without it every test here passes for a digest that returns a constant.
+    """
     assert _fingerprint(inputs={"titles": 1_271_570}).digest != _fingerprint().digest
 
 
@@ -219,11 +229,12 @@ def test_a_changed_catalog_input_changes_the_digest() -> None:
 def test_any_one_input_field_moved_on_its_own_changes_the_digest(
     moved: dict[str, object],
 ) -> None:
-    """**The positive control above moves one field, so it cannot see a digest
-    that reads only that field.** An implementation digesting `titles` alone
-    -- or one that skips `pools` because a nested mapping is awkward to
-    serialise -- passes it and reports a bootstrap re-run, an enrichment crawl
-    and a re-sampled frame as all comparable with the baseline.
+    """**The positive control above moves one field.
+
+    so it cannot see a digest that reads only that field.** An implementation digesting
+    `titles` alone -- or one that skips `pools` because a nested mapping is awkward to
+    serialise -- passes it and reports a bootstrap re-run, an enrichment crawl and a re-
+    sampled frame as all comparable with the baseline.
 
     The two integers and the nested mapping are the three shapes an input
     carries, and each is a parameter rather than an arm of one case so the
@@ -236,11 +247,12 @@ def test_any_one_input_field_moved_on_its_own_changes_the_digest(
 def test_a_field_that_is_absent_is_not_the_same_catalog_as_one_that_is_present(
     present: object,
 ) -> None:
-    """A field that *did not appear at all* is a different measurement from
-    one that did, and the difference is the one a comparison is most likely to
-    get wrong: a digest built by reading known keys out of the mapping
-    (`inputs.get(name)`), or one that drops `None`s on the way in, calls a
-    capture that never read the pools identical to a capture that read them.
+    """A field that *did not appear at all* is a different measurement from one that did.
+
+    and the difference is the one a comparison is most likely to get wrong: a digest
+    built by reading known keys out of the mapping (`inputs.get(name)`), or one that
+    drops `None`s on the way in, calls a capture that never read the pools identical to
+    a capture that read them.
 
     The `None` parameter is the half that is not obvious -- a frame whose pool
     query failed answers `None`, and "the pools are unknown" must not digest
@@ -252,10 +264,11 @@ def test_a_field_that_is_absent_is_not_the_same_catalog_as_one_that_is_present(
 
 
 def test_a_changed_git_sha_does_not_change_the_digest() -> None:
-    """**The whole reason this class has two fields.** Every commit changes
-    the sha. Digested, that makes each run incomparable with the previous
-    one, `baseline-invalid` the only reachable verdict, and the eval job
-    noise that someone turns off."""
+    """**The whole reason this class has two fields.** Every commit changes the sha.
+
+    Digested, that makes each run incomparable with the previous one, `baseline-invalid`
+    the only reachable verdict, and the eval job noise that someone turns off.
+    """
     assert _fingerprint(provenance={"git_sha": "deadbee"}).digest == _fingerprint().digest
 
 
@@ -270,10 +283,11 @@ def test_a_changed_git_sha_does_not_change_the_digest() -> None:
     ids=["git_sha", "seed", "ranx", "a-field-nobody-recorded-before"],
 )
 def test_no_provenance_field_of_any_kind_reaches_the_digest(moved: dict[str, object]) -> None:
-    """The case above is satisfied by a digest that special-cases the sha and
-    keeps the rest -- which is the repair somebody reaches for on being told
-    the sha is the problem, and it re-creates the bug one field over: a `ranx`
-    upgrade would then invalidate every baseline in the repository.
+    """The case above is satisfied by a digest that special-cases the sha and keeps the rest.
+
+    which is the repair somebody reaches for on being told the sha is the problem, and
+    it re-creates the bug one field over: a `ranx` upgrade would then invalidate every
+    baseline in the repository.
 
     The fourth parameter adds a key nothing recorded before, because the half
     a fixed key list cannot see is a *new* provenance field arriving later.
@@ -282,17 +296,20 @@ def test_no_provenance_field_of_any_kind_reaches_the_digest(moved: dict[str, obj
 
 
 def test_provenance_still_reaches_the_record() -> None:
-    """Not compared is not the same as not kept. A metric that moved because
-    a library was upgraded is diagnosable only if the version was written
-    down."""
+    """Not compared is not the same as not kept.
+
+    A metric that moved because a library was upgraded is diagnosable only if the
+    version was written down.
+    """
     assert _fingerprint().provenance["ranx"] == "0.3.21"
 
 
 def test_the_recorded_provenance_is_read_from_the_run_and_not_written_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case above pins that `provenance` survives construction; it cannot
-    see a field whose value was *invented*, and a recorded constant is worse
+    """The case above pins that `provenance` survives construction.
+
+    it cannot see a field whose value was *invented*, and a recorded constant is worse
     than an absent record because a reader believes it.
 
     `"ranx": "0.3.21"` written as a literal is the shape: it is what the
@@ -312,12 +329,15 @@ def test_the_recorded_provenance_is_read_from_the_run_and_not_written_down(
 
 
 def test_the_digest_is_the_same_in_two_processes_with_different_hash_seeds() -> None:
-    """**A baseline is written by one process and compared by another**, which
-    is the property every other case here is blind to: a digest over anything
-    `PYTHONHASHSEED` salts -- `hash()`, a `set` iterated, a `frozenset` of
-    band names -- agrees with itself all day inside one interpreter and with
-    no other run of the harness. Two interpreters, two seeds, and the parent's
-    own answer, so this pins agreement rather than merely internal consistency.
+    """**A baseline is written by one process and compared by another**.
+
+    which is the property every other case here is blind to: a digest over anything
+    `PYTHONHASHSEED` salts -- `hash()`, a `set` iterated, a `frozenset` of band names --
+    agrees with itself all day inside one interpreter and with no other run of the
+    harness.
+
+    Two interpreters, two seeds, and the parent's own answer, so this pins agreement
+    rather than merely internal consistency.
 
     The digest's *shape* is asserted here rather than in its own case because
     it is the same claim: 64 lowercase hex characters is what a sha256 answers
@@ -358,7 +378,7 @@ def test_the_digest_is_the_same_in_two_processes_with_different_hash_seeds() -> 
 
 
 def test_the_suggest_fingerprint_compares_the_frame_and_records_the_rest() -> None:
-    """**The partition is the deliverable, so it is pinned as two exact sets.**
+    """**The partition is the deliverable, so it is pinned as two exact sets.**.
 
     A membership assertion (`"git_sha" in provenance`) is satisfied by a
     fingerprint that also digests it, and that is the defect this whole module
@@ -420,9 +440,10 @@ def test_the_suggest_fingerprint_compares_the_frame_and_records_the_rest() -> No
 def test_any_one_number_of_the_suggest_frame_moving_changes_its_digest(
     seed: int, case_count: int, frame: Frame
 ) -> None:
-    """Each of the four numbers `for_suggest` calls an input has to reach the
-    digest, or the run it describes is compared against a baseline drawn from
-    a different catalog.
+    """Each of the four numbers `for_suggest` calls an input has to reach the digest.
+
+    or the run it describes is compared against a baseline drawn from a different
+    catalog.
 
     The second parameter is the case count the transposition arm really
     produced -- 2,993 - 29 -- rather than a round number, because that is the
@@ -433,10 +454,10 @@ def test_any_one_number_of_the_suggest_frame_moving_changes_its_digest(
 
 
 def test_the_gates_own_mappingproxy_pools_digest_as_the_plain_dict_spelling_does() -> None:
-    """`for_suggest`'s `dict(frame.pools)` is load-bearing and was pinned by
-    nothing: measured out of tree, replacing it with `frame.pools` leaves every
-    other case in this file green, because no fixture anywhere passes a
-    non-`dict` `pools`.
+    """`for_suggest`'s `dict(frame.pools)` is load-bearing and was pinned by nothing.
+
+    measured out of tree, replacing it with `frame.pools` leaves every other case in
+    this file green, because no fixture anywhere passes a non-`dict` `pools`.
 
     The state is one line away and mypy-clean -- `Frame.pools` is
     `Mapping[str, int]` and `GATE_POOLS` is a `MappingProxyType`, so
@@ -459,10 +480,11 @@ def test_the_gates_own_mappingproxy_pools_digest_as_the_plain_dict_spelling_does
 
 
 def test_the_gate_digest_is_the_digest_the_gates_own_constants_produce() -> None:
-    """`GATE_DIGEST` is computed from `GATE_SEED`, `GATE_CASES`,
-    `GATE_SHARED_LOWER_NAMES` and `GATE_POOLS` rather than transcribed, so it
-    cannot drift from the four; this is the case that says the computation is
-    still the one `for_suggest` performs.
+    """`GATE_DIGEST` is computed from `GATE_SEED`.
+
+    `GATE_CASES`, `GATE_SHARED_LOWER_NAMES` and `GATE_POOLS` rather than transcribed, so
+    it cannot drift from the four; this is the case that says the computation is still
+    the one `for_suggest` performs.
 
     It pins that the constant is **in force**. It cannot pin its *value* --
     both sides move together if `_suggest_inputs` changes shape -- which is
@@ -478,9 +500,11 @@ def test_the_gate_digest_is_this_exact_value() -> None:
 
 
 def test_the_gates_own_run_is_comparable_with_the_gates_baseline() -> None:
-    """The positive control, and the one that makes every refusal below
-    evidence: without it a `check_digest` that refused everything -- or one
-    that refused nothing and never returned -- reads the same."""
+    """The positive control, and the one that makes every refusal below evidence.
+
+    without it a `check_digest` that refused everything -- or one that refused nothing
+    and never returned -- reads the same.
+    """
     fingerprint = for_suggest(_GATE_FRAME, case_count=GATE_CASES)
     assert check_digest(fingerprint) is fingerprint
 
@@ -510,13 +534,15 @@ def test_the_gates_own_run_is_comparable_with_the_gates_baseline() -> None:
 def test_a_run_whose_inputs_are_not_the_gates_is_refused_and_the_input_is_named(
     seed: int, case_count: int, frame: Frame, named: str, unnamed: str
 ) -> None:
-    """**The hole this closes is reachable and quiet.** `usher eval suggest
-    --full --seed 12345` is a supported invocation (Task 11 ships `--seed`).
+    """**The hole this closes is reachable and quiet.** `usher eval suggest --full --seed 12345`.
+
+    is a supported invocation (Task 11 ships `--seed`).
+
     It yields a different digest, passes `check_frame` -- which sees
-    `shared_lower_names` and the five pools and *cannot* see `surface`, `seed`
-    or `case_count` -- is then judged against bars derived from `GATE_SEED`,
-    and is written to `eval.runs` and to a git-committed `ledger.jsonl` with a
-    `pass` or a `fail` beside it.
+    `shared_lower_names` and the five pools and *cannot* see `surface`, `seed` or
+    `case_count` -- is then judged against bars derived from `GATE_SEED`, and is written
+    to `eval.runs` and to a git-committed `ledger.jsonl` with a `pass` or a `fail`
+    beside it.
 
     The first parameter is that invocation. The other three are the remaining
     shapes an input takes, one per case so the verdict names which one went
@@ -545,10 +571,11 @@ def test_a_run_whose_inputs_are_not_the_gates_is_refused_and_the_input_is_named(
 def test_an_input_present_on_one_side_only_is_named_rather_than_merely_unequal(
     inputs: dict[str, object], named: str
 ) -> None:
-    """An absent input and a wrong one are different operator problems, and
-    the first is the one a key-by-key comparison is most likely to lose: a
-    run whose pool query failed carries `None`, and a surface that grew a
-    field carries one the gate never had.
+    """An absent input and a wrong one are different operator problems.
+
+    and the first is the one a key-by-key comparison is most likely to lose: a run whose
+    pool query failed carries `None`, and a surface that grew a field carries one the
+    gate never had.
 
     The second parameter is also the shape E3 will arrive in: a judge model id
     is an input by this module's own ruling, so the first E3 run's fingerprint
@@ -562,13 +589,15 @@ def test_an_input_present_on_one_side_only_is_named_rather_than_merely_unequal(
 
 
 def test_two_input_mappings_only_the_serialisation_can_tell_apart_are_still_refused() -> None:
-    """The branch a key-by-key diff cannot report on, and it is reachable
-    rather than paranoid: `2993.0 == 2993` in Python and `2993.0 != 2993` in
-    JSON, so this mapping compares equal to the gate's key by key and digests
-    differently -- a `case_count` that reached the fingerprint through a
-    division, or through a driver returning `NUMERIC`, is exactly that. A
-    refusal that listed what moved would list nothing, which reads as a check
-    that fired for no reason.
+    """The branch a key-by-key diff cannot report on, and it is reachable rather than paranoid.
+
+    `2993.0 == 2993` in Python and `2993.0 != 2993` in JSON, so this mapping compares
+    equal to the gate's key by key and digests differently -- a `case_count` that
+    reached the fingerprint through a division, or through a driver returning `NUMERIC`,
+    is exactly that.
+
+    A refusal that listed what moved would list nothing, which reads as a check that
+    fired for no reason.
     """
     gate = dict(for_suggest(_GATE_FRAME, case_count=GATE_CASES).inputs)
     with pytest.raises(EvalRefused, match="every input comparing equal"):
@@ -578,8 +607,9 @@ def test_two_input_mappings_only_the_serialisation_can_tell_apart_are_still_refu
 def test_the_suggest_fingerprint_carries_no_credential_no_host_and_no_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fingerprint is written into a report, a baseline file and a CI log, so anything
-    that rides along in it is published.
+    """A fingerprint is written into a report.
+
+    a baseline file and a CI log, so anything that rides along in it is published.
     """
     sentinel = "usher-eval-must-not-travel-9f2c"
     monkeypatch.setenv("USHER_SECRET_KEY", sentinel)
@@ -629,9 +659,11 @@ def test_the_suggest_fingerprint_carries_no_credential_no_host_and_no_user(
 
 
 def test_the_sha_is_the_commit_git_names_for_the_tree_the_process_is_standing_in() -> None:
-    """The end-to-end half: a mocked `subprocess.run` cannot see a wrong argv,
-    and `git rev-parse --short HEAD` or `git log -1` would answer a
-    plausible-looking string that is not the sha a later reader would resolve.
+    """The end-to-end half.
+
+    a mocked `subprocess.run` cannot see a wrong argv, and `git rev-parse --short HEAD`
+    or `git log -1` would answer a plausible-looking string that is not the sha a later
+    reader would resolve.
 
     `monkeypatch.chdir` is not used and the comparison is run in `_ROOT`
     deliberately: `git_sha()` reads the *process's* working tree, which is
@@ -677,9 +709,10 @@ def test_the_sha_is_the_commit_git_names_for_the_tree_the_process_is_standing_in
 def test_a_dirty_tree_is_marked_and_a_clean_one_is_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """**`git rev-parse HEAD` reads `.git/HEAD` and consults neither the index
-    nor the worktree**, so on its own it records a clean sha for a tree
-    carrying uncommitted code -- a sha naming code that did not run.
+    """**`git rev-parse HEAD` reads `.git/HEAD` and consults neither the index nor the worktree**.
+
+    so on its own it records a clean sha for a tree carrying uncommitted code -- a sha
+    naming code that did not run.
 
     That is the ordinary workflow rather than an edge case: this harness
     exists to answer "did my diff move the number", `--full` appends to
@@ -771,10 +804,11 @@ def test_a_tree_check_that_itself_failed_says_so_rather_than_reading_as_clean(
 def test_a_directory_that_is_not_a_repository_names_that_event_rather_than_crashing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A run in a tarball, or in a container with no `.git`, is a legitimate run whose
-    provenance is simply thinner -- and it is the *only* one of the three unknowns that
-    is legitimate, which is why it is named apart from them rather than sharing a bare
-    `"unknown"`.
+    """A run in a tarball.
+
+    or in a container with no `.git`, is a legitimate run whose provenance is simply
+    thinner -- and it is the *only* one of the three unknowns that is legitimate, which
+    is why it is named apart from them rather than sharing a bare `"unknown"`.
     """
     assert shutil.which("git"), (
         "the premise: git is on PATH, so the refusal below is a repository "
@@ -801,12 +835,14 @@ def test_a_directory_that_is_not_a_repository_names_that_event_rather_than_crash
 def test_a_git_that_cannot_be_run_at_all_names_which_way_it_failed(
     monkeypatch: pytest.MonkeyPatch, failure: Exception, expected: str
 ) -> None:
-    """The two families the `except`s name, one parameter each: `OSError` for
-    an image with no git in it, and `SubprocessError` for a `timeout=` that
-    expired. A harness that dies on either is a harness that cannot run in a
-    container -- and one that reports them as the same event as a tarball
-    tells an operator their run was thin when what happened is that their
-    image is missing a binary.
+    """The two families the `except`s name, one parameter each.
+
+    `OSError` for an image with no git in it, and `SubprocessError` for a `timeout=`
+    that expired.
+
+    A harness that dies on either is a harness that cannot run in a container -- and one
+    that reports them as the same event as a tarball tells an operator their run was
+    thin when what happened is that their image is missing a binary.
     """
 
     def _refuse(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -819,9 +855,10 @@ def test_a_git_that_cannot_be_run_at_all_names_which_way_it_failed(
 def test_the_three_events_that_answer_no_sha_answer_three_different_things(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The claim the three cases above cannot make individually, and the one
-    the finding is about: each of them pins a literal, and a pair of literals
-    that had been made equal would pass both.
+    """The claim the three cases above cannot make individually, and the one the finding is about.
+
+    each of them pins a literal, and a pair of literals that had been made equal would
+    pass both.
 
     All three are also asserted non-empty, because `provenance` is asserted
     truthy whole (`all(fingerprint.provenance.values())`) and an empty field

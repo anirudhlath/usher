@@ -47,7 +47,9 @@ class IndexService:
         self._commit = commit
 
     async def index(self, title_id: uuid.UUID) -> None:
-        """Bring one title's embedding up to date. Raises `UsherPortError`.
+        """Bring one title's embedding up to date.
+
+        Raises `UsherPortError`.
 
         **Safe to call twice with no observable difference**, and cheap the
         second time: the stored row is compared against the current

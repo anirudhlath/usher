@@ -35,10 +35,13 @@ def _points(reader: InMemoryMetricReader, name: str) -> list[float]:
 async def test_the_gauge_reports_the_buses_live_subscriber_count(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """A live read, which is the one shape an observable callback may safely
-    take in this project: `len()` on an in-memory set has no coroutine to
-    bounce onto the event loop from the metric reader's background thread.
-    `register_queue_gauges` documents why the queue's equivalent cannot."""
+    """A live read, which is the one shape an observable callback may safely take in this project.
+
+    `len()` on an in-memory set has no coroutine to bounce onto the event loop from the
+    metric reader's background thread.
+
+    `register_queue_gauges` documents why the queue's equivalent cannot.
+    """
     bus = InMemoryEventBus()
     register_sse_gauge(lambda: bus.subscribers)
     assert _points(meter_reader, "usher.sse.connections") == [0.0]
@@ -48,9 +51,12 @@ async def test_the_gauge_reports_the_buses_live_subscriber_count(
 
 
 def test_the_series_is_a_gauge(meter_reader: InMemoryMetricReader) -> None:
-    """PRD 10 documents a gauge. A row emitted under its documented *name*
-    but the wrong *type* is the same class of failure as a near-miss name --
-    the panel exists, the series is wrong, and nothing says so."""
+    """PRD 10 documents a gauge.
+
+    A row emitted under its documented *name* but the wrong *type* is the same class of
+    failure as a near-miss name -- the panel exists, the series is wrong, and nothing
+    says so.
+    """
     register_sse_gauge(lambda: 0)
     kinds = {
         metric.name: type(metric.data).__name__
@@ -64,10 +70,11 @@ def test_the_series_is_a_gauge(meter_reader: InMemoryMetricReader) -> None:
 def test_registering_a_second_reader_replaces_the_first(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The SDK keeps only the *first* observable instrument registered under
-    a name and silently discards the rest, so a second `create_app()` in one
-    process would otherwise leave the first, now-dead bus reporting its
-    subscriber count forever."""
+    """The SDK keeps only the *first* observable instrument registered under a name and silently.
+
+    discards the rest, so a second `create_app()` in one process would otherwise leave
+    the first, now-dead bus reporting its subscriber count forever.
+    """
     register_sse_gauge(lambda: 3)
     _points(meter_reader, "usher.sse.connections")
     register_sse_gauge(lambda: 9)
@@ -77,10 +84,11 @@ def test_registering_a_second_reader_replaces_the_first(
 def test_no_reader_reports_no_observation_rather_than_a_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fabricated zero is a claim this process does not have. Pinned by
-    calling the callback directly with the reader unset, for the reason M4
+    """A fabricated zero is a claim this process does not have.
+
+    Pinned by calling the callback directly with the reader unset, for the reason M4
     recorded for the queue gauges: the branch is unreachable through
-    `register_sse_gauge`, which assigns the reader *before* it creates the
-    instrument."""
+    `register_sse_gauge`, which assigns the reader *before* it creates the instrument.
+    """
     monkeypatch.setattr("usher.telemetry._sse._read", None)
     assert list(_observe_sse_connections(CallbackOptions())) == []

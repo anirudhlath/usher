@@ -156,10 +156,12 @@ async def test_a_200_carries_a_well_formed_traceresponse(client: httpx.AsyncClie
 
 
 async def test_a_404_problem_document_carries_it_too(client: httpx.AsyncClient) -> None:
-    """`http_error_as_a_problem_document`'s path, which is the one that
-    matters most: a 404 is exactly when somebody wants the trace link, and the
-    handler runs inside `ExceptionMiddleware` — one layer *below* this
-    middleware — so nothing about the normal path implies this one."""
+    """`http_error_as_a_problem_document`'s path, which is the one that matters most.
+
+    a 404 is exactly when somebody wants the trace link, and the handler runs inside
+    `ExceptionMiddleware` — one layer *below* this middleware — so nothing about the
+    normal path implies this one.
+    """
     response = await client.get(f"/titles/{uuid.uuid4()}")
     assert response.status_code == 404
     assert response.json()["code"] == "not_found", "this is not the problem-document path"
@@ -167,9 +169,11 @@ async def test_a_404_problem_document_carries_it_too(client: httpx.AsyncClient) 
 
 
 async def test_a_422_carries_it_too(client: httpx.AsyncClient) -> None:
-    """`validation_error_without_the_request_body`'s path — the second
-    handler, registered for a different exception type, reached through
-    FastAPI's own request parsing rather than through a raise in a handler."""
+    """`validation_error_without_the_request_body`'s path.
+
+    the second handler, registered for a different exception type, reached through
+    FastAPI's own request parsing rather than through a raise in a handler.
+    """
     response = await client.get("/events?titles=not-a-uuid")
     assert response.status_code == 422
     assert response.json()["code"] == "validation_failed", "this is not the 422 handler's path"
@@ -200,10 +204,12 @@ async def test_the_header_names_the_span_the_tracer_actually_made(
 
 
 async def test_two_requests_get_two_different_trace_ids(client: httpx.AsyncClient) -> None:
-    """The cheapest control against a constant, kept beside the identity case
-    because it fails for a different reason: a middleware that read one span
-    once and cached it passes `test_the_header_names_the_span…` on the request
-    that populated the cache."""
+    """The cheapest control against a constant.
+
+    kept beside the identity case because it fails for a different reason: a middleware
+    that read one span once and cached it passes `test_the_header_names_the_span…` on
+    the request that populated the cache.
+    """
     first = await client.get("/health")
     second = await client.get("/health")
     assert first.headers[TRACERESPONSE_HEADER] != second.headers[TRACERESPONSE_HEADER]
@@ -262,9 +268,10 @@ def test_a_non_recording_span_with_a_real_id_emits_nothing_either() -> None:
 
 
 def test_the_invalid_span_is_absent_rather_than_zeroed() -> None:
-    """`traceresponse` as a function, over the value the SDK itself uses for
-    "there is no span". Kept beside the middleware case above because the two
-    fail differently: this one names the formatter, that one names the wiring.
+    """`traceresponse` as a function, over the value the SDK itself uses for "there is no span".
+
+    Kept beside the middleware case above because the two fail differently: this one
+    names the formatter, that one names the wiring.
     """
     assert traceresponse(trace.INVALID_SPAN) is None
     context = trace.INVALID_SPAN.get_span_context()

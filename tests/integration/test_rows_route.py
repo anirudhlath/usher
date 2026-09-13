@@ -1,5 +1,6 @@
-"""`/admin/rows/*` through real requests against real Postgres: `POST .../regenerate`
-(M8) and `GET`/`PUT .../providers` (M9).
+"""`/admin/rows/*` through real requests against real Postgres.
+
+`POST .../regenerate` (M8) and `GET`/`PUT .../providers` (M9).
 """
 
 import uuid
@@ -119,8 +120,9 @@ async def _stored_household(sessions: async_sessionmaker[AsyncSession]) -> uuid.
 
 
 def _queue(session: AsyncSession) -> PostgresJobQueue:
-    """The **real** queue, for the two cases that have to put the row into a
-    state only a worker reaches.
+    """The **real** queue.
+
+    for the two cases that have to put the row into a state only a worker reaches.
 
     Neither `claim` nor `fail` is reachable through any route, and driving
     them through `FakeJobQueue` would put the row in the fake's dict rather
@@ -161,8 +163,9 @@ async def test_a_regeneration_commits_a_job_for_the_stored_household(
 async def test_asking_twice_writes_nothing_the_second_time(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"*, measured rather than asserted
-    about a count the route never sees.
+    """PRD 06's *"one modest completion per user per day"*.
+
+    measured rather than asserted about a count the route never sees.
     """
     first = await client.post(ROUTE)
     before = await _curate_rows(sessions)
@@ -185,8 +188,7 @@ async def test_asking_twice_writes_nothing_the_second_time(
 async def test_a_repeat_while_the_generation_runs_is_accepted_and_then_discarded(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """**The sharpest limit on what this 202 means**, and the one the route's
-    docstring rests on.
+    """**The sharpest limit on what this 202 means**, and the one the route's docstring rests on.
 
     `status = 'running'` appears nowhere in `_ENQUEUE`'s `WHERE`, so a repeat
     arriving mid-generation is coalesced into the run already in flight -- and
@@ -222,8 +224,9 @@ async def test_a_repeat_while_the_generation_runs_is_accepted_and_then_discarded
 async def test_a_parked_generation_is_accepted_and_left_exactly_as_it_was(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 08: *"Re-enqueueing does not un-park... and a parked job's priority
-    is not promoted behind their back either."*
+    """PRD 08: *"Re-enqueueing does not un-park...
+
+    and a parked job's priority is not promoted behind their back either."*
 
     A household whose candidate pool cannot be served parks
     (`CurationService.generate` raises `PortDataMalformed` for an empty pool,
@@ -289,8 +292,9 @@ class _Screen:
 async def screen(
     sessions: async_sessionmaker[AsyncSession], household: uuid.UUID
 ) -> AsyncIterator[_Screen]:
-    """A household with a genuinely non-empty `continue-watching` shelf, and a
-    second shelf beside it.
+    """A household with a genuinely non-empty `continue-watching` shelf.
+
+    and a second shelf beside it.
 
     **Two titles, because one cannot tell "the toggle worked" from "the screen
     went empty".** `resuming` is owned and part-way through, which is
@@ -398,8 +402,9 @@ async def _stored_overrides(sessions: async_sessionmaker[AsyncSession]) -> dict[
 async def test_a_disabled_provider_stops_appearing_on_the_home_screen(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], screen: _Screen
 ) -> None:
-    """**The centre of this task**, and the reason M7 refused the table at all: a toggle
-    nothing reads is worse than no toggle.
+    """**The centre of this task**, and the reason M7 refused the table at all.
+
+    a toggle nothing reads is worse than no toggle.
     """
     before = await _slugs(client)
     assert "continue-watching" in before, (
@@ -424,8 +429,9 @@ async def test_a_toggle_committed_by_another_process_reaches_the_next_screen(
     sessions: async_sessionmaker[AsyncSession],
     screen: _Screen,
 ) -> None:
-    """**The filter reads the table, not something the `PUT` left in memory -- and the ~30
-    s window in between is asserted rather than hidden.**
+    """**The filter reads the table, not something the `PUT` left in memory.
+
+    and the ~30 s window in between is asserted rather than hidden.**.
     """
     assert "continue-watching" in await _slugs(client), "the fixture seeded no shelf to remove"
 
@@ -451,8 +457,7 @@ async def test_a_toggle_committed_by_another_process_reaches_the_next_screen(
 async def test_the_listing_and_the_toggle_round_trip_through_real_postgres(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`GET` and `PUT` over the real repository, and the row read back on
-    another connection.
+    """`GET` and `PUT` over the real repository, and the row read back on another connection.
 
     What only this level can see is the **upsert**: `ON CONFLICT (slug_prefix)
     DO UPDATE` is what makes a second toggle one row rather than an

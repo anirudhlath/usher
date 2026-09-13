@@ -1,6 +1,4 @@
-"""The CLI's error boundary: what an operator sees when the thing that failed is theirs
-to fix.
-"""
+"""The CLI's error boundary: what an operator sees when the thing that failed is theirs to fix."""
 
 import argparse
 import ast
@@ -87,8 +85,10 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
 
 
 def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A `Settings` that validates, so a case about the *command* failing is
-    not accidentally a case about the settings failing.
+    """A `Settings` that validates.
+
+    so a case about the *command* failing is not accidentally a case about the settings
+    failing.
 
     Its own values rather than `tests.unit.commands.configured`'s: the host
     and the key are what this file's rendering cases scan a failure message
@@ -130,9 +130,11 @@ def _every_command_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -
 
 
 def _refused() -> ConnectionRefusedError:
-    """The exact exception the M7 smoke test hit, shape and all: asyncpg lets
-    the raw `OSError` out rather than wrapping it, which is why the boundary
-    cannot key on a SQLAlchemy type alone."""
+    """The exact exception the M7 smoke test hit, shape and all.
+
+    asyncpg lets the raw `OSError` out rather than wrapping it, which is why the
+    boundary cannot key on a SQLAlchemy type alone.
+    """
     return ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 5432)")
 
 
@@ -160,9 +162,11 @@ def test_an_unreachable_database_is_a_message_rather_than_a_traceback(
 
 
 def test_the_message_names_the_command_that_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator runs `usher bootstrap` overnight and finds the output in
-    a log the next morning; a bare `[Errno 111]` with no subject is the same
-    problem as the traceback, shorter."""
+    """An operator runs `usher bootstrap` overnight and finds the output in a log the next.
+
+    morning; a bare `[Errno 111]` with no subject is the same problem as the traceback,
+    shorter.
+    """
     _configured(monkeypatch)
     monkeypatch.setattr(usher_cli, "_sync_status", _raising(_refused()))
 
@@ -173,8 +177,10 @@ def test_the_message_names_the_command_that_failed(monkeypatch: pytest.MonkeyPat
 
 
 def test_the_message_names_the_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The stack still exists and the message has to say so, or the boundary
-    has removed the only tool for the failure it is most likely to hide."""
+    """The stack still exists and the message has to say so.
+
+    or the boundary has removed the only tool for the failure it is most likely to hide.
+    """
     _configured(monkeypatch)
     monkeypatch.setattr(usher_cli, "_status", _raising(_refused()))
 
@@ -201,8 +207,9 @@ def test_the_traceback_flag_lets_the_original_exception_through(
 
 
 def test_a_programming_error_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The boundary's hardest requirement, and the reason it enumerates
-    families instead of catching `Exception`.
+    """The boundary's hardest requirement.
+
+    and the reason it enumerates families instead of catching `Exception`.
 
     `AttributeError` here stands for every bug: nothing the operator sets or
     starts makes it go away, so collapsing it to one line moves the cost
@@ -221,9 +228,11 @@ def test_a_programming_error_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch
 def test_an_http_source_that_is_down_is_operator_facing_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TMDb, Emby and every bulk download fail through httpx, not through
-    the driver -- an unreachable Emby is the same class of operator problem
-    as an unreachable database and reads the same way."""
+    """TMDb, Emby and every bulk download fail through httpx, not through the driver.
+
+    an unreachable Emby is the same class of operator problem as an unreachable database
+    and reads the same way.
+    """
     _configured(monkeypatch)
     monkeypatch.setattr(
         usher_cli, "_sync", _raising(httpx.ConnectError("[Errno -2] Name or service not known"))
@@ -239,10 +248,12 @@ def test_an_http_source_that_is_down_is_operator_facing_too(
 def test_a_database_error_the_driver_does_wrap_is_operator_facing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of the database story: a connect failure arrives as a
-    bare `OSError`, but `relation "titles" does not exist` -- an operator who
-    skipped `alembic upgrade head` -- arrives wrapped as a
-    `SQLAlchemyError`."""
+    """The other half of the database story.
+
+    a connect failure arrives as a bare `OSError`, but `relation "titles" does not
+    exist` -- an operator who skipped `alembic upgrade head` -- arrives wrapped as a
+    `SQLAlchemyError`.
+    """
     _configured(monkeypatch)
     monkeypatch.setattr(
         usher_cli,
@@ -257,8 +268,9 @@ def test_a_database_error_the_driver_does_wrap_is_operator_facing(
 
 
 def test_a_missing_greenlet_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The case issue #8 is about, and it is
-    `test_a_programming_error_keeps_its_traceback` in the one family that
+    """The case issue #8 is about.
+
+    and it is `test_a_programming_error_keeps_its_traceback` in the one family that
     reached this boundary for real.
 
     `MissingGreenlet` is `InvalidRequestError` is `SQLAlchemyError`, so a
@@ -289,8 +301,9 @@ def test_a_missing_greenlet_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch)
 def test_the_operator_database_family_is_what_the_driver_wraps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The membership assertion behind the case above, so the repair cannot be
-    undone by widening the tuple back without noticing.
+    """The membership assertion behind the case above.
+
+    so the repair cannot be undone by widening the tuple back without noticing.
 
     `DBAPIError` is the driver's half -- a missing table, a dead pool, a
     permission the role does not have. `InvalidRequestError` is this
@@ -305,9 +318,9 @@ def test_the_operator_database_family_is_what_the_driver_wraps(
 def test_a_rejected_setting_is_reported_without_the_value_it_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The security case, and it is a live regression rather than a
-    hypothetical: `USHER_DATABASE_URL` with the wrong driver made
-    `usher bootstrap-status` print
+    """The security case, and it is a live regression rather than a hypothetical.
+
+    `USHER_DATABASE_URL` with the wrong driver made `usher bootstrap-status` print.
 
         ... [type=value_error, input_value='mysql://admin:<the password>@db:5432/usher', ...]
 
@@ -333,9 +346,11 @@ def test_a_rejected_setting_is_reported_without_the_value_it_rejected(
 def test_a_rejected_secret_key_is_reported_without_the_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`USHER_SECRET_KEY` too short printed `input_value='0000'` -- the key
-    itself. A weak key is still a key, and it is usually a real one that was
-    truncated by a copy-paste rather than a placeholder."""
+    """`USHER_SECRET_KEY` too short printed `input_value='0000'` -- the key itself.
+
+    A weak key is still a key, and it is usually a real one that was truncated by a
+    copy-paste rather than a placeholder.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", _PASSWORD)
 
@@ -369,10 +384,10 @@ def test_the_traceback_flag_does_not_reopen_the_settings_leak(
 def test_ctrl_c_during_a_long_import_is_not_a_crash(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`usher bootstrap` is a multi-hour download that an operator is
-    expected to interrupt. Interrupting it printed a `KeyboardInterrupt`
-    traceback through `asyncio.run`, which reads as a failure of the run
-    rather than as the operator's own decision.
+    """`usher bootstrap` is a multi-hour download that an operator is expected to interrupt.
+
+    Interrupting it printed a `KeyboardInterrupt` traceback through `asyncio.run`, which
+    reads as a failure of the run rather than as the operator's own decision.
 
     130 rather than 1: the shell's convention for "killed by SIGINT"
     (128 + 2), so a wrapping script can tell an interrupt from a failure.
@@ -390,11 +405,13 @@ def test_ctrl_c_during_a_long_import_is_not_a_crash(
 
 
 def test_a_deliberate_exit_message_is_not_re_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The CLI already raised `SystemExit` with a written message in three
-    places before this boundary existed -- `_as_uuid`, the semantic-search
-    guard, `similar`'s cross-argument rule. Those messages were chosen for
-    the failure they describe, and the boundary must pass them through
-    untouched rather than prefix them with a second explanation.
+    """The CLI already raised `SystemExit` with a written message in three places before this.
+
+    boundary existed -- `_as_uuid`, the semantic-search guard, `similar`'s cross-
+    argument rule.
+
+    Those messages were chosen for the failure they describe, and the boundary must pass
+    them through untouched rather than prefix them with a second explanation.
 
     Free structurally, because `SystemExit` is a `BaseException` and the
     boundary names only `Exception` subclasses -- pinned anyway, because
@@ -412,8 +429,10 @@ def test_a_deliberate_exit_message_is_not_re_wrapped(monkeypatch: pytest.MonkeyP
 
 
 def test_the_parsers_own_exits_are_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`--help` exits 0 and a bad argument exits 2 with usage. Both happen
-    before the boundary, and both are what every other CLI does."""
+    """`--help` exits 0 and a bad argument exits 2 with usage.
+
+    Both happen before the boundary, and both are what every other CLI does.
+    """
     _configured(monkeypatch)
 
     with pytest.raises(SystemExit) as helped:
@@ -426,9 +445,10 @@ def test_the_parsers_own_exits_are_untouched(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_the_argv_table_covers_every_subcommand() -> None:
-    """The parametrised case below is only "CLI-wide" if this passes: a new
-    subcommand with no row is a command nobody has checked is inside the
-    boundary."""
+    """The parametrised case below is only "CLI-wide" if this passes.
+
+    a new subcommand with no row is a command nobody has checked is inside the boundary.
+    """
     subparsers = next(
         action
         for action in usher_cli.build_parser()._actions
@@ -441,8 +461,10 @@ def test_the_argv_table_covers_every_subcommand() -> None:
 def test_every_command_reports_a_dead_database_the_same_way(
     command: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The finding named two commands; the fix is one boundary, so the case
-    is every command rather than those two."""
+    """The finding named two commands.
+
+    the fix is one boundary, so the case is every command rather than those two.
+    """
     _configured(monkeypatch)
     _every_command_raises(monkeypatch, _refused())
 
@@ -496,18 +518,23 @@ def test_the_boundary_is_one_try_around_the_whole_dispatch() -> None:
 
 
 def test_the_boundary_catches_families_and_not_exception() -> None:
-    """`except Exception` is the change that passes every behavioural case
-    in this module except `test_a_programming_error_keeps_its_traceback`,
-    and it is what somebody reaches for when a new failure escapes. The
-    tuple is named so the intent is legible at the handler."""
+    """`except Exception` is the change that passes every behavioural case in this module except.
+
+    `test_a_programming_error_keeps_its_traceback`, and it is what somebody reaches for
+    when a new failure escapes.
+
+    The tuple is named so the intent is legible at the handler.
+    """
     assert Exception not in usher_cli.OPERATOR_ERRORS
     assert BaseException not in usher_cli.OPERATOR_ERRORS
     assert OSError in usher_cli.OPERATOR_ERRORS
 
 
 def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> None:
-    """**The shape of ADR-0026's 2026-08-07 amendment, asserted rather than described**,
-    and the assertion that fails on the one-line version of it.
+    """**The shape of ADR-0026's 2026-08-07 amendment.
+
+    asserted rather than described**, and the assertion that fails on the one-line
+    version of it.
     """
     reaching = {PortUnavailable, PortAuthFailed, PortRateLimited}
     everything_else = set(UsherPortError.__subclasses__()) - reaching
@@ -547,8 +574,7 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
 def test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**ADR-0026's own motivating defect, in the family the ADR did not
-    name.**
+    """**ADR-0026's own motivating defect, in the family the ADR did not name.**.
 
     `OpenAICompatibleClient` translates every transport failure into a port
     error *before* it crosses the boundary -- which is what the taxonomy is
@@ -589,9 +615,11 @@ def test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback(
 def test_a_rejected_credential_and_a_rate_limit_read_the_same_way(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other two thirds of the transport half, and neither is worth a
-    stack: `USHER_LLM_API_KEY` is wrong, or the endpoint asked to be backed
-    off and a CLI has no backoff schedule to apply."""
+    """The other two thirds of the transport half, and neither is worth a stack.
+
+    `USHER_LLM_API_KEY` is wrong, or the endpoint asked to be backed off and a CLI has
+    no backoff schedule to apply.
+    """
     _configured(monkeypatch)
 
     monkeypatch.setattr(
@@ -610,8 +638,9 @@ def test_a_rejected_credential_and_a_rate_limit_read_the_same_way(
 
 
 def test_a_repository_conflict_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """**The half of the amendment that is a refusal**, and the case that
-    fails if somebody later widens the tuple to `UsherPortError`.
+    """**The half of the amendment that is a refusal**.
+
+    and the case that fails if somebody later widens the tuple to `UsherPortError`.
 
     `PostgresTitleNeighborRepository.replace` raises this for a score outside
     `[0, 1]`, a self-neighbour, a negative rank or a title id naming no row --
@@ -635,11 +664,13 @@ def test_a_repository_conflict_keeps_its_traceback(monkeypatch: pytest.MonkeyPat
 def test_a_malformed_upstream_payload_keeps_its_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`FastEmbedEmbedder` raises this when it hands back a different number
-    of vectors than it was given texts -- title *n*'s vector landing on title
-    *m*, which its own adapter calls the most damaging bug available in that
-    milestone and which no operator action reaches. `usher search --mode
-    semantic` is where it surfaces.
+    """`FastEmbedEmbedder` raises this when it hands back a different number of vectors than it.
+
+    was given texts -- title *n*'s vector landing on title *m*, which its own adapter
+    calls the most damaging bug available in that milestone and which no operator action
+    reaches.
+
+    `usher search --mode semantic` is where it surfaces.
 
     The commands that *can* answer a `PortDataMalformed` sensibly do it
     themselves, in the arm that knows what the message means:
@@ -840,8 +871,10 @@ def test_the_escape_hatch_is_offered_on_the_column_rather_than_on_the_message(
 def test_a_transport_failure_is_not_offered_the_escape_hatch(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The control for the case above: an escape hatch offered for every
-    failure is one people learn to paste without reading.
+    """The control for the case above.
+
+    an escape hatch offered for every failure is one people learn to paste without
+    reading.
 
     `error_code` is null for a read timeout, and a message that happens to
     mention a ceiling must not be enough to earn the flag.
@@ -1019,9 +1052,10 @@ class _RefusesTheForeignKey:
 async def test_resolving_to_a_title_the_catalog_does_not_hold_is_a_sentence(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An operator typo in `--title` used to be a stack, and this module's
-    rule 2 does not cover it: the id is well-formed, so `_as_uuid` passes it,
-    and the row it names is the operator's mistake rather than a bug in this
+    """An operator typo in `--title` used to be a stack.
+
+    and this module's rule 2 does not cover it: the id is well-formed, so `_as_uuid`
+    passes it, and the row it names is the operator's mistake rather than a bug in this
     project's code.
 
     The write is what raised, so the guard has to run **before** it -- the

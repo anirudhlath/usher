@@ -1,5 +1,6 @@
-"""`search_queries.surface` and `.tier` written by the shipped requests, and every
-place a row deliberately does **not** appear.
+"""`search_queries.surface` and `.tier` written by the shipped requests.
+
+and every place a row deliberately does **not** appear.
 """
 
 import uuid
@@ -170,8 +171,11 @@ async def keystrokes(deployment: _Deployment) -> SearchQueryBuffer:
 
 
 async def _rows(sessions: async_sessionmaker[AsyncSession]) -> list[dict[str, object]]:
-    """Every `search_queries` row, joined to its household so a case can assert
-    the id is `DefaultUserIdDep`'s and not an invented one."""
+    """Every `search_queries` row.
+
+    joined to its household so a case can assert the id is `DefaultUserIdDep`'s and not
+    an invented one.
+    """
     async with sessions() as reader:
         result = await reader.execute(
             text(
@@ -194,8 +198,9 @@ async def test_a_suggest_records_its_surface_and_the_tier_that_answered(
     keystrokes: SearchQueryBuffer,
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """PRD 10's amendment 2, through the shipped routes and read back from a session no
-    request touched.
+    """PRD 10's amendment 2.
+
+    through the shipped routes and read back from a session no request touched.
     """
     search = await client.get("/search", params={"q": "marrowlight"})
     assert search.status_code == 200, search.text
@@ -266,8 +271,7 @@ async def test_a_prefix_below_its_tiers_minimum_writes_no_row_on_either_tier(
     keystrokes: SearchQueryBuffer,
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The short-`q` arm returns before the service, so there is no answered
-    query to record.
+    """The short-`q` arm returns before the service, so there is no answered query to record.
 
     PRD 10 excludes *"a blank or whitespace-only query"* because a search box
     sends one between every character; the length bound is the same exclusion
@@ -330,8 +334,9 @@ async def test_the_switch_is_whole_or_nothing_and_leaves_the_search_row_alone(
 async def test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller(
     settings: Settings, catalog: uuid.UUID, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 10's *"a search with no household"* exclusion, and the caller it is now load-
-    bearing for.
+    """PRD 10's *"a search with no household"* exclusion.
+
+    and the caller it is now load- bearing for.
     """
     engine = build_engine(settings.database_url.get_secret_value())
     lines: list[str] = []

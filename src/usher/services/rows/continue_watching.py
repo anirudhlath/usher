@@ -32,8 +32,11 @@ _DEFAULT_LIMIT = 20
 
 @dataclass(frozen=True, slots=True)
 class Resume:
-    """One shelf entry: a series or film, where the household is in it, and
-    which chapter that is when the answer is an episode."""
+    """One shelf entry.
+
+    a series or film, where the household is in it, and which chapter that is when the
+    answer is an episode.
+    """
 
     title_id: uuid.UUID
     progress: Progress

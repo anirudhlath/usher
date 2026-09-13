@@ -51,8 +51,9 @@ def _pattern(prefix: str) -> str:
 
 
 class PostgresPrefixSuggestIndex(SuggestIndex):
-    """Prefix-only type-ahead over `titles.name` and `title_search_names.name`. **Writes
-    nothing.**
+    """Prefix-only type-ahead over `titles.name` and `title_search_names.name`.
+
+    **Writes nothing.**
     """
 
     def __init__(self, session: AsyncSession) -> None:

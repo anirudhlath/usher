@@ -19,11 +19,13 @@ from usher.domain.ids import new_id
 
 
 def _literal(relevance: tuple[float, ...]) -> str:
-    """pgvector's text input form. `CAST(:x AS halfvec)` below rather than
-    `:x::halfvec` -- SQLAlchemy's bind-parameter regex reads a name followed
-    by `::` as a Postgres cast and skips the bind entirely, so the literal
-    string `:relevance::halfvec` reaches asyncpg and it answers with a syntax
-    error at `":"`."""
+    """Pgvector's text input form.
+
+    `CAST(:x AS halfvec)` below rather than `:x::halfvec` -- SQLAlchemy's bind-parameter
+    regex reads a name followed by `::` as a Postgres cast and skips the bind entirely,
+    so the literal string `:relevance::halfvec` reaches asyncpg and it answers with a
+    syntax error at `":"`.
+    """
     return "[" + ",".join(repr(value) for value in relevance) + "]"
 
 
@@ -81,13 +83,13 @@ class TestPostgresGenomeRepository(GenomeRepositoryContract):
 async def test_a_vector_of_the_wrong_width_is_refused_by_the_column(
     session: AsyncSession,
 ) -> None:
-    """The declaration `halfvec(1128)` is a real constraint and not
-    documentation. This is what the fake cannot fail on -- a dict stores
-    whatever it is handed -- and it is why `MovieLensGenomeDataset` verifies
-    the vocabulary width against `genome-tags.csv` *before* reading a score:
-    a release whose vocabulary grew must fail naming both widths, not
-    16,376 rows later inside a COPY with a dimension error naming neither
-    the dataset nor the release.
+    """The declaration `halfvec(1128)` is a real constraint and not documentation.
+
+    This is what the fake cannot fail on -- a dict stores whatever it is handed -- and
+    it is why `MovieLensGenomeDataset` verifies the vocabulary width against `genome-
+    tags.csv` *before* reading a score: a release whose vocabulary grew must fail naming
+    both widths, not 16,376 rows later inside a COPY with a dimension error naming
+    neither the dataset nor the release.
     """
     seeder = PostgresGenomeSeeder(session)
     title_id = await seeder.title()
@@ -98,14 +100,16 @@ async def test_a_vector_of_the_wrong_width_is_refused_by_the_column(
 async def test_deleting_a_title_takes_its_genome_vector_with_it(
     session: AsyncSession,
 ) -> None:
-    """`ON DELETE CASCADE`, and it is the `title_embeddings` case rather than
-    the `watch_states` one. ADR-0010 makes `watch_states.title_id` RESTRICT
-    because a watch state is *user state* a delete would destroy silently. A
-    genome vector is neither user state nor irrecoverable -- it is fully
-    re-derivable from the archive plus the title's `imdb_id`. The merge case
-    runs the same way: after a repointing merge the loser's vector describes
-    a film that is no longer the canonical title, so it should die with the
-    loser rather than block the delete or survive attached to nothing.
+    """`ON DELETE CASCADE`.
+
+    and it is the `title_embeddings` case rather than the `watch_states` one.
+
+    ADR-0010 makes `watch_states.title_id` RESTRICT because a watch state is *user
+    state* a delete would destroy silently. A genome vector is neither user state nor
+    irrecoverable -- it is fully re-derivable from the archive plus the title's
+    `imdb_id`. The merge case runs the same way: after a repointing merge the loser's
+    vector describes a film that is no longer the canonical title, so it should die with
+    the loser rather than block the delete or survive attached to nothing.
 
     Kills a migration written with `RESTRICT` (which would make every title
     merge fail once the genome is loaded) and one with no `ondelete` at all

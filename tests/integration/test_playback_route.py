@@ -270,8 +270,9 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def test_a_play_over_the_real_graph_answers_tickets_and_not_the_emby_url(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """The un-overridden graph, end to end, with the leak assertion that
-    only this level can make.
+    """The un-overridden graph.
+
+    end to end, with the leak assertion that only this level can make.
 
     The token is the one `FakeEmbyServer._authenticate` minted for **this**
     request's adapter, reached through a real `source_credentials` decrypt --
@@ -298,8 +299,9 @@ async def test_a_play_over_the_real_graph_answers_tickets_and_not_the_emby_url(
 async def test_a_play_carrying_a_search_id_records_played_durably(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """**PRD 10's `played`, through the un-overridden graph, read back on a
-    different connection.**
+    """**PRD 10's `played`.
+
+    through the un-overridden graph, read back on a different connection.**.
 
     That last clause is what only this level can say: `get_session` is the
     request's commit boundary, and a route that issued the `UPDATE` and never
@@ -383,8 +385,7 @@ async def test_following_the_ticket_redirects_to_the_url_the_adapter_really_buil
 async def test_an_episode_play_reads_the_episode_row_and_not_the_titles(
     client: AsyncClient, seeded: _Seeded
 ) -> None:
-    """`list_for_episode`, against the statement that really carries
-    `AND episode_id IS NULL`.
+    """`list_for_episode`, against the statement that really carries `AND episode_id IS NULL`.
 
     Both arms, because either alone is satisfied by a route wired to the
     wrong read: the series' own `title_id` holds no episode-free copy, so
@@ -402,8 +403,9 @@ async def test_an_episode_play_reads_the_episode_row_and_not_the_titles(
 async def test_a_source_that_cannot_be_reached_is_a_503_source_unavailable(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """The project's first genuine `503 source_unavailable`, against a real
-    `EmbyAdapter` whose transport refuses the connection.
+    """The project's first genuine `503 source_unavailable`.
+
+    against a real `EmbyAdapter` whose transport refuses the connection.
 
     Not a scripted `PortUnavailable`: the failure starts as an
     `httpx.ConnectError` inside the adapter's own authentication and is
@@ -431,8 +433,9 @@ async def test_a_source_that_cannot_be_reached_is_a_503_source_unavailable(
 async def test_a_ticket_minted_by_this_deployment_is_refused_by_a_rotated_key(
     client: AsyncClient, app: FastAPI, seeded: _Seeded, settings: Settings
 ) -> None:
-    """Rotating `USHER_SECRET_KEY` is the coarse revocation the stateless
-    ticket has, and this is it happening.
+    """Rotating `USHER_SECRET_KEY` is the coarse revocation the stateless ticket has.
+
+    and this is it happening.
 
     `services/playback_ticket.py` records it as correct rather than a bug;
     nothing had exercised it end to end. The app's settings are swapped on

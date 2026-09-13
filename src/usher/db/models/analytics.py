@@ -1,5 +1,6 @@
-"""`search_queries` — [PRD 10](../../../../docs/prd/10-telemetry-and-dashboards.md)'s
-second analytics table, shipped whole and with no writer.
+"""`search_queries`.
+
+[PRD 10](../../../../docs/prd/10-telemetry-and-dashboards.md)'s second analytics table,
 """
 
 import uuid

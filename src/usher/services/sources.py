@@ -139,7 +139,9 @@ class SourceService:
         return replace(status, push_available=self._push_health(source_id))
 
     async def remove(self, source_id: uuid.UUID) -> bool:
-        """Delete a source and its credentials. Returns whether it existed.
+        """Delete a source and its credentials.
+
+        Returns whether it existed.
 
         The credential is deleted first. If the process dies between the two
         writes, what survives is a source row with no credential -- which

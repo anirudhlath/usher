@@ -81,7 +81,9 @@ _SERIES_REF = ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERI
 
 
 class FakeMetadataProvider(MetadataProvider):
-    """Seeded payloads in, canonical state out. No network, no clock.
+    """Seeded payloads in, canonical state out.
+
+    No network, no clock.
 
     `fetches`/`searches` and `reset_calls()` are test-double affordances
     rather than port methods: "a cached payload within the ceiling is not
@@ -164,15 +166,22 @@ class FakeMetadataProvider(MetadataProvider):
         self._changed = list(refs)
 
     def fail_with(self, exc: UsherPortError) -> None:
-        """Every subsequent call raises. Cleared by `recover()`."""
+        """Every subsequent call raises.
+
+        Cleared by `recover()`.
+        """
         self._failure = exc
 
     def recover(self) -> None:
         self._failure = None
 
     def return_partial(self, ref: ProviderRef = _MOVIE_REF) -> None:
-        """Answer with a payload carrying only an id, as TMDb does for an
-        entity nobody has filled in. The tier must not move for it."""
+        """Answer with a payload carrying only an id.
+
+        as TMDb does for an entity nobody has filled in.
+
+        The tier must not move for it.
+        """
         self._payloads[ref] = {"id": int(ref.value)}
 
     def reset_calls(self) -> None:
@@ -346,8 +355,7 @@ class FakeMetadataProvider(MetadataProvider):
 
 
 def _images(payload: dict[str, Any], title_id: uuid.UUID) -> list[Image]:
-    """A seeded payload's artwork, keyed by path so a path named twice is one
-    row.
+    """A seeded payload's artwork, keyed by path so a path named twice is one row.
 
     A module function rather than a method for the same reason the credit
     reader is inline: nothing here reads the provider's state, and a helper

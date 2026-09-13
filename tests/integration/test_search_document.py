@@ -63,10 +63,11 @@ async def test_updating_a_title_recomputes_its_search_document(
 async def test_reading_a_title_back_does_not_carry_the_search_document(
     session: AsyncSession,
 ) -> None:
-    """Site 1. `Title` is `extra="forbid"`, so `_to_domain`'s dict
-    comprehension over every column hands `model_validate` a key the model
-    does not declare, and every read of every title raises in every entry
-    point.
+    """Site 1.
+
+    `Title` is `extra="forbid"`, so `_to_domain`'s dict comprehension over every column
+    hands `model_validate` a key the model does not declare, and every read of every
+    title raises in every entry point.
 
     The wrong implementation this fails: `_to_domain` without the
     `DERIVED_COLUMNS` filter. It does *not* fail an implementation that
@@ -86,11 +87,13 @@ async def test_reading_a_title_back_does_not_carry_the_search_document(
 
 
 async def test_the_document_is_weighted_by_field(session: AsyncSession) -> None:
-    """The milestone's central retrieval claim, asserted at the storage layer
-    before any query touches it. An implementation that forgot `setweight` --
-    which is what you get by concatenating every field into one
-    `to_tsvector` call -- stores a document no membership assertion can
-    distinguish from this one.
+    """The milestone's central retrieval claim.
+
+    asserted at the storage layer before any query touches it.
+
+    An implementation that forgot `setweight` -- which is what you get by concatenating
+    every field into one `to_tsvector` call -- stores a document no membership assertion
+    can distinguish from this one.
 
     Weight `D` is the tsvector default and is **not printed**, so the absence
     of a marker on a genre lexeme is correct rather than a bug.
@@ -115,10 +118,10 @@ async def test_the_document_is_weighted_by_field(session: AsyncSession) -> None:
 async def test_a_genre_array_lexizes_rather_than_arriving_raw(
     session: AsyncSession,
 ) -> None:
-    """`array_to_tsvector` is the obvious immutable fix for
-    `array_to_string`'s STABLE volatility, and it is a trap: it emits raw,
-    case-preserving, unlexized lexemes, so `ARRAY['Sci-Fi','Drama']` becomes
-    `'Drama' 'Sci-Fi'` and a genre search matches nothing.
+    """`array_to_tsvector` is the obvious immutable fix for `array_to_string`'s STABLE volatility.
+
+    and it is a trap: it emits raw, case-preserving, unlexized lexemes, so `ARRAY['Sci-
+    Fi','Drama']` becomes `'Drama' 'Sci-Fi'` and a genre search matches nothing.
 
     This case is the difference between the two, asserted as a match rather
     than as a string shape -- `websearch_to_tsquery` is what the query path
@@ -141,8 +144,7 @@ async def test_a_genre_array_lexizes_rather_than_arriving_raw(
 async def test_the_stored_document_equals_a_freshly_computed_one(
     session: AsyncSession,
 ) -> None:
-    """The only thing standing between the wrapper and a silent mixed-state
-    table.
+    """The only thing standing between the wrapper and a silent mixed-state table.
 
     `CREATE OR REPLACE FUNCTION usher_array_text(...)` does **not** recompute
     stored generated values -- verified: a row stored as `'alpha':1 'beta':2`
@@ -193,8 +195,7 @@ async def test_the_stored_document_equals_a_freshly_computed_one(
 async def test_a_title_with_no_credits_stores_the_same_document_it_did_before(
     session: AsyncSession,
 ) -> None:
-    """The migration's blast radius, bounded by measurement rather than by
-    hope.
+    """The migration's blast radius, bounded by measurement rather than by hope.
 
     An empty `credit_names` produces an empty tsvector, and `tsvector ||
     <empty>` shifts no positions -- verified on pg17.10 against the M6

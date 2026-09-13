@@ -1,5 +1,6 @@
-"""The in-process client event bus (PRD 07's SSE channel), and the publisher that holds
-a unit of work's events until it commits.
+"""The in-process client event bus (PRD 07's SSE channel).
+
+and the publisher that holds a unit of work's events until it commits.
 """
 
 import asyncio
@@ -42,8 +43,9 @@ class _Subscriber:
         self.overflowed = False
 
     def wants(self, event: ClientEvent) -> bool:
-        """An unfiltered subscriber wants everything; a filtered one wants
-        events for its titles and nothing else.
+        """An unfiltered subscriber wants everything.
+
+        a filtered one wants events for its titles and nothing else.
 
         Matching on `title_id` and never on `episode_id`: a client watching
         a series subscribes with the series' title, because that is the only
@@ -54,7 +56,9 @@ class _Subscriber:
         return event.title_id is not None and event.title_id in self.titles
 
     def offer(self, sent: SentEvent, resync: SentEvent) -> None:
-        """Non-blocking. **This is the whole design.**
+        """Non-blocking.
+
+        **This is the whole design.**
 
         `put_nowait` and a branch, never `await put`. The awaiting spelling
         is one character shorter and makes an enrichment completing at 04:00
@@ -92,10 +96,12 @@ class InMemoryEventBus(EventPublisher):
 
     @property
     def subscribers(self) -> int:
-        """For PRD 10's `usher.sse.connections`. An in-memory integer, which
-        is the one case where an observable OTel callback really can read
-        live state -- see `usher.telemetry.register_queue_gauges` for why
-        the queue's equivalent cannot."""
+        """For PRD 10's `usher.sse.connections`.
+
+        An in-memory integer, which is the one case where an observable OTel callback
+        really can read live state -- see `usher.telemetry.register_queue_gauges` for
+        why the queue's equivalent cannot.
+        """
         return len(self._subscribers)
 
     @property
@@ -203,11 +209,17 @@ class DeferredEventPublisher(EventPublisher):
 
     @property
     def held(self) -> int:
-        """How many events are waiting on the commit. Zero between jobs."""
+        """How many events are waiting on the commit.
+
+        Zero between jobs.
+        """
         return len(self._held)
 
     async def publish(self, event: ClientEvent) -> None:
-        """Hold it. Never raises, never suspends, delivers nothing."""
+        """Hold it.
+
+        Never raises, never suspends, delivers nothing.
+        """
         self._held.append(event)
 
     async def flush(self) -> None:

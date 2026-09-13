@@ -1,5 +1,7 @@
-"""The `Embedder` port's shape, asserted against the signature rather than
-against the docstring that used to state it."""
+"""The `Embedder` port's shape.
+
+asserted against the signature rather than against the docstring that used to state it.
+"""
 
 import inspect
 from collections.abc import Sequence
@@ -8,8 +10,10 @@ from usher.ports.embedding import Embedder
 
 
 def test_the_port_does_not_ask_callers_to_apply_a_query_prefix() -> None:
-    """`embed` is symmetric: one batch of plain strings, and no query/document
-    distinction for a caller to get wrong.
+    """`embed` is symmetric.
+
+    one batch of plain strings, and no query/document distinction for a caller to get
+    wrong.
 
     The instruction this case was written against lived in prose -- "callers
     are responsible for any query-side instruction prefix" -- and prose cannot

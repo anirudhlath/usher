@@ -47,8 +47,10 @@ class TestLiveImageFetcher(ImageFetcherContract):
         return _PATH
 
     async def test_the_cdn_was_really_reached(self) -> None:
-        """The control, and it is the whole reason this file is allowed to
-        exist as a "contract arm" rather than as a script.
+        """The control.
+
+        and it is the whole reason this file is allowed to exist as a "contract arm"
+        rather than as a script.
 
         A misconfiguration, a stubbed transport or a proxy answering an empty
         200 all produce a green suite otherwise. A four-figure body and a media
@@ -61,11 +63,13 @@ class TestLiveImageFetcher(ImageFetcherContract):
         assert fetched.content_type.split(";", 1)[0].strip() in SUPPORTED_MEDIA_TYPES
 
     async def test_a_larger_rung_is_larger(self) -> None:
-        """ADR-0032's ladder is a *measurement* — `w154` 14 KB, `w1280` 563 KB
-        median for a poster — and the one property that has to still hold
-        against whatever the CDN serves today is monotonicity. If it does not,
-        the rung is not doing what the clamp assumes and the ADR is reopened
-        rather than the case relaxed.
+        """ADR-0032's ladder is a *measurement*.
+
+        `w154` 14 KB, `w1280` 563 KB median for a poster — and the one property that has
+        to still hold against whatever the CDN serves today is monotonicity.
+
+        If it does not, the rung is not doing what the clamp assumes and the ADR is
+        reopened rather than the case relaxed.
         """
         fetcher = self.fetcher()
         sizes = []

@@ -35,8 +35,7 @@ def conditional_bytes_response(
     cache_control: str,
     headers: Mapping[str, str] | None = None,
 ) -> Response:
-    """Either a 304 or `payload`, under a strong `sha256` tag over exactly
-    these bytes.
+    """Either a 304 or `payload`, under a strong `sha256` tag over exactly these bytes.
 
     **The bytes hashed are the bytes returned**, computed once and never
     re-derived to check -- which is the whole reason a tag over bytes exists

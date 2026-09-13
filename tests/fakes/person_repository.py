@@ -136,8 +136,7 @@ class FakePersonRepository(PersonRepository):
         }
 
     def _title_of(self, watch_state: SeededWatchState) -> uuid.UUID | None:
-        """`coalesce(w.title_id, e.title_id)`, reproduced rather than
-        shortcut.
+        """`coalesce(w.title_id, e.title_id)`, reproduced rather than shortcut.
 
         An episode's watch state carries `title_id IS NULL`; the series is on
         `episodes.title_id`. Storing the series id on the watch state instead

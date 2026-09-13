@@ -234,8 +234,10 @@ def app(household: _Household, settings: Settings, queries: FakeSearchQueryRepos
 async def _seed_search(
     queries: FakeSearchQueryRepository, *, user_id: uuid.UUID = USER_ID
 ) -> uuid.UUID:
-    """One answered search, through the port, and its id back -- the value
-    `GET /search` echoes as `search_id`."""
+    """One answered search, through the port, and its id back.
+
+    the value `GET /search` echoes as `search_id`.
+    """
     record = SearchQueryRecord(
         id=new_id(),
         at=SEARCHED_AT,
@@ -412,11 +414,13 @@ async def test_an_owned_but_unplayable_title_is_a_409_in_the_same_envelope(
 async def test_a_title_nobody_owns_a_copy_of_is_the_409_and_not_the_404(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """The premise for the pair above: existence and playability are two
-    different reads, and the catalog is much larger than the library -- the
-    one measured household holds 1,126,789 items against 1,271,138 titles, so
-    "in the catalog, not in the house" is the ordinary case rather than the
-    edge one."""
+    """The premise for the pair above.
+
+    existence and playability are two different reads, and the catalog is much larger
+    than the library -- the one measured household holds 1,126,789 items against
+    1,271,138 titles, so "in the catalog, not in the house" is the ordinary case rather
+    than the edge one.
+    """
     title_id = await household.add_title()
     response = await client.post(f"/titles/{title_id}/play")
     assert response.status_code == 409
@@ -486,9 +490,13 @@ async def test_both_targets_of_one_copy_redeem_the_same_ticket(
 async def test_the_episode_route_answers_the_copy_of_the_episode(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """`list_for_episode`, not `list_for_title`: the latter carries
-    `AND episode_id IS NULL`, which excludes precisely the row this route is
-    about. A route wired to the title read answers 409 here."""
+    """`list_for_episode`, not `list_for_title`.
+
+    the latter carries `AND episode_id IS NULL`, which excludes precisely the row this
+    route is about.
+
+    A route wired to the title read answers 409 here.
+    """
     title_id = await household.add_title()
     episode_id = await household.add_episode(title_id)
     source = await household.add_source("Living Room Emby")
@@ -507,9 +515,10 @@ async def test_the_episode_route_answers_the_copy_of_the_episode(
 async def test_playing_a_result_of_a_search_records_the_play_against_that_row(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """**The `played` half of PRD 10's outcome attribution, end to end.**
-    `search_queries` exists to answer *"did they play anything"*, and this is
-    the only route that can say yes.
+    """**The `played` half of PRD 10's outcome attribution.
+
+    end to end.** `search_queries` exists to answer *"did they play anything"*, and this
+    is the only route that can say yes.
 
     The wrong implementation this kills: a `/play` route that declares
     `?search_id=` and never reads it, leaving `played` `false` forever --
@@ -540,8 +549,10 @@ async def test_the_click_and_then_the_play_fill_the_two_columns_independently(
     household: _Household,
     queries: FakeSearchQueryRepository,
 ) -> None:
-    """**The funnel whole, through the two routes a client really drives**,
-    and the case that F1's corrected statement exists for.
+    """**The funnel whole.
+
+    through the two routes a client really drives**, and the case that F1's corrected
+    statement exists for.
 
     `GET /titles/{id}?search_id=…` attributes the click and
     `POST /titles/{id}/play` reports the play, at two different times against
@@ -587,8 +598,10 @@ async def test_the_click_and_then_the_play_fill_the_two_columns_independently(
 async def test_the_episode_route_records_the_play_against_the_same_kind_of_row(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """The second play writer, which is a route of its own and would
-    otherwise be the one that quietly did not attribute.
+    """The second play writer.
+
+    which is a route of its own and would otherwise be the one that quietly did not
+    attribute.
 
     `clicked_title_id` is still `NULL` and there is nothing awkward about
     that: an episode is not a title, the column names a search *result*, and
@@ -613,9 +626,10 @@ async def test_the_episode_route_records_the_play_against_the_same_kind_of_row(
 async def test_played_does_not_revert_when_a_later_play_fails(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """Monotonic, at the boundary. There is no route that means *"undo the
-    play"*, so a second attempt that could not resolve a target must leave
-    the fact the row already holds.
+    """Monotonic, at the boundary.
+
+    There is no route that means *"undo the play"*, so a second attempt that could not
+    resolve a target must leave the fact the row already holds.
 
     Its first half is also the positive control the second needs: a case
     asserting only that a failed play changes nothing passes against a route
@@ -642,8 +656,9 @@ async def test_played_does_not_revert_when_a_later_play_fails(
 async def test_a_play_that_resolved_nothing_records_no_play(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """**A 409 and a 503 are not plays**, and the write sits after the branch
-    that raises them rather than before it.
+    """**A 409 and a 503 are not plays**.
+
+    and the write sits after the branch that raises them rather than before it.
 
     `played` is the closest thing this API can observe to a play -- a target
     was handed out -- and a request that got no target got no closer to
@@ -678,8 +693,10 @@ async def test_a_play_that_resolved_nothing_records_no_play(
 async def test_a_play_of_a_title_that_does_not_exist_records_nothing(
     client: httpx.AsyncClient, queries: FakeSearchQueryRepository
 ) -> None:
-    """The 404 is resolved first and the attribution sits behind it, exactly
-    as it does on `GET /titles/{id}`."""
+    """The 404 is resolved first and the attribution sits behind it.
+
+    exactly as it does on `GET /titles/{id}`.
+    """
     search_id = await _seed_search(queries)
 
     response = await client.post(f"/titles/{new_id()}/play", params={"search_id": str(search_id)})
@@ -691,8 +708,9 @@ async def test_a_play_of_a_title_that_does_not_exist_records_nothing(
 async def test_another_households_search_id_is_not_marked_played(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """The same security boundary the click writer has, on the writer whose
-    column is the one PRD 10 is actually about.
+    """The same security boundary the click writer has.
+
+    on the writer whose column is the one PRD 10 is actually about.
 
     **The positive control is the byte-identical call from the owning
     household**, against the same route with the same title: without it a
@@ -725,9 +743,10 @@ async def test_another_households_search_id_is_not_marked_played(
 async def test_a_malformed_or_absent_search_id_leaves_a_play_untouched(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """Neither is a 422. A client that truncated its `search_id`, or never
-    had one, is still entitled to play what it owns -- analytics may not
-    decide whether an action is performed.
+    """Neither is a 422.
+
+    A client that truncated its `search_id`, or never had one, is still entitled to play
+    what it owns -- analytics may not decide whether an action is performed.
 
     The third arm is the control that the parameter does anything at all,
     against the same route and the same title.
@@ -754,10 +773,12 @@ async def test_a_malformed_or_absent_search_id_leaves_a_play_untouched(
 
 
 async def test_both_play_routes_describe_the_search_id_parameter(app: FastAPI) -> None:
-    """A parameter a client is asked to send back and that `/openapi.json`
-    does not describe is a parameter no generated client will send -- and
-    the episode route is the one that would be missed, since it is a second
-    signature carrying the same three dependencies."""
+    """A parameter a client is asked to send back and that `/openapi.json` does not describe is.
+
+    a parameter no generated client will send -- and the episode route is the one that
+    would be missed, since it is a second signature carrying the same three
+    dependencies.
+    """
     paths = app.openapi()["paths"]
     for path in ("/titles/{title_id}/play", "/episodes/{episode_id}/play"):
         declared = {one["name"] for one in paths[path]["post"]["parameters"]}
@@ -794,8 +815,10 @@ async def test_the_minted_url_is_the_redeem_routes_own_path(
 async def test_following_a_ticket_is_a_302_to_the_real_url_with_no_store(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """The whole round trip: mint through the real closure, redeem through
-    the real route, and the `Location` is the URL the adapter gave.
+    """The whole round trip.
+
+    mint through the real closure, redeem through the real route, and the `Location` is
+    the URL the adapter gave.
 
     `Cache-Control: no-store` is asserted here rather than assumed: a proxy
     that cached this `302` would answer a later, expired ticket with the real
@@ -863,8 +886,10 @@ async def test_a_ticket_redeemed_after_its_ttl_answers_404_with_no_location_at_a
 async def test_a_ticket_one_second_inside_the_ttl_is_still_honoured(
     client: httpx.AsyncClient,
 ) -> None:
-    """The other side of the boundary, so the case above is evidence about
-    the TTL rather than about tickets being refused in general.
+    """The other side of the boundary.
+
+    so the case above is evidence about the TTL rather than about tickets being refused
+    in general.
 
     Both offsets are **derived from `TICKET_TTL_SECONDS`**, which is what
     these two cases are for: they pin that the constant is the number in
@@ -888,8 +913,9 @@ async def test_a_ticket_one_second_inside_the_ttl_is_still_honoured(
 async def test_a_ticket_is_honoured_for_five_minutes_and_no_second_longer(
     client: httpx.AsyncClient, age_seconds: int, expected: int
 ) -> None:
-    """The TTL's *value*, pinned with literal seconds rather than with the
-    symbol -- the one number D4 owns, and the only case that can see it move.
+    """The TTL's *value*, pinned with literal seconds rather than with the symbol.
+
+    the one number D4 owns, and the only case that can see it move.
 
     A boundary case whose offsets are derived from the constant is a premise
     written against the thing under test: `TICKET_TTL_SECONDS = 3000`

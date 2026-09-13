@@ -20,6 +20,8 @@ _ATTRIBUTIONS: tuple[AttributionEntry, ...] = (
 
 @router.get("/meta/attribution", response_model=list[AttributionEntry])
 async def attribution() -> list[AttributionEntry]:
-    """The four required attribution strings, unfiltered by deployment
-    state. See the module docstring for why."""
+    """The four required attribution strings, unfiltered by deployment state.
+
+    See the module docstring for why.
+    """
     return list(_ATTRIBUTIONS)

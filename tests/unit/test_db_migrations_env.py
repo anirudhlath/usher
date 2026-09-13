@@ -16,21 +16,26 @@ _PERCENT_DSN = "postgresql+asyncpg://usher:p%40ss%25word@localhost:5432/usher"
 
 
 def test_configparser_round_trip_is_the_hazard_env_py_must_avoid() -> None:
-    """Pins the exact failure env.py used to hit: `Config.set_main_option`
-    raises immediately -- it doesn't even need a later get_section/
-    get_main_option call -- so nobody reintroduces routing the DSN through
-    Config. Verified directly: configparser's BasicInterpolation.before_set
-    raises a plain ValueError here, not a configparser.Error subclass --
-    the failure happens at *set* time, before interpolation proper ever
-    runs at get time."""
+    """Pins the exact failure env.py used to hit: `Config.set_main_option` raises immediately.
+
+    it doesn't even need a later get_section/ get_main_option call -- so nobody
+    reintroduces routing the DSN through Config.
+
+    Verified directly: configparser's BasicInterpolation.before_set raises a plain
+    ValueError here, not a configparser.Error subclass -- the failure happens at *set*
+    time, before interpolation proper ever runs at get time.
+    """
     config = Config()
     with pytest.raises(ValueError, match="invalid interpolation syntax"):
         config.set_main_option("sqlalchemy.url", _PERCENT_DSN)
 
 
 def test_the_percent_dsn_would_leak_into_the_configparser_error_message() -> None:
-    """The failure mode is worse than a crash: the exception text embeds
-    the raw DSN, including the password -- a credentials-in-logs leak."""
+    """The failure mode is worse than a crash.
+
+    the exception text embeds the raw DSN, including the password -- a credentials-in-
+    logs leak.
+    """
     config = Config()
     with pytest.raises(ValueError) as exc_info:
         config.set_main_option("sqlalchemy.url", _PERCENT_DSN)
@@ -40,10 +45,13 @@ def test_the_percent_dsn_would_leak_into_the_configparser_error_message() -> Non
 def test_settings_database_url_is_returned_unmangled_regardless_of_percent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The code path env.py actually uses -- plain SecretStr unwrapping, no
-    Config/configparser involved -- must hand back the DSN byte-for-byte,
-    %-and-all. This is what makes the fix in env.py's _database_url()
-    correct, not just different."""
+    """The code path env.py actually uses.
+
+    plain SecretStr unwrapping, no Config/configparser involved -- must hand back the
+    DSN byte-for-byte, %-and-all.
+
+    This is what makes the fix in env.py's _database_url() correct, not just different.
+    """
     monkeypatch.setenv("USHER_DATABASE_URL", _PERCENT_DSN)
     monkeypatch.setenv("USHER_SECRET_KEY", "0123456789abcdef0123456789abcdef")
     settings = Settings()
@@ -51,14 +59,15 @@ def test_settings_database_url_is_returned_unmangled_regardless_of_percent(
 
 
 def test_env_py_never_lets_fileconfig_disable_the_loggers_it_did_not_name() -> None:
-    """`fileConfig`'s `disable_existing_loggers` defaults to **True**, which
-    sets `.disabled` on every logger absent from alembic.ini's `[loggers]`
-    (root, sqlalchemy, alembic) -- a migration file silencing modules it has
-    no opinion about, permanently, because nothing in `logging` clears that
-    flag on reconfigure. Measured 2026-08-10: it is why `pytest tests/unit`
-    was green and `pytest tests/integration tests/unit/test_telemetry.py`
-    was not. Companion repair in `usher.telemetry.configure_logging`, which
-    reclaims the flag whoever set it.
+    """`fileConfig`'s `disable_existing_loggers` defaults to **True**.
+
+    which sets `.disabled` on every logger absent from alembic.ini's `[loggers]` (root,
+    sqlalchemy, alembic) -- a migration file silencing modules it has no opinion about,
+    permanently, because nothing in `logging` clears that flag on reconfigure.
+
+    Measured 2026-08-10: it is why `pytest tests/unit` was green and `pytest
+    tests/integration tests/unit/test_telemetry.py` was not. Companion repair in
+    `usher.telemetry.configure_logging`, which reclaims the flag whoever set it.
 
     Structural rather than behavioural, deliberately and in both directions.
     env.py calls this at import under a live alembic context, so a unit test

@@ -476,8 +476,9 @@ async def _work(settings: Settings, *, once: bool) -> None:
             recovered += claims
 
         def _report(ran: int) -> None:
-            """Print the pass line at startup, and after that only when the
-            recovered total has moved.
+            """Print the pass line at startup.
+
+            and after that only when the recovered total has moved.
 
             **On a change, never per pass.** A line per pass is ~17,280 a day
             at the idle floor, which is the rate that trains an operator to
@@ -552,9 +553,7 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
-    """Report derivation coverage, or re-derive people, credits, collections and artwork
-    inline.
-    """
+    """Report derivation coverage, or re-derive people, credits, collections and artwork inline."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if not backfill:
@@ -651,8 +650,9 @@ async def _genres(
     limit: int,
     after: uuid.UUID | None,
 ) -> None:
-    """Report how much of `titles.genres` is written in a source's spelling, or rewrite it
-    into Usher's own vocabulary.
+    """Report how much of `titles.genres` is written in a source's spelling.
+
+    or rewrite it into Usher's own vocabulary.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
@@ -762,9 +762,10 @@ async def _search(
 
 
 def _print_search_answer(answer: SearchAnswer) -> None:
-    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
-    and `_print_curation_report`'s split, and the same reason: a command's
-    answer is stdout.
+    """The operator's answer.
+
+    `print`, never `logger` -- `_print_home_report`'s and `_print_curation_report`'s
+    split, and the same reason: a command's answer is stdout.
 
     A function of its own rather than a tail of `_search`, for
     `_print_curation_report`'s reason: everything above it needs a database and
@@ -856,8 +857,10 @@ async def _eval(
 
 
 async def _similar_status(pipeline: Pipeline) -> None:
-    """The whole-table half of issue #17's *"staleness is at least observable"*: how old
-    `title_neighbors` is, and how much of it was computed under a different blend.
+    """The whole-table half of issue #17's *"staleness is at least observable"*.
+
+    how old `title_neighbors` is, and how much of it was computed under a different
+    blend.
     """
     computed_at = await pipeline.similar.computed_at()
     if computed_at is None:
@@ -1013,10 +1016,11 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
 def _print_home_report(
     report: ComposeReport, *, cold: Sequence[float], warm: float, disabled: Sequence[str]
 ) -> None:
-    """The operator's table. `print`, never `logger` -- the split every command
-    in this module makes: loguru output is operational and goes to a sink an
-    operator may not be reading, and a command's answer is stdout, which is
-    what gets piped.
+    """The operator's table.
+
+    `print`, never `logger` -- the split every command in this module makes: loguru
+    output is operational and goes to a sink an operator may not be reading, and a
+    command's answer is stdout, which is what gets piped.
 
     **`disabled` is printed unconditionally**, on exactly the argument the
     revisit rule below is printed unconditionally for. A disabled provider has
@@ -1121,8 +1125,10 @@ async def _curate(settings: Settings) -> None:
 
 
 def _print_curation_report(report: CurationReport) -> None:
-    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
-    split, and the same reason: a command's answer is stdout.
+    """The operator's answer.
+
+    `print`, never `logger` -- `_print_home_report`'s split, and the same reason: a
+    command's answer is stdout.
 
     Every number here comes off the `CurationReport` rather than being
     re-derived. **The pool size is the one that could not be re-derived
@@ -1878,8 +1884,9 @@ def build_parser() -> argparse.ArgumentParser:
 def _parse_without_echoing_unknown_values(
     parser: argparse.ArgumentParser, argv: list[str]
 ) -> argparse.Namespace:
-    """`parser.parse_args`, except that `rotate-secret`'s unrecognised arguments are
-    refused **without** them.
+    """`parser.parse_args`.
+
+    except that `rotate-secret`'s unrecognised arguments are refused **without** them.
     """
     args, unknown = parser.parse_known_args(argv)
     if unknown:
@@ -1899,8 +1906,7 @@ def _parse_without_echoing_unknown_values(
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    """`build_parser().parse_args`, plus the cross-argument rules argparse
-    has no vocabulary for.
+    """`build_parser().parse_args`, plus the cross-argument rules argparse has no vocabulary for.
 
     A separate function rather than a `build_parser` that validates, so the
     parser stays a pure description of the surface -- and a *public* one
@@ -1990,13 +1996,15 @@ def _operator_problem(command: str, exc: BaseException) -> str:
 
 
 def _settings_problem(command: str, exc: ValidationError) -> str:
-    """pydantic's diagnosis with every rejected value stripped out."""
+    """Pydantic's diagnosis with every rejected value stripped out."""
     return settings_rejection(exc, entry_point=f"usher {command}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Every entry point's single door: `python -m usher`, the `usher` console script
-    (`[project.scripts]`), and the container's `CMD`.
+    """Every entry point's single door.
+
+    `python -m usher`, the `usher` console script (`[project.scripts]`), and the
+    container's `CMD`.
     """
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
@@ -2025,8 +2033,11 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
-    """The command table, lifted out of `main` so the boundary there is one
-    `try` around all of it rather than one per arm."""
+    """The command table.
+
+    lifted out of `main` so the boundary there is one `try` around all of it rather than
+    one per arm.
+    """
     if args.command == "bootstrap":
         asyncio.run(_bootstrap(settings, BootstrapPhase(args.phase)))
     elif args.command == "bootstrap-status":

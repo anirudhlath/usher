@@ -1,6 +1,4 @@
-"""`GET /collections/{id}` (PRD 07) -- a franchise, and how much of it the household
-has.
-"""
+"""`GET /collections/{id}` (PRD 07) -- a franchise, and how much of it the household has."""
 
 import uuid
 from collections.abc import Iterable

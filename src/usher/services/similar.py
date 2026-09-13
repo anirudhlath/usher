@@ -118,8 +118,9 @@ class SimilarityService:
 
     @property
     def embedding_model(self) -> str:
-        """What this service was configured with, for the one caller that has
-        to *report* it rather than hash it.
+        """What this service was configured with.
+
+        for the one caller that has to *report* it rather than hash it.
 
         `NeighborRebuildJob`'s refusal names both sides -- the configured model
         and what the table holds -- because "the table is mixed" is not a
@@ -132,7 +133,9 @@ class SimilarityService:
     async def neighbors_of(
         self, title_id: uuid.UUID, *, limit: int = 10
     ) -> tuple[SimilarTitle, ...]:
-        """One seed's precomputed neighbours, hydrated. A lookup, not a scan.
+        """One seed's precomputed neighbours, hydrated.
+
+        A lookup, not a scan.
 
         Empty for a title that has none **and** for a table that has never been
         built. `computed_at()` is what separates the two, and a caller that
@@ -158,12 +161,16 @@ class SimilarityService:
         )
 
     async def computed_at(self) -> AwareDatetime | None:
-        """The artefact's age. `None` means it has never been built."""
+        """The artefact's age.
+
+        `None` means it has never been built.
+        """
         return await self._neighbors.computed_at()
 
     async def foreign_embedding_models(self) -> tuple[str, ...]:
-        """Stored vector model names that are **not** this service's configured
-        one, sorted. Empty means the table agrees with the deployment.
+        """Stored vector model names that are **not** this service's configured one, sorted.
+
+        Empty means the table agrees with the deployment.
 
         The read behind M10 J6's model guard. `blend_fingerprint` hashes the
         *configured* model and this asks what the vectors actually are, so the
@@ -274,7 +281,9 @@ class SimilarityService:
 def _neighbors_for(
     seed: NeighborSeed, candidates: Sequence[NeighborCandidate]
 ) -> list[ScoredNeighbor]:
-    """Blend, order, cap. The whole of what M6 means by "similar".
+    """Blend, order, cap.
+
+    The whole of what M6 means by "similar".
 
     Ties break by `neighbor_title_id`. Two candidates at the same blended score
     are ordinary here -- one shared genre, no keywords, near-identical cosines --
@@ -367,8 +376,7 @@ class NeighborRebuildJob(ScheduledJob):
         return self._period
 
     async def last_done(self) -> datetime | None:
-        """`min(title_neighbors.computed_at)`, or `None` if nothing has ever
-        been built.
+        """`min(title_neighbors.computed_at)`, or `None` if nothing has ever been built.
 
         `None` is *"never built, therefore due"*, which is right here and is
         the opposite of `SearchQueryRetention`'s answer: this artefact has to

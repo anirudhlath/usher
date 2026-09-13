@@ -1,6 +1,4 @@
-"""`m10c`'s five artefacts, one assertion each, plus the two things a catalog reader
-cannot see.
-"""
+"""`m10c`'s five artefacts, one assertion each, plus the two things a catalog reader cannot see."""
 
 import asyncio
 import functools
@@ -72,10 +70,11 @@ async def test_the_cost_ledgers_generation_index_exists(postgres_url: str) -> No
 async def test_the_generation_index_is_partial_and_says_so_in_its_own_definition(
     postgres_url: str,
 ) -> None:
-    """Asserted **as text in `indexdef`**, because `compare_metadata` is blind
-    to a partial index's predicate and a full index answers every membership
-    check a partial one does -- so the case above this one cannot tell them
-    apart, by construction.
+    """Asserted **as text in `indexdef`**.
+
+    because `compare_metadata` is blind to a partial index's predicate and a full index
+    answers every membership check a partial one does -- so the case above this one
+    cannot tell them apart, by construction.
 
     `m08a`'s docstring is where the predicate comes from: query-expansion rows
     carry `NULL` and are the majority of the table once Task 20 ships, and they
@@ -86,11 +85,12 @@ async def test_the_generation_index_is_partial_and_says_so_in_its_own_definition
 
 
 async def test_the_two_new_columns_carry_no_server_default(postgres_url: str) -> None:
-    """Read off `information_schema.columns.column_default`, **not off the
-    model**, and the distinction is the whole case: `m09d`'s rule is that a
-    `server_default` *"would outlive this migration and supply a plausible
-    wrong value to a writer that forgot"*, so what has to be checked is what
-    the migration left in the catalog rather than what the mapped class says.
+    """Read off `information_schema.columns.column_default`.
+
+    **not off the model**, and the distinction is the whole case: `m09d`'s rule is that
+    a `server_default` *"would outlive this migration and supply a plausible wrong value
+    to a writer that forgot"*, so what has to be checked is what the migration left in
+    the catalog rather than what the mapped class says.
 
     `surface` also carries its `NOT NULL`, asserted here rather than in a
     fourth case because a nullable column with no default is the state
@@ -122,11 +122,12 @@ async def test_the_two_new_columns_carry_no_server_default(postgres_url: str) ->
 
 
 async def test_a_search_row_with_no_tier_round_trips(session: AsyncSession) -> None:
-    """`tier` is nullable **by design and not by oversight**, so the design
-    gets a case: a `surface='search'` row carrying `tier IS NULL` is the
-    ordinary shape of every row in this table today, and a `NOT NULL` added by
-    a later hand would need a sentinel member meaning "not applicable" in the
-    one column whose purpose is to keep two vocabularies apart.
+    """`tier` is nullable **by design and not by oversight**, so the design gets a case.
+
+    a `surface='search'` row carrying `tier IS NULL` is the ordinary shape of every row
+    in this table today, and a `NOT NULL` added by a later hand would need a sentinel
+    member meaning "not applicable" in the one column whose purpose is to keep two
+    vocabularies apart.
     """
     user_id = new_id()
     await session.execute(
@@ -158,9 +159,11 @@ async def test_a_search_row_with_no_tier_round_trips(session: AsyncSession) -> N
 async def test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran(
     postgres_url: str,
 ) -> None:
-    """**An empty-table upgrade satisfies a three-statement backfill exactly as
-    well as a correct one**, so the row is what makes the `UPDATE` observable
-    at all. Seeded against the `m10b` schema, read back above `m10c`.
+    """**An empty-table upgrade satisfies a three-statement backfill exactly as well as a.
+
+    correct one**, so the row is what makes the `UPDATE` observable at all.
+
+    Seeded against the `m10b` schema, read back above `m10c`.
 
     The deployment's own nine rows -- 107 of them as of 2026-08-26 -- are not a
     test population: asserting against whatever the developer's database
@@ -245,9 +248,10 @@ async def _delete_plan(url: str) -> str:
 async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
     postgres_url: str,
 ) -> None:
-    """**An index that exists proves nothing about what it serves.** This is
-    the discipline `test_both_new_foreign_keys_have_an_index_the_referential_check_can_use`
-    already applies, one table over.
+    """**An index that exists proves nothing about what it serves.** This is the discipline.
+
+    `test_both_new_foreign_keys_have_an_index_the_referential_check_can_use` already
+    applies, one table over.
 
     Two arms on one scratch database, and the pre-migration arm is what makes
     the post-migration arm a measurement rather than a hope: with
@@ -284,9 +288,10 @@ async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
 async def test_one_step_back_and_forward_restores_each_artefact(
     postgres_url: str, artefact: str
 ) -> None:
-    """Down to `m10b` then back up, parametrised so a
-    `downgrade()`/`upgrade()` pair that forgets one of the five fails naming
-    *that* one rather than the first.
+    """Down to `m10b` then back up.
+
+    parametrised so a `downgrade()`/`upgrade()` pair that forgets one of the five fails
+    naming *that* one rather than the first.
 
     **A named stop rather than `-1`**, which is what this read while `m10c` was
     head: `-1` follows the chain, so the moment a later revision lands it
@@ -320,10 +325,11 @@ async def test_one_step_back_and_forward_restores_each_artefact(
 async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check_cannot_see_it(
     postgres_url: str,
 ) -> None:
-    """🔴 **The five artefacts above come back and the data does not**, and nothing in this
-    file could say so: every assertion beside this one reads `information_schema` or
-    `pg_indexes`, so a cycle that restored the whole schema over silently rewritten rows
-    passes all five.
+    """🔴 **The five artefacts above come back and the data does not**.
+
+    and nothing in this file could say so: every assertion beside this one reads
+    `information_schema` or `pg_indexes`, so a cycle that restored the whole schema over
+    silently rewritten rows passes all five.
     """
     admin, scratch, url = await scratch_database(postgres_url, "relabel")
     try:

@@ -12,10 +12,11 @@ from usher.domain.ids import new_id
 
 
 class BootstrapPhase(StrEnum):
-    """What one bulk-import run does. **The members that are *steps* are in execution
-    order** (PRD 04's phased import) -- `FULL_SEQUENCE` names them; `ALL` and `RATINGS`
-    are aliases and take no position in it, which the paragraph before the members works
-    through.
+    """What one bulk-import run does.
+
+    **The members that are *steps* are in execution order** (PRD 04's phased import) --
+    `FULL_SEQUENCE` names them; `ALL` and `RATINGS` are aliases and take no position in
+    it, which the paragraph before the members works through.
     """
 
     IMDB = "imdb"

@@ -204,8 +204,9 @@ def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
 
 
 def audio_token(audio: Mapping[str, Any]) -> str | None:
-    """A single lowercase token describing an audio stream as a client
-    thinks about it: `truehd_atmos_7_1`, `eac3_5_1`, `aac_2_0`.
+    """A single lowercase token describing an audio stream as a client thinks about it.
+
+    `truehd_atmos_7_1`, `eac3_5_1`, `aac_2_0`.
 
     This is `StreamTarget.audio`, and it is a different thing from
     `SourceItem.audio_codec`'s raw `"truehd"` -- the codec alone does not

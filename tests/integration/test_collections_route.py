@@ -62,9 +62,11 @@ async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[Non
 
 @pytest_asyncio.fixture
 async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
-    """**No `dependency_overrides` at all**, which is the point of this file:
+    """**No `dependency_overrides` at all**, which is the point of this file.
+
     `get_collection_repository` and `get_title_repository` are resolved through
-    FastAPI's own machinery onto one `get_session`."""
+    FastAPI's own machinery onto one `get_session`.
+    """
     app: FastAPI = create_app(settings)
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
@@ -74,8 +76,10 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, captured off
-    `before_cursor_execute` rather than transcribed."""
+    """Every SQL statement SQLAlchemy issues.
+
+    captured off `before_cursor_execute` rather than transcribed.
+    """
     seen: list[str] = []
 
     def record(
@@ -211,8 +215,7 @@ def catalog(sessions: async_sessionmaker[AsyncSession]) -> _Catalog:
 async def test_a_franchise_renders_in_release_order_with_its_completeness(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """The whole answer, assembled by the shipped graph with nothing
-    overridden.
+    """The whole answer, assembled by the shipped graph with nothing overridden.
 
     **The ordering premise is asserted**, and it is the one a UUIDv7 primary
     key gives away for free: the films are seeded latest-first, so insertion
@@ -275,9 +278,10 @@ async def test_a_franchise_the_household_owns_one_of_is_readable_where_the_home_
 async def test_a_retracted_copy_does_not_count_as_owned(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """`media_items.available` is what the join reads, and only this arm can
-    show it: the sweep sets it false for every item a walk stops seeing, so a
-    film on a temporarily unmounted drive is an ordinary state.
+    """`media_items.available` is what the join reads, and only this arm can show it.
+
+    the sweep sets it false for every item a walk stops seeing, so a film on a
+    temporarily unmounted drive is an ordinary state.
 
     The wrong implementation overstates -- "you own 2 of 2" for a household
     that can play one -- which is the direction nobody checks.
@@ -298,8 +302,9 @@ async def test_a_retracted_copy_does_not_count_as_owned(
 async def test_a_series_carrying_a_collection_id_is_not_on_the_franchise_page(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """The fourth wrong implementation, at a second call site and against a row
-    that really is in the table.
+    """The fourth wrong implementation.
+
+    at a second call site and against a row that really is in the table.
 
     `attach_titles` refuses to write it and `titles` carries no
     `CHECK (collection_id IS NULL OR kind = 'movie')`, so the row is storable
@@ -326,8 +331,10 @@ async def test_a_series_carrying_a_collection_id_is_not_on_the_franchise_page(
 
 
 async def test_an_unknown_collection_is_a_404_from_the_real_graph(client: AsyncClient) -> None:
-    """The 404 through the un-overridden wiring, so it is the row that is
-    missing rather than a fake that was never seeded."""
+    """The 404 through the un-overridden wiring.
+
+    so it is the row that is missing rather than a fake that was never seeded.
+    """
     collection_id = new_id()
     response = await client.get(f"/collections/{collection_id}")
     assert response.status_code == 404

@@ -135,8 +135,9 @@ def curate_handler(service: CurationService) -> Handler:
 def match_handler(
     matcher: MatchService, media_items: MediaItemRepository, resolve: SourceResolver
 ) -> Handler:
-    """`match` jobs key on a source's own `external_id`, and are the only
-    caller of the remote-search tier.
+    """`match` jobs key on a source's own `external_id`.
+
+    and are the only caller of the remote-search tier.
 
     PRD 03: "the TMDb search tier is queued, not inline" — it is one network
     call per unmatched item, and a first full walk against an unbootstrapped
@@ -226,9 +227,10 @@ def sync_handler(
     *,
     user_id: uuid.UUID,
 ) -> Handler:
-    """`sync` jobs key on `"{source_id}:{lane}"` -- the M4 boundary call that deferred
-    `POST /admin/sources/{id}/sync` to M9, landing here as an enqueue rather than as a
-    synchronous walk.
+    """`sync` jobs key on `"{source_id}:{lane}"`.
+
+    the M4 boundary call that deferred `POST /admin/sources/{id}/sync` to M9, landing
+    here as an enqueue rather than as a synchronous walk.
     """
 
     async def handle(job: Job) -> None:
@@ -264,8 +266,10 @@ def sync_handler(
 
 
 def bootstrap_handler(run: BootstrapRunner) -> Handler:
-    """`bootstrap` jobs key on a `BootstrapPhase`, and this handler is the thinnest one in
-    the module because everything it would otherwise hold is a composition-root concern.
+    """`bootstrap` jobs key on a `BootstrapPhase`.
+
+    and this handler is the thinnest one in the module because everything it would
+    otherwise hold is a composition-root concern.
     """
 
     async def handle(job: Job) -> None:
@@ -281,8 +285,9 @@ def watch_writeback_handler(
     *,
     user_id: uuid.UUID,
 ) -> Handler:
-    """`watch_writeback` jobs key on a source's own `external_id`, carry no payload, and
-    push whatever the household's row holds **now**.
+    """`watch_writeback` jobs key on a source's own `external_id`.
+
+    carry no payload, and push whatever the household's row holds **now**.
     """
 
     async def handle(job: Job) -> None:

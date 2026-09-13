@@ -157,9 +157,10 @@ def _refuse_a_missing_directory(path: Path) -> None:
 def _compress(handle: IO[bytes], *, lines: Iterable[str]) -> None:
     """The body of the artifact, gzipped into an open file.
 
-    An explicit encoding and newline: JSON Lines is defined as UTF-8 with
-    `\n` separators, and leaving either to the platform would make an
-    artifact written on one host unreadable as lines on another.
+        An explicit encoding and newline: JSON Lines is defined as UTF-8 with
+        `
+    ` separators, and leaving either to the platform would make an
+        artifact written on one host unreadable as lines on another.
     """
     with (
         gzip.GzipFile(fileobj=handle, mode="wb") as compressed,
@@ -169,10 +170,10 @@ def _compress(handle: IO[bytes], *, lines: Iterable[str]) -> None:
 
 
 def _line(obj: Mapping[str, Any]) -> str:
-    """One JSON object, one newline.
+    r"""One JSON object, one newline.
 
     `ensure_ascii=False` because a household's titles and search queries are
-    not ASCII and `\\u00e9` is not what property 3 above means by readable;
+    not ASCII and `\u00e9` is not what property 3 above means by readable;
     the file declares UTF-8 by being written as UTF-8. `sort_keys` is
     deliberately **off**: the insertion order is the column order the schema
     declares, which is the order an operator reading a row expects, and the

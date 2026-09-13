@@ -30,10 +30,13 @@ class FakeTitleMatchRepository(TitleMatchRepository):
         self.calls = 0
 
     def _all_rows(self) -> list[_Row]:
-        """Seeded rows first, then whatever `FakeTitleRepository` holds --
-        one table, read through two ports. Order decides this fake's
-        first-one-wins tie-break, which describes a state
-        `ix_titles_tmdb_id_kind` makes unreachable in Postgres anyway."""
+        """Seeded rows first, then whatever `FakeTitleRepository` holds.
+
+        one table, read through two ports.
+
+        Order decides this fake's first-one-wins tie-break, which describes a state
+        `ix_titles_tmdb_id_kind` makes unreachable in Postgres anyway.
+        """
         if self._titles is None:
             return self._rows
         return self._rows + [
@@ -152,8 +155,10 @@ class FakeTitleMatchRepository(TitleMatchRepository):
 
 
 def _as_int(value: str) -> int | None:
-    """A source is free to report `ProviderIds.Tmdb: "unknown"`. That is a
-    matching failure, not a pipeline failure."""
+    """A source is free to report `ProviderIds.Tmdb: "unknown"`.
+
+    That is a matching failure, not a pipeline failure.
+    """
     try:
         return int(value)
     except ValueError:

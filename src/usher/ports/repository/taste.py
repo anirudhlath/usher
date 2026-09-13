@@ -98,8 +98,9 @@ class TasteRepository(ABC):
 
     @abstractmethod
     async def latest(self, user_id: uuid.UUID) -> StoredTaste | None:
-        """The stored row for this household, **whatever model wrote it** — read-only, and
-        no staleness predicate.
+        """The stored row for this household, **whatever model wrote it**.
+
+        read-only, and no staleness predicate.
         """
 
     @abstractmethod
@@ -113,8 +114,7 @@ class TasteRepository(ABC):
 
     @abstractmethod
     async def watermark(self, user_id: uuid.UUID) -> AwareDatetime | None:
-        """`max(watch_states.updated_at)` for this user; `None` on an empty
-        history.
+        """`max(watch_states.updated_at)` for this user; `None` on an empty history.
 
         **Read *before* the window, never after.** A merge landing between the
         window read and the write would otherwise be stamped as included when

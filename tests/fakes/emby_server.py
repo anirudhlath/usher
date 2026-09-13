@@ -69,8 +69,10 @@ _PLAYED = re.compile(r"^/Users/(?P<user>[^/]+)/PlayedItems/(?P<item>[^/]+)$")
 
 
 def _identity_of(request: httpx.Request) -> tuple[str, str] | None:
-    """`(Device, DeviceId)` from the MediaBrowser header, or `None` if the
-    header is missing or malformed.
+    """`(Device.
+
+    DeviceId)` from the MediaBrowser header, or `None` if the header is missing or
+    malformed.
 
     Emby derives a session's device from this header, so a request without
     it is attributed to an anonymous client -- which is precisely the
@@ -96,9 +98,12 @@ def _identity_of(request: httpx.Request) -> tuple[str, str] | None:
 
 
 def _stamp(value: datetime) -> str:
-    """The coarse form used for `MinDateLastSaved` comparisons, matching
-    what `usher.adapters.emby.mapping.emby_datetime` produces. Compared as
-    strings, which is chronological for same-format UTC ISO stamps."""
+    """The coarse form used for `MinDateLastSaved` comparisons.
+
+    matching what `usher.adapters.emby.mapping.emby_datetime` produces.
+
+    Compared as strings, which is chronological for same-format UTC ISO stamps.
+    """
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -237,8 +242,10 @@ class FakeEmbyServer:
         return None if state is None else (state.position_seconds, state.played)
 
     def expire_session(self) -> None:
-        """The exact Emby failure: the credentials are still right, the
-        session token simply stopped working."""
+        """The exact Emby failure.
+
+        the credentials are still right, the session token simply stopped working.
+        """
         self._session_token = None
 
     def reject_credentials(self) -> None:
@@ -375,8 +382,10 @@ class FakeEmbyServer:
         )
 
     def _ordered(self, params: httpx.QueryParams) -> list[str]:
-        """The listing order, honouring exactly the `SortBy` fields asked
-        for and inventing nothing beyond them.
+        """The listing order.
+
+        honouring exactly the `SortBy` fields asked for and inventing nothing beyond
+        them.
 
         Deliberately *not* a `sorted(..., key=(changed_at, external_id))`.
         That supplied a total order the adapter never requested, so a walk
@@ -431,10 +440,12 @@ class FakeEmbyServer:
         return httpx.Response(200, json=self._payload(external_id, for_listing=False))
 
     def _state_of(self, external_id: str) -> SourceWatchState:
-        """The item's current state, or the all-zero one Emby reports for an
-        item nobody has touched. Never `None`: every write below *evolves*
-        this rather than building a replacement, so there has to be
-        something to evolve.
+        """The item's current state.
+
+        or the all-zero one Emby reports for an item nobody has touched.
+
+        Never `None`: every write below *evolves* this rather than building a
+        replacement, so there has to be something to evolve.
 
         `play_count=0` explicitly, rather than the DTO's `None` default: on
         the port, `None` means "this read could not determine it", and a
@@ -446,8 +457,11 @@ class FakeEmbyServer:
         )
 
     def _write_user_data(self, request: httpx.Request, external_id: str) -> httpx.Response:
-        """`POST /Users/{user}/Items/{item}/UserData`, the route that writes
-        a resume position without a play session. 204, no body.
+        """`POST /Users/{user}/Items/{item}/UserData`.
+
+        the route that writes a resume position without a play session.
+
+        204, no body.
 
         Two behaviours transcribed from the live server on 2026-07-31, both
         of which a more forgiving fake would hide:
@@ -463,7 +477,6 @@ class FakeEmbyServer:
           fields this route carries would zero the play history, and the
           loss is invisible to a harness that reads back only position and
           played. (`replace` rather than `.evolve()` because the port's DTOs
-          are plain frozen dataclasses, not `DomainModel`s.)
         """
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
@@ -478,8 +491,10 @@ class FakeEmbyServer:
         return httpx.Response(204)
 
     def _played(self, external_id: str, played: bool) -> httpx.Response:
-        """`POST`/`DELETE /Users/{user}/PlayedItems/{item}` -- 200, with the
-        updated `UserData` as the body, which is how the live server answers.
+        """`POST`/`DELETE /Users/{user}/PlayedItems/{item}`.
+
+        200, with the updated `UserData` as the body, which is how the live server
+        answers.
 
         **Both directions clear the resume position**, verified live: the
         POST is why the adapter writes the position first and the played
@@ -517,9 +532,11 @@ class FakeEmbyServer:
     # -- rendering -----------------------------------------------------
 
     def _payload(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
-        """One item, as the listing route or as the single-item route
-        renders it. The two differ only in `UserData` -- see `_user_data`,
-        which is the whole reason this parameter exists."""
+        """One item, as the listing route or as the single-item route renders it.
+
+        The two differ only in `UserData` -- see `_user_data`, which is the whole reason
+        this parameter exists.
+        """
         item, _ = self._items[external_id]
         payload = load_emby_fixture(_TEMPLATES[item.kind])
         payload["Id"] = item.external_id
@@ -589,8 +606,10 @@ class FakeEmbyServer:
         payload["MediaSources"] = [*alternates, media]
 
     def _user_data(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
-        """One item's `UserData`, rendered **differently for the two routes
-        that carry it**, because the live server does.
+        """One item's `UserData`.
+
+        rendered **differently for the two routes that carry it**, because the live
+        server does.
 
         Until M4 this method took no `for_listing` and both routes got the
         item-route rendering, which is precisely the fake-agrees-with-the-
@@ -703,8 +722,10 @@ class FakeEmbyServer:
         return json.dumps(message)
 
     def sessions_frame(self) -> str:
-        """The periodic message. It maps to no event and is the reason an
-        idle library's channel stays measurably alive.
+        """The periodic message.
+
+        It maps to no event and is the reason an idle library's channel stays measurably
+        alive.
 
         ADR-0004 observed `Sessions` arriving "periodically" and **not at
         what interval**, which is the single assumption

@@ -1,5 +1,6 @@
-"""The image proxy's orchestration: resolve the row, clamp the width, ask the store,
-fetch and store on a miss.
+"""The image proxy's orchestration.
+
+resolve the row, clamp the width, ask the store, fetch and store on a miss.
 """
 
 import uuid
@@ -36,9 +37,7 @@ _image_references = _meter.create_counter(
 
 
 def servable_images(images: Iterable[Image]) -> tuple[Image, ...]:
-    """Drop the artwork `GET /images/{id}` can never answer for, and say how much was
-    dropped.
-    """
+    """Drop the artwork `GET /images/{id}` can never answer for, and say how much was dropped."""
     every = tuple(images)
     kept = tuple(one for one in every if is_servable_path(one.provider_path))
     # Recorded even when both are zero. A title with no artwork at all
@@ -72,8 +71,9 @@ class ImageProxyService:
         self._store = store
 
     async def serve(self, image_id: uuid.UUID, *, width: int | None = None) -> StoredImage | None:
-        """The bytes for `image_id` at the rung `width` clamps to, or `None`
-        when no row carries that id.
+        """The bytes for `image_id` at the rung `width` clamps to.
+
+        or `None` when no row carries that id.
 
         **`None` and not a raise**, so C5's 404 is a value: a client holding an
         artwork reference the catalog re-derived away is an ordinary request

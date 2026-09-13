@@ -8,12 +8,14 @@ from usher.db.migrations.status import code_head_revision
 
 
 def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
-    """No Docker needed: reads usher/db/migrations/versions/*.py directly
-    off disk, the same files `alembic upgrade head` itself would use --
-    doesn't touch a database at all. Pinned to the literal revision id (not
-    just "is not None") so a migration ever added without updating this test
-    fails loudly here instead of silently changing what "the" expected head
-    means.
+    """No Docker needed.
+
+    reads usher/db/migrations/versions/*.py directly off disk, the same files `alembic
+    upgrade head` itself would use -- doesn't touch a database at all.
+
+    Pinned to the literal revision id (not just "is not None") so a migration ever added
+    without updating this test fails loudly here instead of silently changing what "the"
+    expected head means.
     """
     assert code_head_revision() == "m10f"
 
@@ -81,11 +83,12 @@ def _chain_to_head() -> tuple[str, ...]:
 
 
 def test_the_repointing_chain_on_disk_is_the_one_three_documents_spell_out() -> None:
-    """**A counted fact restated in three places goes stale in the two nobody
-    re-reads**, and this repository has the receipt: `.claude/rules/db-and-sql.md`
-    records the count standing at *six* from `m09a` (2026-08-10) until issue
-    #41 brought it current on 2026-08-25 -- five landings that each re-pointed
-    `test_migrations.py`'s `-1` block and none of which wrote it down.
+    """**A counted fact restated in three places goes stale in the two nobody re-reads**.
+
+    and this repository has the receipt: `.claude/rules/db-and-sql.md` records the count
+    standing at *six* from `m09a` (2026-08-10) until issue #41 brought it current on
+    2026-08-25 -- five landings that each re-pointed `test_migrations.py`'s `-1` block
+    and none of which wrote it down.
 
     So the chain is compared against a **scan** rather than restated a fourth
     time. `ffa` is the lower bound because that is the landing that created
@@ -104,9 +107,11 @@ def test_the_repointing_chain_on_disk_is_the_one_three_documents_spell_out() -> 
 
 
 def test_the_landing_count_the_prose_states_is_the_one_on_disk() -> None:
-    """The half a chain comparison cannot see: two documents write the count
-    out **in words**, and a landing that re-points the block without touching
-    them leaves the repository asserting one number and explaining another.
+    """The half a chain comparison cannot see.
+
+    two documents write the count out **in words**, and a landing that re-points the
+    block without touching them leaves the repository asserting one number and
+    explaining another.
 
     Only the phrase *"<cardinal> landings"* is matched, not every occurrence
     of the word -- `thirteen` appears in over thirty unrelated places in this

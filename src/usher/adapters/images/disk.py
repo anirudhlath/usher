@@ -89,8 +89,7 @@ class DiskImageBlobStore(ImageBlobStore):
         return StoredImage(content_type=fetched.content_type, data=bytes(body))
 
     async def _forget_other_media_types(self, key: ImageCacheKey, extension: str) -> None:
-        """Keep one entry per `(image, rung)`, which is what ADR-0032 says the
-        cache holds.
+        """Keep one entry per `(image, rung)`, which is what ADR-0032 says the cache holds.
 
         Reachable only when the provider changes what it answers for a path it
         already served. Without it `get`'s first match would be the stale one

@@ -1,5 +1,6 @@
-"""`Embedder` over `POST {base_url}/embeddings`, and the three checks that exist
-because the model is somebody else's process.
+"""`Embedder` over `POST {base_url}/embeddings`.
+
+and the three checks that exist because the model is somebody else's process.
 """
 
 import math
@@ -138,9 +139,12 @@ class OpenAICompatEmbedder(Embedder):
         return vectors
 
     async def aclose(self) -> None:
-        """Release the connection pool. Idempotent -- `httpx.AsyncClient.aclose`
-        is, and `composition.embedder`'s release callable may be reached twice
-        by an entry point that closes in a `finally` under a failure."""
+        """Release the connection pool.
+
+        Idempotent -- `httpx.AsyncClient.aclose` is, and `composition.embedder`'s
+        release callable may be reached twice by an entry point that closes in a
+        `finally` under a failure.
+        """
         await self._client.aclose()
 
     # ----------------------------------------------------------------- send

@@ -1,4 +1,7 @@
-"""TMDb payloads -> canonical state. Pure functions, no client, no clock."""
+"""TMDb payloads -> canonical state.
+
+Pure functions, no client, no clock.
+"""
 
 import math
 import re
@@ -409,8 +412,7 @@ def search_candidates(body: Mapping[str, Any], kind: TitleKind) -> list[Metadata
 
 
 def changed_ids(body: Mapping[str, Any]) -> tuple[list[int], bool]:
-    """One `/movie/changes` or `/tv/changes` page: its ids, and whether more
-    pages follow.
+    """One `/movie/changes` or `/tv/changes` page: its ids, and whether more pages follow.
 
     Both feeds have the identical shape (`results[].id`, `page`,
     `total_pages`) — the one place TMDb's two spaces agree — so one reader
@@ -596,9 +598,11 @@ def _external_ids(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _imdb_id(payload: Mapping[str, Any]) -> str | None:
-    """Top-level for a movie, `external_ids` for a series -- and both are
-    tried for both, because reading a field a payload does not carry costs
-    nothing and TMDb serves `external_ids` for movies too."""
+    """Top-level for a movie, `external_ids` for a series.
+
+    and both are tried for both, because reading a field a payload does not carry costs
+    nothing and TMDb serves `external_ids` for movies too.
+    """
     for candidate in (payload.get("imdb_id"), _external_ids(payload).get("imdb_id")):
         if isinstance(candidate, str) and _IMDB_ID.match(candidate):
             return candidate
@@ -684,8 +688,11 @@ def _strings(value: Any) -> tuple[str, ...]:
 
 
 def _text(value: Any) -> str | None:
-    """A non-empty string, or `None`. TMDb spells "we do not know" as `""`
-    for almost every string field, and `Title.name` is `min_length=1`."""
+    """A non-empty string, or `None`.
+
+    TMDb spells "we do not know" as `""` for almost every string field, and `Title.name`
+    is `min_length=1`.
+    """
     if not isinstance(value, str):
         return None
     stripped = value.strip()
@@ -693,8 +700,10 @@ def _text(value: Any) -> str | None:
 
 
 def _date(value: Any) -> date | None:
-    """`"1999-10-15"` -> a date; `""`, `None`, and anything unparseable ->
-    `None`. TMDb really does send `""` for an unreleased film."""
+    """`"1999-10-15"` -> a date; `""`, `None`, and anything unparseable -> `None`.
+
+    TMDb really does send `""` for an unreleased film.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -718,16 +727,17 @@ def _non_negative_int(value: Any) -> int | None:
 
 
 def _positive_int(value: Any) -> int | None:
-    """`Image.width`/`height` are `gt=0`, not `ge=0`: a stored `0` is a
-    placeholder a layout engine divides by, and `None` is the honest answer for
-    a dimension the provider did not report."""
+    """`Image.width`/`height` are `gt=0`, not `ge=0`.
+
+    a stored `0` is a placeholder a layout engine divides by, and `None` is the honest
+    answer for a dimension the provider did not report.
+    """
     number = _as_int(value)
     return number if number is not None and number > 0 else None
 
 
 def _non_negative_float(value: Any) -> float | None:
-    """`None` for anything `Title.popularity` will not take, **including a
-    non-finite one**.
+    """`None` for anything `Title.popularity` will not take, **including a non-finite one**.
 
     `math.isfinite` is not decoration beside `value >= 0`: `float("inf") >= 0`
     is `True`, and `json.loads` maps any JSON number that overflows binary64 --

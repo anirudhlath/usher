@@ -113,8 +113,9 @@ _MEDIA_ITEM_PREDICATE: Final = "title_id IS NOT NULL OR episode_id IS NOT NULL"
 
 
 def carried_tables() -> tuple[str, ...]:
-    """The manifest's precious set plus its one partial entry, in manifest
-    order -- derived from `tables_of`, never listed.
+    """The manifest's precious set plus its one partial entry, in manifest order.
+
+    derived from `tables_of`, never listed.
 
     A module-level function rather than only a method, because the tests
     that check the accounting below need it without a session.
@@ -155,8 +156,9 @@ def _carried_columns(table: str) -> tuple[str, ...]:
 
 
 def unaccounted_reference_columns() -> dict[str, tuple[str, ...]]:
-    """Foreign-key columns in the carried set that are neither rewritten nor declared raw
-    -- per table, empty when the accounting is complete.
+    """Foreign-key columns in the carried set that are neither rewritten nor declared raw.
+
+    per table, empty when the accounting is complete.
     """
     gaps: dict[str, tuple[str, ...]] = {}
     for table in carried_tables():
@@ -223,8 +225,9 @@ class PostgresBackupRepository(BackupRepository):
         )
 
     async def _rewrite(self, table: str, rows: Sequence[dict[str, Any]]) -> list[dict[str, object]]:
-        """Replace every reference column in one table's rows, in two passes
-        over the whole batch rather than a lookup per row.
+        """Replace every reference column in one table's rows.
+
+        in two passes over the whole batch rather than a lookup per row.
 
         Episodes first, because an episode reference embeds its *series'*
         title reference -- so resolving episodes adds title ids the rows
@@ -355,8 +358,7 @@ class _Episode:
 
 
 def _order_by(table: str, columns: Sequence[str]) -> tuple[str, ...]:
-    """The primary key where the artifact carries it, the carried columns
-    otherwise.
+    """The primary key where the artifact carries it, the carried columns otherwise.
 
     `media_items` is the "otherwise": the `PARTIAL` entry does not carry
     `id`, so ordering by it would be a stable order nothing in the file can
@@ -505,11 +507,12 @@ class PostgresRestoreRepository(RestoreRepository):
         return len(result.all())
 
     async def _merge(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
-        """One table's merge rule. A table with no arm raises rather than
-        falling through to an insert: the manifest's precious set is what
-        `restored_tables` answers, so a table added to K1 and not to this
-        `match` is a loud failure at the moment it is first restored, never a
-        row written under a rule nobody chose.
+        """One table's merge rule.
+
+        A table with no arm raises rather than falling through to an insert: the
+        manifest's precious set is what `restored_tables` answers, so a table added to
+        K1 and not to this `match` is a loud failure at the moment it is first restored,
+        never a row written under a rule nobody chose.
         """
         match table:
             case "users":
@@ -584,8 +587,11 @@ class PostgresRestoreRepository(RestoreRepository):
     async def _existing_sources(
         self, rows: Sequence[Mapping[str, Any]]
     ) -> tuple[dict[uuid.UUID, str], dict[str, uuid.UUID]]:
-        """Every source the target already holds under one of this artifact's
-        ids or names, indexed both ways. One statement, never one per row.
+        """Every source the target already holds under one of this artifact's ids or names.
+
+        indexed both ways.
+
+        One statement, never one per row.
 
         **Both directions rather than one**, because neither column is a key
         for the other: `id` is `pk_sources` and `name` is constrained by
@@ -657,8 +663,7 @@ class PostgresRestoreRepository(RestoreRepository):
         return TableOutcome(written=written, present=len(landing) - written, refused=tuple(refused))
 
     async def _merge_watch_states(self, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
-        """Upsert on whichever of the two unique constraints the row's target
-        names.
+        """Upsert on whichever of the two unique constraints the row's target names.
 
         `ck_watch_states_exactly_one_target` is `num_nonnulls(title_id,
         episode_id) = 1`, so every row has exactly one of them and the arbiter
@@ -707,8 +712,9 @@ class PostgresRestoreRepository(RestoreRepository):
         return TableOutcome(written=written, present=len(rows) - written)
 
     async def _append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> TableOutcome:
-        """`INSERT ... ON CONFLICT (id) DO NOTHING`, for the two append-only
-        tables.
+        """`INSERT ...
+
+        ON CONFLICT (id) DO NOTHING`, for the two append-only tables.
 
         `llm_calls` is a spend ledger: every row is a call that was made and
         billed, nothing ever updates one, and *"restoring the same ledger twice
@@ -779,8 +785,9 @@ class PostgresRestoreRepository(RestoreRepository):
         *,
         skip_unresolvable: bool,
     ) -> tuple[list[dict[str, Any]], tuple[RestoreRefusal, ...], int]:
-        """Every reference in one table resolved against this catalog, in one
-        round trip per kind rather than one per row.
+        """Every reference in one table resolved against this catalog.
+
+        in one round trip per kind rather than one per row.
 
         The resolution has to happen per table rather than once for the file,
         because `users` is applied first and every `user` key in the tables

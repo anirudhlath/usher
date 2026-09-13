@@ -1,5 +1,6 @@
-"""`WatchStateSyncService` against real Postgres, for the three things its port fakes
-structurally cannot express.
+"""`WatchStateSyncService` against real Postgres.
+
+for the three things its port fakes structurally cannot express.
 """
 
 import dataclasses
@@ -36,8 +37,9 @@ CHANGED_AT = datetime(2099, 1, 1, tzinfo=UTC)
 
 
 class _LossyAdapter(FakeSourceAdapter):
-    """Emby 4.9.5.0's measured asymmetry: the listing route cannot report
-    play history, the single-item route can.
+    """Emby 4.9.5.0's measured asymmetry.
+
+    the listing route cannot report play history, the single-item route can.
 
     `blind_to` names the ids whose history the *walk* drops. Everything not
     listed is reported as seeded, so one walk can carry an absent count and
@@ -95,9 +97,11 @@ def media_items(session: AsyncSession) -> PostgresMediaItemRepository:
 
 @pytest.fixture
 def queue() -> FakeJobQueue:
-    """The queue is not under test here and `PostgresJobQueue` would only
-    add statements to the counts below; its own contract runs against real
-    Postgres in `tests/integration/test_job_queue.py`."""
+    """The queue is not under test here and `PostgresJobQueue` would only add statements to the.
+
+    counts below; its own contract runs against real Postgres in
+    `tests/integration/test_job_queue.py`.
+    """
     return FakeJobQueue()
 
 
@@ -232,10 +236,12 @@ async def test_a_batch_from_a_walk_zeroes_no_stored_play_count(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """**The milestone's central question, at the layer where the answer is
-    permanent.** Four rows holding real history, one walk, one
-    `merge_from_source`, every count absent on the wire. The natural
-    one-statement spelling of that merge reads every one of them back as
+    """**The milestone's central question.
+
+    at the layer where the answer is permanent.** Four rows holding real history, one
+    walk, one `merge_from_source`, every count absent on the wire.
+
+    The natural one-statement spelling of that merge reads every one of them back as
     `0`.
 
     The position assertions are not decoration: a merge that wrote nothing
@@ -279,8 +285,9 @@ async def test_one_batch_keeps_an_absent_count_and_writes_a_reported_zero(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """The two halves of ADR-0014 in one statement, which is where a
-    per-statement fix passes and a per-row one is required.
+    """The two halves of ADR-0014 in one statement.
+
+    which is where a per-statement fix passes and a per-row one is required.
 
     "Never write a count from a merge" preserves the 7 and makes un-marking
     something played impossible to propagate; `COALESCE(count, 0)` writes
@@ -356,9 +363,13 @@ async def test_the_backfill_sweep_drains_the_predicate(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """Termination, against the real `played AND play_count = 0` query and
-    the real reverse lookup rather than against two dicts. Five rows in, one
-    bounded pass, nothing left."""
+    """Termination.
+
+    against the real `played AND play_count = 0` query and the real reverse lookup
+    rather than against two dicts.
+
+    Five rows in, one bounded pass, nothing left.
+    """
     adapter = _LossyAdapter(source)
     for index in range(5):
         external_id = f"movie-{index}"
@@ -384,10 +395,11 @@ async def test_an_episodes_state_lands_on_a_real_episode_row(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """`watch_states.episode_id` is a real foreign key and
-    `num_nonnulls(title_id, episode_id) = 1` is a real CHECK, so the
-    collapse from "what the media item is matched to" to "what a watch state
-    may carry" is enforced here and merely preferred against a dict.
+    """`watch_states.episode_id` is a real foreign key and `num_nonnulls(title_id.
+
+    episode_id) = 1` is a real CHECK, so the collapse from "what the media item is
+    matched to" to "what a watch state may carry" is enforced here and merely preferred
+    against a dict.
 
     Handing both ids through raises `PortDataMalformed` and fails the run;
     handing the series' title through stores 24 episodes on one row and
@@ -439,10 +451,11 @@ async def test_a_batch_of_states_costs_a_bounded_number_of_statements(
     user_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """The scale property, measured against real SQL rather than a fake's
-    call counter: 20 states and 200 must cost the same number of statements.
-    A per-state resolve or a per-state merge is 1,126,674 round trips a
-    walk.
+    """The scale property, measured against real SQL rather than a fake's call counter.
+
+    20 states and 200 must cost the same number of statements.
+
+    A per-state resolve or a per-state merge is 1,126,674 round trips a walk.
 
     Not an exact number -- the staged `COPY` path issues DDL and a
     `SAVEPOINT` per merge, and pinning the total would break on any

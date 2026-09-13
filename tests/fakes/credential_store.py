@@ -27,8 +27,10 @@ class FakeCredentialStore(CredentialStore):
         self._entries.pop(ref, None)
 
     def owner_of(self, ref: str) -> uuid.UUID | None:
-        """Test-only probe. Not part of the port -- nothing in `src/` reads
-        an owner back, because `owner_id` exists solely so a real backing
-        store can cascade a delete."""
+        """Test-only probe.
+
+        Not part of the port -- nothing in `src/` reads an owner back, because
+        `owner_id` exists solely so a real backing store can cascade a delete.
+        """
         entry = self._entries.get(ref)
         return None if entry is None else entry.owner_id

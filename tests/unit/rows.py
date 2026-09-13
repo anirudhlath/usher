@@ -275,7 +275,7 @@ class Library:
         await self.watched(title_id, played=False, position_seconds=position_seconds, at=at)
 
     async def finished(self, title_id: uuid.UUID, *, at: datetime, play_count: int = 1) -> None:
-        """**The distractor, and it varies exactly one thing.**
+        """**The distractor, and it varies exactly one thing.**.
 
         `played = True` with the resume position *kept*, so it isolates the
         `NOT played` half of `list_in_progress`' predicate. The plan's own
@@ -288,8 +288,10 @@ class Library:
         )
 
     async def never_started(self, title_id: uuid.UUID) -> None:
-        """`position_seconds = 0` with `played = False`: the *other* half of the
-        predicate, alone."""
+        """`position_seconds = 0` with `played = False`.
+
+        the *other* half of the predicate, alone.
+        """
         await self.watched(title_id, played=False, position_seconds=0, at=days_ago(0.5))
 
     # -- people, credits and collections -----------------------------------

@@ -112,8 +112,10 @@ def _to_row(title: Title) -> TitleRow:
 def _browse_filters(
     *, genre: str | None, year: int | None, owned: bool | None
 ) -> list[ColumnElement[bool]]:
-    """`browse`'s `WHERE`, built once so `browse_facets` can leave exactly one
-    predicate out rather than re-read the filters.
+    """`browse`'s `WHERE`.
+
+    built once so `browse_facets` can leave exactly one predicate out rather than re-
+    read the filters.
 
     Two copies of a filter set is two chances for a facet to be counted over a
     population the page is not drawn from -- the same argument
@@ -164,8 +166,9 @@ def _browse_order(key: ColumnElement[Any], *, descending: bool) -> tuple[ColumnE
 def _browse_after(
     key: ColumnElement[object], *, descending: bool, after: BrowseCursorPosition
 ) -> ColumnElement[bool]:
-    """ADR-0034's keyset predicate, for the order `_browse_order` builds: NULLs last, then
-    the key, then `id`.
+    """ADR-0034's keyset predicate, for the order `_browse_order` builds.
+
+    NULLs last, then the key, then `id`.
     """
     if after.key is None:
         # The boundary is inside the unkeyed group, which sorts last, so only
@@ -182,16 +185,15 @@ def _browse_after(
 
 
 def _conflict(title_id: uuid.UUID, constraint: str | None) -> RepositoryConflict:
-    """Builds an accurate `RepositoryConflict` for `add()`/`update()`
-    alike. Deliberately never claims `title_id` itself already exists --
-    measured bug this replaced: the message used to read "title {id}
-    already exists" unconditionally, which is false whenever the actual
-    collision was on a *different* row's tmdb_id/imdb_id/tvdb_id (`id`
-    doesn't pre-exist at all in that case; the provider id does). "conflicts
-    with an existing title" is true either way -- `title_id`'s own id
-    collided, or one of its provider ids did -- and `constraint` carries
-    the specific, structured answer for a caller that needs to branch on
-    which.
+    """Builds an accurate `RepositoryConflict` for `add()`/`update()` alike.
+
+    Deliberately never claims `title_id` itself already exists -- measured bug this
+    replaced: the message used to read "title {id} already exists" unconditionally,
+    which is false whenever the actual collision was on a *different* row's
+    tmdb_id/imdb_id/tvdb_id (`id` doesn't pre-exist at all in that case; the provider id
+    does). "conflicts with an existing title" is true either way -- `title_id`'s own id
+    collided, or one of its provider ids did -- and `constraint` carries the specific,
+    structured answer for a caller that needs to branch on which.
     """
     detail = f" (constraint: {constraint})" if constraint else ""
     return RepositoryConflict(

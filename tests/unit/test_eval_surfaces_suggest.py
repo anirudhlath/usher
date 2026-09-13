@@ -29,9 +29,11 @@ def _case(name: str, probe: str, band: str = "5-7", klass: str = "substitution")
 
 
 async def test_every_case_gets_a_ranking_even_when_nothing_came_back() -> None:
-    """The denominator is the case count. A surface that emitted rankings
-    only for cases that matched would report recall over the cases that
-    worked, which rises as the index gets worse."""
+    """The denominator is the case count.
+
+    A surface that emitted rankings only for cases that matched would report recall over
+    the cases that worked, which rises as the index gets worse.
+    """
     cases = (_case("Alien", "Alein"), _case("Heat", "Heta"))
     run: SurfaceRun = await rank_cases(
         cases, _StubSuggester({"Alein": [cases[0].title_id]}), limit=5
@@ -41,9 +43,11 @@ async def test_every_case_gets_a_ranking_even_when_nothing_came_back() -> None:
 
 
 async def test_the_ranking_order_is_the_index_order() -> None:
-    """`suggest` is not re-ranked by the service (both tiers order their own
-    answer), so the eval must not reorder it either -- MRR is the metric that
-    would silently change if it did."""
+    """`suggest` is not re-ranked by the service (both tiers order their own answer).
+
+    so the eval must not reorder it either -- MRR is the metric that would silently
+    change if it did.
+    """
     case = _case("Alien", "Alein")
     other = uuid.UUID(int=99)
     run = await rank_cases((case,), _StubSuggester({"Alein": [other, case.title_id]}), limit=5)
@@ -51,9 +55,10 @@ async def test_the_ranking_order_is_the_index_order() -> None:
 
 
 async def test_the_probe_is_what_reaches_the_index_not_the_name() -> None:
-    """The whole measurement is that a *misspelt* prefix still finds the
-    title. An eval that sent the correct name would score ~1.0 on any index
-    and prove nothing."""
+    """The whole measurement is that a *misspelt* prefix still finds the title.
+
+    An eval that sent the correct name would score ~1.0 on any index and prove nothing.
+    """
     suggester = _StubSuggester({})
     await rank_cases((_case("Alien", "Alein"),), suggester, limit=5)
     assert suggester.asked == ["Alein"]
@@ -73,9 +78,12 @@ async def test_the_relevant_map_is_one_entry_per_case() -> None:
 
 
 async def test_strata_split_by_band_and_by_typo_class_and_never_average_them() -> None:
-    """ADR-0031 ships two tiers with very different profiles and ADR-0002
-    measured 0.0% on one typo class against 95%+ on a long band. A mean over
-    either dimension describes neither."""
+    """ADR-0031 ships two tiers with very different profiles and ADR-0002 measured 0.0% on one.
+
+    typo class against 95%+ on a long band.
+
+    A mean over either dimension describes neither.
+    """
     cases = (
         _case("Up", "Uq", band="2-4", klass="substitution"),
         _case("Aliens", "Alines", band="5-7", klass="transposition"),
@@ -90,9 +98,11 @@ class _Boom:
 
 
 async def test_an_index_that_raises_is_not_scored_as_a_miss() -> None:
-    """A zero and a failure are different facts and only one of them is a
-    regression. Swallowing the error would report the outage as a quality
-    collapse and send somebody to read the ranking code."""
+    """A zero and a failure are different facts and only one of them is a regression.
+
+    Swallowing the error would report the outage as a quality collapse and send somebody
+    to read the ranking code.
+    """
     import pytest
 
     with pytest.raises(RuntimeError, match="index is down"):

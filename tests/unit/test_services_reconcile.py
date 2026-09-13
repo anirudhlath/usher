@@ -132,9 +132,12 @@ async def test_a_full_walk_stores_everything_and_retracts_what_vanished(
 
 
 async def test_an_item_that_came_back_is_available_again(fixture: _Fixture) -> None:
-    """PRD 02: "Items that vanish from a source get `available = false`" --
-    and items that come back must come back. The sweep only ever sets false;
-    appearing in a walk is what sets it true again."""
+    """PRD 02: "Items that vanish from a source get `available = false`".
+
+    and items that come back must come back.
+
+    The sweep only ever sets false; appearing in a walk is what sets it true again.
+    """
     for index in range(4):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
@@ -149,13 +152,15 @@ async def test_an_item_that_came_back_is_available_again(fixture: _Fixture) -> N
 async def test_every_row_is_stamped_with_the_runs_start_instant(
     fixture: _Fixture,
 ) -> None:
-    """`observed_at=run.started_at`, deterministically. The plan's mutation
-    table predicted `datetime.now(UTC)` here would make the retraction case
-    "flaky/wrong"; it does neither, because a per-row `now()` is always
-    *later* than `started_at` and the sweep's `<` therefore still spares
-    everything the run saw. What it actually breaks is the meaning of the
-    column -- `last_seen_at` stops being "the run that saw this" -- and an
-    equality assertion against the run's own instant is what notices."""
+    """`observed_at=run.started_at`, deterministically.
+
+    The plan's mutation table predicted `datetime.now(UTC)` here would make the
+    retraction case "flaky/wrong"; it does neither, because a per-row `now()` is always
+    *later* than `started_at` and the sweep's `<` therefore still spares everything the
+    run saw. What it actually breaks is the meaning of the column -- `last_seen_at`
+    stops being "the run that saw this" -- and an equality assertion against the run's
+    own instant is what notices.
+    """
     for index in range(5):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     fixture.service._batch_size = 2
@@ -167,10 +172,13 @@ async def test_every_row_is_stamped_with_the_runs_start_instant(
 
 
 async def test_a_walk_longer_than_one_batch_stores_every_item(fixture: _Fixture) -> None:
-    """The trailing partial batch. Seven items at a batch size of two is
-    three full batches and one of one -- and a `_walk` that flushed only on
-    the size threshold silently drops the last page of every walk whose item
-    count is not a multiple of the batch size, which is almost all of them."""
+    """The trailing partial batch.
+
+    Seven items at a batch size of two is three full batches and one of one -- and a
+    `_walk` that flushed only on the size threshold silently drops the last page of
+    every walk whose item count is not a multiple of the batch size, which is almost all
+    of them.
+    """
     for index in range(7):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     fixture.service._batch_size = 2
@@ -180,9 +188,11 @@ async def test_a_walk_longer_than_one_batch_stores_every_item(fixture: _Fixture)
 
 
 async def test_a_run_checkpoints_every_batch(fixture: _Fixture) -> None:
-    """1,126,674 items is hours. A run that recorded its counters only at the
-    end tells an operator nothing while it is going, and PRD 10's dashboard-3
-    panel plots exactly those counters."""
+    """1,126,674 items is hours.
+
+    A run that recorded its counters only at the end tells an operator nothing while it
+    is going, and PRD 10's dashboard-3 panel plots exactly those counters.
+    """
     for index in range(7):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     fixture.service._batch_size = 2
@@ -192,9 +202,11 @@ async def test_a_run_checkpoints_every_batch(fixture: _Fixture) -> None:
 
 
 async def test_a_run_records_its_matched_and_unmatched_counts(fixture: _Fixture) -> None:
-    """PRD 10's dashboard 3. A run that reported `items_seen` and left the
-    other two at zero makes "how much of this library does Usher actually
-    know" unanswerable from the sync history."""
+    """PRD 10's dashboard 3.
+
+    A run that reported `items_seen` and left the other two at zero makes "how much of
+    this library does Usher actually know" unanswerable from the sync history.
+    """
     fixture.adapter.seed(_item("m1"), T0)
     fixture.adapter.seed(_item("m2", name="Home Video 2004", year=None, provider_ids={}), T0)
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
@@ -202,9 +214,12 @@ async def test_a_run_records_its_matched_and_unmatched_counts(fixture: _Fixture)
 
 
 async def test_the_run_is_recorded_before_the_walk_starts(fixture: _Fixture) -> None:
-    """A run row that only appears once the walk finishes leaves an operator
-    with no way to see an in-flight sync, and leaves a killed process with no
-    trace at all. It is inserted and committed first, `RUNNING`."""
+    """A run row that only appears once the walk finishes leaves an operator with no way to see.
+
+    an in-flight sync, and leaves a killed process with no trace at all.
+
+    It is inserted and committed first, `RUNNING`.
+    """
     seen: list[SyncRunStatus] = []
     original = fixture.media_items.upsert_many
 
@@ -223,10 +238,11 @@ async def test_the_run_is_recorded_before_the_walk_starts(fixture: _Fixture) -> 
 
 
 async def test_a_walk_that_raises_sweeps_nothing(fixture: _Fixture) -> None:
-    """**The failure this milestone is most warned about.** A generator that
-    stops because the adapter gave up is indistinguishable from one that
-    finished, which is why `list_items` is contracted to raise -- and that
-    guarantee is worth exactly nothing if the reconciler sweeps either way.
+    """**The failure this milestone is most warned about.** A generator that stops because the.
+
+    adapter gave up is indistinguishable from one that finished, which is why
+    `list_items` is contracted to raise -- and that guarantee is worth exactly nothing
+    if the reconciler sweeps either way.
 
     The seeded items are all still present on the source; only the transport
     failed. A reconciler that swept here marks a healthy 1,126,674-item
@@ -256,9 +272,11 @@ async def test_a_walk_that_raises_sweeps_nothing(fixture: _Fixture) -> None:
 async def test_a_walk_that_raises_keeps_the_batches_it_already_wrote(
     fixture: _Fixture,
 ) -> None:
-    """The other half of committing per batch. A crash costs the batch in
-    flight, never the walk -- 1,126,674 items is hours, and re-walking from
-    the start after every transient failure is how a sync never finishes.
+    """The other half of committing per batch.
+
+    A crash costs the batch in flight, never the walk -- 1,126,674 items is hours, and
+    re-walking from the start after every transient failure is how a sync never
+    finishes.
 
     The `items_seen` assertions are the ones with teeth, and they are about
     the *durable record* rather than the walk. `SyncRun` is frozen, `_flush`
@@ -285,8 +303,12 @@ async def test_a_walk_that_raises_keeps_the_batches_it_already_wrote(
 async def test_a_refused_sweep_fails_the_run_and_changes_nothing(
     fixture: _Fixture,
 ) -> None:
-    """The residual `list_items`' contract does not cover: a walk that
-    *completes* and returns almost nothing. ADR-0015."""
+    """The residual `list_items`' contract does not cover.
+
+    a walk that *completes* and returns almost nothing.
+
+    ADR-0015.
+    """
     for index in range(10):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
@@ -303,11 +325,12 @@ async def test_a_refused_sweep_fails_the_run_and_changes_nothing(
 async def test_a_refused_sweep_keeps_the_upserts_the_walk_made(
     fixture: _Fixture,
 ) -> None:
-    """A refusal fails the run, and the run's *writes* must survive it
-    anyway. The alternative is the mirror-image bug: a source that has
-    genuinely shrunk below the ceiling can never record anything again,
-    because every walk's upsert half is rolled back with the sweep's
-    refusal."""
+    """A refusal fails the run, and the run's *writes* must survive it anyway.
+
+    The alternative is the mirror-image bug: a source that has genuinely shrunk below
+    the ceiling can never record anything again, because every walk's upsert half is
+    rolled back with the sweep's refusal.
+    """
     fixture.adapter.seed(_item("m0"), T0)
     fixture.adapter.seed(_item("m1"), T0)
     fixture.adapter.seed(_item("m2"), T0)
@@ -324,9 +347,11 @@ async def test_a_refused_sweep_keeps_the_upserts_the_walk_made(
 
 
 async def test_a_bug_is_not_recorded_as_an_upstream_failure(fixture: _Fixture) -> None:
-    """`reconcile` swallows `UsherPortError` so `usher sync` can carry on to
-    the next source. Anything else is a bug in this process, and recording it
-    as a failed *sync* hides it behind an operational-looking row."""
+    """`reconcile` swallows `UsherPortError` so `usher sync` can carry on to the next source.
+
+    Anything else is a bug in this process, and recording it as a failed *sync* hides it
+    behind an operational-looking row.
+    """
 
     async def _explode(*args: object, **kwargs: object) -> None:
         raise ZeroDivisionError("a bug, not an outage")
@@ -340,9 +365,10 @@ async def test_a_bug_is_not_recorded_as_an_upstream_failure(fixture: _Fixture) -
 async def test_a_run_that_could_not_reach_the_source_at_all_is_recorded(
     fixture: _Fixture,
 ) -> None:
-    """`usher sync` across three sources needs the second and third to run
-    when the first is unreachable, so this returns a durable record rather
-    than raising."""
+    """`usher sync` across three sources needs the second and third to run when the first is.
+
+    unreachable, so this returns a durable record rather than raising.
+    """
     fixture.adapter.go_offline()
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert run.status is SyncRunStatus.FAILED
@@ -356,9 +382,12 @@ async def test_a_run_that_could_not_reach_the_source_at_all_is_recorded(
 
 
 async def test_a_delta_walk_uses_the_last_completed_cursor(fixture: _Fixture) -> None:
-    """Resuming from the newest run of *any* status would skip everything a
-    failed run never reached, silently. `latest_completed_cursor` is the
-    method, and this is why."""
+    """Resuming from the newest run of *any* status would skip everything a failed run never.
+
+    reached, silently.
+
+    `latest_completed_cursor` is the method, and this is why.
+    """
     fixture.adapter.seed(_item("m1"), T0)
     completed = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     fixture.adapter.seed(_item("m2"), LATER)
@@ -374,8 +403,10 @@ async def test_a_delta_walk_uses_the_last_completed_cursor(fixture: _Fixture) ->
 async def test_a_delta_walk_resumes_from_the_newest_completed_delta(
     fixture: _Fixture,
 ) -> None:
-    """A completed delta must move the cursor on, or every delta re-walks
-    from the last full run and the lane saves nothing."""
+    """A completed delta must move the cursor on.
+
+    or every delta re-walks from the last full run and the lane saves nothing.
+    """
     fixture.adapter.seed(_item("m1"), T0)
     full = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     fixture.adapter.seed(_item("m2"), LATER)
@@ -393,8 +424,10 @@ async def test_a_delta_walk_resumes_from_the_newest_completed_delta(
 
 
 async def test_a_full_walk_ignores_every_cursor(fixture: _Fixture) -> None:
-    """A full walk that inherited a cursor would return only what changed and
-    then sweep -- the exact combination ADR-0015 exists to make unreachable."""
+    """A full walk that inherited a cursor would return only what changed and then sweep.
+
+    the exact combination ADR-0015 exists to make unreachable.
+    """
     fixture.adapter.seed(_item("m1"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     # T0, deliberately: it is *older* than the cursor a delta would have
@@ -406,10 +439,12 @@ async def test_a_full_walk_ignores_every_cursor(fixture: _Fixture) -> None:
 
 
 async def test_a_delta_walk_never_sweeps(fixture: _Fixture) -> None:
-    """A delta walk returns only what changed, so by construction almost
-    everything is "unseen". Sweeping after one retracts the entire library --
-    and the guard would catch it, which would make every delta run fail
-    rather than merely be wrong. Only a full walk may retract."""
+    """A delta walk returns only what changed, so by construction almost everything is "unseen".
+
+    Sweeping after one retracts the entire library -- and the guard would catch it,
+    which would make every delta run fail rather than merely be wrong. Only a full walk
+    may retract.
+    """
     for index in range(10):
         fixture.adapter.seed(_item(f"m{index}"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
@@ -426,10 +461,12 @@ async def test_a_delta_walk_never_sweeps(fixture: _Fixture) -> None:
 
 async def test_a_delta_walk_under_the_ceiling_still_never_sweeps() -> None:
     """The version of the case above that the ADR-0015 guard cannot rescue.
-    With ten items and one changed, a sweeping delta would retract nine --
-    90%, refused, so the run merely fails and nothing is lost. Here only two
-    of ten are stale, which is under the ceiling: a sweeping delta succeeds
-    and silently retracts two available items."""
+
+    With ten items and one changed, a sweeping delta would retract nine -- 90%, refused,
+    so the run merely fails and nothing is lost. Here only two of ten are stale, which
+    is under the ceiling: a sweeping delta succeeds and silently retracts two available
+    items.
+    """
     fixture = _Fixture(batch_size=2)
     for index in range(10):
         fixture.adapter.seed(_item(f"m{index}"), T0)
@@ -453,8 +490,7 @@ async def test_a_delta_walk_under_the_ceiling_still_never_sweeps() -> None:
 
 
 async def test_a_delta_an_operator_asked_for_is_not_bounded_by_the_gap_closers_ceiling() -> None:
-    """The split S5 makes, one task on: the ceiling is the *lane's*, not
-    `ReconcileService`'s.
+    """The split S5 makes, one task on: the ceiling is the *lane's*, not `ReconcileService`'s.
 
     `LaneSupervisor._close_gap` is the one caller nobody typed a command
     for, so a delta it starts against a source Usher has not reached for a
@@ -553,8 +589,9 @@ async def test_a_walk_stopped_at_the_gap_ceiling_keeps_every_batch_it_committed(
 
 
 async def test_a_walk_stopped_at_the_gap_ceiling_sweeps_nothing() -> None:
-    """A truncated walk must not reach the availability sweep: it has rows it never looked
-    at, and the sweep retracts exactly those.
+    """A truncated walk must not reach the availability sweep.
+
+    it has rows it never looked at, and the sweep retracts exactly those.
     """
     fixture = _Fixture(batch_size=3)
     for index in range(20):
@@ -621,8 +658,9 @@ async def test_a_walk_stopped_at_the_gap_ceiling_tells_the_operator_what_to_run(
 
 
 async def test_the_gap_ceilings_error_is_distinguishable_from_the_dead_mans_switch() -> None:
-    """Two different things end a walk early and both land in the same
-    `sync_runs` row, meaning opposite things.
+    """Two different things end a walk early and both land in the same `sync_runs` row.
+
+    meaning opposite things.
 
     `MAX_PAGES` is `EmbyAdapter`'s dead-man's switch against a server that
     ignores `StartIndex`; exhausting it raises `PortDataMalformed` and is a
@@ -694,11 +732,14 @@ async def test_the_gap_ceilings_error_is_distinguishable_from_the_dead_mans_swit
 async def test_the_reconcile_span_is_a_child_of_whatever_is_active(
     fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """M1 wired `FastAPIInstrumentor` specifically so a pipeline triggered by
-    a request nests under that request's server span. A service that started
-    a root span -- `tracer.start_span(..., context=Context())`, or work
-    handed to a task created before the span existed -- throws that away and
-    "what happened in this request" stops being answerable."""
+    """M1 wired `FastAPIInstrumentor` specifically so a pipeline triggered by a request nests.
+
+    under that request's server span.
+
+    A service that started a root span -- `tracer.start_span(..., context=Context())`,
+    or work handed to a task created before the span existed -- throws that away and
+    "what happened in this request" stops being answerable.
+    """
     fixture.adapter.seed(_item("m1"), T0)
     tracer = trace.get_tracer("test")
     with tracer.start_as_current_span("server") as server:
@@ -714,9 +755,11 @@ async def test_the_reconcile_span_is_a_child_of_whatever_is_active(
 async def test_a_failed_run_is_marked_on_its_span(
     fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """PRD 10 reads run outcomes off spans as well as off `sync_runs`. A
-    failure that only ever reached the database row is invisible in a trace
-    view, which is where an operator looks first."""
+    """PRD 10 reads run outcomes off spans as well as off `sync_runs`.
+
+    A failure that only ever reached the database row is invisible in a trace view,
+    which is where an operator looks first.
+    """
     fixture.adapter.go_offline()
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     pipeline = [span for span in spans.get_finished_spans() if span.name == "sync.reconcile"]
@@ -729,11 +772,12 @@ async def test_a_failed_run_is_marked_on_its_span(
 
 
 def test_the_service_never_imports_a_storage_or_transport_library() -> None:
-    """ADR-0009 and PRD 01's layering rule, at module level. `import-linter`
-    already forbids `usher.services -> usher.db`; this catches the other
-    half, which no contract expresses: a service reaching for `httpx`,
-    `sqlalchemy` or `asyncpg` directly to branch on a failure kind, instead
-    of on `usher.ports.errors`."""
+    """ADR-0009 and PRD 01's layering rule, at module level.
+
+    `import-linter` already forbids `usher.services -> usher.db`; this catches the other
+    half, which no contract expresses: a service reaching for `httpx`, `sqlalchemy` or
+    `asyncpg` directly to branch on a failure kind, instead of on `usher.ports.errors`.
+    """
     import usher.services.reconcile as module
 
     source = (module.__file__ or "").replace(".pyc", ".py")
@@ -744,11 +788,12 @@ def test_the_service_never_imports_a_storage_or_transport_library() -> None:
 
 
 async def test_reconcile_never_raises_a_port_error(fixture: _Fixture) -> None:
-    """Every `UsherPortError` subclass, not just the two the other cases
-    happen to produce. A handler that named `PortUnavailable` specifically
-    would let `PortAuthFailed`, `PortRateLimited` and `PortDataMalformed`
-    escape, and `usher sync` would stop at the first source with an expired
-    credential."""
+    """Every `UsherPortError` subclass, not just the two the other cases happen to produce.
+
+    A handler that named `PortUnavailable` specifically would let `PortAuthFailed`,
+    `PortRateLimited` and `PortDataMalformed` escape, and `usher sync` would stop at the
+    first source with an expired credential.
+    """
 
     class _Boom(UsherPortError):
         pass
@@ -769,10 +814,12 @@ async def test_reconcile_never_raises_a_port_error(fixture: _Fixture) -> None:
 async def test_the_sweep_window_is_the_runs_own_start_instant(
     fixture: _Fixture,
 ) -> None:
-    """`seen_since=run.started_at`, not `now()`. With `now()` the window
-    closes *after* the walk wrote its rows, so every row the run just stamped
-    is `< seen_since` and the whole source is retracted -- which the guard
-    then refuses, turning every successful walk into a failed run."""
+    """`seen_since=run.started_at`, not `now()`.
+
+    With `now()` the window closes *after* the walk wrote its rows, so every row the run
+    just stamped is `< seen_since` and the whole source is retracted -- which the guard
+    then refuses, turning every successful walk into a failed run.
+    """
     seen: list[datetime] = []
     original = fixture.media_items.mark_unseen_unavailable
 
@@ -795,13 +842,16 @@ async def test_the_sweep_window_is_the_runs_own_start_instant(
 
 
 async def test_each_batch_publishes_sync_progress() -> None:
-    """Per batch, not per run. A nightly walk of the one measured library
-    flushes 1,127 of these and an admin UI's progress bar is the point of
-    them; one at the end is a bar that jumps from 0% to 100%.
+    """Per batch, not per run.
+
+    A nightly walk of the one measured library flushes 1,127 of these and an admin UI's
+    progress bar is the point of them; one at the end is a bar that jumps from 0% to
+    100%.
 
     Batch size 2 against 3 items, so a per-run publisher reports 1 where a
     per-batch one reports 2 -- the count is only evidence because the
-    denominator is held fixed."""
+    denominator is held fixed.
+    """
     fixture = _Fixture(batch_size=2)
     for index in range(3):
         fixture.adapter.seed(_item(f"m{index}"), T0)
@@ -816,10 +866,13 @@ async def test_each_batch_publishes_sync_progress() -> None:
 
 
 async def test_sync_progress_is_scoped_to_no_title(fixture: _Fixture) -> None:
-    """PRD 07 marks it "Admin UI only", and the scoping is what implements
-    that: a `?titles=` subscriber never sees one. A detail screen that
-    re-rendered on each of a walk's 1,127 batches is the failure the filter
-    exists for."""
+    """PRD 07 marks it "Admin UI only", and the scoping is what implements that.
+
+    a `?titles=` subscriber never sees one.
+
+    A detail screen that re-rendered on each of a walk's 1,127 batches is the failure
+    the filter exists for.
+    """
     fixture.adapter.seed(_item("m0"), T0)
     await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     progress = [
@@ -832,11 +885,14 @@ async def test_sync_progress_is_scoped_to_no_title(fixture: _Fixture) -> None:
 async def test_a_failed_walk_still_reported_the_batches_it_did_finish(
     fixture: _Fixture,
 ) -> None:
-    """The events are published per *flush*, so a walk that dies halfway has
-    already told the admin UI how far it got -- which is the same reason
-    `_flush` commits per batch. Nothing announces the failure itself: PRD
-    07's SSE table has no such event, and `sync_runs` is where a failure is
-    recorded."""
+    """The events are published per *flush*.
+
+    so a walk that dies halfway has already told the admin UI how far it got -- which is
+    the same reason `_flush` commits per batch.
+
+    Nothing announces the failure itself: PRD 07's SSE table has no such event, and
+    `sync_runs` is where a failure is recorded.
+    """
     fixture.service._batch_size = 2
     for index in range(4):
         fixture.adapter.seed(_item(f"m{index}"), T0)
@@ -879,8 +935,7 @@ async def test_a_bounded_walk_records_its_kind_in_a_column_rather_than_as_a_pref
 
 
 async def test_a_refused_sweep_records_its_kind_in_a_column_rather_than_as_a_prefix() -> None:
-    """The refusal's half of the same rule, and the one an operator has a
-    command for.
+    """The refusal's half of the same rule, and the one an operator has a command for.
 
     `ports/ingest.py` builds this sentence from three numbers and is a standing
     candidate for rewording, which is exactly why the CLI must not read it: the

@@ -54,8 +54,9 @@ async def _threshold(session: AsyncSession) -> float:
 async def test_pg_trgm_folds_case_so_the_index_is_on_the_raw_column(
     session: AsyncSession,
 ) -> None:
-    """Verified rather than assumed, because the schema right next door does
-    the opposite for a different reason.
+    """Verified rather than assumed.
+
+    because the schema right next door does the opposite for a different reason.
 
     `ix_titles_name_lower_year` is an expression index on `lower(name)`,
     because a *btree* equality lookup is case-sensitive and the matcher
@@ -71,9 +72,10 @@ async def test_pg_trgm_folds_case_so_the_index_is_on_the_raw_column(
 
 
 async def test_a_fuzzy_lookup_uses_the_trigram_index(session: AsyncSession) -> None:
-    """The wrong implementations this fails: no index at all, and a GIN index
-    built without `gin_trgm_ops` (which is not an error -- it just silently
-    cannot serve `%`).
+    """The wrong implementations this fails.
+
+    no index at all, and a GIN index built without `gin_trgm_ops` (which is not an error
+    -- it just silently cannot serve `%`).
 
     `enable_seqscan = off` is what makes the claim observable on a small
     fixture. A near-empty table seq-scans regardless of how many indexes it
@@ -104,8 +106,7 @@ async def test_the_similarity_threshold_is_set_local_and_does_not_outlive_it(
 async def test_a_bare_set_outlives_a_commit_and_set_local_does_not(
     postgres_url: str,
 ) -> None:
-    """The pooled-connection hazard itself, on the only boundary that shows
-    it.
+    """The pooled-connection hazard itself, on the only boundary that shows it.
 
     `SET LOCAL` ends with the transaction. A bare `SET` ends with the
     *session* -- so on a committed transaction it survives, and the pooled
@@ -142,8 +143,10 @@ async def test_a_bare_set_outlives_a_commit_and_set_local_does_not(
 async def test_a_contrib_guc_is_unreadable_until_something_loads_the_library(
     session: AsyncSession,
 ) -> None:
-    """The lazy-load trap, measured for `pg_trgm` rather than worked around silently in
-    `_warm`, and it is sharper than the `hnsw.%` version the plan records.
+    """The lazy-load trap.
+
+    measured for `pg_trgm` rather than worked around silently in `_warm`, and it is
+    sharper than the `hnsw.%` version the plan records.
     """
     savepoint = await session.begin_nested()
     with pytest.raises(ProgrammingError):
@@ -165,8 +168,10 @@ async def test_a_contrib_guc_is_unreadable_until_something_loads_the_library(
 
 
 async def test_a_high_threshold_destroys_fuzzy_recall(session: AsyncSession) -> None:
-    """The cliff, asserted as a candidate set rather than quoted as a number, so it stays
-    true on whatever data the fixture holds.
+    """The cliff.
+
+    asserted as a candidate set rather than quoted as a number, so it stays true on
+    whatever data the fixture holds.
     """
     await _seed(session, ["Iron"])
     typo = "irom"

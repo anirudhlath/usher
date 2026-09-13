@@ -1,5 +1,6 @@
-"""`GET /search` -- the three-valued mode, the two mode fields, and the rewrite that
-has to reach the wire.
+"""`GET /search`.
+
+the three-valued mode, the two mode fields, and the rewrite that has to reach the wire.
 """
 
 import ast
@@ -77,8 +78,9 @@ _ROUTER = pathlib.Path(__file__).parents[2] / "src" / "usher" / "api" / "routers
 
 
 class _ScriptedIndex(SearchIndex):
-    """A `SearchIndex` that answers with exactly what a case scripted, and
-    records the `SearchRequest` that crossed the port.
+    """A `SearchIndex` that answers with exactly what a case scripted.
+
+    and records the `SearchRequest` that crossed the port.
 
     The record is what makes the `limit` case an observation rather than a
     hope: the only place a re-clamp in the route is visible is the number the
@@ -100,16 +102,19 @@ class _ScriptedIndex(SearchIndex):
         return self.outcome
 
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        """The scripted outcome's own number, for
-        `tests/unit/test_services_search.py`'s reason: the probe and the answer
-        are the same question a statement apart, and a double that could answer
-        them differently is a deployment that cannot exist."""
+        """The scripted outcome's own number, for `tests/unit/test_services_search.py`'s reason.
+
+        the probe and the answer are the same question a statement apart, and a double
+        that could answer them differently is a deployment that cannot exist.
+        """
         return self.outcome.semantic_coverage
 
 
 class _ScriptedSuggest(SuggestIndex):
-    """Present because `SearchService` takes one. `GET /search` never calls
-    it -- `GET /search/suggest` is B5's route."""
+    """Present because `SearchService` takes one.
+
+    `GET /search` never calls it -- `GET /search/suggest` is B5's route.
+    """
 
     async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
         return []
@@ -261,13 +266,15 @@ async def hits() -> _ScriptedIndex:
 
 @pytest.fixture
 async def client(hits: _ScriptedIndex) -> AsyncIterator[httpx.AsyncClient]:
-    """A deployment that configured no embedding model, which is the shipped
-    default (`USHER_EMBEDDING_ENABLED=false`).
+    """A deployment that configured no embedding model.
+
+    which is the shipped default (`USHER_EMBEDDING_ENABLED=false`).
 
     Since #31 that is the *only* deployment answering this way: the lifespan
     builds a model whenever one is configured and parks it on `app.state`, and
     `api/deps.get_search_service` reads it. The cases below are therefore about
-    a deployment rather than about the product, which they were not before."""
+    a deployment rather than about the product, which they were not before.
+    """
     async for connected in _client(_app(await _service(hits))):
         yield connected
 
@@ -275,8 +282,9 @@ async def client(hits: _ScriptedIndex) -> AsyncIterator[httpx.AsyncClient]:
 async def test_the_route_ranks_for_the_household_the_dependency_resolved(
     hits: _ScriptedIndex,
 ) -> None:
-    """The household reaches the blend, and it comes off `DefaultUserIdDep`
-    rather than off the query string.
+    """The household reaches the blend.
+
+    and it comes off `DefaultUserIdDep` rather than off the query string.
 
     Fails: a route that never resolves one, which renders **identically** --
     the same rows in the same order with the same scores, no error and nothing
@@ -301,9 +309,10 @@ async def test_the_route_ranks_for_the_household_the_dependency_resolved(
 
 
 async def test_the_household_is_not_a_query_parameter(client: httpx.AsyncClient) -> None:
-    """PRD 05 keeps `SearchFilters` a closed vocabulary with no user field, and
-    this is that rule where a client could see it: `q`, `mode` and `limit` are
-    the whole of what a caller chooses.
+    """PRD 05 keeps `SearchFilters` a closed vocabulary with no user field.
+
+    and this is that rule where a client could see it: `q`, `mode` and `limit` are the
+    whole of what a caller chooses.
 
     Fails: a `user_id`/`user` query parameter, which would let any caller rank
     a search against any household's watch history -- and which is the shape
@@ -322,7 +331,7 @@ async def test_the_household_is_not_a_query_parameter(client: httpx.AsyncClient)
 async def test_a_fused_request_served_without_an_embedder_reports_both_modes(
     client: httpx.AsyncClient,
 ) -> None:
-    """**The headline, and the reason `requested_mode` sits beside `mode`.**
+    """**The headline, and the reason `requested_mode` sits beside `mode`.**.
 
     A `fused` request on a deployment with no embedder is served as full text
     and every row of that answer is correct, so without two fields the only
@@ -387,14 +396,16 @@ async def test_a_semantic_request_without_an_embedder_is_a_problem_document(
 async def test_a_semantic_request_is_served_where_this_process_holds_an_embedder(
     hits: _ScriptedIndex,
 ) -> None:
-    """**The positive control the two cases above were missing**, and it was
-    green before #31 was fixed -- which is the point worth stating rather than
-    hiding. The refusal has never been the route's: `?mode=semantic` reaches
-    `SearchService` unmolested and answers 200 whenever the service it was
-    handed holds a model. What shipped until #31 was a *dependency* that never
-    handed it one, so the two negative cases above passed on every deployment
-    there was and nothing on this surface distinguished "this deployment
-    cannot" from "no deployment can".
+    """**The positive control the two cases above were missing**.
+
+    and it was green before #31 was fixed -- which is the point worth stating rather
+    than hiding.
+
+    The refusal has never been the route's: `?mode=semantic` reaches `SearchService`
+    unmolested and answers 200 whenever the service it was handed holds a model. What
+    shipped until #31 was a *dependency* that never handed it one, so the two negative
+    cases above passed on every deployment there was and nothing on this surface
+    distinguished "this deployment cannot" from "no deployment can".
 
     Fails: a route that refuses the mode itself -- a 422 minted here from
     `settings` or a `mode` narrowed in the handler -- which is the shape the
@@ -451,8 +462,9 @@ async def test_the_lifespan_puts_this_processs_embedder_on_app_state(
 
 
 async def test_a_deployment_with_no_embedding_model_exposes_none_rather_than_nothing() -> None:
-    """The push-only deployment PRD 08 describes, and the claim
-    `get_search_service`'s docstring used to make about it.
+    """The push-only deployment PRD 08 describes.
+
+    and the claim `get_search_service`'s docstring used to make about it.
 
     `USHER_EMBEDDING_ENABLED` is `false` by default, so `composition.embedder`
     answers `(None, no-op)` and this attribute is `None` -- which is
@@ -485,8 +497,10 @@ def _drains() -> list[asyncio.Task[None]]:
 
 
 async def test_the_process_holds_one_keystroke_buffer_and_its_drain_ends_with_it() -> None:
-    """The buffer is a process resource on `app.state`, the model's shape, and
-    the drain is the task that makes it a buffer rather than a leak.
+    """The buffer is a process resource on `app.state`.
+
+    the model's shape, and the drain is the task that makes it a buffer rather than a
+    leak.
 
     Both halves, because either alone passes for the wrong reason: a lifespan
     that parked a buffer and started nothing would record a keystroke nowhere,
@@ -501,9 +515,10 @@ async def test_the_process_holds_one_keystroke_buffer_and_its_drain_ends_with_it
 
 
 async def test_get_search_service_hands_over_the_model_this_process_holds() -> None:
-    """The other half of the wiring, and the one a mutation can delete
-    silently: a dependency that went on passing `None` would answer a working
-    `SearchService` on every deployment and fail nothing but `?mode=semantic`.
+    """The other half of the wiring, and the one a mutation can delete silently.
+
+    a dependency that went on passing `None` would answer a working `SearchService` on
+    every deployment and fail nothing but `?mode=semantic`.
 
     Driven directly rather than through a request because the route's own path
     needs a database and this app has none -- the session below is constructed
@@ -544,8 +559,9 @@ async def test_get_search_service_hands_over_the_model_this_process_holds() -> N
 async def test_the_mode_parameter_is_an_enum_on_the_wire_and_semantic_is_not_a_boolean(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 07's sketch spells this `?semantic=`, which is a **boolean** and
-    cannot express fusion at all.
+    """PRD 07's sketch spells this `?semantic=`.
+
+    which is a **boolean** and cannot express fusion at all.
 
     Two claims, and the second is the one a route could pass while getting
     wrong. First, `?mode=` reaches `/openapi.json` as an *enum* rather than as
@@ -586,8 +602,7 @@ async def test_the_mode_parameter_is_an_enum_on_the_wire_and_semantic_is_not_a_b
 
 
 async def test_an_expanded_query_reaches_the_body_only_when_a_completion_was_bought() -> None:
-    """**The mutation is deleting the field**, and only an injected expander
-    can see it.
+    """**The mutation is deleting the field**, and only an injected expander can see it.
 
     A case asserting the shipped default's `null` cannot fail: with no LLM
     client and `USHER_QUERY_EXPANSION_ENABLED` false there is nothing to
@@ -679,8 +694,9 @@ async def test_a_blank_query_is_a_200_with_no_results_and_buys_no_completion() -
 
 
 async def test_the_limit_ceiling_is_the_services_and_this_route_spells_none() -> None:
-    """**The mutation is re-clamping in the route**, and it is invisible
-    wherever the two ceilings agree.
+    """**The mutation is re-clamping in the route**.
+
+    and it is invisible wherever the two ceilings agree.
 
     `SearchService.search` does `min(limit, self._result_limit)` against
     `settings.search_result_limit`. A route that clamped as well would be the
@@ -719,8 +735,9 @@ async def test_the_limit_ceiling_is_the_services_and_this_route_spells_none() ->
 async def test_the_body_echoes_the_id_of_the_row_this_search_was_recorded_as(
     hits: _ScriptedIndex,
 ) -> None:
-    """**How a client gets a `search_id` at all**, which is the first link of
-    F3's funnel and the only one that lives on this route.
+    """**How a client gets a `search_id` at all**.
+
+    which is the first link of F3's funnel and the only one that lives on this route.
 
     Asserted against the stored row's own id rather than as "a UUID is
     present": an echo of a freshly minted id, or of the request's own trace
@@ -819,8 +836,9 @@ async def _catalog_of(**states: EnrichmentState) -> FakeTitleRepository:
 
 
 async def test_a_search_promotes_the_skeletons_it_answered_with(hits: _ScriptedIndex) -> None:
-    """The surface with the strongest intent signal in the API: a viewer typed
-    this query and got these rows back.
+    """The surface with the strongest intent signal in the API.
+
+    a viewer typed this query and got these rows back.
 
     `SearchResult` carries no `enrichment_state` (issue #52), so the route
     cannot judge its own answer and `seen_ids` resolves the tier. Both tiers
@@ -842,9 +860,10 @@ async def test_a_search_promotes_the_skeletons_it_answered_with(hits: _ScriptedI
 
 
 async def test_type_ahead_promotes_what_it_offered() -> None:
-    """`GET /search/suggest` fires per keystroke, which makes it the highest
-    volume surface on this lane and the one whose cost is least like the
-    others'.
+    """`GET /search/suggest` fires per keystroke.
+
+    which makes it the highest volume surface on this lane and the one whose cost is
+    least like the others'.
 
     It is wired anyway, and the reason is that a suggestion is drawn: a
     dropdown of names a viewer is choosing between is exactly "titles a client

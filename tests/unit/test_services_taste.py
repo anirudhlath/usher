@@ -131,7 +131,10 @@ class _Household:
     async def in_catalog(
         self, vector: Sequence[float] | None, *, genres: Sequence[str] = ()
     ) -> uuid.UUID:
-        """A title the household has never touched. No watch state at all."""
+        """A title the household has never touched.
+
+        No watch state at all.
+        """
         title_id = uuid.uuid4()
         await self.embeddings.given(title_id, vector, genres=genres)
         return title_id
@@ -195,7 +198,7 @@ class _Household:
 
 
 async def test_the_centroid_points_at_what_the_household_finished_not_away_from_it() -> None:
-    """**The sign trap, and its three siblings, distinguished by three poles.**
+    """**The sign trap, and its three siblings, distinguished by three poles.**.
 
     Engaged titles at `a`, abandoned titles at `b`, never-touched catalog
     titles at `c` -- an exactly orthonormal triple. The correct centroid is the
@@ -231,8 +234,9 @@ async def _five_title_window(
     *,
     oldest_play_count: int = 1,
 ) -> None:
-    """Newest at `a`, three middles at `c`, oldest at `b` -- **seeded oldest
-    first**, so insertion order is the reverse of recency order and no
+    """Newest at `a`, three middles at `c`, oldest at `b`.
+
+    **seeded oldest first**, so insertion order is the reverse of recency order and no
     `ORDER BY id` satisfies the fixture.
 
     Five titles because `_MIN_TITLES` is five and every one of them must carry
@@ -341,11 +345,13 @@ async def test_a_title_abandoned_at_ten_percent_is_absent_rather_than_negative()
 
 
 async def test_the_centroid_is_a_unit_vector() -> None:
-    """`Embedder` guarantees unit vectors, but a *mean* of unit vectors is not
-    one, and `<=>` is normalisation-invariant while `<#>` is not -- so an
-    unnormalised centroid is correct today under the shipped operator class and
-    silently wrong the day anything reaches for inner product. Normalised once,
-    here, rather than at every reader.
+    """`Embedder` guarantees unit vectors.
+
+    but a *mean* of unit vectors is not one, and `<=>` is normalisation-invariant while
+    `<#>` is not -- so an unnormalised centroid is correct today under the shipped
+    operator class and silently wrong the day anything reaches for inner product.
+
+    Normalised once, here, rather than at every reader.
     """
     house = _Household()
     a, b = planted_pair(math.pi / 4)
@@ -362,8 +368,9 @@ async def test_the_centroid_is_a_unit_vector() -> None:
 
 
 async def test_a_deployment_with_no_embedder_has_no_centroid_rather_than_a_zero_one() -> None:
-    """`Embedder` is optional and **off by default**, so this is the shipped
-    configuration rather than an edge case.
+    """`Embedder` is optional and **off by default**.
+
+    so this is the shipped configuration rather than an edge case.
 
     `None`, never a zero vector. The zero vector is uniquely awful here:
     `<=>` against it is undefined in pgvector and `NaN` in Python, so a zero
@@ -381,10 +388,11 @@ async def test_a_deployment_with_no_embedder_has_no_centroid_rather_than_a_zero_
 
 
 async def test_a_household_that_has_watched_nothing_has_no_centroid() -> None:
-    """A mean of zero embeddings is `0/0`. The arithmetic has to be refused
-    before it is attempted, and the honest answer is `None` -- a point
-    equidistant from everything makes every genre equally affine and every seed
-    equally close, which is a row that is noise wearing a reason.
+    """A mean of zero embeddings is `0/0`.
+
+    The arithmetic has to be refused before it is attempted, and the honest answer is
+    `None` -- a point equidistant from everything makes every genre equally affine and
+    every seed equally close, which is a row that is noise wearing a reason.
     """
     house = _Household()
     assert await house.service().centroid(USER) is None
@@ -427,7 +435,10 @@ async def test_a_household_below_the_minimum_gets_a_written_refusal_and_is_recla
 
 
 async def test_a_stored_centroid_is_reused_rather_than_recomputed() -> None:
-    """The cache half of the fingerprint. Two reads, one computation."""
+    """The cache half of the fingerprint.
+
+    Two reads, one computation.
+    """
     house = _Household()
     a, _b = planted_pair(math.pi / 2)
     for _ in range(6):
@@ -444,13 +455,14 @@ async def test_a_stored_centroid_is_reused_rather_than_recomputed() -> None:
 
 
 async def test_a_newer_watch_state_recomputes_the_centroid_without_any_event() -> None:
-    """**Trap 5.** PRD 06 says the centroid is *"invalidated on watch-state
-    change"*; the nightly walk merges up to 1,126,789 states, and one
-    invalidation per merged row is the fan-out M5 refused for
-    `watchstate.updated`. So nothing publishes and nothing subscribes: the
-    stored row carries the `max(updated_at)` it was computed from, and a demand
-    read recomputes when the household's max has moved. ADR-0020's fingerprint
-    scheme, per user.
+    """**Trap 5.** PRD 06 says the centroid is *"invalidated on watch-state change"*.
+
+    the nightly walk merges up to 1,126,789 states, and one invalidation per merged row
+    is the fan-out M5 refused for `watchstate.updated`.
+
+    So nothing publishes and nothing subscribes: the stored row carries the
+    `max(updated_at)` it was computed from, and a demand read recomputes when the
+    household's max has moved. ADR-0020's fingerprint scheme, per user.
 
     Seeded so the *direction* changes, not merely the count -- a case asserting
     only `writes == 2` passes against an implementation that recomputes and
@@ -475,10 +487,11 @@ async def test_a_newer_watch_state_recomputes_the_centroid_without_any_event() -
 
 
 async def test_a_title_with_no_embedding_is_dropped_from_the_mean_rather_than_zeroed() -> None:
-    """ADR-0014 on the vector itself. A title the index has not reached yet has
-    **no** vector, and a zero vector in a mean is not "no opinion": it drags the
-    result toward the origin and shortens every subsequent cosine by a factor
-    nobody chose.
+    """ADR-0014 on the vector itself.
+
+    A title the index has not reached yet has **no** vector, and a zero vector in a mean
+    is not "no opinion": it drags the result toward the origin and shortens every
+    subsequent cosine by a factor nobody chose.
 
     Five engaged titles at `a` and five with no embedding at all. The centroid
     is `a` exactly. An implementation substituting zeros returns a vector that
@@ -500,11 +513,13 @@ async def test_a_title_with_no_embedding_is_dropped_from_the_mean_rather_than_ze
 
 
 async def test_the_centroid_records_the_embedder_that_produced_it() -> None:
-    """`model_name` carries the runtime *and* the checkpoint, so a checkpoint
-    swap invalidates the centroid through the same `IS DISTINCT FROM` predicate
-    that invalidates `title_embeddings` -- rather than through somebody
-    remembering to write a migration. Without it a swap serves vectors from a
-    different space at full confidence.
+    """`model_name` carries the runtime *and* the checkpoint.
+
+    so a checkpoint swap invalidates the centroid through the same `IS DISTINCT FROM`
+    predicate that invalidates `title_embeddings` -- rather than through somebody
+    remembering to write a migration.
+
+    Without it a swap serves vectors from a different space at full confidence.
     """
     house = _Household()
     a, _b = planted_pair(math.pi / 2)
@@ -535,7 +550,7 @@ async def _owned(house: "_Household", genres: Sequence[str], *, count: int = 1) 
 
 
 async def test_the_most_watched_genre_is_not_the_affinity_when_the_library_is_made_of_it() -> None:
-    """**The front matter's GenreAffinity distractor, as arithmetic.**
+    """**The front matter's GenreAffinity distractor, as arithmetic.**.
 
     Forty engaged dramas and six engaged westerns, against a library that is
     78% drama and 3% western. Drama is the household's most-watched genre by a
@@ -586,8 +601,9 @@ async def test_a_genre_watched_once_does_not_fire_however_high_its_lift() -> Non
 
 
 async def test_a_genre_the_library_does_not_carry_is_dropped_rather_than_infinite() -> None:
-    """`share_library == 0`, which is reachable through a watch state whose
-    media item was removed.
+    """`share_library == 0`.
+
+    which is reachable through a watch state whose media item was removed.
 
     Two wrong spellings, and neither raises anything a caller would recognise:
     a `ZeroDivisionError` in the request path, and a `coalesce` that puts a
@@ -606,7 +622,7 @@ async def test_a_genre_the_library_does_not_carry_is_dropped_rather_than_infinit
 
 
 async def test_genre_affinity_is_identical_with_and_without_an_embedder() -> None:
-    """**The reason this is not computed from the centroid.**
+    """**The reason this is not computed from the centroid.**.
 
     The same household, the same library, asked twice -- once with an embedder
     and once with none -- returns the same affinities in the same order. A
@@ -650,8 +666,9 @@ async def test_recent_engagement_outweighs_old_engagement_in_the_affinity() -> N
 
 
 async def test_equal_lifts_are_ordered_by_genre_name_so_two_screens_agree() -> None:
-    """Determinism, and ties here are ordinary rather than exotic: two genres
-    carried by the *same* titles have identical lift by construction.
+    """Determinism, and ties here are ordinary rather than exotic.
+
+    two genres carried by the *same* titles have identical lift by construction.
 
     "Whatever the aggregate returned" is not an order, and without the tiebreak
     two renders of one unchanged household disagree about which row comes
@@ -670,8 +687,9 @@ async def test_equal_lifts_are_ordered_by_genre_name_so_two_screens_agree() -> N
 
 
 async def test_an_untagged_library_title_contributes_to_neither_side() -> None:
-    """`titles.genres` is `NOT NULL DEFAULT '{}'` and the skeleton tier is
-    largely empty, so untagged titles are most of a real library.
+    """`titles.genres` is `NOT NULL DEFAULT '{}'` and the skeleton tier is largely empty.
+
+    so untagged titles are most of a real library.
 
     They are excluded from **both** the counts and the total rather than only
     from the counts. Left in the denominator they would divide every
@@ -695,8 +713,10 @@ async def test_an_untagged_library_title_contributes_to_neither_side() -> None:
 
 
 async def test_an_untagged_watched_title_is_not_a_genre_named_empty_string() -> None:
-    """The other half, and the one that would be the *largest* "genre" in most
-    libraries if it were counted.
+    """The other half.
+
+    and the one that would be the *largest* "genre" in most libraries if it were
+    counted.
 
     An untagged engaged title occupies a recency rank -- it is genuinely part
     of the household's history and the ramp is a fact about that history, so
@@ -721,8 +741,11 @@ async def test_an_untagged_watched_title_is_not_a_genre_named_empty_string() -> 
 
 
 async def test_a_household_that_has_watched_nothing_gets_no_affinities() -> None:
-    """Not "the library's most common genres". A provider with nothing to say
-    returns nothing, and the fallback that looks personalised is the bug."""
+    """Not "the library's most common genres".
+
+    A provider with nothing to say returns nothing, and the fallback that looks
+    personalised is the bug.
+    """
     house = _Household()
     await _owned(house, ("drama",), count=50)
 
@@ -730,9 +753,12 @@ async def test_a_household_that_has_watched_nothing_gets_no_affinities() -> None
 
 
 async def test_an_empty_catalog_yields_no_affinities_rather_than_a_zero_division() -> None:
-    """`library_genre_counts()` is empty, so every `share_library` is absent and
-    every lift is dropped. The naive spelling divides by the owned-title total
-    and raises in the request path."""
+    """`library_genre_counts()` is empty.
+
+    so every `share_library` is absent and every lift is dropped.
+
+    The naive spelling divides by the owned-title total and raises in the request path.
+    """
     house = _Household()
     for _ in range(10):
         await house.watched(None, genres=("drama",))
@@ -741,9 +767,11 @@ async def test_an_empty_catalog_yields_no_affinities_rather_than_a_zero_division
 
 
 async def test_at_most_three_affinity_rows_are_returned() -> None:
-    """PRD 06 says 1-3 rows, and the cap is the provider's own rather than the
-    composer's: a signal that can emit one row per genre can claim the whole
-    screen before diversity ever sees it."""
+    """PRD 06 says 1-3 rows, and the cap is the provider's own rather than the composer's.
+
+    a signal that can emit one row per genre can claim the whole screen before diversity
+    ever sees it.
+    """
     house = _Household()
     for genre in ("alpha", "beta", "gamma", "delta", "epsilon"):
         for _ in range(6):
@@ -761,8 +789,10 @@ async def test_at_most_three_affinity_rows_are_returned() -> None:
 
 
 async def test_support_counts_engaged_titles_rather_than_a_weight() -> None:
-    """`GenreAffinity.support` is a count of titles, and the plan's own text
-    says both "the weighted count" and "4 engaged titles" for the same number.
+    """`GenreAffinity.support` is a count of titles.
+
+    and the plan's own text says both "the weighted count" and "4 engaged titles" for
+    the same number.
 
     The count is what ships. `_MIN_SUPPORT = 4` is argued in *titles* ("where a
     genre stops being a weekend"), and a weighted floor of 4 would be a much
@@ -823,8 +853,10 @@ class _CountingTaste(FakeTasteRepository):
 
 
 async def _two_households(house: _Household) -> None:
-    """One library, two households, one genre each -- so a memo that answered
-    the wrong household's question is visible as a *genre*, not only as a count.
+    """One library, two households, one genre each.
+
+    so a memo that answered the wrong household's question is visible as a *genre*, not
+    only as a count.
 
     The library is 2 westerns, 2 horrors and 96 dramas, so either household's
     own genre clears `_MIN_LIFT` by a factor of tens while the genre the *other*
@@ -879,7 +911,7 @@ async def test_the_engaged_window_is_read_once_however_many_answers_are_asked_of
 
 
 async def test_one_households_window_is_never_answered_from_anothers() -> None:
-    """**The memo is keyed by household, and this is the case that says so.**
+    """**The memo is keyed by household, and this is the case that says so.**.
 
     A cache on a per-user read is the one optimisation whose failure mode is a
     data leak rather than a slow screen: a memo keyed on nothing at all answers
@@ -906,8 +938,10 @@ async def test_one_households_window_is_never_answered_from_anothers() -> None:
 
 
 async def test_the_library_wide_genre_aggregate_is_read_once_and_not_once_per_answer() -> None:
-    """**`library_genre_counts` takes no `user_id`, and that is the whole
-    argument for memoising it where the per-user reads cannot be.**
+    """**`library_genre_counts` takes no `user_id`.
+
+    and that is the whole argument for memoising it where the per-user reads cannot
+    be.**.
 
     It is an `unnest(genres) GROUP BY` over the entire owned library -- 1.27M
     titles on the measured catalog -- and its answer is identical for every
@@ -946,8 +980,7 @@ async def test_the_library_wide_genre_aggregate_is_read_once_and_not_once_per_an
 
 
 async def test_a_history_that_moves_is_re_read_rather_than_answered_from_the_memo() -> None:
-    """**The memo's own invalidation, asserted where the memo is -- on the
-    count.**
+    """**The memo's own invalidation, asserted where the memo is -- on the count.**.
 
     `test_a_newer_watch_state_recomputes_the_centroid_without_any_event` and
     its sibling already pin that a moved history produces a *different answer*;
@@ -990,11 +1023,13 @@ async def test_a_history_that_moves_is_re_read_rather_than_answered_from_the_mem
 
 
 async def test_the_centroid_reads_vectors_unscoped_by_model() -> None:
-    """`TitleEmbeddingRepository.list_for_titles` grew a keyword-only,
-    **optional** `model_name` in M9 (F5). This caller keeps the call it has,
-    and the reason is `centroid`'s own opening line: the model is read off the
-    *embedder*, and the window's vectors are whatever is stored for the titles
-    the household engaged with.
+    """`TitleEmbeddingRepository.list_for_titles` grew a keyword-only.
+
+    **optional** `model_name` in M9 (F5).
+
+    This caller keeps the call it has, and the reason is `centroid`'s own opening line:
+    the model is read off the *embedder*, and the window's vectors are whatever is
+    stored for the titles the household engaged with.
 
     Scoping it here would look like an improvement and would change what a
     centroid *is*: mid-swap, the window's already-re-embedded titles would be

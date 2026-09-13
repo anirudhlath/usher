@@ -1,5 +1,6 @@
-"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against real
-Postgres, and the run-time facts the two routes depend on and cannot check.
+"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against real Postgres.
+
+and the run-time facts the two routes depend on and cannot check.
 """
 
 import gzip
@@ -73,8 +74,9 @@ def _offline_settings(cache: Path, **rest: object) -> Settings:
 async def test_a_bootstrap_phase_runs_end_to_end_through_the_shared_dispatch(
     session: AsyncSession, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The `bootstrap` handler's whole body, against real Postgres: the two
-    IMDb passes inside one load window, a real catalog afterwards, and a
+    """The `bootstrap` handler's whole body, against real Postgres.
+
+    the two IMDb passes inside one load window, a real catalog afterwards, and a
     `COMPLETED` checkpoint per dataset.
 
     Driven through `run_bootstrap` rather than through `BootstrapService`
@@ -111,10 +113,10 @@ async def test_a_bootstrap_phase_runs_end_to_end_through_the_shared_dispatch(
 async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_nothing(
     postgres_url: str, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`JobWorker` requires the claim to be committed before the handler
-    runs, and the handler commits per batch inside it -- so no transaction
-    spans the work, and a run killed halfway leaves what it had already
-    written.
+    """`JobWorker` requires the claim to be committed before the handler runs.
+
+    and the handler commits per batch inside it -- so no transaction spans the work, and
+    a run killed halfway leaves what it had already written.
 
     The property with teeth is the **cursor**, not the row count: every write
     here is an upsert, so `count_titles()` recovers either way, and only a
@@ -183,17 +185,20 @@ async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_noth
 
 
 class _Killed(Exception):
-    """Not a `UsherPortError`: `BootstrapService` records those and returns,
-    which is the graceful path rather than the abrupt one this case needs."""
+    """Not a `UsherPortError`.
+
+    `BootstrapService` records those and returns, which is the graceful path rather than
+    the abrupt one this case needs.
+    """
 
 
 async def test_the_load_window_declines_on_a_live_catalog_and_keeps_both_indexes(
     session: AsyncSession,
 ) -> None:
-    """`bulk_load_window()` suspends `ix_titles_sort_name` and
-    `ix_titles_name_lower_year` **only into an empty table**, and that guard
-    is now load-bearing for a *serving* process rather than for an operator's
-    own command.
+    """`bulk_load_window()` suspends `ix_titles_sort_name` and `ix_titles_name_lower_year`.
+
+    **only into an empty table**, and that guard is now load-bearing for a *serving*
+    process rather than for an operator's own command.
 
     Before M9 the only caller was `usher bootstrap`, so dropping two indexes
     on a live catalog would have been one person's mistake at their own
@@ -227,10 +232,11 @@ async def test_the_load_window_declines_on_a_live_catalog_and_keeps_both_indexes
 
 
 class _ContendedDataset(BulkDataset[object]):
-    """A dataset whose `revision()` resolves and whose `batches()` must never
-    be reached: a `RepositoryConflict` from `start()` short-circuits before
-    `_drain`, and raising here turns that into something this case verifies
-    rather than assumes."""
+    """A dataset whose `revision()` resolves and whose `batches()` must never be reached.
+
+    a `RepositoryConflict` from `start()` short-circuits before `_drain`, and raising
+    here turns that into something this case verifies rather than assumes.
+    """
 
     @property
     def name(self) -> str:
@@ -271,8 +277,9 @@ class _AlwaysFreshStart(PostgresImportRunRepository):
 async def test_a_second_bootstrap_leaves_the_owning_processs_checkpoint_untouched(
     postgres_url: str,
 ) -> None:
-    """The `_concede_to_other_owner` path, reachable in anger for the first
-    time because of this route.
+    """The `_concede_to_other_owner` path.
+
+    reachable in anger for the first time because of this route.
 
     `(kind, key)` stops two *jobs* for one phase from existing, and the
     single `JobWorker` lane stops two claims running at once -- neither says
@@ -326,8 +333,9 @@ async def _refuses(rows: Sequence[object]) -> int:
 async def test_the_route_writes_a_real_job_row_and_no_import_run(
     postgres_url: str, session: AsyncSession
 ) -> None:
-    """End to end over the un-overridden dependency graph: the request writes
-    one `jobs` row at `DEMAND` and touches `import_runs` not at all.
+    """End to end over the un-overridden dependency graph.
+
+    the request writes one `jobs` row at `DEMAND` and touches `import_runs` not at all.
 
     `tests/unit/test_api_bootstrap.py` asserts the same shape against
     `FakeJobQueue`; what this adds is the wiring -- `get_job_queue`,
@@ -377,7 +385,7 @@ _RELEASE_B = "an-invented-etag-b"
 
 
 def _zero_vector() -> str:
-    """pgvector's text input form at the production width.
+    """Pgvector's text input form at the production width.
 
     `CAST(:x AS halfvec)` at the call site rather than `:x::halfvec` --
     SQLAlchemy's bind-parameter regex reads a name followed by `::` as a
@@ -493,10 +501,11 @@ async def _status_body(postgres_url: str) -> dict[str, object]:
 async def test_the_status_route_answers_200_against_a_database_no_import_has_touched(
     postgres_url: str, clean_status: None
 ) -> None:
-    """The empty-database case first, because PRD 08's operator rule is that a
-    diagnostic must work before the thing it diagnoses has run -- and because
-    an empty answer is where a report assembled from four reads is most likely
-    to raise.
+    """The empty-database case first.
+
+    because PRD 08's operator rule is that a diagnostic must work before the thing it
+    diagnoses has run -- and because an empty answer is where a report assembled from
+    four reads is most likely to raise.
 
     200 rather than 404: "no import has ever run" is a fact about the thing
     being described, not a failure of the request. That is the rule
@@ -545,10 +554,11 @@ async def test_the_route_and_the_cli_report_the_same_vocabulary_verdict(
     state: VocabularyState,
     sentence_holds: str,
 ) -> None:
-    """One decision, two renderings -- asserted over every branch the verdict
-    has, including the mixed-releases one whose comment records why it exists
-    (*"asking for one of several releases would report the vocabulary as wrong
-    when what is wrong is the vectors"*).
+    """One decision, two renderings.
+
+    asserted over every branch the verdict has, including the mixed-releases one whose
+    comment records why it exists (*"asking for one of several releases would report the
+    vocabulary as wrong when what is wrong is the vectors"*).
 
     The assertion that makes this a test of *sharing* rather than of two
     agreeing implementations is the last one: the document the route
@@ -596,9 +606,10 @@ async def test_a_failed_run_reaches_the_body_as_the_stored_string_and_carries_no
     sessions: async_sessionmaker[AsyncSession],
     clean_status: None,
 ) -> None:
-    """`error` is what `BootstrapService` wrote -- `str(exc)`, never the
-    exception object and never a payload -- and 200 is the answer for a
-    catalog holding one.
+    """`error` is what `BootstrapService` wrote.
+
+    `str(exc)`, never the exception object and never a payload -- and 200 is the answer
+    for a catalog holding one.
 
     The credential arm is the half worth having: a dataset whose upstream
     failure message quotes a URL is the realistic shape (`PortUnavailable`

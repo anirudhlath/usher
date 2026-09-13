@@ -60,11 +60,12 @@ SOURCE = Source(
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """A real `MeterProvider` with an in-memory reader, installed for this
-    test alone -- `tests/conftest.py::reset_otel_meter_provider` is what
-    makes "for this test alone" true (the API refuses a second
-    `set_meter_provider` in a process, and every module-level instrument
-    caches the first real one it is handed)."""
+    """A real `MeterProvider` with an in-memory reader, installed for this test alone.
+
+    `tests/conftest.py::reset_otel_meter_provider` is what makes "for this test alone"
+    true (the API refuses a second `set_meter_provider` in a process, and every module-
+    level instrument caches the first real one it is handed).
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -119,10 +120,11 @@ def _applier(events: FakeEventPublisher) -> PushApplyService:
 async def test_every_applied_event_is_counted_by_source_and_kind(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10's `usher.source.push.events`. Labelled by kind because the two
-    that cost nothing (`item_removed`, which ADR-0015 forbids acting on) and
-    the one that costs a merge look identical on an unlabelled series -- and
-    "is this lane doing anything" is the question dashboard 3's push panel
+    """PRD 10's `usher.source.push.events`.
+
+    Labelled by kind because the two that cost nothing (`item_removed`, which ADR-0015
+    forbids acting on) and the one that costs a merge look identical on an unlabelled
+    series -- and "is this lane doing anything" is the question dashboard 3's push panel
     exists to answer alongside uptime.
 
     Counted on the way *out* of `apply`, so a deferred event is counted too:
@@ -177,23 +179,26 @@ def _instrument_names(reader: InMemoryMetricReader) -> set[str]:
 
 
 def test_every_prd_10_push_metric_actually_exists(meter_reader: InMemoryMetricReader) -> None:
-    """The catalogue as a set, read off the instruments themselves rather
-    than restated. Each name has its own case above that drives the code
-    emitting it -- this is the one that fails when a rename in `src/` moves
-    a dashboard's target, even if whoever renamed it also updated the case
-    that drives it. PRD 10 already prices the failure: a metric emitted
-    under a near-miss name is a permanently empty panel that nothing
+    """The catalogue as a set, read off the instruments themselves rather than restated.
+
+    Each name has its own case above that drives the code emitting it -- this is the one
+    that fails when a rename in `src/` moves a dashboard's target, even if whoever
+    renamed it also updated the case that drives it. PRD 10 already prices the failure:
+    a metric emitted under a near-miss name is a permanently empty panel that nothing
     distinguishes from a healthy zero.
     """
     assert _instrument_names(meter_reader) >= PRD_10_M5_PUSH_METRICS
 
 
 def test_the_module_owning_those_instruments_is_imported() -> None:
-    """`_instrument_names` walks `sys.modules`, so a catalogue case whose
-    module was never imported compares an empty set against a set it happens
-    to contain and passes having measured nothing. Pinned rather than relied
-    on -- the same family as "a harness must refuse to classify a run that
-    did not run"."""
+    """`_instrument_names` walks `sys.modules`.
+
+    so a catalogue case whose module was never imported compares an empty set against a
+    set it happens to contain and passes having measured nothing.
+
+    Pinned rather than relied on -- the same family as "a harness must refuse to
+    classify a run that did not run".
+    """
     assert "usher.services.push" in sys.modules
 
 
@@ -209,11 +214,12 @@ def _points(reader: InMemoryMetricReader, name: str) -> list[tuple[float, str]]:
 def test_the_push_gauge_reports_delivery_not_connection(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10's "Push down" alert fires on `push.connected == 0` for fifteen
-    minutes. A gauge reporting the *socket* would be permanently green
-    against the one failure ADR-0004 warns about -- a channel that upgraded,
-    is held open, and delivers nothing -- which is precisely the condition
-    that alert exists to catch."""
+    """PRD 10's "Push down" alert fires on `push.connected == 0` for fifteen minutes.
+
+    A gauge reporting the *socket* would be permanently green against the one failure
+    ADR-0004 warns about -- a channel that upgraded, is held open, and delivers nothing
+    -- which is precisely the condition that alert exists to catch.
+    """
     register_push_gauges(lambda: {"Living Room Emby": PushSnapshot(delivering=False, reconnects=2)})
     assert _points(meter_reader, "usher.source.push.connected") == [(0.0, "Living Room Emby")]
 
@@ -228,10 +234,13 @@ def test_the_push_gauge_reports_one_for_a_delivering_channel(
 def test_the_reconnect_series_reports_the_lanes_cumulative_count(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """Cumulative for the adapter's whole life rather than per connection --
-    `PushHealth` is one object across reconnects for exactly this. A
-    per-connection counter would read 0 or 1 forever and dashboard 3's
-    "reconnect count" panel would be a flat line."""
+    """Cumulative for the adapter's whole life rather than per connection.
+
+    `PushHealth` is one object across reconnects for exactly this.
+
+    A per-connection counter would read 0 or 1 forever and dashboard 3's "reconnect
+    count" panel would be a flat line.
+    """
     register_push_gauges(lambda: {"A": PushSnapshot(delivering=True, reconnects=7)})
     assert _points(meter_reader, "usher.source.push.reconnects") == [(7.0, "A")]
 
@@ -239,11 +248,13 @@ def test_the_reconnect_series_reports_the_lanes_cumulative_count(
 def test_the_reconnect_series_is_a_counter_and_the_uptime_series_is_a_gauge(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10 documents one of each, and the two are different instruments
-    on the wire: a monotonic `Sum` is what a Prometheus counter is, and
-    `rate()` over a gauge is not the same query. A row emitted under its
-    documented *name* but the wrong *type* is the same class of failure as a
-    near-miss name -- the panel exists, the series is wrong, and nothing
+    """PRD 10 documents one of each, and the two are different instruments on the wire.
+
+    a monotonic `Sum` is what a Prometheus counter is, and `rate()` over a gauge is not
+    the same query.
+
+    A row emitted under its documented *name* but the wrong *type* is the same class of
+    failure as a near-miss name -- the panel exists, the series is wrong, and nothing
     says so.
 
     Read off the exported data rather than off the call, so registering both
@@ -263,11 +274,14 @@ def test_the_reconnect_series_is_a_counter_and_the_uptime_series_is_a_gauge(
 def test_registering_a_second_reader_replaces_the_first(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The SDK keeps only the *first* observable instrument registered under
-    a name and silently discards the rest -- verified directly for
-    `register_queue_gauges` and true here for the same reason. A
-    re-registration that only created a second instrument would leave the
-    first, now-dead reader reporting forever."""
+    """The SDK keeps only the *first* observable instrument registered under a name and silently.
+
+    discards the rest -- verified directly for `register_queue_gauges` and true here for
+    the same reason.
+
+    A re-registration that only created a second instrument would leave the first, now-
+    dead reader reporting forever.
+    """
     register_push_gauges(lambda: {"A": PushSnapshot(delivering=False, reconnects=0)})
     _recorded(meter_reader)
     register_push_gauges(lambda: {"B": PushSnapshot(delivering=True, reconnects=1)})
@@ -277,10 +291,11 @@ def test_registering_a_second_reader_replaces_the_first(
 def test_no_reader_reports_no_observation_rather_than_a_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fabricated zero is indistinguishable from a source whose channel is
-    down, and PRD 10's "Push down" alert fires on exactly that value -- so a
-    process that reported 0 from start-up would page somebody about a source
-    that was never configured.
+    """A fabricated zero is indistinguishable from a source whose channel is down.
+
+    and PRD 10's "Push down" alert fires on exactly that value -- so a process that
+    reported 0 from start-up would page somebody about a source that was never
+    configured.
 
     Pinned by calling the callbacks directly with the reader unset, not
     through a collection, for the reason M4 recorded for the queue gauges:

@@ -18,8 +18,7 @@ RECENTLY = datetime(2026, 7, 2, 20, 30, tzinfo=UTC)
 
 
 class PersonHistorySeeder(ABC):
-    """Everything a `PersonRepositoryContract` case needs and the port cannot
-    write.
+    """Everything a `PersonRepositoryContract` case needs and the port cannot write.
 
     Deliberately not "give me a session": the fake has no session, and a
     seeder shaped around one would make the whole suite Postgres-only, which
@@ -32,9 +31,11 @@ class PersonHistorySeeder(ABC):
 
     @abstractmethod
     async def series_with_episodes(self, count: int) -> tuple[uuid.UUID, list[uuid.UUID]]:
-        """A series and `count` of its episodes, returning `(title_id,
-        episode_ids)`. The episodes are what an episode-level watch state
-        names, and their series is what the credit hangs off."""
+        """A series and `count` of its episodes, returning `(title_id, episode_ids)`.
+
+        The episodes are what an episode-level watch state names, and their series is
+        what the credit hangs off.
+        """
 
     @abstractmethod
     async def credit(
@@ -91,8 +92,10 @@ class PersonRepositoryContract:
     async def test_two_people_who_share_a_name_are_two_people(
         self, repository: PersonRepository
     ) -> None:
-        """The wrong implementation this kills: dedupes by `name` rather than
-        by `tmdb_id`, collapsing two directors who share one.
+        """The wrong implementation this kills.
+
+        dedupes by `name` rather than by `tmdb_id`, collapsing two directors who share
+        one.
 
         ADR-0003 is the rule -- identity is Usher's own UUIDv7 and `tmdb_id`
         is an indexed attribute, never identity -- and this is what it buys. A
@@ -109,10 +112,11 @@ class PersonRepositoryContract:
     async def test_a_person_is_updated_rather_than_duplicated_on_a_second_pass(
         self, repository: PersonRepository, seeder: PersonHistorySeeder
     ) -> None:
-        """Keyed on `tmdb_id`, not on `Person.id`. The derivation mints a
-        fresh UUIDv7 per sighting exactly as ingest does for seasons, so an
-        id-keyed upsert inserts a duplicate row per pass and the catalog grows
-        a copy of every actor every time `usher derive` runs.
+        """Keyed on `tmdb_id`, not on `Person.id`.
+
+        The derivation mints a fresh UUIDv7 per sighting exactly as ingest does for
+        seasons, so an id-keyed upsert inserts a duplicate row per pass and the catalog
+        grows a copy of every actor every time `usher derive` runs.
 
         The rename assertion is the second half and kills the mirror mistake:
         `name = COALESCE(excluded.name, people.name)`, under which a corrected
@@ -136,9 +140,10 @@ class PersonRepositoryContract:
     async def test_upsert_never_blanks_a_known_for_department(
         self, repository: PersonRepository, seeder: PersonHistorySeeder
     ) -> None:
-        """The `COALESCE` rule, and here it is **required rather than
-        defensive** -- which is the difference from `upsert_seasons`, where it
-        guards against a later walk.
+        """The `COALESCE` rule, and here it is **required rather than defensive**.
+
+        which is the difference from `upsert_seasons`, where it guards against a later
+        walk.
 
         Measured against the recorded payloads: a `credits.cast[]` entry
         carries `known_for_department` and a `created_by[]` entry does not. So
@@ -168,8 +173,9 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """The front matter's ranking failure, seeded so the wrong answer is confident
-        rather than empty.
+        """The front matter's ranking failure.
+
+        seeded so the wrong answer is confident rather than empty.
         """
         await repository.upsert_many(
             [
@@ -249,8 +255,7 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """The wrong implementation this kills: reading only
-        `watch_states.title_id`.
+        """The wrong implementation this kills: reading only `watch_states.title_id`.
 
         An episode-level watch state carries `title_id IS NULL` and an
         `episode_id`; the series is on `episodes.title_id`. Without the join
@@ -285,9 +290,10 @@ class PersonRepositoryContract:
         user_id: uuid.UUID,
         other_user_id: uuid.UUID,
     ) -> None:
-        """Seeds the *other* user with the larger history, so an
-        implementation ignoring `user_id` returns more rather than fewer --
-        the failure that reads as working.
+        """Seeds the *other* user with the larger history.
+
+        so an implementation ignoring `user_id` returns more rather than fewer -- the
+        failure that reads as working.
 
         This user has watched one film; the other has watched three, all
         credited to a person this user has never seen. An unscoped read
@@ -317,10 +323,11 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """`played` is the predicate, not "has a watch state". A row with
-        `played = false, position_seconds = 0` is a state a sync created and
-        nobody watched -- the same distinction `ContinueWatchingProvider`'s
-        distractor is about, one provider over.
+        """`played` is the predicate, not "has a watch state".
+
+        A row with `played = false, position_seconds = 0` is a state a sync created and
+        nobody watched -- the same distinction `ContinueWatchingProvider`'s distractor
+        is about, one provider over.
 
         The person is credited on three films and the user has a watch state
         for all three, but only one is played -- so `WHERE played` dropped
@@ -343,9 +350,10 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """PRD 06's word is *recurring*, and one appearance is not a
-        recurrence. The front matter's distractor for this provider is exactly
-        this: "a person with one credit, against one with four".
+        """PRD 06's word is *recurring*, and one appearance is not a recurrence.
+
+        The front matter's distractor for this provider is exactly this: "a person with
+        one credit, against one with four".
 
         The one-film person is seeded **second**, so an implementation with
         `>= 1` in place of `>= min_titles` returns them in a position an
@@ -371,8 +379,7 @@ class PersonRepositoryContract:
     async def test_get_returns_the_person_and_none_for_an_unknown_id(
         self, repository: PersonRepository
     ) -> None:
-        """`GET /people/{id}` is the caller M7 said would come, and this is
-        the read it needs.
+        """`GET /people/{id}` is the caller M7 said would come, and this is the read it needs.
 
         **Two people seeded, and the assertion is on the value rather than on
         truthiness.** The wrong implementation this kills is a `get` whose
@@ -415,11 +422,13 @@ class PersonRepositoryContract:
     async def test_a_duplicate_person_inside_one_batch_is_tolerated(
         self, repository: PersonRepository, seeder: PersonHistorySeeder
     ) -> None:
-        """One derivation pass spans many titles and a working actor is on
-        several of them, so this is the common case rather than the odd one.
+        """One derivation pass spans many titles and a working actor is on several of them.
+
+        so this is the common case rather than the odd one.
+
         Without `SELECT DISTINCT ON` the real implementation answers
-        `CardinalityViolationError: ON CONFLICT DO UPDATE command cannot
-        affect row a second time`. Last-wins, matching the port's stated rule.
+        `CardinalityViolationError: ON CONFLICT DO UPDATE command cannot affect row a
+        second time`. Last-wins, matching the port's stated rule.
         """
         result = await repository.upsert_many(
             [person(93_000_016, "First"), person(93_000_016, "Last")]
@@ -431,9 +440,12 @@ class PersonRepositoryContract:
     async def test_two_people_with_no_tmdb_id_are_two_people(
         self, repository: PersonRepository
     ) -> None:
-        """The partial index's other half, and the fake's easiest bug: a dict
-        keyed on `tmdb_id` collapses every `None` onto one entry. In Postgres
-        the property comes free from the index being *partial*."""
+        """The partial index's other half, and the fake's easiest bug.
+
+        a dict keyed on `tmdb_id` collapses every `None` onto one entry.
+
+        In Postgres the property comes free from the index being *partial*.
+        """
         result = await repository.upsert_many([person(None, "Nameless"), person(None, "Other")])
         assert (result.inserted, result.updated) == (2, 0)
 
@@ -447,7 +459,7 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """**The front matter's opening failure with a person's name on it.**
+        """**The front matter's opening failure with a person's name on it.**.
 
         Two actors at three titles each, one of them last watched a month ago
         and the other in 2019. Without the recency key the answer is "whatever
@@ -530,9 +542,10 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """`watch_states.last_played_at` is nullable because a walk's listing
-        cannot determine it (ADR-0014), so `max(...)` over a person's states is
-        genuinely NULL on a freshly-walked deployment.
+        """`watch_states.last_played_at` is nullable because a walk's listing cannot determine.
+
+        it (ADR-0014), so `max(...)` over a person's states is genuinely NULL on a
+        freshly-walked deployment.
 
         Postgres defaults a `DESC` sort to **NULLS FIRST**, which would put
         every such person above everyone the household demonstrably watched

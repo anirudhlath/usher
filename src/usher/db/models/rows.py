@@ -9,8 +9,9 @@ from usher.db.base import Base
 
 
 class RowProviderSettingRow(Base):
-    """One provider's operator-set override. Three columns and no surrogate
-    id.
+    """One provider's operator-set override.
+
+    Three columns and no surrogate id.
 
     **`RowProvider.slug_prefix` is the natural key**, and its own port
     docstring is why: it is *"declared rather than derived"* and *"bounded at

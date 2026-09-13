@@ -24,8 +24,9 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class TitleGenres:
-    """One title's id and its genre labels — the whole projection the
-    write-time genre sweep reads and writes.
+    """One title's id and its genre labels.
+
+    the whole projection the write-time genre sweep reads and writes.
 
     **Not a `Title`.** `usher genres --backfill` walks 1.27M rows to decide
     whether two of thirty-three columns need touching, and hydrating an
@@ -102,8 +103,7 @@ class BrowseSort(StrEnum):
 
     @classmethod
     def position_of(cls, title: Title, *, sort: "BrowseSort") -> "BrowseCursorPosition":
-        """Where `title` sits in `sort`'s order — what a caller hands back as
-        `browse`'s `after`.
+        """Where `title` sits in `sort`'s order — what a caller hands back as `browse`'s `after`.
 
         Here rather than in the caller so the sort's key is read from
         `_ORDERS` in one place. A route that spelled `title.year` for itself
@@ -161,8 +161,10 @@ class BrowseFacets:
 
 
 class TitleRepository(ABC):
-    """Persistence for canonical titles, kept behind a port so services depend on this ABC
-    and never on `usher.db` directly — see ADR-0009.
+    """Persistence for canonical titles.
+
+    kept behind a port so services depend on this ABC and never on `usher.db` directly —
+    see ADR-0009.
     """
 
     @abstractmethod
@@ -185,9 +187,10 @@ class TitleRepository(ABC):
     @abstractmethod
     async def update(self, title: Title) -> None:
         """Persist a mutated, already-existing title — e.g.
-        `title.evolve(enrichment_state=EnrichmentState.ENRICHED, ...)`
-        after enrichment, which is the read-through design's whole point
-        (PRD 03: stub-on-sight, then enrich in place).
+
+        `title.evolve(enrichment_state=EnrichmentState.ENRICHED, ...)` after enrichment,
+        which is the read-through design's whole point (PRD 03: stub-on-sight, then
+        enrich in place).
 
         This is an update, not an upsert: a `title.id` that does not
         already exist raises `RepositoryNotFound` (`usher.ports.errors`).
@@ -211,8 +214,7 @@ class TitleRepository(ABC):
 
     @abstractmethod
     async def get_by_tmdb_id(self, tmdb_id: int, kind: TitleKind) -> Title | None:
-        """Fetch by TMDb id *within its namespace*, or None if no title
-        carries it.
+        """Fetch by TMDb id *within its namespace*, or None if no title carries it.
 
         `kind` is not optional, and not a convenience filter. TMDb keys
         movies and TV series in separate id spaces that both land in this

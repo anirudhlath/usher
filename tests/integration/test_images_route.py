@@ -52,8 +52,9 @@ def settings(postgres_url: str, cache_dir: Path) -> Settings:
 
 @pytest.fixture
 def cdn() -> httpx.MockTransport:
-    """The CDN's fifteen-rung allowlist, in miniature: a body per rung of the
-    ladder and an **HTTP 400** for anything else.
+    """The CDN's fifteen-rung allowlist, in miniature.
+
+    a body per rung of the ladder and an **HTTP 400** for anything else.
 
     The 400 is the half that matters. ADR-0032 measured that the real CDN's
     allowlist is closed and answers 400 off it -- `w0`, `w100`, `w600`,
@@ -77,9 +78,11 @@ def title_id() -> uuid.UUID:
 
 
 def an_image(title_id: uuid.UUID) -> Image:
-    """A fresh UUIDv7 every call -- exactly what `usher derive` mints per
-    sighting, which is what makes the re-derivation case a real test of the
-    natural key rather than of a constant."""
+    """A fresh UUIDv7 every call.
+
+    exactly what `usher derive` mints per sighting, which is what makes the re-
+    derivation case a real test of the natural key rather than of a constant.
+    """
     return Image(
         title_id=title_id,
         kind=ImageKind.POSTER,
@@ -198,8 +201,7 @@ async def test_the_same_id_still_serves_the_same_bytes_after_a_real_re_derivatio
     title_id: uuid.UUID,
     cache_dir: Path,
 ) -> None:
-    """C2's `uq_images_owner_provider_path` arriving on the wire, over real
-    SQL.
+    """C2's `uq_images_owner_provider_path` arriving on the wire, over real SQL.
 
     This is the case the header rests on, and the fake cannot make it: a Python
     tuple key is `NULLS NOT DISTINCT` for free, so the id survives there
@@ -237,8 +239,7 @@ async def test_the_same_id_still_serves_the_same_bytes_after_a_real_re_derivatio
 async def test_an_id_no_row_carries_is_a_404_and_writes_nothing(
     client: httpx.AsyncClient, seeded: uuid.UUID, cache_dir: Path
 ) -> None:
-    """A real `SELECT` that found nothing, through the un-overridden
-    repository.
+    """A real `SELECT` that found nothing, through the un-overridden repository.
 
     `seeded` is requested first as the positive control: a route that 404s
     everything, or an app whose image router never registered, produces the
@@ -258,8 +259,7 @@ async def test_an_id_no_row_carries_is_a_404_and_writes_nothing(
 async def test_a_width_the_cdn_refuses_never_reaches_it(
     client: httpx.AsyncClient, seeded: uuid.UUID, cache_dir: Path
 ) -> None:
-    """`?w=513` is a width the provider answers HTTP 400 to, and this route
-    never asks it.
+    """`?w=513` is a width the provider answers HTTP 400 to, and this route never asks it.
 
     The `MockTransport` mirrors the measured allowlist, so if the clamp were
     removed the CDN's 400 would arrive here as `PortDataMalformed` and the

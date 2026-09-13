@@ -47,8 +47,7 @@ _MAX_IMDB_DIGITS = 8
 
 
 def _imdb_id(raw: str) -> str:
-    """`links.csv`'s bare `imdbId` digits as the catalog's `'tt'`-prefixed,
-    zero-padded id.
+    """`links.csv`'s bare `imdbId` digits as the catalog's `'tt'`-prefixed, zero-padded id.
 
     `zfill(7)` rather than bare concatenation -- see the module docstring for
     the width distribution this rests on. A value that is empty, non-numeric
@@ -76,8 +75,7 @@ def _optional_int(raw: str, *, movie_id: str, column: str) -> int | None:
 
 
 class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
-    """The MovieLens tag genome, streamed as resumable batches of dense
-    vectors.
+    """The MovieLens tag genome, streamed as resumable batches of dense vectors.
 
     **One dataset, one `import_runs` row, three members.** The alternative --
     three `BulkDataset`s -- is wrong because two of the three members are
@@ -114,8 +112,7 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         return MOVIELENS_ATTRIBUTION
 
     async def revision(self) -> str:
-        """The archive's ETag -- measured `"14ea425b-600f0e149d407"`, unchanged
-        since 2023-07-20.
+        """The archive's ETag -- measured `"14ea425b-600f0e149d407"`, unchanged since 2023-07-20.
 
         Raises `PortUnavailable` if `files.grouplens.org` is unreachable or
         answers 4xx/5xx, **and `PortRateLimited` if it answers 429**. Both are
@@ -139,9 +136,10 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         return self._vocabulary(revision)
 
     def _vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
-        """`genome-tags.csv`, parsed and checked, before a single score is read -- 1,128
-        rows and 18,103 bytes, so a changed vocabulary costs one 18 kB read rather than
-        a 521 MB pass.
+        """`genome-tags.csv`, parsed and checked, before a single score is read.
+
+        1,128 rows and 18,103 bytes, so a changed vocabulary costs one 18 kB read rather
+        than a 521 MB pass.
         """
         if self._tags is not None and self._tags[0] == revision:
             return self._tags[1]
@@ -243,8 +241,9 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         run_len = 0
 
         def close_run(movie_id: int) -> None:
-            """Validate the open run, emit its vector if it joins, and retire
-            the movie into `seen`.
+            """Validate the open run.
+
+            emit its vector if it joins, and retire the movie into `seen`.
 
             Takes the id rather than reading `current`, so the "a run is only
             ever closed for a movie that has one" precondition is expressed by

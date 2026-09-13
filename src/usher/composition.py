@@ -529,8 +529,7 @@ async def selected_sources(pipeline: Pipeline, name: str | None = None) -> list[
 
 
 async def open_adapter(pipeline: Pipeline, source: Source) -> SourceAdapter | None:
-    """Build the adapter for one source, or `None` if its credential row
-    has gone missing.
+    """Build the adapter for one source, or `None` if its credential row has gone missing.
 
     `None` rather than a raise: an operator with three sources needs the
     second and third to run when the first's credential has gone -- exactly
@@ -582,8 +581,7 @@ def build_enrich_service(
     events: EventPublisher,
     cache: RowCache | None = None,
 ) -> EnrichService:
-    """Enrichment, with its publisher passed in rather than read off the
-    pipeline.
+    """Enrichment, with its publisher passed in rather than read off the pipeline.
 
     `events` is explicit for the reason `build_push_applier`'s is, pointing
     the other way: the applier's publisher **must** be the live bus, and this
@@ -1075,8 +1073,9 @@ async def llm_client(
 def image_proxy(
     settings: Settings,
 ) -> tuple[ImageFetcher, ImageBlobStore, Callable[[], Awaitable[None]]]:
-    """The image proxy's two process-scoped halves, and the callable that closes the
-    fetcher's transport.
+    """The image proxy's two process-scoped halves.
+
+    and the callable that closes the fetcher's transport.
     """
     client = httpx.AsyncClient(timeout=settings.image_fetch_timeout_seconds)
     fetcher = ProviderCdnImageFetcher(
@@ -1104,9 +1103,7 @@ def build_image_proxy_service(
 
 
 def _load_embedder(settings: Settings) -> Embedder:
-    """The one place a runtime prefix becomes an `Embedder`, isolated so a test can replace
-    it.
-    """
+    """The one place a runtime prefix becomes an `Embedder`, isolated so a test can replace it."""
     runtime, separator, _ = settings.embedding_model.partition(":")
     if separator and runtime == OPENAI_RUNTIME:
         from usher.adapters.embedding.openai_compat import OpenAICompatEmbedder
@@ -1361,9 +1358,11 @@ BootstrapReporter = Callable[[str], None]
 
 
 def _log_bootstrap_line(line: str) -> None:
-    """The worker's sink. One `logger.info` per report line, and `{}` in a
-    dataset name or a tag cannot become a loguru placeholder because the line
-    is passed as an argument rather than as the format string.
+    """The worker's sink.
+
+    One `logger.info` per report line, and `{}` in a dataset name or a tag cannot become
+    a loguru placeholder because the line is passed as an argument rather than as the
+    format string.
     """
     logger.info("{line}", line=line)
 
@@ -1454,9 +1453,11 @@ async def run_bootstrap(
 def _titles_writer(
     catalog: BulkCatalogRepository,
 ) -> Callable[[Sequence[ImdbTitle]], Awaitable[int]]:
-    """Adapts `upsert_titles`' BulkWriteResult to the `-> int` the service
-    wants. The other three repository methods already return `int`, so only
-    this one needs a wrapper."""
+    """Adapts `upsert_titles`' BulkWriteResult to the `-> int` the service wants.
+
+    The other three repository methods already return `int`, so only this one needs a
+    wrapper.
+    """
 
     async def write(rows: Sequence[ImdbTitle]) -> int:
         result = await catalog.upsert_titles(rows)
@@ -1493,8 +1494,9 @@ async def _credit_names(
     service: BootstrapService,
     report: BootstrapReporter,
 ) -> None:
-    """`name.basics` x `title.principals` -> `titles.credit_names`, and the report that
-    says how much of the catalog gained a name.
+    """`name.basics` x `title.principals` -> `titles.credit_names`.
+
+    and the report that says how much of the catalog gained a name.
     """
     if await catalog.count_titles() == 0:
         report(
@@ -1609,8 +1611,10 @@ async def _movielens(
     commit: Callable[[], Awaitable[None]],
     report: BootstrapReporter,
 ) -> None:
-    """The MovieLens tag genome, its tag vocabulary, and the coverage report that is the
-    actual deliverable of this phase.
+    """The MovieLens tag genome.
+
+    its tag vocabulary, and the coverage report that is the actual deliverable of this
+    phase.
     """
     if await catalog.count_titles() == 0:
         report(
@@ -1672,8 +1676,7 @@ def _percent(part: int, whole: int, *, noun: str = "titles") -> str:
 def _report_coverage(
     coverage: GenomeCoverage, unmatched: int, tags: int, report: BootstrapReporter
 ) -> None:
-    """Four fractions, the enriched-tier one last because it is the one that
-    matters.
+    """Four fractions, the enriched-tier one last because it is the one that matters.
 
     PRD 05 promised "~7% coverage" and PRD 04 repeated it as "~7% of the
     priority tier", and that figure has never had a denominator. Three of

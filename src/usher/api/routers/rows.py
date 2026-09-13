@@ -1,5 +1,6 @@
-"""PRD 07's admin row actions: `POST /admin/rows/regenerate` (M8), and `GET`/`PUT
-/admin/rows/providers` (M9).
+"""PRD 07's admin row actions.
+
+`POST /admin/rows/regenerate` (M8), and `GET`/`PUT /admin/rows/providers` (M9).
 """
 
 from typing import Any, Final

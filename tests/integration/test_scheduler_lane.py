@@ -90,7 +90,7 @@ def _with_job(monkeypatch: pytest.MonkeyPatch, job: ScheduledJob) -> None:
 async def test_the_scheduler_lane_runs_a_due_job_inside_the_server_process(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**A job running, not an assertion about wiring.**
+    """**A job running, not an assertion about wiring.**.
 
     An app is started with nothing but `LifespanManager`, and a job that has
     never been built runs before the app stops. Nothing in this test creates a

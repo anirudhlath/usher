@@ -1,4 +1,7 @@
-"""`OpenAICompatEmbedder` over `httpx.MockTransport`. No network, no model."""
+"""`OpenAICompatEmbedder` over `httpx.MockTransport`.
+
+No network, no model.
+"""
 
 import json
 import math
@@ -156,11 +159,14 @@ async def test_the_credential_is_a_header_and_never_reaches_the_url() -> None:
 
 
 async def test_no_credential_configured_sends_no_authorization_header() -> None:
-    """**The shipped default, not an edge case.** `Settings.embedding_api_key`
-    is an empty `SecretStr` and `composition._load_embedder` normalises that to
-    `None`, so a local vLLM -- the deployment this runtime exists for -- takes
-    this branch on every request. Sending `Bearer None`, or a blank bearer, is
-    how a client fails against the one server it was written for.
+    """**The shipped default.
+
+    not an edge case.** `Settings.embedding_api_key` is an empty `SecretStr` and
+    `composition._load_embedder` normalises that to `None`, so a local vLLM -- the
+    deployment this runtime exists for -- takes this branch on every request.
+
+    Sending `Bearer None`, or a blank bearer, is how a client fails against the one
+    server it was written for.
     """
     seen: list[httpx.Request] = []
 
@@ -200,8 +206,9 @@ async def test_a_batch_larger_than_the_batch_size_is_split_and_rejoined_in_order
 
 
 async def test_an_empty_batch_is_not_a_call() -> None:
-    """The port states this as a contract rather than an optimisation, and here
-    the cost is a round trip and a billable request rather than a GPU stall.
+    """The port states this as a contract rather than an optimisation.
+
+    and here the cost is a round trip and a billable request rather than a GPU stall.
 
     Asserted on the request that did not happen, never on the empty result: an
     implementation that sent `{"input": []}` and got an empty `data` array back
@@ -227,8 +234,10 @@ async def test_an_empty_batch_is_not_a_call() -> None:
 
 
 async def test_the_vectors_come_back_in_the_order_the_texts_went_in() -> None:
-    """The control. Without it every case below passes against an
-    implementation that refuses everything.
+    """The control.
+
+    Without it every case below passes against an implementation that refuses
+    everything.
     """
     handler = _responds(body=_body([_unit(1.0), _unit(2.0), _unit(3.0)]))
 
@@ -238,7 +247,7 @@ async def test_the_vectors_come_back_in_the_order_the_texts_went_in() -> None:
 
 
 async def test_a_shuffled_response_is_sorted_back_by_index() -> None:
-    """**The case this file exists for.**
+    """**The case this file exists for.**.
 
     `Embedder.embed` calls a reordering the most damaging bug available here:
     title *n*'s vector is stored against title *m*, `title_neighbors` is built
@@ -273,10 +282,12 @@ async def test_a_shuffled_response_is_sorted_back_by_index() -> None:
 
 
 async def test_fewer_vectors_than_texts_is_malformed() -> None:
-    """A provider that deduplicated identical inputs, or truncated an
-    over-long batch, answers 200 with a short array. Every vector in it is
-    perfectly good and every one after the gap is attributed to the wrong
-    title.
+    """A provider that deduplicated identical inputs.
+
+    or truncated an over-long batch, answers 200 with a short array.
+
+    Every vector in it is perfectly good and every one after the gap is attributed to
+    the wrong title.
 
     `PortDataMalformed` rather than retryable: no backoff makes a server return
     a different number of vectors for the same input, so `JobWorker` parks the
@@ -289,11 +300,13 @@ async def test_fewer_vectors_than_texts_is_malformed() -> None:
 
 
 async def test_a_duplicated_index_is_malformed() -> None:
-    """The count is right and the answer is still wrong, which is why the
-    count check is not enough. Two objects both claiming `index: 0` leave one
-    input with no vector at all -- an implementation keyed on a dict would
-    silently answer with the second one twice, and an implementation trusting
-    arrival order would not notice anything.
+    """The count is right and the answer is still wrong.
+
+    which is why the count check is not enough.
+
+    Two objects both claiming `index: 0` leave one input with no vector at all -- an
+    implementation keyed on a dict would silently answer with the second one twice, and
+    an implementation trusting arrival order would not notice anything.
     """
     handler = _responds(body=_body([_unit(1.0), _unit(2.0)], indices=[0, 0]))
 
@@ -320,8 +333,9 @@ async def test_an_index_set_that_is_not_zero_to_n_minus_one_is_malformed() -> No
 
 
 async def test_a_vector_that_is_not_unit_normalised_is_refused() -> None:
-    """**The mutation with the largest silent blast radius, and the reason it
-    is asserted here rather than taken from a model card.**
+    """**The mutation with the largest silent blast radius.
+
+    and the reason it is asserted here rather than taken from a model card.**.
 
     Normalisation is a property of the *checkpoint* -- a third module after
     Transformer and Pooling -- and the same backbone with it removed returns
@@ -343,8 +357,9 @@ async def test_a_vector_that_is_not_unit_normalised_is_refused() -> None:
 
 
 async def test_a_vector_of_the_wrong_width_is_refused() -> None:
-    """**The check `FastEmbedEmbedder` does not have, and the whole reason this
-    adapter takes a `dimension`.**
+    """**The check `FastEmbedEmbedder` does not have.
+
+    and the whole reason this adapter takes a `dimension`.**.
 
     An in-process model's width is a property of the file that was loaded; this
     one's is a property of a server somebody else can restart against different
@@ -365,8 +380,9 @@ async def test_a_vector_of_the_wrong_width_is_refused() -> None:
 
 
 async def test_the_first_batch_checks_run_once_and_not_per_batch() -> None:
-    """The other half of the two cases above, and the half that keeps a square
-    root per vector off the hot path.
+    """The other half of the two cases above.
+
+    and the half that keeps a square root per vector off the hot path.
 
     Both checks answer a question about *which model the endpoint is serving*.
     That can change -- which is the whole argument for checking at all -- but
@@ -401,17 +417,21 @@ async def test_the_first_batch_checks_run_once_and_not_per_batch() -> None:
 
 @pytest.mark.parametrize("status", [401, 403])
 async def test_a_rejected_credential_is_auth_failed(status: int) -> None:
-    """A key is a key: no cooldown and no negative cache, the way
-    `usher.adapters.http.port_error_for` decided it for the two upstreams that
-    got there first. The queue's own backoff spaces the retries out.
+    """A key is a key.
+
+    no cooldown and no negative cache, the way `usher.adapters.http.port_error_for`
+    decided it for the two upstreams that got there first.
+
+    The queue's own backoff spaces the retries out.
     """
     with pytest.raises(PortAuthFailed):
         await _embed(_embedder(_responds(status=status, body={})), ["one"])
 
 
 async def test_a_429_is_rate_limited_and_reads_retry_after() -> None:
-    """The hint is optional and both RFC 9110 forms are parsed by the shared
-    helper, which exists because the same `Retry-After` bug was written twice.
+    """The hint is optional and both RFC 9110 forms are parsed by the shared helper.
+
+    which exists because the same `Retry-After` bug was written twice.
     """
     handler = _responds(status=429, body={}, headers={"retry-after": "7"})
 
@@ -423,18 +443,20 @@ async def test_a_429_is_rate_limited_and_reads_retry_after() -> None:
 
 @pytest.mark.parametrize("status", [500, 502, 503])
 async def test_a_5xx_is_unavailable(status: int) -> None:
-    """A model still loading, a GPU held by something else, a proxy with no
-    upstream. All three are a bad five minutes that a restart or a wait fixes,
-    so `JobWorker` backs off rather than parking work whose only problem was
-    the clock -- a park needs a human to release it.
+    """A model still loading, a GPU held by something else, a proxy with no upstream.
+
+    All three are a bad five minutes that a restart or a wait fixes, so `JobWorker`
+    backs off rather than parking work whose only problem was the clock -- a park needs
+    a human to release it.
     """
     with pytest.raises(PortUnavailable):
         await _embed(_embedder(_responds(status=status, body={})), ["one"])
 
 
 async def test_a_transport_failure_is_unavailable() -> None:
-    """The commonest failure this adapter has and the one `FastEmbedEmbedder`
-    cannot have: nothing is listening on the configured port.
+    """The commonest failure this adapter has and the one `FastEmbedEmbedder` cannot have.
+
+    nothing is listening on the configured port.
     """
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -446,10 +468,11 @@ async def test_a_transport_failure_is_unavailable() -> None:
 
 @pytest.mark.parametrize("status", [400, 404, 422])
 async def test_a_permanent_4xx_is_malformed_not_unavailable(status: int) -> None:
-    """M4 measured this against TMDb and M8 confirmed it against a live
-    completion endpoint: a 4xx that is not a 429 cannot become an answer by
-    being sent again, so five rate-limited retries reach the identical answer
-    and then park with "upstream unavailable" rather than with what was wrong.
+    """M4 measured this against TMDb and M8 confirmed it against a live completion endpoint.
+
+    a 4xx that is not a 429 cannot become an answer by being sent again, so five rate-
+    limited retries reach the identical answer and then park with "upstream unavailable"
+    rather than with what was wrong.
 
     Here the realistic three are a model name the server does not serve (404),
     a batch or a text over the server's own input bound (400), and a schema it
@@ -460,9 +483,10 @@ async def test_a_permanent_4xx_is_malformed_not_unavailable(status: int) -> None
 
 
 async def test_a_200_that_is_not_the_documented_shape_is_malformed() -> None:
-    """A reverse proxy answering an HTML login page under a 200 is the
-    realistic way to get here, and a raw `json.JSONDecodeError` is not
-    something a caller written against `usher.ports.errors` can catch.
+    """A reverse proxy answering an HTML login page under a 200 is the realistic way to get here.
+
+    and a raw `json.JSONDecodeError` is not something a caller written against
+    `usher.ports.errors` can catch.
     """
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -515,10 +539,10 @@ async def test_an_embedding_object_that_is_not_the_documented_shape_is_malformed
 
 
 async def test_no_failure_message_carries_the_credential_or_the_base_url() -> None:
-    """PRD 08: credentials are never logged, error paths included -- and an
-    httpx transport exception's own text frequently contains the request URL,
-    which is why nothing here interpolates `exc` rather than
-    `type(exc).__name__`.
+    """PRD 08: credentials are never logged, error paths included.
+
+    and an httpx transport exception's own text frequently contains the request URL,
+    which is why nothing here interpolates `exc` rather than `type(exc).__name__`.
 
     The base URL is in scope alongside the key and not as a courtesy: a
     household may point `USHER_EMBEDDING_BASE_URL` at a provider whose URL
@@ -553,8 +577,9 @@ async def test_no_failure_message_carries_the_credential_or_the_base_url() -> No
 
 
 def test_the_model_name_is_the_whole_prefixed_string() -> None:
-    """What goes on the wire and what goes in the column are two strings, and
-    this is the column's.
+    """What goes on the wire and what goes in the column are two strings.
+
+    and this is the column's.
 
     `title_embeddings.model_name` is the fingerprint the stale predicate
     compares, so recording the checkpoint alone would make a runtime swap --
@@ -590,9 +615,10 @@ def test_the_model_name_is_the_whole_prefixed_string() -> None:
     ],
 )
 def test_the_runtime_prefix_splits_on_the_first_colon(configured: str, expected: str) -> None:
-    """Identical to `FastEmbedEmbedder`'s split, deliberately: the two adapters
-    are chosen between by `composition._load_embedder` on the same `partition`,
-    so a divergence here would make one string mean two models.
+    """Identical to `FastEmbedEmbedder`'s split, deliberately.
+
+    the two adapters are chosen between by `composition._load_embedder` on the same
+    `partition`, so a divergence here would make one string mean two models.
     """
     assert checkpoint_of(configured) == expected
 
@@ -602,9 +628,10 @@ def test_the_runtime_prefix_splits_on_the_first_colon(configured: str, expected:
 
 
 async def test_aclose_closes_the_client_and_a_later_call_is_unavailable() -> None:
-    """`composition.embedder` returns `built.aclose` as the release callable
-    and every entry point calls it in a `finally`, so this is the only thing
-    standing between a `usher index --backfill` and a leaked connection pool.
+    """`composition.embedder` returns `built.aclose` as the release callable and every entry.
+
+    point calls it in a `finally`, so this is the only thing standing between a `usher
+    index --backfill` and a leaked connection pool.
 
     The second assertion is the one with teeth: a closed `httpx.AsyncClient`
     raises a bare `builtins.RuntimeError`, which is not a `UsherPortError` and

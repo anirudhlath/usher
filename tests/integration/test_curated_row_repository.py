@@ -106,8 +106,9 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         session: AsyncSession,
         user_id: uuid.UUID,
     ) -> None:
-        """**One read of one household's shelves should be one look at the table, and the
-        correlated-subquery spelling is two.**
+        """**One read of one household's shelves should be one look at the table.
+
+        and the correlated-subquery spelling is two.**.
         """
         # One `generation_id` per generation, not per row: a generation is what
         # `replace_for_user` writes in one call, and a comprehension minting one
@@ -157,8 +158,9 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         repository: PostgresCuratedRowRepository,
         user_id: uuid.UUID,
     ) -> None:
-        """`ck_curated_rows_cards_not_empty`, reached through the repository
-        rather than through raw SQL.
+        """`ck_curated_rows_cards_not_empty`.
+
+        reached through the repository rather than through raw SQL.
 
         Constructed with `model_construct`, because `CuratedRow`'s own
         `min_length=1` refuses it first -- which is exactly why the CHECK
@@ -178,9 +180,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_one_row_id_twice_in_a_batch_is_a_port_error(
         self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """`pk_curated_rows`, and it is here because the enumeration beside the
-        `except` clause said "a CHECK or a foreign key" and was wrong by a
-        whole class of constraint.
+        """`pk_curated_rows`.
+
+        and it is here because the enumeration beside the `except` clause said "a CHECK
+        or a foreign key" and was wrong by a whole class of constraint.
 
         Postgres-only: the fake is a list and has no primary key, so a batch
         naming one id twice is stored twice there. Reachable as a
@@ -208,8 +211,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_a_position_wider_than_the_column_is_a_port_error(
         self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """**The refusal that is not a constraint**, and the one that crossed this port
-        boundary raw until the `except` clause widened.
+        """**The refusal that is not a constraint**.
+
+        and the one that crossed this port boundary raw until the `except` clause
+        widened.
         """
         wide = curated_row(user_id, position=2**31, generation_id=new_id())
 
@@ -229,8 +234,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         user_id: uuid.UUID,
         seeder: PostgresCuratedRowSeeder,
     ) -> None:
-        """**The SAVEPOINT, and the reason `replace_for_user` is one transaction rather
-        than two statements.**
+        """**The SAVEPOINT.
+
+        and the reason `replace_for_user` is one transaction rather than two
+        statements.**.
         """
         survivor = [curated_row(user_id, position=0, generation_id=new_id())]
         await repository.replace_for_user(user_id, survivor)

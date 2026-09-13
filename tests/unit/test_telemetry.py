@@ -39,18 +39,19 @@ def test_trace_context_injected_inside_a_span() -> None:
 
 
 async def test_a_request_through_the_app_produces_a_valid_span() -> None:
-    """The whole point of Task 11 is trace-correlated logs, which needs a
-    real, valid span active during request handling. Without FastAPI/
-    SQLAlchemy/httpx auto-instrumentation wired into create_app, nothing
-    ever starts one -- confirmed directly (a plain request against an
-    uninstrumented app leaves get_current_span().get_span_context().
-    is_valid False, so inject_trace_context has nothing to inject, ever,
-    in the running service). This installs an in-memory exporter *before*
-    create_app() runs, so configure_tracing's idempotency guard (see its
-    docstring) leaves this provider in place rather than replacing it,
-    and asserts the /health request actually produced a recorded, valid
-    span -- proof the wiring fires end-to-end, not just that the library
-    calls don't raise.
+    """The whole point of Task 11 is trace-correlated logs.
+
+    which needs a real, valid span active during request handling.
+
+    Without FastAPI/ SQLAlchemy/httpx auto-instrumentation wired into create_app,
+    nothing ever starts one -- confirmed directly (a plain request against an
+    uninstrumented app leaves get_current_span().get_span_context(). is_valid False, so
+    inject_trace_context has nothing to inject, ever, in the running service). This
+    installs an in-memory exporter *before* create_app() runs, so configure_tracing's
+    idempotency guard (see its docstring) leaves this provider in place rather than
+    replacing it, and asserts the /health request actually produced a recorded, valid
+    span -- proof the wiring fires end-to-end, not just that the library calls don't
+    raise.
 
     Uses /health, not /health/ready, specifically so this stays a unit
     test with no real Postgres: create_app's lifespan builds an engine
@@ -94,11 +95,12 @@ def _settings_with_telemetry_disabled() -> Settings:
 
 
 def test_no_exporter_constructed_when_telemetry_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ "Exporters must degrade to no-ops when unconfigured" was previously
-    prose, not a test -- nothing caught a stray refactor that hoisted the
-    OTLPSpanExporter construction above configure_tracing's early check.
-    Monkeypatches OTLPSpanExporter to raise if constructed at all, so this
-    fails loudly rather than merely not asserting anything.
+    """Exporters must degrade to no-ops when unconfigured.
+
+    That was previously prose, not a test -- nothing caught a stray refactor
+    that hoisted the OTLPSpanExporter construction above configure_tracing's
+    early check. Monkeypatches OTLPSpanExporter to raise if constructed at
+    all, so this fails loudly rather than merely not asserting anything.
     """
 
     def _fail_if_constructed(*args: object, **kwargs: object) -> None:
@@ -112,22 +114,22 @@ def test_no_exporter_constructed_when_telemetry_disabled(monkeypatch: pytest.Mon
 
 
 def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """diagnose=True renders the *value* of any local variable referenced
-    on a traceback frame's failing line. Verified directly against a real
-    connection failure (not a synthetic exception): forcing build_engine
-    to fail against an unreachable host with diagnose=True printed the
-    plaintext password four times over -- not because the DSN string
-    itself appears anywhere obvious (SQLAlchemy's own Engine.__repr__
-    correctly masks it as `://user:***@host`), but because several of
-    asyncpg's and SQLAlchemy's own internal frames pass the parsed
-    connection parameters as a dict (`cparams`, `kw`, ...) on their
-    failing line, e.g. `dialect.connect(*cargs_tup, **cparams)` -- and
-    diagnose renders whatever a failing line references, including a
-    dict containing `password: <plaintext>`, three frames deep in a
-    third-party library this module doesn't control. PRD 08's
-    "credentials are never logged" rule depends on this staying False;
-    worth asserting directly rather than trusting it stays correct by eye
-    in a file nine milestones will edit.
+    """Diagnose=True renders the *value* of any local variable referenced on a traceback frame's.
+
+    failing line.
+
+    Verified directly against a real connection failure (not a synthetic exception):
+    forcing build_engine to fail against an unreachable host with diagnose=True printed
+    the plaintext password four times over -- not because the DSN string itself appears
+    anywhere obvious (SQLAlchemy's own Engine.__repr__ correctly masks it as
+    `://user:***@host`), but because several of asyncpg's and SQLAlchemy's own internal
+    frames pass the parsed connection parameters as a dict (`cparams`, `kw`, ...) on
+    their failing line, e.g. `dialect.connect(*cargs_tup, **cparams)` -- and diagnose
+    renders whatever a failing line references, including a dict containing `password:
+    <plaintext>`, three frames deep in a third-party library this module doesn't
+    control. PRD 08's "credentials are never logged" rule depends on this staying False;
+    worth asserting directly rather than trusting it stays correct by eye in a file nine
+    milestones will edit.
     """
     captured: dict[str, object] = {}
 
@@ -144,7 +146,7 @@ def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
-    """**A command's answer is stdout, and `httpx` was writing to it.**"""
+    """**A command's answer is stdout, and `httpx` was writing to it.**."""
     httpx_logger = logging.getLogger("httpx")
     before = httpx_logger.level
     configure_logging(_settings_with_telemetry_disabled())
@@ -164,8 +166,9 @@ def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
 
 
 def test_configure_logging_reclaims_a_logger_that_fileconfig_disabled() -> None:
-    """**`configure_logging` cleared handlers and levels and left `.disabled` standing, so
-    one `fileConfig` call muted a logger permanently.**
+    """**`configure_logging` cleared handlers and levels and left `.disabled` standing.
+
+    so one `fileConfig` call muted a logger permanently.**.
     """
     httpx_logger = logging.getLogger("httpx")
     before_level, before_disabled = httpx_logger.level, httpx_logger.disabled
@@ -190,10 +193,11 @@ def test_configure_logging_reclaims_a_logger_that_fileconfig_disabled() -> None:
 def test_no_metric_exporter_constructed_when_telemetry_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same invariant as test_no_exporter_constructed_when_telemetry_disabled,
-    for configure_metrics's OTLPMetricExporter -- the two bootstraps
-    mirror each other's shape deliberately (see configure_metrics's
-    docstring), so they get the same regression test.
+    """Same invariant as test_no_exporter_constructed_when_telemetry_disabled.
+
+    for configure_metrics's OTLPMetricExporter -- the two bootstraps mirror each other's
+    shape deliberately (see configure_metrics's docstring), so they get the same
+    regression test.
     """
 
     def _fail_if_constructed(*args: object, **kwargs: object) -> None:
@@ -223,7 +227,8 @@ def _settings_with_endpoint(endpoint: str) -> Settings:
 
 
 def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel() -> None:
-    """The positive mirror of the two "nothing is constructed when disabled" cases above,
+    """The positive mirror of the two "nothing is constructed when disabled" cases above.
+
     which is the half nobody wrote -- and it asserts one *installation* rather than one
     *construction*, because those are different failures.
     """
@@ -261,7 +266,8 @@ def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel
 def test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintext_collector() -> (
     None
 ):
-    """The scheme is load-bearing and the wrong spelling fails *silently*,
+    """The scheme is load-bearing and the wrong spelling fails *silently*.
+
     which is why it gets a case rather than a sentence in a docstring.
 
     Measured in the installed `opentelemetry-exporter-otlp-proto-grpc`

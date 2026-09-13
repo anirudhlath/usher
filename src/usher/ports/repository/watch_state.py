@@ -18,8 +18,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class RecentWatch:
-    """One title the household finished, with the engagement facts this
-    schema actually has.
+    """One title the household finished, with the engagement facts this schema actually has.
 
     **Not a `WatchState`, and that is structural rather than stylistic.** A
     watched *episode* is rolled up to its series here, and a `WatchState`
@@ -69,8 +68,9 @@ class WatchStateRepository(ABC):
     async def list_needing_history(
         self, *, limit: int = 500
     ) -> list[tuple[uuid.UUID, uuid.UUID | None, uuid.UUID | None]]:
-        """`(user_id, title_id, episode_id)` for rows that are played but
-        whose play count is unknown.
+        """`(user_id.
+
+        title_id, episode_id)` for rows that are played but whose play count is unknown.
 
         "Unknown" is spelled `played AND play_count = 0`, because
         `watch_states.play_count` is `NOT NULL DEFAULT 0` and a walk that

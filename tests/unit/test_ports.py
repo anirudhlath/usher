@@ -1,5 +1,7 @@
-"""Ports are ABCs (ADR-0001), not Protocols: an incomplete implementation
-must fail at instantiation, not at the call site."""
+"""Ports are ABCs (ADR-0001), not Protocols.
+
+an incomplete implementation must fail at instantiation, not at the call site.
+"""
 
 from abc import ABC
 from collections.abc import Sequence
@@ -136,9 +138,10 @@ def test_port_declares_abstract_methods(port: type[ABC]) -> None:
 
 @pytest.mark.parametrize("port", ALL_PORTS)
 def test_no_port_is_a_protocol(port: type[ABC]) -> None:
-    """ADR-0001: ports are `abc.ABC`, never `typing.Protocol`. A Protocol is satisfied
-    structurally, so a fake that drifts from the port keeps passing and the contract
-    suite silently stops being a contract.
+    """ADR-0001: ports are `abc.ABC`, never `typing.Protocol`.
+
+    A Protocol is satisfied structurally, so a fake that drifts from the port keeps
+    passing and the contract suite silently stops being a contract.
     """
     assert ABC in port.__mro__, f"{port.__name__} is not an ABC (ADR-0001)"
     # Widened to `object` deliberately: `typing.Protocol` is a typing special
@@ -209,10 +212,11 @@ def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
 
 
 def test_every_port_abc_is_registered_in_all_ports() -> None:
-    """`ALL_PORTS` is hand-maintained, and until this case existed nothing noticed a port
-    that was left out of it -- so a new port silently got neither the "cannot be
-    instantiated" check nor the "declares abstract methods" one, which are the two
-    properties ADR-0001 chose ABCs *for*.
+    """`ALL_PORTS` is hand-maintained.
+
+    and until this case existed nothing noticed a port that was left out of it -- so a
+    new port silently got neither the "cannot be instantiated" check nor the "declares
+    abstract methods" one, which are the two properties ADR-0001 chose ABCs *for*.
     """
     import importlib
     import pkgutil
@@ -241,12 +245,13 @@ def test_every_port_abc_is_registered_in_all_ports() -> None:
 
 
 def test_suggest_index_has_no_write_method() -> None:
-    """**The structural half of ADR-0021.** The whole argument for splitting
-    this port is that adding a second engine for the instant-search box must
-    require *adding* a write path, visibly, rather than filling in one that
-    was already declared. A future `index`/`remove` here would make that
-    change look like satisfying an abstract method instead of acquiring the
-    dual write ADR-0002 refused.
+    """**The structural half of ADR-0021.** The whole argument for splitting this port is that.
+
+    adding a second engine for the instant-search box must require *adding* a write
+    path, visibly, rather than filling in one that was already declared.
+
+    A future `index`/`remove` here would make that change look like satisfying an
+    abstract method instead of acquiring the dual write ADR-0002 refused.
 
     So this is not a style assertion -- it is the reason the class exists,
     written as a check. Deleting it and adding `index` is a decision; doing
@@ -256,7 +261,7 @@ def test_suggest_index_has_no_write_method() -> None:
 
 
 def test_a_scheduled_job_declares_exactly_these_four_members() -> None:
-    """**The exact set, and `name`/`period` being in it is the decision.**
+    """**The exact set, and `name`/`period` being in it is the decision.**.
 
     ADR-0046's contract is a name, a period, a `last_done()` and a `run()`, and
     the M10 plan sketches the first two as bare annotations (`name: str`). An
@@ -282,8 +287,10 @@ def test_a_scheduled_job_declares_exactly_these_four_members() -> None:
 
 
 def test_a_scheduled_job_that_forgets_its_name_cannot_be_instantiated() -> None:
-    """The behavioural half of the case above, because a `frozenset` equality
-    is satisfied by a class whose abstractness Python does not enforce.
+    """The behavioural half of the case above.
+
+    because a `frozenset` equality is satisfied by a class whose abstractness Python
+    does not enforce.
 
     This is the whole of what ADR-0001 buys over a `Protocol` here, and the
     plan's bare-annotation spelling is what it would have cost: the job below
@@ -309,11 +316,13 @@ def test_a_scheduled_job_that_forgets_its_name_cannot_be_instantiated() -> None:
 
 
 def test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts() -> None:
-    """`LLMCallRepository.record`'s signature is the answer to "what happens
-    when the constructor raises inside an exception handler", and the port's
-    docstring is where that argument is made. Pinned here because a signature
-    is the part of it a later change can undo without reading a word of the
-    reasoning.
+    """`LLMCallRepository.record`'s signature is the answer to "what happens when the.
+
+    constructor raises inside an exception handler", and the port's docstring is where
+    that argument is made.
+
+    Pinned here because a signature is the part of it a later change can undo without
+    reading a word of the reasoning.
 
     Asserted on the annotation rather than on the parameter count, because a
     parts-shaped `record(**fields: Any)` has one parameter too.
@@ -353,8 +362,10 @@ def test_complete_implementation_instantiates() -> None:
 
 
 def test_source_not_supported_is_a_usher_port_error() -> None:
-    """Reparented under UsherPortError so a service can catch the shared
-    base without knowing every port's own exception names."""
+    """Reparented under UsherPortError so a service can catch the shared base without knowing.
+
+    every port's own exception names.
+    """
     assert issubclass(SourceNotSupported, UsherPortError)
 
 
@@ -370,10 +381,11 @@ def test_source_not_supported_is_a_usher_port_error() -> None:
     ],
 )
 def test_port_errors_are_usher_port_errors(error: type[UsherPortError]) -> None:
-    """A service must be able to catch UsherPortError alone and handle every
-    port failure, without importing httpx or sqlalchemy -- which would break
-    the `adapters are driven, not driving` and `db is driven, not driving`
-    contracts that ADR-0009 rests on."""
+    """A service must be able to catch UsherPortError alone and handle every port failure.
+
+    without importing httpx or sqlalchemy -- which would break the `adapters are driven,
+    not driving` and `db is driven, not driving` contracts that ADR-0009 rests on.
+    """
     assert issubclass(error, UsherPortError)
 
 
@@ -389,10 +401,11 @@ def test_port_rate_limited_retry_after_defaults_to_none() -> None:
 
 
 def test_llm_usage_is_a_real_equatable_value() -> None:
-    """Was a plain class with only a generated __init__, so equality was
-    identity. Now a frozen dataclass: two calls that recorded the same
-    numbers compare equal, which is what a test asserting on usage
-    actually wants."""
+    """Was a plain class with only a generated __init__, so equality was identity.
+
+    Now a frozen dataclass: two calls that recorded the same numbers compare equal,
+    which is what a test asserting on usage actually wants.
+    """
     a = LLMUsage(
         model="gpt-4", tokens_in=10, tokens_out=5, cost_usd=Decimal("0.01"), latency_ms=200
     )
@@ -417,9 +430,10 @@ def test_llm_purpose_is_a_closed_string_vocabulary() -> None:
 
 
 def test_search_mode_fused_is_reachable() -> None:
-    """The bug this replaced: `semantic: bool` could not express a third
-    "fused" option, even though RRF fusion is the actual design
-    (ADR-0002), not a hypothetical alongside full-text and semantic.
+    """The bug this replaced.
+
+    `semantic: bool` could not express a third "fused" option, even though RRF fusion is
+    the actual design (ADR-0002), not a hypothetical alongside full-text and semantic.
 
     Carries a `query_vector` since M6: a fused request without one is
     refused at construction, because the caller owns the model.
@@ -432,10 +446,13 @@ def test_search_mode_fused_is_reachable() -> None:
 
 
 def test_metadata_candidate_uses_the_canonical_kind_vocabulary() -> None:
-    """The bug this replaced: search() returning list[dict[str, Any]] made
-    the match stage index into TMDb's own keys, including its movie/TV
-    divergence. MetadataCandidate normalises that away before it ever
-    reaches M4."""
+    """The bug this replaced.
+
+    search() returning list[dict[str, Any]] made the match stage index into TMDb's own
+    keys, including its movie/TV divergence.
+
+    MetadataCandidate normalises that away before it ever reaches M4.
+    """
     candidate = MetadataCandidate(
         provider_id=90000100, name="Dune", year=2021, kind=TitleKind.MOVIE, popularity=95.2
     )
@@ -465,8 +482,9 @@ def test_complete_title_repository_implementation_instantiates() -> None:
 def test_the_surface_a_row_claims_is_the_one_its_tier_implies(
     tier: SuggestTier | None, surface: SearchSurface
 ) -> None:
-    """A search row names no tier and a suggest row names the index that
-    answered, so `surface` is derived rather than stored beside `tier`.
+    """A search row names no tier and a suggest row names the index that answered.
+
+    so `surface` is derived rather than stored beside `tier`.
 
     That is what makes the two combinations that are not states -- a search row
     with a tier, a suggest row without one -- unconstructible rather than

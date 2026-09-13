@@ -237,7 +237,9 @@ class PlaybackService:
             return None
 
     def _with_tickets(self, served: Sequence[tuple[Source, StreamTarget]]) -> list[PlaybackTarget]:
-        """Substitute a ticket for every URL. See the module docstring.
+        """Substitute a ticket for every URL.
+
+        See the module docstring.
 
         **Two passes, and that is what makes the pairing order-independent.**
         Every distinct direct URL is minted first, so a deep link that arrives

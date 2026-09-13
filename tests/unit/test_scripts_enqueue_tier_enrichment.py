@@ -121,8 +121,7 @@ def _enqueued_keys(queue: FakeJobQueue) -> set[str]:
 
 
 async def test_the_tier_is_movies_with_a_hundred_votes_and_a_tmdb_id() -> None:
-    """The predicate, one arm per conjunct, and the NULL `tmdb_id` arm named
-    for its reason.
+    """The predicate, one arm per conjunct, and the NULL `tmdb_id` arm named for its reason.
 
     `EnrichService._ref_for` raises `PortDataMalformed` for a title carrying
     no id the provider understands, and `PortDataMalformed`'s contract in

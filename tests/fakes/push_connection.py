@@ -23,8 +23,10 @@ class FakePushConnection(PushConnection):
     # -- what a test arranges -------------------------------------------
 
     def deliver(self, frame: str) -> None:
-        """Queue a frame. Synchronous, so a test can arrange before it
-        awaits."""
+        """Queue a frame.
+
+        Synchronous, so a test can arrange before it awaits.
+        """
         self._frames.put_nowait(frame)
 
     def stall(self) -> None:
@@ -38,8 +40,10 @@ class FakePushConnection(PushConnection):
         self._stalled = True
 
     def drop(self, message: str = "connection closed by peer") -> None:
-        """Fail every later `recv` with a `PortUnavailable`, as a real
-        `ConnectionClosedError` translates to."""
+        """Fail every later `recv` with a `PortUnavailable`.
+
+        as a real `ConnectionClosedError` translates to.
+        """
         self._failure = PortUnavailable(message)
 
     # -- PushConnection --------------------------------------------------

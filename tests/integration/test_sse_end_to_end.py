@@ -161,8 +161,7 @@ class _CommittedStateProbe(EventPublisher):
 async def worker(
     settings: Settings, sessions: async_sessionmaker[AsyncSession], bus: InMemoryEventBus
 ) -> AsyncIterator[tuple[LaneSupervisor, _CommittedStateProbe]]:
-    """A real worker lane over a fake metadata provider, publishing into the
-    app's own bus.
+    """A real worker lane over a fake metadata provider, publishing into the app's own bus.
 
     The same `LaneSupervisor` the server's lifespan builds, wired by the
     same `unit_of_work` -- what differs is the provider (no network) and
@@ -215,17 +214,21 @@ async def _read_frame(lines: AsyncIterator[str]) -> str:
 
 
 async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None:
-    """The route subscribes inside its response generator, so the
-    subscription lands when the first chunk is produced rather than when the
-    request returns. Publishing before it lands is a publish to nobody, and
-    this project has already had one concurrency case time out on exactly
-    that harness bug rather than on the code it was written for.
+    """The route subscribes inside its response generator.
+
+    so the subscription lands when the first chunk is produced rather than when the
+    request returns.
+
+    Publishing before it lands is a publish to nobody, and this project has already had
+    one concurrency case time out on exactly that harness bug rather than on the code it
+    was written for.
 
     `count` is for the two-subscriber case below, where waiting for *one*
     would let the bootstrap start with the filtered stream not yet attached
     -- and "the filtered subscriber saw nothing" would then be true for the
     wrong reason, which is the failure that case's liveness control exists
-    to make impossible."""
+    to make impossible.
+    """
     for _ in range(400):
         if bus.subscribers >= count:
             return
@@ -236,10 +239,12 @@ async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None
 
 
 async def _job_xmin(sessions: async_sessionmaker[AsyncSession], key: uuid.UUID) -> str | None:
-    """The row version. `xmin` is the transaction that last wrote this row,
-    so an unchanged one is proof no new row version was created -- which a
-    `SELECT priority` cannot show, since a rewrite to the same value reads
-    identically."""
+    """The row version.
+
+    `xmin` is the transaction that last wrote this row, so an unchanged one is proof no
+    new row version was created -- which a `SELECT priority` cannot show, since a
+    rewrite to the same value reads identically.
+    """
     async with sessions() as session:
         return (
             await session.execute(
@@ -255,7 +260,7 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     bus: InMemoryEventBus,
     worker: tuple[LaneSupervisor, _CommittedStateProbe],
 ) -> None:
-    """**The loop PRD 03 diagrams, end to end, in one case.**
+    """**The loop PRD 03 diagrams, end to end, in one case.**.
 
     A client opens a stub and gets it immediately; the open promotes its
     enrichment to `DEMAND`; a worker lane in this process claims it, enriches
@@ -328,8 +333,7 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
 async def test_a_second_open_writes_no_row(
     client: httpx.AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """M4's `WHERE jobs.priority < excluded.priority`, called from a client
-    for the first time.
+    """M4's `WHERE jobs.priority < excluded.priority`, called from a client for the first time.
 
     A detail screen a user opens twice must not cost a row version.
     Asserted on `xmin` rather than on the stored priority, because a rewrite
@@ -351,8 +355,9 @@ async def test_a_second_open_writes_no_row(
 async def test_a_slow_client_is_told_to_resync_and_the_publisher_is_unaffected(
     client: httpx.AsyncClient, bus: InMemoryEventBus, settings: Settings
 ) -> None:
-    """PRD 07's one in-stream failure vocabulary, delivered as a real SSE
-    frame down a real response body.
+    """PRD 07's one in-stream failure vocabulary.
+
+    delivered as a real SSE frame down a real response body.
 
     A client that opens the stream and does not read it fills its queue. The
     publisher must finish anyway -- `EnrichService` completing a title at
@@ -396,8 +401,9 @@ async def test_a_bootstrap_batch_reaches_an_unfiltered_subscriber_and_never_a_fi
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`bootstrap.progress` on the wire: the row PRD 07's SSE table carried with no
-    milestone against it until M9's E7.
+    """`bootstrap.progress` on the wire.
+
+    the row PRD 07's SSE table carried with no milestone against it until M9's E7.
     """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)

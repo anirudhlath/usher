@@ -160,9 +160,10 @@ def _chain(spans: Sequence[ReadableSpan], start: str) -> list[str]:
 
 
 async def test_no_two_providers_are_ever_in_flight_on_one_session(ctx: RowContext) -> None:
-    """`AsyncSession` is explicitly not safe for concurrent use: two coroutines
-    awaiting on one session interleave on one connection, and the failure is an
-    intermittent `InvalidRequestError` or a result set attributed to the wrong
+    """`AsyncSession` is explicitly not safe for concurrent use.
+
+    two coroutines awaiting on one session interleave on one connection, and the failure
+    is an intermittent `InvalidRequestError` or a result set attributed to the wrong
     query -- **under load, in production, after it has usually worked**.
 
     Kills `asyncio.gather(*(row.build(ctx) for row in selected))`, which drives
@@ -180,7 +181,7 @@ async def test_no_two_providers_are_ever_in_flight_on_one_session(ctx: RowContex
 
 
 async def test_the_depth_recorder_can_see_a_gather_at_all(ctx: RowContext) -> None:
-    """**The control, and without it this file is a guard that cannot fail.**
+    """**The control, and without it this file is a guard that cannot fail.**.
 
     Delete the `await asyncio.sleep(0)` from `_DepthRecorder.read` and the case
     above still passes against a deliberate `gather`: nine coroutines that
@@ -197,8 +198,9 @@ async def test_the_depth_recorder_can_see_a_gather_at_all(ctx: RowContext) -> No
 
 
 def test_the_composer_never_reaches_for_a_task_or_a_gather() -> None:
-    """The depth recorder proves today's implementation is sequential; this is
-    what stops the next one.
+    """The depth recorder proves today's implementation is sequential.
+
+    this is what stops the next one.
 
     Scanned two ways deliberately, the same two the `SourceAdapter` check
     documents: a scan for the *attribute* form `asyncio.gather` misses
@@ -228,10 +230,14 @@ def test_the_composer_never_reaches_for_a_task_or_a_gather() -> None:
 async def test_the_composition_records_its_duration(
     ctx: RowContext, meter_reader: InMemoryMetricReader
 ) -> None:
-    """PRD 10's first principle runs both ways: a metric nothing records is a
-    permanently empty panel, and nothing distinguishes it from a healthy zero.
-    So the assertion is that a **data point exists**, not that the instrument
-    was created."""
+    """PRD 10's first principle runs both ways.
+
+    a metric nothing records is a permanently empty panel, and nothing distinguishes it
+    from a healthy zero.
+
+    So the assertion is that a **data point exists**, not that the instrument was
+    created.
+    """
     await HomeService(providers=[_provider("recently-added", score=0.9)]).compose(ctx)
 
     assert _points(meter_reader, "usher.home.compose.duration")
@@ -240,8 +246,12 @@ async def test_the_composition_records_its_duration(
 async def test_each_row_build_is_recorded_under_its_provider(
     ctx: RowContext, meter_reader: InMemoryMetricReader
 ) -> None:
-    """PRD 10's dashboard 4: "home composition time broken down per row, which
-    finds the one slow provider". The breakdown is what forces the label."""
+    """PRD 10's dashboard 4.
+
+    "home composition time broken down per row, which finds the one slow provider".
+
+    The breakdown is what forces the label.
+    """
     await HomeService(
         providers=[_provider("recently-added", score=0.9), _provider("next-up", score=0.8)]
     ).compose(ctx)
@@ -253,11 +263,15 @@ async def test_each_row_build_is_recorded_under_its_provider(
 async def test_the_provider_label_is_the_provider_and_never_the_row_slug(
     ctx: RowContext, meter_reader: InMemoryMetricReader
 ) -> None:
-    """**A cardinality case, and the reason the label is spelled the way PRD 10
-    spells it.** `BecauseYouWatchedProvider` mints one slug per seed, so a label
-    carrying the slug has the cardinality of the household's watch history and,
-    over time, of the catalog. That is a metrics-backend outage rather than a
-    dashboard, and nothing in a green suite says so."""
+    """**A cardinality case.
+
+    and the reason the label is spelled the way PRD 10 spells it.**
+    `BecauseYouWatchedProvider` mints one slug per seed, so a label carrying the slug
+    has the cardinality of the household's watch history and, over time, of the catalog.
+
+    That is a metrics-backend outage rather than a dashboard, and nothing in a green
+    suite says so.
+    """
     seeded = _seed_provider("because-you-watched", seeds=["dune", "arrival", "sicario"])
 
     screen = await HomeService(providers=[seeded]).compose(ctx)
@@ -270,10 +284,12 @@ async def test_the_provider_label_is_the_provider_and_never_the_row_slug(
 async def test_no_cache_metric_is_recorded_here(
     ctx: RowContext, meter_reader: InMemoryMetricReader
 ) -> None:
-    """`usher.cache.hits`/`.misses` is M9's (PRD 10). A metric recorded a
-    milestone before the dashboard that reads it is the `search_queries`
-    failure in miniature -- a shape fixed before anything has tried to use
-    it."""
+    """`usher.cache.hits`/`.misses` is M9's (PRD 10).
+
+    A metric recorded a milestone before the dashboard that reads it is the
+    `search_queries` failure in miniature -- a shape fixed before anything has tried to
+    use it.
+    """
     await HomeService(providers=[_provider("recently-added", score=0.9)]).compose(ctx)
 
     assert not _points(meter_reader, "usher.cache.hits")
@@ -283,10 +299,10 @@ async def test_no_cache_metric_is_recorded_here(
 async def test_a_row_build_span_nests_under_the_composition_span(
     ctx: RowContext, span_exporter: InMemorySpanExporter
 ) -> None:
-    """PRD 10: everything a request triggers nests under that request's server
-    span. Asserted as **parentage**, not as existence -- a composer that started
-    its own root spans has valid ids, exports traces, and carries every span
-    name PRD 10 asks for.
+    """PRD 10: everything a request triggers nests under that request's server span.
+
+    Asserted as **parentage**, not as existence -- a composer that started its own root
+    spans has valid ids, exports traces, and carries every span name PRD 10 asks for.
 
     **`tests/integration/test_pipeline_spans.py` extends this walk to
     `GET /home`.** There is no request to be a parent of in a unit test.

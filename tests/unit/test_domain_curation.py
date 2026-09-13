@@ -84,8 +84,10 @@ def test_a_curated_row_carries_every_field_it_was_given() -> None:
 
 
 def test_a_curated_row_with_no_cards_is_not_constructible() -> None:
-    """**The one place this project's usual rule reverses**, so it is the one
-    place a reader will assume `BuiltRow`'s answer applies and it does not.
+    """**The one place this project's usual rule reverses**.
+
+    so it is the one place a reader will assume `BuiltRow`'s answer applies and it does
+    not.
 
     Kills `card_title_ids: tuple[uuid.UUID, ...] = ()` -- which is exactly what
     `BuiltRow.cards` is, one module over, with a docstring arguing for it: an
@@ -103,9 +105,7 @@ def test_a_curated_row_with_no_cards_is_not_constructible() -> None:
 
 
 def test_the_order_the_model_returned_is_the_product_and_survives_construction() -> None:
-    """A curated row *is* an ordering -- it is the only judgement the completion was bought
-    for.
-    """
+    """A curated row *is* an ordering -- it is the only judgement the completion was bought for."""
     ids = (_CARD_A, _CARD_B, _CARD_C, _CARD_A)
     assert list(ids) != sorted(ids), "the fixture is pre-sorted, so it cannot see a sort"
     assert len(set(ids)) != len(ids), "the fixture is already unique, so it cannot see a dedupe"
@@ -120,7 +120,7 @@ def test_card_ids_are_a_tuple_even_when_a_list_is_handed_in() -> None:
 
 
 def test_a_positional_slug_survives_two_rows_that_chose_the_same_title() -> None:
-    """**Kills minting `slug` from the model's prose title.**
+    """**Kills minting `slug` from the model's prose title.**.
 
     Three separate failures sit behind that one-liner, and the case can only
     exhibit the second: a title is arbitrary text that would need escaping to be
@@ -159,8 +159,7 @@ def test_position_starts_at_zero_and_refuses_a_negative() -> None:
 
 
 def test_a_row_with_nothing_to_explain_carries_none_and_not_an_empty_string() -> None:
-    """Kills a validator that normalises `""` to `None`, and kills
-    `reason: str = ""`.
+    """Kills a validator that normalises `""` to `None`, and kills `reason: str = ""`.
 
     `None` is reachable here and is not reachable from any of M7's nine
     providers -- all nine return a sentence -- so this is the first plausible row
@@ -215,8 +214,7 @@ def test_a_generated_at_without_a_timezone_is_rejected() -> None:
 
 
 def test_a_curated_row_is_frozen_and_refuses_an_unknown_field() -> None:
-    """Kills relaxing `frozen=True` on this model, and kills relaxing
-    `extra="forbid"`.
+    """Kills relaxing `frozen=True` on this model, and kills relaxing `extra="forbid"`.
 
     Both matter more here than on a model nothing caches: a curated row is
     handed to concurrent readers out of `RowCache`, and the field names are
@@ -303,9 +301,9 @@ def test_a_successful_call_carries_no_error() -> None:
 
 
 def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -> None:
-    """Kills deleting the second `_ok_and_error_must_agree` clause, and kills
-    weakening
-    it from `not self.error` to `self.error is None`.
+    """Kills deleting the second `_ok_and_error_must_agree` clause.
+
+    and kills weakening it from `not self.error` to `self.error is None`.
 
     The second mutation is the one that survives a carelessly written case. A
     failed call whose error is `""` is a row an operator cannot act on in
@@ -321,8 +319,10 @@ def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -
 
 
 def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None:
-    """**The escape hatch is deliberate, and it is why this invariant is a
-    `model_validator(mode="after")` rather than a `model_post_init`.**
+    """**The escape hatch is deliberate.
+
+    and it is why this invariant is a `model_validator(mode="after")` rather than a
+    `model_post_init`.**.
     """
     smuggled = LLMCall.model_construct(
         id=uuid.uuid4(),
@@ -345,7 +345,7 @@ def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None
 
 
 def test_a_call_that_answered_perfectly_and_kept_nothing_is_a_failure() -> None:
-    """**ADR-0028 rule 3, which is why `ok` is not "the HTTP call returned 200".**"""
+    """**ADR-0028 rule 3, which is why `ok` is not "the HTTP call returned 200".**."""
     call = _call(ok=False, error="validated to zero rows", tokens_out=316)
     assert (call.ok, call.error) == (False, "validated to zero rows")
     assert (call.tokens_in, call.tokens_out) == (2924, 316)
@@ -353,8 +353,7 @@ def test_a_call_that_answered_perfectly_and_kept_nothing_is_a_failure() -> None:
 
 
 def test_evolve_re_runs_the_ok_error_agreement() -> None:
-    """The path this invariant is actually reached by, and it is not
-    construction.
+    """The path this invariant is actually reached by, and it is not construction.
 
     A generation records its call, then discovers the validator kept nothing,
     then has to say so. That is an `.evolve(ok=False, error=...)` on a row
@@ -394,8 +393,9 @@ def test_cost_is_a_decimal_because_a_month_of_these_is_summed() -> None:
 
 
 def test_negative_tokens_latency_or_cost_are_all_rejected() -> None:
-    """Kills dropping `ge=0` from any one of the four numeric columns, which is
-    why each is asserted separately rather than through one representative.
+    """Kills dropping `ge=0` from any one of the four numeric columns.
+
+    which is why each is asserted separately rather than through one representative.
 
     None of the four has a negative reading. A negative token count or latency
     is a subtraction done in the wrong order against a clock or a counter, and a
@@ -414,7 +414,7 @@ def test_negative_tokens_latency_or_cost_are_all_rejected() -> None:
 
 
 def test_an_llm_call_has_no_user_id() -> None:
-    """**Deliberate, and specified: PRD 10's column list has none.**
+    """**Deliberate, and specified: PRD 10's column list has none.**.
 
     Kills adding `user_id: uuid.UUID | None = None`, which is the five-line diff
     somebody writes after being asked "which user did this cost belong to". The
@@ -434,8 +434,7 @@ def test_an_llm_call_has_no_user_id() -> None:
 
 
 def test_a_purpose_that_produces_no_rows_records_no_generation() -> None:
-    """The asymmetry between the two models, and it is not an oversight in
-    either direction.
+    """The asymmetry between the two models, and it is not an oversight in either direction.
 
     Kills making `LLMCall.generation_id` required -- query expansion is a real
     purpose that produces no curated rows, so a required column would have
@@ -499,8 +498,9 @@ def test_the_purpose_vocabulary_is_closed_at_the_two_that_have_call_sites() -> N
 
 
 def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> None:
-    """**What makes the move to `usher.domain` invisible to every caller, and exactly the
-    property a tidy-up would break.**
+    """**What makes the move to `usher.domain` invisible to every caller.
+
+    and exactly the property a tidy-up would break.**.
     """
     import usher.domain.curation as domain_module
     import usher.ports.llm as port_module

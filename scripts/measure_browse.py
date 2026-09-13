@@ -319,7 +319,7 @@ async def verify_harness(session: AsyncSession, recorder: RecordingSession) -> d
 async def diagnose_order_by(
     session: AsyncSession, recorder: RecordingSession, reps: int
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """**Added after both bars were scored, and it is a diagnostic, not a bar.**
+    """**Added after both bars were scored, and it is a diagnostic, not a bar.**.
 
     Bar 2's named output is an index recommendation, and the first question a
     recommendation has to answer is whether the index is missing or merely

@@ -32,7 +32,10 @@ _DEGRADED: Final[dict[int | str, dict[str, Any]]] = {
 
 @router.get("/health", response_model=LivenessResponse)
 async def health() -> LivenessResponse:
-    """Liveness. Checks nothing external by design."""
+    """Liveness.
+
+    Checks nothing external by design.
+    """
     return LivenessResponse(status="ok", version=__version__)
 
 
@@ -52,15 +55,16 @@ async def _check_database(session: AsyncSession) -> bool:
 
 
 async def _check_migrations(session: AsyncSession) -> bool:
-    """PRD 08: "the app refuses to serve on a schema mismatch rather than
-    guessing." `alembic upgrade head && uvicorn ...` (Task 13) runs
-    migrations on container start, but is not itself a mismatch check: a
-    stale image running an older migration chain against a
-    newer-than-expected database (or vice versa) would otherwise serve
-    happily. Only called once `_check_database` has already succeeded --
-    a database that can't be reached can't have its migration state read
-    either, and attempting to would hit the exact PendingRollbackError
-    class of bug `_check_database`'s own rollback avoids.
+    """PRD 08.
+
+    "the app refuses to serve on a schema mismatch rather than guessing." `alembic
+    upgrade head && uvicorn ...` (Task 13) runs migrations on container start, but is
+    not itself a mismatch check: a stale image running an older migration chain against
+    a newer-than-expected database (or vice versa) would otherwise serve happily.
+
+    Only called once `_check_database` has already succeeded -- a database that can't be
+    reached can't have its migration state read either, and attempting to would hit the
+    exact PendingRollbackError class of bug `_check_database`'s own rollback avoids.
     """
     try:
         db_revision = await database_revision(session)
@@ -82,7 +86,9 @@ async def _check_migrations(session: AsyncSession) -> bool:
 async def ready(
     session: SessionDep, lanes: LaneSupervisorDep, response: Response
 ) -> ReadinessResponse:
-    """Readiness. Reports each dependency separately.
+    """Readiness.
+
+    Reports each dependency separately.
 
     Sets the response status to 503 when degraded rather than leaving the
     default 200: no doc pins a status code here, so this is a deliberate

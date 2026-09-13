@@ -1,5 +1,8 @@
 # scripts/capture_tmdb_fixture.py
-"""Re-derive a scrubbed TMDb *shape* from the live API. NOT a test."""
+"""Re-derive a scrubbed TMDb *shape* from the live API.
+
+NOT a test.
+"""
 
 import argparse
 import asyncio

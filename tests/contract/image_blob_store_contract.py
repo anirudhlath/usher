@@ -39,8 +39,11 @@ class ImageBlobStoreContract(ABC):
         """An empty store."""
 
     async def test_a_miss_is_a_value_and_not_an_error(self) -> None:
-        """`None`, because a miss is the ordinary state of every entry exactly
-        once and a raise would make the cold path an exception path."""
+        """`None`.
+
+        because a miss is the ordinary state of every entry exactly once and a raise
+        would make the cold path an exception path.
+        """
         assert await self.store().get(_KEY) is None
 
     async def test_a_put_round_trips_the_bytes_and_the_media_type(self) -> None:
@@ -55,10 +58,13 @@ class ImageBlobStoreContract(ABC):
         assert read.content_type == "image/jpeg"
 
     async def test_the_answer_put_gives_back_is_the_answer_get_would_give(self) -> None:
-        """`put` returns the entry so a cold request costs one write and no
-        read — which is only sound if the two answers agree. An implementation
-        that returned what it *was handed* rather than what it *stored* would
-        diverge the first time the two differed."""
+        """`put` returns the entry so a cold request costs one write and no read.
+
+        which is only sound if the two answers agree.
+
+        An implementation that returned what it *was handed* rather than what it
+        *stored* would diverge the first time the two differed.
+        """
         store = self.store()
 
         written = await store.put(_KEY, _fetched(b"one", b"two", b"three"))
@@ -78,10 +84,11 @@ class ImageBlobStoreContract(ABC):
         assert await store.get(_KEY) is None
 
     async def test_a_second_put_replaces_the_entry_rather_than_appending(self) -> None:
-        """Idempotence under redelivery, and the failure it rules out is
-        concatenation: an implementation opening the final path in `"ab"` mode
-        would double the bytes of every re-fetched image and still answer
-        every assertion about presence."""
+        """Idempotence under redelivery, and the failure it rules out is concatenation.
+
+        an implementation opening the final path in `"ab"` mode would double the bytes
+        of every re-fetched image and still answer every assertion about presence.
+        """
         store = self.store()
 
         await store.put(_KEY, _fetched(b"first-bytes"))
@@ -100,9 +107,11 @@ class ImageBlobStoreContract(ABC):
         ],
     )
     async def test_each_term_of_the_key_separates_two_entries(self, other: ImageCacheKey) -> None:
-        """One case per term, and each differs from `_KEY` in exactly that
-        term — a single "different key" case is satisfied by a store keyed on
-        any one of the three."""
+        """One case per term, and each differs from `_KEY` in exactly that term.
+
+        a single "different key" case is satisfied by a store keyed on any one of the
+        three.
+        """
         store = self.store()
         differing = [
             field
@@ -136,8 +145,10 @@ class ImageBlobStoreContract(ABC):
         assert await store.get(_KEY) is None
 
     async def test_a_declined_artwork_type_is_refused_as_its_own_kind(self) -> None:
-        """The SVG arm, and it is here rather than only at the fetcher because
-        this layer is the one that has to name a file.
+        """The SVG arm.
+
+        and it is here rather than only at the fetcher because this layer is the one
+        that has to name a file.
 
         Measured 2026-08-11: the CDN answers `image/svg+xml` at **every** rung,
         `w342` byte for byte the size of `original` — so the clamp does not bound
@@ -155,8 +166,11 @@ class ImageBlobStoreContract(ABC):
         assert await store.get(_KEY) is None
 
     async def test_a_media_type_with_parameters_is_still_the_media_type(self) -> None:
-        """`image/jpeg; charset=binary` is a header a real server sends, and a
-        map lookup on the raw value would refuse it."""
+        """`image/jpeg.
+
+        charset=binary` is a header a real server sends, and a map lookup on the raw
+        value would refuse it.
+        """
         store = self.store()
 
         await store.put(_KEY, _fetched(b"bytes", content_type="image/jpeg; charset=binary"))

@@ -67,8 +67,9 @@ def traceresponse(span: trace.Span | None = None) -> str | None:
 
 
 def inject_trace_context(record: Mapping[str, Any]) -> None:
-    """Patch the active trace and span ids into every log record, so a line
-    in Loki links to its trace and back again.
+    """Patch the active trace and span ids into every log record.
+
+    so a line in Loki links to its trace and back again.
 
     Typed `Mapping[str, Any]` rather than `dict[str, Any]`: loguru's real
     `Record` (a `TypedDict`) satisfies `Mapping` but not the invariant
@@ -150,10 +151,11 @@ def configure_logging(settings: Settings) -> None:
 
 
 def configure_tracing(settings: Settings) -> None:
-    """Install a real SDK `TracerProvider` unconditionally and instrument SQLAlchemy +
-    httpx globally, so any span started anywhere in the process — including by FastAPI's
-    auto-instrumentation, wired in `create_app` — gets a real trace/span id for
-    `inject_trace_context` to correlate, whether or not there is anywhere to export it
+    """Install a real SDK `TracerProvider` unconditionally and instrument SQLAlchemy + httpx.
+
+    globally, so any span started anywhere in the process — including by FastAPI's auto-
+    instrumentation, wired in `create_app` — gets a real trace/span id for
+    `inject_trace_context` to correlate, whether or not there is anywhere to export it.
     """
     if not isinstance(trace.get_tracer_provider(), TracerProvider):
         provider = TracerProvider(resource=Resource.create({"service.name": settings.service_name}))
@@ -167,18 +169,19 @@ def configure_tracing(settings: Settings) -> None:
 
 
 def configure_metrics(settings: Settings) -> None:
-    """Install a real SDK `MeterProvider`, exporting over OTLP only when
-    `settings.telemetry_enabled` -- mirrors `configure_tracing`'s shape for
-    the same two reasons: a real (if unexported) provider lets any
-    instrument a later milestone creates (`usher.http.server.duration`,
-    `usher.jobs.queued`, ... -- PRD 10's metric catalogue) bind to
-    something real from day one instead of the API's no-op default, and
-    the same `isinstance` idempotency guard avoids leaking a
-    `PeriodicExportingMetricReader` background export thread across
-    repeated `create_app()` calls the way an unguarded `configure_tracing`
-    did (see its docstring; verified directly that `set_meter_provider`
-    has the identical silently-refuse-the-second-call behaviour
-    `set_tracer_provider` does).
+    """Install a real SDK `MeterProvider`.
+
+    exporting over OTLP only when `settings.telemetry_enabled` -- mirrors
+    `configure_tracing`'s shape for the same two reasons: a real (if unexported)
+    provider lets any instrument a later milestone creates
+    (`usher.http.server.duration`, `usher.jobs.queued`, ...
+
+    -- PRD 10's metric catalogue) bind to something real from day one instead of the
+    API's no-op default, and the same `isinstance` idempotency guard avoids leaking a
+    `PeriodicExportingMetricReader` background export thread across repeated
+    `create_app()` calls the way an unguarded `configure_tracing` did (see its
+    docstring; verified directly that `set_meter_provider` has the identical silently-
+    refuse-the-second-call behaviour `set_tracer_provider` does).
 
     No metrics are registered here — PRD 10's OTel metrics are each owned
     by the milestone that emits them (M5 push, M6 search, ...). This is
@@ -411,8 +414,9 @@ _search: _ReaderSlot[SearchSnapshot] = _ReaderSlot()
 
 
 def register_search_gauges(read: SearchReader) -> None:
-    """PRD 10's `usher.search.embeddings.stale`, its refused companion, and
-    `usher.similarity.neighbors.stale`.
+    """PRD 10's `usher.search.embeddings.stale`.
+
+    its refused companion, and `usher.similarity.neighbors.stale`.
 
     `read` returns the caller's most recent full re-read, never a query, for
     `register_queue_gauges`' reason. The third instrument takes a different

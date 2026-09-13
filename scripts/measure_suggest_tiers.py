@@ -266,7 +266,9 @@ def quiet_opening(*, settle: bool = False) -> QuietOpening:
 
 
 def quiet_closing(opening: QuietOpening) -> bool:
-    """Whether the box was the same box throughout. `False` discards the run.
+    """Whether the box was the same box throughout.
+
+    `False` discards the run.
 
     Settles first, or the closing sample is taken in this run's own wake and
     reads as contention nobody else caused.

@@ -26,12 +26,13 @@ from usher.domain.ids import new_id
 
 
 async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> None:
-    """The three `set_updated_at` triggers are hand-written `op.execute()`
-    calls in the migration -- entirely invisible to
-    `Base.metadata.create_all`. Their own migration comment calls them
-    "what actually guarantees updated_at reflects every write, regardless
-    of how it was made", specifically for M2/M4's `ON CONFLICT DO UPDATE`
-    bulk paths -- true only if something actually runs the migration that
+    """The three `set_updated_at` triggers are hand-written `op.execute()` calls in the migration.
+
+    entirely invisible to `Base.metadata.create_all`.
+
+    Their own migration comment calls them "what actually guarantees updated_at reflects
+    every write, regardless of how it was made", specifically for M2/M4's `ON CONFLICT
+    DO UPDATE` bulk paths -- true only if something actually runs the migration that
     creates them, which is exactly what `postgres_url` now does.
     """
     engine = build_engine(postgres_url)
@@ -58,14 +59,14 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
 
 
 async def test_migration_matches_the_orm_metadata(postgres_url: str) -> None:
-    """Autogenerate-diffing the *migrated* database against `Base.metadata`
-    is what actually proves the hand-maintained migration and the
-    SQLAlchemy models it's supposed to mirror haven't drifted apart --
-    catching exactly the two categories of change CLAUDE.md already warns
-    `--autogenerate` alone is blind to (CHECK constraint bodies, and
-    triggers/functions) requires running it against a database the
-    migration itself built, not one `create_all` built directly from the
-    same models it would be compared against.
+    """Autogenerate-diffing the *migrated* database against `Base.metadata` is what actually.
+
+    proves the hand-maintained migration and the SQLAlchemy models it's supposed to
+    mirror haven't drifted apart -- catching exactly the two categories of change
+    CLAUDE.md already warns `--autogenerate` alone is blind to (CHECK constraint bodies,
+    and triggers/functions) requires running it against a database the migration itself
+    built, not one `create_all` built directly from the same models it would be compared
+    against.
     """
 
     def _diff(connection: Connection) -> list[object]:
@@ -89,8 +90,9 @@ _BETWEEN = re.compile(r"(\w+)\s+BETWEEN\s+(\S+)\s+AND\s+(\S+)", re.IGNORECASE)
 
 
 def _normalise_check_body(sql: str) -> str:
-    """Enough normalisation to compare a hand-written CHECK body against
-    what Postgres stores, and no more.
+    """Enough normalisation to compare a hand-written CHECK body against what Postgres stores.
+
+    and no more.
 
     Postgres re-prints a constraint from its parse tree: it parenthesises
     aggressively, lowercases keywords inconsistently with the source, and
@@ -121,7 +123,8 @@ async def test_every_check_constraint_in_the_models_exists_in_the_database(
 
     Bodies are compared, not just names: CLAUDE.md's original finding was
     that *loosening a bound* produces an empty `pass` migration with no
-    warning, and a name-only check would still be green for it."""
+    warning, and a name-only check would still be green for it.
+    """
     expected = {
         constraint.name: _normalise_check_body(str(constraint.sqltext))
         for table in Base.metadata.tables.values()
@@ -149,9 +152,12 @@ async def test_every_check_constraint_in_the_models_exists_in_the_database(
 async def test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_given(
     postgres_url: str,
 ) -> None:
-    """Read back off `pg_constraint`, not off `Base.metadata`: `confdeltype`
-    is what Postgres will actually do, and it is the whole content of the
-    ADR-0010 asymmetry. `n` is SET NULL, `r` is RESTRICT.
+    """Read back off `pg_constraint`, not off `Base.metadata`.
+
+    `confdeltype` is what Postgres will actually do, and it is the whole content of the
+    ADR-0010 asymmetry.
+
+    `n` is SET NULL, `r` is RESTRICT.
 
     `confdeltype::text` is not decoration -- the column's type is `"char"`,
     which asyncpg hands back as `bytes`, so the uncast comparison fails
@@ -164,7 +170,8 @@ async def test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_give
     correct, in a table it is not about. Widening the expected map instead
     would make an M4 case about ADR-0010's two-way asymmetry silently own
     every future episode FK's delete rule; `images`' three are asserted in
-    `test_api_surface_schema.py`, beside the CHECK that decides them."""
+    `test_api_surface_schema.py`, beside the CHECK that decides them.
+    """
     engine = build_engine(postgres_url)
     async with engine.connect() as conn:
         result = await conn.execute(
@@ -186,17 +193,20 @@ async def test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_give
 async def test_both_new_foreign_keys_have_an_index_the_referential_check_can_use(
     postgres_url: str,
 ) -> None:
-    """Every referenced-side DELETE runs a lookup by the *referencing*
-    column -- to NULL those rows, or to refuse -- and neither pre-existing
-    index can serve it (`uq_media_items_source_external` leads with
-    `source_id`, `uq_watch_states_user_episode` with `user_id`). This asserts
-    the plan is index-shaped rather than a scan; `enable_seqscan = off`
-    forces the planner to reveal whether a usable index exists at all, which
-    is the property being claimed. An empty table would otherwise seq-scan
-    regardless of how many indexes it has, and prove nothing.
+    """Every referenced-side DELETE runs a lookup by the *referencing* column.
+
+    to NULL those rows, or to refuse -- and neither pre-existing index can serve it
+    (`uq_media_items_source_external` leads with `source_id`,
+    `uq_watch_states_user_episode` with `user_id`).
+
+    This asserts the plan is index-shaped rather than a scan; `enable_seqscan = off`
+    forces the planner to reveal whether a usable index exists at all, which is the
+    property being claimed. An empty table would otherwise seq-scan regardless of how
+    many indexes it has, and prove nothing.
 
     Neither index was in the M4 plan. The identical argument is already
-    written into `db/models/watch.py` for `ix_watch_states_title_id`."""
+    written into `db/models/watch.py` for `ix_watch_states_title_id`.
+    """
     probes = [
         ("media_items", "ix_media_items_episode_id"),
         ("watch_states", "ix_watch_states_episode_id"),
@@ -220,9 +230,12 @@ async def test_both_new_foreign_keys_have_an_index_the_referential_check_can_use
 
 
 async def test_deleting_a_title_cascades_into_its_episodes(session: AsyncSession) -> None:
-    """`seasons`/`episodes` CASCADE from `titles` because neither protects
-    any user state and both are re-derivable from a cached provider payload.
-    Contrast the RESTRICT one test below."""
+    """`seasons`/`episodes` CASCADE from `titles` because neither protects any user state and.
+
+    both are re-derivable from a cached provider payload.
+
+    Contrast the RESTRICT one test below.
+    """
     title_id, season_id, episode_id = new_id(), new_id(), new_id()
     await _insert_series_tree(session, title_id, season_id, episode_id)
 
@@ -236,13 +249,14 @@ async def test_deleting_a_title_cascades_into_its_episodes(session: AsyncSession
 async def test_a_titles_cascade_is_refused_when_watch_history_hangs_off_an_episode(
     session: AsyncSession,
 ) -> None:
-    """The two rules composing, which is the point of choosing them
-    separately. `titles -> episodes` is CASCADE and `watch_states.episode_id`
-    is RESTRICT, so deleting a series whose episodes carry history fails at
-    the DELETE two levels down instead of silently destroying that history.
-    That is ADR-0010's argument reaching episodes, and it is the reason
-    `episode_id` is RESTRICT rather than the CASCADE that would have been
-    the shorter diff."""
+    """The two rules composing, which is the point of choosing them separately.
+
+    `titles -> episodes` is CASCADE and `watch_states.episode_id` is RESTRICT, so
+    deleting a series whose episodes carry history fails at the DELETE two levels down
+    instead of silently destroying that history. That is ADR-0010's argument reaching
+    episodes, and it is the reason `episode_id` is RESTRICT rather than the CASCADE that
+    would have been the shorter diff.
+    """
     title_id, season_id, episode_id = new_id(), new_id(), new_id()
     await _insert_series_tree(session, title_id, season_id, episode_id)
     user_id = new_id()
@@ -288,10 +302,11 @@ async def _insert_series_tree(
 async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
     session: AsyncSession,
 ) -> None:
-    """`compare_metadata` does not diff a partial index's predicate or a btree's null
-    ordering, so `test_migration_matches_the_orm_metadata` is green against an index
-    missing either -- and an index missing either is not an error, it just silently
-    stops serving the query it was built for.
+    """`compare_metadata` does not diff a partial index's predicate or a btree's null ordering.
+
+    so `test_migration_matches_the_orm_metadata` is green against an index missing
+    either -- and an index missing either is not an error, it just silently stops
+    serving the query it was built for.
     """
     for name, expected in (
         (
@@ -316,10 +331,10 @@ async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
 
 
 async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> None:
-    """`ix_watch_states_user_played` is replaced rather than supplemented,
-    because `(user_id, played, last_played_at DESC NULLS LAST)` is a strict
-    prefix superset -- anything the narrow one could serve, the wide one
-    serves.
+    """`ix_watch_states_user_played` is replaced rather than supplemented.
+
+    because `(user_id, played, last_played_at DESC NULLS LAST)` is a strict prefix
+    superset -- anything the narrow one could serve, the wide one serves.
 
     Two indexes where one suffices is a write cost on every merge of every
     nightly walk -- up to 1,126,789 states -- for no read. Asserted rather
@@ -333,8 +348,9 @@ async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> N
 
 
 async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url: str) -> None:
-    """**The one thing `m10a` does that no schema reader in this file can
-    see**, and the only statement in it that touches a row.
+    """**The one thing `m10a` does that no schema reader in this file can see**.
+
+    and the only statement in it that touches a row.
 
     `field_provenance` is `field -> provider` and `adapters/tmdb/mapping.py`
     derives its keys from the `Title` field names this revision renames, so a
@@ -412,8 +428,9 @@ async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url:
 
 
 async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str) -> None:
-    """**The one thing `m10b` does that no schema reader in this file can see**: `ADD
-    COLUMN … NOT NULL` against a table that already holds rows.
+    """**The one thing `m10b` does that no schema reader in this file can see**.
+
+    `ADD COLUMN … NOT NULL` against a table that already holds rows.
     """
     admin, scratch, url = await scratch_database(postgres_url, "resume")
     source_id, run_id = new_id(), new_id()
@@ -469,8 +486,9 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
 
 
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
-    """`downgrade base` then `upgrade head`, on a throwaway database, with the index set
-    compared before and after.
+    """`downgrade base` then `upgrade head`.
+
+    on a throwaway database, with the index set compared before and after.
     """
     admin, scratch, url = await scratch_database(postgres_url, "cycle")
     try:

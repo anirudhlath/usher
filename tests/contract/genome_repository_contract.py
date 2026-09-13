@@ -35,8 +35,10 @@ def lanes(*values: float) -> tuple[float, ...]:
 
 
 class GenomeSeeder(ABC):
-    """A `genome_scores` row, written by whatever the implementation stores
-    into. The port cannot write one and deliberately never will."""
+    """A `genome_scores` row, written by whatever the implementation stores into.
+
+    The port cannot write one and deliberately never will.
+    """
 
     @abstractmethod
     async def title(self) -> uuid.UUID:
@@ -81,13 +83,15 @@ class GenomeRepositoryContract:
     async def test_a_title_with_no_genome_row_reads_as_none_not_a_zero_vector(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """ADR-0014 at the 20th site in `src/` (counted with
-        `grep -rl 'ADR-0014' src/`, not trusted). A zero vector is not an
-        absence: it is a specific vector at cosine 0.0 from everything, so
-        the 98.7% of the catalog with no genome row would score as maximally
-        dissimilar from every candidate, silently, while every gauge read
-        healthy. Kills `return GenomeVectorRow(title_id, (0.0,) * 1128, rev)`
-        and any other padding of the missing case.
+        """ADR-0014 at the 20th site in `src/` (counted with `grep -rl 'ADR-0014' src/`.
+
+        not trusted).
+
+        A zero vector is not an absence: it is a specific vector at cosine 0.0 from
+        everything, so the 98.7% of the catalog with no genome row would score as
+        maximally dissimilar from every candidate, silently, while every gauge read
+        healthy. Kills `return GenomeVectorRow(title_id, (0.0,) * 1128, rev)` and any
+        other padding of the missing case.
         """
         title_id = await seeder.title()
         assert await repository.get(title_id) is None
@@ -95,12 +99,13 @@ class GenomeRepositoryContract:
     async def test_the_vector_reads_back_at_full_width_and_in_order(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """`halfvec` is lossy by design (M6 measured max cosine error
-        1.21e-04) but it is not lossy in *width* or in *order*. Kills a
-        round-trip that truncates, and one that reads the lanes back
-        reversed -- which no similarity number would ever reveal, because a
-        reversed vector is a perfectly well-formed vector describing a
-        different film.
+        """`halfvec` is lossy by design (M6 measured max cosine error 1.21e-04) but it is not.
+
+        lossy in *width* or in *order*.
+
+        Kills a round-trip that truncates, and one that reads the lanes back reversed --
+        which no similarity number would ever reveal, because a reversed vector is a
+        perfectly well-formed vector describing a different film.
 
         Asserted with distinct, asymmetric lane values for exactly that
         reason: a palindrome would survive the reversal mutation.
@@ -120,9 +125,11 @@ class GenomeRepositoryContract:
     async def test_get_pair_returns_both_vectors_when_both_exist_at_one_release(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """The ordinary path, and the control the three refusal cases below
-        need: without it, an implementation that returns `None`
-        unconditionally passes every one of them."""
+        """The ordinary path, and the control the three refusal cases below need.
+
+        without it, an implementation that returns `None` unconditionally passes every
+        one of them.
+        """
         left, right = await seeder.title(), await seeder.title()
         await seeder.vector(left, lanes(0.5))
         await seeder.vector(right, lanes(0.0, 0.5))
@@ -135,11 +142,14 @@ class GenomeRepositoryContract:
     async def test_get_pair_returns_none_when_only_one_side_has_a_vector(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """Kills an implementation that pads the missing side, which is the
-        zero-vector defect wearing a different name -- and one that returns
+        """Kills an implementation that pads the missing side.
+
+        which is the zero-vector defect wearing a different name -- and one that returns
         the single row it found, which would then be blended against itself.
-        At 1.29% coverage this is overwhelmingly the common outcome, so it is
-        the arm that runs in production."""
+
+        At 1.29% coverage this is overwhelmingly the common outcome, so it is the arm
+        that runs in production.
+        """
         left, right = await seeder.title(), await seeder.title()
         await seeder.vector(left, lanes(0.5))
 
@@ -172,8 +182,7 @@ class GenomeRepositoryContract:
     async def test_a_catalog_with_no_vocabulary_reads_as_none_rather_than_raising(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """Absence is a value here and a mismatch is an error, and this is the
-        value half.
+        """Absence is a value here and a mismatch is an error, and this is the value half.
 
         It is not a hypothetical state: `ffa` shipped `genome_scores` with the
         vocabulary deliberately unstored, so **every catalog bootstrapped
@@ -196,8 +205,7 @@ class GenomeRepositoryContract:
     async def test_the_vocabulary_reads_back_in_lane_order_not_in_storage_order(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """`result[i]` names `relevance[i]`, which is the only thing this
-        method is for.
+        """`result[i]` names `relevance[i]`, which is the only thing this method is for.
 
         Seeded **descending** and asserted ascending: storage order and lane
         order are the same on any fixture that seeds in order, so an
@@ -217,11 +225,12 @@ class GenomeRepositoryContract:
     async def test_the_vocabulary_refuses_a_release_it_was_not_loaded_under(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """The failure this table's third column exists for, and it is worse
-        than the sibling one `get_pair` refuses: a cosine taken across two
-        releases is a wrong number, and a *label* taken across two releases is
-        a sentence about a household's taste, in prose, on a screen, with
-        nothing anywhere reporting an error.
+        """The failure this table's third column exists for.
+
+        and it is worse than the sibling one `get_pair` refuses: a cosine taken across
+        two releases is a wrong number, and a *label* taken across two releases is a
+        sentence about a household's taste, in prose, on a screen, with nothing anywhere
+        reporting an error.
 
         `PortDataMalformed` rather than a `None`: retrying does not help and
         `JobWorker` parks it, which is the response an operator's re-import is
@@ -244,10 +253,10 @@ class GenomeRepositoryContract:
     async def test_a_vocabulary_with_a_gap_is_refused_rather_than_shifting_every_later_lane(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """A read that collected the names in `tag_id` order and handed them
-        back would give lane 2 the name of tag 4 -- and every lane after it
-        the name of the tag one further on -- while returning a
-        perfectly-shaped tuple of the wrong length.
+        """A read that collected the names in `tag_id` order and handed them back would give.
+
+        lane 2 the name of tag 4 -- and every lane after it the name of the tag one
+        further on -- while returning a perfectly-shaped tuple of the wrong length.
 
         `replace_genome_tags` refuses to *write* one, so reaching this needs a
         hand-written `DELETE`; it is three lines in the reader and it is the
@@ -262,11 +271,13 @@ class GenomeRepositoryContract:
     async def test_get_pair_of_a_title_with_itself_is_not_a_special_case(
         self, repository: GenomeRepository, seeder: GenomeSeeder
     ) -> None:
-        """A self-pair is a legitimate call -- it is what a caller does when
-        it has not yet excluded the seed from its own candidate list -- and it
-        must return the row twice rather than `None`. Kills an implementation
-        that spells the two-row read as `WHERE title_id IN (:a, :b)` and then
-        checks `len(rows) == 2`, which finds one row for a self-pair and
+        """A self-pair is a legitimate call.
+
+        it is what a caller does when it has not yet excluded the seed from its own
+        candidate list -- and it must return the row twice rather than `None`.
+
+        Kills an implementation that spells the two-row read as `WHERE title_id IN (:a,
+        :b)` and then checks `len(rows) == 2`, which finds one row for a self-pair and
         reports the vector as missing.
         """
         title_id = await seeder.title()

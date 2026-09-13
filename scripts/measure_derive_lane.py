@@ -1,4 +1,7 @@
-"""Price `derive` at 1, 2, 4 and 8 in flight on one pool. **Zero live requests.**"""
+"""Price `derive` at 1, 2, 4 and 8 in flight on one pool.
+
+**Zero live requests.**
+"""
 
 from __future__ import annotations
 
@@ -99,7 +102,9 @@ def synthetic_payload(base: dict[str, Any], tmdb_id: int) -> dict[str, Any]:
 
 
 async def seed(url: str, *, titles: int, fixture: Path, offset: int = 0) -> list[uuid.UUID]:
-    """`titles` enriched titles, each with one cached payload. Returns their ids.
+    """`titles` enriched titles, each with one cached payload.
+
+    Returns their ids.
 
     `offset` moves the synthetic `tmdb_id` range, because `ix_titles_tmdb_id_kind`
     is unique and every rung seeds a fresh population -- see `main`'s note on

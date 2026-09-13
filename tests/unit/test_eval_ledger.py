@@ -1,5 +1,7 @@
-"""The JSONL half of the ledger. The Postgres half is
-`tests/integration/test_eval_ledger_postgres.py` -- it needs real DDL."""
+"""The JSONL half of the ledger.
+
+The Postgres half is `tests/integration/test_eval_ledger_postgres.py` -- it needs real
+"""
 
 import json
 from pathlib import Path
@@ -39,9 +41,11 @@ def _record() -> RunRecord:
 
 
 def test_a_run_appends_exactly_one_line(tmp_path: Path) -> None:
-    """One line per run. A record spread over several lines cannot be read
-    back by `wc -l` or diffed usefully, which is half the reason this sink
-    exists beside the table."""
+    """One line per run.
+
+    A record spread over several lines cannot be read back by `wc -l` or diffed
+    usefully, which is half the reason this sink exists beside the table.
+    """
     path = tmp_path / "ledger.jsonl"
     append_jsonl(path, _record(), started_at="2026-08-18T12:00:00+00:00")
     append_jsonl(path, _record(), started_at="2026-08-18T13:00:00+00:00")
@@ -51,8 +55,10 @@ def test_a_run_appends_exactly_one_line(tmp_path: Path) -> None:
 
 
 def test_the_line_carries_the_digest_the_bars_hash_and_every_score(tmp_path: Path) -> None:
-    """A line missing any of the three is a number nobody can re-check: what
-    catalog, against which bars, at which stratum."""
+    """A line missing any of the three is a number nobody can re-check.
+
+    what catalog, against which bars, at which stratum.
+    """
     path = tmp_path / "ledger.jsonl"
     append_jsonl(path, _record(), started_at="2026-08-18T12:00:00+00:00")
     row = json.loads(path.read_text().splitlines()[0])
@@ -70,10 +76,12 @@ def test_the_file_is_created_if_absent(tmp_path: Path) -> None:
 
 
 def test_the_line_is_json_serialisable_with_numpy_floats_absent(tmp_path: Path) -> None:
-    """`ranx` returns `np.float64`, which `json.dumps` refuses. The cast
-    happens in `metrics/ir.py`; this asserts nothing reintroduces one on the
-    way here, because the failure surfaces only at the very end of a run
-    that has already spent minutes."""
+    """`ranx` returns `np.float64`, which `json.dumps` refuses.
+
+    The cast happens in `metrics/ir.py`; this asserts nothing reintroduces one on the
+    way here, because the failure surfaces only at the very end of a run that has
+    already spent minutes.
+    """
     path = tmp_path / "ledger.jsonl"
     append_jsonl(path, _record(), started_at="2026-08-18T12:00:00+00:00")
     row = json.loads(path.read_text().splitlines()[0])

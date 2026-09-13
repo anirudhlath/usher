@@ -50,9 +50,12 @@ def test_every_issue_form_parses_and_asks_for_the_version() -> None:
 
 
 def test_the_chooser_forbids_a_blank_issue_and_routes_a_vulnerability_away() -> None:
-    """**A vulnerability must not arrive as a public issue**, and the chooser
-    is the only thing a reporter is looking at in the moment they would file
-    one. `blank_issues_enabled: false` is what stops them walking past it.
+    """**A vulnerability must not arrive as a public issue**.
+
+    and the chooser is the only thing a reporter is looking at in the moment they would
+    file one.
+
+    `blank_issues_enabled: false` is what stops them walking past it.
     """
     chooser = yaml.safe_load((_DIR / _CHOOSER).read_text())
 

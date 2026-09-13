@@ -176,7 +176,9 @@ async def _load_tag_counts(session: object) -> tuple[dict[uuid.UUID, int], dict[
 async def _determinism_probe(
     embeddings: TitleEmbeddingRepository, *, page_size: int
 ) -> tuple[int, bool]:
-    """Two reads of one page's pool, compared. Asserted, never assumed.
+    """Two reads of one page's pool, compared.
+
+    Asserted, never assumed.
 
     `_NEAREST` orders by distance then `e.title_id`, so a second walk over an
     unchanged `title_embeddings` must draw the identical pool — which is what

@@ -116,9 +116,11 @@ class RestoreReport:
         return sum(outcome.unresolved for outcome in self.outcomes.values())
 
     def refused_by_table(self) -> Mapping[str, int]:
-        """How many rows each table refused. **Exact whatever the renderer
-        caps**, which is the half of K5's finding 4 that a truncated list of
-        lines cannot carry."""
+        """How many rows each table refused.
+
+        **Exact whatever the renderer caps**, which is the half of K5's finding 4 that a
+        truncated list of lines cannot carry.
+        """
         return {
             table: len(outcome.refused)
             for table, outcome in self.outcomes.items()
@@ -260,8 +262,9 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
 def _refuse_a_short_body(
     source: Path, header: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
 ) -> None:
-    """The header's per-table counts against the body's, which is the truncation check two
-    files had claimed for a milestone.
+    """The header's per-table counts against the body's.
+
+    which is the truncation check two files had claimed for a milestone.
     """
     claimed = header.get("rows")
     if not isinstance(claimed, dict):
@@ -311,8 +314,7 @@ def _refuse_a_schema_mismatch(header: Mapping[str, Any], revision: str | None) -
 def _refuse_an_unknown_table(
     rows: Sequence[Mapping[str, Any]], repository: RestoreRepository
 ) -> None:
-    """Every distinct `table` key, checked against the manifest before any of
-    them is written.
+    """Every distinct `table` key, checked against the manifest before any of them is written.
 
     Checked over the whole file rather than as each table comes up, so a table
     named only by the last row of a large artifact is refused before the first
@@ -331,8 +333,7 @@ def _refuse_an_unknown_table(
 def _decode_rows(
     rows: Sequence[Mapping[str, Any]], repository: RestoreRepository
 ) -> dict[str, list[Mapping[str, object]]]:
-    """Every body line, with its references read back out of JSON, in one list
-    per table.
+    """Every body line, with its references read back out of JSON, in one list per table.
 
     Grouped here rather than by the caller filtering the whole body once per
     table: the artifact interleaves tables freely, and a pass per table to

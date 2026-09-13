@@ -1,4 +1,7 @@
-"""Alembic environment. Reads the URL from Usher settings, not alembic.ini."""
+"""Alembic environment.
+
+Reads the URL from Usher settings, not alembic.ini.
+"""
 
 import asyncio
 from logging.config import fileConfig
@@ -25,9 +28,10 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """The literal DSN from settings, unwrapped once, here, and handed straight to
-    SQLAlchemy — never stored in a variable that outlives this call, never logged, and
-    never passed through `alembic.config.Config`.
+    """The literal DSN from settings, unwrapped once, here, and handed straight to SQLAlchemy.
+
+    never stored in a variable that outlives this call, never logged, and never passed
+    through `alembic.config.Config`.
     """
     try:
         return get_settings().database_url.get_secret_value()

@@ -1,6 +1,6 @@
-"""Shared behavioural contract every `TitleRepository` implementation must satisfy —
-the technique PRD 08 calls out for `SourceAdapter` ("One parametrised test class
-every SourceAdapter must pass...
+"""Shared behavioural contract every `TitleRepository` implementation must satisfy.
+
+the technique PRD 08 calls out for `SourceAdapter` ("One parametrised test class every
 """
 
 import uuid
@@ -85,14 +85,17 @@ class TitleRepositoryContract:
         )
 
     async def test_created_at_is_not_taken_from_the_caller(self, repo: TitleRepository) -> None:
-        """Postgres is the authoritative clock for created_at: add()'s
-        _to_row excludes it from the INSERT entirely, so the database's own
-        server_default assigns it, never whatever the caller's Title
-        happened to carry -- a stale retry, a deliberately backdated import,
-        or (as here) a plain constructor call that hardcodes one. Measured
-        divergence this pins: the fake used to honour the caller's value
-        verbatim (`created_at_is_callers: fake=True`), while the real,
-        Postgres-backed repository never did (`real=False`)."""
+        """Postgres is the authoritative clock for created_at.
+
+        add()'s _to_row excludes it from the INSERT entirely, so the database's own
+        server_default assigns it, never whatever the caller's Title happened to carry
+        -- a stale retry, a deliberately backdated import, or (as here) a plain
+        constructor call that hardcodes one.
+
+        Measured divergence this pins: the fake used to honour the caller's value
+        verbatim (`created_at_is_callers: fake=True`), while the real, Postgres-backed
+        repository never did (`real=False`).
+        """
         backdated = datetime(2020, 1, 1, tzinfo=UTC)
         title = Title(
             kind=TitleKind.MOVIE,
@@ -107,14 +110,16 @@ class TitleRepositoryContract:
         assert fetched.created_at != backdated
 
     async def test_created_at_is_stable_across_updates(self, repo: TitleRepository) -> None:
-        """M4 builds re-enrichment scheduling on updated_at -- which only
-        means anything if created_at never moves once a title exists.
-        Deliberately tampers with created_at on the incoming Title (not
-        just leaves it untouched via evolve(), which would pass this
-        assertion even without the fix, since evolve() alone never changes
-        a field it isn't told to): update() must ignore it regardless,
-        the same way the real repository's update() never even looks at
-        created_at on the incoming row (see title.py's update())."""
+        """M4 builds re-enrichment scheduling on updated_at.
+
+        which only means anything if created_at never moves once a title exists.
+
+        Deliberately tampers with created_at on the incoming Title (not just leaves it
+        untouched via evolve(), which would pass this assertion even without the fix,
+        since evolve() alone never changes a field it isn't told to): update() must
+        ignore it regardless, the same way the real repository's update() never even
+        looks at created_at on the incoming row (see title.py's update()).
+        """
         title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
         await repo.add(title)
         first = await repo.get(title.id)
@@ -140,9 +145,10 @@ class TitleRepositoryContract:
     async def test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind(
         self, repo: TitleRepository
     ) -> None:
-        """tmdb_id is unique *per kind* (ADR-0011), so two movies claiming
-        one TMDb movie id is still a conflict — and the constraint that
-        fires is now the composite index.
+        """Tmdb_id is unique *per kind* (ADR-0011).
+
+        so two movies claiming one TMDb movie id is still a conflict — and the
+        constraint that fires is now the composite index.
 
         The final assertion pins a measured bug, not a style preference:
         the message used to read "title {second.id} already exists"
@@ -162,10 +168,14 @@ class TitleRepositoryContract:
         assert "already exists" not in str(exc_info.value)
 
     async def test_a_movie_and_a_series_may_share_a_tmdb_id(self, repo: TitleRepository) -> None:
-        """The measurement ADR-0011 rests on: 26,968 TMDb ids are live in
-        both namespaces at once. Under M1's single-column index this call
-        raised RepositoryConflict and 47.3% of TV lost its tmdb_id during
-        Phase 2. Delete the `kind` column from the index and this fails."""
+        """The measurement ADR-0011 rests on.
+
+        26,968 TMDb ids are live in both namespaces at once.
+
+        Under M1's single-column index this call raised RepositoryConflict and 47.3% of
+        TV lost its tmdb_id during Phase 2. Delete the `kind` column from the index and
+        this fails.
+        """
         movie = Title(kind=TitleKind.MOVIE, name="Pride", sort_name="Pride", tmdb_id=1)
         series = Title(kind=TitleKind.SERIES, name="Pride", sort_name="Pride", tmdb_id=1)
         await repo.add(movie)
@@ -174,11 +184,12 @@ class TitleRepositoryContract:
         assert (await repo.get(series.id)) is not None
 
     async def test_add_rejects_a_duplicate_imdb_id(self, repo: TitleRepository) -> None:
-        """Same property as test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind,
+        """Same property as test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind.
+
         for the imdb_id branch -- exercised separately, not folded into a single
-        parametrized case, so a typo swapping which field
-        `_provider_id_conflict` (the fake) or Postgres (the real
-        repository) actually checks can't pass by accident."""
+        parametrized case, so a typo swapping which field `_provider_id_conflict` (the
+        fake) or Postgres (the real repository) actually checks can't pass by accident.
+        """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         second = Title(
             kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", imdb_id="tt99000100"
@@ -190,8 +201,10 @@ class TitleRepositoryContract:
         assert "already exists" not in str(exc_info.value)
 
     async def test_add_rejects_a_duplicate_tvdb_id(self, repo: TitleRepository) -> None:
-        """Same property, for the tvdb_id branch -- see
-        test_add_rejects_a_duplicate_imdb_id's docstring."""
+        """Same property, for the tvdb_id branch.
+
+        see test_add_rejects_a_duplicate_imdb_id's docstring.
+        """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tvdb_id=91000030)
         second = Title(
             kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tvdb_id=91000030
@@ -206,10 +219,12 @@ class TitleRepositoryContract:
         assert await repo.get(new_id()) is None
 
     async def test_get_by_tmdb_id_disambiguates_by_kind(self, repo: TitleRepository) -> None:
-        """Without the `kind` argument this method has no correct answer
-        when both namespaces hold the id — the Postgres implementation
-        raised a raw sqlalchemy.exc.MultipleResultsFound straight out of the
-        port, which `db is driven, not driving` exists to prevent."""
+        """Without the `kind` argument this method has no correct answer when both namespaces.
+
+        hold the id — the Postgres implementation raised a raw
+        sqlalchemy.exc.MultipleResultsFound straight out of the port, which `db is
+        driven, not driving` exists to prevent.
+        """
         movie = Title(
             kind=TitleKind.MOVIE, name="Fight Club", sort_name="Fight Club", tmdb_id=90000550
         )
@@ -236,23 +251,23 @@ class TitleRepositoryContract:
         assert found.id == title.id
 
     async def test_get_by_tmdb_id_of_none_finds_nothing(self, repo: TitleRepository) -> None:
-        """tmdb_id's own type is `int`, not `int | None` -- but a caller
-        holding a genuinely optional value (e.g. `Title.tmdb_id` itself)
-        can still reach this with `None` if it ever bypasses mypy at the
-        call site (a stray `# type: ignore`, `cast`, ...). Both
-        implementations compile "tmdb_id == None" straight through --
-        Postgres as `IS NULL`, the fake as a plain `==` -- which matches
-        whichever null-provider-id title happens to come first, not "the
-        title with this id": the opposite of what this method promises.
-        Measured without the guard: this returned an arbitrary
+        """Tmdb_id's own type is `int`, not `int | None`.
+
+        but a caller holding a genuinely optional value (e.g.
+
+        `Title.tmdb_id` itself) can still reach this with `None` if it ever bypasses
+        mypy at the call site (a stray `# type: ignore`, `cast`, ...). Both
+        implementations compile "tmdb_id == None" straight through -- Postgres as `IS
+        NULL`, the fake as a plain `==` -- which matches whichever null-provider-id
+        title happens to come first, not "the title with this id": the opposite of what
+        this method promises. Measured without the guard: this returned an arbitrary
         null-tmdb_id title instead of None, in both implementations.
         """
         await repo.add(Title(kind=TitleKind.MOVIE, name="Home Video", sort_name="Home Video"))
         assert await repo.get_by_tmdb_id(None, TitleKind.MOVIE) is None  # type: ignore[arg-type]
 
     async def test_get_by_imdb_id_of_none_finds_nothing(self, repo: TitleRepository) -> None:
-        """Same property as test_get_by_tmdb_id_of_none_finds_nothing, for
-        imdb_id."""
+        """Same property as test_get_by_tmdb_id_of_none_finds_nothing, for imdb_id."""
         await repo.add(Title(kind=TitleKind.MOVIE, name="Home Video", sort_name="Home Video"))
         assert await repo.get_by_imdb_id(None) is None  # type: ignore[arg-type]
 
@@ -287,9 +302,10 @@ class TitleRepositoryContract:
         assert exc_info.value.constraint == "ix_titles_tmdb_id_kind"
 
     async def test_update_rejects_a_conflicting_imdb_id(self, repo: TitleRepository) -> None:
-        """Same property as test_update_rejects_a_conflicting_tmdb_id_of_the_same_kind,
-        for the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's
-        docstring for why this is a separate case, not a parametrized one.
+        """Same property as test_update_rejects_a_conflicting_tmdb_id_of_the_same_kind.
+
+        for the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's docstring
+        for why this is a separate case, not a parametrized one.
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         second = Title(
@@ -314,11 +330,13 @@ class TitleRepositoryContract:
     async def test_update_clearing_provider_ids_to_none_is_allowed(
         self, repo: TitleRepository
     ) -> None:
-        """update() clearing a field to None/() was untested -- worth
-        pinning separately from test_update_mutates_an_existing_title,
-        since a naive fix for the conflict-detection tests above could plausibly
-        treat None as just another value to compare, rejecting a clear as
-        a false conflict between two titles that both have tmdb_id=None."""
+        """Update() clearing a field to None/() was untested.
+
+        worth pinning separately from test_update_mutates_an_existing_title, since a
+        naive fix for the conflict-detection tests above could plausibly treat None as
+        just another value to compare, rejecting a clear as a false conflict between two
+        titles that both have tmdb_id=None.
+        """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=1)
         second = Title(kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", tmdb_id=2)
         await repo.add(first)
@@ -346,8 +364,9 @@ class TitleRepositoryContract:
     async def test_resolve_tmdb_ids_keeps_the_two_id_spaces_apart(
         self, repo: TitleRepository
     ) -> None:
-        """ADR-0011 arriving at the *reverse* lookup, which is the direction a
-        derivation gets wrong.
+        """ADR-0011 arriving at the *reverse* lookup.
+
+        which is the direction a derivation gets wrong.
 
         `get_by_tmdb_id` already takes a kind and the case above pins it. What
         is new here is a walk that starts from a **payload** and has to find
@@ -384,9 +403,10 @@ class TitleRepositoryContract:
     async def test_resolve_tmdb_ids_answers_a_whole_page_in_one_call(
         self, repo: TitleRepository
     ) -> None:
-        """A batch rather than one, for `PersonRepository.resolve_tmdb_ids`'
-        reason: a derivation page is 500 payloads and a lookup per payload is
-        the round-trip-per-item shape batching exists to remove.
+        """A batch rather than one, for `PersonRepository.resolve_tmdb_ids`' reason.
+
+        a derivation page is 500 payloads and a lookup per payload is the round-trip-
+        per-item shape batching exists to remove.
 
         **An id naming no title is absent from the answer, never `None` and
         never an error.** `raw_payloads` outlives `titles` -- there is no
@@ -404,10 +424,12 @@ class TitleRepositoryContract:
         assert found == {90000601: first.id, 90000602: second.id}
 
     async def test_resolve_tmdb_ids_of_nothing_asks_nothing(self, repo: TitleRepository) -> None:
-        """PRD 08's empty-database rule at the port. A derivation page whose
-        payloads are all series reaches the movie branch with an empty list,
-        and `WHERE tmdb_id = ANY('{}')` is a statement issued to learn
-        nothing."""
+        """PRD 08's empty-database rule at the port.
+
+        A derivation page whose payloads are all series reaches the movie branch with an
+        empty list, and `WHERE tmdb_id = ANY('{}')` is a statement issued to learn
+        nothing.
+        """
         assert await repo.resolve_tmdb_ids(TitleKind.MOVIE, []) == {}
 
 
@@ -461,9 +483,9 @@ class TitleRepositoryOwnedContract:
     async def test_an_unowned_title_is_absent_however_popular_it_is(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """**The distractor `SeasonalProvider`'s own case seeds**, one layer
-        down: the *best* match in the catalog, highest popularity, exact
-        genre, and no copy.
+        """**The distractor `SeasonalProvider`'s own case seeds**, one layer down.
+
+        the *best* match in the catalog, highest popularity, exact genre, and no copy.
 
         The wrong implementation matches the predicate against the whole
         catalog -- 1.27M titles, of which the household can play none, in a
@@ -484,9 +506,12 @@ class TitleRepositoryOwnedContract:
     async def test_the_answer_is_ordered_by_popularity_rather_than_by_insertion(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """Insertion order is id order -- every id here is a UUIDv7 -- so a
-        fixture seeded best-first is satisfied by `ORDER BY id` and by no
-        ordering at all. These are seeded worst-first.
+        """Insertion order is id order.
+
+        every id here is a UUIDv7 -- so a fixture seeded best-first is satisfied by
+        `ORDER BY id` and by no ordering at all.
+
+        These are seeded worst-first.
         """
         worst = self._tagged("Least", genres=("Horror",), popularity=1.0)
         middle = self._tagged("Middling", genres=("Horror",), popularity=5.0)
@@ -502,9 +527,10 @@ class TitleRepositoryOwnedContract:
     async def test_vote_count_orders_titles_whose_popularity_is_unknown(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """`titles.tmdb_popularity` was measured NULL on all 1,271,138 rows of a
-        bootstrap-only catalog, so an ordering with only that key is an
-        ordering by `id` on the deployment most likely to exist.
+        """`titles.tmdb_popularity` was measured NULL on all 1,271,138 rows of a bootstrap-only.
+
+        catalog, so an ordering with only that key is an ordering by `id` on the
+        deployment most likely to exist.
 
         Seeded worst-first again, and with the *popular* title third so a
         `NULLS FIRST` default -- Postgres's, under `DESC` -- puts the two
@@ -524,10 +550,11 @@ class TitleRepositoryOwnedContract:
     async def test_a_keyword_predicate_does_not_match_the_genres_array(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """Two arrays, two predicates. The wrong implementation searches
-        whichever array it was written against and answers plausibly for the
-        other -- a "christmas" row of films whose *genre* happens to be the
-        word is populated and wrong.
+        """Two arrays, two predicates.
+
+        The wrong implementation searches whichever array it was written against and
+        answers plausibly for the other -- a "christmas" row of films whose *genre*
+        happens to be the word is populated and wrong.
         """
         by_keyword = self._tagged("A Keyworded Film", keywords=("christmas",))
         by_genre = self._tagged("A Genred Film", genres=("christmas",))
@@ -542,9 +569,11 @@ class TitleRepositoryOwnedContract:
     async def test_both_predicates_together_narrow_rather_than_widen(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """The natural wrong spelling is `OR`, which on a window carrying both
-        a genre and a keyword returns the union -- a strictly larger, less
-        relevant row that still looks correct."""
+        """The natural wrong spelling is `OR`.
+
+        which on a window carrying both a genre and a keyword returns the union -- a
+        strictly larger, less relevant row that still looks correct.
+        """
         both = self._tagged("Both", genres=("Horror",), keywords=("slasher",))
         genre_only = self._tagged("Genre Only", genres=("Horror",))
         keyword_only = self._tagged("Keyword Only", keywords=("slasher",))
@@ -559,10 +588,13 @@ class TitleRepositoryOwnedContract:
     async def test_a_request_with_no_predicate_answers_with_nothing(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """An unpredicated call is "the library ordered by popularity", which
-        is the popular-titles fallback wearing a query's clothes. The library
-        is deliberately populated and owned, so the empty answer is the port
-        declining rather than the fixture being empty."""
+        """An unpredicated call is "the library ordered by popularity".
+
+        which is the popular-titles fallback wearing a query's clothes.
+
+        The library is deliberately populated and owned, so the empty answer is the port
+        declining rather than the fixture being empty.
+        """
         for index in range(3):
             one = self._tagged(f"Owned {index}", genres=("Horror",), popularity=float(index))
             await repo.add(one)
@@ -573,9 +605,10 @@ class TitleRepositoryOwnedContract:
     async def test_the_limit_is_honoured_and_keeps_the_best(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """A limit applied before the ordering keeps whichever rows the scan
-        reached first, which is the same failure `list_recent`'s own limit
-        case is about."""
+        """A limit applied before the ordering keeps whichever rows the scan reached first.
+
+        which is the same failure `list_recent`'s own limit case is about.
+        """
         seeded = []
         for index in range(5):
             one = self._tagged(f"Owned {index}", genres=("Horror",), popularity=float(index))
@@ -590,12 +623,12 @@ class TitleRepositoryOwnedContract:
     async def test_a_series_owned_only_through_its_episodes_is_owned(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """**The divergence from `owned_title_ids`, asserted rather than
-        commented.** A series' copies are its episode files, so a semi-join
-        carrying `episode_id IS NULL` -- which that method does carry, for its
-        own good reason -- reports every series in the library as unowned, and
-        every row built on this read becomes films-only on a library that is
-        89% episodes.
+        """**The divergence from `owned_title_ids`.
+
+        asserted rather than commented.** A series' copies are its episode files, so a
+        semi-join carrying `episode_id IS NULL` -- which that method does carry, for its
+        own good reason -- reports every series in the library as unowned, and every row
+        built on this read becomes films-only on a library that is 89% episodes.
 
         The distractor is a series with **no** copy at all, so this cannot
         pass by an implementation that dropped the ownership join entirely.
@@ -683,8 +716,9 @@ class TitleRepositoryCandidateContract:
     async def test_a_title_the_household_finished_is_not_a_candidate(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own, watch: Watch
     ) -> None:
-        """**The distractor is the best row in the catalog**: owned, the most
-        voted title present, and already seen.
+        """**The distractor is the best row in the catalog**.
+
+        owned, the most voted title present, and already seen.
 
         Under a dropped or inverted exclusion it is `[0]` -- the pool's most
         prominent member is the film the household finished last week, and
@@ -735,8 +769,9 @@ class TitleRepositoryCandidateContract:
     async def test_a_title_started_and_abandoned_is_still_a_candidate(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own, watch: Watch
     ) -> None:
-        """`played`, never "has a watch state" -- `played_title_ids`' rule,
-        arriving at the read that has to agree with it.
+        """`played`, never "has a watch state".
+
+        `played_title_ids`' rule, arriving at the read that has to agree with it.
 
         A sync writes a row per item it observed, so "has a state" is the
         owned library: under that spelling the pool holds only titles the
@@ -764,8 +799,9 @@ class TitleRepositoryCandidateContract:
         own: Own,
         watch: Watch,
     ) -> None:
-        """The `user_id` predicate, which on a single-household deployment --
-        i.e. every deployment during development -- is invisible.
+        """The `user_id` predicate, which on a single-household deployment -- i.e.
+
+        every deployment during development -- is invisible.
 
         Without it one member's history empties another's pool, and the
         household with the most watching decides what everyone else is
@@ -808,8 +844,9 @@ class TitleRepositoryCandidateContract:
     async def test_a_series_owned_only_through_its_episodes_ranks_as_owned(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """`list_owned_by_tag`'s divergence from `owned_title_ids`, asserted
-        again here because this read makes its own ownership decision.
+        """`list_owned_by_tag`'s divergence from `owned_title_ids`.
+
+        asserted again here because this read makes its own ownership decision.
 
         A series' copies are its episode files, so a semi-join carrying
         `episode_id IS NULL` ranks every series in the library alongside the
@@ -829,10 +866,11 @@ class TitleRepositoryCandidateContract:
     async def test_a_copy_the_source_has_retracted_does_not_rank_as_owned(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """`media_items.available` is a column the availability sweep *writes*
-        -- `mark_unseen_unavailable` sets it false for an item a walk stopped
-        seeing -- so a row with `available = false` is the ordinary state of a
-        film the household deleted, not an exotic one.
+        """`media_items.available` is a column the availability sweep *writes*.
+
+        `mark_unseen_unavailable` sets it false for an item a walk stopped seeing -- so
+        a row with `available = false` is the ordinary state of a film the household
+        deleted, not an exotic one.
 
         The wrong implementation ranks it first, because it is still a
         `media_items` row: the pool then leads with the title the household
@@ -859,8 +897,9 @@ class TitleRepositoryCandidateContract:
     async def test_a_genre_the_household_watches_outranks_a_more_voted_stranger(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """The genre-affinity key, which is the only household-shaped signal
-        in the base ordering.
+        """The genre-affinity key.
+
+        which is the only household-shaped signal in the base ordering.
 
         The distractor is a title of another genre with five orders of
         magnitude more votes: `[0]` when the key is dropped, and the affinity
@@ -882,9 +921,10 @@ class TitleRepositoryCandidateContract:
     async def test_with_no_affinities_the_order_is_the_vote_count(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """The shipped default's own case: `genres=()` is what a household
-        with no watch history produces, and it must leave a usable order
-        rather than collapsing one.
+        """The shipped default's own case.
+
+        `genres=()` is what a household with no watch history produces, and it must
+        leave a usable order rather than collapsing one.
 
         Seeded worst-first so `ORDER BY id` and no ordering at all are the
         reverse of the answer, and the unknown count is seeded *first* so
@@ -917,11 +957,12 @@ class TitleRepositoryCandidateContract:
     async def test_two_titles_alike_in_everything_are_ordered_by_id(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """**The tiebreak, and it is the whole of ADR-0028's stability.** The
-        prompt addresses candidates by small integer index, so a pool whose
-        ties resolve to "whatever the storage returned" is a pool whose index
-        7 is a different film on a re-read -- and the service's index->UUID
-        map is then a map of nothing.
+        """**The tiebreak.
+
+        and it is the whole of ADR-0028's stability.** The prompt addresses candidates
+        by small integer index, so a pool whose ties resolve to "whatever the storage
+        returned" is a pool whose index 7 is a different film on a re-read -- and the
+        service's index->UUID map is then a map of nothing.
 
         Why ties are ordinary rather than exotic here, and why losing the tail
         changes the pool's *membership* rather than only its order, is argued
@@ -949,9 +990,9 @@ class TitleRepositoryCandidateContract:
     async def test_the_limit_keeps_the_best_rather_than_the_first_found(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """A limit applied before the ordering keeps whichever rows the scan
-        reached first -- and this limit is the pool *size*, which ADR-0028's
-        measurements are scoped to.
+        """A limit applied before the ordering keeps whichever rows the scan reached first.
+
+        and this limit is the pool *size*, which ADR-0028's measurements are scoped to.
 
         Seeded worst-first, so a limit honoured before the sort answers with
         the two least-voted titles.
@@ -970,8 +1011,9 @@ class TitleRepositoryCandidateContract:
     async def test_a_household_that_has_watched_nothing_still_gets_a_pool(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """A cold start is the *normal* state, not a degraded one -- PRD 06's
-        own words -- and an implementation whose exclusion joined rather than
+        """A cold start is the *normal* state, not a degraded one.
+
+        PRD 06's own words -- and an implementation whose exclusion joined rather than
         anti-joined answers with nothing at all here.
 
         Positional rather than `len(rows) > 0`, which is satisfied by
@@ -990,7 +1032,7 @@ class TitleRepositoryCandidateContract:
     async def test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """**The tier the pool is mostly made of, seeded for the first time.**"""
+        """**The tier the pool is mostly made of, seeded for the first time.**."""
         enriched = self._candidate("Enriched And Quiet", vote_count=5)
         skeleton = self._candidate(
             "A Skeleton Everybody Voted For",
@@ -1123,13 +1165,13 @@ class TitleRepositoryBrowseContract:
     async def test_a_row_inserted_before_the_cursor_between_two_pages_neither_duplicates_nor_drops(
         self, repo: TitleRepository
     ) -> None:
-        """**PRD 07's stated reason for the whole design, as a test.**
-        *"Offset paging is not offered -- it degrades badly over a 1.3M-row
-        catalog and produces duplicates under concurrent writes."* The first
-        half is measured; the second half is this case, and until it existed
-        the argument ADR-0034 rests on shipped unverified (that ADR's own
-        *Uncertainty* section says so and files it against group B's first
-        paged route).
+        """**PRD 07's stated reason for the whole design.
+
+        as a test.** *"Offset paging is not offered -- it degrades badly over a 1.3M-row
+        catalog and produces duplicates under concurrent writes."* The first half is
+        measured; the second half is this case, and until it existed the argument
+        ADR-0034 rests on shipped unverified (that ADR's own *Uncertainty* section says
+        so and files it against group B's first paged route).
 
         Page 1 is served, a row is inserted that sorts **inside** it, page 2 is
         served from the cursor. Under a keyset the client sees the pre-insert
@@ -1235,7 +1277,7 @@ class TitleRepositoryBrowseContract:
     async def test_a_page_boundary_inside_the_unkeyed_group_does_not_drop_the_rest_of_it(
         self, repo: TitleRepository, sort: BrowseSort
     ) -> None:
-        """**The NULL trap, and it is the quietest defect in this port.**"""
+        """**The NULL trap, and it is the quietest defect in this port.**."""
         keys: dict[str, tuple[int | None, float | None, int | None]] = {
             "year": (2001, None, None),
             "popularity": (None, 9.0, None),
@@ -1272,8 +1314,9 @@ class TitleRepositoryBrowseContract:
         )
 
     async def test_every_sort_the_enum_declares_is_served(self, repo: TitleRepository) -> None:
-        """A member added to `BrowseSort` with no order behind it must fail
-        here rather than fall back to something plausible.
+        """A member added to `BrowseSort` with no order behind it must fail here rather than.
+
+        fall back to something plausible.
 
         The floor on the member count is the premise: an enum that lost three
         members would make an "every member works" loop trivially true, which
@@ -1289,9 +1332,10 @@ class TitleRepositoryBrowseContract:
     async def test_a_sort_this_port_cannot_express_raises_rather_than_being_ignored(
         self, repo: TitleRepository
     ) -> None:
-        """`FilterNotSupported`'s own argument, applied to the sort: an
-        ignored order answers with *more* rows in some other sequence, and
-        more rows reads as working.
+        """`FilterNotSupported`'s own argument, applied to the sort.
+
+        an ignored order answers with *more* rows in some other sequence, and more rows
+        reads as working.
 
         The `cast` is the point rather than a wart. `BrowseSort` is closed, so
         the only way to reach this arm is the way a route reaches it -- a
@@ -1314,8 +1358,10 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_filter_matches_the_genres_array_and_not_the_keywords_beside_it(
         self, repo: TitleRepository
     ) -> None:
-        """Two arrays, one predicate. The wrong implementation searches
-        whichever it was written against and answers plausibly for the other.
+        """Two arrays, one predicate.
+
+        The wrong implementation searches whichever it was written against and answers
+        plausibly for the other.
         """
         by_genre = self._browsable("A Genred Film", genres=("Horror",))
         by_keyword = self._browsable("A Keyworded Film", keywords=("Horror",))
@@ -1329,12 +1375,15 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_filter_answers_one_concept_across_both_source_spellings(
         self, repo: TitleRepository
     ) -> None:
-        """**Issue #30's user-visible half, as a test.** `titles.genres` is
-        written by two importers with no shared vocabulary: the IMDb bulk phase
-        spells it `Sci-Fi` and `EnrichService` spells it `Science Fiction`, and
-        on the live catalog the two never co-occur (20,051 / 6,223 / **0**
-        both, 2026-08-19). Exact containment therefore answers half a concept
-        under either spelling, and looks completely right doing it.
+        """**Issue #30's user-visible half.
+
+        as a test.** `titles.genres` is written by two importers with no shared
+        vocabulary: the IMDb bulk phase spells it `Sci-Fi` and `EnrichService` spells it
+        `Science Fiction`, and on the live catalog the two never co-occur (20,051 /
+        6,223 / **0** both, 2026-08-19).
+
+        Exact containment therefore answers half a concept under either spelling, and
+        looks completely right doing it.
 
         **Both arms are asserted, and the order is the assertion.** A filter
         that expanded only the canonical spelling would pass a
@@ -1367,9 +1416,11 @@ class TitleRepositoryBrowseContract:
     async def test_a_genre_outside_the_vocabulary_filters_exactly_as_it_did(
         self, repo: TitleRepository
     ) -> None:
-        """The column is open even though the vocabulary is Usher-owned. An
-        expansion that dropped an unmapped label — or widened it to everything
-        — would be invisible on the labels the map does name."""
+        """The column is open even though the vocabulary is Usher-owned.
+
+        An expansion that dropped an unmapped label — or widened it to everything —
+        would be invisible on the labels the map does name.
+        """
         tagged = self._browsable("A Sword And Sandal Film", genres=("Sword & Sandal",))
         other = self._browsable("Zed Comedy", genres=("Comedy",))
         for one in (tagged, other):
@@ -1382,8 +1433,10 @@ class TitleRepositoryBrowseContract:
     async def test_the_year_filter_is_exact_and_the_two_filters_intersect(
         self, repo: TitleRepository
     ) -> None:
-        """The natural wrong spelling of two filters is `OR`, which answers
-        with a strictly larger, less relevant page that still looks right."""
+        """The natural wrong spelling of two filters is `OR`.
+
+        which answers with a strictly larger, less relevant page that still looks right.
+        """
         both = self._browsable("Both", genres=("Horror",), year=1999)
         genre_only = self._browsable("Genre Only", genres=("Horror",), year=2001)
         year_only = self._browsable("Year Only", genres=("Comedy",), year=1999)
@@ -1402,8 +1455,9 @@ class TitleRepositoryBrowseContract:
     async def test_owned_means_an_available_title_level_copy(
         self, repo: TitleRepository, own: Own
     ) -> None:
-        """**The two readings of "owned" in this codebase, settled by a
-        fixture rather than by whichever join got written.**
+        """**The two readings of "owned" in this codebase.
+
+        settled by a fixture rather than by whichever join got written.**.
 
         `MediaItemRepository.owned_title_ids` carries `episode_id IS NULL` and
         counts a retracted copy; `list_owned_by_tag` requires `available` and
@@ -1447,8 +1501,10 @@ class TitleRepositoryBrowseContract:
     async def test_the_limit_keeps_the_head_of_the_order_rather_than_the_first_found(
         self, repo: TitleRepository
     ) -> None:
-        """A limit applied before the ordering keeps whichever rows the scan
-        reached first, which on a freshly-seeded table is insertion order."""
+        """A limit applied before the ordering keeps whichever rows the scan reached first.
+
+        which on a freshly-seeded table is insertion order.
+        """
         await self._seed_population(repo)
 
         rows = await repo.browse(sort=BrowseSort.NAME, limit=2)
@@ -1458,11 +1514,11 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_facet_is_counted_without_its_own_predicate(
         self, repo: TitleRepository
     ) -> None:
-        """**The facet's whole job.** With `genre=Horror` active the genre
-        facet must still say how many comedies there are, or the client cannot
-        navigate anywhere: a facet folded back onto its own filter answers
-        "how many Horror films are Horror", which is the size of the page
-        already on screen.
+        """**The facet's whole job.** With `genre=Horror` active the genre facet must still say.
+
+        how many comedies there are, or the client cannot navigate anywhere: a facet
+        folded back onto its own filter answers "how many Horror films are Horror",
+        which is the size of the page already on screen.
 
         The assertion is that the map is *unchanged* by activating the filter,
         which is the strongest form and the one that catches the fold-back on
@@ -1484,9 +1540,10 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_facet_offers_one_button_per_concept_not_per_spelling(
         self, repo: TitleRepository
     ) -> None:
-        """**The other half of issue #30.** `GET /browse?facets=true` offered
-        `Sci-Fi` (20,075) and `Science Fiction` (6,204) as two buttons for one
-        concept, so whichever a viewer pressed silently lost the other.
+        """**The other half of issue #30.** `GET /browse?facets=true` offered `Sci-Fi` (20,075).
+
+        and `Science Fiction` (6,204) as two buttons for one concept, so whichever a
+        viewer pressed silently lost the other.
 
         The assertion is on the **whole map**, which is what catches the two
         wrong implementations that both look right: one that emits the
@@ -1511,11 +1568,14 @@ class TitleRepositoryBrowseContract:
     async def test_a_facet_count_is_the_size_of_the_page_that_button_would_serve(
         self, repo: TitleRepository
     ) -> None:
-        """The facet and the filter are one rule read twice, and this is the
-        case that fails if they drift apart. A count collapsed into a canonical
-        label that the filter does not expand — or expanded by a filter the
-        facet does not collapse — leaves a button whose number is not the
-        number of rows pressing it produces."""
+        """The facet and the filter are one rule read twice.
+
+        and this is the case that fails if they drift apart.
+
+        A count collapsed into a canonical label that the filter does not expand — or
+        expanded by a filter the facet does not collapse — leaves a button whose number
+        is not the number of rows pressing it produces.
+        """
         for index in range(3):
             await repo.add(self._browsable(f"Skeleton {index}", genres=("Sci-Fi",)))
         for index in range(2):
@@ -1529,10 +1589,12 @@ class TitleRepositoryBrowseContract:
     async def test_a_facet_the_request_named_is_zero_under_its_canonical_label(
         self, repo: TitleRepository
     ) -> None:
-        """`browse_facets`' "never a sparse dict", after the collapse. A client
-        that filtered on a legacy spelling must get its zero back under the key
-        the rest of the map is written in, or the entry is both absent and
-        present depending on how you look."""
+        """`browse_facets`' "never a sparse dict", after the collapse.
+
+        A client that filtered on a legacy spelling must get its zero back under the key
+        the rest of the map is written in, or the entry is both absent and present
+        depending on how you look.
+        """
         await repo.add(self._browsable("A Comedy", genres=("Comedy",)))
 
         facets = await repo.browse_facets(genre="Sci-Fi")
@@ -1542,10 +1604,12 @@ class TitleRepositoryBrowseContract:
     async def test_the_year_facet_is_counted_without_its_own_predicate(
         self, repo: TitleRepository
     ) -> None:
-        """`test_the_genre_facet_is_counted_without_its_own_predicate`'s twin,
-        and it is a separate case because the two facets are two statements: a
-        drop-your-own-predicate rule applied to one of them and forgotten for
-        the other is exactly the shape a shared docstring hides."""
+        """`test_the_genre_facet_is_counted_without_its_own_predicate`'s twin.
+
+        and it is a separate case because the two facets are two statements: a drop-
+        your-own-predicate rule applied to one of them and forgotten for the other is
+        exactly the shape a shared docstring hides.
+        """
         for index in range(2):
             await repo.add(self._browsable(f"Nineties {index}", year=1999))
         await repo.add(self._browsable("Noughties", year=2000))
@@ -1564,9 +1628,10 @@ class TitleRepositoryBrowseContract:
     async def test_the_facets_keep_every_predicate_that_is_not_their_own(
         self, repo: TitleRepository, own: Own
     ) -> None:
-        """The other half of the rule, and the one a "drop the filters"
-        shortcut gets wrong: the genre facet drops the *genre* predicate and
-        keeps the year and ownership ones.
+        """The other half of the rule, and the one a "drop the filters" shortcut gets wrong.
+
+        the genre facet drops the *genre* predicate and keeps the year and ownership
+        ones.
 
         Without this, a facet bar computed over the whole catalog reports
         counts the client's own filters make unreachable -- 4,000 comedies
@@ -1597,9 +1662,10 @@ class TitleRepositoryBrowseContract:
     async def test_a_genre_the_request_named_is_present_at_zero_rather_than_absent(
         self, repo: TitleRepository
     ) -> None:
-        """`count_by_state`'s *"never a sparse dict"* rule, narrowed to the
-        values the request itself named -- a genre vocabulary is open, so
-        "every possible key" is not a thing this can promise.
+        """`count_by_state`'s *"never a sparse dict"* rule.
+
+        narrowed to the values the request itself named -- a genre vocabulary is open,
+        so "every possible key" is not a thing this can promise.
 
         A `GROUP BY` returns only the values that have rows, so the defect is
         a **missing key**, which a client cannot tell apart from a filter it
@@ -1617,8 +1683,10 @@ class TitleRepositoryBrowseContract:
     async def test_a_year_the_request_named_is_present_at_zero_rather_than_absent(
         self, repo: TitleRepository
     ) -> None:
-        """The year facet's half of the same rule. Separate for the reason the
-        two "without its own predicate" cases are separate."""
+        """The year facet's half of the same rule.
+
+        Separate for the reason the two "without its own predicate" cases are separate.
+        """
         await repo.add(self._browsable("Old Horror", genres=("Horror",), year=1998))
         await repo.add(self._browsable("New Comedy", genres=("Comedy",), year=1999))
 
@@ -1628,8 +1696,10 @@ class TitleRepositoryBrowseContract:
 
 
 class TitleRepositoryGenreSweepContract:
-    """`list_genres_page` and `replace_genres` — the narrow projection the write-time genre
-    backfill walks and the batched write it lands.
+    """`list_genres_page` and `replace_genres`.
+
+    the narrow projection the write-time genre backfill walks and the batched write it
+    lands.
     """
 
     @pytest.fixture
@@ -1649,9 +1719,11 @@ class TitleRepositoryGenreSweepContract:
     async def test_the_page_walk_returns_every_title_once_in_id_order(
         self, repo: TitleRepository
     ) -> None:
-        """The whole population, ordered, with no row served twice — asserted
-        as a walk rather than as one page, because `>=` and `>` differ only at
-        a boundary two abutting pages have and one page does not."""
+        """The whole population, ordered, with no row served twice.
+
+        asserted as a walk rather than as one page, because `>=` and `>` differ only at
+        a boundary two abutting pages have and one page does not.
+        """
         added = [self._titled(f"Title {index}", "Drama") for index in range(5)]
         for title in added:
             await repo.add(title)
@@ -1670,8 +1742,10 @@ class TitleRepositoryGenreSweepContract:
     async def test_the_page_carries_the_labels_and_nothing_else(
         self, repo: TitleRepository
     ) -> None:
-        """A projection, not an entity: the sweep reads 1.27M rows and has no
-        use for 33 columns of each."""
+        """A projection, not an entity.
+
+        the sweep reads 1.27M rows and has no use for 33 columns of each.
+        """
         title = self._titled("The Quiet Vacuum", "Sci-Fi", "Drama")
         await repo.add(title)
 
@@ -1680,11 +1754,13 @@ class TitleRepositoryGenreSweepContract:
         assert [(row.id, row.genres) for row in page] == [(title.id, ("Sci-Fi", "Drama"))]
 
     async def test_a_title_with_no_genres_is_still_in_the_walk(self, repo: TitleRepository) -> None:
-        """**The population is every title, not every title with a genre.** A
-        read filtered on `cardinality(genres) > 0` would be a second, silent
-        definition of "affected" living in SQL, next to the one in
-        `usher.domain.genres` — the `_FINGERPRINT_SQL` failure shape, one
-        column over."""
+        """**The population is every title.
+
+        not every title with a genre.** A read filtered on `cardinality(genres) > 0`
+        would be a second, silent definition of "affected" living in SQL, next to the
+        one in `usher.domain.genres` — the `_FINGERPRINT_SQL` failure shape, one column
+        over.
+        """
         bare = self._titled("Untagged")
         await repo.add(bare)
 
@@ -1708,9 +1784,12 @@ class TitleRepositoryGenreSweepContract:
     async def test_replacing_genres_with_what_the_row_already_holds_writes_nothing(
         self, repo: TitleRepository
     ) -> None:
-        """**The idempotence guard, in the statement rather than only in the
-        caller.** A re-run over a normalised catalog must be observably free,
-        and `rowcount` is what an operator reads to believe it."""
+        """**The idempotence guard.
+
+        in the statement rather than only in the caller.** A re-run over a normalised
+        catalog must be observably free, and `rowcount` is what an operator reads to
+        believe it.
+        """
         title = self._titled("The Quiet Vacuum", "Science Fiction")
         await repo.add(title)
 
@@ -1719,8 +1798,7 @@ class TitleRepositoryGenreSweepContract:
         assert written == 0
 
     async def test_a_batch_writes_only_its_changed_members(self, repo: TitleRepository) -> None:
-        """The count is per row, not per batch — a batch of ten carrying one
-        change reports one."""
+        """The count is per row, not per batch — a batch of ten carrying one change reports one."""
         changed = self._titled("Changed", "Sci-Fi")
         same = self._titled("Same", "Drama")
         await repo.add(changed)
@@ -1741,16 +1819,20 @@ class TitleRepositoryGenreSweepContract:
     async def test_an_empty_batch_writes_nothing_and_asks_nothing(
         self, repo: TitleRepository
     ) -> None:
-        """A page that changed nothing must not reach the database at all —
-        an `UPDATE ... FROM (VALUES)` with no rows is a syntax error, so this
-        is a real refusal rather than a tidiness case."""
+        """A page that changed nothing must not reach the database at all — an `UPDATE ...
+
+        FROM (VALUES)` with no rows is a syntax error, so this is a real refusal rather
+        than a tidiness case.
+        """
         assert await repo.replace_genres([]) == 0
 
     async def test_replacing_genres_for_a_title_that_is_gone_changes_nothing(
         self, repo: TitleRepository
     ) -> None:
-        """`raw_payloads` outlives `titles` and so does a page read a moment
-        ago. An id naming no row is absent from the count, never an error."""
+        """`raw_payloads` outlives `titles` and so does a page read a moment ago.
+
+        An id naming no row is absent from the count, never an error.
+        """
         assert await repo.replace_genres([TitleGenres(id=new_id(), genres=("Drama",))]) == 0
 
 
@@ -1783,10 +1865,11 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_reference_resolves_to_the_id_this_catalog_holds(
         self, repo: TitleRepository
     ) -> None:
-        """The whole point: the artifact's id is not the answer, the
-        target's is. `db/repositories/bulk.py:611` mints a fresh UUIDv7 per
-        staged row, so two catalogs built from one dump agree on `imdb_id`
-        and on nothing else (ADR-0003, ADR-0045).
+        """The whole point: the artifact's id is not the answer, the target's is.
+
+        `db/repositories/bulk.py:611` mints a fresh UUIDv7 per staged row, so two
+        catalogs built from one dump agree on `imdb_id` and on nothing else (ADR-0003,
+        ADR-0045).
         """
         held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000101")
         await repo.add(held)
@@ -1799,8 +1882,10 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_title_with_no_imdb_id_resolves_on_the_tmdb_rung(
         self, repo: TitleRepository
     ) -> None:
-        """The fallback the live catalog needs: 72 of 1,272,888 titles carry
-        no `imdb_id` (2026-08-21), and it was 13 eight days earlier.
+        """The fallback the live catalog needs.
+
+        72 of 1,272,888 titles carry no `imdb_id` (2026-08-21), and it was 13 eight days
+        earlier.
 
         Two references in one call, so the case is a statement about the
         *ladder* rather than about a repository that only ever looks at
@@ -1828,9 +1913,11 @@ class TitleRepositoryNaturalKeyContract:
         }
 
     async def test_the_tmdb_rung_is_namespaced_by_kind(self, repo: TitleRepository) -> None:
-        """ADR-0011: TMDb keys movies and series in separate spaces that
-        overlap on 26,968 measured ids, so `tmdb_id` alone resolves a series'
-        watch state onto whichever film shares the integer.
+        """ADR-0011.
+
+        TMDb keys movies and series in separate spaces that overlap on 26,968 measured
+        ids, so `tmdb_id` alone resolves a series' watch state onto whichever film
+        shares the integer.
 
         Both rows are seeded and both references asked in one call, so a
         resolver that dropped `kind` cannot pass by answering one of them.
@@ -1871,10 +1958,11 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_raw_id_resolves_only_against_a_target_that_already_holds_it(
         self, repo: TitleRepository
     ) -> None:
-        """ADR-0003 makes a title with neither provider id a first-class
-        citizen and the live catalog holds six of them (2026-08-21, against
-        zero on 2026-08-13). The artifact carries the UUID and the target is
-        *asked* rather than trusted.
+        """ADR-0003 makes a title with neither provider id a first-class citizen and the live.
+
+        catalog holds six of them (2026-08-21, against zero on 2026-08-13).
+
+        The artifact carries the UUID and the target is *asked* rather than trusted.
 
         Both arms in one case: the id the catalog holds, and one it does not.
         """
@@ -1890,8 +1978,9 @@ class TitleRepositoryNaturalKeyContract:
         assert await repo.resolve_natural_keys([held, stranger]) == {held: orphan.id}
 
     async def test_the_imdb_rung_wins_over_the_tmdb_one(self, repo: TitleRepository) -> None:
-        """Precedence, asserted rather than left to whichever row a
-        `UNION` happened to return first.
+        """Precedence.
+
+        asserted rather than left to whichever row a `UNION` happened to return first.
 
         The fixture is the state a merge leaves behind: two rows, one holding
         the `imdb_id` the artifact carries and one holding its `tmdb_id`.
@@ -1915,8 +2004,10 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_reference_this_catalog_does_not_hold_is_absent(
         self, repo: TitleRepository
     ) -> None:
-        """Absent, never mapped to `None` — the port's contract, and what
-        `usher.db.backup_identity.resolve_titles` turns into a named refusal.
+        """Absent, never mapped to `None`.
+
+        the port's contract, and what `usher.db.backup_identity.resolve_titles` turns
+        into a named refusal.
 
         The premise is a sibling that does resolve in the same call.
         """
@@ -1932,15 +2023,19 @@ class TitleRepositoryNaturalKeyContract:
         assert missing not in answers
 
     async def test_an_empty_batch_asks_nothing(self, repo: TitleRepository) -> None:
-        """`unnest` over an empty array is a round trip to learn nothing —
-        `resolve_tmdb_ids`' own guard, one method over."""
+        """`unnest` over an empty array is a round trip to learn nothing.
+
+        `resolve_tmdb_ids`' own guard, one method over.
+        """
         assert await repo.resolve_natural_keys([]) == {}
 
     async def test_a_repeated_reference_is_answered_once(self, repo: TitleRepository) -> None:
-        """A household names one title once per watch state, so a batch
-        carrying it twice is the ordinary shape rather than a defect. Two
-        probes for one reference would make the ordinal disagree with the
-        caller's list, which is the failure mode the mapping cannot survive.
+        """A household names one title once per watch state.
+
+        so a batch carrying it twice is the ordinary shape rather than a defect.
+
+        Two probes for one reference would make the ordinal disagree with the caller's
+        list, which is the failure mode the mapping cannot survive.
         """
         held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000701")
         await repo.add(held)

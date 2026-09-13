@@ -1,4 +1,4 @@
-"""tmdb_id namespaced by kind"""
+"""Tmdb_id namespaced by kind."""
 
 from collections.abc import Sequence
 

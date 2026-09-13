@@ -108,9 +108,10 @@ class TestFakeEpisodeRepository(EpisodeRepositoryContract, EpisodeRepositoryNext
         other_seeded: dict[tuple[int, int], uuid.UUID],
         mark_played: MarkPlayed,
     ) -> None:
-        """The N+1 half of `test_next_up_answers_for_many_series_at_once`,
-        which the result cannot express: a per-series loop returns exactly the
-        same mapping.
+        """The N+1 half of `test_next_up_answers_for_many_series_at_once`.
+
+        which the result cannot express: a per-series loop returns exactly the same
+        mapping.
 
         `NextUpProvider` asks about every series the household has started, so
         a loop here is one round trip per started series -- and it must never
@@ -127,11 +128,13 @@ class TestFakeEpisodeRepository(EpisodeRepositoryContract, EpisodeRepositoryNext
 
 
 class TestFakeEpisodeRepositoryNaturalKeys(EpisodeRepositoryNaturalKeyContract):
-    """`resolve_natural_keys` against the fake. The Postgres half is
-    `tests/integration/test_episode_repository.py`, and it is the one that
-    can fail on the four-way join, on `WITH ORDINALITY` and on the "one
-    statement per call" promise -- `title_keys` here is a seeded dict rather
-    than a join, which is this fake's sixth recorded divergence."""
+    """`resolve_natural_keys` against the fake.
+
+    The Postgres half is `tests/integration/test_episode_repository.py`, and it is the
+    one that can fail on the four-way join, on `WITH ORDINALITY` and on the "one
+    statement per call" promise -- `title_keys` here is a seeded dict rather than a
+    join, which is this fake's sixth recorded divergence.
+    """
 
     @pytest.fixture
     def repository(self) -> FakeEpisodeRepository:
@@ -139,9 +142,11 @@ class TestFakeEpisodeRepositoryNaturalKeys(EpisodeRepositoryNaturalKeyContract):
 
     @pytest.fixture
     def series_reference(self, repository: FakeEpisodeRepository) -> TitleReference:
-        """Registered in `title_keys`, which is what makes the reference true
-        of a row this fake holds -- the Postgres arm writes a `titles` row
-        instead."""
+        """Registered in `title_keys`.
+
+        which is what makes the reference true of a row this fake holds -- the Postgres
+        arm writes a `titles` row instead.
+        """
         reference = TitleReference(
             kind=TitleKind.SERIES, id=new_id(), imdb_id="tt99001001", tmdb_id=99001001
         )
@@ -158,9 +163,11 @@ class TestFakeEpisodeRepositoryNaturalKeys(EpisodeRepositoryNaturalKeyContract):
 
     @pytest.fixture
     def title_id(self, series_reference: TitleReference) -> uuid.UUID:
-        """The same id the reference names: on the Postgres arm these are one
-        `titles` row, and a fake whose two fixtures disagreed would make every
-        case here vacuous."""
+        """The same id the reference names.
+
+        on the Postgres arm these are one `titles` row, and a fake whose two fixtures
+        disagreed would make every case here vacuous.
+        """
         return series_reference.id
 
     @pytest.fixture

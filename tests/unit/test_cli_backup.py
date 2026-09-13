@@ -40,8 +40,7 @@ def _report(
 
 
 def test_backup_takes_one_optional_output_path() -> None:
-    """`--output` and nothing else, and it is `None` by default rather than a
-    computed name.
+    """`--output` and nothing else, and it is `None` by default rather than a computed name.
 
     The default filename embeds the run's own UTC instant, and that instant
     has to be the one the header is stamped with -- so it is computed inside
@@ -53,24 +52,32 @@ def test_backup_takes_one_optional_output_path() -> None:
 
 
 def test_the_output_argument_arrives_as_a_path() -> None:
-    """`type=Path` at the parser rather than a `Path(...)` in `_dispatch`, so
-    the surface is described in one place and there is no spelling of this
-    argument that is a `str` on one side and a `Path` on the other."""
+    """`type=Path` at the parser rather than a `Path(...)` in `_dispatch`.
+
+    so the surface is described in one place and there is no spelling of this argument
+    that is a `str` on one side and a `Path` on the other.
+    """
     args = parse_args(["backup", "--output", "/srv/usher/backups/x.jsonl.gz"])
     assert args.output == Path("/srv/usher/backups/x.jsonl.gz")
 
 
 def test_backup_is_advertised_by_the_parser() -> None:
-    """A subcommand `build_parser` does not declare is a command
-    `test_cli_errors.py`'s boundary sweep never runs."""
+    """A subcommand `build_parser` does not declare is a command `test_cli_errors.py`'s boundary.
+
+    sweep never runs.
+    """
     assert build_parser().parse_args(["backup"]).command == "backup"
 
 
 def test_backup_dispatches_to_backup_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured for `usher curate` in M8: deleting its arm left the whole
-    boundary selection green. `dispatched` carries the argument."""
+    """Measured for `usher curate` in M8.
+
+    deleting its arm left the whole boundary selection green.
+
+    `dispatched` carries the argument.
+    """
     configured(monkeypatch)
 
     calls = dispatched(
@@ -87,9 +94,7 @@ def test_backup_dispatches_to_backup_and_not_to_the_server(
 def test_a_missing_directory_is_one_line_and_exit_one(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Through `OSError` in `OPERATOR_ERRORS`, and not through a handler of this command's
-    own.
-    """
+    """Through `OSError` in `OPERATOR_ERRORS`, and not through a handler of this command's own."""
     configured(monkeypatch)
     missing = tmp_path / "no-such-directory" / "x.jsonl.gz"
 
@@ -122,8 +127,9 @@ def test_traceback_re_raises_rather_than_rendering(
 def test_the_report_prints_a_line_per_table_including_the_zero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Zeros included**, for `_print_curation_report`'s reason: a table
-    absent from a report and a table nobody carries read the same, and at a
+    """**Zeros included**, for `_print_curation_report`'s reason.
+
+    a table absent from a report and a table nobody carries read the same, and at a
     terminal there is no second export to compare against.
 
     `llm_calls` is the one that matters. It is 0 rows on the deployment this
@@ -145,8 +151,9 @@ def test_the_report_prints_a_line_per_table_including_the_zero(
 def test_the_summary_line_carries_the_total_the_size_and_the_revision(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The three facts an operator checks against `ls -l` and against the
-    database they just backed up.
+    """The three facts an operator checks against `ls -l` and against the database they just.
+
+    backed up.
 
     The size is `stat()` on the written file rather than a sum of what was
     encoded: gzip's ratio over JSON is the whole reason the format is
@@ -164,7 +171,7 @@ def test_the_summary_line_carries_the_total_the_size_and_the_revision(
 def test_the_report_names_the_secret_key_dependency_on_every_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Every run, not only when a credential row was carried.**
+    """**Every run, not only when a credential row was carried.**.
 
     `source_credentials` travels as ciphertext and this command holds no key,
     so an artifact restored into a deployment with a different

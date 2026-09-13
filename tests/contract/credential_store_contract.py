@@ -34,10 +34,13 @@ class CredentialStoreContract:
         assert await store.get("never-stored") is None
 
     async def test_put_replaces_an_existing_secret(self, store: CredentialStore) -> None:
-        """Both re-registering a source with a corrected password and PRD
-        08's key rotation land here. A store that inserted instead of
-        upserting would raise on the second call, or -- worse -- keep
-        serving the old secret."""
+        """Both re-registering a source with a corrected password and PRD 08's key rotation land.
+
+        here.
+
+        A store that inserted instead of upserting would raise on the second call, or --
+        worse -- keep serving the old secret.
+        """
         owner = await self.owner(store)
         await store.put("ref-1", WRONG, owner_id=owner)
         await store.put("ref-1", RIGHT, owner_id=owner)
@@ -46,10 +49,12 @@ class CredentialStoreContract:
         assert fetched.password.get_secret_value() == "correct-horse-battery"
 
     async def test_refs_are_independent(self, store: CredentialStore) -> None:
-        """Rules out a store keyed on the owner rather than the ref, which
-        would make PRD 08's rotation (write under a new ref, flip
-        `Source.credentials_ref`, delete the old) overwrite the very secret
-        it is meant to be replacing."""
+        """Rules out a store keyed on the owner rather than the ref.
+
+        which would make PRD 08's rotation (write under a new ref, flip
+        `Source.credentials_ref`, delete the old) overwrite the very secret it is meant
+        to be replacing.
+        """
         owner = await self.owner(store)
         await store.put("ref-old", WRONG, owner_id=owner)
         await store.put("ref-new", RIGHT, owner_id=owner)
@@ -65,9 +70,11 @@ class CredentialStoreContract:
         assert await store.get("ref-1") is None
 
     async def test_delete_is_idempotent(self, store: CredentialStore) -> None:
-        """`DELETE /admin/sources/{id}` removes a source and its credentials
-        in two steps; a retry after a partial failure must not fail on the
-        step that already succeeded."""
+        """`DELETE /admin/sources/{id}` removes a source and its credentials in two steps.
+
+        a retry after a partial failure must not fail on the step that already
+        succeeded.
+        """
         await store.delete("never-stored")
         owner = await self.owner(store)
         await store.put("ref-1", RIGHT, owner_id=owner)

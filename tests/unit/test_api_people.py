@@ -103,8 +103,10 @@ async def _seed_title(
 
 
 async def _seed_credits(credits: FakeCreditRepository, rows: list[Credit]) -> None:
-    """Through the port, so the seeding cannot express something the
-    derivation could not have written."""
+    """Through the port.
+
+    so the seeding cannot express something the derivation could not have written.
+    """
     await credits.replace_for_titles(
         list(dict.fromkeys(row.title_id for row in rows)), rows, credit_names={}
     )
@@ -131,8 +133,9 @@ async def test_a_filmography_is_grouped_into_cast_and_one_group_per_crew_job(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """PRD 07's "filmography grouped by role", and the wrong implementation it
-    kills is one flat list.
+    """PRD 07's "filmography grouped by role".
+
+    and the wrong implementation it kills is one flat list.
 
     A flat list is what every membership assertion accepts and what a client
     cannot render: "acted in" and "directed" are different sentences about the
@@ -179,10 +182,12 @@ async def test_a_film_card_carries_what_a_filmography_renders(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """The card is hydrated from `TitleRepository.list_by_ids`, so it is the
-    catalog's answer about the title rather than the credit's -- which is what
-    keeps `CreditRepository` from growing a second opinion about what a title
-    is (`PersonCredit`'s own docstring)."""
+    """The card is hydrated from `TitleRepository.list_by_ids`.
+
+    so it is the catalog's answer about the title rather than the credit's -- which is
+    what keeps `CreditRepository` from growing a second opinion about what a title is
+    (`PersonCredit`'s own docstring).
+    """
     person = await _seed_person(people)
     film = await _seed_title(titles, name="A Film They Acted In", year=1998)
     await _seed_credits(
@@ -215,8 +220,9 @@ async def test_a_person_credited_twice_on_one_title_is_in_both_groups_once_each(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """The other side of `RecurringPerson`'s counting rule, stated here so
-    nobody "fixes" it into a distinct-title collapse.
+    """The other side of `RecurringPerson`'s counting rule.
+
+    stated here so nobody "fixes" it into a distinct-title collapse.
 
     `list_recurring_for_user` counts **distinct titles** because a person
     credited twice on one film is not two films watched. This route is the
@@ -277,8 +283,9 @@ async def test_titles_in_a_group_are_newest_first_with_unknown_years_last(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """`PersonCredit` carries no `year`, so this ordering happens after
-    hydration and nothing below the route can supply it.
+    """`PersonCredit` carries no `year`.
+
+    so this ordering happens after hydration and nothing below the route can supply it.
 
     **The case asserts its own premise.** `Title.id` is a UUIDv7 minted at
     validation time, so seeding oldest-first makes insertion order, id order
@@ -323,10 +330,12 @@ async def test_two_titles_of_one_year_are_broken_by_id(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """The tiebreak, so two reads of one catalog agree. Without it the order
-    within a year is whatever `list_by_ids` returned, which Postgres does not
-    promise at all -- `TitleRepository.list_by_ids` says "in any order" in its
-    own docstring."""
+    """The tiebreak, so two reads of one catalog agree.
+
+    Without it the order within a year is whatever `list_by_ids` returned, which
+    Postgres does not promise at all -- `TitleRepository.list_by_ids` says "in any
+    order" in its own docstring.
+    """
     person = await _seed_person(people)
     first = await _seed_title(titles, name="One Of Two", year=2004)
     second = await _seed_title(titles, name="Two Of Two", year=2004)
@@ -406,9 +415,10 @@ async def test_a_crew_credit_with_no_job_lands_in_its_own_group(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """`credits.job` is nullable and `Credit`'s own docstring says why: "a
-    crew entry with no `job` and a cast entry with no `character` are the same
-    row shape".
+    """`credits.job` is nullable and `Credit`'s own docstring says why.
+
+    "a crew entry with no `job` and a cast entry with no `character` are the same row
+    shape".
 
     So the grouping cannot key on `job` alone. The wrong implementations this
     kills are a `None` key -- which is not a JSON object key and not a role a
@@ -441,8 +451,9 @@ async def test_a_credit_naming_a_title_the_catalog_no_longer_holds_is_dropped(
     titles: FakeTitleRepository,
     credits: FakeCreditRepository,
 ) -> None:
-    """`list_by_ids` returns fewer rows than it was asked for -- the port says
-    so -- and `titles[hit.title_id]` is therefore a `KeyError`, which is a
+    """`list_by_ids` returns fewer rows than it was asked for.
+
+    the port says so -- and `titles[hit.title_id]` is therefore a `KeyError`, which is a
     500 on a route whose honest answer is a shorter list.
 
     The same hazard `SearchService._rank` and `SimilarityService.neighbors_of`
@@ -480,8 +491,9 @@ async def test_a_credit_naming_a_title_the_catalog_no_longer_holds_is_dropped(
 async def test_a_person_with_no_credits_is_a_200_with_no_groups_at_all(
     client: httpx.AsyncClient, people: FakePersonRepository
 ) -> None:
-    """Absent, never `[]` -- group B's convention, stated once for the whole
-    group and applied here.
+    """Absent, never `[]`.
+
+    group B's convention, stated once for the whole group and applied here.
 
     A client cannot tell `"groups": []` from "this person's credits have not
     been derived yet", and on a catalog whose enriched tier is single-digit
@@ -502,10 +514,13 @@ async def test_a_person_with_no_credits_is_a_200_with_no_groups_at_all(
 
 
 async def test_an_unknown_person_is_a_404_in_the_envelope(client: httpx.AsyncClient) -> None:
-    """V1's generic `not_found`, never a `person_not_found`: RFC 9457's
-    `instance` already carries the path, so a per-resource member is a second
-    spelling of what the document says. Kept thin -- the envelope itself is
-    asserted in `tests/unit/test_api_problem.py`."""
+    """V1's generic `not_found`, never a `person_not_found`.
+
+    RFC 9457's `instance` already carries the path, so a per-resource member is a second
+    spelling of what the document says.
+
+    Kept thin -- the envelope itself is asserted in `tests/unit/test_api_problem.py`.
+    """
     person_id = uuid.uuid4()
     response = await client.get(f"/people/{person_id}")
     assert response.status_code == 404
@@ -517,9 +532,13 @@ async def test_an_unknown_person_is_a_404_in_the_envelope(client: httpx.AsyncCli
 async def test_an_unknown_person_reads_no_credits_at_all(
     client: httpx.AsyncClient, credits: FakeCreditRepository
 ) -> None:
-    """Existence is resolved before the filmography is read, so a 404 costs
-    one statement rather than three. The counter is the only way to say this:
-    the response body of a route that read and discarded is identical."""
+    """Existence is resolved before the filmography is read.
+
+    so a 404 costs one statement rather than three.
+
+    The counter is the only way to say this: the response body of a route that read and
+    discarded is identical.
+    """
     credits.reset_calls()
     await client.get(f"/people/{uuid.uuid4()}")
     assert credits.calls == 0
@@ -592,8 +611,9 @@ def test_the_route_names_its_page_size_rather_than_taking_the_ports_default() ->
 
 
 async def test_the_route_is_in_the_schema_with_its_page_size_stated(app: FastAPI) -> None:
-    """A route that answers correctly and is absent from `/openapi.json` is a
-    route no generated client can call.
+    """A route that answers correctly and is absent from `/openapi.json` is a route no generated.
+
+    client can call.
 
     The page size is in the operation's description because it is the one
     thing about this response a client cannot measure: a filmography that came

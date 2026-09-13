@@ -27,10 +27,13 @@ _MIGRATIONS = _PACKAGE / "db" / "migrations" / "versions"
 
 
 def _written_sources() -> list[pathlib.Path]:
-    """Every module in the package, because `usher.db.repositories` is not the
-    whole of the write surface: `adapters/search/postgres.py` holds a second
-    writer of `title_embeddings`, and a scan of the repositories package alone
-    reports that column's translation from one of its two writers."""
+    """Every module in the package.
+
+    because `usher.db.repositories` is not the whole of the write surface:
+    `adapters/search/postgres.py` holds a second writer of `title_embeddings`, and a
+    scan of the repositories package alone reports that column's translation from one of
+    its two writers.
+    """
     return sorted(path for path in _PACKAGE.rglob("*.py") if "migrations" not in path.parts)
 
 
@@ -111,8 +114,9 @@ class WriteSite:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RefusalPoint:
-    """One call in a method that can make Postgres refuse a row, with the rank
-    of the translation lexically enclosing it.
+    """One call in a method that can make Postgres refuse a row.
+
+    with the rank of the translation lexically enclosing it.
 
     `call` is `""` for a statement the method runs itself and the callee's name
     for one it delegates. `bound_select` marks the case this file deliberately
@@ -472,8 +476,10 @@ _ORM_STATEMENT_CALLS = frozenset({"update", "delete", "pg_insert"})
 
 
 def _constructed_rows(tree: ast.Module) -> dict[str, set[str]]:
-    """Per module-level function, the tables whose mapped class it *constructs*, followed
-    transitively across calls inside this module.
+    """Per module-level function.
+
+    the tables whose mapped class it *constructs*, followed transitively across calls
+    inside this module.
     """
     functions = {
         node.name: node
@@ -641,8 +647,9 @@ def _statement_text(node: ast.Call, texts: Mapping[str, str]) -> str | None:
 def _refusal_points(
     node: ast.AST, texts: Mapping[str, str], local: frozenset[str], covered: int = 0
 ) -> Iterator[RefusalPoint]:
-    """Every call in this subtree that can make Postgres refuse a *row*, paired with the
-    rank of the translation **lexically enclosing it**.
+    """Every call in this subtree that can make Postgres refuse a *row*.
+
+    paired with the rank of the translation **lexically enclosing it**.
     """
     if isinstance(node, ast.AsyncWith | ast.With):
         inner = covered
@@ -1367,9 +1374,11 @@ def migration_bounded_columns(stop_after: str | None = None) -> set[tuple[str, s
 
 
 def _in_order(node: ast.AST) -> Iterator[ast.AST]:
-    """Depth-first, source order. `ast.walk` is breadth-first, which reorders a
-    migration's own statements -- and `m09e` creates nothing and *alters* two
-    columns, so an out-of-order replay reads the width the chain started at.
+    """Depth-first, source order.
+
+    `ast.walk` is breadth-first, which reorders a migration's own statements -- and
+    `m09e` creates nothing and *alters* two columns, so an out-of-order replay reads the
+    width the chain started at.
 
     **`ast.For` is yielded and not descended into**, because `_replay_body`
     unrolls it with its loop variables bound; descending here as well would
@@ -1461,7 +1470,9 @@ def _replay_loop(
     literals: Mapping[str, Any],
     strings: Mapping[str, str],
 ) -> None:
-    """Unroll `for a, b, ... in <module constant>:` and replay the body per item.
+    """Unroll `for a, b, ...
+
+    in <module constant>:` and replay the body per item.
 
     Only over an iterable that resolves to a literal sequence -- which is the
     one shape this chain uses (`m10a`'s `_RENAMES`). Anything else raises,
@@ -1581,9 +1592,10 @@ _SQL_TYPE_RENAMES = {
 
 
 def _replay_sql(statement: str, schema: dict[str, dict[str, str]]) -> None:
-    """`op.execute("ALTER TABLE credits ADD COLUMN source varchar(8)")` and its
-    inverse -- 45 `op.execute` calls in this chain, and `m09d` puts two bounded
-    columns in one, so a replay that only reads `op.add_column` is short by two.
+    """`op.execute("ALTER TABLE credits ADD COLUMN source varchar(8)")` and its inverse.
+
+    45 `op.execute` calls in this chain, and `m09d` puts two bounded columns in one, so
+    a replay that only reads `op.add_column` is short by two.
     """
     for table, column, sql_type in _ADD_COLUMN.findall(statement):
         collapsed = re.sub(r"\s+", "", sql_type).upper()
@@ -1883,8 +1895,11 @@ def _classify(
 
 
 def _fully_bounded(sql_type: str, domain: str) -> bool:
-    """`_errors.py`'s own rule, run forwards: safe when the field is bounded on
-    every side the column is, and exposed when it is bounded on fewer."""
+    """`_errors.py`'s own rule, run forwards.
+
+    safe when the field is bounded on every side the column is, and exposed when it is
+    bounded on fewer.
+    """
     if not domain:
         return False
     declared_parts = dict(part.partition("=")[::2] for part in domain.split("; "))
@@ -2001,8 +2016,11 @@ def staging_shape() -> tuple[list[str], list[str]]:
 
 
 def counts(rows: Sequence[LedgerRow]) -> dict[str, int]:
-    """The bucket census. One function, so `--summary` and `--check` cannot
-    read the same ledger and disagree about what it says."""
+    """The bucket census.
+
+    One function, so `--summary` and `--check` cannot read the same ledger and disagree
+    about what it says.
+    """
     counted: dict[str, int] = {bucket: 0 for bucket in BUCKETS}
     for row in rows:
         counted[row.bucket] = counted.get(row.bucket, 0) + 1
@@ -2053,8 +2071,10 @@ def readings_table() -> str:
 def summary(
     rows: Sequence[LedgerRow], reading: str = DEFAULT_READING, at: str | None = None
 ) -> str:
-    """The counts. Under `at`, the sections that read the **live** metadata are
-    withheld rather than printed wrong.
+    """The counts.
+
+    Under `at`, the sections that read the **live** metadata are withheld rather than
+    printed wrong.
 
     `staging_shape()` and `check_bounded_columns()` both read
     `Base.metadata`, which is today's schema whatever `--at` says. Printing
@@ -2150,7 +2170,9 @@ _TAUTOLOGOUS = (
 
 
 def _drift(reading: str) -> list[str]:
-    """Everything `--check` compares. Empty means no drift.
+    """Everything `--check` compares.
+
+    Empty means no drift.
 
     Three comparisons, not one. The column set against the migration replay is
     the weakest of them and was the only one this file had: it cannot see a

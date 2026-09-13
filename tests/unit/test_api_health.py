@@ -1,6 +1,6 @@
-"""The degraded-readiness path -- deliberately not in tests/integration/: it needs no
-real Postgres (a connection refused on a port nothing listens on fails the same way
-an actually-down database would, from the app's perspective), so it belongs where
+"""The degraded-readiness path.
+
+deliberately not in tests/integration/: it needs no real Postgres (a connection refused
 """
 
 import uuid
@@ -56,21 +56,25 @@ async def test_ready_returns_503_when_database_unreachable(
 async def test_health_stays_ok_even_when_database_unreachable(
     client_against_unreachable_database: AsyncClient,
 ) -> None:
-    """The liveness/readiness split's entire point: a database outage must
-    not affect liveness, so this and the 503 test above use the same
-    unreachable-database app to prove the difference directly rather than
-    asserting it in isolation."""
+    """The liveness/readiness split's entire point.
+
+    a database outage must not affect liveness, so this and the 503 test above use the
+    same unreachable-database app to prove the difference directly rather than asserting
+    it in isolation.
+    """
     response = await client_against_unreachable_database.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "version": usher.__version__}
 
 
 async def test_create_app_builds_the_client_event_bus() -> None:
-    """`get_reconcile_service` resolves `EventPublisher` off `app.state.events`
-    on every request that walks a source, so an app without one 500s at
-    request time rather than at start-up. Built in `create_app` rather than in
-    the lifespan for the reason `settings` is: it holds no connection, no
-    thread, and nothing to dispose.
+    """`get_reconcile_service` resolves `EventPublisher` off `app.state.events` on every request.
+
+    that walks a source, so an app without one 500s at request time rather than at
+    start-up.
+
+    Built in `create_app` rather than in the lifespan for the reason `settings` is: it
+    holds no connection, no thread, and nothing to dispose.
     """
     settings = Settings(
         database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
@@ -192,7 +196,7 @@ async def test_readiness_reports_the_lanes() -> None:
 
 
 async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than_zero() -> None:
-    """**`null`, not `0`, and the difference is a claim.**
+    """**`null`, not `0`, and the difference is a claim.**.
 
     `USHER_WORKER_ENABLED=false` beside a `usher work` container is the split
     topology PRD 08 prices, and this process never calls `recover()` at all --
@@ -223,11 +227,11 @@ async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than
 
 
 async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() -> None:
-    """**The correction PRD 08 needs.** A readiness check that failed
-    because Emby is down would take Usher out of a load balancer for a
-    reason restarting Usher cannot fix -- which is the exact argument M1's
-    liveness/readiness split is built on, and PRD 08's own failure table
-    says an unreachable source leaves the catalog "fully browsable".
+    """**The correction PRD 08 needs.** A readiness check that failed because Emby is down would.
+
+    take Usher out of a load balancer for a reason restarting Usher cannot fix -- which
+    is the exact argument M1's liveness/readiness split is built on, and PRD 08's own
+    failure table says an unreachable source leaves the catalog "fully browsable".
 
     Driven against a *reachable* database so the only thing that could
     degrade it is the lane report. The database this app points at is not
@@ -285,9 +289,11 @@ async def test_no_lane_state_can_change_the_readiness_verdict(
 
 
 async def test_readiness_never_touches_a_source() -> None:
-    """Docker's healthcheck polls this every 2 s in the shipped compose
-    file, against an upstream PRD 01 measures at 1-5 s per request. A probe
-    here is a request per poll per source, forever -- and it would take the
+    """Docker's healthcheck polls this every 2 s in the shipped compose file.
+
+    against an upstream PRD 01 measures at 1-5 s per request.
+
+    A probe here is a request per poll per source, forever -- and it would take the
     process out of a load balancer for a reason restarting it cannot fix.
 
     Asserted on the route's own dependency graph rather than on "no adapter
@@ -316,7 +322,8 @@ def _flatten(dependant: Dependant) -> set[object]:
 
     FastAPI 0.121 has no public `get_flat_dependant`, so this walks
     `Dependant.dependencies` itself -- three lines, and pinned by the
-    positive assertion above rather than trusted."""
+    positive assertion above rather than trusted.
+    """
     found: set[object] = {dependant.call}
     for sub in dependant.dependencies:
         found |= _flatten(sub)
@@ -326,8 +333,7 @@ def _flatten(dependant: Dependant) -> set[object]:
 async def test_liveness_names_the_running_version(
     client_against_unreachable_database: AsyncClient,
 ) -> None:
-    """The one fact an operator needs during an incident: which image is
-    actually running.
+    """The one fact an operator needs during an incident: which image is actually running.
 
     **Shares the unreachable-database fixture with the case above, and adds
     the two things that case is not about.** That one is the liveness/readiness

@@ -236,8 +236,10 @@ async def read_pools(session: AsyncSession) -> dict[str, list[tuple[uuid.UUID, s
 
 
 async def read_frame(session: AsyncSession) -> Frame:
-    """The frame as this catalog presents it, counted from the same statement
-    `read_pools` draws from."""
+    """The frame as this catalog presents it.
+
+    counted from the same statement `read_pools` draws from.
+    """
     shared = (
         await session.execute(
             text(

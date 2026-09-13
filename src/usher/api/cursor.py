@@ -155,8 +155,7 @@ def encode_cursor(values: Sequence[CursorValue], *, spec: CursorSpec) -> str:
 
 
 def decode_cursor(raw: str, *, spec: CursorSpec) -> tuple[CursorValue, ...]:
-    """The position a cursor names, as the same typed values it was minted
-    from.
+    """The position a cursor names, as the same typed values it was minted from.
 
     Raises `ProblemException` -- `400 invalid_cursor` -- for every malformed
     input, in the order the causes can be told apart: a cursor that is not
@@ -205,14 +204,17 @@ def paginate[RowT, ItemT](
 
 
 def _invalid(detail: str) -> ProblemException:
-    """One line for a route to adopt, and the reason `ProblemCode` already
-    carries `INVALID_CURSOR`: `api/errors.py`'s status table cannot map this,
-    because no *status* implies it -- a 400 is not always a bad cursor."""
+    """One line for a route to adopt.
+
+    and the reason `ProblemCode` already carries `INVALID_CURSOR`: `api/errors.py`'s
+    status table cannot map this, because no *status* implies it -- a 400 is not always
+    a bad cursor.
+    """
     return ProblemException(status_code=400, code=ProblemCode.INVALID_CURSOR, detail=detail)
 
 
 def _payload(raw: str) -> Mapping[str, Any]:
-    """base64url -> JSON -> a mapping, refusing at each step separately."""
+    """Base64url -> JSON -> a mapping, refusing at each step separately."""
     padded = raw + "=" * (-len(raw) % 4)
     try:
         # `validate=True`, and it is load-bearing rather than pedantic:

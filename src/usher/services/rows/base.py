@@ -1,5 +1,6 @@
-"""`BaseRow` -- the shared hydration every row does the same way, and the one place a
-title id becomes a card.
+"""`BaseRow`.
+
+the shared hydration every row does the same way, and the one place a title id becomes a
 """
 
 import uuid
@@ -189,7 +190,9 @@ class BaseRow(Row):
     async def _known(
         self, ctx: RowContext, title_ids: Sequence[uuid.UUID]
     ) -> dict[uuid.UUID, Title]:
-        """This shelf's titles, by id. One statement, whatever the length.
+        """This shelf's titles, by id.
+
+        One statement, whatever the length.
 
         **Overridable, and `LLMRow` is the one row that overrides it.** Four
         curated shelves come out of a single `list_for_user`, so the family's
@@ -209,7 +212,9 @@ class BaseRow(Row):
         return {title.id: title for title in rows}
 
     async def _ownership(self, ctx: RowContext, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
-        """Which of them this household has a copy of. One statement, always.
+        """Which of them this household has a copy of.
+
+        One statement, always.
 
         `owned_title_ids` rather than `list_for_title` per card: one statement
         for the whole shelf, and its own bound (`episode_id IS NULL`, no

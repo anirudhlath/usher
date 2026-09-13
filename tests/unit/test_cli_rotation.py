@@ -50,8 +50,9 @@ BASE64_KEY = "aB3/xY+9zQ7wE1rT2uI5oP8kL0jH6gF4dS2aZ1xC3v=="
 
 
 def _merged(argv: list[str]) -> tuple[object, str]:
-    """Run `main` and return its exit code beside **everything an operator
-    sees**: stdout, stderr and the `SystemExit` string, concatenated.
+    """Run `main` and return its exit code beside **everything an operator sees**.
+
+    stdout, stderr and the `SystemExit` string, concatenated.
 
     The three together, because the leak this file's security cases are about
     was found on the merged stream -- argparse writes its refusals to stderr
@@ -98,7 +99,7 @@ def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
 def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """🔴 **The 2026-08-26 defect, and it was a silent success.**"""
+    """🔴 **The 2026-08-26 defect, and it was a silent success.**."""
     configured(monkeypatch)
     argv = ["rotate-secret", "--new-key", NEW_KEY]
     assert NEW_KEY in argv, "the premise: the key really is in this invocation"
@@ -143,8 +144,9 @@ def test_an_abbreviation_cannot_bind_a_value_into_the_variable_name(
 def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The half `allow_abbrev=False` does not reach: the operator uses the
-    **right** flag and passes the key to it.
+    """The half `allow_abbrev=False` does not reach.
+
+    the operator uses the **right** flag and passes the key to it.
 
     Two premises, and the second is the whole reason this case exists.
     """
@@ -170,10 +172,12 @@ def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed
 def test_a_name_that_is_not_an_environment_variable_name_is_refused_without_being_echoed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The grammar half. `openssl rand -base64 32` carries `+/=` and a
-    hyphenated key carries `-`, none of which is a legal name -- so the
-    commonest way to reach this refusal is to have passed the key, and
-    repeating it is the defect."""
+    """The grammar half.
+
+    `openssl rand -base64 32` carries `+/=` and a hyphenated key carries `-`, none of
+    which is a legal name -- so the commonest way to reach this refusal is to have
+    passed the key, and repeating it is the defect.
+    """
     configured(monkeypatch)
     assert not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", BASE64_KEY), "the premise"
 
@@ -207,8 +211,7 @@ def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_o
 def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The blast radius of `allow_abbrev=False`, pinned rather than asserted in
-    a comment.
+    """The blast radius of `allow_abbrev=False`, pinned rather than asserted in a comment.
 
     It is set on this subparser only -- measured, because a subparser does
     **not** inherit it from the parser that created it -- so exactly three
@@ -266,9 +269,11 @@ def test_the_key_itself_is_absent_from_argv_and_from_the_parsed_namespace(
 
 
 def test_the_variable_name_is_required() -> None:
-    """No default, because this command rewrites every stored credential in
-    the deployment: a bare `usher rotate-secret` must not pick up a variable
-    left over in the shell from a previous run."""
+    """No default, because this command rewrites every stored credential in the deployment.
+
+    a bare `usher rotate-secret` must not pick up a variable left over in the shell from
+    a previous run.
+    """
     with pytest.raises(SystemExit) as exit_info:
         build_parser().parse_args(["rotate-secret"])
     assert exit_info.value.code == 2
@@ -277,10 +282,12 @@ def test_the_variable_name_is_required() -> None:
 def test_rotate_secret_dispatches_to_rotate_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The argument is asserted as well as the call, and here that is a
-    security assertion rather than only a wiring one: what crosses `_dispatch`
-    is the **variable name**, so a frame summary of this call site cannot
-    print a key."""
+    """The argument is asserted as well as the call.
+
+    and here that is a security assertion rather than only a wiring one: what crosses
+    `_dispatch` is the **variable name**, so a frame summary of this call site cannot
+    print a key.
+    """
     configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
@@ -293,8 +300,10 @@ def test_rotate_secret_dispatches_to_rotate_and_not_to_the_server(
 def test_an_unset_variable_is_a_sentence_naming_it_rather_than_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The commonest way to get this wrong is to forget the `export`, and the
-    message has to be the fix rather than a `KeyError`."""
+    """The commonest way to get this wrong is to forget the `export`.
+
+    and the message has to be the fix rather than a `KeyError`.
+    """
     monkeypatch.delenv(VAR, raising=False)
 
     with pytest.raises(SystemExit) as exit_info:
@@ -307,8 +316,9 @@ def test_an_unset_variable_is_a_sentence_naming_it_rather_than_a_traceback(
 
 
 def test_an_empty_variable_is_refused_the_same_way(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`export USHER_NEW_SECRET_KEY=` is set-and-empty, which `os.environ.get`
-    answers with `""` rather than `None`.
+    """`export USHER_NEW_SECRET_KEY=` is set-and-empty.
+
+    which `os.environ.get` answers with `""` rather than `None`.
 
     `Settings` has a validator for exactly this shape one namespace over
     (*"not set" is not "set to the empty string"*), and an empty key here
@@ -327,9 +337,10 @@ def test_an_empty_variable_is_refused_the_same_way(monkeypatch: pytest.MonkeyPat
 def test_a_key_shorter_than_settings_would_accept_is_refused_without_printing_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rotation to a key `Settings` would refuse is a rotation that bricks
-    the next start, so the refusal has to arrive here rather than from
-    pydantic at the next boot with every credential already re-encrypted.
+    """A rotation to a key `Settings` would refuse is a rotation that bricks the next start.
+
+    so the refusal has to arrive here rather than from pydantic at the next boot with
+    every credential already re-encrypted.
 
     The premise is that the short value really was read: a `_new_secret_key`
     that ignored the environment would refuse this for the *absent-variable*
@@ -352,10 +363,11 @@ def test_a_key_shorter_than_settings_would_accept_is_refused_without_printing_it
 def test_the_documented_placeholder_is_refused_even_though_it_is_long_enough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`min_length` is not the whole of `Settings.secret_key`'s rules, and the
-    placeholder is the half a length check cannot see: it is exactly 32
-    characters, so this case is about `_reject_placeholder_secret_key` and
-    nothing else."""
+    """`min_length` is not the whole of `Settings.secret_key`'s rules.
+
+    and the placeholder is the half a length check cannot see: it is exactly 32
+    characters, so this case is about `_reject_placeholder_secret_key` and nothing else.
+    """
     monkeypatch.setenv(VAR, PLACEHOLDER)
     assert len(PLACEHOLDER) >= 32, "the premise: min_length alone would accept this"
 
@@ -370,8 +382,11 @@ def test_the_documented_placeholder_is_refused_even_though_it_is_long_enough(
 def test_a_key_settings_accepts_comes_back_as_the_secret_it_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control for the three refusals above. Without it, *"a bad key is
-    refused"* is satisfied by a function that refuses everything."""
+    """The control for the three refusals above.
+
+    Without it, *"a bad key is refused"* is satisfied by a function that refuses
+    everything.
+    """
     monkeypatch.setenv(VAR, NEW_KEY)
 
     key = _new_secret_key(_settings(), VAR)
@@ -386,9 +401,10 @@ def test_a_key_settings_accepts_comes_back_as_the_secret_it_is(
 def test_the_report_prints_three_counts_and_names_every_refused_ref(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No cap on the refused list, unlike `_print_restore_report`'s
-    `_REFUSALS_NAMED`: a restore can refuse 14,166 rows and this table holds
-    one row per configured source."""
+    """No cap on the refused list, unlike `_print_restore_report`'s `_REFUSALS_NAMED`.
+
+    a restore can refuse 14,166 rows and this table holds one row per configured source.
+    """
     report = RotationReport(rotated=("ref-a",), already=("ref-b", "ref-c"), refused=("ref-d",))
 
     _print_rotation_report(report, new_key_env=VAR)
@@ -409,9 +425,11 @@ def test_the_report_prints_three_counts_and_names_every_refused_ref(
 def test_a_run_that_rotated_nothing_does_not_tell_anyone_to_restart(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The control for the line above. A no-op rerun printing *"set
-    USHER_SECRET_KEY and restart"* would send an operator to change a key that
-    is already the right one."""
+    """The control for the line above.
+
+    A no-op rerun printing *"set USHER_SECRET_KEY and restart"* would send an operator
+    to change a key that is already the right one.
+    """
     _print_rotation_report(
         RotationReport(rotated=(), already=("ref-b",), refused=()), new_key_env=VAR
     )
@@ -422,8 +440,10 @@ def test_a_run_that_rotated_nothing_does_not_tell_anyone_to_restart(
 
 
 def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`_sync`'s and `_restore`'s precedent: the refused refs are on stdout
-    for a human, and cron, CI and a systemd unit read the exit code.
+    """`_sync`'s and `_restore`'s precedent.
+
+    the refused refs are on stdout for a human, and cron, CI and a systemd unit read the
+    exit code.
 
     ⚠️ **The fixture rotates a row as well as refusing one, and that is
     load-bearing since M10's K8.** It refused a single row out of a single row
@@ -454,8 +474,10 @@ def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_run_with_nothing_refused_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The control for the case above, and the one that would catch a command
-    that exits non-zero on every run."""
+    """The control for the case above.
+
+    and the one that would catch a command that exits non-zero on every run.
+    """
     configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
 
@@ -495,8 +517,9 @@ class _SessionContext:
 def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """K8's drill measured the state this message is for, and measured that
-    the message was wrong in it.
+    """K8's drill measured the state this message is for.
+
+    and measured that the message was wrong in it.
 
     With `USHER_SECRET_KEY` already changed to the new key -- the `.env`-first
     mistake, and the likeliest operator error this command has -- `cli._rotate`
@@ -541,8 +564,10 @@ def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials
 def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control, and it is what keeps the case above a statement about the
-    *saturated* count rather than about the message being removed.
+    """The control.
+
+    and it is what keeps the case above a statement about the *saturated* count rather
+    than about the message being removed.
 
     A run that rotated some rows and refused others proves the old key was
     right, so a row it could not open really is unreadable and really does have

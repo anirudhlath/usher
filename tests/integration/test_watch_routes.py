@@ -118,8 +118,9 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
 
 @pytest_asyncio.fixture
 async def seeded(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[_Seeded]:
-    """A movie with one copy, and a series with one copy plus three episode
-    copies -- which is what makes `AND episode_id IS NULL` observable at all.
+    """A movie with one copy, and a series with one copy plus three episode copies.
+
+    which is what makes `AND episode_id IS NULL` observable at all.
 
     Three rather than twenty thousand: the clause is the thing under test and
     it does not care how many rows it excludes.
@@ -342,8 +343,10 @@ async def test_a_series_write_enqueues_one_job_and_not_one_per_episode(
 async def test_an_episode_write_enqueues_the_episodes_own_file(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`list_for_episode` is the other statement, and it answers with exactly
-    the row `list_for_title` excludes."""
+    """`list_for_episode` is the other statement.
+
+    and it answers with exactly the row `list_for_title` excludes.
+    """
     response = await client.put(
         f"/watch/episodes/{seeded.episode_ids[1]}",
         json={"position_seconds": 61, "played": False},
@@ -356,8 +359,9 @@ async def test_an_episode_write_enqueues_the_episodes_own_file(
 async def test_the_write_back_job_is_committed_by_the_request(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The enqueue rides `get_session`'s commit rather than the service's, so
-    the row is only durable once the handler has returned.
+    """The enqueue rides `get_session`'s commit rather than the service's.
+
+    so the row is only durable once the handler has returned.
 
     Read on a second connection, which is the only reader that can tell a
     committed job from one the request is still holding.
@@ -383,11 +387,13 @@ async def test_the_write_back_job_is_committed_by_the_request(
 async def test_marking_played_twice_does_not_advance_the_count_twice(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`GREATEST(watch_states.play_count, 1)`, which is Emby's own
-    `POST /PlayedItems` semantics measured against 4.9.5.0: it advances to 1
-    idempotently rather than incrementing. A local `play_count + 1` would
-    diverge from the source on the second press, and the write-back would then
-    carry a number Usher invented.
+    """`GREATEST(watch_states.play_count.
+
+    1)`, which is Emby's own `POST /PlayedItems` semantics measured against 4.9.5.0: it
+    advances to 1 idempotently rather than incrementing.
+
+    A local `play_count + 1` would diverge from the source on the second press, and the
+    write-back would then carry a number Usher invented.
     """
     await client.post(f"/watch/titles/{seeded.movie_id}/played")
     first = await _watch_state(sessions, title_id=seeded.movie_id)
@@ -451,9 +457,10 @@ async def test_an_unknown_title_is_a_404_rather_than_a_foreign_key_violation(
 async def test_a_repeat_write_of_identical_state_publishes_nothing(
     client: AsyncClient, seeded: _Seeded, probe: _CommitProbe
 ) -> None:
-    """The changed-row guard against the real statement, where `updated_at`
-    really is trigger-owned and really does move on every write -- which is
-    the thing that makes a guard spelled `before != after` dead.
+    """The changed-row guard against the real statement.
+
+    where `updated_at` really is trigger-owned and really does move on every write --
+    which is the thing that makes a guard spelled `before != after` dead.
     """
     await client.put(
         f"/watch/titles/{seeded.movie_id}", json={"position_seconds": 61, "played": False}

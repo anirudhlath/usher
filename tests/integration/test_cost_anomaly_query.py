@@ -108,8 +108,9 @@ async def _evaluate(session: AsyncSession, sql: str | None = None) -> RowMapping
 
 
 def _planted(replacements: Mapping[str, str]) -> str:
-    """The committed statement with one decision mutated, having checked that
-    the mutation landed.
+    """The committed statement with one decision mutated.
+
+    having checked that the mutation landed.
 
     `testing-discipline.md`: *"a plant that did not land looks exactly like a
     check that passed"*. Here it would look like something else and worse -- a
@@ -176,8 +177,9 @@ async def test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one
 async def test_a_zero_trailing_median_is_held_by_the_floor_and_not_by_the_comparison(
     session: AsyncSession, nights: int, fires: bool
 ) -> None:
-    """🔴 The state every unpriced deployment is in, and the one the comparison alone gets
-    catastrophically wrong.
+    """🔴 The state every unpriced deployment is in.
+
+    and the one the comparison alone gets catastrophically wrong.
     """
     await _seed(session, [(None, _A_NIGHT * nights)])
 
@@ -282,8 +284,9 @@ async def test_the_trailing_statistic_is_a_median_and_a_mean_would_miss_this_nig
 async def test_the_window_is_seven_complete_trailing_days_and_reaches_no_further(
     session: AsyncSession,
 ) -> None:
-    """🔴 Eight calendar days: seven complete ones judged, plus the partial one being
-    judged. Both ends are asserted, and by the same fixture.
+    """🔴 Eight calendar days: seven complete ones judged, plus the partial one being judged.
+
+    Both ends are asserted, and by the same fixture.
     """
     # `(days_back, multiple of one night)`, so the *first* entry is the oldest
     # day in the window and is deliberately the largest -- an ascending week
@@ -391,8 +394,10 @@ async def test_the_comparison_stays_in_numeric_and_float8_pages_on_an_exact_tie(
 async def test_the_day_boundary_does_not_move_with_the_sessions_time_zone(
     session: AsyncSession, elsewhere: str
 ) -> None:
-    """`date_trunc('day', <timestamptz>)` truncates in the **session's** time zone, so the
-    unqualified spelling makes "today" a property of who is asking.
+    """`date_trunc('day'.
+
+    <timestamptz>)` truncates in the **session's** time zone, so the unqualified
+    spelling makes "today" a property of who is asking.
     """
     await _seed(session, [(day, _A_NIGHT) for day in range(1, 8)])
     for hour, cost in ((5, Decimal("0.02000000")), (20, Decimal("0.03000000"))):
@@ -426,8 +431,9 @@ async def test_the_day_boundary_does_not_move_with_the_sessions_time_zone(
 async def test_the_windows_lower_bound_is_served_by_the_time_index(
     session: AsyncSession, analyze: Analyze
 ) -> None:
-    """**`ix_llm_calls_at` earns its keep on this statement too**, which is the other half
-    of the sentence `m08a` deferred it with.
+    """**`ix_llm_calls_at` earns its keep on this statement too**.
+
+    which is the other half of the sentence `m08a` deferred it with.
     """
     await session.execute(_SEED_LADDER, {"rows": _SEEDED_LEDGER_ROWS})
     # Without statistics the planner sizes `llm_calls` off an empty `pg_class`,
@@ -473,9 +479,10 @@ async def test_the_windows_lower_bound_is_served_by_the_time_index(
 async def test_the_statement_returns_one_row_and_one_numeric_column(
     session: AsyncSession,
 ) -> None:
-    """🔴 Grafana's SQL-to-alerting conversion reads a table frame as *one series per
-    numeric column, labelled by every string column*, and the condition on this rule is
-    a `> 0` threshold.
+    """🔴 Grafana's SQL-to-alerting conversion reads a table frame as *one series per numeric.
+
+    column, labelled by every string column*, and the condition on this rule is a `> 0`
+    threshold.
     """
     await session.execute(text(f"CREATE TEMP VIEW cost_anomaly AS {cost_anomaly_sql()}"))
     columns = (
@@ -519,8 +526,9 @@ async def test_the_statement_returns_one_row_and_one_numeric_column(
 
 
 async def _explain(session: AsyncSession) -> str:
-    """`EXPLAIN` in text format, because `total_cost` reads the root node's
-    `(cost=start..total ` off the first line.
+    """`EXPLAIN` in text format.
+
+    because `total_cost` reads the root node's `(cost=start..total ` off the first line.
 
     `EXPLAIN` without `ANALYZE`: what is asserted is the plan the planner
     *chose*, and executing it would add runtime to a comparison whose whole

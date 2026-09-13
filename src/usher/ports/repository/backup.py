@@ -1,5 +1,6 @@
-"""What a backup reads out of the database, what a restore writes back, and the stamp
-both read with it.
+"""What a backup reads out of the database.
+
+what a restore writes back, and the stamp both read with it.
 """
 
 from abc import ABC, abstractmethod
@@ -41,8 +42,9 @@ class CarriedRow:
 
 
 class BackupRepository(ABC):
-    """The read half of `usher backup`: the manifest's tables, their rows, and the revision
-    the database is at.
+    """The read half of `usher backup`.
+
+    the manifest's tables, their rows, and the revision the database is at.
     """
 
     @abstractmethod
@@ -66,8 +68,7 @@ class BackupRepository(ABC):
 
     @abstractmethod
     async def carry(self, table: str) -> tuple[CarriedRow, ...]:
-        """Every row this table contributes to the artifact, in a stable
-        order.
+        """Every row this table contributes to the artifact, in a stable order.
 
         Stable because a diff between two nights' artifacts is a thing an
         operator will do, and a physical-order read makes every row look
@@ -114,8 +115,9 @@ class TableOutcome:
 
 
 class RestoreRepository(ABC):
-    """The write half of `usher restore`: resolve against *this* database,
-    merge per table, and never commit.
+    """The write half of `usher restore`.
+
+    resolve against *this* database, merge per table, and never commit.
 
     **Never commits, like every other repository in `usher.db`.** The
     transaction is the caller's, and here that is the whole design rather
@@ -162,8 +164,7 @@ class RestoreRepository(ABC):
 
     @abstractmethod
     def refusal_for_table(self, table: str) -> str | None:
-        """`None` when restore writes this table, the reason it does not
-        otherwise.
+        """`None` when restore writes this table, the reason it does not otherwise.
 
         Two reasons, and telling them apart is the point. A table the
         manifest does not classify **at all** is what an artifact from a
@@ -197,6 +198,7 @@ class RestoreRepository(ABC):
         *,
         skip_unresolvable: bool = False,
     ) -> TableOutcome:
-        """Resolve one table's references and merge its rows, writing nothing that cannot
-        be resolved.
+        """Resolve one table's references and merge its rows.
+
+        writing nothing that cannot be resolved.
         """

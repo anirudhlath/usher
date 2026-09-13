@@ -8,32 +8,43 @@ from usher.domain.people import Credit, Person
 
 
 def test_person_and_person_row_have_matching_field_sets() -> None:
-    """The wrong implementation this kills: a row carrying a column the model
-    does not model (or the reverse). Every read here is `SELECT *` into an
-    `extra="forbid"` model, so either direction is a `ValidationError` at read
-    time with no obvious cause."""
+    """The wrong implementation this kills.
+
+    a row carrying a column the model does not model (or the reverse).
+
+    Every read here is `SELECT *` into an `extra="forbid"` model, so either direction is
+    a `ValidationError` at read time with no obvious cause.
+    """
     assert {c.name for c in PersonRow.__table__.columns} == set(Person.model_fields)
 
 
 def test_credit_and_credit_row_have_matching_field_sets() -> None:
-    """Same rule; the mutation that matters here is adding `episode_id` to one
-    side only, which is exactly what transcribing PRD 02's sketch into the
-    schema after Task 4 declined it would produce."""
+    """Same rule.
+
+    the mutation that matters here is adding `episode_id` to one side only, which is
+    exactly what transcribing PRD 02's sketch into the schema after Task 4 declined it
+    would produce.
+    """
     assert {c.name for c in CreditRow.__table__.columns} == set(Credit.model_fields)
 
 
 def test_collection_and_collection_row_have_matching_field_sets() -> None:
-    """Same rule. The tempting divergence is a `poster_path` on the row for
-    "later", which boundary call 3 already refused one route over."""
+    """Same rule.
+
+    The tempting divergence is a `poster_path` on the row for "later", which boundary
+    call 3 already refused one route over.
+    """
     assert {c.name for c in CollectionRow.__table__.columns} == set(Collection.model_fields)
 
 
 def test_credits_has_no_updated_at() -> None:
-    """Every write to `credits` is an insert -- a title's credit set is
-    replaced rather than merged, because an upsert cannot express the deletion
-    of a credit that disappeared upstream. So a row here is a batch artefact,
-    the `title_neighbors`/`sync_runs`/`raw_payloads` case, and a second
-    timestamp would differ from `created_at` only by the width of a
+    """Every write to `credits` is an insert.
+
+    a title's credit set is replaced rather than merged, because an upsert cannot
+    express the deletion of a credit that disappeared upstream.
+
+    So a row here is a batch artefact, the `title_neighbors`/`sync_runs`/`raw_payloads`
+    case, and a second timestamp would differ from `created_at` only by the width of a
     transaction.
 
     Asserted rather than commented because the tempting edit is to add one
@@ -46,8 +57,10 @@ def test_credits_has_no_updated_at() -> None:
 
 
 def test_credits_source_is_not_null_and_carries_no_server_default() -> None:
-    """ADR-0036. `source` is the column that lets two bulk sources own one
-    entity, and both halves of its declaration are load-bearing.
+    """ADR-0036.
+
+    `source` is the column that lets two bulk sources own one entity, and both halves of
+    its declaration are load-bearing.
 
     NOT NULL, because a nullable `source` makes "unknown provenance"
     representable -- the state the column exists to abolish. And **no server
@@ -65,9 +78,10 @@ def test_credits_source_is_not_null_and_carries_no_server_default() -> None:
 
 
 def test_the_non_tmdb_dedup_key_is_the_two_columns_that_were_measured_unique() -> None:
-    """`ix_credits_tmdb_credit_id` is partial over `tmdb_credit_id IS NOT NULL`, i.e. over
-    **none** of an IMDb load, so before `m09d` this table could not dedupe a bulk import
-    at all.
+    """`ix_credits_tmdb_credit_id` is partial over `tmdb_credit_id IS NOT NULL`, i.e.
+
+    over **none** of an IMDb load, so before `m09d` this table could not dedupe a bulk
+    import at all.
     """
     index = next(
         one

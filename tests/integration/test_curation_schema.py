@@ -35,7 +35,10 @@ def _call(
     tokens_out: int = 340,
     cost_usd: Decimal = Decimal("0.00870000"),
 ) -> LLMCall:
-    """A valid ledger row. PRD 10's own worked example by default."""
+    """A valid ledger row.
+
+    PRD 10's own worked example by default.
+    """
     return LLMCall(
         id=new_id(),
         at=datetime(2026, 8, 5, 3, 0, tzinfo=UTC),
@@ -102,8 +105,9 @@ async def _insert_row(
 async def test_the_card_array_reads_back_in_the_order_it_was_written(
     session: AsyncSession,
 ) -> None:
-    """The property the `uuid[]` shape was chosen for, and the reason it is
-    asserted rather than assumed.
+    """The property the `uuid[]` shape was chosen for.
+
+    and the reason it is asserted rather than assumed.
 
     A curated row *is* an ordering — it is the only judgement the completion
     was bought for — so nothing downstream may re-sort it. In the child-table
@@ -144,8 +148,9 @@ async def test_an_empty_curated_row_cannot_be_stored(session: AsyncSession) -> N
 
 
 async def test_a_null_card_id_cannot_be_stored(session: AsyncSession) -> None:
-    """The one liability the array shape introduces that a child table's
-    `NOT NULL` column would have closed for free.
+    """The one liability the array shape introduces that a child table's `NOT NULL` column would.
+
+    have closed for free.
 
     A `uuid[]` admits a NULL element; a `curated_row_cards.title_id NOT NULL`
     could not. A NULL element reads back as a card that denotes nothing, and
@@ -161,7 +166,7 @@ async def test_a_null_card_id_cannot_be_stored(session: AsyncSession) -> None:
 async def test_deleting_a_title_leaves_a_dangling_card_id_rather_than_failing(
     session: AsyncSession,
 ) -> None:
-    """**The price of the array shape, asserted so it stays a known price.**
+    """**The price of the array shape, asserted so it stays a known price.**.
 
     Postgres has no foreign key over array elements, so a `title_id` in here
     is a value nothing checks and nothing cascades. This case pins all three
@@ -216,8 +221,7 @@ async def test_deleting_a_user_takes_their_curated_rows_with_them(
 
 
 async def test_a_sub_cent_cost_round_trips_exactly_as_a_decimal(session: AsyncSession) -> None:
-    """`NUMERIC(12, 8)`'s whole reason, against the value PRD 10 uses as its
-    own worked example.
+    """`NUMERIC(12, 8)`'s whole reason, against the value PRD 10 uses as its own worked example.
 
     `$3/Mtok x 1,200 in` plus `$15/Mtok x 340 out` is exactly `0.0087`, which
     binary floating point cannot represent — the sentence
@@ -253,8 +257,9 @@ async def test_a_sub_cent_cost_round_trips_exactly_as_a_decimal(session: AsyncSe
 async def test_the_database_refuses_an_ok_error_disagreement_the_model_no_longer_can(
     session: AsyncSession,
 ) -> None:
-    """`LLMCall._ok_and_error_must_agree`, in the database — and this case is the reason
-    "rather than as a CHECK alone" has an *alone* in it.
+    """`LLMCall._ok_and_error_must_agree`, in the database.
+
+    and this case is the reason "rather than as a CHECK alone" has an *alone* in it.
     """
     valid = _call()
     for changes in (

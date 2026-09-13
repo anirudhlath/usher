@@ -1,5 +1,6 @@
-"""Reads over `genome_scores` and `genome_tags` — the MovieLens tag-genome vectors, and
-the vocabulary that names their lanes.
+"""Reads over `genome_scores` and `genome_tags`.
+
+the MovieLens tag-genome vectors, and the vocabulary that names their lanes.
 """
 
 import uuid

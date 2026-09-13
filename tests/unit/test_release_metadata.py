@@ -14,8 +14,7 @@ _UNINSTALLED = "0.0.0+unknown"
 
 
 def test_the_three_version_sources_agree() -> None:
-    """`pyproject.toml`, the installed distribution's metadata, and
-    `usher.__version__`.
+    """`pyproject.toml`, the installed distribution's metadata, and `usher.__version__`.
 
     ⚠️ **A red here is not a bug in the code.** The build backend is hatchling
     with the version static in `[project]`, so it is copied into the
@@ -41,8 +40,10 @@ def test_the_three_version_sources_agree() -> None:
 
 
 def test_the_declared_version_is_pre_one_point_zero() -> None:
-    """`0.x`, per ADR-0047, and the message names the record so a bump is a
-    decision rather than an edit.
+    """`0.x`.
+
+    per ADR-0047, and the message names the record so a bump is a decision rather than
+    an edit.
 
     This is the whole of what a test can honestly say about R3. The rest of
     that task is prose, and a case grepping the README for the word "Beta"

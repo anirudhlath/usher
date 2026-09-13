@@ -45,8 +45,10 @@ async def get_title(
     queries: SearchQueryRepositoryDep,
     search_id: SearchIdDep,
 ) -> TitleResponse:
-    """One title, everything local about it, a promotion if it needs one, and
-    the click attributed to the search it came from if the client says so.
+    """One title.
+
+    everything local about it, a promotion if it needs one, and the click attributed to
+    the search it came from if the client says so.
 
     **`response_model_exclude_unset=True` is what makes an empty `cast` or
     `crew` an absent key rather than `[]`** -- `TitleResponse.of` declines to
@@ -63,7 +65,6 @@ async def get_title(
     and changes nothing else: no status code, no field, no header. Omitting
     it is always legal, and a value that is unknown or not a UUID at all is
     ignored rather than refused -- analytics may not decide whether a
-    resource is served.
     """
     detail = await titles.detail(title_id, user_id=user_id)
     if detail is None:
@@ -90,9 +91,10 @@ async def get_title(
 async def get_similar_titles(
     title_id: uuid.UUID, titles: TitleRepositoryDep, similarity: SimilarityServiceDep
 ) -> SimilarResponse:
-    """M6's precomputed neighbours (`SimilarityService.neighbors_of`), plus
-    both of `title_neighbors`' staleness signals -- see `SimilarResponse` for
-    what each one answers and what neither can.
+    """M6's precomputed neighbours (`SimilarityService.neighbors_of`).
+
+    plus both of `title_neighbors`' staleness signals -- see `SimilarResponse` for what
+    each one answers and what neither can.
 
     A title with no stored neighbours is `200` with an empty list -- that is
     a fact about the title, not a failure -- and only an unknown `title_id`

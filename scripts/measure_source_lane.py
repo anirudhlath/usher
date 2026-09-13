@@ -62,8 +62,7 @@ WARMUP_REQUESTS = 2
 
 @dataclass(frozen=True)
 class Overlap:
-    """What a set of request windows did in wall clock, rather than how many
-    of them there were.
+    """What a set of request windows did in wall clock, rather than how many of them there were.
 
     `peak` is the largest number in flight at any instant. `mean_in_flight` is
     the summed duration over the union -- the concurrency actually achieved,
@@ -81,8 +80,7 @@ class Overlap:
 
 
 def overlap_of(timings: Sequence[Timing]) -> Overlap:
-    """A sweep line over `(start, +1)` / `(end, -1)`, and no assumption about
-    order.
+    """A sweep line over `(start, +1)` / `(end, -1)`, and no assumption about order.
 
     ⚠️ **The list is not in start order and cannot be.** S1's `_run` takes
     `every[0].started_at` and `every[-1].ended_at` as the window, which is
@@ -234,8 +232,9 @@ async def run_block(
     journal: Journal,
     arm: str,
 ) -> None:
-    """`concurrency` requests in flight over one shared session, appending into
-    a **caller-owned** list and writing each one through to disk.
+    """`concurrency` requests in flight over one shared session.
+
+    appending into a **caller-owned** list and writing each one through to disk.
 
     Caller-owned for S1's recorded reason and journalled for this harness's
     own: the list is what the tables are computed from, and the journal is what

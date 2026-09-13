@@ -65,9 +65,11 @@ _DEFAULT_SIGMA = 0.9
 
 
 def _delay(chooser: random.Random, sigma: float) -> float:
-    """One draw from S3's measured latency distribution. See `_DEFAULT_SIGMA`
-    for which two of its three statistics a given `sigma` reproduces, and why
-    no value reproduces all three."""
+    """One draw from S3's measured latency distribution.
+
+    See `_DEFAULT_SIGMA` for which two of its three statistics a given `sigma`
+    reproduces, and why no value reproduces all three.
+    """
     return chooser.lognormvariate(_LATENCY_MU, sigma)
 
 

@@ -18,8 +18,9 @@ from usher.domain.people import (
 
 
 def test_a_persons_sort_name_is_their_name_unchanged() -> None:
-    """The wrong implementation this kills: a "Last, First" reordering built
-    by splitting on whitespace.
+    """The wrong implementation this kills.
+
+    a "Last, First" reordering built by splitting on whitespace.
 
     `Title.sort_name` carries an explicit no-normalisation contract in its own
     docstring, and a person's is the same rule one entity over -- with a worse
@@ -38,8 +39,9 @@ def test_a_persons_sort_name_is_their_name_unchanged() -> None:
 
 
 def test_a_person_must_have_a_sort_name() -> None:
-    """`NOT NULL` on the row and `min_length=1` here, matching
-    `titles.sort_name` / `ck_titles_sort_name_not_empty`.
+    """`NOT NULL` on the row and `min_length=1` here.
+
+    matching `titles.sort_name` / `ck_titles_sort_name_not_empty`.
 
     Deliberately unlike `imdb_id`, which this milestone does not build at all:
     an IMDb id is *absent data* whose honest storage is NULL, and a sort name
@@ -51,9 +53,10 @@ def test_a_person_must_have_a_sort_name() -> None:
 
 
 def test_a_person_carries_no_biography_birth_year_or_death_year() -> None:
-    """Boundary call 4, as amended by ADR-0036. Three of the four fields PRD
-    02 sketched are still not built: `birth_year`, `death_year` and
-    `biography` live on `/person/{id}` and nothing can fill them.
+    """Boundary call 4, as amended by ADR-0036.
+
+    Three of the four fields PRD 02 sketched are still not built: `birth_year`,
+    `death_year` and `biography` live on `/person/{id}` and nothing can fill them.
 
     **`imdb_id` has moved out of that list and the reason is a source rather
     than an endpoint.** It is not filled from TMDb here -- it is what an IMDb
@@ -67,10 +70,11 @@ def test_a_person_carries_no_biography_birth_year_or_death_year() -> None:
 
 
 def test_a_person_carries_an_imdb_id_that_is_an_attribute_and_not_identity() -> None:
-    """ADR-0036. A person derived from an IMDb bulk row is identified upstream
-    by `nconst`, exactly as a title is by `tconst` -- so `imdb_id` is the same
-    shape `titles.imdb_id` and `people.tmdb_id` already are: nullable, indexed
-    and *never* identity (ADR-0003).
+    """ADR-0036.
+
+    A person derived from an IMDb bulk row is identified upstream by `nconst`, exactly
+    as a title is by `tconst` -- so `imdb_id` is the same shape `titles.imdb_id` and
+    `people.tmdb_id` already are: nullable, indexed and *never* identity (ADR-0003).
 
     Nullable rather than required, and that nullability is the whole merge
     design rather than laxity: a row carrying `tmdb_id` and no `imdb_id` is
@@ -97,10 +101,12 @@ def test_a_person_carries_an_imdb_id_that_is_an_attribute_and_not_identity() -> 
 
 
 def test_a_credit_names_the_source_that_supplied_it() -> None:
-    """ADR-0036's first column. `CreditRepository.replace_for_titles` is a
-    title-scoped delete-then-insert, so the moment a second bulk source writes
-    credits for a title the next derivation of that title silently deletes
-    them. `source` is what turns that scope into `(title_id, source)`.
+    """ADR-0036's first column.
+
+    `CreditRepository.replace_for_titles` is a title-scoped delete-then-insert, so the
+    moment a second bulk source writes credits for a title the next derivation of that
+    title silently deletes them. `source` is what turns that scope into `(title_id,
+    source)`.
 
     The wrong implementation this kills: no column at all, which is the state
     that defect lives in.
@@ -112,8 +118,7 @@ def test_a_credit_names_the_source_that_supplied_it() -> None:
 
 
 def test_a_credit_has_no_default_source_and_will_not_be_constructed_without_one() -> None:
-    """`source` is required, not defaulted, and the difference is the whole
-    point of the column.
+    """`source` is required, not defaulted, and the difference is the whole point of the column.
 
     A nullable `source` would make "unknown provenance" representable, which
     is the state the rule exists to abolish -- and a `source` defaulted to the
@@ -132,10 +137,11 @@ def test_a_credit_has_no_default_source_and_will_not_be_constructed_without_one(
 
 
 def test_credit_source_values_are_the_provider_names_already_in_use() -> None:
-    """`domain/enums.py`'s rule: values are stable wire and storage
-    identifiers. `tmdb` is `adapters/tmdb/provider.PROVIDER_NAME` and the key
-    every `raw_payloads` row is already filed under; `imdb` is what PRD 04's
-    Sources table and every `BulkDataset` call the other one.
+    """`domain/enums.py`'s rule: values are stable wire and storage identifiers.
+
+    `tmdb` is `adapters/tmdb/provider.PROVIDER_NAME` and the key every `raw_payloads`
+    row is already filed under; `imdb` is what PRD 04's Sources table and every
+    `BulkDataset` call the other one.
 
     The wrong implementation this kills: `TMDB = "TMDb"`, which is the
     rendering rather than the identifier and which no existing row matches.
@@ -162,8 +168,7 @@ def test_tmdb_wins_every_title_it_covers_and_the_order_is_total() -> None:
 
 
 def test_a_credit_names_a_title_and_never_an_episode() -> None:
-    """The episode-level-credit call, asserted on the model rather than left
-    in prose.
+    """The episode-level-credit call, asserted on the model rather than left in prose.
 
     `season.json`'s `episodes[0].crew` and `episodes[0].guest_stars` are both
     `[]` and no live run has seen either populated, so building the
@@ -181,11 +186,13 @@ def test_a_credit_names_a_title_and_never_an_episode() -> None:
 
 
 def test_billing_order_is_kept_and_bounded() -> None:
-    """PRD 06's People row is about *top-billed* cast, so `order` from the
-    payload is the field that makes "top billed" mean anything. The bound
-    mirrors `ck_credits_billing_order_non_negative`; the schema mirrors every
-    pydantic bound as a CHECK precisely because the bulk path constructs no
-    pydantic model at all.
+    """PRD 06's People row is about *top-billed* cast.
+
+    so `order` from the payload is the field that makes "top billed" mean anything.
+
+    The bound mirrors `ck_credits_billing_order_non_negative`; the schema mirrors every
+    pydantic bound as a CHECK precisely because the bulk path constructs no pydantic
+    model at all.
     """
     assert (
         Credit(
@@ -208,14 +215,17 @@ def test_billing_order_is_kept_and_bounded() -> None:
 
 
 def test_credit_kind_values_are_the_payloads_own_words() -> None:
-    """`domain/enums.py`'s rule: values are stable wire and storage
-    identifiers. `cast` and `crew` are the two keys of TMDb's `credits`
-    object, so a derivation reads the key and has the member."""
+    """`domain/enums.py`'s rule: values are stable wire and storage identifiers.
+
+    `cast` and `crew` are the two keys of TMDb's `credits` object, so a derivation reads
+    the key and has the member.
+    """
     assert [member.value for member in CreditKind] == ["cast", "crew"]
 
 
 def test_a_collection_carries_no_overview_and_no_artwork() -> None:
     """`belongs_to_collection` is `{id, name, poster_path, backdrop_path}`.
+
     The overview and `parts[]` are on `/collection/{id}` -- a second network
     call boundary call 4 refuses -- and artwork is M9's whole table.
 
@@ -232,8 +242,7 @@ def test_a_collection_carries_no_overview_and_no_artwork() -> None:
 
 
 def test_the_models_are_frozen_and_evolve() -> None:
-    """Standing rule: domain models are frozen, `.evolve()` never
-    `model_copy(update=)`."""
+    """Standing rule: domain models are frozen, `.evolve()` never `model_copy(update=)`."""
     person = Person(name="Someone Invented", sort_name="Someone Invented")
     assert person.evolve(known_for_department="Directing").name == "Someone Invented"
     with pytest.raises(ValidationError):
@@ -241,10 +250,15 @@ def test_the_models_are_frozen_and_evolve() -> None:
 
 
 def test_a_collection_id_is_a_uuid_not_a_tmdb_id() -> None:
-    """ADR-0003: identity is Usher's own UUIDv7, provider identifiers are
-    nullable indexed attributes and never identity. The wrong implementation
-    this kills is `Collection.id = belongs_to_collection["id"]`, which is
-    exactly the shortcut a derivation reaching for a stable key takes."""
+    """ADR-0003.
+
+    identity is Usher's own UUIDv7, provider identifiers are nullable indexed attributes
+    and never identity.
+
+    The wrong implementation this kills is `Collection.id =
+    belongs_to_collection["id"]`, which is exactly the shortcut a derivation reaching
+    for a stable key takes.
+    """
     collection = Collection(tmdb_id=98_000_001, name="An Invented Collection")
     assert isinstance(collection.id, uuid.UUID)
     assert collection.id.version == 7

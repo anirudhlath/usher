@@ -113,8 +113,9 @@ class _Catalog:
 
 @pytest_asyncio.fixture
 async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _Catalog:
-    """One title carrying `TERM` in its **name**, one carrying it only in its
-    **overview**, and one owned copy of the second.
+    """One title carrying `TERM` in its **name**.
+
+    one carrying it only in its **overview**, and one owned copy of the second.
 
     The described title is created **first**, so its UUIDv7 sorts below the
     named one's. That is the ordering premise this file needs rather than a
@@ -226,8 +227,10 @@ async def keystrokes(deployment: _Deployment) -> SearchQueryBuffer:
 async def test_the_shipped_graph_answers_a_real_full_text_search(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """The whole path with nothing overridden: `get_search_service` ->
-    `build_search_service` -> `PostgresSearchIndex` on the request's session.
+    """The whole path with nothing overridden.
+
+    `get_search_service` -> `build_search_service` -> `PostgresSearchIndex` on the
+    request's session.
 
     **The ordering premise is asserted first**, because UUIDv7 makes
     `ORDER BY id` and `ORDER BY <the real key>` agree by accident: with the
@@ -262,9 +265,9 @@ async def test_the_shipped_graph_answers_a_real_full_text_search(
 async def test_a_fused_request_is_served_as_full_text_on_an_api_only_deployment(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """`create_app`'s lifespan builds a model only when `worker_enabled`, and
-    this app has it off -- which is the shipped shape of an API-only
-    deployment, not a test contrivance.
+    """`create_app`'s lifespan builds a model only when `worker_enabled`, and this app has it off.
+
+    which is the shipped shape of an API-only deployment, not a test contrivance.
 
     The results are the full-text ones and every row of them is correct; the
     only thing that says the deployment is narrowed is the two mode fields
@@ -284,8 +287,10 @@ async def test_a_fused_request_is_served_as_full_text_on_an_api_only_deployment(
 async def test_a_semantic_request_is_refused_rather_than_quietly_narrowed(
     client: AsyncClient,
 ) -> None:
-    """`fused` narrows because a whole lane is left; `semantic` refuses,
-    because the caller asked the one question full text cannot answer.
+    """`fused` narrows because a whole lane is left.
+
+    `semantic` refuses, because the caller asked the one question full text cannot
+    answer.
 
     Driven through the real graph rather than a raised fake, so this is also
     the proof that `build_search_service` really does hand the API a
@@ -320,8 +325,9 @@ async def test_a_blank_query_is_answered_without_touching_the_index(
 async def test_the_limit_is_clamped_by_the_deployments_own_ceiling(
     postgres_url: str, catalog: _Catalog
 ) -> None:
-    """The route declares no maximum, so an absurd `?limit=` is the
-    deployment's ceiling rather than a 422 or a scan.
+    """The route declares no maximum.
+
+    so an absurd `?limit=` is the deployment's ceiling rather than a 422 or a scan.
 
     `search_result_limit = 1` here, against two matching titles: one comes
     back. A route that had re-declared a `le=` of its own would answer 422 for
@@ -356,9 +362,10 @@ async def test_the_limit_is_clamped_by_the_deployments_own_ceiling(
 async def test_the_two_tiers_are_two_indexes_in_the_composed_graph(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """**The one claim only this level can make: `build_search_service` really
-    constructs two different `SuggestIndex` implementations, and each one is
-    reachable by name from the wire.**
+    """**The one claim only this level can make.
+
+    `build_search_service` really constructs two different `SuggestIndex`
+    implementations, and each one is reachable by name from the wire.**.
 
     Every unit case in `tests/unit/test_api_suggest.py` is satisfied by a
     factory that handed one index to both slots and by fakes that are two
@@ -394,8 +401,9 @@ async def test_the_two_tiers_are_two_indexes_in_the_composed_graph(
 async def test_the_minimum_prefix_length_is_in_force_on_the_shipped_route(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """Three characters of a real prefix of a real seeded title, through the
-    real graph: an empty box and a `min_query_length` that says why.
+    """Three characters of a real prefix of a real seeded title, through the real graph.
+
+    an empty box and a `min_query_length` that says why.
 
     The fourth character is what makes this a statement about the bound rather
     than about the catalog -- the same title, one character further in, comes
@@ -416,10 +424,11 @@ async def test_the_minimum_prefix_length_is_in_force_on_the_shipped_route(
 async def test_a_blank_suggest_is_answered_without_touching_either_index(
     client: AsyncClient,
 ) -> None:
-    """200 with no results, which is the request a search box sends on every
-    backspace to zero. On tier 1 the query it replaces is `LIKE '%'` over
-    1,271,138 rows plus a 10.9M-row union, collected, de-duplicated and sorted
-    to answer a question nobody asked."""
+    """200 with no results, which is the request a search box sends on every backspace to zero.
+
+    On tier 1 the query it replaces is `LIKE '%'` over 1,271,138 rows plus a 10.9M-row
+    union, collected, de-duplicated and sorted to answer a question nobody asked.
+    """
     for tier in ("prefix", "fuzzy"):
         response = await client.get("/search/suggest", params={"q": "   ", "tier": tier})
         assert response.status_code == 200, response.text
@@ -434,8 +443,9 @@ async def test_a_blank_suggest_is_answered_without_touching_either_index(
 async def test_one_answered_request_writes_exactly_one_search_queries_row(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
 ) -> None:
-    """PRD 10's analytics row, through the shipped request and read back from a
-    session the request never touched.
+    """PRD 10's analytics row.
+
+    through the shipped request and read back from a session the request never touched.
 
     **`get_session` commits when the handler returns, so this reads a committed
     row either way** -- which is exactly why the durability claim is made one
@@ -489,8 +499,9 @@ async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
     sessions: async_sessionmaker[AsyncSession],
     catalog: _Catalog,
 ) -> None:
-    """`GET /search/suggest` records one row per **answered** request since M10's J2, and
-    none for the two arms that never reach the service.
+    """`GET /search/suggest` records one row per **answered** request since M10's J2.
+
+    and none for the two arms that never reach the service.
     """
     answered = ({"q": TYPED_PREFIX}, {"q": TYPED_TYPO, "tier": "fuzzy"})
     unanswered = ({"q": TYPED_PREFIX[:3]}, {"q": "   "})

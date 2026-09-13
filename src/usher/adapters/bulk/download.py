@@ -56,8 +56,9 @@ def _raise_for_status(response: httpx.Response, url: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class LocalFile:
-    """Where an `ensure_local` call left the file, and whether that call
-    actually fetched different bytes than were already cached.
+    """Where an `ensure_local` call left the file.
+
+    and whether that call actually fetched different bytes than were already cached.
 
     `replaced` exists for a dataset whose own checkpoint revision is
     coarser than a single file's real identity -- TMDb's is a calendar
@@ -75,8 +76,9 @@ class LocalFile:
 
 
 class CachedDatasetFile:
-    """One remote compressed file, cached under `cache_dir` and re-fetched only when its
-    upstream revision changes.
+    """One remote compressed file.
+
+    cached under `cache_dir` and re-fetched only when its upstream revision changes.
     """
 
     def __init__(self, client: httpx.AsyncClient, url: str, cache_dir: Path) -> None:
@@ -90,13 +92,15 @@ class CachedDatasetFile:
         return self._cache_dir / self._name
 
     async def revision(self) -> str:
-        """One `HEAD` request. Raises `PortUnavailable` if unreachable or if
-        upstream answers 4xx/5xx, and `PortRateLimited` if it answers 429 --
-        both via `_raise_for_status` below, so both are real, not theoretical.
-        Naming only the first is what let a `PortRateLimited` escape uncaught
-        from a caller that had only guarded against `PortUnavailable`; every
-        `BulkDataset.revision()` that delegates here inherits both. Either way
-        a run fails before it writes anything."""
+        """One `HEAD` request.
+
+        Raises `PortUnavailable` if unreachable or if upstream answers 4xx/5xx, and
+        `PortRateLimited` if it answers 429 -- both via `_raise_for_status` below, so
+        both are real, not theoretical. Naming only the first is what let a
+        `PortRateLimited` escape uncaught from a caller that had only guarded against
+        `PortUnavailable`; every `BulkDataset.revision()` that delegates here inherits
+        both. Either way a run fails before it writes anything.
+        """
         try:
             response = await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
@@ -149,8 +153,7 @@ class CachedDatasetFile:
         return LocalFile(self.path, replaced=True)
 
     def lines(self, *, skip: int = 0) -> Iterator[str]:
-        """Decompressed lines, newline stripped, with the first `skip`
-        discarded.
+        """Decompressed lines, newline stripped, with the first `skip` discarded.
 
         Skipping by re-reading rather than seeking: a gzip member is not
         randomly seekable, and the decompression cost of a prefix is small
@@ -179,8 +182,9 @@ class CachedDatasetFile:
             ) from exc
 
     def member_lines(self, member: str, *, skip: int = 0) -> Iterator[str]:
-        """Decompressed lines of one member of a zip archive, newline stripped, with the
-        first `skip` discarded.
+        """Decompressed lines of one member of a zip archive.
+
+        newline stripped, with the first `skip` discarded.
         """
         try:
             with zipfile.ZipFile(self.path) as archive:

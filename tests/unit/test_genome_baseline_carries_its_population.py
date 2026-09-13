@@ -1,6 +1,4 @@
-"""The genome's 1.81% pair rate never travels without the population it was measured
-over.
-"""
+"""The genome's 1.81% pair rate never travels without the population it was measured over."""
 
 from pathlib import Path
 

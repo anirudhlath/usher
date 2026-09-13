@@ -1,4 +1,4 @@
-"""titles.credit_names, and weight class B"""
+"""Titles.credit_names, and weight class B."""
 
 from collections.abc import Sequence
 

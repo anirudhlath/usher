@@ -1,4 +1,4 @@
-"""core schema"""
+"""Core schema."""
 
 from collections.abc import Sequence
 

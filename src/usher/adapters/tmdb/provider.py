@@ -181,8 +181,7 @@ class TmdbMetadataProvider(MetadataProvider):
         )
 
     def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
-        """The other half of ADR-0016's promissory note, and it fetches
-        nothing.
+        """The other half of ADR-0016's promissory note, and it fetches nothing.
 
         Beside `to_result` rather than folded into it, for the reason
         `DerivationResult` gives: enrichment runs once per title per fetch,
@@ -273,8 +272,9 @@ class TmdbMetadataProvider(MetadataProvider):
         return ref.kind, tmdb_id
 
     async def _compose_seasons(self, payload: dict[str, Any], tmdb_id: int) -> None:
-        """Merge each season's block into the detail payload's `seasons` entry, in place,
-        fetching only what the blind window missed.
+        """Merge each season's block into the detail payload's `seasons` entry.
+
+        in place, fetching only what the blind window missed.
         """
         blocks = _take_appended_seasons(payload)
         seasons = payload.get("seasons")
@@ -303,7 +303,9 @@ class TmdbMetadataProvider(MetadataProvider):
 
     @staticmethod
     def _position(cursor: str | None) -> tuple[TitleKind, int]:
-        """`"movie:2"` -> `(MOVIE, 2)`. Opaque to the caller by contract.
+        """`"movie:2"` -> `(MOVIE, 2)`.
+
+        Opaque to the caller by contract.
 
         A cursor that does not parse restarts at the first page of the first
         space rather than raising: it can only have come from a corrupted or

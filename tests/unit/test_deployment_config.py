@@ -44,8 +44,10 @@ def _env_file(directory: Path, body: str) -> Path:
 
 
 def _env_example_entries() -> dict[str, str]:
-    """`.env.example` as compose's own dotenv parser reads it: `KEY=value`
-    lines, full-line `#` comments skipped, the value taken verbatim."""
+    """`.env.example` as compose's own dotenv parser reads it.
+
+    `KEY=value` lines, full-line `#` comments skipped, the value taken verbatim.
+    """
     entries: dict[str, str] = {}
     for line in _ENV_EXAMPLE.read_text().splitlines():
         stripped = line.strip()
@@ -85,17 +87,21 @@ def _usher_service() -> dict[str, Any]:
 
 
 def _compose_env_files() -> list[str]:
-    """The paths under the `usher` service's `env_file:`, in either the short
-    form (a bare string) or the long one (`{path, required}`)."""
+    """The paths under the `usher` service's `env_file:`.
+
+    in either the short form (a bare string) or the long one (`{path, required}`).
+    """
     declared = _usher_service().get("env_file", [])
     entries = [declared] if isinstance(declared, str) else declared
     return [entry if isinstance(entry, str) else str(entry["path"]) for entry in entries]
 
 
 def _compose_substitutions() -> set[str]:
-    """Every `${VAR}` in the whole file, not just the ones under a key this
-    test knows to look at -- a compose variable added to a `volumes:` or an
-    `image:` line is the same hazard as one added to `ports:`."""
+    """Every `${VAR}` in the whole file, not just the ones under a key this test knows to look at.
+
+    a compose variable added to a `volumes:` or an `image:` line is the same hazard as
+    one added to `ports:`.
+    """
     return set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", _COMPOSE.read_text()))
 
 
@@ -103,8 +109,9 @@ def _compose_substitutions() -> set[str]:
 
 
 def test_the_readmes_first_step_produces_working_settings(tmp_path: Path) -> None:
-    """`cp .env.example .env` and fill in the secret key -- verbatim from
-    `README.md` -- and every entry point must still start.
+    """`cp .env.example .env` and fill in the secret key.
+
+    verbatim from `README.md` -- and every entry point must still start.
 
     Before `USHER_COMPOSE_` existed this raised
     `ValidationError: usher_host_port -- Extra inputs are not permitted`, out
@@ -141,8 +148,9 @@ def test_a_compose_only_variable_does_not_break_the_application(tmp_path: Path) 
 
 
 def test_a_misspelled_setting_is_still_refused(tmp_path: Path) -> None:
-    """The other half, and the reason the fix is a reserved namespace rather
-    than `extra="ignore"`.
+    """The other half.
+
+    and the reason the fix is a reserved namespace rather than `extra="ignore"`.
 
     `extra="forbid"` is what turns `USHER_LOG_LEVL=DEBUG` into a startup
     failure instead of a line in `.env` that silently does nothing -- the
@@ -163,8 +171,10 @@ def test_a_misspelled_setting_is_still_refused(tmp_path: Path) -> None:
 
 
 def test_no_setting_hides_inside_the_reserved_namespace() -> None:
-    """A field named `compose_*` would be dropped before validation and would
-    then read as a setting that validates and influences nothing."""
+    """A field named `compose_*` would be dropped before validation and would then read as a.
+
+    setting that validates and influences nothing.
+    """
     offenders = sorted(
         name for name in _settings_variables() if name.startswith(COMPOSE_ONLY_PREFIX)
     )
@@ -175,8 +185,10 @@ def test_no_setting_hides_inside_the_reserved_namespace() -> None:
 
 
 def test_every_usher_variable_in_env_example_is_a_setting_or_compose_reserved() -> None:
-    """The guard that fails if a future compose variable is added to
-    `.env.example` in the application's own namespace."""
+    """The guard that fails if a future compose variable is added to `.env.example` in the.
+
+    application's own namespace.
+    """
     known = _settings_variables()
     offenders = sorted(
         key
@@ -274,8 +286,9 @@ def test_the_container_is_given_the_env_file_whole() -> None:
 
 
 def test_compose_overrides_only_what_the_topology_owns() -> None:
-    """`environment:` wins over `env_file:`, so anything left in it is a
-    setting an operator cannot change from `.env`.
+    """`environment:` wins over `env_file:`.
+
+    so anything left in it is a setting an operator cannot change from `.env`.
 
     Keeping that list to the six the compose topology genuinely owns is what
     stops `environment:` quietly becoming the dead-config list again -- each
@@ -292,10 +305,10 @@ _SHIPPED_IN_THE_IMAGE = frozenset({"console_dist_dir"})
 
 
 def test_a_relative_path_setting_is_overridden_for_the_container() -> None:
-    """A relative default is right for a dev shell and resolves against the
-    container's `WORKDIR` of `/app` -- so every one of them is either
-    overridden here or shipped there, and a new one is a decision rather than
-    a silent repeat.
+    """A relative default is right for a dev shell and resolves against the container's.
+
+    `WORKDIR` of `/app` -- so every one of them is either overridden here or shipped
+    there, and a new one is a decision rather than a silent repeat.
 
     This is the check that did not exist when `bulk_data_dir` was added.
     `image_cache_dir` got its override in M9 and `bulk_data_dir` did not, and

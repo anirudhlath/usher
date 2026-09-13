@@ -155,8 +155,9 @@ def _printed_default(field: FieldInfo) -> str:
 def test_every_catalogued_default_is_the_default_usher_actually_ships(
     catalogued: set[str],
 ) -> None:
-    """🔴 **`def:` was an unverified copy of the Python default until 2026-09-07**, and it
-    is the field on this screen an operator acts on.
+    """🔴 **`def:` was an unverified copy of the Python default until 2026-09-07**.
+
+    and it is the field on this screen an operator acts on.
     """
     paired = dict(_ROW_DEFAULT.findall(_CATALOGUE.read_text()))
     assert set(paired) == catalogued, (

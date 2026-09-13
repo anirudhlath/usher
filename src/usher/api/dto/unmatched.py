@@ -1,5 +1,6 @@
-"""The review queue's wire shapes: one queue entry, one resolution, and what a
-resolution answers with.
+"""The review queue's wire shapes.
+
+one queue entry, one resolution, and what a resolution answers with.
 """
 
 import uuid
@@ -16,8 +17,7 @@ __all__ = [
 
 
 class UnmatchedItemResponse(BaseModel):
-    """One item in the review queue (PRD 02: *"unmatched items are never
-    dropped"*).
+    """One item in the review queue (PRD 02: *"unmatched items are never dropped"*).
 
     `added_at` is `None` for an item its source could not date, which is not
     an edge case: it is the population this queue's keyset is built to page

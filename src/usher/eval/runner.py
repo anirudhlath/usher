@@ -1,4 +1,4 @@
-"""generate -> run -> score -> compare -> record."""
+"""Generate -> run -> score -> compare -> record."""
 
 from collections.abc import Sequence
 

@@ -88,7 +88,9 @@ def _apply_cache_policy(response: Response, path: str) -> None:
 
 
 def mount_console(app: FastAPI, settings: Settings) -> bool:
-    """Mount the console if it is enabled and built. Returns whether it mounted.
+    """Mount the console if it is enabled and built.
+
+    Returns whether it mounted.
 
     Every route added here is `include_in_schema=False`. The console is a
     consumer of the API document, not a member of it -- `openapi-typescript`

@@ -288,8 +288,9 @@ def test_the_codes_the_api_emits_are_exactly_the_codes_the_decision_records() ->
 
 
 def test_a_members_name_and_its_wire_string_are_one_thing() -> None:
-    """`SOURCE_UNAVAILABLE = "source_unavailable"`, never a member whose
-    Python name and wire string can be changed apart.
+    """`SOURCE_UNAVAILABLE = "source_unavailable"`.
+
+    never a member whose Python name and wire string can be changed apart.
 
     Cheap, and it is what lets every scan in this file report a code the
     enum lacks by its wire spelling: `_member_value` falls back to
@@ -329,8 +330,9 @@ def test_no_404_is_spelled_per_resource() -> None:
 
 
 def test_no_404_code_names_a_collection_the_route_table_already_names() -> None:
-    """The careful spelling of the same defect, and the reason this case
-    exists beside the one above.
+    """The careful spelling of the same defect.
+
+    and the reason this case exists beside the one above.
 
     A linter catches the careless spelling only -- `title_not_found` dies on
     a `_not_found$` regex and `no_such_title`, `title_missing` and
@@ -365,8 +367,7 @@ def test_no_404_code_names_a_collection_the_route_table_already_names() -> None:
 
 
 def test_every_code_carries_one_status_everywhere_it_is_raised() -> None:
-    """The stability rule, encoded: the status for a given code never
-    changes.
+    """The stability rule, encoded: the status for a given code never changes.
 
     It is the half of the contract a client's `switch` rests on -- a code
     that means 404 on one route and 409 on another is two codes wearing one
@@ -398,6 +399,7 @@ def test_every_code_carries_one_status_everywhere_it_is_raised() -> None:
 
 def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itself() -> None:
     """D4 left open whether 503 and 409 belong in `_CODE_FOR_STATUS`.
+
     ADR-0030 says they do not, and this is that answer encoded.
 
     The table exists for statuses raised by machinery Usher does not
@@ -463,11 +465,13 @@ def test_the_image_proxys_amendment_is_no_longer_open() -> None:
 async def test_the_readiness_probe_stays_exempt_and_answers_its_own_shape(
     readiness_client: httpx.AsyncClient,
 ) -> None:
-    """`/health/ready`'s 503 is not a problem document, and the mechanism
-    exempts it **by accident** today -- the route mutates
-    `response.status_code` and raises nothing, so no exception handler can
-    see it. "Held by convention" is the class of safety property
-    `api/errors.py` was written to stop relying on, so it is asserted.
+    """`/health/ready`'s 503 is not a problem document.
+
+    and the mechanism exempts it **by accident** today -- the route mutates
+    `response.status_code` and raises nothing, so no exception handler can see it.
+
+    "Held by convention" is the class of safety property `api/errors.py` was written to
+    stop relying on, so it is asserted.
 
     **The degraded assertions come first and they are the point.** "No
     `code` key in the body" is also what a 404, a route that never ran, or

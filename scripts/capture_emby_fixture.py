@@ -1,5 +1,8 @@
 # scripts/capture_emby_fixture.py
-"""Re-derive a scrubbed Emby *shape* from a live server. NOT a test."""
+"""Re-derive a scrubbed Emby *shape* from a live server.
+
+NOT a test.
+"""
 
 import argparse
 import asyncio

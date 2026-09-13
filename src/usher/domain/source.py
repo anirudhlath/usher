@@ -26,8 +26,9 @@ class Source(DomainModel):
 
 
 class MediaItem(DomainModel):
-    """'This title is available on that source', plus the quality facts of
-    that particular copy. A Title may have many, across sources.
+    """'This title is available on that source', plus the quality facts of that particular copy.
+
+    A Title may have many, across sources.
 
     Deliberately permissive about `title_id`: NULL means unmatched, sitting
     in a review queue for manual resolution — a legitimate, expected, and

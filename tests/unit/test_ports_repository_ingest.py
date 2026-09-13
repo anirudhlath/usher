@@ -81,10 +81,12 @@ def test_watch_state_repository_surface() -> None:
 
 
 def test_the_merge_dto_and_the_port_agree_that_absence_is_representable() -> None:
-    """ADR-0014 reaching storage. `merge_from_source`'s whole correctness
-    argument rests on `play_count` being able to say "I do not know", which
-    is a property of `WatchStateMerge` rather than of the ABC -- so it is
-    checked where the two meet, not only where the DTO is defined."""
+    """ADR-0014 reaching storage.
+
+    `merge_from_source`'s whole correctness argument rests on `play_count` being able to
+    say "I do not know", which is a property of `WatchStateMerge` rather than of the ABC
+    -- so it is checked where the two meet, not only where the DTO is defined.
+    """
     from usher.ports.ingest import WatchStateMerge
 
     annotations = WatchStateMerge.__annotations__

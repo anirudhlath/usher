@@ -369,7 +369,9 @@ def plan_probes(
 
 
 async def issue(session: EmbySession, probe: Probe) -> tuple[Timing, dict[str, Any]]:
-    """One request. **The budget is not spent here** -- see `Budget.install`.
+    """One request.
+
+    **The budget is not spent here** -- see `Budget.install`.
 
     Spending here counted *probes*; the wire counts *requests*, and a 401
     retry makes those differ. The hook on the client is downstream of every
@@ -625,7 +627,7 @@ def _relative_difference(left: float | None, right: float | None) -> str:
 
     Named for what it computes. It was called `_agreement` and printed under a
     heading of "agree", so `0.13%` read as *terrible* agreement to anyone who
-    did not already know the convention -- the column is headed `\u0394%` now.
+    did not already know the convention -- the column is headed `Δ%` now.
     """
     if left is None or right is None or not right:
         return "n/a"

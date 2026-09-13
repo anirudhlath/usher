@@ -1,5 +1,6 @@
-"""One artwork reference — [PRD 02](../../../docs/prd/02-data-model.md)'s `Image`, and
-the twin `m09a` deliberately shipped without.
+"""One artwork reference.
+
+[PRD 02](../../../docs/prd/02-data-model.md)'s `Image`, and the twin `m09a` deliberately
 """
 
 import uuid
@@ -15,8 +16,7 @@ __all__ = ["Image"]
 
 
 class Image(DomainModel):
-    """One artwork reference, owned by exactly one of a title, an episode or a
-    person.
+    """One artwork reference, owned by exactly one of a title, an episode or a person.
 
     Field bounds mirror `images`' CHECKs one for one — `provider <> ''`,
     `provider_path <> ''`, `width IS NULL OR width > 0` and the same for

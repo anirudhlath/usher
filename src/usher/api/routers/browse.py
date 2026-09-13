@@ -46,8 +46,7 @@ _KEYSET_TYPES: dict[BrowseSort, tuple[CursorType, ...]] = {
 def _keyset(
     sort: BrowseSort, *, genre: str | None, year: int | None, owned: bool | None
 ) -> CursorSpec:
-    """This query's cursor identity: the sort, and every filter that narrows
-    the population.
+    """This query's cursor identity: the sort, and every filter that narrows the population.
 
     The filters ride in `filters` and not in the keyset, which is what makes a
     cursor minted over `genre=horror` and replayed against `genre=comedy` a
@@ -111,8 +110,7 @@ async def browse_catalog(
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query()] = None,
 ) -> BrowseResponse:
-    """One page of the catalog, keyset-paged, with the facet counts the
-    measurement allows.
+    """One page of the catalog, keyset-paged, with the facet counts the measurement allows.
 
     **An empty page is `200`, an empty list and a `null` cursor.** `/browse` is
     a screen, and a screen with nothing on it is a statement about the catalog

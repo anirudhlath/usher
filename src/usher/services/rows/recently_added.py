@@ -1,6 +1,4 @@
-"""Recently Added -- the one row that is about the library rather than about the
-person.
-"""
+"""Recently Added -- the one row that is about the library rather than about the person."""
 
 import uuid
 from collections.abc import Sequence

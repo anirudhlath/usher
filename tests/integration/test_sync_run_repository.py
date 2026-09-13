@@ -1,5 +1,6 @@
-"""The shared contract against real Postgres, plus the three things a dict
-cannot express: a foreign key, a CHECK constraint, and a poisoned session.
+"""The shared contract against real Postgres, plus the three things a dict cannot express.
+
+a foreign key, a CHECK constraint, and a poisoned session.
 """
 
 import uuid
@@ -60,9 +61,11 @@ class TestPostgresSyncRunRepository(SyncRunRepositoryContract):
 async def test_a_source_id_no_source_carries_is_a_port_error(
     repository: PostgresSyncRunRepository,
 ) -> None:
-    """A dict has no foreign keys, so the fake stores a run attributed to
-    nothing. Postgres raises, and `services/` must not import
-    `sqlalchemy.exc` to handle it (ADR-0009)."""
+    """A dict has no foreign keys, so the fake stores a run attributed to nothing.
+
+    Postgres raises, and `services/` must not import `sqlalchemy.exc` to handle it
+    (ADR-0009).
+    """
     with pytest.raises(RepositoryConflict) as caught:
         await repository.add(run(new_id()))
     assert caught.value.constraint == "fk_sync_runs_source_id_sources"
@@ -71,10 +74,12 @@ async def test_a_source_id_no_source_carries_is_a_port_error(
 async def test_a_caught_conflict_leaves_the_session_usable(
     repository: PostgresSyncRunRepository, source_id: uuid.UUID
 ) -> None:
-    """Postgres aborts the entire transaction on any statement error until a
-    ROLLBACK, so without a SAVEPOINT a caught conflict poisons the session for
-    the caller's next, unrelated call -- and this repository's caller commits a
-    run's checkpoint together with the batch it describes."""
+    """Postgres aborts the entire transaction on any statement error until a ROLLBACK.
+
+    so without a SAVEPOINT a caught conflict poisons the session for the caller's next,
+    unrelated call -- and this repository's caller commits a run's checkpoint together
+    with the batch it describes.
+    """
     with pytest.raises(RepositoryConflict):
         await repository.add(run(new_id()))
     one = run(source_id)
@@ -88,12 +93,14 @@ async def test_the_cursor_query_uses_the_source_kind_index(
     source_id: uuid.UUID,
     analyze: Analyze,
 ) -> None:
-    """`ix_sync_runs_source_kind_started` is
-    `(source_id, kind, started_at DESC)`, so "the newest completed run of this
-    kind" is the index's first qualifying entry rather than a sort over a
-    source's whole history. `status` is deliberately not a key -- a scan back
-    through consecutive failures is bounded by how many times in a row it
-    failed."""
+    """`ix_sync_runs_source_kind_started` is `(source_id.
+
+    kind, started_at DESC)`, so "the newest completed run of this kind" is the index's
+    first qualifying entry rather than a sort over a source's whole history.
+
+    `status` is deliberately not a key -- a scan back through consecutive failures is
+    bounded by how many times in a row it failed.
+    """
     for index in range(500):
         one = run(source_id, started_at=EARLIER.replace(year=2020) + (LATER - EARLIER) * index)
         await repository.add(one)
@@ -123,10 +130,12 @@ async def test_the_resume_query_uses_the_source_kind_index(
     source_id: uuid.UUID,
     analyze: Analyze,
 ) -> None:
-    """`_INCOMPLETE`'s comment claims the index supplies the ordering and that
-    the `id` tiebreak costs only an Incremental Sort over one `started_at`
-    group. The neighbouring `_CURSOR` claim is pinned; this one was resting on
-    a reading of the SQL until this case.
+    """`_INCOMPLETE`'s comment claims the index supplies the ordering and that the `id` tiebreak.
+
+    costs only an Incremental Sort over one `started_at` group.
+
+    The neighbouring `_CURSOR` claim is pinned; this one was resting on a reading of the
+    SQL until this case.
 
     **Not `"Sort" not in plan`**, which the case above can assert and this one
     cannot: `Incremental Sort` contains it. The two are very different plans --
@@ -167,11 +176,14 @@ async def test_the_resume_query_uses_the_source_kind_index(
 async def test_a_negative_counter_is_a_port_error(
     repository: PostgresSyncRunRepository, source_id: uuid.UUID
 ) -> None:
-    """`ck_sync_runs_items_seen_non_negative` mirrors `SyncRun`'s own
-    `Field(ge=0)`, and the two fire at different moments: pydantic on the way
-    in, the CHECK on the way to disk. Only the second one is still there if a
-    future caller writes this row without going through the model, so it is
-    worth knowing it reaches the caller as a port error."""
+    """`ck_sync_runs_items_seen_non_negative` mirrors `SyncRun`'s own `Field(ge=0)`.
+
+    and the two fire at different moments: pydantic on the way in, the CHECK on the way
+    to disk.
+
+    Only the second one is still there if a future caller writes this row without going
+    through the model, so it is worth knowing it reaches the caller as a port error.
+    """
     one = run(source_id)
     await repository.add(one)
     broken = one.model_construct(**{**one.model_dump(), "items_seen": -1})
@@ -183,10 +195,13 @@ async def test_a_negative_counter_is_a_port_error(
 async def test_started_at_survives_a_save(
     session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
 ) -> None:
-    """`started_at` is the availability sweep's own `seen_since` (ADR-0015),
-    so a save that quietly refreshed it would let a run retract items it had
-    already seen. It has no `server_default`-on-update and no trigger, and
-    this is what says so."""
+    """`started_at` is the availability sweep's own `seen_since` (ADR-0015).
+
+    so a save that quietly refreshed it would let a run retract items it had already
+    seen.
+
+    It has no `server_default`-on-update and no trigger, and this is what says so.
+    """
     one = run(source_id, started_at=EARLIER)
     await repository.add(one)
     await repository.save(one.evolve(status=SyncRunStatus.COMPLETED, finished_at=LATER))

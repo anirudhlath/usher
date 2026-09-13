@@ -11,7 +11,8 @@ from usher.domain.enums import EnrichmentState, TitleKind
 
 
 class RowFamily(StrEnum):
-    """PRD 06's row *family*, and the key the composer's diversity constraint is stated in:
+    """PRD 06's row *family*, and the key the composer's diversity constraint is stated in.
+
     *"no three consecutive similarity rows; cap per family"*.
     """
 
@@ -21,9 +22,10 @@ class RowFamily(StrEnum):
 
 
 class DisplayHint(StrEnum):
-    """ADR-0006's only concrete client vocabulary, and its whole of it:
-    *"Rows carry a display **hint** (`portrait | landscape | wide | square`)
-    but never a layout."*
+    """ADR-0006's only concrete client vocabulary, and its whole of it.
+
+    *"Rows carry a display **hint** (`portrait | landscape | wide | square`) but never a
+    layout."*.
 
     Closed on purpose. The way this goes wrong is a fifth member -- `HERO`, or
     `GRID_3_COLUMN` -- which is a layout wearing a hint's name and which the

@@ -165,8 +165,7 @@ class FakeSuggestIndex(SuggestIndex):
 
 
 class FakePrefixSuggestIndex(SuggestIndex):
-    """Tier 1's matching rule and nothing else: the name starts with the typed
-    prefix.
+    """Tier 1's matching rule and nothing else: the name starts with the typed prefix.
 
     **Subclasses no contract, deliberately**, for the reason this module's
     docstring gives: checked against `SuggestIndexContract` it would be
@@ -267,10 +266,14 @@ def _rank(
 
 
 def _is_exact_name(document: SearchDocument, query: str | None) -> bool:
-    """Python's `casefold()` where the statement spells `lower(t.name) =
-    lower(btrim(...))` -- the divergence this module's docstring already
-    records for `FakeSuggestIndex`, in a second place. The two agree on ASCII
-    and no case in this repository names a title in anything else."""
+    """Python's `casefold()` where the statement spells `lower(t.name) = lower(btrim(...))`.
+
+    the divergence this module's docstring already records for `FakeSuggestIndex`, in a
+    second place.
+
+    The two agree on ASCII and no case in this repository names a title in anything
+    else.
+    """
     return query is not None and document.name.casefold() == query.strip().casefold()
 
 
@@ -310,9 +313,11 @@ def _coverage(population: Sequence[SearchDocument]) -> float:
 
 
 def _edit_distance(left: str, right: str) -> int:
-    """Plain Levenshtein. Not Damerau: a transposition costs 2 here, which
-    is what `TypoTolerantSuggestIndexContract`'s transposition case is
-    arranged for."""
+    """Plain Levenshtein.
+
+    Not Damerau: a transposition costs 2 here, which is what
+    `TypoTolerantSuggestIndexContract`'s transposition case is arranged for.
+    """
     previous = list(range(len(right) + 1))
     for row, one in enumerate(left, start=1):
         current = [row]

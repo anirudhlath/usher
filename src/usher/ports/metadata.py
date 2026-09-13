@@ -18,10 +18,13 @@ from usher.ports.ingest import ProviderRef
 
 @dataclass(frozen=True)
 class MetadataCandidate:
-    """One search result from a `MetadataProvider`, normalised enough that
-    the match stage (PRD 03 Stage 2) never indexes into a provider's own
-    JSON keys — e.g. TMDb's movie/TV divergence (`title`/`name`,
-    `release_date`/`first_air_date`) stops here, not one layer up in M4.
+    """One search result from a `MetadataProvider`.
+
+    normalised enough that the match stage (PRD 03 Stage 2) never indexes into a
+    provider's own JSON keys — e.g.
+
+    TMDb's movie/TV divergence (`title`/`name`, `release_date`/`first_air_date`) stops
+    here, not one layer up in M4.
 
     `provider_id` stays an `int` while `fetch` takes a `ProviderRef`, and
     that asymmetry is deliberate rather than an oversight the settling
@@ -96,8 +99,9 @@ class MetadataProvider(ABC):
     @property
     @abstractmethod
     def genre_vocabulary(self) -> frozenset[str]:
-        """Which canonical genres (`usher.domain.genres`) this provider can name. **The set
-        of concepts it is entitled to delete.**
+        """Which canonical genres (`usher.domain.genres`) this provider can name.
+
+        **The set of concepts it is entitled to delete.**
         """
 
     @abstractmethod
@@ -121,8 +125,9 @@ class MetadataProvider(ABC):
 
     @abstractmethod
     async def fetch(self, ref: ProviderRef) -> dict[str, Any]:
-        """Full raw payload for one entity. Stored verbatim in
-        `raw_payloads` and consumed only by `to_result`.
+        """Full raw payload for one entity.
+
+        Stored verbatim in `raw_payloads` and consumed only by `to_result`.
 
         Returning a raw `dict` here is deliberate and different in kind
         from `search`'s old raw-dict return (now `MetadataCandidate`):
@@ -144,8 +149,9 @@ class MetadataProvider(ABC):
 
     @abstractmethod
     def to_result(self, payload: dict[str, Any], title_id: uuid.UUID) -> EnrichmentResult:
-        """Normalise a raw payload into canonical state. See
-        `EnrichmentResult` for what it does and does not carry, and why.
+        """Normalise a raw payload into canonical state.
+
+        See `EnrichmentResult` for what it does and does not carry, and why.
 
         `title_id` is passed in and never minted here: identity is Usher's
         own UUIDv7 (ADR-0003), and a provider that generated one would create
@@ -163,8 +169,9 @@ class MetadataProvider(ABC):
 
     @abstractmethod
     def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
-        """Normalise a raw payload into people, credits, a collection and artwork. See
-        `DerivationResult` for what it carries and why it is not a field on
+        """Normalise a raw payload into people, credits, a collection and artwork.
+
+        See `DerivationResult` for what it carries and why it is not a field on
         `EnrichmentResult`.
         """
 

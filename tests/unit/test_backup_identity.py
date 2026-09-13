@@ -52,9 +52,10 @@ def _title(**changes: object) -> Title:
 async def test_a_reference_whose_natural_key_finds_nothing_is_refused_rather_than_written_null() -> (  # noqa: E501
     None
 ):
-    """The headline of the whole group: an unresolved reference is a named
-    refusal, never a `None` a caller can mistake for "this column is
-    nullable".
+    """The headline of the whole group.
+
+    an unresolved reference is a named refusal, never a `None` a caller can mistake for
+    "this column is nullable".
 
     `watch_states.title_id` is `ON DELETE RESTRICT` (ADR-0010), so a `None`
     written there is an insert Postgres refuses with a foreign-key error --
@@ -134,11 +135,11 @@ async def test_two_catalogs_built_from_one_dump_share_no_title_id() -> None:
 
 @pytest.mark.parametrize("spelling", ["TT99000011", "tt99000011 ", " tt99000011"])
 async def test_the_resolver_is_case_and_whitespace_exact(spelling: str) -> None:
-    """`tt99000011` and `TT99000011` are different keys.
+    r"""`tt99000011` and `TT99000011` are different keys.
 
     `replace_aliases` folds under SQL `lower()` because it is comparing a
     *name* somebody typed; a provider id is not that. IMDb issues one
-    spelling, `Title.imdb_id` carries `pattern=r"^tt\\d{7,8}$"`, and a
+    spelling, `Title.imdb_id` carries `pattern=r"^tt\d{7,8}$"`, and a
     resolver that folded would let an artifact naming `TT99000011` claim a
     row it was not written from -- a silent mis-attribution of watch state,
     which is the one thing the raw-id rung exists to make impossible.
@@ -159,10 +160,11 @@ async def test_the_resolver_is_case_and_whitespace_exact(spelling: str) -> None:
 
 
 async def test_a_tmdb_id_without_a_kind_is_refused_by_the_type() -> None:
-    """ADR-0011: TMDb's movie and series id spaces overlap on 26,968 ids
-    (measured against Wikidata, 2026-07-30 -- 47.3% of every series id it
-    knows), so `tmdb_id` alone is not an identity and `ix_titles_tmdb_id_kind`
-    is composite for that reason.
+    """ADR-0011.
+
+    TMDb's movie and series id spaces overlap on 26,968 ids (measured against Wikidata,
+    2026-07-30 -- 47.3% of every series id it knows), so `tmdb_id` alone is not an
+    identity and `ix_titles_tmdb_id_kind` is composite for that reason.
 
     A default would be the defect: `kind=MOVIE` for a reference whose title
     is a series resolves to whichever film shares the integer, and every
@@ -175,8 +177,10 @@ async def test_a_tmdb_id_without_a_kind_is_refused_by_the_type() -> None:
 
 
 async def test_two_titles_sharing_a_tmdb_id_across_kinds_resolve_to_their_own() -> None:
-    """The behavioural half of the case above: the fallback rung is
-    `(kind, tmdb_id)` and not `tmdb_id`."""
+    """The behavioural half of the case above.
+
+    the fallback rung is `(kind, tmdb_id)` and not `tmdb_id`.
+    """
     repository = FakeTitleRepository()
     film = _title(kind=TitleKind.MOVIE, tmdb_id=99000550, name="Film", sort_name="Film")
     show = _title(kind=TitleKind.SERIES, tmdb_id=99000550, name="Show", sort_name="Show")
@@ -194,10 +198,12 @@ async def test_two_titles_sharing_a_tmdb_id_across_kinds_resolve_to_their_own() 
 async def test_a_title_with_neither_provider_id_is_carried_by_raw_id_and_only_accepted_when_the_target_already_holds_it() -> (  # noqa: E501
     None
 ):
-    """ADR-0003 makes a title with no provider id a first-class citizen on
-    purpose, and the live catalog now holds six of them (2026-08-21, against
-    zero when this was designed on 2026-08-13). So the raw-id rung is
-    exercised by real rows rather than being defensive.
+    """ADR-0003 makes a title with no provider id a first-class citizen on purpose.
+
+    and the live catalog now holds six of them (2026-08-21, against zero when this was
+    designed on 2026-08-13).
+
+    So the raw-id rung is exercised by real rows rather than being defensive.
 
     It is a **check** rather than a trust: the artifact carries the UUID and
     restore accepts it if and only if the target already holds a title with
@@ -229,16 +235,21 @@ async def test_a_title_with_neither_provider_id_is_carried_by_raw_id_and_only_ac
 
 
 async def test_an_empty_batch_asks_the_repository_nothing() -> None:
-    """`resolve_natural_keys([])` is a round trip to learn nothing, the same
-    guard `list_by_ids` and `resolve_tmdb_ids` carry."""
+    """`resolve_natural_keys([])` is a round trip to learn nothing.
+
+    the same guard `list_by_ids` and `resolve_tmdb_ids` carry.
+    """
     assert await resolve_titles(FakeTitleRepository(), []) == {}
 
 
 async def test_every_reference_gets_an_answer_even_when_it_repeats() -> None:
-    """K4 iterates the mapping it is handed, so a reference absent from it is
-    a row silently written with no target. A repeated reference -- two watch
-    states for one title, which is the ordinary shape of a household -- is
-    one probe and two answers."""
+    """K4 iterates the mapping it is handed.
+
+    so a reference absent from it is a row silently written with no target.
+
+    A repeated reference -- two watch states for one title, which is the ordinary shape
+    of a household -- is one probe and two answers.
+    """
     repository = FakeTitleRepository()
     held = _title(imdb_id="tt99000011")
     await repository.add(held)
@@ -253,10 +264,11 @@ async def test_every_reference_gets_an_answer_even_when_it_repeats() -> None:
 
 
 def test_the_reference_a_title_is_carried_as_names_every_key_the_row_has() -> None:
-    """The builder is what decides what an artifact writes down, so it is
-    asserted directly rather than only through a resolve: a builder that
-    dropped `tmdb_id` would still pass every case above, because every one of
-    them resolves on the rung before it.
+    """The builder is what decides what an artifact writes down.
+
+    so it is asserted directly rather than only through a resolve: a builder that
+    dropped `tmdb_id` would still pass every case above, because every one of them
+    resolves on the rung before it.
 
     `uuid.UUID` for the id, `TitleKind` for the kind -- both carried whatever
     the provider ids say, because the kind is half of the tmdb rung's key
@@ -273,8 +285,9 @@ def test_the_reference_a_title_is_carried_as_names_every_key_the_row_has() -> No
 
 
 def test_the_unresolved_rules_are_the_ones_this_group_argued_for() -> None:
-    """Stored per table rather than derived, because the answer is a function
-    of the table and of nothing K1 already records.
+    """Stored per table rather than derived.
+
+    because the answer is a function of the table and of nothing K1 already records.
 
     They differ on purpose. A `watch_states` row whose title is missing is a
     real loss and the operator must see it, and it is recoverable: enrich the
@@ -293,7 +306,7 @@ def test_the_unresolved_rules_are_the_ones_this_group_argued_for() -> None:
 async def test_an_episode_whose_series_resolves_but_whose_numbers_do_not_is_refused_by_name() -> (
     None
 ):
-    """**The episode half of the headline claim, which nothing exercised.**
+    """**The episode half of the headline claim, which nothing exercised.**.
 
     Measured with `coverage` over the whole unit suite on 2026-08-21: four
     statements of `backup_identity` were unreached, and all four were this
@@ -346,8 +359,9 @@ async def test_an_episode_whose_series_resolves_but_whose_numbers_do_not_is_refu
 
 
 def test_the_rendered_rungs_name_the_kind_beside_the_tmdb_id() -> None:
-    """`keys_tried`'s tmdb rung was unreached by any test, so the operator
-    report K4 prints from it was unchecked at exactly the rung ADR-0011
+    """`keys_tried`'s tmdb rung was unreached by any test.
+
+    so the operator report K4 prints from it was unchecked at exactly the rung ADR-0011
     exists for.
 
     A rung rendered `tmdb_id=99000550` rather than `series+tmdb_id=99000550`
@@ -372,12 +386,13 @@ def test_the_rendered_rungs_name_the_kind_beside_the_tmdb_id() -> None:
 
 
 async def test_resolution_order_names_the_ladder_both_arms_actually_walk() -> None:
-    """`RESOLUTION_ORDER` is exported and documented as *"the ladder both
-    arms spell"* -- a claim two implementations have to honour, and until
-    this case nothing checked it. **Measured 2026-08-21:** rewriting the
-    constant to `("id", "imdb_id")` survived all 4,527 unit cases, because
-    its only other occurrences are its own `__all__` entry and two prose
-    mentions.
+    """`RESOLUTION_ORDER` is exported and documented as *"the ladder both arms spell"*.
+
+    a claim two implementations have to honour, and until this case nothing checked it.
+
+    **Measured 2026-08-21:** rewriting the constant to `("id", "imdb_id")` survived all
+    4,527 unit cases, because its only other occurrences are its own `__all__` entry and
+    two prose mentions.
 
     This binds it to observed behaviour rather than to a second copy of
     itself. Each rung is exercised by a reference that can resolve *only*

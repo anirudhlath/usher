@@ -1,5 +1,6 @@
-"""The scheduled-work port (ADR-0046, and PRD 08's "nothing runs `usher similar
---rebuild` for you").
+"""The scheduled-work port (ADR-0046.
+
+and PRD 08's "nothing runs `usher similar --rebuild` for you").
 """
 
 from abc import ABC, abstractmethod
@@ -8,8 +9,9 @@ from enum import StrEnum
 
 
 class JobOutcome(StrEnum):
-    """What one `ScheduledJob.run()` amounted to, and what the loop does with
-    each. **The one statement of this; every other site points here.**
+    """What one `ScheduledJob.run()` amounted to, and what the loop does with each.
+
+    **The one statement of this; every other site points here.**
 
     `DECLINED` is a run that never started, because the deployment is in a
     state no retry fixes. It is neither work nor failure, so it is counted in
@@ -44,8 +46,7 @@ class ScheduledJob(ABC):
     @property
     @abstractmethod
     def period(self) -> timedelta:
-        """The **minimum interval since the last completion**, never a
-        wall-clock schedule.
+        """The **minimum interval since the last completion**, never a wall-clock schedule.
 
         *"Every night at 3am"* is not expressible here and is deliberately
         not offered: an operator who wants that runs `usher schedule --once`
@@ -61,8 +62,9 @@ class ScheduledJob(ABC):
 
     @abstractmethod
     async def last_done(self) -> datetime | None:
-        """When this job's **artefact** was last complete, or `None` if it has never been
-        built. Timezone-aware.
+        """When this job's **artefact** was last complete, or `None` if it has never been built.
+
+        Timezone-aware.
         """
 
     @abstractmethod

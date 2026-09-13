@@ -273,8 +273,9 @@ class SearchQueryBuffer:
 
 @dataclass(frozen=True, slots=True)
 class SearchAnalytics:
-    """`search_queries`' retrieval half: the repository, and the commit that makes what it
-    wrote durable.
+    """`search_queries`' retrieval half.
+
+    the repository, and the commit that makes what it wrote durable.
     """
 
     queries: SearchQueryRepository
@@ -459,7 +460,10 @@ class SearchService:
         # caller can claim to be.
         user_id: uuid.UUID | None = None,
     ) -> SearchAnswer:
-        """Retrieve, then rank. Raises `SemanticSearchUnavailable`."""
+        """Retrieve, then rank.
+
+        Raises `SemanticSearchUnavailable`.
+        """
         requested = mode
         # Refused before the model, not after.
         if not query.strip():
@@ -557,10 +561,12 @@ class SearchService:
         results: int,
         elapsed: float,
     ) -> uuid.UUID | None:
-        """One `search_queries` row for one answered search, and the commit that makes it
-        durable. **Answers the row's own id, or `None` when no row was written** --
-        which is the value `SearchAnswer.search_id` carries and therefore what `GET
-        /search` echoes.
+        """One `search_queries` row for one answered search.
+
+        and the commit that makes it durable.
+
+        **Answers the row's own id, or `None` when no row was written** -- which is the
+        value `SearchAnswer.search_id` carries and therefore what `GET /search` echoes.
         """
         analytics = self._analytics
         if analytics is None or user_id is None:
@@ -587,8 +593,9 @@ class SearchService:
         results: int,
         elapsed: float,
     ) -> None:
-        """One `search_queries` row for one answered keystroke -- PRD 10's amendment 2, and
-        the writer `m10c` shipped the columns for.
+        """One `search_queries` row for one answered keystroke.
+
+        PRD 10's amendment 2, and the writer `m10c` shipped the columns for.
         """
         analytics = self._analytics
         if analytics is None or user_id is None or not self._suggest_analytics:
@@ -736,8 +743,9 @@ class SearchService:
 
 
 def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
-    """Positions, with equal index scores sharing a position -- and an exact name match in
-    a group of its own.
+    """Positions, with equal index scores sharing a position.
+
+    and an exact name match in a group of its own.
     """
     ranks: list[int] = []
     rank = 0
@@ -833,8 +841,9 @@ def _blend(**signals: float | None) -> float:
 
 
 def _ms(seconds: float) -> int:
-    """`search_queries.latency_ms`, which is `>= 0` in the column
-    (`ck_search_queries_latency_ms_non_negative`).
+    """`search_queries.latency_ms`.
+
+    which is `>= 0` in the column (`ck_search_queries_latency_ms_non_negative`).
 
     **The clamp is `adapters/llm/openai_compatible.py:181`'s shape and it
     defends a promise the shipped clock never breaks.** `time.perf_counter` is

@@ -1,5 +1,6 @@
-"""`PushApplyService` against real Postgres, for the two things its port fakes
-structurally cannot express.
+"""`PushApplyService` against real Postgres.
+
+for the two things its port fakes structurally cannot express.
 """
 
 import uuid
@@ -148,12 +149,16 @@ async def _given_matched_movie(
 async def _given_stored_history(
     session: AsyncSession, user_id: uuid.UUID, title_id: uuid.UUID, play_count: int
 ) -> None:
-    """A row as a walk plus a backfill would have left it, written with raw
-    SQL because the `BEFORE UPDATE` trigger owns `updated_at` on every other
-    path. `clock_timestamp()`, never `now()`: `now()` is frozen at the
-    transaction's start and this whole suite is one transaction, so a row
-    stamped with it is *not* later than an instant taken during the test and
-    the refusal this file exists to detect would not happen."""
+    """A row as a walk plus a backfill would have left it.
+
+    written with raw SQL because the `BEFORE UPDATE` trigger owns `updated_at` on every
+    other path.
+
+    `clock_timestamp()`, never `now()`: `now()` is frozen at the transaction's start and
+    this whole suite is one transaction, so a row stamped with it is *not* later than an
+    instant taken during the test and the refusal this file exists to detect would not
+    happen.
+    """
     await session.execute(
         text(
             """
@@ -183,12 +188,13 @@ async def test_a_pushed_state_lands_on_a_row_a_walk_just_wrote(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """**The property no fake can hold.** The row's stored `updated_at` is
-    the instant Postgres wrote it, which is later than every timestamp the
-    event itself could carry. A lane stamping the event's own instant -- or
-    the last walk's, or a value cached when the socket opened -- is refused
-    by the conflict rule and writes nothing, and the household's resume
-    position never moves however many events arrive.
+    """**The property no fake can hold.** The row's stored `updated_at` is the instant Postgres.
+
+    wrote it, which is later than every timestamp the event itself could carry.
+
+    A lane stamping the event's own instant -- or the last walk's, or a value cached
+    when the socket opened -- is refused by the conflict rule and writes nothing, and
+    the household's resume position never moves however many events arrive.
 
     `EVENT_INSTANT` is what such a lane would use; nothing here passes it,
     and that is the point: the row is *newer* than it by construction.
@@ -222,12 +228,12 @@ async def test_a_pushed_state_zeroes_neither_play_count_nor_last_played_at(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """ADR-0014 at the layer where the answer is permanent, on the push
-    path. A `UserDataChanged` entry is a payload shape nobody here has
-    captured, so the adapter reports its play history as absent -- and the
-    natural one-statement spelling of this merge reads that absence back as
-    `0` because `play_count` is `NOT NULL` and the insert path's `COALESCE`
-    runs before the conflict clause could see the `NULL`.
+    """ADR-0014 at the layer where the answer is permanent, on the push path.
+
+    A `UserDataChanged` entry is a payload shape nobody here has captured, so the
+    adapter reports its play history as absent -- and the natural one-statement spelling
+    of this merge reads that absence back as `0` because `play_count` is `NOT NULL` and
+    the insert path's `COALESCE` runs before the conflict clause could see the `NULL`.
 
     **Both columns, deliberately.** `last_played_at` is nullable and
     therefore survives that same wrong statement, so a case asserting only
@@ -267,9 +273,11 @@ async def test_a_pushed_item_is_ingested_and_published(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """The item half, through the real repositories -- `IngestService`'s two
-    known defects (a minted season/episode id that names no row) are
-    invisible to every port fake and fail on a foreign key here."""
+    """The item half, through the real repositories.
+
+    `IngestService`'s two known defects (a minted season/episode id that names no row)
+    are invisible to every port fake and fail on a foreign key here.
+    """
     adapter = FakeSourceAdapter(source)
     adapter.seed(
         SourceItem(
@@ -302,10 +310,12 @@ async def test_a_removal_leaves_every_row_available(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """ADR-0015 against the table that holds the flag. An Emby library
-    refresh emits `ItemsRemoved` for items that have not gone anywhere, and
-    the one thing that must not happen is a row flipping to
-    `available = false` on the strength of it."""
+    """ADR-0015 against the table that holds the flag.
+
+    An Emby library refresh emits `ItemsRemoved` for items that have not gone anywhere,
+    and the one thing that must not happen is a row flipping to `available = false` on
+    the strength of it.
+    """
     await _given_matched_movie(session, source, "movie-1")
     outcome = await applier.apply(
         source,

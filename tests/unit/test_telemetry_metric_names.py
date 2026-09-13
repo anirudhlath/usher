@@ -106,8 +106,10 @@ def _catalogue_names() -> list[str]:
 
 
 def _fastapi_points(reader: InMemoryMetricReader, name: str) -> list[dict[str, str]]:
-    """The attribute maps of every point recorded under `name` by the
-    instrumentation scope, which is the scope a dashboard panel is coupled to."""
+    """The attribute maps of every point recorded under `name` by the instrumentation scope.
+
+    which is the scope a dashboard panel is coupled to.
+    """
     data = reader.get_metrics_data()
     return [
         {str(key): str(value) for key, value in dict(point.attributes or {}).items()}
@@ -157,9 +159,11 @@ def _settings() -> Settings:
 
 @pytest.fixture
 def meter_reader() -> InMemoryMetricReader:
-    """`tests/conftest.py::reset_otel_meter_provider` is what makes this
-    installable more than once per process -- `set_meter_provider` is set-once
-    and every `usher` module holds a `_ProxyMeter` from import time."""
+    """`tests/conftest.py::reset_otel_meter_provider` is what makes this installable more than.
+
+    once per process -- `set_meter_provider` is set-once and every `usher` module holds
+    a `_ProxyMeter` from import time.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     return reader
@@ -216,8 +220,10 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
 async def test_a_path_that_matched_no_route_carries_no_http_target_at_all(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """**`http.target` is absent on an unrouted path, not empty**, so a panel
-    that groups by it silently drops every 404 an operator most wants to see.
+    """**`http.target` is absent on an unrouted path.
+
+    not empty**, so a panel that groups by it silently drops every 404 an operator most
+    wants to see.
 
     The mechanism is `_collect_target_attribute` in the installed
     `opentelemetry-instrumentation-asgi` 0.65b0 (`asgi/__init__.py:528-551`):
@@ -245,10 +251,11 @@ async def test_a_path_that_matched_no_route_carries_no_http_target_at_all(
 
 
 def test_the_semconv_opt_in_cannot_be_set_from_a_dotenv_file(tmp_path: Path) -> None:
-    """`Settings.model_config` is `extra="forbid"` (`config.py:144-149`) and
-    pydantic-settings' dotenv source hands an unmatched key back under its full
-    lowercased name -- so the opt-in in `.env` is a `ValidationError` out of
-    every entry point rather than a silently renamed metric.
+    """`Settings.model_config` is `extra="forbid"` (`config.py:144-149`) and pydantic-settings'.
+
+    dotenv source hands an unmatched key back under its full lowercased name -- so the
+    opt-in in `.env` is a `ValidationError` out of every entry point rather than a
+    silently renamed metric.
 
     Not a general claim that `.env` refuses `OTEL_*`: `Settings` declares
     `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` as aliased fields

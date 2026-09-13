@@ -72,10 +72,12 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement issued from every engine in the process, captured
-    off `before_cursor_execute` -- `test_titles_route.py`'s own helper,
-    copied rather than imported so this file has no import of a sibling test
-    module's fixtures and parametrized cases."""
+    """Every SQL statement issued from every engine in the process.
+
+    captured off `before_cursor_execute` -- `test_titles_route.py`'s own helper, copied
+    rather than imported so this file has no import of a sibling test module's fixtures
+    and parametrized cases.
+    """
     seen: list[str] = []
 
     def record(
@@ -122,14 +124,15 @@ async def _given_neighbors(
 async def test_the_route_resolves_through_the_real_wiring_and_reports_staleness(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    """The end-to-end check `tests/unit/test_api_similar.py` cannot make:
-    `api/deps.py`'s `get_similarity_service` actually resolves against a real
-    session, and the real `count_stale` SQL predicate -- not the fake's
-    Python comparison, which `testing-discipline.md` records as the thing an
-    inverted `WHERE blend_fingerprint <> :fp` survived against for a whole
-    milestone -- reaches the wire scoped to this seed. Two seeds, one stale
-    and one fresh in the *same* real table, for the same reason that finding
-    gives: with only one kind present an inversion of the predicate answers
+    """The end-to-end check `tests/unit/test_api_similar.py` cannot make.
+
+    `api/deps.py`'s `get_similarity_service` actually resolves against a real session,
+    and the real `count_stale` SQL predicate -- not the fake's Python comparison, which
+    `testing-discipline.md` records as the thing an inverted `WHERE blend_fingerprint <>
+    :fp` survived against for a whole milestone -- reaches the wire scoped to this seed.
+
+    Two seeds, one stale and one fresh in the *same* real table, for the same reason
+    that finding gives: with only one kind present an inversion of the predicate answers
     correctly by luck of direction.
     """
     stale_seed = await _given_title(sessions, "Stale Seed")
@@ -177,11 +180,15 @@ async def test_the_route_issues_no_write_statement(
     statement_counter: list[str],
     settings: Settings,
 ) -> None:
-    """B8's own risk, checked against real SQL rather than argued in a
-    docstring: `SimilarityService`'s fourth constructor argument is
-    `session.commit`, the same callable `get_session` calls at the end of
-    every request -- and this route only reads. A write here would mean the
-    wiring meant for `usher similar --rebuild` leaked onto a `GET`."""
+    """B8's own risk, checked against real SQL rather than argued in a docstring.
+
+    `SimilarityService`'s fourth constructor argument is `session.commit`, the same
+    callable `get_session` calls at the end of every request -- and this route only
+    reads.
+
+    A write here would mean the wiring meant for `usher similar --rebuild` leaked onto a
+    `GET`.
+    """
     seed = await _given_title(sessions, "A Read Only Seed")
     neighbor = await _given_title(sessions, "Its Neighbour")
     await _given_neighbors(

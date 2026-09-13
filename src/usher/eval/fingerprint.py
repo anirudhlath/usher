@@ -51,14 +51,15 @@ class Fingerprint:
 
     @property
     def digest(self) -> str:
-        """sha256 over `inputs` alone, canonically serialised."""
+        """Sha256 over `inputs` alone, canonically serialised."""
         canonical = json.dumps(dict(self.inputs), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _tree_is_clean() -> bool | None:
-    """Whether the working tree still matches `HEAD` -- or `None` for "git
-    would not say", which is a third answer and not a quiet "yes".
+    """Whether the working tree still matches `HEAD`.
+
+    or `None` for "git would not say", which is a third answer and not a quiet "yes".
 
     A second bounded call rather than `git describe --dirty`, which with any
     tag in the repository answers `v1.0-3-gabc1234-dirty`: not a sha a reader
@@ -87,8 +88,9 @@ def _tree_is_clean() -> bool | None:
 
 
 def git_sha() -> str:
-    """The commit the code that ran came from, marked when the tree has moved past it -- or
-    one of three named `"unknown:…"` answers.
+    """The commit the code that ran came from, marked when the tree has moved past it.
+
+    or one of three named `"unknown:…"` answers.
     """
     try:
         # S607: `git` rather than an absolute path, so it is found the way an

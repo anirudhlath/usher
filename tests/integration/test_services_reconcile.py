@@ -1,5 +1,6 @@
-"""`ReconcileService` against real Postgres, for the one thing the fakes cannot say
-about a refused sweep: whether the session survives it.
+"""`ReconcileService` against real Postgres.
+
+for the one thing the fakes cannot say about a refused sweep: whether the session
 """
 
 from collections.abc import AsyncIterator, Iterator
@@ -164,8 +165,7 @@ def meter_reader() -> Iterator[InMemoryMetricReader]:
 
 
 def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[tuple[str, float]]:
-    """Every `usher.sync.retraction.fraction` point under `outcome`, as
-    `(source label, sum)`.
+    """Every `usher.sync.retraction.fraction` point under `outcome`, as `(source label, sum)`.
 
     A **list** rather than a single value, so a case can assert on *how many*
     records happened: a metric published twice per walk and a metric published
@@ -204,10 +204,12 @@ async def test_a_refused_sweep_still_records_a_failed_run(
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """The one this file exists for. A refusal must leave the session usable
-    for the `FAILED` row that explains it -- and it does, because the guard is
-    evaluated in Python after a successful `SELECT` rather than by a statement
-    that fails."""
+    """The one this file exists for.
+
+    A refusal must leave the session usable for the `FAILED` row that explains it -- and
+    it does, because the guard is evaluated in Python after a successful `SELECT` rather
+    than by a statement that fails.
+    """
     for index in range(10):
         adapter.items[f"m{index}"] = _item(f"m{index}")
     await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
@@ -336,9 +338,11 @@ async def test_a_full_walk_retracts_and_restores_against_real_sql(
     adapter: _Adapter,
 ) -> None:
     """The sweep's own SQL, driven by the service that decides when it runs.
-    `mark_unseen_unavailable`'s `last_seen_at < :seen_since` and the upsert's
-    `available = true` are two statements in two repositories, and only a run
-    exercises the handoff between them."""
+
+    `mark_unseen_unavailable`'s `last_seen_at < :seen_since` and the upsert's `available
+    = true` are two statements in two repositories, and only a run exercises the handoff
+    between them.
+    """
     for index in range(8):
         adapter.items[f"m{index}"] = _item(f"m{index}")
     await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
@@ -361,10 +365,12 @@ async def test_a_walk_that_raises_leaves_every_row_available(
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """The headline property, against the real sweep statement. Eight of ten
-    items are written before the failure, so a sweep that ran anyway would
-    retract two -- 20%, under the ceiling, and `UPDATE ... SET available =
-    false` would commit it."""
+    """The headline property, against the real sweep statement.
+
+    Eight of ten items are written before the failure, so a sweep that ran anyway would
+    retract two -- 20%, under the ceiling, and `UPDATE ... SET available = false` would
+    commit it.
+    """
     for index in range(10):
         adapter.items[f"m{index}"] = _item(f"m{index}")
     await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
@@ -384,10 +390,12 @@ async def test_a_run_that_failed_does_not_move_the_delta_cursor(
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """`latest_completed_cursor` against real SQL. A delta resuming from a run
-    that failed halfway skips everything it never reached, silently -- and the
-    filter that prevents it lives in a `WHERE status = 'completed'` no fake
-    can vouch for."""
+    """`latest_completed_cursor` against real SQL.
+
+    A delta resuming from a run that failed halfway skips everything it never reached,
+    silently -- and the filter that prevents it lives in a `WHERE status = 'completed'`
+    no fake can vouch for.
+    """
     adapter.items["m0"] = _item("m0")
     completed = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
     adapter.items["m1"] = _item("m1")
@@ -471,10 +479,13 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
 
 
 def test_the_service_is_constructed_from_ports_only() -> None:
-    """ADR-0009, restated where the concrete repositories are in scope: this
-    file wires `ReconcileService` entirely out of `Postgres*` classes and the
-    service itself imports none of them. `import-linter` enforces the module
-    graph; this is the assembly actually running."""
+    """ADR-0009, restated where the concrete repositories are in scope.
+
+    this file wires `ReconcileService` entirely out of `Postgres*` classes and the
+    service itself imports none of them.
+
+    `import-linter` enforces the module graph; this is the assembly actually running.
+    """
     import usher.services.reconcile as module
 
     assert "usher.db" not in (module.__doc__ or "")

@@ -1,6 +1,4 @@
-"""The review queue on the wire: `GET /admin/unmatched` and `POST
-/admin/unmatched/{id}/resolve`.
-"""
+"""The review queue on the wire: `GET /admin/unmatched` and `POST /admin/unmatched/{id}/resolve`."""
 
 import ast
 import inspect
@@ -113,8 +111,11 @@ def _upsert(
 async def _given(
     media_items: FakeMediaItemRepository, rows: Sequence[MediaItemUpsert]
 ) -> dict[str, MediaItem]:
-    """Seed in the order given -- which is what lets a case make the minted
-    UUIDv7s disagree with `added_at` on purpose."""
+    """Seed in the order given.
+
+    which is what lets a case make the minted UUIDv7s disagree with `added_at` on
+    purpose.
+    """
     await media_items.upsert_many(rows)
     stored: dict[str, MediaItem] = {}
     for row in rows:
@@ -203,9 +204,12 @@ async def test_the_queue_is_newest_first_and_the_undated_ones_are_last(
 async def test_a_queue_entry_carries_the_source_id_the_operator_needs_to_find_the_file(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """The one place a source's own item id is on the wire, and the reason is
-    that an operator resolves an unmatched file by finding it on their own
-    server. `usher unmatched` has printed it since M4.
+    """The one place a source's own item id is on the wire.
+
+    and the reason is that an operator resolves an unmatched file by finding it on their
+    own server.
+
+    `usher unmatched` has printed it since M4.
 
     Also the shape assertion: every declared field is rendered, derived from
     the model rather than from a list this case keeps in step by hand.
@@ -247,9 +251,11 @@ async def test_a_page_that_exactly_exhausts_the_queue_carries_no_next_cursor(
 async def test_walking_the_cursor_serves_every_item_exactly_once_over_more_than_one_page(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """Seven items at `limit=3`: the partition case, whose `7 % 3 != 0` is why
-    it cannot see the off-by-one above. Both dated and undated, so the walk
-    crosses the boundary between the two groups.
+    """Seven items at `limit=3`.
+
+    the partition case, whose `7 % 3 != 0` is why it cannot see the off-by-one above.
+
+    Both dated and undated, so the walk crosses the boundary between the two groups.
 
     `pages > 1` is asserted because a route that ignored `limit` and served
     everything at once satisfies the set assertion perfectly.
@@ -272,10 +278,12 @@ async def test_walking_the_cursor_serves_every_item_exactly_once_over_more_than_
 async def test_the_source_filter_narrows_the_queue_and_the_cursor_remembers_which(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """`?source_id=` is a filter and rides in the cursor's digest, so a cursor
-    minted over one source and replayed against another is a `400
-    invalid_cursor` rather than a plausible, wrong, silent page of the other
-    source's backlog starting after *this* source's second item."""
+    """`?source_id=` is a filter and rides in the cursor's digest.
+
+    so a cursor minted over one source and replayed against another is a `400
+    invalid_cursor` rather than a plausible, wrong, silent page of the other source's
+    backlog starting after *this* source's second item.
+    """
     await _given(
         media_items,
         [
@@ -303,10 +311,13 @@ async def test_the_source_filter_narrows_the_queue_and_the_cursor_remembers_whic
 async def test_dropping_the_source_filter_mid_walk_is_refused_rather_than_silently_widened(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """The other direction of the same digest, and the one a client reaches by
-    accident: a cursor minted with a filter, replayed with none. An unfiltered
-    read resuming from a filtered position is a page of a different population
-    whose every row still looks right."""
+    """The other direction of the same digest, and the one a client reaches by accident.
+
+    a cursor minted with a filter, replayed with none.
+
+    An unfiltered read resuming from a filtered position is a page of a different
+    population whose every row still looks right.
+    """
     await _given(
         media_items,
         [
@@ -358,10 +369,12 @@ async def test_a_tampered_cursor_is_refused_in_the_envelope_and_never_echoed(
 async def test_a_foreign_cursor_carrying_the_wrong_key_type_is_refused(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """A well-formed cursor minted by another listing. It decodes cleanly as
-    base64 and as JSON, and it is still not this sort's key -- which is the
-    failure a digest and a type check exist for and a base64 check cannot
-    see."""
+    """A well-formed cursor minted by another listing.
+
+    It decodes cleanly as base64 and as JSON, and it is still not this sort's key --
+    which is the failure a digest and a type check exist for and a base64 check cannot
+    see.
+    """
     await _given(media_items, [_upsert("orphan", added_at=NEWER)])
     foreign = encode_cursor(
         (7, new_id()),
@@ -377,10 +390,13 @@ async def test_a_foreign_cursor_carrying_the_wrong_key_type_is_refused(
 async def test_a_page_size_past_the_ceiling_is_refused_rather_than_clamped(
     client: httpx.AsyncClient,
 ) -> None:
-    """`MAX_LIMIT` is what stops a client asking for the whole of a library
-    that has never run a match pass -- 1,126,789 items on the one measured
-    source. Refused rather than silently clamped, so a client that asked for
-    more learns that it did."""
+    """`MAX_LIMIT` is what stops a client asking for the whole of a library that has never run a.
+
+    match pass -- 1,126,789 items on the one measured source.
+
+    Refused rather than silently clamped, so a client that asked for more learns that it
+    did.
+    """
     assert (await client.get("/admin/unmatched", params={"limit": "0"})).status_code == 422
     over = await client.get(
         "/admin/unmatched", params={"limit": str(unmatched_module.MAX_LIMIT + 1)}
@@ -416,10 +432,12 @@ async def test_resolving_to_an_episode_writes_both_ids_which_is_what_the_cli_cou
     titles: FakeTitleRepository,
     episodes: FakeEpisodeRepository,
 ) -> None:
-    """The argument `usher.cli._unmatched` said this route would grow. Both
-    ids land on the row, which is the shape `ports/ingest.py`'s
-    `MediaItemTarget` documents for an episode's `media_items` row: its
-    series' `title_id` **and** its own `episode_id`."""
+    """The argument `usher.cli._unmatched` said this route would grow.
+
+    Both ids land on the row, which is the shape `ports/ingest.py`'s `MediaItemTarget`
+    documents for an episode's `media_items` row: its series' `title_id` **and** its own
+    `episode_id`.
+    """
     stored = await _given(media_items, [_upsert("orphan", added_at=NEWER)])
     series = await _given_title(titles, "A Resolved Series")
     episode = await _given_episode(episodes, series.id)
@@ -439,11 +457,14 @@ async def test_resolving_to_an_episode_writes_both_ids_which_is_what_the_cli_cou
 async def test_an_unknown_media_item_is_a_404_that_names_no_resource_in_its_code(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """`attach_title`'s boolean is what answers this -- the port returns
-    whether a row changed precisely so a caller can say 404 rather than claim
-    to have resolved something that does not exist. The code is the generic
-    `not_found`: RFC 9457's `instance` carries the path, which names the
-    missing item more precisely than a code could."""
+    """`attach_title`'s boolean is what answers this.
+
+    the port returns whether a row changed precisely so a caller can say 404 rather than
+    claim to have resolved something that does not exist.
+
+    The code is the generic `not_found`: RFC 9457's `instance` carries the path, which
+    names the missing item more precisely than a code could.
+    """
     title = await _given_title(titles, "A Real Title")
     missing = new_id()
 
@@ -460,9 +481,11 @@ async def test_an_unknown_media_item_is_a_404_that_names_no_resource_in_its_code
 async def test_an_unknown_title_is_refused_and_the_item_stays_on_the_queue(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """Read back rather than inferred from the status code: "it answered 422"
-    is also what a route that wrote the row and then failed a lookup
-    produces."""
+    """Read back rather than inferred from the status code.
+
+    "it answered 422" is also what a route that wrote the row and then failed a lookup
+    produces.
+    """
     stored = await _given(media_items, [_upsert("orphan", added_at=NEWER)])
 
     response = await client.post(
@@ -499,11 +522,12 @@ async def test_an_episode_of_another_title_is_refused_and_the_item_stays_on_the_
     titles: FakeTitleRepository,
     episodes: FakeEpisodeRepository,
 ) -> None:
-    """The check nothing downstream would have made. `attach_title` writes
-    what it is given, `media_items` has no CHECK tying `title_id` to
-    `episode_id`, and an episode row is *supposed* to carry its series' title
-    beside its own episode -- so a file pointed at episode 1 of a different
-    series is a valid row every read on this port answers with.
+    """The check nothing downstream would have made.
+
+    `attach_title` writes what it is given, `media_items` has no CHECK tying `title_id`
+    to `episode_id`, and an episode row is *supposed* to carry its series' title beside
+    its own episode -- so a file pointed at episode 1 of a different series is a valid
+    row every read on this port answers with.
 
     Both titles are real and both are series, so the only thing separating the
     accepted resolution from this one is the relation between them.

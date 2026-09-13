@@ -1,5 +1,6 @@
-"""`PostgresPrefixSuggestIndex` against real Postgres: tier 1 of the two-tier suggest,
-the btree `lower(name) text_pattern_ops` prefix probe.
+"""`PostgresPrefixSuggestIndex` against real Postgres.
+
+tier 1 of the two-tier suggest, the btree `lower(name) text_pattern_ops` prefix probe.
 """
 
 import ast
@@ -46,8 +47,9 @@ async def _given_title(
     popularity: float | None = None,
     vote_count: int | None = None,
 ) -> uuid.UUID:
-    """One `titles` row. Every name in this file is invented (see
-    `tests/unit/test_no_third_party_data.py`).
+    """One `titles` row.
+
+    Every name in this file is invented (see `tests/unit/test_no_third_party_data.py`).
 
     A raw `INSERT` rather than `PostgresTitleRepository.add`, for the reason
     the neighbouring file gives: a `Title` has 31 fields nothing here has an
@@ -172,7 +174,7 @@ async def _given_a_catalog_to_plan_against(session: AsyncSession, rows: int) -> 
 
 @pytest.mark.integration
 async def test_the_prefix_tier_answers_a_prefix_and_finds_no_typo(session: AsyncSession) -> None:
-    """**The tier's whole shape in one case, positive control first.**
+    """**The tier's whole shape in one case, positive control first.**.
 
     The positive arm runs before the absence arm on purpose: an assertion that
     a misspelt prefix returns nothing is satisfied by an implementation that
@@ -219,10 +221,13 @@ class TestPostgresPrefixSuggestIndex(SuggestIndexContract):
         self._session = session
 
     async def given_title(self, index: SuggestIndex, *, name: str, popularity: float) -> uuid.UUID:
-        """The port has no write method (ADR-0021) and this implementation
-        writes nothing either -- it reads two tables somebody else owns. So
-        the arrangement is an insert, which is the honest shape of a read-only
-        port and the reason this is a hook rather than a convenience."""
+        """The port has no write method (ADR-0021) and this implementation writes nothing either.
+
+        it reads two tables somebody else owns.
+
+        So the arrangement is an insert, which is the honest shape of a read-only port
+        and the reason this is a hook rather than a convenience.
+        """
         return await _given_title(self._session, name=name, popularity=popularity)
 
 
@@ -326,9 +331,12 @@ async def test_the_cap_is_ordered_so_the_top_of_the_list_is_not_arbitrary(
 
 @pytest.mark.integration
 async def test_a_wildcard_typed_into_the_box_is_not_a_wildcard(session: AsyncSession) -> None:
-    """`LIKE`'s own metacharacters reaching the pattern, and the three ways the escaping
-    can be wrong. **Four arms, because each kills a different spelling and no one of
-    them kills the others.**
+    """`LIKE`'s own metacharacters reaching the pattern.
+
+    and the three ways the escaping can be wrong.
+
+    **Four arms, because each kills a different spelling and no one of them kills the
+    others.**
     """
     await _given_title(session, name="Vane Alpha", popularity=1.0)
     await _given_title(session, name="Harbour Lights", popularity=900.0)
@@ -368,9 +376,7 @@ async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near
     session: AsyncSession,
     analyze: Analyze,
 ) -> None:
-    """The statement reaching `titles` any way other than through the `text_pattern_ops`
-    btree.
-    """
+    """The statement reaching `titles` any way other than through the `text_pattern_ops` btree."""
     await _given_a_catalog_to_plan_against(session, _ENOUGH_TO_PLAN_AGAINST)
     film = await _given_title(session, name="Vane Alpha", popularity=1.0)
     await _given_search_name(
@@ -410,8 +416,9 @@ async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near
 async def test_the_trigram_index_is_still_gin_and_tier_two_still_plans_to_it(
     session: AsyncSession,
 ) -> None:
-    """A GiST trigram index added beside the GIN one -- "add GiST for KNN and
-    keep GIN for `%`", which is measured and is not available.
+    """A GiST trigram index added beside the GIN one.
+
+    "add GiST for KNN and keep GIN for `%`", which is measured and is not available.
 
     With both present the planner takes GiST for `%` and the identical shipped
     configuration goes **33.3 ms -> 141.5 ms p50 (4.3x) for byte-identical
@@ -456,8 +463,9 @@ async def test_the_trigram_index_is_still_gin_and_tier_two_still_plans_to_it(
 
 @pytest.mark.integration
 async def test_the_two_tiers_order_their_answers_the_same_way(session: AsyncSession) -> None:
-    """Tier 1 ordering on something tier 2 does not, so the box reshuffles
-    when the debounced tier arrives behind it.
+    """Tier 1 ordering on something tier 2 does not.
+
+    so the box reshuffles when the debounced tier arrives behind it.
 
     Both statements sort `popularity DESC NULLS LAST, vote_count DESC NULLS
     LAST, id ASC`; tier 2 puts edit distance above all three and tier 1 has no

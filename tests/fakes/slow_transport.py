@@ -7,10 +7,12 @@ import httpx
 
 
 class SlowTransport(httpx.AsyncBaseTransport):
-    """Wraps a synchronous handler with a real `asyncio.sleep`, so that N tasks fired via
-    `asyncio.gather` are provably all in-flight at once (see `max_in_flight` below)
-    rather than racing to completion one at a time -- which a bare `httpx.MockTransport`
-    is fast enough to do, since it never actually awaits anything on the way to calling
+    """Wraps a synchronous handler with a real `asyncio.sleep`.
+
+    so that N tasks fired via `asyncio.gather` are provably all in-flight at once (see
+    `max_in_flight` below) rather than racing to completion one at a time -- which a
+    bare `httpx.MockTransport` is fast enough to do, since it never actually awaits
+    anything on the way to calling.
     """
 
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:

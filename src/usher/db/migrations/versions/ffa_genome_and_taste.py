@@ -1,6 +1,4 @@
-"""The MovieLens tag genome as one dense halfvec per title, and the per-user taste
-centroid.
-"""
+"""The MovieLens tag genome as one dense halfvec per title, and the per-user taste centroid."""
 
 import sqlalchemy as sa
 from alembic import op

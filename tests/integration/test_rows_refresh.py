@@ -63,8 +63,9 @@ def settings(postgres_url: str) -> Settings:
 
 @pytest_asyncio.fixture
 async def household(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
-    """The singleton default user's id -- the cache key, and the value the
-    queue hands to the lane.
+    """The singleton default user's id.
+
+    the cache key, and the value the queue hands to the lane.
 
     Created here rather than read, because the route's own `get_default_user`
     would create it on the first request and a case that planted a screen
@@ -326,8 +327,9 @@ _RECYCLE_TRIALS = 2000
 
 
 async def test_the_session_log_holds_every_session_it_records_so_no_address_is_recycled() -> None:
-    """`_SessionLog.held` is the whole of why `id(session)` is a safe key, and
-    nothing asserted it until this case.
+    """`_SessionLog.held` is the whole of why `id(session)` is a safe key.
+
+    and nothing asserted it until this case.
 
     **This is a guard for a repair that is already in the tree**, not a repair.
     `held` landed in `271b0d4` on 2026-08-19 and closes the hazard issue #7
@@ -391,8 +393,9 @@ async def test_the_session_log_holds_every_session_it_records_so_no_address_is_r
 async def test_the_session_log_holds_the_session_at_the_moment_it_credits_a_commit(
     session_log: _SessionLog,
 ) -> None:
-    """The commit credit must pin for itself, not inherit a pin from a handler that happens
-    to run next.
+    """The commit credit must pin for itself.
+
+    not inherit a pin from a handler that happens to run next.
     """
     held_when_credited: list[bool] = []
 
@@ -419,8 +422,7 @@ async def test_the_session_log_holds_the_session_at_the_moment_it_credits_a_comm
 
 
 def _plant(app: FastAPI, household: uuid.UUID, screen: tuple[BuiltRow, ...]) -> None:
-    """Make `screen` this household's cached entry, already expired and still
-    inside its grace.
+    """Make `screen` this household's cached entry, already expired and still inside its grace.
 
     A negative TTL rather than a stepped clock: `create_app` builds its cache
     over `datetime.now(UTC)`, and a real wall clock cannot be advanced. The
@@ -432,8 +434,7 @@ def _plant(app: FastAPI, household: uuid.UUID, screen: tuple[BuiltRow, ...]) -> 
 
 
 def _expire(app: FastAPI, household: uuid.UUID) -> None:
-    """Expire the cached screen **and** the rows on it, without deleting
-    either.
+    """Expire the cached screen **and** the rows on it, without deleting either.
 
     `RowCache.invalidate` would drop both outright, which makes the next
     request a hard miss rather than a stale serve -- the opposite of what
@@ -463,8 +464,10 @@ async def test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_o
     session_log: _SessionLog,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """The whole feature, end to end, with the lane held back across the request so both
-    orderings are facts rather than races.
+    """The whole feature.
+
+    end to end, with the lane held back across the request so both orderings are facts
+    rather than races.
     """
     await owned("A Film That Arrived Before The Request")
     await app.state.lanes.stop()
@@ -520,7 +523,7 @@ async def test_the_refresh_reads_state_committed_after_the_screen_was_cached(
     household: uuid.UUID,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """**The refresh's session is genuinely new, shown by what it can see.**
+    """**The refresh's session is genuinely new, shown by what it can see.**.
 
     Identity is one half of "its own session"; freshness is the other, and it
     is the half a stale connection would fail. A title committed on a third
@@ -572,9 +575,10 @@ async def test_a_screen_refresh_reuses_a_row_whose_own_ttl_has_not_moved(
     household: uuid.UUID,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """**PRD 06's two layers, and the consequence of them a reader will not
-    guess** -- found by writing the case above without it and watching the
-    refreshed screen come back unchanged.
+    """**PRD 06's two layers, and the consequence of them a reader will not guess**.
+
+    found by writing the case above without it and watching the refreshed screen come
+    back unchanged.
 
     The screen is ~30 s and `recently-added` is five minutes, so a screen
     refresh re-proposes, re-selects and re-orders while *reusing* every row

@@ -1,6 +1,4 @@
-"""What a backup carries instead of a title id, and what restore does when it cannot
-find one.
-"""
+"""What a backup carries instead of a title id, and what restore does when it cannot find one."""
 
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -153,8 +151,9 @@ async def _answer[ReferenceT: (TitleReference, EpisodeReference)](
     resolve: Callable[[Sequence[ReferenceT]], Awaitable[dict[ReferenceT, uuid.UUID]]],
     references: Sequence[ReferenceT],
 ) -> dict[ReferenceT, uuid.UUID | Unresolved]:
-    """The one place an absence becomes a refusal, shared by both arms so
-    they cannot drift on what "not found" means.
+    """The one place an absence becomes a refusal.
+
+    shared by both arms so they cannot drift on what "not found" means.
 
     An empty batch asks nothing: `resolve_natural_keys([])` is a round trip
     to learn nothing, the same guard `list_by_ids` and `resolve_tmdb_ids`

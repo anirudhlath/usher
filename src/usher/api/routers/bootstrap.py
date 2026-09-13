@@ -26,8 +26,10 @@ _TRIGGER_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 
 @router.get("/status", response_model=BootstrapStatusResponse)
 async def bootstrap_status(report: BootstrapReportDep) -> BootstrapStatusResponse:
-    """What every dataset's import has done, the catalog's size, the genome's
-    coverage, and whether the stored tag vocabulary can name its lanes.
+    """What every dataset's import has done.
+
+    the catalog's size, the genome's coverage, and whether the stored tag vocabulary can
+    name its lanes.
 
     **Declared before `POST /{phase}` and safe either way.** The two differ by
     method, so no request can match both; the order here is for a reader.
@@ -54,8 +56,9 @@ async def bootstrap_status(report: BootstrapReportDep) -> BootstrapStatusRespons
     responses=_TRIGGER_FAILURES,
 )
 async def start_bootstrap(phase: BootstrapPhase, queue: JobQueueDep) -> BootstrapTriggerResponse:
-    """Ask for one bulk-import phase to run. Enqueues `JobKind.BOOTSTRAP` and returns
-    before a byte is read.
+    """Ask for one bulk-import phase to run.
+
+    Enqueues `JobKind.BOOTSTRAP` and returns before a byte is read.
     """
     await queue.enqueue(
         [

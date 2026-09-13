@@ -1,5 +1,6 @@
-"""`GET /search` and `GET /search/suggest` — PRD 05's read path on the wire, and PRD
-07's `### Screens`.
+"""`GET /search` and `GET /search/suggest`.
+
+PRD 05's read path on the wire, and PRD 07's `### Screens`.
 """
 
 import uuid

@@ -131,8 +131,7 @@ async def seeded(images: FakeImageRepository) -> uuid.UUID:
 
 
 def app_over(service: ImageProxyService) -> FastAPI:
-    """A real `create_app()` with the proxy service overridden and nothing
-    else.
+    """A real `create_app()` with the proxy service overridden and nothing else.
 
     Both lanes off: `dependency_overrides` do not reach the lifespan, so a
     worker lane here would poll a `jobs` table at an unreachable DSN and a push
@@ -152,8 +151,10 @@ def app_over(service: ImageProxyService) -> FastAPI:
 
 @asynccontextmanager
 async def serving(service: ImageProxyService) -> AsyncIterator[httpx.AsyncClient]:
-    """`app_over` behind a live client, for the cases that need a fetcher the
-    module's fixtures do not build."""
+    """`app_over` behind a live client.
+
+    for the cases that need a fetcher the module's fixtures do not build.
+    """
     async with LifespanManager(app_over(service)) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as connected:
@@ -221,8 +222,7 @@ async def test_the_clamp_holds_at_both_ends_of_the_ladder_and_between(
     asked: int,
     served: int,
 ) -> None:
-    """Three points, because a clamp with one asserted point is satisfied by
-    a constant.
+    """Three points, because a clamp with one asserted point is satisfied by a constant.
 
     `Content-Location` is asserted alongside the bytes: the acceptance is that
     *the response says which rung it served*, and a body a client cannot name
@@ -241,7 +241,8 @@ async def test_the_clamp_holds_at_both_ends_of_the_ladder_and_between(
 async def test_the_representation_uri_is_canonical_and_not_the_path_the_client_typed(
     client: httpx.AsyncClient, seeded: uuid.UUID
 ) -> None:
-    """`Content-Location` is built from the route table and the parsed `UUID`,
+    """`Content-Location` is built from the route table and the parsed `UUID`.
+
     never from `request.url.path`.
 
     **Found by the sweep**: `return f"{request.url.path}?w={rung}"` survived
@@ -268,9 +269,9 @@ async def test_the_representation_uri_is_canonical_and_not_the_path_the_client_t
 async def test_an_absent_width_is_the_row_card_rung_and_not_the_bottom_one(
     client: httpx.AsyncClient, seeded: uuid.UUID, fetcher: RungStampedFetcher
 ) -> None:
-    """`w` omitted is 342 (ADR-0032), the surface both of M9's two artwork
-    consumers paint -- and already a rung, so the default creates no fifth
-    cache entry.
+    """`w` omitted is 342 (ADR-0032), the surface both of M9's two artwork consumers paint.
+
+    and already a rung, so the default creates no fifth cache entry.
 
     Asserted as its own case rather than folded into the table above because
     the plausible wrong answers are different: a default of `IMAGE_LADDER[0]`
@@ -314,8 +315,7 @@ async def test_a_warm_request_is_served_from_the_store_and_asks_the_network_noth
     fetcher: RungStampedFetcher,
     store: FakeImageBlobStore,
 ) -> None:
-    """The whole point of the cache, and the premise every header case below
-    rests on.
+    """The whole point of the cache, and the premise every header case below rests on.
 
     `fetcher.calls` rather than a count on the store: "asked the store twice"
     is also true of a proxy that fetches every time and writes over its own
@@ -408,8 +408,10 @@ async def test_a_conditional_request_answers_304_with_the_same_validators(
 async def test_two_rungs_of_one_image_are_two_entries_with_two_different_etags(
     client: httpx.AsyncClient, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """The cache is `(image, rung)` and the tag is over the served bytes, so
-    the second rung is neither a 304 nor a second copy of the first.
+    """The cache is `(image.
+
+    rung)` and the tag is over the served bytes, so the second rung is neither a 304 nor
+    a second copy of the first.
 
     Without this, a route that hashed the *id* rather than the bytes would
     answer 304 to a client holding `w342` and asking for `w780` -- and the
@@ -433,8 +435,9 @@ async def test_the_same_id_still_serves_the_same_bytes_after_a_re_derivation(
     images: FakeImageRepository,
     fetcher: RungStampedFetcher,
 ) -> None:
-    """C2's natural key arriving on the wire, which is the whole of what makes
-    a long `max-age` honest.
+    """C2's natural key arriving on the wire.
+
+    which is the whole of what makes a long `max-age` honest.
 
     `replace_for_titles` runs between the two requests with a **fresh**
     `Image` -- a new UUIDv7 minted by `new_id`, exactly as `usher derive` mints
@@ -567,8 +570,9 @@ async def test_a_rate_limited_upstream_is_the_envelope_like_every_other_failure(
 async def test_a_rate_limit_with_no_hint_still_names_a_wait(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`retry_after` is `None` when the upstream sent no `Retry-After`, and a
-    503 without one is a client guessing.
+    """`retry_after` is `None` when the upstream sent no `Retry-After`.
+
+    and a 503 without one is a client guessing.
 
     The pair to the case above rather than a duplicate: together they say the
     header is *derived* from the hint rather than either always the default or
@@ -613,8 +617,9 @@ async def test_an_upstream_that_refused_this_servers_credentials_is_the_envelope
 async def test_an_upstream_answer_this_proxy_will_not_serve_is_a_503_with_no_retry_after(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`PortDataMalformed` -- a 4xx, a body past the ceiling, or an answer that is not
-    artwork at all.
+    """`PortDataMalformed`.
+
+    a 4xx, a body past the ceiling, or an answer that is not artwork at all.
     """
     fetcher = FakeImageFetcher(
         answers=[PortDataMalformed("an image proxy will not cache 'text/html'")]
@@ -633,8 +638,9 @@ async def test_an_upstream_answer_this_proxy_will_not_serve_is_a_503_with_no_ret
 async def test_artwork_this_deployment_declines_to_carry_is_an_ordinary_404(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`MediaTypeNotServable` is an absence, not an outage, and this is the one
-    place in `src/` that spends C4's subclass.
+    """`MediaTypeNotServable` is an absence.
+
+    not an outage, and this is the one place in `src/` that spends C4's subclass.
 
     `.claude/rules/ports-and-error-taxonomy.md` carries the measurement that
     decided it: an SVG logo is roughly **one title in seventeen** and is the
@@ -697,8 +703,7 @@ def test_the_declined_media_type_arm_precedes_its_parents() -> None:
 async def test_neither_upstream_failure_puts_a_provider_message_in_the_document(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """`detail` is written at the raise site and never interpolated from the
-    exception.
+    """`detail` is written at the raise site and never interpolated from the exception.
 
     A port error's own message may carry a rung, a path or -- from a transport
     failure httpx raised -- a whole URL, and `api/errors.py`'s whole reason for
@@ -723,10 +728,12 @@ async def test_neither_upstream_failure_puts_a_provider_message_in_the_document(
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """A fresh provider per case, which only works because of
-    `tests/conftest.py::reset_otel_meter_provider`: `set_meter_provider` is
-    set-once and every `usher` module's counter is a `_Proxy*` shell caching
-    the first real instrument it is ever handed."""
+    """A fresh provider per case.
+
+    which only works because of `tests/conftest.py::reset_otel_meter_provider`:
+    `set_meter_provider` is set-once and every `usher` module's counter is a `_Proxy*`
+    shell caching the first real instrument it is ever handed.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -779,8 +786,7 @@ async def test_both_paths_are_counted_through_a5s_instruments_under_the_image_la
 
 
 def test_the_proxy_records_through_the_row_caches_instruments_and_declares_none() -> None:
-    """The pair is A5's, and `services/images.py` may not declare a parallel
-    one.
+    """The pair is A5's, and `services/images.py` may not declare a parallel one.
 
     Two `create_counter` calls for one name under one meter do not add up --
     either a duplicate-instrument warning or a second stream, and either way a
@@ -838,8 +844,9 @@ def _cdn(body: bytes) -> httpx.MockTransport:
 async def test_no_provider_url_reaches_the_client(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """PRD 07's actual promise: *"clients never see provider image URLs and
-    never need a provider key"*.
+    """PRD 07's actual promise.
+
+    *"clients never see provider image URLs and never need a provider key"*.
 
     **The positive control comes first, and it is three assertions rather than
     a status code.** A 200 with a real body and a real image media type is what
@@ -875,8 +882,7 @@ async def test_no_provider_url_reaches_the_client(
 async def test_no_provider_url_reaches_the_log_sink(
     images: FakeImageRepository, seeded: uuid.UUID, store: FakeImageBlobStore
 ) -> None:
-    """The other surface ADR-0012 names, and the one a body assertion cannot
-    see.
+    """The other surface ADR-0012 names, and the one a body assertion cannot see.
 
     `httpx` logs `HTTP Request: <method> <url>` at INFO once per request and
     `_InterceptHandler` redirects every stdlib record into loguru, so on a

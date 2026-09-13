@@ -1,5 +1,6 @@
-"""A committed dashboard can lie in three ways, and this module is the three checks
-that close them.
+"""A committed dashboard can lie in three ways.
+
+and this module is the three checks that close them.
 """
 
 import json
@@ -382,8 +383,9 @@ def _reads_only_the_postgres_catalogue(sql: str) -> bool:
 
 
 def test_the_committed_dashboards_are_not_written_in_aliases() -> None:
-    """Invariant 3's coverage is a property of the committed SQL, so it is
-    asserted per *panel* rather than once over the glob.
+    """Invariant 3's coverage is a property of the committed SQL.
+
+    so it is asserted per *panel* rather than once over the glob.
 
     The case above asserts only that *some* pair was graded, which one
     unaliased panel satisfies for a file of eleven. This is the arm that
@@ -430,9 +432,11 @@ def test_the_committed_dashboards_are_not_written_in_aliases() -> None:
 
 
 def test_a_panel_written_in_aliases_is_checked_on_nothing() -> None:
-    """The limitation, pinned by name so it is a stated hole rather than a
-    silent one. Both spellings select a column that does not exist; only the
-    unaliased one is visible to the scan."""
+    """The limitation, pinned by name so it is a stated hole rather than a silent one.
+
+    Both spellings select a column that does not exist; only the unaliased one is
+    visible to the scan.
+    """
     aliased = "SELECT t.enrichment_status FROM titles t"
     written_out = "SELECT titles.enrichment_status FROM titles"
 
@@ -444,9 +448,11 @@ def test_a_panel_written_in_aliases_is_checked_on_nothing() -> None:
 
 
 def test_the_normaliser_is_not_vacuous() -> None:
-    """A normaliser that lower-cased everything to nothing would make invariant
-    2 pass on any input at all, so it is asserted in both directions: the two
-    spellings of one metric agree, and two different metrics stay different."""
+    """A normaliser that lower-cased everything to nothing would make invariant 2 pass on any.
+
+    input at all, so it is asserted in both directions: the two spellings of one metric
+    agree, and two different metrics stay different.
+    """
     assert normalise_metric("usher.suggest.duration") == "usher_suggest_duration"
     assert normalise_metric("usher_suggest_duration_bucket") == "usher_suggest_duration"
     assert normalise_metric("usher.suggest.duration") == normalise_metric(
@@ -489,10 +495,12 @@ def test_the_normaliser_is_not_vacuous() -> None:
 
 
 def test_the_catalogue_scan_reaches_the_row_that_carries_no_usher_prefix() -> None:
-    """The whole reason the anchor was dropped. `http.server.duration` is
-    supplied by `FastAPIInstrumentor` rather than declared by Usher, and it is
-    the metric an API-latency panel queries — a catalogue that cannot see it
-    grades that panel as naming an unknown metric."""
+    """The whole reason the anchor was dropped.
+
+    `http.server.duration` is supplied by `FastAPIInstrumentor` rather than declared by
+    Usher, and it is the metric an API-latency panel queries — a catalogue that cannot
+    see it grades that panel as naming an unknown metric.
+    """
     catalogue = metric_catalogue()
 
     assert "http_server_duration" in catalogue, (
@@ -510,10 +518,13 @@ def _synthetic(panel: dict[str, Any], uid: str = "u1") -> dict[str, Any]:
 
 
 def test_a_prometheus_target_naming_a_metric_outside_the_catalogue_is_caught() -> None:
-    """Invariant 2's teeth, proved on a synthetic dashboard because the
-    committed glob has no Prometheus panel at this HEAD — Dashboard 1 is eleven
-    Postgres panels and PRD 10 says so. `usher.suggest.latency` is the near-miss
-    D1 named: a plausible spelling of a metric nothing emits.
+    """Invariant 2's teeth.
+
+    proved on a synthetic dashboard because the committed glob has no Prometheus panel
+    at this HEAD — Dashboard 1 is eleven Postgres panels and PRD 10 says so.
+
+    `usher.suggest.latency` is the near-miss D1 named: a plausible spelling of a metric
+    nothing emits.
     """
     catalogue = metric_catalogue()
     good = 'histogram_quantile(0.95, sum by (tier) (rate(usher_suggest_duration_bucket{job="usher"}[5m])))'  # noqa: E501
@@ -535,9 +546,11 @@ def test_a_prometheus_target_naming_a_metric_outside_the_catalogue_is_caught() -
 
 
 def test_the_panel_walk_reaches_a_collapsed_rows_children() -> None:
-    """A row panel carries no targets and is exempt; its children are not, and
-    a walk of the top level alone would stop seeing them the moment a row is
-    collapsed and saved."""
+    """A row panel carries no targets and is exempt.
+
+    its children are not, and a walk of the top level alone would stop seeing them the
+    moment a row is collapsed and saved.
+    """
     dashboard = _synthetic(
         {
             "type": "row",
@@ -555,10 +568,12 @@ def test_the_panel_walk_reaches_a_collapsed_rows_children() -> None:
 
 
 def test_the_catalogue_parse_and_the_glob_are_both_falsifiable() -> None:
-    """The two positive controls of the main case, exercised where they can be
-    made to fail. Neither can be shown red against the real tree once this task
-    lands, which is precisely why an `assert files` that nobody has watched fail
-    is worth as little as no assertion at all."""
+    """The two positive controls of the main case, exercised where they can be made to fail.
+
+    Neither can be shown red against the real tree once this task lands, which is
+    precisely why an `assert files` that nobody has watched fail is worth as little as
+    no assertion at all.
+    """
     assert metric_catalogue("no table here at all") == set()
     assert metric_catalogue("| `usher.jobs.queued` | gauge | kind | ✅ M4 |") == {
         "usher_jobs_queued"
@@ -602,8 +617,9 @@ def _title_collisions(titles: list[str], forbidden: dict[str, str]) -> list[str]
 
 
 def test_dashboard_two_ships_no_panel_the_audit_found_unbacked() -> None:
-    """D0's audit found three of PRD 10's eight D2 panels have no backing
-    series, and this is the assertion that they did not ship anyway.
+    """D0's audit found three of PRD 10's eight D2 panels have no backing series.
+
+    and this is the assertion that they did not ship anyway.
 
     Both premises are asserted first, because both failures are silent in the
     same direction: a parse that found no forbidden names and a dashboard with
@@ -629,9 +645,11 @@ def test_dashboard_two_ships_no_panel_the_audit_found_unbacked() -> None:
 
 
 def test_a_dashboard_that_shipped_all_eight_panels_is_caught_naming_the_three() -> None:
-    """The case above cannot be shown red against the committed tree once this
-    task lands, so its teeth are proved on the dashboard it exists to refuse:
-    the "complete" one, with all eight of PRD 10's D2 panels on it."""
+    """The case above cannot be shown red against the committed tree once this task lands.
+
+    so its teeth are proved on the dashboard it exists to refuse: the "complete" one,
+    with all eight of PRD 10's D2 panels on it.
+    """
     forbidden = unbacked_panels()
     complete = [
         "Watch time by day and user",
@@ -660,10 +678,14 @@ def test_a_dashboard_that_shipped_all_eight_panels_is_caught_naming_the_three() 
 
 
 def test_the_five_shipped_panels_are_not_false_positives_of_the_collision_scan() -> None:
-    """Containment in both directions is the strong half of the scan and the
-    half that can over-fire: a short legitimate title inside a long forbidden
-    one reads as a collision. This asserts the five that shipped are clear of
-    it, which is what makes the empty result above evidence rather than luck."""
+    """Containment in both directions is the strong half of the scan and the half that can.
+
+    over-fire: a short legitimate title inside a long forbidden one reads as a
+    collision.
+
+    This asserts the five that shipped are clear of it, which is what makes the empty
+    result above evidence rather than luck.
+    """
     forbidden = unbacked_panels()
     dashboard = json.loads(_DASHBOARD_TWO.read_text(encoding="utf-8"))
     titles = _query_panel_titles(dashboard)
@@ -676,8 +698,9 @@ def test_the_five_shipped_panels_are_not_false_positives_of_the_collision_scan()
 
 
 def test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens() -> None:
-    """The text panel duplicates PRD 10 rather than linking to it, so the
-    duplication needs a red when the two drift.
+    """The text panel duplicates PRD 10 rather than linking to it.
+
+    so the duplication needs a red when the two drift.
 
     Duplication was chosen deliberately: the operator reading the dashboard at
     2 a.m. must not have to hold the document. The cost of that choice is
@@ -722,8 +745,9 @@ def test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens() -> 
 
 
 def test_the_prd_parse_of_the_unbacked_panels_is_falsifiable() -> None:
-    """The two parses of this module's fourth question, exercised where they
-    can be made to fail — neither can be, against the real PRD, once D7 lands.
+    """The two parses of this module's fourth question, exercised where they can be made to fail.
+
+    neither can be, against the real PRD, once D7 lands.
 
     An `assert forbidden` nobody has watched go red is worth what an empty
     `assert files` was worth to D6: nothing.
@@ -758,10 +782,12 @@ def test_the_prd_parse_of_the_unbacked_panels_is_falsifiable() -> None:
 
 
 def test_a_text_panel_with_no_content_is_caught() -> None:
-    """Invariant 1's text-panel arm. The exemption above removes the datasource
-    and target requirement from a panel that draws no data; this is what it was
-    replaced with, and it is asserted on the failure it names rather than on
-    the committed file, where it can no longer fail."""
+    """Invariant 1's text-panel arm.
+
+    The exemption above removes the datasource and target requirement from a panel that
+    draws no data; this is what it was replaced with, and it is asserted on the failure
+    it names rather than on the committed file, where it can no longer fail.
+    """
     empty = {"type": "text", "title": "Absences", "options": {"content": "   "}}
     filled = {"type": "text", "title": "Absences", "options": {"content": "#84"}}
 
@@ -800,9 +826,10 @@ def _sql(panel: dict[str, Any]) -> str:
 
 
 def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
-    """The failure this closes renders perfectly and answers a different
-    question: one panel titled *"queue depth by priority"* whose target is
-    `usher.jobs.queued`, a gauge PRD 10 says twice is labelled `kind`.
+    """The failure this closes renders perfectly and answers a different question.
+
+    one panel titled *"queue depth by priority"* whose target is `usher.jobs.queued`, a
+    gauge PRD 10 says twice is labelled `kind`.
 
     *"`usher.jobs.queued` is labelled `kind`, not `priority`. `JobQueue.depth()`
     counts pending rows per kind, which is what 'which lane is backed up'
@@ -915,8 +942,9 @@ def test_the_prometheus_normaliser_strips_the_exporters_unit_suffix() -> None:
 
 
 def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_series() -> None:
-    """The sentence D11's *"Push down"* alert is written against, pinned on the
-    panel rather than left in a rules file.
+    """The sentence D11's *"Push down"* alert is written against.
+
+    pinned on the panel rather than left in a rules file.
 
     `api/lanes.py`'s `push_snapshots` builds the reader as
     `{self._names[source_id]: PushSnapshot(...)}` over `self._open_adapters`,
@@ -987,8 +1015,10 @@ def test_the_enrichment_panel_says_its_label_is_outcome_and_carries_no_demand_sp
 
 
 def test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_error() -> None:
-    """PRD 10: *"a denominator that omitted the failures would read low exactly
-    during an outage."*
+    """PRD 10.
+
+    *"a denominator that omitted the failures would read low exactly during an
+    outage."*.
 
     `adapters/tmdb/client.py` sets `status = str(response.status_code)` inside
     the span and leaves it at the literal `"error"` for a transport failure
@@ -1022,10 +1052,13 @@ def test_the_tmdb_panel_counts_429s_and_denominates_on_every_status_including_er
 
 
 def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
-    """The four description checks above are substring scans, and a substring
-    scan over prose nobody can make fail is decoration. Each is exercised here
-    against a description with the sentence removed, which is the only place
-    they can be shown red once the real file is committed."""
+    """The four description checks above are substring scans.
+
+    and a substring scan over prose nobody can make fail is decoration.
+
+    Each is exercised here against a description with the sentence removed, which is the
+    only place they can be shown red once the real file is committed.
+    """
     panel = {"title": "Push connection uptime", "description": "a socket, probably"}
     assert "operator-typed" not in str(panel["description"])
 
@@ -1058,9 +1091,10 @@ def _balanced(text: str, opening: int) -> int:
 
 
 def _aggregations(expr: str) -> list[tuple[set[str], str]]:
-    """`(grouping labels, operand)` for every aggregation call in a PromQL
-    expression, in both spellings PromQL allows — `sum by (x) (…)` and
-    `sum(…) by (x)`.
+    """`(grouping labels.
+
+    operand)` for every aggregation call in a PromQL expression, in both spellings
+    PromQL allows — `sum by (x) (…)` and `sum(…) by (x)`.
 
     A substring test for `by (cache` would pass on an expression that carries
     the grouping on some *other* aggregation than the one wrapping the
@@ -1124,8 +1158,9 @@ _LEGEND_LABEL = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 
 def test_every_legend_entry_names_a_label_its_own_query_still_groups_by() -> None:
-    """🔴 The legend and the `by (…)` are two halves of one claim and only the legend half
-    had teeth.
+    """🔴 The legend and the `by (…)` are two halves of one claim and only the legend half had.
+
+    teeth.
     """
     targets = _legend_targets()
     named = [
@@ -1172,11 +1207,12 @@ def test_every_legend_entry_names_a_label_its_own_query_still_groups_by() -> Non
 
 
 def test_the_cache_panel_groups_by_cache_and_never_sums_across_it() -> None:
-    """PRD 10 declares `usher.cache.hits` with `cache` **and** `freshness`
-    while `usher.cache.misses` carries `cache` alone — *"a miss served nothing,
-    so it has no freshness to report"* — and the pair is declared once in
-    `telemetry.py` for three callers precisely because a second stream under
-    one name makes *"a dashboard's hit rate silently stop covering a cache"*.
+    """PRD 10 declares `usher.cache.hits` with `cache` **and** `freshness` while.
+
+    `usher.cache.misses` carries `cache` alone — *"a miss served nothing, so it has no
+    freshness to report"* — and the pair is declared once in `telemetry.py` for three
+    callers precisely because a second stream under one name makes *"a dashboard's hit
+    rate silently stop covering a cache"*.
 
     A hit rate summed across `cache` is that failure arriving from the panel
     end instead: the row cache, the screen cache and the image proxy have
@@ -1294,9 +1330,9 @@ def test_no_committed_panel_takes_a_quantile_over_a_histogram_still_on_the_sdk_d
 
 
 def test_the_catalogue_check_survives_the_unit_suffix_the_collector_appends() -> None:
-    """🔴 The normaliser was measured against OTel's *name* mangling and not
-    against what the collector actually stores, and the two differ by a
-    segment.
+    """🔴 The normaliser was measured against OTel's *name* mangling and not against what the.
+
+    collector actually stores, and the two differ by a segment.
 
     Read out of this host's Prometheus on 2026-09-07, the committed
     instruments are `usher_home_compose_duration_seconds_bucket`,

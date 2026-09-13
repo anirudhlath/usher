@@ -1,5 +1,6 @@
-"""The composed home screen: PRD 06, and
-[ADR-0006](../../../docs/prd/decisions/0006-server-composed-home.md).
+"""The composed home screen.
+
+PRD 06, and [ADR-0006](../../../docs/prd/decisions/0006-server-composed-home.md).
 """
 
 import time
@@ -189,8 +190,10 @@ class HomeService:
         return (await self.compose_report(ctx)).rows
 
     async def compose_report(self, ctx: RowContext) -> ComposeReport:
-        """The same composition, with the per-provider breakdown `usher home`
-        prints and PRD 10's dashboard 4 draws.
+        """The same composition.
+
+        with the per-provider breakdown `usher home` prints and PRD 10's dashboard 4
+        draws.
 
         One method rather than two paths: a report assembled by a second loop
         over the providers would describe a composition that never happened,
@@ -362,8 +365,7 @@ class HomeService:
         return [*pinned, *capped][: self._max_rows]
 
     def _order(self, rows: Sequence[BuiltRow]) -> tuple[BuiltRow, ...]:
-        """Score order subject to the adjacency rule, by **deferring** rather
-        than dropping.
+        """Score order subject to the adjacency rule, by **deferring** rather than dropping.
 
         `rows` arrives pinned-first and score-descending, because that is the
         order `_select` built and the order the loop built in. A row that would

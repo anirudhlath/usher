@@ -27,7 +27,8 @@ _UNDATED = datetime.min.replace(tzinfo=UTC)
 
 
 def _after(entry: MediaItem, boundary: UnmatchedCursorPosition) -> bool:
-    """Whether `entry` sorts strictly after `boundary` in the review queue's order:
+    """Whether `entry` sorts strictly after `boundary` in the review queue's order.
+
     `added_at DESC NULLS LAST, id DESC`.
     """
     if boundary.added_at is None:
@@ -66,9 +67,11 @@ class FakeMediaItemRepository(MediaItemRepository):
         self.calls = 0
 
     def reset_calls(self) -> None:
-        """A test-double affordance, not a port method -- see
-        `tests/fakes/title_match_repository.py` for why the round-trip count
-        is a service property that only a counter can express."""
+        """A test-double affordance, not a port method.
+
+        see `tests/fakes/title_match_repository.py` for why the round-trip count is a
+        service property that only a counter can express.
+        """
         self.calls = 0
 
     async def upsert_many(self, rows: Sequence[MediaItemUpsert]) -> BulkWriteResult:

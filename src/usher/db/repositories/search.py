@@ -587,12 +587,12 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
 
 
 def _as_vector_literal(embedding: tuple[float, ...] | None) -> str | None:
-    """pgvector's own text form, which the staging table holds and the
-    `INSERT ... SELECT` casts. `repr` per component because it is the
-    shortest round-tripping form -- `halfvec` quantises it to float16 anyway
-    (measured max cosine error 1.21e-04), so precision beyond round-trip
-    buys nothing, and a lossy formatter here would be indistinguishable from
-    the quantisation it hides behind.
+    """Pgvector's own text form, which the staging table holds and the `INSERT ...
+
+    SELECT` casts. `repr` per component because it is the shortest round-tripping form
+    -- `halfvec` quantises it to float16 anyway (measured max cosine error 1.21e-04), so
+    precision beyond round-trip buys nothing, and a lossy formatter here would be
+    indistinguishable from the quantisation it hides behind.
 
     `None` for a refused title, which stages as NULL and casts to NULL.
     """

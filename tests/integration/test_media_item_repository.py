@@ -1,6 +1,6 @@
-"""The shared contract against real Postgres, plus the five things a fake cannot
-express: a duplicate that raises rather than being last-wins, a CHECK that fires, a
-foreign key, a poisoned session, and "one statement per batch".
+"""The shared contract against real Postgres, plus the five things a fake cannot express.
+
+a duplicate that raises rather than being last-wins, a CHECK that fires, a foreign key,
 """
 
 import dataclasses
@@ -61,10 +61,12 @@ async def title_id(session: AsyncSession) -> uuid.UUID:
 
 @pytest_asyncio.fixture
 async def episode_id(session: AsyncSession) -> uuid.UUID:
-    """A real episode, which needs a real series and a real season: both FKs
-    are `NOT NULL`, and `media_items.episode_id` is itself a foreign key --
-    the whole reason the contract's episode cases mean something here and
-    are dict entries in the unit half."""
+    """A real episode, which needs a real series and a real season.
+
+    both FKs are `NOT NULL`, and `media_items.episode_id` is itself a foreign key -- the
+    whole reason the contract's episode cases mean something here and are dict entries
+    in the unit half.
+    """
     series = Title(kind=TitleKind.SERIES, name="Contract Series", sort_name="Contract Series")
     await PostgresTitleRepository(session).add(series)
     season, episode = new_id(), new_id()
@@ -109,9 +111,11 @@ async def series_title_id(session: AsyncSession) -> uuid.UUID:
 
 @pytest_asyncio.fixture
 async def episode_ids(session: AsyncSession, series_title_id: uuid.UUID) -> list[uuid.UUID]:
-    """Ten real episodes of one series. `media_items.episode_id` is a foreign
-    key, so these cannot be invented here the way they can in the unit
-    half."""
+    """Ten real episodes of one series.
+
+    `media_items.episode_id` is a foreign key, so these cannot be invented here the way
+    they can in the unit half.
+    """
     season = (
         await session.execute(
             text("SELECT id FROM seasons WHERE title_id = :title_id"),
@@ -155,13 +159,15 @@ class TestPostgresMediaItemRepository(
 async def test_a_negative_dimension_is_a_port_error_not_an_integrity_error(
     repository: PostgresMediaItemRepository, source_id: uuid.UUID
 ) -> None:
-    """`ck_media_items_width_non_negative` is one of five CHECKs mirroring
-    `MediaItem`'s own pydantic bounds, and the staged path bypasses pydantic
-    entirely -- a `COPY` never constructs a `MediaItem`. So the database is
-    the only thing standing between a bad width and a stored row, and the
-    repository has to translate what it raises: a raw
-    `sqlalchemy.exc.IntegrityError` escaping here would break "db is driven,
-    not driving" for every caller written against `usher.ports.errors`.
+    """`ck_media_items_width_non_negative` is one of five CHECKs mirroring `MediaItem`'s own.
+
+    pydantic bounds, and the staged path bypasses pydantic entirely -- a `COPY` never
+    constructs a `MediaItem`.
+
+    So the database is the only thing standing between a bad width and a stored row, and
+    the repository has to translate what it raises: a raw
+    `sqlalchemy.exc.IntegrityError` escaping here would break "db is driven, not
+    driving" for every caller written against `usher.ports.errors`.
 
     Note *where* it fires. The staging table carries no constraints, so the
     `COPY` succeeds and the following `INSERT ... SELECT` is what raises --
@@ -186,12 +192,15 @@ async def test_an_unknown_title_id_is_a_port_error_not_an_integrity_error(
 async def test_a_caught_conflict_leaves_the_session_usable(
     repository: PostgresMediaItemRepository, source_id: uuid.UUID
 ) -> None:
-    """The bug `PostgresImportRunRepository` shipped with: Postgres aborts
-    the *entire* transaction on any statement error until a ROLLBACK, so a
-    caught conflict poisons the session for the next unrelated call. This
-    repository uses a SAVEPOINT rather than a full rollback, because its
-    caller genuinely does have other pending work -- a batch of items and
-    its sync-run checkpoint commit together."""
+    """The bug `PostgresImportRunRepository` shipped with.
+
+    Postgres aborts the *entire* transaction on any statement error until a ROLLBACK, so
+    a caught conflict poisons the session for the next unrelated call.
+
+    This repository uses a SAVEPOINT rather than a full rollback, because its caller
+    genuinely does have other pending work -- a batch of items and its sync-run
+    checkpoint commit together.
+    """
     with pytest.raises(RepositoryConflict):
         await repository.upsert_many([item(source_id, "movie-1", title_id=new_id())])
     result = await repository.upsert_many([item(source_id, "movie-2")])
@@ -201,13 +210,15 @@ async def test_a_caught_conflict_leaves_the_session_usable(
 async def test_a_caught_conflict_leaves_no_staging_table_behind(
     repository: PostgresMediaItemRepository, source_id: uuid.UUID
 ) -> None:
-    """The rollback-to-SAVEPOINT has to take the staging table's DDL with it
-    (Postgres DDL is transactional), or the next batch's `CREATE UNLOGGED
-    TABLE` either fails or -- with the `DROP ... IF EXISTS` in front of it --
-    silently inherits nothing while the failed batch's rows sit in a table
-    nobody reads. Verified by writing a second batch and checking its counts,
-    which the test above already does; this one checks the mechanism
-    directly."""
+    """The rollback-to-SAVEPOINT has to take the staging table's DDL with it (Postgres DDL is.
+
+    transactional), or the next batch's `CREATE UNLOGGED TABLE` either fails or -- with
+    the `DROP ...
+
+    IF EXISTS` in front of it -- silently inherits nothing while the failed batch's rows
+    sit in a table nobody reads. Verified by writing a second batch and checking its
+    counts, which the test above already does; this one checks the mechanism directly.
+    """
     with pytest.raises(RepositoryConflict):
         await repository.upsert_many([item(source_id, "movie-1", title_id=new_id())])
     second = await repository.upsert_many(
@@ -249,14 +260,16 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """ "One statement per batch" is a scale requirement, not an aesthetic:
-    at 1,126,674 items a per-row write is ~21 minutes of pure repository
+    """One statement per batch is a scale requirement, not an aesthetic.
+
+    At 1,126,674 items a per-row write is ~21 minutes of pure repository
     overhead per walk before a byte of upstream I/O, on the same measurement
     that put `BulkCatalogRepository` outside `TitleRepository`.
 
     Asserted as "the count does not grow with the batch" rather than as a
     magic number, so adding a legitimate statement to the path does not
-    break this and making one of them per-row does."""
+    break this and making one of them per-row does.
+    """
     statement_counter.clear()
     await repository.upsert_many([item(source_id, f"small-{index}") for index in range(5)])
     small = len(statement_counter)
@@ -275,10 +288,13 @@ async def test_the_sweep_costs_the_same_number_of_statements_however_big_it_is(
     other_source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """A sweep that loaded rows to decide which to retract is the design
-    defect this milestone is warned about. It is also the *obvious*
-    implementation, because the guard needs a count and the retraction needs
-    a set -- reading the rows once gives you both."""
+    """A sweep that loaded rows to decide which to retract is the design defect this milestone.
+
+    is warned about.
+
+    It is also the *obvious* implementation, because the guard needs a count and the
+    retraction needs a set -- reading the rows once gives you both.
+    """
     await repository.upsert_many(
         [item(source_id, f"m-{index}", last_seen_at=RUN_AT) for index in range(4)]
     )
@@ -304,10 +320,13 @@ async def test_a_refused_sweep_issues_no_update_at_all(
     source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """ "Nothing was retracted" has to mean the UPDATE never ran, not that it
-    ran and was rolled back -- a sweep that writes first and checks after
-    leaves the guard depending on the caller's transaction discipline, and
-    `deps.get_session` commits on any handler that does not raise."""
+    """A report of nothing retracted has to mean the UPDATE never ran.
+
+    Not that it ran and was rolled back -- a sweep that writes first and
+    checks after leaves the guard depending on the caller's transaction
+    discipline, and `deps.get_session` commits on any handler that does not
+    raise.
+    """
     await repository.upsert_many(
         [item(source_id, f"m-{index}", last_seen_at=EARLIER) for index in range(4)]
     )
@@ -322,10 +341,11 @@ async def test_a_refused_sweep_issues_no_update_at_all(
 async def _seed_a_series_with_episodes(
     session: AsyncSession, source_id: uuid.UUID, *, episodes: int
 ) -> uuid.UUID:
-    """One series, one season, `episodes` real episodes, and a `media_items`
-    row for each -- plus one for the series itself, which is what a real Emby
-    walk produces (a `Series` item has no `MediaSource`, so its row carries no
-    quality facts, and M4's live run counted exactly 20 such rows among 601).
+    """One series, one season, `episodes` real episodes, and a `media_items` row for each.
+
+    plus one for the series itself, which is what a real Emby walk produces (a `Series`
+    item has no `MediaSource`, so its row carries no quality facts, and M4's live run
+    counted exactly 20 such rows among 601).
 
     Raw `INSERT ... SELECT generate_series` rather than the repository,
     because the point is to make the *episode count* large cheaply; the read
@@ -405,10 +425,12 @@ async def test_upsert_many_never_hard_deletes_across_sources(
     source_id: uuid.UUID,
     other_source_id: uuid.UUID,
 ) -> None:
-    """The `DELETE`-shaped mistake a set-based implementation invites: a
-    statement that reconciles the table to the batch rather than merging the
+    """The `DELETE`-shaped mistake a set-based implementation invites.
+
+    A statement that reconciles the table to the batch rather than merging the
     batch into the table. PRD 02: "Soft-delete availability, hard-delete
-    nothing.\""""
+    nothing."
+    """
     await repository.upsert_many([item(source_id, "mine"), item(other_source_id, "theirs")])
     await repository.upsert_many([item(source_id, "mine")])
     assert await repository.count_for_source(other_source_id) == 1

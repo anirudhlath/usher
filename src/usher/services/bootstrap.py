@@ -41,8 +41,9 @@ _failures = _meter.create_counter(
 
 
 class VocabularyState(StrEnum):
-    """Whether the stored tag vocabulary can name the lanes of the stored
-    vectors — the **decision**, with the sentence left to whoever renders it.
+    """Whether the stored tag vocabulary can name the lanes of the stored vectors.
+
+    the **decision**, with the sentence left to whoever renders it.
 
     Five members and not four: "there is nothing to name" and "there is
     something to name and no names" are different operator actions, and
@@ -90,11 +91,11 @@ class VocabularyVerdict:
 
 @dataclass(frozen=True, slots=True)
 class BootstrapReport:
-    """Everything `bootstrap-status` describes, assembled once.
+    r"""Everything `bootstrap-status` describes, assembled once.
 
     ⚠️ **Two aggregate reads on every call, and they are priced for an
     operator screen rather than a client one.** Measured 2026-08-12 against a
-    real 1,272,367-title catalog with a 15,565-vector genome (`\\timing`,
+    real 1,272,367-title catalog with a 15,565-vector genome (`\timing`,
     median of five, on a *busy* box, so these are upper bounds):
     `count_titles()` is a seq-scan `count(*)` at **80.6 ms**;
     `genome_coverage()` is **248.6 ms** for its five-way aggregate plus
@@ -272,8 +273,10 @@ class BootstrapService:
     async def _concede_to_other_owner(
         self, dataset: str, revision: str, exc: RepositoryConflict, span: trace.Span
     ) -> ImportRun:
-        """Case 1 of `import_dataset`: `self._runs.start()` lost the race to create
-        `dataset`'s row to a concurrent process.
+        """Case 1 of `import_dataset`.
+
+        `self._runs.start()` lost the race to create `dataset`'s row to a concurrent
+        process.
         """
         owner = await self._runs.get(dataset)
         span.set_attribute("usher.conflict", True)

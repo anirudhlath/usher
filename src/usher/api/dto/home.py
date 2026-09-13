@@ -1,5 +1,6 @@
-"""`GET /home` — [ADR-0006](../../../../docs/prd/decisions/0006-server-composed-
-home.md), PRD 06 and PRD 07.
+"""`GET /home`.
+
+[ADR-0006](../../../../docs/prd/decisions/0006-server-composed- home.md), PRD 06 and PRD
 """
 
 import uuid

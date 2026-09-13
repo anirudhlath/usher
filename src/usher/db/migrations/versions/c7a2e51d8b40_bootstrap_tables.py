@@ -1,4 +1,4 @@
-"""bootstrap tables"""
+"""Bootstrap tables."""
 
 from collections.abc import Sequence
 

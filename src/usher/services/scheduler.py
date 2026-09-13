@@ -1,4 +1,7 @@
-"""The scheduler loop (ADR-0046). One `asyncio` task per deployment."""
+"""The scheduler loop (ADR-0046).
+
+One `asyncio` task per deployment.
+"""
 
 import asyncio
 import time
@@ -93,12 +96,16 @@ class Scheduler:
 
     @property
     def jobs(self) -> tuple[ScheduledJob, ...]:
-        """What is registered, in registration order -- which is the order a
-        tick runs them in, and the only ordering there is."""
+        """What is registered, in registration order.
+
+        which is the order a tick runs them in, and the only ordering there is.
+        """
         return tuple(self._jobs)
 
     def register(self, job: ScheduledJob) -> None:
-        """Add a job. Refuses a name already registered.
+        """Add a job.
+
+        Refuses a name already registered.
 
         The name is a metric label and a span name, so two jobs under one name
         make `usher.scheduler.job.duration` a histogram over two populations
@@ -112,8 +119,11 @@ class Scheduler:
     # -- observation -----------------------------------------------------
 
     def read(self) -> Mapping[str, float]:
-        """PRD 10's `usher.scheduler.job.due`: seconds since `last_done()` minus the
-        period, per job. Negative means not due.
+        """PRD 10's `usher.scheduler.job.due`.
+
+        seconds since `last_done()` minus the period, per job.
+
+        Negative means not due.
         """
         return self._due
 
@@ -133,7 +143,9 @@ class Scheduler:
     # -- the lifecycle ---------------------------------------------------
 
     async def start(self) -> None:
-        """Create the loop task. **Awaits nothing, connects to nothing.**
+        """Create the loop task.
+
+        **Awaits nothing, connects to nothing.**
 
         `create_app`'s lifespan builds an engine and opens no connection, and
         that is load-bearing: `/health` answers 200 with Postgres down while
@@ -167,8 +179,9 @@ class Scheduler:
         await asyncio.gather(task, return_exceptions=True)
 
     async def run(self) -> None:
-        """Tick, then sleep -- in that order, so the first tick is this task's
-        work rather than `start()`'s.
+        """Tick, then sleep.
+
+        in that order, so the first tick is this task's work rather than `start()`'s.
 
         The `except Exception` here is the loop's own boundary and is not the
         one that isolates a failing job: `tick` already catches per job, so
@@ -188,8 +201,9 @@ class Scheduler:
     # -- one tick --------------------------------------------------------
 
     async def tick(self) -> int:
-        """Walk the registry once and run whatever is due. Returns how many
-        did the work, which is **not** how many were due.
+        """Walk the registry once and run whatever is due.
+
+        Returns how many did the work, which is **not** how many were due.
 
         Two results are excluded: a job that raised, and one that answered
         `JobOutcome.DECLINED`. The number says *"how much work happened"*, and
@@ -254,7 +268,9 @@ class Scheduler:
         return overdue >= timedelta(0)
 
     async def _run(self, job: ScheduledJob) -> bool:
-        """One job, inside its own root span. Returns whether it did the work.
+        """One job, inside its own root span.
+
+        Returns whether it did the work.
 
         **A `JobOutcome.DECLINED` is neither timed nor counted as a failure**
         -- `JobOutcome` carries why -- and the caller spaces it out.
@@ -312,8 +328,9 @@ class Scheduler:
     # -- the retry backoff -----------------------------------------------
 
     def _back_off(self, job: ScheduledJob) -> None:
-        """Do not offer this job again for a doubling number of ticks, **capped at its own
-        period**.
+        """Do not offer this job again for a doubling number of ticks.
+
+        **capped at its own period**.
         """
         held = self._backoff.get(job.name)
         failures = (held.failures if held is not None else 0) + 1

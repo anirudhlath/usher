@@ -31,8 +31,10 @@ _DEEP = 12_000
 
 
 def _json(body: str) -> httpx.Response:
-    """A 200 carrying `body` verbatim, so a case can put something on the wire
-    that `json=` would refuse to encode."""
+    """A 200 carrying `body` verbatim.
+
+    so a case can put something on the wire that `json=` would refuse to encode.
+    """
     return httpx.Response(200, content=body.encode(), headers={"content-type": "application/json"})
 
 
@@ -45,17 +47,21 @@ def test_a_json_object_body_decodes() -> None:
 
 
 def test_a_non_json_body_is_malformed() -> None:
-    """A reverse proxy or a captive portal serving an HTML error page with
-    status 200 is the realistic way to reach this, and a raw
-    `json.JSONDecodeError` escaping the port is not something a caller written
-    against `usher.ports.errors` can catch."""
+    """A reverse proxy or a captive portal serving an HTML error page with status 200 is the.
+
+    realistic way to reach this, and a raw `json.JSONDecodeError` escaping the port is
+    not something a caller written against `usher.ports.errors` can catch.
+    """
     with pytest.raises(PortDataMalformed):
         decode_json(httpx.Response(200, text="<html>nope</html>"), what="/Items")
 
 
 def test_a_json_array_body_is_malformed() -> None:
-    """The annotation says `dict[str, Any]`. A list that reached a caller
-    fails several frames away on `body["something"]`, not here."""
+    """The annotation says `dict[str, Any]`.
+
+    A list that reached a caller fails several frames away on `body["something"]`, not
+    here.
+    """
     with pytest.raises(PortDataMalformed) as raised:
         decode_json(_json("[1, 2, 3]"), what="/Items")
     assert "list" in str(raised.value)
@@ -90,8 +96,9 @@ def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None:
 
 
 def test_the_detail_is_optional_because_one_caller_may_not_name_its_path() -> None:
-    """`EmbySession` and `TmdbClient` pass the request path as both subject
-    and `detail`; `OpenAICompatibleClient` may pass neither.
+    """`EmbySession` and `TmdbClient` pass the request path as both subject and `detail`.
+
+    `OpenAICompatibleClient` may pass neither.
 
     A household may be pointed at a provider whose `base_url` carries a token
     in a path segment, so PRD 08's "credentials are never logged" means the
@@ -115,9 +122,11 @@ def test_the_detail_is_optional_because_one_caller_may_not_name_its_path() -> No
 
 @pytest.mark.parametrize("status", [200, 201, 204, 304])
 def test_a_status_that_is_not_an_error_returns_none(status: int) -> None:
-    """`None` rather than a raise, so a caller can put its own arm *above*
-    this one without reordering the ladder -- which is what `TmdbClient` does
-    with the 404 it translates differently."""
+    """`None` rather than a raise.
+
+    so a caller can put its own arm *above* this one without reordering the ladder --
+    which is what `TmdbClient` does with the 404 it translates differently.
+    """
     assert port_error_for(httpx.Response(status), what="TMDb", request_line="GET /movie/1") is None
 
 
@@ -145,11 +154,11 @@ def test_a_rejected_credential_is_auth_failed(status: int) -> None:
 
 @pytest.mark.parametrize("status", [400, 402, 404, 409, 422, 499])
 def test_a_permanent_4xx_is_malformed_not_unavailable(status: int) -> None:
-    """The six statuses `.claude/rules/config-cli-and-deployment.md` measured
-    against this ladder on 2026-08-07, and the arm that behaves differently at
-    the CLI boundary: `PortDataMalformed` is deliberately outside
-    `cli.OPERATOR_ERRORS`, so a slip here changes what `usher curate` prints
-    and not merely how it words it.
+    """The six statuses `.claude/rules/config-cli-and-deployment.md` measured against this.
+
+    ladder on 2026-08-07, and the arm that behaves differently at the CLI boundary:
+    `PortDataMalformed` is deliberately outside `cli.OPERATOR_ERRORS`, so a slip here
+    changes what `usher curate` prints and not merely how it words it.
 
     A 4xx that is not a 429 cannot become an answer by being sent again --
     translated as `PortUnavailable` it costs `JobWorker` five rate-limited
@@ -164,11 +173,13 @@ def test_a_permanent_4xx_is_malformed_not_unavailable(status: int) -> None:
 
 
 def test_a_408_stays_retryable() -> None:
-    """The one 4xx that really does mean "send this again". Neither upstream
-    has been observed sending it, but `Settings.tmdb_base_url` and
-    `Settings.llm_base_url` both exist so a household can put a proxy in
-    front of a hosted provider, and a proxy that gives up waiting is exactly
-    what the queue's backoff is for."""
+    """The one 4xx that really does mean "send this again".
+
+    Neither upstream has been observed sending it, but `Settings.tmdb_base_url` and
+    `Settings.llm_base_url` both exist so a household can put a proxy in front of a
+    hosted provider, and a proxy that gives up waiting is exactly what the queue's
+    backoff is for.
+    """
     error = port_error_for(httpx.Response(408), what="TMDb", request_line="GET /movie/1")
     assert isinstance(error, PortUnavailable)
 
@@ -196,10 +207,13 @@ def test_the_outage_names_the_request_and_the_rejection_names_the_subject() -> N
 
 
 def test_the_ladder_interpolates_nothing_the_caller_did_not_hand_it() -> None:
-    """PRD 08, from the LLM adapter's side: a rejected request never echoes
-    the body it rejected, and here that body is the household's watch
-    history. The response body is available to this function and no branch
-    may reach for it."""
+    """PRD 08, from the LLM adapter's side.
+
+    a rejected request never echoes the body it rejected, and here that body is the
+    household's watch history.
+
+    The response body is available to this function and no branch may reach for it.
+    """
     response = httpx.Response(400, json={"error": {"message": "the household watched Solaris"}})
     error = port_error_for(response, what="the LLM endpoint", request_line="POST /chat/completions")
     assert error is not None
@@ -238,9 +252,11 @@ def test_the_untranslated_tuple_covers_the_families_httpx_error_does_not() -> No
 
 
 class _Clock:
-    """A monotonic clock that only ever moves when something sleeps -- the
-    `TmdbClient` test's own instrument, so the gate and the bucket it is
-    compared against are driven identically."""
+    """A monotonic clock that only ever moves when something sleeps.
+
+    the `TmdbClient` test's own instrument, so the gate and the bucket it is compared
+    against are driven identically.
+    """
 
     def __init__(self) -> None:
         self.now = 0.0
@@ -260,9 +276,11 @@ class _Clock:
 
 
 async def _grants(gate: _MinInterval | _TokenBucket, clock: _Clock, n: int) -> list[float]:
-    """The clock instant each of `n` concurrent `take()` calls was granted at,
-    sorted -- sorted because the order the lock hands them out in is not the
-    thing under test, the *spacing* is."""
+    """The clock instant each of `n` concurrent `take()` calls was granted at, sorted.
+
+    sorted because the order the lock hands them out in is not the thing under test, the
+    *spacing* is.
+    """
 
     async def _timed() -> float:
         await gate.take()
@@ -272,8 +290,9 @@ async def _grants(gate: _MinInterval | _TokenBucket, clock: _Clock, n: int) -> l
 
 
 async def test_two_calls_are_spaced_and_a_burst_is_not_permitted_after_an_idle_period() -> None:
-    """The whole reason this is a minimum interval and not a token bucket, and
-    the case proves the two designs *differ* rather than that one works -- so a
+    """The whole reason this is a minimum interval and not a token bucket.
+
+    and the case proves the two designs *differ* rather than that one works -- so a
     later "simplification" back to a bucket fails here.
 
     Five concurrent `take()`s after ten seconds of simulated idleness. The gate
@@ -315,8 +334,10 @@ async def test_two_calls_are_spaced_and_a_burst_is_not_permitted_after_an_idle_p
 
 
 async def test_the_gate_records_its_wait_on_every_call_labelled_by_source() -> None:
-    """`usher.source.throttle.wait`, PRD 10's M10 row: the seconds spent inside
-    the gate, on **every** call and not only when it waits, labelled `source`.
+    """`usher.source.throttle.wait`, PRD 10's M10 row.
+
+    the seconds spent inside the gate, on **every** call and not only when it waits,
+    labelled `source`.
 
     Zero is a real reading -- it is how an operator sees the limiter is enabled
     and not binding -- so a gate that recorded only its waits would leave the
@@ -351,10 +372,12 @@ async def test_the_gate_records_its_wait_on_every_call_labelled_by_source() -> N
 
 
 async def test_a_disabled_gate_records_no_throttle_series_at_all() -> None:
-    """A disabled gate and one that never binds are two different readings, and
-    the metric has to keep them apart: a `rate=0` gate emits nothing, so an
-    empty `usher.source.throttle.wait` series means the limiter is disabled
-    rather than enabled and permanently unbinding."""
+    """A disabled gate and one that never binds are two different readings.
+
+    and the metric has to keep them apart: a `rate=0` gate emits nothing, so an empty
+    `usher.source.throttle.wait` series means the limiter is disabled rather than
+    enabled and permanently unbinding.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
 
@@ -378,8 +401,9 @@ async def test_a_disabled_gate_records_no_throttle_series_at_all() -> None:
 
 
 async def test_a_registrys_gate_paces_and_a_second_source_gets_its_own_budget() -> None:
-    """The **behavioural** half of "keyed by `source.id`", which the identity assertions
-    elsewhere cannot state.
+    """The **behavioural** half of "keyed by `source.id`".
+
+    which the identity assertions elsewhere cannot state.
     """
     clock = _Clock()
     gates = SourceGateRegistry(2.0, clock=clock, sleep=clock.sleep)
@@ -422,12 +446,12 @@ def test_failure_detail_names_the_type_when_the_text_is_empty() -> None:
 
 
 def test_failure_detail_never_carries_httpx_own_text() -> None:
-    """`type(exc).__name__` and nothing else, which is the rule
-    `TmdbClient`, `OpenAICompatibleClient` and the embedding client each
-    wrote for themselves: httpx's messages belong to a third party, this
-    project cannot promise what a later version puts in one, and two of
-    these upstreams are pointed by an operator at a URL that may carry a
-    token in a path segment.
+    """`type(exc).__name__` and nothing else.
+
+    which is the rule `TmdbClient`, `OpenAICompatibleClient` and the embedding client
+    each wrote for themselves: httpx's messages belong to a third party, this project
+    cannot promise what a later version puts in one, and two of these upstreams are
+    pointed by an operator at a URL that may carry a token in a path segment.
     """
     leaky = httpx.ConnectError("connecting to https://host.invalid/?api_key=SEKRIT failed")
     assert failure_detail(leaky) == "ConnectError"
@@ -435,10 +459,10 @@ def test_failure_detail_never_carries_httpx_own_text() -> None:
 
 
 def test_failure_detail_recovers_the_budget_a_timeout_exhausted() -> None:
-    """The number is Usher's own, and it is recovered rather than invented:
-    `Client.build_request` writes `extensions["timeout"]` from the client's
-    `Timeout`, and httpx sets `.request` on every `RequestError` on its way
-    out of `send`.
+    """The number is Usher's own, and it is recovered rather than invented.
+
+    `Client.build_request` writes `extensions["timeout"]` from the client's `Timeout`,
+    and httpx sets `.request` on every `RequestError` on its way out of `send`.
 
     Named per phase because `httpx.Timeout` carries four independent budgets.
     A client built from one scalar -- which is what
@@ -497,9 +521,10 @@ def test_failure_detail_recovers_the_budget_a_timeout_exhausted() -> None:
     ],
 )
 def test_failure_detail_still_names_a_failure_it_cannot_price(exc: BaseException) -> None:
-    """This runs while *formatting an exception message*. A guard that missed
-    would replace the recorded sync failure with an unrelated crash, which is
-    strictly worse than the empty message it set out to fix.
+    """This runs while *formatting an exception message*.
+
+    A guard that missed would replace the recorded sync failure with an unrelated crash,
+    which is strictly worse than the empty message it set out to fix.
     """
     detail = failure_detail(exc)
     assert detail == type(exc).__name__

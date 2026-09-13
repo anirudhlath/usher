@@ -1,4 +1,7 @@
-"""The priority work queue, on `SELECT ... FOR UPDATE SKIP LOCKED`."""
+"""The priority work queue, on `SELECT ...
+
+FOR UPDATE SKIP LOCKED`.
+"""
 
 import uuid
 from collections.abc import Sequence
@@ -161,10 +164,11 @@ _PARKED = (
 
 
 class PostgresJobQueue(JobQueue):
-    """`max_attempts` and `backoff_seconds` are constructor arguments rather
-    than reads of `Settings`: `db/` must not import `config` for the same
-    reason `services/` must not, and both composition roots already pass every
-    other tunable this way."""
+    """`max_attempts` and `backoff_seconds` are constructor arguments rather than reads of.
+
+    `Settings`: `db/` must not import `config` for the same reason `services/` must not,
+    and both composition roots already pass every other tunable this way.
+    """
 
     def __init__(self, session: AsyncSession, *, max_attempts: int, backoff_seconds: float) -> None:
         self._session = session
@@ -173,8 +177,7 @@ class PostgresJobQueue(JobQueue):
 
     @staticmethod
     def claim_sql() -> str:
-        """The literal claim statement, for `EXPLAIN` in the integration
-        suite.
+        """The literal claim statement, for `EXPLAIN` in the integration suite.
 
         A plan assertion against a hand-copied lookalike drifts from the
         statement that actually runs, and then asserts about a query nothing

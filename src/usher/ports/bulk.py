@@ -18,8 +18,9 @@ class BulkCursor:
 
 @dataclass(frozen=True, slots=True)
 class BulkBatch[RowT]:
-    """One committable unit of work: the rows, plus the cursor that is
-    correct *after* they have been persisted.
+    """One committable unit of work.
+
+    the rows, plus the cursor that is correct *after* they have been persisted.
 
     Generic over the row type rather than carrying `Mapping[str, object]`:
     every implementation yields exactly one record shape, and a weakly-typed
@@ -211,17 +212,21 @@ class BulkDataset[RowT](ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Stable identifier, used as the `import_runs.dataset` key. Changing
-        one orphans its checkpoint, which restarts that import from zero
-        rather than corrupting anything."""
+        """Stable identifier, used as the `import_runs.dataset` key.
+
+        Changing one orphans its checkpoint, which restarts that import from zero rather
+        than corrupting anything.
+        """
 
     @property
     @abstractmethod
     def attribution(self) -> str:
-        """The attribution string this dataset's licence requires a client to display (PRD
-        04's hard rule 4). Never empty — a dataset with no attribution requirement
-        returns its own name and source URL, so the API surface has something to serve
-        either way.
+        """The attribution string this dataset's licence requires a client to display (PRD 04's.
+
+        hard rule 4).
+
+        Never empty — a dataset with no attribution requirement returns its own name and
+        source URL, so the API surface has something to serve either way.
         """
 
     @abstractmethod
@@ -249,6 +254,7 @@ class BulkDataset[RowT](ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Release held resources — the HTTP client, and any open file
-        handle. Called by the caller that constructed this dataset, in a
-        `finally`."""
+        """Release held resources — the HTTP client, and any open file handle.
+
+        Called by the caller that constructed this dataset, in a `finally`.
+        """

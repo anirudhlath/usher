@@ -189,8 +189,7 @@ LaneSupervisorDep = Annotated[LaneSupervisor, Depends(get_lane_supervisor)]
 
 
 def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
-    """Typed accessor for the session factory `create_app`'s lifespan
-    installs on `app.state`.
+    """Typed accessor for the session factory `create_app`'s lifespan installs on `app.state`.
 
     `request.app.state.session_factory` is otherwise typed `Any` --
     Starlette's `State` permits arbitrary attributes, so `get_session`'s
@@ -214,9 +213,10 @@ def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    """Request-scoped session and the request's unit-of-work boundary:
-    commits once the handler completes without raising, rolls back and
-    re-raises otherwise.
+    """Request-scoped session and the request's unit-of-work boundary.
+
+    commits once the handler completes without raising, rolls back and re-raises
+    otherwise.
 
     `ports/repository.py` says "the caller owns the session and the
     transaction... committing or rolling back is the caller's call" --
@@ -273,8 +273,9 @@ HouseholdDep = Annotated[Household, Depends(get_household)]
 
 
 def get_source_repository(session: SessionDep) -> SourceRepository:
-    """Its own provider rather than being constructed inside
-    `get_source_service`, because `get_title_read_service` needs the same one.
+    """Its own provider rather than being constructed inside `get_source_service`.
+
+    because `get_title_read_service` needs the same one.
 
     Two callers each building their own would be two chances for one of them
     to drift onto a different session and quietly leave the request's
@@ -515,8 +516,9 @@ def get_reconcile_service(
     runs: SyncRunRepositoryDep,
     events: EventPublisherDep,
 ) -> ReconcileService:
-    """`commit` is `session.commit`, the same callable `get_session` calls
-    at the end of a successful request.
+    """`commit` is `session.commit`.
+
+    the same callable `get_session` calls at the end of a successful request.
 
     That is deliberate and it is the one place this root differs from the
     CLI's: a reconcile checkpoints and commits *per batch*, so a route that
@@ -662,7 +664,8 @@ def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
 
 
 def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSettingsRepository:
-    """The overrides table `GET`/`PUT /admin/rows/providers` renders and writes,
+    """The overrides table `GET`/`PUT /admin/rows/providers` renders and writes.
+
     and that `get_home_service` below filters the registry against.
 
     Request-scoped like every other repository here, and **not** cached on
@@ -696,7 +699,7 @@ def get_taste_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     taste: Annotated[TasteRepository, Depends(get_taste_repository)],
 ) -> TasteService:
-    """**No embedder, and that is the same call `get_home_service` makes.**"""
+    """**No embedder, and that is the same call `get_home_service` makes.**."""
     return TasteService(
         watch_states=watch_states,
         embeddings=embeddings,
@@ -807,8 +810,10 @@ async def get_home_service(
     provider_settings: RowProviderSettingsRepositoryDep,
     visibility: VisibilityServiceDep,
 ) -> HomeService:
-    """The composer, over the registry `services/rows/__init__.py` owns, minus what an
-    operator has switched off.
+    """The composer.
+
+    over the registry `services/rows/__init__.py` owns, minus what an operator has
+    switched off.
     """
     return HomeService(
         enabled_row_providers(row_provider_settings(await provider_settings.overrides())),
@@ -835,13 +840,15 @@ def get_similarity_service(
     neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
 ) -> SimilarityService:
-    """`commit` is `session.commit`, the same callable `get_session` calls at
-    the end of a successful request -- and `SimilarityService.rebuild` is the
-    only method that ever calls it. **The route built over this provider only
-    reads** (`neighbors_of`, `computed_at`, `stale_neighbors`), so nothing on
-    this path commits; the wiring exists because the service's fourth
-    constructor argument is not optional, not because a write is reachable
-    here. `usher similar --rebuild` is `rebuild`'s only caller, and nothing
+    """`commit` is `session.commit`.
+
+    the same callable `get_session` calls at the end of a successful request -- and
+    `SimilarityService.rebuild` is the only method that ever calls it.
+
+    **The route built over this provider only reads** (`neighbors_of`, `computed_at`,
+    `stale_neighbors`), so nothing on this path commits; the wiring exists because the
+    service's fourth constructor argument is not optional, not because a write is
+    reachable here. `usher similar --rebuild` is `rebuild`'s only caller, and nothing
     schedules it -- it is an operator's command or a cron entry.
 
     **`settings` is here for `embedding_model` and for nothing else**, and it
@@ -1025,8 +1032,9 @@ WatchWriteServiceDep = Annotated[WatchWriteService, Depends(get_watch_write_serv
 
 
 def get_image_proxy_service(request: Request, session: SessionDep) -> ImageProxyService:
-    """`GET /images/{id}`'s service: this request's repository over the
-    process's fetcher and store.
+    """`GET /images/{id}`'s service.
+
+    this request's repository over the process's fetcher and store.
 
     **The asymmetry is the design, not an inconsistency.** The repository is
     session-scoped because a row read belongs to the request's unit of work;

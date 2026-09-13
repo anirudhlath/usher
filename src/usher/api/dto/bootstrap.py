@@ -11,9 +11,10 @@ from usher.services.bootstrap import BootstrapReport, VocabularyState, Vocabular
 
 
 class BootstrapTriggerResponse(BaseModel):
-    """`POST /admin/bootstrap/{phase}`'s whole body: the enqueued job's
-    identity, on the shape `RegenerateResponse` and `SyncTriggerResponse`
-    already use for the other two admin triggers.
+    """`POST /admin/bootstrap/{phase}`'s whole body.
+
+    the enqueued job's identity, on the shape `RegenerateResponse` and
+    `SyncTriggerResponse` already use for the other two admin triggers.
 
     `key` is a `BootstrapPhase`'s wire value, so a client that posted
     `/admin/bootstrap/all` reads `all` back and can watch for exactly that
@@ -115,8 +116,7 @@ class GenomeCoverageResponse(BaseModel):
 
 
 class VocabularyResponse(BaseModel):
-    """The genome vocabulary's verdict, as the decision rather than the
-    sentence.
+    """The genome vocabulary's verdict, as the decision rather than the sentence.
 
     `tags` is set only for `named` and `detail` only for `mismatched`, which
     is `VocabularyVerdict`'s own shape. Both are nullable rather than absent:

@@ -24,37 +24,50 @@ def test_recall_and_mrr_match_the_hand_computed_control() -> None:
 
 
 def test_a_single_metric_still_returns_a_mapping() -> None:
-    """Measured 2026-08-18: `evaluate(qrels, run, ["recall@5"])` -- a
-    one-element list -- returns a bare `np.float64`, not a dict. Two or more
-    returns a dict. A caller subscripting the result would crash on exactly
-    the one-metric call, which is the cheapest call and therefore the one a
-    quick run makes."""
+    """Measured 2026-08-18: `evaluate(qrels, run, ["recall@5"])`.
+
+    a one-element list -- returns a bare `np.float64`, not a dict.
+
+    Two or more returns a dict. A caller subscripting the result would crash on exactly
+    the one-metric call, which is the cheapest call and therefore the one a quick run
+    makes.
+    """
     scores = score(_RELEVANT, _RANKINGS, ["recall@5"])
     assert math.isclose(scores["recall@5"], 2 / 3, rel_tol=1e-9)
 
 
 def test_every_value_is_a_builtin_float() -> None:
-    """`ranx` hands back `np.float64`, which `json.dumps` cannot serialise
-    and asyncpg will not bind. The ledger writes both, so the cast belongs
-    here rather than at each of the two sinks."""
+    """`ranx` hands back `np.float64`.
+
+    which `json.dumps` cannot serialise and asyncpg will not bind.
+
+    The ledger writes both, so the cast belongs here rather than at each of the two
+    sinks.
+    """
     for value in score(_RELEVANT, _RANKINGS, ["recall@5", "mrr"]).values():
         assert type(value) is float
 
 
 def test_a_query_that_returned_nothing_scores_zero_rather_than_vanishing() -> None:
-    """The denominator is the case count, always. A run that dropped
-    empty-result queries would report recall over the cases that worked --
-    which rises as the system gets worse."""
+    """The denominator is the case count, always.
+
+    A run that dropped empty-result queries would report recall over the cases that
+    worked -- which rises as the system gets worse.
+    """
     scores = score(_RELEVANT, (_RANKINGS[0], _RANKINGS[1], Ranking("q3", ())), ["recall@5"])
     assert math.isclose(scores["recall@5"], 2 / 3, rel_tol=1e-9)
 
 
 def test_a_total_wipeout_scores_zero_rather_than_crashing() -> None:
-    """Measured 2026-08-18: `Run.from_dict` raises
-    `ValueError: max() iterable argument is empty` when *every* query has an
-    empty result dict. That is exactly the negative control's output and
-    exactly where tier 1 heads on short typos, so the harness must be able to
-    express it. The `NO_RESULT` sentinel is what makes it 0.0."""
+    """Measured 2026-08-18.
+
+    `Run.from_dict` raises `ValueError: max() iterable argument is empty` when *every*
+    query has an empty result dict.
+
+    That is exactly the negative control's output and exactly where tier 1 heads on
+    short typos, so the harness must be able to express it. The `NO_RESULT` sentinel is
+    what makes it 0.0.
+    """
     nothing = tuple(Ranking(query_id, ()) for query_id in _RELEVANT)
     scores = score(_RELEVANT, nothing, ["recall@5", "mrr"])
     assert scores["recall@5"] == 0.0
@@ -83,26 +96,33 @@ def test_the_sentinel_cannot_be_mistaken_for_a_title() -> None:
 
 
 def test_a_ranking_for_an_unjudged_query_is_refused() -> None:
-    """Measured 2026-08-18: ranx raises a bare `AssertionError` reading
-    'Qrels and Run query ids do not match'. Caught here so the operator gets
-    a refusal naming the surface instead of an assertion from a dependency."""
+    """Measured 2026-08-18.
+
+    ranx raises a bare `AssertionError` reading 'Qrels and Run query ids do not match'.
+
+    Caught here so the operator gets a refusal naming the surface instead of an
+    assertion from a dependency.
+    """
     with pytest.raises(EvalRefused, match="not judged"):
         score(_RELEVANT, (*_RANKINGS, Ranking("q4", ("a",))), ["recall@5"])
 
 
 def test_a_judged_query_with_no_ranking_at_all_is_refused() -> None:
-    """The dangerous direction. ranx crashes here, which is the *good*
-    failure -- but the tempting repair is to drop the qrels entry instead,
-    which makes recall rise over a shrinking denominator. Refuse with the
-    reason so nobody reaches for that repair."""
+    """The dangerous direction.
+
+    ranx crashes here, which is the *good* failure -- but the tempting repair is to drop
+    the qrels entry instead, which makes recall rise over a shrinking denominator.
+    Refuse with the reason so nobody reaches for that repair.
+    """
     with pytest.raises(EvalRefused, match="no ranking"):
         score(_RELEVANT, _RANKINGS[:2], ["recall@5"])
 
 
 def test_two_rankings_for_one_query_are_refused_rather_than_overwriting() -> None:
-    """The third refusal, and the first of the two whose damage is a *number*
-    rather than a crash -- the sentinel guard below is the other, and it is the
-    worse of the pair because its number is a perfect one.
+    """The third refusal, and the first of the two whose damage is a *number* rather than a crash.
+
+    the sentinel guard below is the other, and it is the worse of the pair because its
+    number is a perfect one.
 
     ranx never sees this one: the two mismatch guards above both pass, because
     a duplicate leaves the key sets equal. The last write into `by_query`
@@ -156,8 +176,9 @@ def test_a_document_id_repeated_inside_one_ranking_is_refused_at_construction() 
 
 
 def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspended() -> None:
-    """The evidence for the refusal above, kept rather than deleted with the behaviour it
-    describes.
+    """The evidence for the refusal above.
+
+    kept rather than deleted with the behaviour it describes.
     """
     one = {"q1": "t1"}
 
@@ -196,8 +217,9 @@ def test_the_demotion_the_guard_prevents_is_still_reachable_with_the_guard_suspe
 
 
 def test_the_one_metric_branch_is_keyed_by_what_was_asked_for_and_casts_it() -> None:
-    """Two claims about behaviour 2's branch that the recall@5 case cannot
-    make, both measured 2026-08-18 as survivors of it.
+    """Two claims about behaviour 2's branch that the recall@5 case cannot make.
+
+    both measured 2026-08-18 as survivors of it.
 
     The **key**: written as the literal `"recall@5"` rather than read from
     `metrics`, the branch answers `{'recall@5': 0.4166...}` for a call that
@@ -216,11 +238,11 @@ def test_the_one_metric_branch_is_keyed_by_what_was_asked_for_and_casts_it() -> 
 
 
 def test_the_library_version_is_read_from_the_installed_distribution() -> None:
-    """`library_version()` was called by nothing until this case, so both wrong
-    spellings of it survived the file: `ranx.__version__` (an `AttributeError`
-    in the middle of writing a run's provenance) and a version read for the
-    wrong distribution, which answered **2.5.1** -- numpy's -- as the IR
-    library's.
+    """`library_version()` was called by nothing until this case.
+
+    so both wrong spellings of it survived the file: `ranx.__version__` (an
+    `AttributeError` in the middle of writing a run's provenance) and a version read for
+    the wrong distribution, which answered **2.5.1** -- numpy's -- as the IR library's.
 
     The first assertion is the premise the function exists for, asserted
     rather than trusted: the day `ranx` grows a `__version__`, this docstring

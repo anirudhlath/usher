@@ -173,8 +173,9 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_upsert_reports_inserts_and_updates_separately(
         self, repository: PostgresPersonRepository
     ) -> None:
-        """`xmax = 0` in `RETURNING` is the only way to tell an insert from an
-        update -- rowcount reports their sum.
+        """`xmax = 0` in `RETURNING` is the only way to tell an insert from an update.
+
+        rowcount reports their sum.
 
         The wrong implementation this kills: `RETURNING true`, or returning
         `(len(rows), 0)`. **This is the one property the fake cannot express
@@ -193,13 +194,14 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_a_person_whose_name_violates_the_check_is_a_port_error(
         self, repository: PostgresPersonRepository
     ) -> None:
-        """`ck_people_name_not_empty` fires at the `INSERT ... SELECT`, not
-        during the `COPY`: the staging table deliberately carries no
-        constraints, so a bad value reaches Postgres and fails one statement
-        later -- which goes through SQLAlchemy and is therefore translatable.
-        `copy_records_to_table` runs on the raw asyncpg connection, outside
-        SQLAlchemy's error translation, and would raise
-        `asyncpg.exceptions.CheckViolationError` straight through.
+        """`ck_people_name_not_empty` fires at the `INSERT ...
+
+        SELECT`, not during the `COPY`: the staging table deliberately carries no
+        constraints, so a bad value reaches Postgres and fails one statement later --
+        which goes through SQLAlchemy and is therefore translatable.
+        `copy_records_to_table` runs on the raw asyncpg connection, outside SQLAlchemy's
+        error translation, and would raise `asyncpg.exceptions.CheckViolationError`
+        straight through.
 
         Constructed by bypassing the model's own validation rather than
         through `Person(name="")`, whose `min_length=1` refuses it first --
@@ -219,12 +221,12 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_the_session_survives_a_conflicting_batch(
         self, repository: PostgresPersonRepository
     ) -> None:
-        """The SAVEPOINT, asserted rather than assumed. `DeriveService`
-        commits a batch of people together with its job checkpoint, so a
-        caught conflict must leave the session usable -- without
-        `begin_nested()` the next unrelated call raises
-        `PendingRollbackError` and the failure is attributed to whatever ran
-        next.
+        """The SAVEPOINT, asserted rather than assumed.
+
+        `DeriveService` commits a batch of people together with its job checkpoint, so a
+        caught conflict must leave the session usable -- without `begin_nested()` the
+        next unrelated call raises `PendingRollbackError` and the failure is attributed
+        to whatever ran next.
         """
         broken = Person.model_construct(
             id=new_id(),
@@ -242,9 +244,9 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_a_batch_of_five_hundred_costs_a_bounded_number_of_statements(
         self, repository: PostgresPersonRepository, session: AsyncSession
     ) -> None:
-        """The fake's `calls` counter cannot express this and this case counts
-        real statements instead -- `FakeEpisodeRepository` records the same
-        split.
+        """The fake's `calls` counter cannot express this and this case counts real statements.
+
+        instead -- `FakeEpisodeRepository` records the same split.
 
         Bounded and independent of batch size: the DDL, the `COPY` (which
         asyncpg issues on the raw connection and SQLAlchemy therefore never

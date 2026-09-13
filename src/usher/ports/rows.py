@@ -78,10 +78,13 @@ class Row(ABC):
     @property
     @abstractmethod
     def slug(self) -> str:
-        """Stable identifier for this shelf: `"continue-watching"`,
-        `"because-you-watched-<seed>"`. Unique within one composed screen,
-        and **not** something the composer branches on -- a per-seed slug is
-        a value that varies with the catalog."""
+        """Stable identifier for this shelf.
+
+        `"continue-watching"`, `"because-you-watched-<seed>"`.
+
+        Unique within one composed screen, and **not** something the composer branches
+        on -- a per-seed slug is a value that varies with the catalog.
+        """
 
     @property
     @abstractmethod
@@ -91,41 +94,52 @@ class Row(ABC):
     @property
     @abstractmethod
     def reason(self) -> str | None:
-        """The subtitle, written to be **spoken aloud** rather than merely
-        displayed -- PRD 06's Alfred section states that as a constraint on
-        the field, and it is a real one on M7's nine providers: "Because you
-        watched Dune" is speakable and "cosine>0.82 seed=a3f9" is not.
-        `None` for a shelf that needs no explaining, and **M8's `LLMRow` is
-        the first thing in `src/` to reach that arm** -- it passes the stored
-        `reason` through, `None` included, because `curation_validate` turns a
-        blank one into `None` rather than `""`."""
+        """The subtitle, written to be **spoken aloud** rather than merely displayed.
+
+        PRD 06's Alfred section states that as a constraint on the field, and it is a
+        real one on M7's nine providers: "Because you watched Dune" is speakable and
+        "cosine>0.82 seed=a3f9" is not.
+
+        `None` for a shelf that needs no explaining, and **M8's `LLMRow` is the first
+        thing in `src/` to reach that arm** -- it passes the stored `reason` through,
+        `None` included, because `curation_validate` turns a blank one into `None`
+        rather than `""`.
+        """
 
     @property
     @abstractmethod
     def family(self) -> RowFamily:
-        """The diversity key. The composer's constraints -- "no three
-        consecutive similarity rows; cap per family" -- are stated in
-        families, so a row that could not name its own would make both
-        inexpressible."""
+        """The diversity key.
+
+        The composer's constraints -- "no three consecutive similarity rows; cap per
+        family" -- are stated in families, so a row that could not name its own would
+        make both inexpressible.
+        """
 
     @property
     @abstractmethod
     def display_hint(self) -> DisplayHint:
-        """ADR-0006's hint, never a layout. A property of the shelf, which is
-        why it is here and not on `RowCard`."""
+        """ADR-0006's hint, never a layout.
+
+        A property of the shelf, which is why it is here and not on `RowCard`.
+        """
 
     @property
     @abstractmethod
     def ttl(self) -> timedelta:
-        """How long a *built* result may be cached. Carried onto `BuiltRow`
-        when the row builds, so the cached artefact is self-describing --
-        ADR-0020's argument on a short-lived derivative."""
+        """How long a *built* result may be cached.
+
+        Carried onto `BuiltRow` when the row builds, so the cached artefact is self-
+        describing -- ADR-0020's argument on a short-lived derivative.
+        """
 
     @abstractmethod
     async def build(self, ctx: RowContext) -> BuiltRow:
-        """Hydrate this shelf's cards. May legitimately return a row with no
-        cards: a seed can vanish between `propose` and `build`, and the
-        composer drops empties for exactly that reason (ADR-0023)."""
+        """Hydrate this shelf's cards.
+
+        May legitimately return a row with no cards: a seed can vanish between `propose`
+        and `build`, and the composer drops empties for exactly that reason (ADR-0023).
+        """
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +152,9 @@ class ScoredRow:
 
 
 class RowProvider(ABC):
-    """Proposes 0..n rows for one context. Does not decide what is shown.
+    """Proposes 0..n rows for one context.
+
+    Does not decide what is shown.
 
     See [ADR-0023](../../../docs/prd/decisions/0023-a-provider-proposes-it-does-not-decide.md).
     """
@@ -146,9 +162,7 @@ class RowProvider(ABC):
     @property
     @abstractmethod
     def slug_prefix(self) -> str:
-        """This provider's stable identifier: `"continue-watching"`, `"because-you-
-        watched"`.
-        """
+        """This provider's stable identifier: `"continue-watching"`, `"because-you- watched"`."""
 
     @abstractmethod
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:

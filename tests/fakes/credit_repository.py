@@ -44,8 +44,10 @@ class FakeCreditRepository(CreditRepository):
     @property
     def credit_names(self) -> dict[uuid.UUID, tuple[str, ...]]:
         """`titles.credit_names`, which this port writes and no other does.
-        A dict rather than a column, so nothing here can express the
-        `IS DISTINCT FROM` guard or the dead-row-version cost it avoids."""
+
+        A dict rather than a column, so nothing here can express the `IS DISTINCT FROM`
+        guard or the dead-row-version cost it avoids.
+        """
         return self._titles.credit_names
 
     def reset_calls(self) -> None:

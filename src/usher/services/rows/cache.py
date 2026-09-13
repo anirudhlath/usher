@@ -28,8 +28,7 @@ REFRESH_QUEUE_SIZE = 32
 
 
 class Freshness(enum.StrEnum):
-    """The three states a cache read can be in, once serving stale is a thing
-    the reader may do.
+    """The three states a cache read can be in, once serving stale is a thing the reader may do.
 
     `ABSENT` covers both "nothing stored" and "past `TTL + grace`", because a
     reader has the same answer for them: rebuild. They are distinguished only
@@ -108,16 +107,22 @@ class RefreshQueue:
 
     @property
     def depth(self) -> int:
-        """Keys waiting for the lane. Read by cases, and by nothing in `src/`."""
+        """Keys waiting for the lane.
+
+        Read by cases, and by nothing in `src/`.
+        """
         return self._queue.qsize()
 
     @property
     def dropped(self) -> int:
-        """Keys a full queue refused. **Not a metric**, deliberately: PRD 10's
-        table is maintained rather than aspirational, and a drop is a normal
-        outcome under load rather than an event worth a series of its own --
-        what it costs is one hard miss, which `usher.cache.misses` already
-        counts. Exposed so a case can assert the drop happened."""
+        """Keys a full queue refused.
+
+        **Not a metric**, deliberately: PRD 10's table is maintained rather than
+        aspirational, and a drop is a normal outcome under load rather than an event
+        worth a series of its own -- what it costs is one hard miss, which
+        `usher.cache.misses` already counts. Exposed so a case can assert the drop
+        happened.
+        """
         return self._dropped
 
     @property
@@ -126,7 +131,9 @@ class RefreshQueue:
         return frozenset(self._pending)
 
     def schedule(self, user: User) -> None:
-        """Hand this household's key to the lane. Returns immediately, always.
+        """Hand this household's key to the lane.
+
+        Returns immediately, always.
 
         Returns `None` rather than a "was it queued" boolean on purpose: a
         caller that branched on the answer would be a request path making a
@@ -145,15 +152,20 @@ class RefreshQueue:
         self._pending.add(user.id)
 
     async def take(self) -> StaleScreen:
-        """The lane's end. Suspends until there is a key; **does not** clear
-        the pending mark -- see the class docstring."""
+        """The lane's end.
+
+        Suspends until there is a key; **does not** clear the pending mark -- see the
+        class docstring.
+        """
         return await self._queue.get()
 
     def done(self, user_id: uuid.UUID) -> None:
-        """The refresh over this key has finished, however it finished. Called
-        from the lane's `finally`, so a refresh that raised still releases the
-        key rather than wedging the household out of refreshes for the life of
-        the process."""
+        """The refresh over this key has finished, however it finished.
+
+        Called from the lane's `finally`, so a refresh that raised still releases the
+        key rather than wedging the household out of refreshes for the life of the
+        process.
+        """
         self._pending.discard(user_id)
         self._queue.task_done()
 
@@ -180,8 +192,11 @@ class RowCache:
 
     @property
     def size(self) -> int:
-        """Entries held, both halves. Read by the eviction case, and by
-        `usher home` when it reports what a warm compose was served from."""
+        """Entries held, both halves.
+
+        Read by the eviction case, and by `usher home` when it reports what a warm
+        compose was served from.
+        """
         return len(self._rows) + len(self._screens)
 
     def read_screen(self, user_id: uuid.UUID, *, grace: timedelta = timedelta(0)) -> ScreenRead:
@@ -226,8 +241,10 @@ class RowCache:
         return ScreenRead(freshness=Freshness.ABSENT, screen=None)
 
     def get_screen(self, user_id: uuid.UUID) -> tuple[BuiltRow, ...] | None:
-        """M7's read, unchanged: fresh or nothing, and an expired entry is a
-        miss on the counter as well as in the answer.
+        """M7's read, unchanged.
+
+        fresh or nothing, and an expired entry is a miss on the counter as well as in
+        the answer.
 
         Kept beside `read_screen` rather than folded into it because a reader
         that cannot refresh must not be handed a stale screen, and because the
@@ -294,9 +311,11 @@ class RowCache:
                 del self._screens[user_id]
 
     def clear(self) -> None:
-        """Empty both halves. `usher home --repeat` calls this between runs,
-        because a repeat that measured cache hits would report a number near
-        zero and mean nothing."""
+        """Empty both halves.
+
+        `usher home --repeat` calls this between runs, because a repeat that measured
+        cache hits would report a number near zero and mean nothing.
+        """
         self._rows.clear()
         self._screens.clear()
 

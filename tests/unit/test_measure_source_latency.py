@@ -1,6 +1,4 @@
-"""`scripts/measure_source_latency.py`'s budget, against the transport it must never
-reach.
-"""
+"""`scripts/measure_source_latency.py`'s budget, against the transport it must never reach."""
 
 import asyncio
 import importlib.util
@@ -38,8 +36,11 @@ _QUIET = sys.modules["scripts.measure_suggest_tiers"]
 
 
 class _Budget(Protocol):
-    """The counter the harness spends against. Structural, because the script
-    is not importable as a package and cannot inherit from anything here."""
+    """The counter the harness spends against.
+
+    Structural, because the script is not importable as a package and cannot inherit
+    from anything here.
+    """
 
     limit: int
     spent: int
@@ -511,9 +512,13 @@ def test_the_four_probe_classes_are_read_only_and_spend_no_discovery_request() -
 
 
 def test_the_secrets_reader_takes_its_path_and_hard_codes_no_host(tmp_path: Path) -> None:
-    """`CLAUDE.md`: a live run must not write a credential, a token, a user id
-    or a host into the repo. The path is an argument, and the redaction is a
-    function this file can point at a known value and check."""
+    """`CLAUDE.md`.
+
+    a live run must not write a credential, a token, a user id or a host into the repo.
+
+    The path is an argument, and the redaction is a function this file can point at a
+    known value and check.
+    """
     secrets = tmp_path / "secrets.yaml"
     secrets.write_text(
         "unrelated: keep-me\n"

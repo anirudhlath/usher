@@ -13,9 +13,11 @@ from usher.domain.enums import EnrichmentState, TitleKind
 
 
 class _FakeCatalog(TitleCatalog):
-    """Seeds through the same object the contract reads from -- there is only
-    one store, so a read that disagreed with a write would have nowhere to
-    hide."""
+    """Seeds through the same object the contract reads from.
+
+    there is only one store, so a read that disagreed with a write would have nowhere to
+    hide.
+    """
 
     def __init__(self, repository: FakeTitleMatchRepository) -> None:
         self._repository = repository

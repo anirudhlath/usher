@@ -23,8 +23,7 @@ class LLMClientContract(ABC):
 
     @abstractmethod
     def client(self) -> LLMClient:
-        """A client whose next `complete_json` succeeds and returns an
-        object with an `ok` key."""
+        """A client whose next `complete_json` succeeds and returns an object with an `ok` key."""
 
     async def test_a_completion_returns_the_object_and_its_usage(self) -> None:
         """Kills an implementation that returns only the parsed object.
@@ -64,8 +63,7 @@ class LLMClientContract(ABC):
         assert usage.latency_ms >= 0
 
     async def test_cost_is_a_decimal_and_never_a_float(self) -> None:
-        """Kills `cost_usd = tokens * price` computed in binary floating
-        point.
+        """Kills `cost_usd = tokens * price` computed in binary floating point.
 
         Pinned on the port too (`test_llm_usage_cost_is_decimal_not_float`),
         and again here because that case constructs an `LLMUsage` by hand and
@@ -80,8 +78,7 @@ class LLMClientContract(ABC):
 
     @pytest.mark.parametrize("purpose", list(LLMPurpose))
     async def test_every_purpose_in_the_vocabulary_is_accepted(self, purpose: LLMPurpose) -> None:
-        """Kills an implementation that branches on `purpose` and handles one
-        member.
+        """Kills an implementation that branches on `purpose` and handles one member.
 
         `LLMPurpose` is closed precisely so it stays a usable telemetry
         dimension; parametrising over the enum means a member added without a

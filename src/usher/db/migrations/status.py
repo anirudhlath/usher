@@ -1,6 +1,6 @@
-"""Migration status: compares the code's expected head revision against what a live
-database reports, so readiness can fail on a schema mismatch instead of guessing --
-PRD 08: "the app refuses to serve on a schema mismatch rather than guessing."
+"""Migration status.
+
+compares the code's expected head revision against what a live database reports, so
 """
 
 from functools import lru_cache
@@ -37,8 +37,7 @@ def code_head_revision() -> str | None:
 
 
 async def database_revision(session: AsyncSession) -> str | None:
-    """The revision Alembic's own bookkeeping table says this database is
-    actually at.
+    """The revision Alembic's own bookkeeping table says this database is actually at.
 
     Raises like any other failed query if the `alembic_version` table
     doesn't exist (a database that predates any migration) or the

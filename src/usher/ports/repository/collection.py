@@ -36,8 +36,9 @@ class OwnedCollection:
 
 
 class CollectionRepository(ABC):
-    """Persistence for TMDb's movie franchise grouping, and the writer
-    `titles.collection_id` has never had.
+    """Persistence for TMDb's movie franchise grouping.
+
+    and the writer `titles.collection_id` has never had.
 
     **Movies only, and the port says so rather than a provider discovering
     it.** `belongs_to_collection` is a field of `/movie/{id}` with no
@@ -52,8 +53,9 @@ class CollectionRepository(ABC):
 
     @abstractmethod
     async def get(self, collection_id: uuid.UUID) -> OwnedCollection | None:
-        """One franchise and the household's coverage of it, or `None` when the catalog
-        does not hold it.
+        """One franchise and the household's coverage of it.
+
+        or `None` when the catalog does not hold it.
         """
 
     @abstractmethod
@@ -69,15 +71,18 @@ class CollectionRepository(ABC):
 
     @abstractmethod
     async def resolve_tmdb_ids(self, tmdb_ids: Sequence[int]) -> dict[int, uuid.UUID]:
-        """`tmdb_id` -> collection id, in one round trip. Absent keys mean "no
-        such collection", never "not asked". Same argument as
-        `PersonRepository.resolve_tmdb_ids`, and it is what
-        `attach_titles`' pairs are built from."""
+        """`tmdb_id` -> collection id, in one round trip.
+
+        Absent keys mean "no such collection", never "not asked". Same argument as
+        `PersonRepository.resolve_tmdb_ids`, and it is what `attach_titles`' pairs are
+        built from.
+        """
 
     @abstractmethod
     async def attach_titles(self, links: Sequence[tuple[uuid.UUID, uuid.UUID]]) -> int:
-        """Set `titles.collection_id` for each `(title_id, collection_id)` pair. Returns
-        the number of rows actually **changed**.
+        """Set `titles.collection_id` for each `(title_id, collection_id)` pair.
+
+        Returns the number of rows actually **changed**.
         """
 
     @abstractmethod

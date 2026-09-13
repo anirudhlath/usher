@@ -8,8 +8,10 @@ _DECISIONS = pathlib.Path(__file__).parents[2] / "docs" / "prd" / "decisions"
 
 
 def test_every_adr_file_is_listed_in_the_decisions_register() -> None:
-    """Kills adding an ADR and forgetting the register row -- which is exactly what this
-    task would do if the row were a checklist item instead of a test.
+    """Kills adding an ADR and forgetting the register row.
+
+    which is exactly what this task would do if the row were a checklist item instead of
+    a test.
     """
     register = (_DECISIONS / "README.md").read_text()
     files = {path.name for path in _DECISIONS.glob("0*.md")}
@@ -23,9 +25,11 @@ def test_every_adr_file_is_listed_in_the_decisions_register() -> None:
 
 
 def test_no_two_adrs_claim_the_same_number() -> None:
-    """**The register check above cannot see this one, and 2026-08-20 is how we found that
-    out.** `spec/quality-evals` wrote `0039-the-eval-schema-is-not-a- migration.md`
-    while `main` merged `0039-the-genre-vocabulary-is-usher- owned.md`.
+    """**The register check above cannot see this one.
+
+    and 2026-08-20 is how we found that out.** `spec/quality-evals` wrote `0039-the-
+    eval-schema-is-not-a- migration.md` while `main` merged `0039-the-genre-vocabulary-
+    is-usher- owned.md`.
     """
     numbers = [path.name[:4] for path in _DECISIONS.glob("0*.md")]
 
@@ -40,10 +44,11 @@ def test_no_two_adrs_claim_the_same_number() -> None:
 
 
 def test_the_provider_proposal_adr_is_reachable_from_prd_06() -> None:
-    """An ADR the PRD does not link is one the next person composing rows
-    will not read, and this is the decision they are most likely to
-    re-litigate -- because the alternative is shorter and PRD 06's own
-    "drops any that build empty" reads like an endorsement of it.
+    """An ADR the PRD does not link is one the next person composing rows will not read.
+
+    and this is the decision they are most likely to re-litigate -- because the
+    alternative is shorter and PRD 06's own "drops any that build empty" reads like an
+    endorsement of it.
 
     Kills writing the ADR and leaving PRD 06's composition paragraph
     unchanged.
@@ -53,12 +58,14 @@ def test_the_provider_proposal_adr_is_reachable_from_prd_06() -> None:
 
 
 def test_the_playback_ticket_adr_is_reachable_from_prd_07_and_from_adr_0012() -> None:
-    """ADR-0029 settles ADR-0012's named M9 successor -- ADR-0012's own
-    "The successor, in M9" section named two options and deferred the
-    choice. A reader who reaches PRD 07's Playback section but not
-    ADR-0012, or ADR-0012 but not ADR-0029, is a reader who re-derives which
-    option was actually built and re-litigates the "removes the credential"
-    mistake ADR-0029 exists to correct.
+    """ADR-0029 settles ADR-0012's named M9 successor.
+
+    ADR-0012's own "The successor, in M9" section named two options and deferred the
+    choice.
+
+    A reader who reaches PRD 07's Playback section but not ADR-0012, or ADR-0012 but not
+    ADR-0029, is a reader who re-derives which option was actually built and re-
+    litigates the "removes the credential" mistake ADR-0029 exists to correct.
 
     Kills writing ADR-0029 and leaving either link unwritten -- PRD 07's
     Playback section (H's D4) or ADR-0012's own Status line and successor
@@ -73,8 +80,9 @@ def test_the_playback_ticket_adr_is_reachable_from_prd_07_and_from_adr_0012() ->
 
 
 def test_the_two_tier_suggest_adr_is_reachable_from_prd_05_and_from_adr_0002() -> None:
-    """ADR-0031 discharges the follow-up ADR-0002's failed typo-tolerance gate opened, and
-    the two documents disagree with each other unless both links exist.
+    """ADR-0031 discharges the follow-up ADR-0002's failed typo-tolerance gate opened.
+
+    and the two documents disagree with each other unless both links exist.
     """
     prd_05 = (_DECISIONS.parent / "05-search-and-similarity.md").read_text()
     adr_0002 = (_DECISIONS / "0002-postgres-first-search.md").read_text()
@@ -85,8 +93,9 @@ def test_the_two_tier_suggest_adr_is_reachable_from_prd_05_and_from_adr_0002() -
 
 
 def test_every_adr_titles_itself_with_its_own_number() -> None:
-    """A renumber that moves the file and the citations can still leave the
-    document introducing itself as the old number, and nothing else looks.
+    """A renumber that moves the file and the citations can still leave the document introducing.
+
+    itself as the old number, and nothing else looks.
 
     **Found by hand on 2026-08-21, which is the argument for the case.** The
     bounded-column record moved `0041` -> `0043`; its filename moved, its
@@ -124,8 +133,7 @@ _ADR_0046 = _DECISIONS / "0046-the-scheduler-stores-nothing.md"
 
 
 def _prose(path: pathlib.Path) -> str:
-    """A document with its Markdown emphasis, its code ticks and its line
-    breaks taken out.
+    """A document with its Markdown emphasis, its code ticks and its line breaks taken out.
 
     Anchoring on `**12,884 s**` pins where a sentence happened to wrap and
     which words were bold or ticked on the day, none of which is the fact.
@@ -135,17 +143,20 @@ def _prose(path: pathlib.Path) -> str:
 
 
 def _matched(pattern: str, text: str, what: str) -> re.Match[str]:
-    """`re.search` with the premise asserted, because `None` here is the
-    "a plant that did not land looks exactly like a check that passed" shape:
-    a regex that stops matching after a rewrite would otherwise skip the
-    arithmetic silently and report green."""
+    """`re.search` with the premise asserted.
+
+    because `None` here is the "a plant that did not land looks exactly like a check
+    that passed" shape: a regex that stops matching after a rewrite would otherwise skip
+    the arithmetic silently and report green.
+    """
     match = re.search(pattern, text)
     assert match is not None, f"nothing in this document still states {what}"
     return match
 
 
 def test_adr_0046s_arithmetic_over_its_own_stated_inputs_holds() -> None:
-    """Three of ADR-0046's figures are **derived from other figures in the same sentence**,
+    """Three of ADR-0046's figures are **derived from other figures in the same sentence**.
+
     and those are the ones a test can own.
     """
     prose = _prose(_ADR_0046)

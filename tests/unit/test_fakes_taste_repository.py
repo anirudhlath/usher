@@ -121,10 +121,12 @@ class TestFakeTasteRepository(TasteRepositoryContract):
 
 
 async def test_the_fake_watermark_is_timezone_aware_like_the_real_one() -> None:
-    """A naive datetime out of the fake and an aware one out of asyncpg
-    compare unequal by raising, not by answering `False` -- so a contract case
-    would fail on the *fake* arm for a reason that has nothing to do with the
-    port. Normalised at the fake rather than papered over in the suite.
+    """A naive datetime out of the fake and an aware one out of asyncpg compare unequal by.
+
+    raising, not by answering `False` -- so a contract case would fail on the *fake* arm
+    for a reason that has nothing to do with the port.
+
+    Normalised at the fake rather than papered over in the suite.
     """
     watch_states = FakeWatchStateRepository()
     repository = FakeTasteRepository(watch_states)

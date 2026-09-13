@@ -97,8 +97,10 @@ def test_a_failed_run_prints_the_redacted_traceback_and_not_just_the_message(
 def test_a_missing_bar_refuses_to_measure(
     arm: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bar's only property is that it provably predates the numbers, and a
-    run that cannot show one has no way to acquire it afterwards."""
+    """A bar's only property is that it provably predates the numbers.
+
+    and a run that cannot show one has no way to acquire it afterwards.
+    """
     module = _load(arm)
     secrets_file = tmp_path / "secrets.yaml"
     secrets_file.write_text(

@@ -1,6 +1,4 @@
-"""`CurationService` -- assemble, call once, validate, replace, and record on every
-path.
-"""
+"""`CurationService` -- assemble, call once, validate, replace, and record on every path."""
 
 import ast
 import contextlib
@@ -149,9 +147,10 @@ class _Household:
         return one
 
     async def watched(self, title: Title, *, play_count: int = 1, user: uuid.UUID = USER) -> None:
-        """One finished watch state, in **both** stores that stand in for one
-        table -- `list_recent` (the prompt's history) reads one and
-        `list_unwatched_candidates` (the pool) reads the other.
+        """One finished watch state, in **both** stores that stand in for one table.
+
+        `list_recent` (the prompt's history) reads one and `list_unwatched_candidates`
+        (the pool) reads the other.
 
         `user` is a parameter because every read this service makes is keyed by
         one and a fixture with a single household cannot tell a keyed read from
@@ -223,9 +222,11 @@ class _Household:
 
 
 class _RecordingRows(FakeCuratedRowRepository):
-    """`FakeCuratedRowRepository` that says *when* it was written, so a case
-    can assert the rows and the ledger entry land in one transaction rather
-    than merely that both happened."""
+    """`FakeCuratedRowRepository` that says *when* it was written.
+
+    so a case can assert the rows and the ledger entry land in one transaction rather
+    than merely that both happened.
+    """
 
     def __init__(self, events: list[str]) -> None:
         super().__init__()
@@ -237,8 +238,10 @@ class _RecordingRows(FakeCuratedRowRepository):
 
 
 class _RecordingLedger(FakeLLMCallRepository):
-    """The same, for the ledger -- plus the one affordance the shared fake
-    deliberately lacks: a `record()` that refuses.
+    """The same, for the ledger.
+
+    plus the one affordance the shared fake deliberately lacks: a `record()` that
+    refuses.
 
     `FakeLLMCallRepository` only refuses a duplicate id, and the id is minted
     inside the service, so a case about *the ledger write itself failing* is
@@ -271,8 +274,9 @@ class _RecordingLedger(FakeLLMCallRepository):
 
 
 async def _candidates(household: _Household, count: int = 8) -> list[Title]:
-    """`count` candidates, **returned in pool order**, which is the reverse of
-    the order they were minted in.
+    """`count` candidates.
+
+    **returned in pool order**, which is the reverse of the order they were minted in.
 
     The pool's base order is `vote_count DESC` here (nothing is owned and there
     is no affinity genre), so seeding ascending votes makes pool rank the
@@ -303,8 +307,11 @@ def _five(start: int = 1) -> list[int]:
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """A real `MeterProvider` for this test alone; `tests/conftest.py`'s
-    `reset_otel_meter_provider` is what makes "for this test alone" true."""
+    """A real `MeterProvider` for this test alone.
+
+    `tests/conftest.py`'s `reset_otel_meter_provider` is what makes "for this test
+    alone" true.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -340,8 +347,9 @@ def _recorded(reader: InMemoryMetricReader) -> dict[str, list[tuple[dict[str, ob
 
 
 async def test_a_generation_writes_one_screen_and_one_successful_ledger_row() -> None:
-    """Assemble -> one call -> validate -> `replace_for_user`, and a ledger row
-    reading `ok = true` with the usage the completion reported.
+    """Assemble -> one call -> validate -> `replace_for_user`.
+
+    and a ledger row reading `ok = true` with the usage the completion reported.
 
     The report is what `usher curate` prints, so it carries the pool size, the
     rows, the drop tally and the usage rather than making a caller re-derive
@@ -389,10 +397,12 @@ async def test_a_generation_writes_one_screen_and_one_successful_ledger_row() ->
 
 
 async def test_the_rows_and_the_ledger_entry_land_in_one_transaction() -> None:
-    """PRD 10's dashboard 5 is `llm_calls JOIN curated_rows USING
-    (generation_id)`, so a commit *between* the two writes is a window in which
-    a screen exists with no cost attributed to it -- and a crash inside that
-    window loses the ledger row for a call that was already paid for."""
+    """PRD 10's dashboard 5 is `llm_calls JOIN curated_rows USING (generation_id)`.
+
+    so a commit *between* the two writes is a window in which a screen exists with no
+    cost attributed to it -- and a crash inside that window loses the ledger row for a
+    call that was already paid for.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five()))))
@@ -403,8 +413,7 @@ async def test_the_rows_and_the_ledger_entry_land_in_one_transaction() -> None:
 
 
 async def test_a_successful_call_records_the_latency_the_adapter_measured() -> None:
-    """The other arm of `_ledger_row`'s ternary, and the one PRD 10 reads on
-    the ordinary night.
+    """The other arm of `_ledger_row`'s ternary, and the one PRD 10 reads on the ordinary night.
 
     `usage.latency_ms` is what the *adapter* measured -- the whole transport,
     including whatever retries it made inside one `complete_json` -- and this
@@ -426,9 +435,11 @@ async def test_a_successful_call_records_the_latency_the_adapter_measured() -> N
 
 
 async def test_the_ledger_row_and_the_curated_rows_share_one_generation_id() -> None:
-    """The join is the whole reason `generation_id` is on a cost ledger with
-    no `user_id`. Two independently-minted ids would leave every panel empty
-    while both tables looked perfectly healthy."""
+    """The join is the whole reason `generation_id` is on a cost ledger with no `user_id`.
+
+    Two independently-minted ids would leave every panel empty while both tables looked
+    perfectly healthy.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(
@@ -458,11 +469,12 @@ async def test_the_ledger_row_and_the_curated_rows_share_one_generation_id() -> 
 async def test_an_upstream_failure_is_recorded_and_leaves_last_nights_screen_up(
     failure: UsherPortError,
 ) -> None:
-    """PRD 08's degradation table: *"previous curated rows persist"*. The
-    delete inside `replace_for_user` is what would break that, so the property
-    is that the write is **not reached** -- asserted on the repository's own
-    call count, because "the rows are still there" is also what a delete
-    followed by a re-insert of the same rows produces.
+    """PRD 08's degradation table: *"previous curated rows persist"*.
+
+    The delete inside `replace_for_user` is what would break that, so the property is
+    that the write is **not reached** -- asserted on the repository's own call count,
+    because "the rows are still there" is also what a delete followed by a re-insert of
+    the same rows produces.
 
     And the job fails: `JobWorker` learns "park" from `PortDataMalformed` and
     "back off" from everything else by catching the exception, so absorbing it
@@ -502,11 +514,12 @@ async def test_an_upstream_failure_is_recorded_and_leaves_last_nights_screen_up(
 async def test_a_failed_generation_commits_the_ledger_row_it_wrote(
     response: dict[str, Any] | BaseException,
 ) -> None:
-    """`JobWorker` marks the job failed in its own transaction after the
-    handler raises, and a service that left the ledger row unflushed and
-    uncommitted would lose exactly the rows an operator most wants -- the
-    failures. `EnrichService._record_failure` commits before re-raising for
-    the same reason.
+    """`JobWorker` marks the job failed in its own transaction after the handler raises.
+
+    and a service that left the ledger row unflushed and uncommitted would lose exactly
+    the rows an operator most wants -- the failures.
+
+    `EnrichService._record_failure` commits before re-raising for the same reason.
 
     **Both failure arms, and the second is the expensive one.** The upstream
     arm loses a row about a call that bought nothing; the rejected arm loses
@@ -532,9 +545,11 @@ async def test_a_failed_generation_commits_the_ledger_row_it_wrote(
 
 
 async def test_a_failed_call_records_the_latency_it_spent_failing() -> None:
-    """A 120-second timeout is the most expensive thing this service can do
-    and the only place the ledger can say so: there is no `LLMUsage` on this
-    path, so the service times the call itself."""
+    """A 120-second timeout is the most expensive thing this service can do and the only place.
+
+    the ledger can say so: there is no `LLMUsage` on this path, so the service times the
+    call itself.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(FakeLLMClient.returning(PortUnavailable("down")), elapsed=118.5)
@@ -546,12 +561,13 @@ async def test_a_failed_call_records_the_latency_it_spent_failing() -> None:
 
 
 async def test_an_exception_with_no_arguments_still_writes_an_error_an_operator_can_read() -> None:
-    """`str(exc)` is `""` for an exception raised with no arguments, and
-    `LLMCall._ok_and_error_must_agree` refuses a failed call with a blank
-    error -- so a bare `str(exc)` loses the ledger row it was constructing and
-    replaces the upstream failure with a `ValidationError`, on the one path the
-    ledger exists for. `usher.ports.repository.LLMCallRepository.record` names
-    the spelling this owes.
+    """`str(exc)` is `""` for an exception raised with no arguments.
+
+    and `LLMCall._ok_and_error_must_agree` refuses a failed call with a blank error --
+    so a bare `str(exc)` loses the ledger row it was constructing and replaces the
+    upstream failure with a `ValidationError`, on the one path the ledger exists for.
+
+    `usher.ports.repository.LLMCallRepository.record` names the spelling this owes.
     """
     failure = PortUnavailable()
     assert str(failure) == "", "the premise: this exception carries no message"
@@ -570,8 +586,10 @@ async def test_an_exception_with_no_arguments_still_writes_an_error_an_operator_
 
 
 async def test_a_completion_that_validates_to_zero_rows_is_a_failure_not_an_empty_success() -> None:
-    """ADR-0028's 108/108 scenario, and the only place in this milestone where
-    "the call succeeded" and "the generation succeeded" disagree.
+    """ADR-0028's 108/108 scenario.
+
+    and the only place in this milestone where "the call succeeded" and "the generation
+    succeeded" disagree.
 
     Asserted on the diagnostics rather than on the verdict: the ledger row
     carries the *real* tokens and the *real* cost -- the money was spent -- and
@@ -609,10 +627,12 @@ async def test_a_completion_that_validates_to_zero_rows_is_a_failure_not_an_empt
 
 
 async def test_the_reason_a_generation_was_rejected_reaches_the_ledger() -> None:
-    """`CurationRejected.error` is what tells "the model invented ids" from
-    "my comparison was wrong" -- the two failures that produce the identical
-    empty screen. A service writing its own generic string instead would erase
-    the distinction the validator's five counters exist to draw.
+    """`CurationRejected.error` is what tells "the model invented ids" from "my comparison was.
+
+    wrong" -- the two failures that produce the identical empty screen.
+
+    A service writing its own generic string instead would erase the distinction the
+    validator's five counters exist to draw.
     """
     household = _Household()
     await _candidates(household)
@@ -628,8 +648,11 @@ async def test_the_reason_a_generation_was_rejected_reaches_the_ledger() -> None
 
 
 async def test_nothing_the_model_wrote_reaches_the_ledger_or_the_exception() -> None:
-    """PRD 08: a rejected request never echoes the body it rejected, and this
-    body is a completion written over the household's own watch history."""
+    """PRD 08.
+
+    a rejected request never echoes the body it rejected, and this body is a completion
+    written over the household's own watch history.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(
@@ -651,9 +674,11 @@ async def test_nothing_the_model_wrote_reaches_the_ledger_or_the_exception() -> 
 
 
 async def test_a_ledger_write_that_fails_does_not_cost_the_household_its_screen() -> None:
-    """`cost_usd` is `NUMERIC(12, 8)` with no ceiling on the domain model, so a
-    per-token price in a per-Mtok field is a `RepositoryConflict` **on the
-    ledger write**, from a validly-constructed `LLMCall`.
+    """`cost_usd` is `NUMERIC(12.
+
+    8)` with no ceiling on the domain model, so a per-token price in a per-Mtok field is
+    a `RepositoryConflict` **on the ledger write**, from a validly-constructed
+    `LLMCall`.
 
     The screen wins. The money is already spent either way, the cause is a
     misconfigured price rather than anything a retry fixes, and failing the job
@@ -674,11 +699,14 @@ async def test_a_ledger_write_that_fails_does_not_cost_the_household_its_screen(
 
 
 async def test_a_ledger_write_that_fails_does_not_replace_the_failure_it_was_recording() -> None:
-    """The ledger row is constructed *inside* the `except` handler, so an
-    exception raised there swaps the upstream failure `JobWorker` needs to
-    classify for a repository error it cannot. `PortRateLimited` backs off and
-    `RepositoryConflict` does too -- but the retry-after is gone and the parked
-    job's message points at the wrong subsystem."""
+    """The ledger row is constructed *inside* the `except` handler.
+
+    so an exception raised there swaps the upstream failure `JobWorker` needs to
+    classify for a repository error it cannot.
+
+    `PortRateLimited` backs off and `RepositoryConflict` does too -- but the retry-after
+    is gone and the parked job's message points at the wrong subsystem.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(FakeLLMClient.returning(PortRateLimited(30.0)))
@@ -691,10 +719,11 @@ async def test_a_ledger_write_that_fails_does_not_replace_the_failure_it_was_rec
 
 
 async def test_a_refused_ledger_write_says_so_in_the_log_because_nothing_else_will() -> None:
-    """**The log line is the entire justification for swallowing**, and it was
-    pinned by nothing: replacing `logger.error` with `pass` left every case
-    green, while the module docstring, `_record`'s docstring and the case above
-    all say *"it is logged loudly and swallowed"*.
+    """**The log line is the entire justification for swallowing**, and it was pinned by nothing.
+
+    replacing `logger.error` with `pass` left every case green, while the module
+    docstring, `_record`'s docstring and the case above all say *"it is logged loudly
+    and swallowed"*.
 
     With no line there is no evidence anywhere that a completion was bought and
     not recorded -- the generation returns a report, the screen is written, the
@@ -726,9 +755,10 @@ async def test_a_refused_ledger_write_says_so_in_the_log_because_nothing_else_wi
 
 
 async def test_a_bug_in_the_ledger_write_is_not_swallowed_as_an_upstream_failure() -> None:
-    """`except UsherPortError` and deliberately **not** `except Exception`,
-    which `_record`'s docstring calls load-bearing and nothing held there:
-    widening it left every case green.
+    """`except UsherPortError` and deliberately **not** `except Exception`.
+
+    which `_record`'s docstring calls load-bearing and nothing held there: widening it
+    left every case green.
 
     The swallow is licensed by one specific argument -- the money is spent, the
     cause is a configured price, and a retry buys a second completion to write
@@ -786,8 +816,11 @@ async def test_the_pool_is_addressed_by_a_one_based_index_into_the_pool_order() 
 
 
 async def test_a_handle_past_the_end_of_the_pool_is_dropped_and_counted() -> None:
-    """The bound is a property of what was *sent*, so the map is built from
-    the pool this generation actually offered rather than from the catalog."""
+    """The bound is a property of what was *sent*.
+
+    so the map is built from the pool this generation actually offered rather than from
+    the catalog.
+    """
     household = _Household()
     pool = await _candidates(household)
     client = FakeLLMClient.returning(_payload(_row("Mostly Real", [1, 2, 3, 4, 5, len(pool) + 1])))
@@ -799,10 +832,14 @@ async def test_a_handle_past_the_end_of_the_pool_is_dropped_and_counted() -> Non
 
 
 async def test_the_prompt_carries_no_uuid() -> None:
-    """A UUID handle is well-formed and denotes nothing; measured, it also
-    costs 3.1x the prompt tokens and is the least accurate of the three
-    spellings. Nothing in this prompt may carry one -- not a candidate, not a
-    history entry, not the household."""
+    """A UUID handle is well-formed and denotes nothing.
+
+    measured, it also costs 3.1x the prompt tokens and is the least accurate of the
+    three spellings.
+
+    Nothing in this prompt may carry one -- not a candidate, not a history entry, not
+    the household.
+    """
     household = _Household()
     pool = await _candidates(household)
     watched = await household.title("Finished Last Night", vote_count=1)
@@ -817,12 +854,14 @@ async def test_the_prompt_carries_no_uuid() -> None:
 
 
 async def test_the_service_reaches_no_credential_and_no_settings() -> None:
-    """A secret reaches a third party for the first time in this milestone,
-    and it does so from `adapters/llm/` through an `Authorization` header. This
-    module builds the *body*, which is the household's watch history, and it
-    has no reason to import a credential or a `Settings` -- so it does not, and
-    a future edit that gives it one fails here rather than in a trace
-    attribute."""
+    """A secret reaches a third party for the first time in this milestone.
+
+    and it does so from `adapters/llm/` through an `Authorization` header.
+
+    This module builds the *body*, which is the household's watch history, and it has no
+    reason to import a credential or a `Settings` -- so it does not, and a future edit
+    that gives it one fails here rather than in a trace attribute.
+    """
     tree = ast.parse(inspect.getsource(curation_module))
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -845,9 +884,10 @@ async def test_the_service_reaches_no_credential_and_no_settings() -> None:
 
 
 async def test_an_empty_pool_never_reaches_the_model() -> None:
-    """PRD 08's operator rule -- every command works against an empty database
-    -- and a completion bought for a household with nothing to recommend is a
-    charge with a guaranteed empty answer.
+    """PRD 08's operator rule.
+
+    every command works against an empty database -- and a completion bought for a
+    household with nothing to recommend is a charge with a guaranteed empty answer.
 
     **No ledger row, and that is the one path where `record()` is not called.**
     The rule the service implements is *record on every path that attempted a
@@ -870,13 +910,16 @@ async def test_an_empty_pool_never_reaches_the_model() -> None:
 
 
 async def test_a_pool_below_the_card_floor_buys_no_completion() -> None:
-    """**Provable arithmetic, not a product judgement.** `_row` discards a row
-    carrying fewer than `min_cards` *distinct* cards and `_cards` de-duplicates
-    by title id, so a pool of four candidates cannot produce a surviving row at
-    a floor of five: every row is `row_too_short`, `validate_curation` rejects,
-    and `llm_calls` records `ok = false` with real tokens and a real cost for a
-    guaranteed-empty answer. The guard is the empty pool's raise one inequality
-    wider, and it sits where that one does -- in front of `complete_json`.
+    """**Provable arithmetic.
+
+    not a product judgement.** `_row` discards a row carrying fewer than `min_cards`
+    *distinct* cards and `_cards` de-duplicates by title id, so a pool of four
+    candidates cannot produce a surviving row at a floor of five: every row is
+    `row_too_short`, `validate_curation` rejects, and `llm_calls` records `ok = false`
+    with real tokens and a real cost for a guaranteed-empty answer.
+
+    The guard is the empty pool's raise one inequality wider, and it sits where that one
+    does -- in front of `complete_json`.
 
     **Three pools in one case, and the boundary is where the arithmetic
     changes**, not a comfortably small number: `min_cards - 1`, `min_cards` and
@@ -887,8 +930,6 @@ async def test_a_pool_below_the_card_floor_buys_no_completion() -> None:
 
     **And the below-floor arm asserts its pool is not empty**, because the
     shipped `if not candidates` guard already buys nothing for a pool of zero:
-    without that premise this case would go green against the unwidened
-    inequality the moment a fixture stopped seeding.
     """
     floor = DEFAULT_MIN_CARDS
     bought: dict[int, int] = {}
@@ -925,8 +966,9 @@ async def test_a_pool_below_the_card_floor_buys_no_completion() -> None:
 
 
 async def test_the_empty_pool_message_carries_no_household_id() -> None:
-    """**`usher curate` renders this raise as its whole message**, so whatever
-    `detail` holds is what an operator reads at a terminal.
+    """**`usher curate` renders this raise as its whole message**.
+
+    so whatever `detail` holds is what an operator reads at a terminal.
 
     It held `str(user_id)` until 2026-08-07, and `build_parser` refuses a
     `--user` flag in the same breath -- *"an id an operator has no way to look
@@ -956,8 +998,10 @@ async def test_the_empty_pool_message_carries_no_household_id() -> None:
 
 
 async def test_the_watch_history_reaches_the_prompt_most_recent_first() -> None:
-    """PRD 06 step 1's other half: a pool with no history behind it produces
-    shelves about the catalog rather than about the household.
+    """PRD 06 step 1's other half.
+
+    a pool with no history behind it produces shelves about the catalog rather than
+    about the household.
 
     `TitleRepository.list_by_ids` is one `IN (...)` and promises no order at
     all -- the fake says so out loud -- so the recency order has to be restored
@@ -991,11 +1035,14 @@ async def test_the_watch_history_reaches_the_prompt_most_recent_first() -> None:
 
 
 async def test_the_history_is_bounded_and_the_pool_is_the_pools_own_bound() -> None:
-    """The prompt's token budget is ~20.4 tokens a candidate and ~18 a history
-    line, both measured against the shipped prompt, and a household with ten
-    thousand finished films would otherwise send all of them. The pool has
-    `USHER_CURATION_POOL_SIZE`; the history's bound is this module's, because
-    nothing else knows the prompt."""
+    """The prompt's token budget is ~20.4 tokens a candidate and ~18 a history line.
+
+    both measured against the shipped prompt, and a household with ten thousand finished
+    films would otherwise send all of them.
+
+    The pool has `USHER_CURATION_POOL_SIZE`; the history's bound is this module's,
+    because nothing else knows the prompt.
+    """
     household = _Household()
     await _candidates(household)
     for index in range(HISTORY_SIZE + 5):
@@ -1010,9 +1057,12 @@ async def test_the_history_is_bounded_and_the_pool_is_the_pools_own_bound() -> N
 
 
 async def test_the_prompt_asks_for_the_minimum_the_validator_enforces() -> None:
-    """A prompt asking for four cards under a validator demanding five drops
-    every row and reports `row_too_short` -- a generation that failed because
-    two numbers in two files disagreed. One number, rendered *and* passed.
+    """A prompt asking for four cards under a validator demanding five drops every row and.
+
+    reports `row_too_short` -- a generation that failed because two numbers in two files
+    disagreed.
+
+    One number, rendered *and* passed.
 
     **Both halves, because either alone is satisfied by a service holding the
     number in one place only.** The seven-card row proves the prompt's copy;
@@ -1040,9 +1090,12 @@ async def test_the_prompt_asks_for_the_minimum_the_validator_enforces() -> None:
 
 @pytest.mark.parametrize("min_cards", [DEFAULT_MIN_CARDS, 7], ids=["default", "raised"])
 async def test_the_schema_names_the_keys_the_validator_reads(min_cards: int) -> None:
-    """A schema saying `ids` and a validator reading `item_ids` is a generation that drops
-    100% of a correct answer. Both are written against the four constants the validator
-    exports, and this is what fails if one moves.
+    """A schema saying `ids` and a validator reading `item_ids` is a generation that drops 100%.
+
+    of a correct answer.
+
+    Both are written against the four constants the validator exports, and this is what
+    fails if one moves.
     """
     household = _Household()
     pool = await _candidates(household, count=12)
@@ -1066,8 +1119,9 @@ async def test_the_schema_names_the_keys_the_validator_reads(min_cards: int) -> 
 
 
 def _shipped(household: _Household, client: FakeLLMClient) -> CurationService:
-    """`CurationService` with **only its required arguments**, which is what a
-    composition root hands it and what nothing else in this file does.
+    """`CurationService` with **only its required arguments**.
+
+    which is what a composition root hands it and what nothing else in this file does.
 
     `_Household.service` overrides `min_cards`, `now` and `clock`, and `src/`
     does not build this service at all until Task 16 -- so all three defaults
@@ -1090,8 +1144,9 @@ def _shipped(household: _Household, client: FakeLLMClient) -> CurationService:
 
 
 async def test_the_shipped_min_cards_is_the_floor_the_validator_ships_with() -> None:
-    """The prompt's copy and the validator's copy are one number, and this is
-    the case that says which number it is when nobody passes one.
+    """The prompt's copy and the validator's copy are one number.
+
+    and this is the case that says which number it is when nobody passes one.
 
     Asserted where it *changes the answer* rather than as an equality between
     two constants: a four-card row and a five-card row, so the default is read
@@ -1113,9 +1168,9 @@ async def test_the_shipped_min_cards_is_the_floor_the_validator_ships_with() -> 
 
 
 async def test_the_shipped_now_is_the_real_clock_rather_than_a_fixed_one() -> None:
-    """`llm_calls.at` is the column every PRD 10 spend query groups by, so a
-    ledger stamped with one constant is a month of spend filed under one
-    second.
+    """`llm_calls.at` is the column every PRD 10 spend query groups by.
+
+    so a ledger stamped with one constant is a month of spend filed under one second.
 
     Aware is not the assertion: every domain model types these `AwareDatetime`,
     so a naive default raises rather than lying. A *fixed* aware one is the
@@ -1136,8 +1191,10 @@ async def test_the_shipped_now_is_the_real_clock_rather_than_a_fixed_one() -> No
 
 
 def test_the_shipped_clock_is_the_monotonic_one() -> None:
-    """**Asserted on the signature, because the behavioural version of this check cannot
-    fail, and that was measured rather than assumed.**
+    """**Asserted on the signature.
+
+    because the behavioural version of this check cannot fail, and that was measured
+    rather than assumed.**.
     """
     default = inspect.signature(CurationService.__init__).parameters["clock"].default
 
@@ -1146,11 +1203,12 @@ def test_the_shipped_clock_is_the_monotonic_one() -> None:
 
 
 async def test_another_households_history_and_screen_stay_out_of_this_generation() -> None:
-    """**No case in this file involved a second household at all**, and that is
-    precisely how a cross-household leak survived fourteen cases on this branch:
-    `PostgresCuratedRowRepository.list_for_user`'s `user_id` predicate was
-    deletable because a `generation_id` happened to be exactly as selective in
-    every single-household fixture.
+    """**No case in this file involved a second household at all**.
+
+    and that is precisely how a cross-household leak survived fourteen cases on this
+    branch: `PostgresCuratedRowRepository.list_for_user`'s `user_id` predicate was
+    deletable because a `generation_id` happened to be exactly as selective in every
+    single-household fixture.
 
     Every read this service makes is keyed by a household -- `list_recent` for
     the history, `list_unwatched_candidates` for the pool, `replace_for_user`
@@ -1214,8 +1272,9 @@ async def test_another_households_history_and_screen_stay_out_of_this_generation
 async def test_exactly_one_completion_is_bought_per_generation(
     response: dict[str, Any] | BaseException,
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"*, which is the milestone's whole
-    cost claim and which **the ledger cannot see**.
+    """PRD 06's *"one modest completion per user per day"*.
+
+    which is the milestone's whole cost claim and which **the ledger cannot see**.
     """
     household = _Household()
     await _candidates(household)
@@ -1240,9 +1299,11 @@ async def test_exactly_one_completion_is_bought_per_generation(
 async def test_record_is_called_exactly_once_per_generation(
     response: dict[str, Any] | BaseException, expected_ok: bool
 ) -> None:
-    """Not zero -- a ledger holding only the successes understates spend by
-    exactly the failures. Not twice -- `pk_llm_calls` refuses the second write
-    and the refusal lands on whichever path was already failing."""
+    """Not zero -- a ledger holding only the successes understates spend by exactly the failures.
+
+    Not twice -- `pk_llm_calls` refuses the second write and the refusal lands on
+    whichever path was already failing.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(FakeLLMClient.returning(response))
@@ -1262,10 +1323,11 @@ async def test_record_is_called_exactly_once_per_generation(
 async def test_the_span_carries_what_an_operator_groups_by(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """PRD 10's `curation.generate`. The pool size, the rows kept and the drops
-    are attributes rather than span names for the reason `row.build` carries
-    `usher.row.provider`: "find the generations the validator ate" is a
-    group-by, not a scan of names.
+    """PRD 10's `curation.generate`.
+
+    The pool size, the rows kept and the drops are attributes rather than span names for
+    the reason `row.build` carries `usher.row.provider`: "find the generations the
+    validator ate" is a group-by, not a scan of names.
 
     **Nothing the model wrote, nothing the household watched, and no
     credential.** `HTTPXClientInstrumentor` already records URLs; a prompt on a
@@ -1292,10 +1354,11 @@ async def test_the_span_carries_what_an_operator_groups_by(
 async def test_the_span_totals_dropped_rows_and_dropped_cards_separately(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """Two of the five `DropReason` members count **rows** and three count
-    **cards**, and this module says so three times -- `curation_validate`'s
-    module docstring, ADR-0028, and the `_rows_dropped` counter's own comment
-    (*"summing across the label is meaningless; the `row_` prefix says so"*).
+    """Two of the five `DropReason` members count **rows** and three count **cards**.
+
+    and this module says so three times -- `curation_validate`'s module docstring,
+    ADR-0028, and the `_rows_dropped` counter's own comment (*"summing across the label
+    is meaningless; the `row_` prefix says so"*).
 
     The span published one `usher.curation.dropped` scalar that added them
     anyway, and **the case above could not see it**: its fixture drops exactly
@@ -1350,8 +1413,7 @@ async def test_a_failed_generation_says_so_on_its_span(
     response: dict[str, Any] | BaseException,
     seed_a_pool: bool,
 ) -> None:
-    """`EnrichService`'s `usher.failed`, on the service whose failures cost
-    money.
+    """`EnrichService`'s `usher.failed`, on the service whose failures cost money.
 
     **All three failure arms, because "find the generations that failed" is a
     group-by and a group missing two thirds of its members is worse than an
@@ -1379,10 +1441,11 @@ async def test_a_failed_generation_says_so_on_its_span(
 async def test_the_two_metrics_count_the_rows_kept_and_the_drops_by_reason(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """Boundary call 7: no `usher.llm.*` metric, because spend is SQL. These
-    two answer the question no `llm_calls` row can -- whether the validator is
-    eating the output -- and the `reason` label is closed precisely so it stays
-    a usable dimension.
+    """Boundary call 7: no `usher.llm.*` metric, because spend is SQL.
+
+    These two answer the question no `llm_calls` row can -- whether the validator is
+    eating the output -- and the `reason` label is closed precisely so it stays a usable
+    dimension.
 
     **Every reason, zeros included.** A reason absent from the export is
     indistinguishable from a reason nobody counts, which is the validator's own
@@ -1416,9 +1479,11 @@ async def test_the_two_metrics_count_the_rows_kept_and_the_drops_by_reason(
 async def test_a_generation_that_kept_nothing_still_counts_its_drops(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The 108/108 run's own shape: every card dropped for one reason. A
-    service that recorded these metrics only on the success path would leave
-    the panel empty for exactly the generation an operator is looking for."""
+    """The 108/108 run's own shape: every card dropped for one reason.
+
+    A service that recorded these metrics only on the success path would leave the panel
+    empty for exactly the generation an operator is looking for.
+    """
     household = _Household()
     await _candidates(household)
     service = household.service(
@@ -1441,8 +1506,10 @@ async def test_a_generation_that_kept_nothing_still_counts_its_drops(
 
 
 async def _seed_a_previous_screen(household: _Household) -> list[CuratedRow]:
-    """Last night's generation, stored. The thing PRD 08's degradation table
-    promises survives a failed one."""
+    """Last night's generation, stored.
+
+    The thing PRD 08's degradation table promises survives a failed one.
+    """
     generation = new_id()
     rows = [
         CuratedRow(

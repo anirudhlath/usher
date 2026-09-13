@@ -1,5 +1,6 @@
-"""The `llm_calls` ledger: one home for *record on every path that attempted a
-completion, and commit what you recorded.*
+"""The `llm_calls` ledger.
+
+one home for *record on every path that attempted a completion, and commit what you
 """
 
 import time
@@ -62,8 +63,7 @@ class LLMLedger:
         error: str | None,
         generation_id: uuid.UUID | None = None,
     ) -> None:
-        """Close out one attempted completion: write its `llm_calls` row, then
-        commit.
+        """Close out one attempted completion: write its `llm_calls` row, then commit.
 
         **The clock is read here**, so `elapsed_ms` is a delta from `started`
         on every path and no caller can hand over an absolute reading. It is
@@ -123,8 +123,7 @@ class LLMLedger:
         )
 
     async def _record(self, call: LLMCall) -> None:
-        """Append to the ledger, and **never change the outcome of the caller
-        by doing so.**
+        """Append to the ledger, and **never change the outcome of the caller by doing so.**.
 
         The reachable failure is a `cost_usd` the column cannot hold, which
         `PostgresLLMCallRepository` translates to `RepositoryConflict` behind a

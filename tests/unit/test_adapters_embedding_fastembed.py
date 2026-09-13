@@ -49,8 +49,7 @@ class _ScriptedModel:
 
 
 async def test_a_vector_that_is_not_unit_normalised_is_refused() -> None:
-    """**The mutation with the largest silent blast radius in this
-    milestone.**
+    """**The mutation with the largest silent blast radius in this milestone.**.
 
     Normalisation is baked into this *checkpoint* as a third module
     (Transformer -> Pooling -> Normalize), not applied by the library:
@@ -90,9 +89,10 @@ async def test_a_unit_vector_passes_and_is_checked_only_once() -> None:
 
 
 async def test_a_batch_that_comes_back_the_wrong_length_is_malformed() -> None:
-    """Order is the port's contract and a length mismatch is its observable
-    half: an implementation that deduplicated internally lands title *n*'s
-    vector on title *m*, which is invisible to any per-vector assertion.
+    """Order is the port's contract and a length mismatch is its observable half.
+
+    an implementation that deduplicated internally lands title *n*'s vector on title
+    *m*, which is invisible to any per-vector assertion.
 
     `PortDataMalformed` rather than retryable -- no backoff makes a model
     return a different number of vectors for the same input.
@@ -102,10 +102,12 @@ async def test_a_batch_that_comes_back_the_wrong_length_is_malformed() -> None:
 
 
 async def test_an_empty_batch_is_not_a_call() -> None:
-    """On a GPU-resident model this is the difference between a no-op and a
-    stall, and the port states it as a contract rather than an optimisation.
-    Asserted on the call that did not happen, never on the empty result --
-    an implementation that called and got nothing back returns `[]` too.
+    """On a GPU-resident model this is the difference between a no-op and a stall.
+
+    and the port states it as a contract rather than an optimisation.
+
+    Asserted on the call that did not happen, never on the empty result -- an
+    implementation that called and got nothing back returns `[]` too.
     """
     embedder = _embedder([_unit()])
 
@@ -115,10 +117,11 @@ async def test_an_empty_batch_is_not_a_call() -> None:
 
 
 async def test_a_model_that_fails_at_runtime_is_retryable() -> None:
-    """The model file has gone, or the process is out of memory. `JobWorker`
-    backs off rather than parking, because a restart genuinely fixes all
-    three -- and a park needs a human to release work whose only problem was
-    a bad five minutes.
+    """The model file has gone, or the process is out of memory.
+
+    `JobWorker` backs off rather than parking, because a restart genuinely fixes all
+    three -- and a park needs a human to release work whose only problem was a bad five
+    minutes.
     """
 
     class _Broken:
@@ -156,9 +159,10 @@ async def test_a_model_that_fails_at_runtime_is_retryable() -> None:
     ],
 )
 def test_the_runtime_prefix_splits_on_the_first_colon(configured: str, expected: str) -> None:
-    """`partition`, not `rpartition`: a checkpoint id contains `/` and may
-    carry a `:` revision suffix, so it is the *first* colon that separates
-    the runtime.
+    """`partition`, not `rpartition`.
+
+    a checkpoint id contains `/` and may carry a `:` revision suffix, so it is the
+    *first* colon that separates the runtime.
 
     The prefix exists because the same weights under two runtimes differ by
     1.41e-03 max pairwise delta -- 6x the halfvec quantisation error -- so

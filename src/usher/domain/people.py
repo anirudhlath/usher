@@ -12,8 +12,7 @@ from usher.domain.ids import new_id
 
 
 class CreditKind(StrEnum):
-    """The two keys of TMDb's `credits` object, so a derivation reads the key
-    and has the member.
+    """The two keys of TMDb's `credits` object, so a derivation reads the key and has the member.
 
     Lives here rather than in `domain/enums.py` because that module holds the
     enums shared across several models; an enum with exactly one owner lives

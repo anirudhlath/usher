@@ -1,5 +1,6 @@
-"""`docs/runbooks/` is four operator-facing documents and an index, and the index is
-the part a rename breaks silently.
+"""`docs/runbooks/` is four operator-facing documents and an index.
+
+and the index is the part a rename breaks silently.
 """
 
 import argparse
@@ -54,7 +55,10 @@ def _subcommands() -> set[str]:
 
 
 def _global_flags() -> set[str]:
-    """Every top-level option string. `--traceback`, `-h` and `--help` today."""
+    """Every top-level option string.
+
+    `--traceback`, `-h` and `--help` today.
+    """
     return {
         option
         for action in build_parser()._actions
@@ -93,8 +97,9 @@ def _invocations(text: str) -> list[tuple[tuple[str, ...], str | None]]:
 
 
 def test_every_runbook_the_index_names_exists_and_every_runbook_is_indexed() -> None:
-    """Kills a renamed runbook leaving a dead row in the index, and a new
-    runbook nobody added to it — the same defect wearing two faces.
+    """Kills a renamed runbook leaving a dead row in the index.
+
+    and a new runbook nobody added to it — the same defect wearing two faces.
 
     **The read comes first and that is the case's design.** A scan of a
     `docs/runbooks/` that does not exist answers the empty set, and the empty
@@ -175,9 +180,10 @@ def test_the_index_is_read_before_the_directory_is_scanned(
 
 
 def test_every_command_a_runbook_names_is_a_command_the_cli_advertises() -> None:
-    """Kills a runbook telling an operator to run something that does not
-    exist — which is how `usher rotate-secret` would have read in any document
-    written a week before it landed.
+    """Kills a runbook telling an operator to run something that does not exist.
+
+    which is how `usher rotate-secret` would have read in any document written a week
+    before it landed.
 
     The floor is the premise. An extraction that matched nothing would report
     every runbook in this directory clean, which is the failure every scan in
@@ -213,8 +219,7 @@ def test_every_command_a_runbook_names_is_a_command_the_cli_advertises() -> None
 
 
 def test_prd_08_points_at_the_runbook_index_and_the_link_resolves() -> None:
-    """PRD 08 asks for four runbooks; this is the line that lets a reader find
-    them.
+    """PRD 08 asks for four runbooks; this is the line that lets a reader find them.
 
     Resolved from `docs/prd/` rather than asserted as a substring, because a
     pointer that does not resolve is exactly the defect the case above exists

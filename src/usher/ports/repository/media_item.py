@@ -118,11 +118,15 @@ class MediaItemRepository(ABC):
 
     @abstractmethod
     async def list_for_title(self, title_id: uuid.UUID) -> list[MediaItem]:
-        """Every copy of one title, across every source. PRD 07's `availability` array."""
+        """Every copy of one title, across every source.
+
+        PRD 07's `availability` array.
+        """
 
     @abstractmethod
     async def list_for_episode(self, episode_id: uuid.UUID) -> list[MediaItem]:
         """Every copy of one **episode**, across every source.
+
         `list_for_title`'s counterpart, for `POST /episodes/{id}/play`.
 
         `list_for_title` carries `AND episode_id IS NULL` -- load-bearing and
@@ -220,5 +224,7 @@ class MediaItemRepository(ABC):
 
     @abstractmethod
     async def count_for_source(self, source_id: uuid.UUID) -> int:
-        """How many items this source has, available or not. The sweep's
-        denominator, and the CLI's report."""
+        """How many items this source has, available or not.
+
+        The sweep's denominator, and the CLI's report.
+        """

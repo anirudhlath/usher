@@ -131,8 +131,9 @@ def _to_domain(row: RowMapping) -> CuratedRow:
 
 
 def _refuse_disagreement(user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> None:
-    """The two disagreements `replace_for_user` can be handed, refused before
-    anything is written.
+    """The two disagreements `replace_for_user` can be handed.
+
+    refused before anything is written.
 
     Both exist because the signature takes no `generation_id`: every
     `CuratedRow` carries one, so a parameter could only restate it, and what a
