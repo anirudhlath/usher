@@ -65,7 +65,7 @@ port before proceeding.**
 
 ### Restore is not "load a database"
 
-`watch_states.title_id` is `ON DELETE RESTRICT` (ADR-0010), so **into an empty
+`watch_states.title_id` is `ON DELETE RESTRICT`, so **into an empty
 catalog every row of the one table PRD 08 calls load-bearing fails its foreign
 key.** Measured: the real artifact restored into a freshly migrated, empty
 database refuses **14,166 of 14,259 rows** and commits nothing.

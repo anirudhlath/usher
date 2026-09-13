@@ -2,7 +2,6 @@
 
 import ast
 import pathlib
-import re
 from collections.abc import AsyncIterator, Sequence
 
 import httpx
@@ -19,30 +18,6 @@ from usher.config import Settings
 
 _REPO = pathlib.Path(__file__).parents[2]
 _API = _REPO / "src" / "usher" / "api"
-_ADR = (
-    _REPO
-    / "docs"
-    / "prd"
-    / "decisions"
-    / ("0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md")
-)
-
-# The table is read out of a delimited region rather than out of the whole document, so
-# a second status-bearing table added by a later amendment -- the declined members, a
-# worked example -- cannot be unioned into the vocabulary by a regex that was only ever
-# aimed at one of them.
-_TABLE_BEGIN = "<!-- vocabulary:begin -->"
-_TABLE_END = "<!-- vocabulary:end -->"
-_ROW = re.compile(r"^\|\s*`([a-z][a-z_]*)`\s*\|\s*(\d{3})\s*\|", re.MULTILINE)
-
-# An amendment's own disposition line, in both spellings the record uses.
-# `_amendment_statuses` explains why the colon has to be adjacent.
-_AMENDMENT_STATUS = re.compile(r"Status of the amendment:\**\s*([A-Z][a-z]+)")
-
-# The three words an amendment may be in. Anything else is a garbled line, and
-# a garbled line is how a status stops being findable while still looking like
-# one to a reader.
-_DISPOSITIONS = frozenset({"Open", "Accepted", "Declined"})
 
 # The one member D4 landed against a real unreachable source, and the one
 # ADR-0030 says it may not rename: PRD 07's worked example of this envelope
@@ -164,43 +139,14 @@ def _emitted_pairs() -> set[tuple[str, int]]:
     return pairs
 
 
-def _declared() -> dict[str, int]:
-    """ADR-0030's table, as `{code: status}`."""
-    text = _ADR.read_text()
-    assert _TABLE_BEGIN in text and _TABLE_END in text, (
-        f"ADR-0030 has lost its {_TABLE_BEGIN}/{_TABLE_END} markers, so the vocabulary "
-        "cannot be read out of it"
-    )
-    region = text.split(_TABLE_BEGIN, 1)[1].split(_TABLE_END, 1)[0]
-    rows = _ROW.findall(region)
-    parsed = {code: int(code_status) for code, code_status in rows}
-    assert len(parsed) == len(rows), f"ADR-0030's table names a code twice: {rows}"
-    return parsed
+def _translated_pairs() -> set[tuple[str, int]]:
+    """Every `(code, status)` `api/errors.py` answers without a raise site naming it.
 
-
-def _amendment_statuses() -> dict[str, str]:
-    """Every amendment heading in ADR-0030, mapped to its declared status.
-
-    Two spellings are in the document and both are load-bearing, so the
-    pattern takes either: `**Status of the amendment: Open.**` and
-    `**Status of the amendment:** Accepted, ...`. Prose that merely *names*
-    the line (`` a `Status of the amendment` line ``) does not match, because
-    the colon has to follow the word directly.
-
-    Keyed by the heading text rather than by position, so a fourth amendment
-    landing between two existing ones cannot silently re-point an assertion
-    at the wrong section.
+    `_CODE_FOR_STATUS` is the other half of `_emitted_pairs`: those statuses
+    come from machinery Usher does not control, so no `ProblemException` in
+    `src/usher/api/` carries them and an AST harvest cannot see them.
     """
-    statuses: dict[str, str] = {}
-    heading = ""
-    for line in _ADR.read_text().splitlines():
-        if line.startswith("#"):
-            heading = line.lstrip("#").strip()
-            continue
-        found = _AMENDMENT_STATUS.search(line)
-        if found is not None:
-            statuses[heading] = found.group(1)
-    return statuses
+    return {(code.value, status) for status, code in _CODE_FOR_STATUS.items()}
 
 
 def _resource_nouns(app: FastAPI) -> set[str]:
@@ -237,21 +183,21 @@ async def readiness_client() -> AsyncIterator[httpx.AsyncClient]:
             yield client
 
 
-def test_the_codes_the_api_emits_are_exactly_the_codes_the_decision_records() -> None:
+def test_the_codes_the_api_emits_are_exactly_the_members_of_the_vocabulary() -> None:
     """The closure, in both directions, and it is the whole mechanism.
 
-    A member the ADR does not name is a code no client was told about; a
-    member the ADR names and nothing emits is a contract with no behaviour
-    behind it. Both are equalities now.
+    A code `src/usher/api/` emits that `ProblemCode` does not hold is a code
+    no client was told about; a member nothing emits is a contract with no
+    behaviour behind it. Both are equalities now.
 
     **The second was a containment for the length of the fan-out and H2
-    closed it, without deleting anything.** ADR-0030 completed the vocabulary
+    closed it, without deleting anything.** The vocabulary was completed
     before the read routes landed, so a member was allowed to sit with no
     emitter for a while; `invalid_cursor` was named as the case and the only
     one. B7's `GET /browse`, E4's `GET /admin/unmatched` and B12's
     `GET /seasons/{id}/episodes` all call `decode_cursor` now, so the member
-    has three emitting routes and the deletion obligation ADR-0030's
-    Consequences hand H2 is discharged by measurement rather than by edit.
+    has three emitting routes and H2's deletion obligation is discharged by
+    measurement rather than by edit.
     `tests/unit/test_api_openapi.py::test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it`
     is the stronger half of the same claim: this case reads the whole of
     `src/usher/api/`, which cannot tell a code a *route* can reach from one
@@ -263,27 +209,14 @@ def test_the_codes_the_api_emits_are_exactly_the_codes_the_decision_records() ->
         "`api/routers/playback.py` demonstrably emits -- the scan is measuring nothing"
     )
 
-    declared = _declared()
-    assert _ANCHOR in declared, (
-        f"ADR-0030's table parsed as {sorted(declared)}, which does not include the code PRD "
-        "07's worked example spells -- the parse is measuring nothing"
-    )
-
     members = {code.value for code in ProblemCode}
-    assert declared.keys() - members == set(), (
-        f"ADR-0030 declares codes `ProblemCode` does not have: {sorted(declared.keys() - members)}"
-    )
-    assert members - declared.keys() == set(), (
-        f"`ProblemCode` has members ADR-0030 does not declare: "
-        f"{sorted(members - declared.keys())} -- amend the ADR in this commit"
-    )
     assert emitted - members == set(), (
         f"`src/usher/api/` emits codes the vocabulary does not hold: {sorted(emitted - members)}"
     )
     assert members - emitted == set(), (
         f"`ProblemCode` holds members nothing under {_API} emits: "
-        f"{sorted(members - emitted)} -- ADR-0030's Consequences oblige M9 to delete a member "
-        "no route can produce, rather than ship a contract with no behaviour behind it."
+        f"{sorted(members - emitted)} -- delete a member no route can produce, rather "
+        "than ship a contract with no behaviour behind it."
     )
 
 
@@ -354,15 +287,20 @@ def test_no_404_code_names_a_collection_the_route_table_already_names() -> None:
         "nothing"
     )
 
-    declared = _declared()
+    pairs = _emitted_pairs() | _translated_pairs()
+    assert ("not_found", 404) in pairs, (
+        f"the status harvest found {sorted(pairs)}, which does not include the 404 "
+        "`api/errors.py` translates -- the scan is measuring nothing"
+    )
+
     offenders = {
         code: sorted(noun for noun in nouns if noun in code)
-        for code, code_status in declared.items()
-        if code_status == 404 and any(noun in code for noun in nouns)
+        for code, raised in sorted(pairs)
+        if raised == 404 and any(noun in code for noun in nouns)
     }
     assert offenders == {}, (
         f"404 codes naming a collection the path already names: {offenders}. A per-resource "
-        "404 is a second spelling of RFC 9457's `instance`; see ADR-0030."
+        "404 is a second spelling of RFC 9457's `instance`."
     )
 
 
@@ -377,23 +315,23 @@ def test_every_code_carries_one_status_everywhere_it_is_raised() -> None:
     `_CODE_FOR_STATUS`, which translates the statuses raised by machinery
     Usher does not control.
     """
-    declared = _declared()
     pairs = _emitted_pairs()
     assert (_ANCHOR, 503) in pairs, (
         f"the ProblemException harvest found {sorted(pairs)}, which does not include the 503 "
         "`api/routers/playback.py` demonstrably raises -- the scan is measuring nothing"
     )
 
-    disagreements = {
-        (code, raised): declared[code]
-        for code, raised in sorted(pairs)
-        if code in declared and declared[code] != raised
-    }
-    assert disagreements == {}, f"raised with a status ADR-0030 does not give it: {disagreements}"
-    for raised_status, code in _CODE_FOR_STATUS.items():
-        assert declared.get(code.value) == raised_status, (
-            f"_CODE_FOR_STATUS maps {raised_status} to {code.value}, which ADR-0030 gives "
-            f"{declared.get(code.value)}"
+    raised: dict[str, set[int]] = {}
+    for code, code_status in pairs:
+        raised.setdefault(code, set()).add(code_status)
+
+    disagreements = {code: sorted(seen) for code, seen in raised.items() if len(seen) > 1}
+    assert disagreements == {}, f"raised with more than one status: {disagreements}"
+    for translated_status, code in _CODE_FOR_STATUS.items():
+        seen = raised.get(code.value, {translated_status})
+        assert seen == {translated_status}, (
+            f"_CODE_FOR_STATUS answers {code.value} for {translated_status}, which "
+            f"`ProblemException` raises with {sorted(seen)}"
         )
 
 
@@ -421,44 +359,6 @@ def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itse
     assert set(_CODE_FOR_STATUS) == {404, 405, 422}, (
         f"_CODE_FOR_STATUS covers {sorted(_CODE_FOR_STATUS)}; ADR-0030 scopes it to the "
         "statuses Starlette and FastAPI raise before any Usher handler runs"
-    )
-
-
-def test_the_image_proxys_amendment_is_no_longer_open() -> None:
-    """ADR-0030's image amendment has an answer, and `Open` is not one."""
-    statuses = _amendment_statuses()
-    assert statuses, (
-        f"the amendment scan found no `Status of the amendment:` lines in {_ADR.name} -- "
-        "the parse is measuring nothing"
-    )
-
-    anchors = [heading for heading in statuses if "not_playable" in heading]
-    assert len(anchors) == 1, (
-        f"the scan found {len(anchors)} amendments naming `not_playable`, expected the one "
-        f"accepted in M9: {sorted(statuses)}"
-    )
-    assert statuses[anchors[0]] == "Accepted", (
-        f"the accepted amendment reads {statuses[anchors[0]]!r}, so the scan is not reading "
-        "the dispositions it thinks it is"
-    )
-
-    unknown = {
-        heading: status for heading, status in statuses.items() if status not in _DISPOSITIONS
-    }
-    assert unknown == {}, (
-        f"amendments whose status is not one of {sorted(_DISPOSITIONS)}: {unknown}"
-    )
-
-    image = [heading for heading in statuses if "/images/{image_id}" in heading]
-    assert len(image) == 1, (
-        f"the scan found {len(image)} amendments naming `GET /images/{{image_id}}`: "
-        f"{sorted(statuses)}"
-    )
-    assert statuses[image[0]] != "Open", (
-        "ADR-0030's image amendment is still `Open`. Its residual `PortDataMalformed` arm has "
-        "been measured against the live CDN; the record has to say `Accepted` or `Declined` "
-        "and carry the rate, or the vocabulary table and `08-operations.md` go on stating an "
-        "answer to a question this record calls unanswered."
     )
 
 

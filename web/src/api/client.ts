@@ -129,7 +129,7 @@ export function imageUrl(imageId: string, w?: number): string {
   return `${API_BASE}/images/${imageId}${w ? `?w=${w}` : ''}`
 }
 
-/** ADR-0032's ladder. The proxy clamps to it; asking for 800 gets you 780. */
+/** The proxy clamps to this ladder; asking for 800 gets you 780. */
 export const IMAGE_WIDTHS = [154, 342, 780, 1280] as const
 
 const STREAM_SEGMENT = /\/stream\/([^/?#]+)/

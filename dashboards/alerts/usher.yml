@@ -215,8 +215,7 @@ groups:
         # is the adapter's `supports_push`, which is `PushHealth.is_delivering`
         # -- a connection, at least one received message, and a recent one. A
         # channel that upgraded, is held open and delivers nothing reads 0,
-        # which is exactly the failure ADR-0004 measured against a nonexistent
-        # path, and the condition this alert exists for. A gauge fed by the
+        # which is the condition this alert exists for. A gauge fed by the
         # socket's state would be permanently green through it.
         expr: usher_source_push_connected_ratio == 0
         for: 15m
@@ -483,7 +482,7 @@ groups:
       # envelope, and this comment is where that is said.** That table's own
       # header records that nothing reads it, no host enforces it and no policy
       # derives from it; M9's Track 2 derived a 2.0 GB ceiling from one row,
-      # measured a design at 2.702 GB and **withdrew the design** (ADR-0036).
+      # measured a design at 2.702 GB and **withdrew the design**.
       # Every number in both halves is measured: the filesystem's own free
       # bytes here, and the catalog's own size and growth in the other.
       # `test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table`

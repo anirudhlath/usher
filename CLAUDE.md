@@ -19,8 +19,7 @@ behind the extra) or `openai:` (any OpenAI-compatible endpoint) — and `m09e`
 widened `title_embeddings.embedding` and `user_taste.centroid` from
 `halfvec(384)` to `halfvec(1024)`, **deleting every embedding, centroid and
 neighbour row**. There is no honest conversion between widths, so *"a model swap
-needs no migration"* holds only within one width
-([ADR-0038](docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)).
+needs no migration"* holds only within one width.
 Nothing restores the rows: `usher index --backfill`, then `usher work`, then
 `usher similar --rebuild`. `m09f` then capped `EMBEDDING_DIMENSIONS` at ~4,000
 lanes by moving every `halfvec` column to `PLAIN` storage. This is here rather
@@ -35,8 +34,7 @@ the change that invalidates it** — not in a follow-up. Start at
 
 ## Conventions that will bite you
 
-- **Ports are `abc.ABC`, not `typing.Protocol`**
-  ([ADR-0001](docs/prd/decisions/0001-abc-over-protocol.md)). Do not modernise.
+- **Ports are `abc.ABC`, not `typing.Protocol`.** Do not modernise.
 - **Layering is enforced by `import-linter`, not by convention.** `domain/`
   imports nothing from `adapters/`, `db/` or `api/`; `services/` depends only on
   `domain/` and `ports/`.
@@ -230,7 +228,7 @@ uv sync --extra embedding                       # optional: fastembed, 167 MiB, 
 ```
 
 - **`--phase all` does not dispatch every member**, and `ratings` is an alias
-  rather than a step (ADR-0040).
+  rather than a step.
 - **`usher similar --rebuild` is *schedulable*, not automatic.** M10's J6
   registers it as `similar.rebuild` on `USHER_SIMILAR_REBUILD_PERIOD_HOURS`
   (24 h), behind `USHER_SCHEDULER_ENABLED=false` — so nothing runs it for you

@@ -145,8 +145,6 @@ DELETE FROM title_embeddings;
 deployment, deleted, by design** — and deletion is the *correct* end state
 rather than merely the reachable one, because a `title_embeddings` row with a
 `NULL` embedding is a written refusal the backfill would never claim again.
-The argument is
-[ADR-0038](../prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md).
 
 🔴 **The backup would not have helped**, and that is why this section is here
 rather than a footnote. All three tables are `REBUILDABLE` in

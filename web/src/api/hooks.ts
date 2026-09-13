@@ -84,7 +84,7 @@ export type SuggestResponse = Ok<'/search/suggest'>
 export type SuggestTier = Schemas['SuggestTier']
 
 /**
- * The two-tier suggest (ADR-0031). `prefix` is the as-you-type tier; `fuzzy`
+ * The two-tier suggest. `prefix` is the as-you-type tier; `fuzzy`
  * is the typo-tolerant one the 2026-08-03 gate showed cannot meet an
  * as-you-type latency budget on this catalog -- which is why the tier is a
  * parameter the UI exposes rather than a detail it hides.
@@ -117,7 +117,7 @@ export type BrowseFilters = {
 }
 
 /**
- * Keyset paging, never an offset (ADR-0034). `next_cursor` carries a position
+ * Keyset paging, never an offset. `next_cursor` carries a position
  * *and* a hash of the query, so changing a filter invalidates the cursor --
  * which is why the filters are part of the query key.
  *
@@ -250,7 +250,7 @@ export type PlayTarget = Schemas['PlayTargetResponse']
 
 /**
  * Mints a short-lived opaque ticket that `GET /stream/{ticket}` 302s to the
- * real target (ADR-0029). The shareable artifact is the ticket, never a URL
+ * real target. The shareable artifact is the ticket, never a URL
  * carrying somebody's session token -- so the player must be pointed at
  * `/stream/{ticket}` (`streamPath` in `client.ts`) and never at `target.url`.
  *

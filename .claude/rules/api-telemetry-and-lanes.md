@@ -14,7 +14,7 @@ paths:
 
 # The HTTP surface, OpenTelemetry and the supervised lanes
 
-Rules for this subsystem; the arguments are in the ADRs and docstrings cited.
+Rules for this subsystem; the arguments are in the docstrings cited.
 
 ```bash
 uv run pytest tests/unit -k "api or lanes or telemetry or events"
@@ -41,8 +41,8 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
 - **Snapshot the replay ring before adding the subscriber, with no `await`
   between** (`services/events.py:39`) — resolving replay lazily at the first
   `__anext__` delivers the window twice.
-- **Commit before you publish.** ADR-0033 owns the rule and its exceptions; the
-  residual window is job ordering, not durability, and needs no outbox.
+- **Commit before you publish.** The residual window is job ordering, not
+  durability, and needs no outbox.
   `services/watch_write.py`'s publish sites are unmeasured.
 - **`BootstrapService._publish_progress` stays out of
   `DeferredEventPublisher`** (pinned at `composition.build_worker`): buffering
@@ -155,8 +155,8 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
   **submitted as data**: assert over pydantic's `input`, never response text.
 - **Adopting a status is not adopting the envelope.** `_CODE_FOR_STATUS`
   (`api/errors.py:107`) maps 404/405/422 only; anything else falls back to
-  `{"detail": …}`. Raise `ProblemException(...)`; do not widen the map, which
-  ADR-0030 owns. Keep the problem-responses scan green.
+  `{"detail": …}`. Raise `ProblemException(...)`; do not widen the map. Keep
+  the problem-responses scan green.
 - **FastAPI has no per-response media type**, so `UsherAPI.openapi` post-passes
   problem bodies onto `PROBLEM_MEDIA_TYPE`. **Key it off the `$ref`, never a
   status list**, keep it idempotent (`app.openapi_schema` caches), subclass
@@ -188,7 +188,7 @@ grep -rhn '^class .*BaseModel' src/usher/api/dto/ | grep -v 'Response\|Request'
 - **Adapter construction is double-checked-locked**, re-read inside the lock; a
   race leaks a socket per loser.
 - **The event buffer is per-job scope, never the worker's** — `discard()` would
-  empty a concurrent job's frames (ADR-0033 amendment).
+  empty a concurrent job's frames.
 - **`asyncio.wait`, never `TaskGroup`, never `gather`.** A task group cancels
   siblings on the first escape, abandoning claims mid-write; `gather` returns
   with siblings unawaited. Under `wait` every task settles first.

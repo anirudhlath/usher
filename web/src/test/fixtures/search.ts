@@ -125,7 +125,7 @@ export const searchEmpty: SearchResponse = {
 }
 
 /**
- * The as-you-type tier (ADR-0031). `min_query_length` is on the wire because
+ * The as-you-type tier. `min_query_length` is on the wire because
  * the combobox has to know why a two-character query returned nothing — and
  * "we did not look" is a different sentence from "we looked and found none".
  */

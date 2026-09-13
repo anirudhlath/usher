@@ -432,7 +432,7 @@ function Results({ loaded, error, items, density, patched, catalogNote, onOpen, 
  * `popularity` and `vote_count` are both nullable and both stay nullable.
  * `null` is "nobody has measured this" — 980,523 of the 1,272,367 rows this
  * route was measured against — and rendering it as `0` would make it
- * indistinguishable from "measured, and unpopular" (ADR-0014, patterns.md §2).
+ * indistinguishable from "measured, and unpopular" (patterns.md §2).
  */
 function Measurements({ item }: { item: BrowseItem }) {
   return (

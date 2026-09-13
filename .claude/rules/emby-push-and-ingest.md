@@ -13,7 +13,7 @@ paths:
 
 # Emby, the push lane, and the ingest pipeline
 
-Rules for this subsystem; the ADRs and docstrings named below hold the detail.
+Rules for this subsystem; the docstrings named below hold the detail.
 `ReconcileService` walks the source → `IngestService` writes `media_items` →
 `MatchService` runs the ladder → `WatchStateSyncService` merges watch state.
 Beside it `EmbyPushChannel` → `PushSupervisor` → `PushApplyService` run the
@@ -47,8 +47,7 @@ uv run python scripts/measure_ingest.py --items 50000   # NOT a test; real datab
 Every route in `services/watch_write.py` runs four steps in an order that is the
 contract: **write locally** with `origin = api`, so the next sync cannot mistake
 Usher's own write for the source's truth; **commit** before anything is offered to
-a client ([ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md));
-**invalidate and publish**, guarded on the row having changed; then **enqueue one
+a client; **invalidate and publish**, guarded on the row having changed; then **enqueue one
 `WATCH_WRITEBACK` job per source copy**, deliberately *not* under that guard — it
 says nothing about a source left out of step by a parked write-back.
 
@@ -82,29 +81,26 @@ says nothing about a source left out of step by a parked write-back.
   reports `PlayCount: 0` and omits `LastPlayedDate` for an item whose own route
   reports the real values, and no `Fields=`/`EnableUserData`/`Ids` spelling
   fixes it. So **`watch_state()`, which walks listings, cannot carry play
-  history**, and a walk must never write `play_count`/`last_played_at`
-  ([ADR-0014](../../docs/prd/decisions/0014-absence-is-not-zero.md)). A pushed
+  history**, and a walk must never write `play_count`/`last_played_at`. A pushed
   `UserDataChanged` *is* honest, so a read-back needs no polling.
 - **`ExtendedVideoType`/`ExtendedVideoSubType` hold the string `"None"`, not
   null** — always truthy, so check them by token lookup, never for presence.
 
 ## The push lane
 
-**Emby push works** ([ADR-0004](../../docs/prd/decisions/0004-push-over-polling.md)):
-`/embywebsocket` upgrades, delivers `Sessions` on change, and pushes
+**Emby push works**: `/embywebsocket` upgrades, delivers `Sessions` on change, and pushes
 `UserDataChanged` within seconds of an out-of-band change.
 
 - ⚠️ **Neither an upgrade nor arriving messages establish that a channel is the
   one you think it is.** A handshake against *any* path succeeds, and a socket
   with **no credential at all** upgrades, subscribes and receives `Sessions` more
   often than an authenticated one, whose stream is row-filtered and sent only on
-  change. **Assert on the *right* messages**
-  ([ADR-0018](../../docs/prd/decisions/0018-push-health-is-a-message-ledger.md)).
+  change. **Assert on the *right* messages.**
 - 🔴 **`/embywebsocket` does not accept `X-Emby-Token` as a header** — such a
-  socket is anonymous, so the token cannot leave the URL and ADR-0012's accepted
-  risk stands unnarrowed. **Liveness here is change-driven, not periodic**, so
-  `DEFAULT_STALE_AFTER_SECONDS` (90 s) is a guess against a quiet server; ADR-0018
-  refuses to count the pong, because **a pong is not delivery**.
+  socket is anonymous, so the token cannot leave the URL. **Liveness here is
+  change-driven, not periodic**, so `DEFAULT_STALE_AFTER_SECONDS` (90 s) is a
+  guess against a quiet server, and the pong does not count — **a pong is not
+  delivery**.
 - **`PushSupervisor` resets its failure counter on *delivery*, not on
   connection** — a buffering proxy connects perfectly every time, so a reset on
   connection means PRD 08's "mark `supports_push = false` after N failures"
@@ -112,8 +108,7 @@ says nothing about a source left out of step by a parked write-back.
   connections. The reset is `failures = 0` in `PushSupervisor._run`, behind `if
   delivering:` — not in `record_open`, which is the connection event.
 - **`ItemsRemoved` fires on a library from which nothing was removed**, so count
-  it and retract nothing on it, or one refresh marks a present file unavailable
-  ([ADR-0015](../../docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
+  it and retract nothing on it, or one refresh marks a present file unavailable.
 - **A dropped socket raises `PortUnavailable` rather than hanging, and Emby
   re-delivers nothing**, so **the gap-closing delta is the only cover there
   is**; no real `429` has ever been seen. Do not let the queue fill during that
@@ -137,9 +132,8 @@ delta, permanently. ⚠️ **And that guard reads the item lane's cursor only, w
 so a source with completed delta runs and no completed `watch_state` run passes
 the guard, closes a delta gap in seconds, then walks the whole library on the
 watch half for ~11 hours — a reachable path, not an observed run — and **neither
-log line names it**. [ADR-0042](../../docs/prd/decisions/0042-the-watch-lane-resumes-from-a-startindex-checkpoint.md)
-made that walk resumable from `sync_runs.position`; it did not teach the guard to
-read both cursors.
+log line names it**. `m10b` made that walk resumable from `sync_runs.position`;
+it did not teach the guard to read both cursors.
 
 ## The match ladder
 
@@ -178,10 +172,9 @@ job is enqueued at `BACKFILL` for that remote search.
   `run.evolve(status=FAILED)` writes `items_seen = 0` over a real checkpoint.
 - 🔴 **The availability sweep must not move into a `finally:`, and the obvious
   test shape hides why.** A walk that fails immediately retracts everything,
-  which ADR-0015's ceiling refuses — the case then fails for the wrong reason
-  and never exercises a sweep that *succeeds* after a failed walk. The shape
-  with teeth commits most of the library and then raises (ADR-0015 has the
-  arithmetic).
+  which the retraction ceiling refuses — the case then fails for the wrong
+  reason and never exercises a sweep that *succeeds* after a failed walk. The
+  shape with teeth commits most of the library and then raises.
 - **`observed_at` must be the run's start instant, not `now()`.** A per-row write
   instant is later than `run.started_at`, so the sweep still spares everything and
   no retraction test fails; what breaks is the column's meaning. **Assert
@@ -201,8 +194,8 @@ job is enqueued at `BACKFILL` for that remote search.
 
 ## Scale
 
-- **`GET /admin/unmatched` is keyset-paged (ADR-0034); the `OFFSET` method stays
-  the CLI's.** ⚠️ **ADR-0034's NULL trap is reachable here**: `added_at` is
+- **`GET /admin/unmatched` is keyset-paged; the `OFFSET` method stays the
+  CLI's.** ⚠️ **The keyset NULL trap is reachable here**: `added_at` is
   nullable, so a page boundary can land in the undated group — the population an
   operator opens this queue for — where a row comparison answers **NULL, not
   false**, dropping the undated tail while every page served looks full. Branch

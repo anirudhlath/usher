@@ -14,8 +14,7 @@ paths:
 
 # IMDb, TMDb id exports, Wikidata and MovieLens
 
-Rules for this subsystem; the detail is in the ADRs and module docstrings named
-here. The `measure_*` scripts are not tests: each hits the network, two take a
+Rules for this subsystem; the detail is in the module docstrings named here. The `measure_*` scripts are not tests: each hits the network, two take a
 required `--phase`, and **`measure_bulk_load.py` takes no arguments and truncates
 the database between passes — scratch database only, never a real catalog.**
 
@@ -33,7 +32,7 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
 - **`all` and `ratings` are aliases rather than steps, and `--phase all`
   dispatches neither.** `ratings` re-imports `title.ratings.tsv.gz` (8.2 MiB)
   alone rather than paying `--phase imdb`'s 214.4 MiB and the rewrite of every
-  name and year, which stales embeddings (ADR-0040); adding it to `FULL_SEQUENCE`
+  name and year, which stales embeddings; adding it to `FULL_SEQUENCE`
   imports the file twice. A unit case asserts `FULL_SEQUENCE` and `PHASE_ALIASES`
   partition the enum, so a member added to neither is a red rather than a phase
   `argparse` offers and `run_bootstrap` ignores. `POST /admin/bootstrap/{phase}`
@@ -124,7 +123,7 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   the *database's* `lower(name)`. Do not repair the fake — the divergence is
   enumerated in `tests/fakes/bulk_catalog_repository.py`.
 - `apply_ratings` writes **`imdb_average_rating` and `imdb_num_votes`**. **There
-  is no `community_rating` column** — `m10a`/ADR-0040 split it out, and the old
+  is no `community_rating` column** — `m10a` split it out, and the old
   name survives on the wire only, through `domain/title.py`'s `WIRE_FIELD_NAMES`.
 
 ## MovieLens
@@ -191,13 +190,13 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
 - **A TMDb `cast[]`/`crew[]`/`created_by[]` entry carries no IMDb `nconst`** —
   `imdb_id`, birth/death year and biography live on `/person/{id}`, one request
   per person (`/find/{nconst}?external_source=imdb_id` works, no follow-up call).
-  **Both merge directions have a low yield (ADR-0036), so a merge costs a second
+  **Both merge directions have a low yield, so a merge costs a second
   request per person.** That is *expensive*, not *impossible* — do not restate it
   as an absolute; that is how this claim went wrong once already.
-- **Price a TMDb crawl from the policy ceiling — ADR-0005's ~25 rps, never an
+- **Price a TMDb crawl from the policy ceiling — ~25 rps, never an
   observed lane rate** — over the people the catalog *holds*, not those its
   payloads mention (`mapping._CAST_LIMIT` caps stored cast at 50 a title).
-- **The ≤6-month cache term applies to `raw_payloads`, not to derived columns**
-  (ADR-0016), so **cache the response and a crawl recurs; store the derived id and
-  it does not.** `_UPSERT_PEOPLE`'s `DO UPDATE SET` omits `imdb_id`, so `usher
+- **The ≤6-month cache term applies to `raw_payloads`, not to derived
+  columns**, so **cache the response and a crawl recurs; store the derived id
+  and it does not.** `_UPSERT_PEOPLE`'s `DO UPDATE SET` omits `imdb_id`, so `usher
   derive` cannot discard a crawl — an accident of a column list, pinned by a test.

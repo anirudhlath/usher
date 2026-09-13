@@ -21,9 +21,7 @@ have parsed a real `/embywebsocket` message. **M6's typo-tolerance gate ran on
 2026-08-03 against a real 1,271,138-title catalog and failed** — short names
 are the weak band and no configuration comes close to an as-you-type latency
 budget. The result is recorded with its numbers, and the follow-up it obliged —
-a two-tier suggest — **shipped in M9**
-([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md),
-[ADR-0031](docs/prd/decisions/0031-the-two-tier-suggest.md)).
+a two-tier suggest — **shipped in M9**.
 
 **M9's own live verification of playback and watch write-back ran on
 2026-08-12, and both halves passed.** `POST /titles/{id}/play` → a minted ticket
@@ -82,19 +80,14 @@ one error envelope:
 
 **Every failure is an RFC 9457 problem document** —
 `application/problem+json`, with a `code` from a **closed seven-member
-vocabulary** that [ADR-0030](docs/prd/decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
-encodes and a test parses back out of the ADR, so a route cannot invent an
-eighth. `/events` and `/health/ready` are the two exemptions, and both are
-asserted rather than skipped. Paging is **keyset only, never an offset**
-([ADR-0034](docs/prd/decisions/0034-the-cursor-carries-a-position.md)):
-`GET /home` still returns the whole screen in one response with no cursor at
-all, which is what
-[ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies.
-Playback hands back a short-lived opaque ticket that `302`s to the real target
-([ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)),
-so the shareable artifact is opaque rather than a URL with somebody's session
-token in it. Everything the API does is also driven from the command line —
-see below.
+vocabulary** that `ProblemCode` holds and a test closes against every code the
+routes emit, so a route cannot invent an eighth. `/events` and `/health/ready`
+are the two exemptions, and both are asserted rather than skipped. Paging is
+**keyset only, never an offset**: `GET /home` still returns the whole screen in
+one response with no cursor at all. Playback hands back a short-lived opaque
+ticket that `302`s to the real target, so the shareable artifact is opaque
+rather than a URL with somebody's session token in it. Everything the API does
+is also driven from the command line — see below.
 
 ## Requirements
 
@@ -213,8 +206,7 @@ docker compose exec usher usher sync --source "Living Room"
 ```
 
 🔴 **Budget hours, not minutes, and there is no bound flag.** Usher is a polite
-guest: outbound requests are rate-limited on purpose
-([ADR-0043](docs/prd/decisions/0043-the-outbound-limiter-is-per-source-and-spaces-requests.md)),
+guest: outbound requests are rate-limited on purpose,
 so the walk is paced by your media server. Measured against a 1.14M-item Emby:
 **24,000 items in 10 minutes**, i.e. roughly **8 hours** for the whole library.
 A small library is proportionally quicker. Run it in a terminal you can leave,
@@ -500,8 +492,7 @@ the item walk — it always runs *after* it, because each state has to resolve
 against a media item.
 
 `--allow-full-retraction` lifts the safety ceiling that refuses to mark a
-whole library unavailable in one run
-([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
+whole library unavailable in one run.
 Only use it for a library the operator really did remove.
 
 `usher sync` **exits non-zero if any run it performed recorded `FAILED`**, so a
@@ -570,7 +561,7 @@ uv run usher index --backfill  # enqueue the work; re-running writes zero rows
 ```
 
 `usher derive` re-derives people, credits and collections out of the provider
-payloads M4 already cached (ADR-0016) — **with no second network call**. Its
+payloads M4 already cached — **with no second network call**. Its
 bare form is five counts and no writes; `--backfill` walks the cache inline,
 which is where it deliberately differs from `usher index`: derivation needs no
 model, no request and no rate limit, so the queue would buy ordering, retry and
@@ -584,8 +575,7 @@ uv run usher derive             # cached payloads, titles with credits, people, 
 uv run usher derive --backfill  # walk the cache and re-derive inline; idempotent
 ```
 
-`usher genres` normalises `titles.genres` into Usher's own vocabulary
-([ADR-0039](docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)).
+`usher genres` normalises `titles.genres` into Usher's own vocabulary.
 The column is written by two importers that share no alphabet — IMDb's bulk
 phase writes `Sci-Fi`, TMDb's enrichment writes `Science Fiction` — and
 `usher.domain.genres` is the map between them. `/browse` expands the two at
@@ -733,7 +723,7 @@ uv run usher home --repeat 5       # five *cold* compositions; the cache is clea
 ```
 
 It ships **alongside** the route rather than instead of it, which is the
-reverse of `usher search`: ADR-0006's claim — one request paints a screen — is
+reverse of `usher search`: the claim that one request paints a screen is
 a property of a request boundary that no command can exhibit, so there the
 route is the deliverable. What the command is for is the rule that every
 operator command works against an empty database, and the arithmetic that rule
@@ -1013,13 +1003,11 @@ from an API that answers.
 `POST /titles/{id}/play` returns an **opaque, short-lived ticket URL**
 (`/stream/{ticket}`) rather than a source URL. The ticket is stateless — a
 Fernet token over an HKDF-SHA256 subkey of `USHER_SECRET_KEY` — with a
-**300-second** TTL
-([ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)).
+**300-second** TTL.
 
 **Redeeming it is a `302`, and the `Location` it sends you to carries the
 source's session token.** A client reads `Location` by definition, so that
-token reaches you. What the ticket changed is the **artifact, not the grant**
-([ADR-0012](docs/prd/decisions/0012-playback-urls-carry-a-source-token.md)) —
+token reaches you. What the ticket changed is the **artifact, not the grant** —
 and that distinction matters, because three documents in this repository have
 claimed the opposite at one time or another and all three were wrong.
 
@@ -1099,8 +1087,6 @@ feature issues each move a wire contract.
 
 **Pin the minor version.** `0.x` is where the wire contract may still move, and
 `1.0.0` stays available for the day it is meant.
-[ADR-0047](docs/prd/decisions/0047-the-release-is-v0-1-0.md) carries the
-argument and the counts behind it.
 
 ## License
 

@@ -16,10 +16,10 @@ paths:
 
 # Search, trigram, RRF and embeddings
 
-Settled rules. Where a docstring, migration or ADR is named it holds the detail
+Settled rules. Where a docstring or migration is named it holds the detail
 and is more current than this file. **Spelling: `titles.popularity`,
 `.vote_count`, `.community_rating` are `tmdb_popularity`, `tmdb_vote_count`,
-`tmdb_vote_average` since `m10a`/ADR-0040.**
+`tmdb_vote_average` since `m10a`.**
 
 ## Trigram and suggest
 
@@ -37,12 +37,12 @@ and is more current than this file. **Spelling: `titles.popularity`,
   distinguishes them**, so a green suite is not evidence here. Keep
   `fastupdate = off`: a pending list costs 7.7× read amplification.
 - **The suggest tiebreak is `tmdb_vote_count DESC NULLS LAST` under
-  `tmdb_popularity`**, which stays the hard key. ⚠️ ADR-0040 moved the bootstrap
+  `tmdb_popularity`**, which stays the hard key. ⚠️ `m10a` moved the bootstrap
   writer to `imdb_num_votes`, so on a bootstrap-only catalog **both** are NULL on
   every row and the `ORDER BY` degenerates to `dist ASC, id ASC` — insertion
   order, tiebreak and all.
 
-## The two-tier suggest boundary (ADR-0031)
+## The two-tier suggest boundary
 
 - **`_MIN_PREFIX_CHARS` is 4 and is derived**: the shortest prefix at which tier
   1's p95 is below tier 2's. Below it tier 1 is slower than the tier it exists
@@ -100,7 +100,7 @@ and is more current than this file. **Spelling: `titles.popularity`,
   at startup rather than falling back. It is part of `model_name` because two
   runtimes of one checkpoint differ by ~6× the halfvec quantisation error —
   **not interchangeable without a re-embed.**
-- **The width is deployment-wide DDL (ADR-0038)**: no honest conversion between
+- **The width is deployment-wide DDL**: no honest conversion between
   widths, and a change deletes every embedding, centroid and neighbour row. A
   `FakeEmbedder` must track `EMBEDDING_DIMENSIONS` (`composition.embedder`
   returns `None` on a mismatch) and **use `hashlib`, never `hash()`**.
@@ -176,7 +176,7 @@ and is more current than this file. **Spelling: `titles.popularity`,
   Scope the stored-model read to rows that **have** a vector — a refused title
   carries a NULL embedding and a model name, and is never a seed.
 - **`blend_fingerprint(*, embedding_model)` hashes the model**, making a model
-  swap a third cause of neighbour staleness in ADR-0020's terms;
+  swap a third cause of neighbour staleness;
   `SimilarityService` takes the *name*, never an `Embedder`, because a request
   must not load a model. **Zero stale is also what an empty table reports** —
   pair any such verdict with a bogus-fingerprint control.
@@ -214,6 +214,6 @@ and is more current than this file. **Spelling: `titles.popularity`,
 `titles.genres` unions IMDb's and TMDb's vocabularies, and two spellings of one
 concept share no lexemes, so `search_document`'s weight class D and
 `compose_document`'s segment 6 each saw half the catalog. `usher genres
---backfill` canonicalises through `GENRE_ALIASES` (ADR-0039). **Canonicalise
+--backfill` canonicalises through `GENRE_ALIASES`. **Canonicalise
 every row in Python and filter nothing in SQL** — `canonicalise_genres` also
 deduplicates — and derive the affected population from `GENRE_ALIASES` itself.

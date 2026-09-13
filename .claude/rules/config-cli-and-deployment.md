@@ -13,7 +13,7 @@ paths:
 
 # Settings, the CLI boundary, compose and the image
 
-Rules for this subsystem; ADR-0026 and the source docstrings hold the arguments.
+Rules for this subsystem; the source docstrings hold the arguments.
 Derive counts (`alembic heads`, `docker compose config`), never quote them.
 
 ## A settings failure must never print the credential it rejected
@@ -44,8 +44,7 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
 
 - **`cli.OPERATOR_ERRORS` (`cli.py:166`) is an enumerated tuple** — `OSError`,
   `DBAPIError`, `httpx.HTTPError`, `PortUnavailable`, `PortAuthFailed`,
-  `PortRateLimited`. Every membership decision is recorded there and in
-  ADR-0026.
+  `PortRateLimited`. Every membership decision is recorded there.
 - **`OSError` is a member because asyncpg lets `ConnectionRefusedError` out
   unwrapped during connect** — `except SQLAlchemyError`, the obvious spelling,
   misses the most common operator failure there is.
@@ -64,7 +63,7 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
   `httpx.HTTPError` cannot fire behind a port and the tuple was blind to every
   adapter until those three were added. `PortDataMalformed` means *this project
   sent something wrong* and keeps its stack; commands that know what it means
-  catch it themselves, which ADR-0026 permits and is not a per-command boundary.
+  catch it themselves, which is not a per-command boundary.
 - **`UsherPortError` wholesale is the one-line version and it is wrong.** Many
   commands reach the boundary through raise sites the repositories document as
   tripwires for **bugs in this project's own code**; the line is *reaching an

@@ -80,7 +80,7 @@
       "id": 2,
       "type": "barchart",
       "title": "Abandonment cliff",
-      "description": "position_seconds / runtime_seconds over played = false, in ten-point buckets. The denominator is a coalesce and its order is part of the panel: watch_states.runtime_seconds first (nullable by ADR-0014 — a walk's listing cannot determine it), then media_items.runtime_seconds, then titles.runtime_minutes * 60. Three fallbacks silently applied are three different populations plotted as one, so dashboards/README.md records which one supplied this deployment's denominator and for what share of rows. Every bucket is emitted, including empty ones, so a gap is a zero and not a missing bar.",
+      "description": "position_seconds / runtime_seconds over played = false, in ten-point buckets. The denominator is a coalesce and its order is part of the panel: watch_states.runtime_seconds first (nullable), then media_items.runtime_seconds, then titles.runtime_minutes * 60. Three fallbacks silently applied are three different populations plotted as one, so dashboards/README.md records which one supplied this deployment's denominator and for what share of rows. Every bucket is emitted, including empty ones, so a gap is a zero and not a missing bar.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "usher-postgres"

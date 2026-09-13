@@ -3,8 +3,8 @@
  *
  * Four things on this screen are correctness rules rather than presentation:
  *
- * · **The two suggest tiers get their own group headers** (patterns.md §12,
- *   ADR-0031). `prefix` is a btree probe with 1.9% measured typo recall;
+ * · **The two suggest tiers get their own group headers** (patterns.md §12).
+ *   `prefix` is a btree probe with 1.9% measured typo recall;
  *   `fuzzy` is trigram + Levenshtein at p50 33.6 ms. They are two different
  *   queries against two different indexes, **not a fallback chain**, and
  *   merging them would tell the reader that a trigram hit is a worse prefix

@@ -103,7 +103,7 @@ session gets wrong about them:
 
 ## Things that look wrong and are not
 
-- **`src/usher/eval/schema.sql` is not an Alembic migration** (ADR-0041). It is
+- **`src/usher/eval/schema.sql` is not an Alembic migration.** It is
   applied idempotently by `ledger.ensure_schema` at the start of every run, via
   the raw asyncpg connection because the dialect refuses a multi-statement
   prepared statement. `alembic heads` must stay at one head; do not "fix" this.
@@ -118,6 +118,5 @@ A `--full` run that failed, or a bar decision, gets a dated write-up in
 `docs/evals/<date>-<slug>.md` — see `2026-08-19-e1-baseline-window-disagreement.md`
 for the shape (a superseded conclusion is annotated in place, never rewritten).
 The sampling frame is anchored on `imdb_num_votes` since the rating-provenance
-split (ADR-0040); the prefix window was widened to `[0.016, 0.028]` on 2026-08-20
-by ADR-0031's amendment — both are the kind of change that must arrive with its
-run.
+split; the prefix window was widened to `[0.016, 0.028]` on 2026-08-20 — both
+are the kind of change that must arrive with its run.

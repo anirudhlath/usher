@@ -342,7 +342,7 @@ groups:
   # table.** `08-operations.md`'s resource envelope says in its own header that
   # nothing reads it, no host enforces it and no policy derives from it, and
   # M9's Track 2 derived a 2.0 GB ceiling from one row and **withdrew a
-  # design** over it (ADR-0036). So there is no byte ceiling here: the
+  # design** over it. So there is no byte ceiling here: the
   # condition is *"the next fortnight adds more than everything this database
   # currently holds"*, which is self-calibrating and needs no operator to have
   # told it how big the disk is. Measured on this deployment 2026-09-11:
@@ -460,8 +460,8 @@ groups:
               # rounding error, but at a wide narrow table it is not, and the
               # sum is over seven of them. The `::numeric` is on the numerator
               # so the whole expression stays exact rather than becoming
-              # `double precision`, which is the type ADR-0036's sibling
-              # argument in `Cost anomaly` is about.
+              # `double precision`, which is the type the sibling argument in
+              # `Cost anomaly` is about.
               #
               # **`nullif(rows_now, 0)`** is what makes an empty relation
               # contribute nothing instead of raising: `sum()` skips the NULL.

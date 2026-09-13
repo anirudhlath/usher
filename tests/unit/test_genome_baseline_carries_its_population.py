@@ -15,8 +15,6 @@ _POPULATION = "5,020"
 # green.
 _MINIMUM_HITS = 8
 
-_DECISIONS = _REPO / "docs" / "prd" / "decisions"
-_ADR_0024 = _DECISIONS / "0024-the-genome-is-one-dense-vector-per-title.md"
 _PROGRESS = _REPO / "docs" / "plans" / "progress.md"
 
 
@@ -53,14 +51,6 @@ def test_every_quotation_of_the_pair_rate_names_the_population_it_was_measured_o
     """1.81% and 5,020 seeds are one fact, so no block may carry only half of it."""
     corpus = _corpus()
 
-    # Control 1: the scan reaches the file whose `## Uncertainty` paragraph is
-    # the load-bearing one -- ADR-0024 is what a later session reads to find out
-    # whether the term earns its weight.
-    assert _ADR_0024 in corpus, (
-        f"the corpus does not include {_ADR_0024.relative_to(_REPO)}; "
-        "a scan that cannot see the ADR cannot hold it to this rule"
-    )
-
     hits: list[str] = []
     unpopulated: list[str] = []
     for path in corpus:
@@ -72,7 +62,7 @@ def test_every_quotation_of_the_pair_rate_names_the_population_it_was_measured_o
             if _POPULATION not in block:
                 unpopulated.append(where)
 
-    # Control 2: a glob that found nothing, or a `_blocks` that returned
+    # The control: a glob that found nothing, or a `_blocks` that returned
     # nothing, produces an empty `unpopulated` and would otherwise pass.
     assert len(hits) >= _MINIMUM_HITS, (
         f"the scan found only {len(hits)} block(s) quoting {_RATE!r} across "

@@ -166,7 +166,7 @@ export const titleSkeleton: SkeletonTitle = {
 /**
  * A title whose last enrichment attempt failed. `enrichment_error` is tracked
  * separately from `enrichment_state` on purpose: a failed attempt does not
- * consume or reset a rung (ADR-0008), so this row is still `stub` and will be
+ * consume or reset a rung, so this row is still `stub` and will be
  * retried.
  */
 export const titleEnrichmentFailed: SkeletonTitle = {

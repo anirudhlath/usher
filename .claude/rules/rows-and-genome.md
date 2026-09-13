@@ -24,9 +24,7 @@ other.
 ## The similarity blend
 
 - **The genome is not a term in the blend.** `_WEIGHTS` has no `"tags"` key and
-  `_neighbors_for` does not pass `tags=`
-  ([ADR-0024](../../docs/prd/decisions/0024-the-genome-is-one-dense-vector-per-title.md)
-  carries that amendment; ADR-0035 settles only the *user-tag* term). Everything
+  `_neighbors_for` does not pass `tags=`. Everything
   that *reads* it stays, and **`NeighborCandidate.tags` must answer `None`,
   never `0.0`** — its only reader counts `tags is not None`, so a zero reports a
   barely-covered catalog as fully covered: `genome_scores`, `genome_tags`,
@@ -71,7 +69,7 @@ other.
   than the rate.** `_jaccard` returns `None` only when a *set* is empty, so two
   titles that each carry tags and share none yield a hard `0.0` that `_blend`
   renormalises as a confident negative — demoting the majority of the pairs the
-  term fires on. **ADR-0014's rule covers *absence*; this is presence with no
+  term fires on. **The absence rule does not cover this: it is presence with no
   overlap.** The rate is also buyable by lowering the tag threshold, which
   clears the bar and makes the zero worse.
 - ⚠️ **The same trap is live on genres.** `_jaccard(seed.genres,
@@ -84,8 +82,7 @@ other.
 
 ## The home screen
 
-- **Rows build sequentially**
-  ([ADR-0025](../../docs/prd/decisions/0025-rows-build-sequentially.md)), and
+- **Rows build sequentially**, and
   **a non-overlap assertion passes against the exact `gather` it exists to
   kill** — coroutines that never suspend produce disjoint windows. What has
   teeth is a depth recorder shared by the providers asserting
@@ -193,11 +190,9 @@ other.
 
 - **Six services still read `titles.genres` raw**: `GenreAffinityProvider`,
   `TasteService`, `BecauseYouWatched`, `Seasonal`, `SimilarityService` and
-  `CandidatePoolService`.
-  [ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)
-  fixed `/browse`'s filter and facets at read time and reached none of them;
-  `GenreNormalisationService` (`usher genres --backfill`) is the writer that
-  does, by rewriting the column through `canonicalise_genres`.
-  `list_owned_by_tag` is deliberately **not** widened by ADR-0039 and stays
+  `CandidatePoolService`. The read-time fix to `/browse`'s filter and facets
+  reached none of them; `GenreNormalisationService` (`usher genres --backfill`)
+  is the writer that does, by rewriting the column through `canonicalise_genres`.
+  `list_owned_by_tag` is deliberately **not** widened and stays
   exact containment — it is the call the two genre-shaped providers make, so it
   is the method a session acting on this bullet is most likely to break.

@@ -40,7 +40,7 @@ uv run usher curate            # one generation for the default household
 - With `USHER_LLM_ENABLED=false` there is no `CurationService` to build at all —
   `composition.llm_client` answers `(None, no-op)` and the service spells its
   client `LLMClient`, never `LLMClient | None`, so *no client, no curation* is a
-  `mypy` fact at the composition root rather than a branch (ADR-0026).
+  `mypy` fact at the composition root rather than a branch.
 - ⚠️ **An empty pool, a generation validating to zero rows and an unproducible
   completion all exit 1 saying the previous rows still stand — which is not
   "nothing was written".** Only the empty pool attempts no call; the other two
@@ -154,10 +154,9 @@ removing it, gives up the bounds, and asks a model to quote a number.
   `usher index --backfill`, then `usher work`, then enough watch history to
   rebuild a centroid, before a single `usher curate`
   (`.claude/rules/search-and-embeddings.md` has the width argument).
-- **No hosted provider has ever been touched**, so ADR-0027's *"two providers'
-  quirks are unmeasured"* stands: whether `json_schema` is honoured, whether
-  `strict: true` is accepted, and 429/`Retry-After` semantics are all
-  one-endpoint knowledge.
+- **No hosted provider has ever been touched**, so two providers' quirks are
+  unmeasured: whether `json_schema` is honoured, whether `strict: true` is
+  accepted, and 429/`Retry-After` semantics are all one-endpoint knowledge.
 
 ## Query expansion is off by default because it measured worse
 

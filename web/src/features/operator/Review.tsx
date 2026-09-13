@@ -63,9 +63,9 @@ export default function Review() {
   const item = items[cursor]
 
   /**
-   * The two tiers are two different queries against two different indexes
-   * (ADR-0031), never a fallback chain — which is why they are fetched
-   * separately and rendered under separate group headers.
+   * The two tiers are two different queries against two different indexes,
+   * never a fallback chain — which is why they are fetched separately and
+   * rendered under separate group headers.
    */
   const prefix = useSuggest(query, 'prefix')
   const fuzzy = useSuggest(query, 'fuzzy')

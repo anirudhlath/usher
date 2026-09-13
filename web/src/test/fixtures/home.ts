@@ -7,7 +7,7 @@
  * · a row with a `reason` sentence and a `null` one — `reason` is nullable and
  *   a row that has none must not get an invented explanation;
  * · three of the four `display_hint` members, which say what shape a card *is*
- *   and never where to put it (ADR-0006);
+ *   and never where to put it;
  * · a card mid-episode (`episode_id` + `episode_label` + `position_seconds`),
  *   a card played through, and cards the household does not own.
  *

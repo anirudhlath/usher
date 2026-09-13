@@ -65,8 +65,8 @@ taken while 1024-lane `halfvec` columns had crossed `TOAST_TUPLE_THRESHOLD` and
 every exact scan cost 594.7 ms/seed. `m09f` moved every `halfvec` column to
 `PLAIN` storage and took that back to 91.7 ms/seed. The *conclusion* survived
 the correction — plan it as an overnight job, not a follow-on step — and the
-number that motivated it did not. ([ADR-0038](../prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md);
-`src/usher/db/backup_manifest.py`'s `title_neighbors` entry.)
+number that motivated it did not. (`src/usher/db/backup_manifest.py`'s
+`title_neighbors` entry carries the storage class.)
 
 ⚠️ **A complete walk of this library has never once been run**, so the `sync`
 row above is a per-request cost and not a total. `.claude/rules/emby-push-and-ingest.md`

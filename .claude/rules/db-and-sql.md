@@ -7,7 +7,7 @@ paths:
 
 # PostgreSQL, SQLAlchemy and migrations
 
-Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
+Rules for this subsystem; the evidence is in the docstrings named here.
 
 ## Generated columns
 
@@ -23,7 +23,7 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
 - **`CREATE OR REPLACE FUNCTION` does not recompute stored values; a later
   `UPDATE` of the row does.** Changing a body means a full column rewrite in the
   same migration — drop index, drop column, replace function, re-add, recreate
-  index; `fa2b6c1e9d30` has the recipe, ADR-0020 the argument.
+  index; `fa2b6c1e9d30` has the recipe.
 - **`update()`'s mutation loop writes `None` onto the generated column**:
   `column "search_document" can only be updated to DEFAULT`. `DERIVED_COLUMNS`
   on `TitleRow` is the declared exception to the 1:1 row/model rule; both are
@@ -57,7 +57,7 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
 - **Before adding a second writer to a column, check whether the first one's
   units survive it, and split the column *before* the second writer lands** —
   `titles.vote_count` held IMDb's and TMDb's counts in overlapping ranges, so no
-  threshold could separate a contaminated row from a clean one (ADR-0040).
+  threshold could separate a contaminated row from a clean one.
   Splitting does not fix the readers, it exposes them: a `NULLS LAST` key
   degrades to `id ASC` and a `>=` predicate selects zero rows, both silently.
 
@@ -146,8 +146,8 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
   WHERE key IS NULL AND id > :after_id                       -- unkeyed resume
   ```
 
-  Branch in Python on `:after_key` being NULL (`title.py::_browse_after`,
-  ADR-0034); where both sort columns are `NOT NULL`, two arms suffice.
+  Branch in Python on `:after_key` being NULL (`title.py::_browse_after`);
+  where both sort columns are `NOT NULL`, two arms suffice.
 - **Do not spell that ordering out as `(key IS NOT NULL) DESC, key <dir>`.**
   Postgres does not simplify the leading term even on a `NOT NULL` column, so
   the sort key matches no index and the page becomes a full scan. `NULLS LAST`
@@ -199,7 +199,7 @@ Rules for this subsystem; the evidence is in the ADRs and docstrings named here.
 
 The two importers' alphabets are disjoint on every concept they both name, so no
 title carries two spellings of one — a vocabulary finding, in
-`search-and-embeddings.md` and [ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md).
+`search-and-embeddings.md`.
 
 - **The filter is `&&` over `genre_spellings(genre)`, not `@>`** — for an
   unmapped label the expansion is one element and the two are identical. Write

@@ -2,7 +2,7 @@
  * Every id this suite uses, in one place, and every one of them shaped like a
  * real UUIDv7.
  *
- * Identity in Usher's contract is its own UUIDv7 (ADR-0003) — `tmdb_id` and
+ * Identity in Usher's contract is its own UUIDv7 — `tmdb_id` and
  * `imdb_id` are indexed attributes and never identifiers in an API response —
  * so a fixture using `"title-1"` would be testing a shape the API cannot
  * produce. These carry the version nibble (`7`) and the variant bits, and they
@@ -68,7 +68,7 @@ export const IMAGE_LOGO = '0191f4c8-2e47-7075-9414-eb52fb637f94'
 
 /**
  * A keyset cursor. Opaque by contract — it encodes a position **and a hash of
- * the query**, which is why changing a filter invalidates it (ADR-0034) — so
+ * the query**, which is why changing a filter invalidates it — so
  * the only thing a test may do with this value is send it back.
  */
 export const CURSOR_PAGE_TWO = 'eyJrIjoibmFtZSIsInYiOiJTb2xhcmlzIiwiaCI6IjRmMmEifQ'

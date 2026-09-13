@@ -595,7 +595,7 @@ then `titles.runtime_minutes * 60`, and on this household:
 
 | source | covers | supplied |
 |---|---|---|
-| `watch_states.runtime_seconds` (`db/models/watch.py`, nullable by ADR-0014) | **0 of 55** | 0 |
+| `watch_states.runtime_seconds` (`db/models/watch.py`, nullable) | **0 of 55** | 0 |
 | `media_items.runtime_seconds` | 55 of 55 | **55 of 55 — 100%** |
 | `titles.runtime_minutes × 60` | 55 of 55 | 0 (never reached) |
 
@@ -811,8 +811,8 @@ answers a different question, which is the failure
 
 **2. "Push connection uptime" plots delivery, and its `source` label is an
 operator-typed name.** `PushSnapshot.delivering`, not `connected`, because
-*"a gauge fed by the socket's state would read 1 for the failure ADR-0004
-measured"*. The half nobody had written down is the label: `api/lanes.py`'s
+*"a gauge fed by the socket's state would read 1"* for a silent channel. The
+half nobody had written down is the label: `api/lanes.py`'s
 `push_snapshots` builds the reader as
 `{self._names[source_id]: PushSnapshot(...)}` over `self._open_adapters`, so
 the label is `"Shared Emby"` and never a UUID — **observed as exactly that
@@ -1248,9 +1248,9 @@ plot a mean until the instruments carry a ladder. **A mean has no p99**, so the
 enrichment panel's second quantile target was dropped rather than converted.
 
 Fixing the instruments is the better repair and is not done here: D1's ladder
-was derived from ADR-0002's and ADR-0031's measured distributions, and neither
-of these two instruments has a measured distribution to derive one from. Issue
-filed; the panels are honest in the meantime.
+was derived from measured distributions, and neither of these two instruments
+has a measured distribution to derive one from. Issue filed; the panels are
+honest in the meantime.
 
 ## 5 — Cost & Compliance (`05-cost-and-compliance.json`, uid `usher-cost-compliance`)
 
@@ -1265,7 +1265,7 @@ whole of it.
 
 They read `raw_payloads.fetched_at` and deliberately not `titles.enriched_at`,
 which records when Usher enriched a title and does not move when a cached
-payload is re-read (ADR-0016). The ceiling is spelled `interval '6 months'` and
+payload is re-read. The ceiling is spelled `interval '6 months'` and
 never `'180 days'` — the two are never equal, and 180 days matches *more* rows,
 so it over-reports a breach that has not happened. `<` and never `<=`: TMDb's
 term is *no more than* six months.
@@ -1297,7 +1297,7 @@ Series verified present: `usher_embedding_duration_seconds_count` = 141.
 08's resource table**, which carries its own warning that nothing reads it and
 no policy derives from it — and which M9's Track 2 treated as a budget, deriving
 a 2.0 GB ceiling and **withdrawing a design** measured at 2.702 GB against a
-number with no forcing function (ADR-0036). A number nothing enforces is not a
+number with no forcing function. A number nothing enforces is not a
 threshold. This panel is where D13's alert is drawn from, and **the window is the
 same in both**: a 7-day least-squares fit extrapolated 14 days.
 
@@ -1543,8 +1543,8 @@ operator-visible condition, and the one the gauge can see.
 ## ⚠️ A silent push channel is given up after ~7.5 minutes, and *Push down* waits 15
 
 Measured while firing this rule, and it narrows what the alert covers. Against a
-stub that upgrades and delivers nothing — ADR-0004's own failure — the shipped
-defaults give the lane up long before the alert's window elapses:
+stub that upgrades and delivers nothing, the shipped defaults give the lane up
+long before the alert's window elapses:
 
 ```
 D11 Stub Emby's push channel failed (5/5): /embywebsocket delivered no message
@@ -1993,7 +1993,7 @@ if it ever matters, is an index on `titles.created_at` and not a shorter window.
 🔴 **The threshold is the database against itself.** *"The next fortnight adds
 more than everything this database currently holds"* — self-calibrating, and it
 needs no operator to have told it how big the disk is, which is exactly what
-`08-operations.md`'s resource envelope cannot be asked for (ADR-0036). A
+`08-operations.md`'s resource envelope cannot be asked for. A
 **bootstrap fires it on purpose**: a deployment filling an empty catalog really
 is on track to add more than it holds, and the operator provisioning its disk
 is who should be told.
@@ -2060,7 +2060,7 @@ cache cap), `image_fetch_timeout_seconds` and `image_cdn_base_url`.
 
 That table's own header records that nothing reads it, no host enforces it and
 no policy derives from it; M9's Track 2 derived a 2.0 GB ceiling from one row,
-measured a design at 2.702 GB and **withdrew the design** (ADR-0036). So
+measured a design at 2.702 GB and **withdrew the design**. So
 `test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table`
 parses **63 byte figures** out of that table — in both the decimal and the
 binary reading of every ambiguous unit — and forbids any of them appearing as a
@@ -2071,7 +2071,7 @@ proposes planting `8589934592` (the old `~8 GB` row); that row now reads
 *"`~8–12 GB` described a database this project no longer has"*, so `8 GB` is no
 longer a standalone figure and the plant would pass. The controls used instead
 are `5025650355` — the measured baseline, the figure most likely to be promoted
-from a measurement into a threshold — and `2147483648`, ADR-0036's withdrawn
+from a measurement into a threshold — and `2147483648`, the withdrawn
 ceiling. Both die on
 *"a rule in this file carries a byte literal that is a figure from PRD 08's
 resource envelope"*.
