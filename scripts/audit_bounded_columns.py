@@ -676,12 +676,11 @@ def _refusal_points(
             yield RefusalPoint("", covered)
         elif _is_session_call(node, _EXECUTE_CALL):
             if _core_dml(node):
-                # A Core DML construct -- `execute(update(SyncRunRow)...)` -- carries no
-                # SQL text for `_statement_text` to read, and the strings it *does*
-                # contain are arguments rather than statements:
-                # `.execution_options(synchronize_session="fetch")` reads back
-                # as the statement `"fetch"`, which matches none of the three
-                # write regexes and would drop the write entirely.
+                # A Core DML construct carries no SQL text for
+                # `_statement_text` to read, and the strings it *does* contain
+                # are arguments: `synchronize_session="fetch"` reads back as
+                # the statement `"fetch"`, matching no write regex, which would
+                # drop the write entirely.
                 yield RefusalPoint("", covered)
             else:
                 statement = _statement_text(node, texts)
