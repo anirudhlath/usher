@@ -1,7 +1,4 @@
-"""`docs/runbooks/` is four operator-facing documents and an index.
-
-and the index is the part a rename breaks silently.
-"""
+"""`docs/runbooks/` is four operator-facing documents and an index."""
 
 import argparse
 import pathlib
@@ -17,9 +14,8 @@ _INDEX = _RUNBOOKS / "README.md"
 _PRD_OPERATIONS = _ROOT / "docs" / "prd" / "08-operations.md"
 
 #: The spec asks for four — restore, upgrade, disaster recovery, rotation.
-#: A floor rather than an equality, on `test_docs_currency.py`'s precedent: an
-#: equality is a line the next runbook edits, which is how a count stops being
-#: a measurement and becomes a number people bump until green.
+#: A floor rather than an equality: an equality is a line the next runbook
+#: edits until it goes green.
 RUNBOOKS_THE_SPEC_ASKS_FOR = 4
 
 #: `.claude/rules/prd-maintenance.md`'s own pattern, unchanged. `[^)#]` on the
@@ -27,24 +23,19 @@ RUNBOOKS_THE_SPEC_ASKS_FOR = 4
 #: keeps `https://…` links and image paths out.
 _MARKDOWN_LINK = re.compile(r"\]\(([^)#][^)]*\.md)\)")
 
-# : Every `uv run usher …` and the rest of its line.
+#: Every `uv run usher …` and the rest of its line.
 _INVOCATION = re.compile(r"uv run usher\b([^\n`&|;]*)")
 
-#: Measured 2026-08-26: the three K5/K8 runbooks alone carry 25 invocations of
-#: 9 distinct subcommands, and all four carry 35. Six is a floor on the
-#: premise, not a description of the corpus — a number that tracked the corpus
-#: would be a line the next runbook edits.
+#: A floor on the premise that the extraction reads something, not a
+#: description of the corpus.
 INVOCATIONS_AT_LEAST = 6
 
 
 def _subcommands() -> set[str]:
     """The subcommands `build_parser()` advertises, read off the parser.
 
-    ⚠️ **Not `grep -c "add_parser("`.** That spelling counts its own comment —
-    caught in this milestone's K3 review — and it cannot see a subparser added
-    by any other route. Twenty commands as of 2026-08-26, which this function
-    does not assert: the number is the CLI's business and the runbooks' only
-    obligation is to name commands that are in it.
+    Not `grep -c "add_parser("`: that spelling counts its own comment and
+    cannot see a subparser added by any other route.
     """
     subparsers = next(
         action
@@ -97,16 +88,10 @@ def _invocations(text: str) -> list[tuple[tuple[str, ...], str | None]]:
 
 
 def test_every_runbook_the_index_names_exists_and_every_runbook_is_indexed() -> None:
-    """Kills a renamed runbook leaving a dead row in the index.
+    """Kills a renamed runbook leaving a dead row in the index, or a runbook nobody indexed.
 
-    and a new runbook nobody added to it — the same defect wearing two faces.
-
-    **The read comes first and that is the case's design.** A scan of a
-    `docs/runbooks/` that does not exist answers the empty set, and the empty
-    set equals the empty set: the check would report success over a directory
-    with nothing in it. Reading the index first turns that into a
-    `FileNotFoundError` naming `docs/runbooks/README.md`, which is a failure
-    an operator can act on rather than a green tick over a hole.
+    The index is read before the directory is scanned so that a missing
+    `docs/runbooks/` raises rather than comparing the empty set to itself.
     """
     linked = _links(_INDEX)
 
@@ -126,19 +111,10 @@ def test_every_runbook_the_index_names_exists_and_every_runbook_is_indexed() -> 
 
 
 def test_every_link_in_every_runbook_resolves() -> None:
-    """The obligation the index case scopes away, taken separately.
+    """Kills a runbook link that points outside `docs/runbooks/` at a file that is gone.
 
-    The case above compares only the links that land *inside*
-    `docs/runbooks/`, because the index legitimately points at
-    `../prd/08-operations.md` and that is not a runbook. This one covers the
-    rest — and it covers a real gap rather than a hypothetical: the link check
-    `.claude/rules/prd-maintenance.md` prescribes is scoped to `docs/prd/**`
-    plus `CLAUDE.md` and `README.md`, so **no check in this repository walks
-    `docs/runbooks/` at all**. Twenty-one links across the five files, 17 to a
-    sibling runbook and 2 to an ADR — and an ADR rename is exactly the event
-    that would break those silently.
-
-    The floor is the premise, on the same reasoning as every other scan here.
+    The index case above compares only links landing inside the directory; no
+    other check in this repository walks `docs/runbooks/` at all.
     """
     checked: list[tuple[str, pathlib.Path]] = []
     for runbook in sorted(_RUNBOOKS.glob("*.md")):
@@ -180,14 +156,10 @@ def test_the_index_is_read_before_the_directory_is_scanned(
 
 
 def test_every_command_a_runbook_names_is_a_command_the_cli_advertises() -> None:
-    """Kills a runbook telling an operator to run something that does not exist.
+    """Kills a runbook telling an operator to run a subcommand the CLI does not advertise.
 
-    which is how `usher rotate-secret` would have read in any document written a week
-    before it landed.
-
-    The floor is the premise. An extraction that matched nothing would report
-    every runbook in this directory clean, which is the failure every scan in
-    this repository carries a non-emptiness control against.
+    The floor is the premise: an extraction that matched nothing would report
+    every runbook clean.
     """
     advertised = _subcommands()
     global_flags = _global_flags()
@@ -241,19 +213,12 @@ def test_prd_08_points_at_the_runbook_index_and_the_link_resolves() -> None:
 
 
 def test_no_runbook_puts_a_key_on_a_command_line() -> None:
-    """`--new-key` is a tripwire, not an argument.
+    """Kills a runbook pasting a secret onto a command line via `--new-key`.
 
-    `cli.py` declares it so that typing it is a refusal rather than a leak: it
-    was an unambiguous *prefix* of `--new-key-env` until `allow_abbrev=False`
-    landed on 2026-08-26, so the operator's key arrived in `argv` — in shell
-    history and in `ps` output for every user on the box — through the very
-    flag that exists to keep it out. A runbook is the most-pasted text this
-    project ships, so the spelling must not appear on a command line in one.
-
-    Scoped to `uv run usher …` lines rather than to the whole file, because
-    `docs/runbooks/rotation.md` names `--new-key` in prose precisely to say it
-    is refused, and a check that could not tell those apart would be asking a
-    document to stop warning about the thing it warns about.
+    `cli.py` declares `--new-key` only so that typing it is a refusal; the key
+    would otherwise land in shell history and in `ps`. Scoped to `uv run usher
+    …` lines, because `rotation.md` names the flag in prose to say it is
+    refused.
     """
     scanned = sorted(_RUNBOOKS.glob("*.md"))
     assert len(scanned) > RUNBOOKS_THE_SPEC_ASKS_FOR - 1, (
