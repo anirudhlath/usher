@@ -187,9 +187,8 @@ vec AS MATERIALIZED (
 )
 SELECT COALESCE(lexical.id, vec.id) AS id,
        -- A vector-only row has no lexical arm to have compared a name in, and
-       -- NULL sorts first under DESC -- trap 1 in the list above, arriving
-       -- through a new column. false is the honest value and it is also the
-       -- one the vector lane answers on its own.
+       -- NULL sorts first under DESC. false is the honest value and it is also
+       -- the one the vector lane answers on its own.
        COALESCE(lexical.exact_name, false) AS exact_name,
        COALESCE(1.0 / (:rrf_k + lexical.rnk), 0.0)
      + COALESCE(1.0 / (:rrf_k + vec.rnk), 0.0) AS score
@@ -500,10 +499,10 @@ WITH candidates AS MATERIALIZED (
     -- statement exists to avoid, one line above the cap that avoids it.
     WHERE t.name % :prefix
     -- **Ordered, and that is load-bearing rather than tidy.** An unordered
-    -- cap truncates arbitrarily, which is what makes a *lower* floor score
-    -- *worse* recall (66.2% at 0.3 -> 48.5% at 0.1 -> 2.6% at 0.05,
-    -- measured). The id keeps the cap itself deterministic when many names
-    -- score identically, which on a `Vane NNNN` family is all of them.
+    -- cap truncates arbitrarily, which is what makes a *lower* trigram floor
+    -- score *worse* recall rather than better. The id keeps the cap itself
+    -- deterministic when many names score identically, which on a
+    -- `Vane NNNN` family is all of them.
     ORDER BY similarity(t.name, :prefix) DESC, t.id
     LIMIT :candidates
 ),
@@ -520,65 +519,23 @@ SELECT id, dist, sim
 FROM scored
 WHERE dist <= :max_distance
 -- Distance first, then `tmdb_popularity`, then `tmdb_vote_count`, then id.
--- Popularity is
--- what stops the type-ahead box's first row from being arbitrary among
--- equally-good matches; NULLS LAST because `titles.tmdb_popularity` is
--- nullable and a descending sort puts NULLs first by default, which would
--- hand the box to whichever skeleton the scan reached first. The id makes the
--- order total.
+-- Popularity is what stops the type-ahead box's first row from being arbitrary
+-- among equally-good matches; NULLS LAST because `titles.tmdb_popularity` is
+-- nullable and a descending sort puts NULLs first by default, which would hand
+-- the box to whichever skeleton the scan reached first. The id makes the order
+-- total.
 --
--- **`tmdb_vote_count` is here because `tmdb_popularity` is sparse, and both
--- the claim and M6's old wording of it are measured rather than suspected.**
--- (Both columns were spelled without the `tmdb_` prefix until ADR-0040 gave
--- every rating column its source; every measurement below was taken against
--- the same bytes and is restated in the new spelling, never re-derived.) M6
--- wrote here that `titles.tmdb_popularity` is NULL on **all 1,271,138 rows --
--- nothing in `src/` writes it except TMDb enrichment**; Task 36 re-measured
--- that on a realistic catalog (2026-08-05) and both halves were wrong:
---   * "NULL on all rows" is true of a **`--phase imdb`** catalog only, which
---     is what M6's gate ran against. `link_crosswalk` writes
---     `tmdb_popularity` from `tmdb_ids` on `--phase crosswalk|all`
---     (`ports/repository.py`), so a real operator's catalog is **partially**
---     populated.
---   * Measured on a `--phase all` catalog of 1,271,570 titles: **291,584
---     (22.9%) carry a popularity, of which exactly 3 are 0.0** -- the daily
---     export ships real values, not the `NOT NULL DEFAULT 0` filler the
---     column permits. On the ~77% that stay NULL this clause degenerates to
---     `dist ASC, id ASC` (a UUIDv7, i.e. insertion order), and
---     `tmdb_vote_count` -- written by the bootstrap on 539,350 rows -- is
---     what orders them.
+-- **`tmdb_vote_count` is the tiebreak because `tmdb_popularity` is sparse**:
+-- only TMDb enrichment writes either column, so on a bootstrap-only catalog
+-- both are NULL and this `ORDER BY` degenerates to `dist ASC, id ASC` --
+-- insertion order, and worth a few points of recall@5.
 --
--- ⚠️ **That last sentence is dated 2026-08-05 and ADR-0040's Task 2 moved the
--- writer it names (2026-08-19).** `BulkCatalogRepository.apply_ratings` filled
--- this column when the 539,350 was taken; it now fills `imdb_num_votes`, so
--- nothing but TMDb enrichment reaches `tmdb_vote_count` and **a bootstrap-only
--- catalog leaves it NULL on every row** rather than on the 732,220 of 1,271,570
--- measured then. Where both keys are NULL this `ORDER BY` is `dist ASC, id ASC`
--- outright -- insertion order -- which is the state M6's gate measured and
--- ADR-0002 recorded costing 4.2 points of recall@5 overall and 8.3 on the
--- 2-4-character band. The measurement above stands for the catalog it was taken
--- on and no longer describes what a fresh bootstrap produces.
---
--- **Deliberately not repaired here.** Pointing this key at `imdb_num_votes`
--- would restore its reach, but it is a *ranking* change with its own
--- measurement owed -- the two columns count different electorates -- and it is
--- issue #39, which the rating-provenance work is scoped not to build. The same
--- ⚠️ is on `adapters/search/prefix.py` and on
+-- **Deliberately not repaired here.** Pointing the tiebreak at
+-- `imdb_num_votes` would restore its reach on such a catalog, but the two
+-- columns count different electorates, so that is a ranking change rather than
+-- a fix: issue #39. The same note is on `adapters/search/prefix.py` and on
 -- `ports/repository/title.py::list_unwatched_candidates`, the three sites that
 -- share this key.
--- **The shipped ordering was re-measured and deliberately kept.** Same 2,993
--- typo cases, same seed, the populated arm against the all-NULL one: the
--- populated catalog costs **1.3 pts overall (83.4 -> 82.1)**, entirely
--- out-ranked misses where a real `tmdb_popularity` promotes a wrong candidate --
--- inside Task 36's 2.0-pt regression bar, so `CLAUDE.md`'s "partial catalog
--- is worse than either extreme" is **refuted**. Making `tmdb_vote_count` the
--- primary key (dropping `tmdb_popularity`) recovers all 1.3 pts and does not hurt
--- the all-NULL arm, but its behaviour on a *genuinely enriched* tier --
--- boundary call 4's population -- could not be measured on this skeleton
--- catalog, so it is an M9 change to re-measure, not shipped here.
--- `NULLIF(tmdb_popularity, 0)` recovers nothing: only 3 zeros exist.
--- `tmdb_vote_count` remains a tiebreak *under* `tmdb_popularity`, so an
--- enriched catalog is unaffected.
 ORDER BY dist ASC, tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS LAST, id ASC
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant
