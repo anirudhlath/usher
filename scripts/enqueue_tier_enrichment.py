@@ -22,9 +22,8 @@ from usher.ports.jobs import JobQueue, JobRequest
 # would think to change.
 TIER_MIN_VOTES = 100
 
-# Keyset, not `OFFSET`: `MediaItemRepository.list_unmatched`'s offset walk is measured
-# at 43.7 ms at offset 0 and 388.9 ms at offset 1,126,574 -- linear per page, quadratic
-# to drain -- which is the exact shape of walk this is.
+# Keyset, not `OFFSET`: an offset walk over this table is linear per page and
+# quadratic to drain, which is the exact shape of walk this is.
 _PAGE = """
 SELECT id, kind, name, sort_name, imdb_num_votes, tmdb_id
 FROM titles

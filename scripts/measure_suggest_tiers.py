@@ -46,8 +46,8 @@ SHIPPED_CANDIDATES = 200
 
 # The union arm, lifted verbatim so the titles-only variant is *derived from*
 # B2's statement rather than retyped beside it. If B2's SQL is ever edited, the
-# surgery finds nothing and the run refuses rather than measuring a stale copy
-# of a statement that has moved.
+# surgery finds nothing and the run refuses rather than scoring a stale copy of
+# a statement that has moved.
 _UNION_ARM = """    UNION
     SELECT n.title_id
     FROM title_search_names AS n
@@ -57,7 +57,7 @@ _UNION_ARM = """    UNION
 # Tier 1 with the second arm removed. **This is the artefact bar (1) is scored
 # on and it is also the narrowing the plan names as bar (2)'s failure
 # consequence** -- one statement serving both, so the number that would justify
-# the narrowing is measured on the narrowing itself.
+# the narrowing is taken on the narrowing itself.
 _TITLES_ONLY = prefix_module._PREFIX.replace(_UNION_ARM, "")
 
 # Bands for W2. One through eight, because eight is where the gate's recall
@@ -138,10 +138,9 @@ class RunLog:
 def _say(message: str) -> None:
     """A progress line with a wall clock on it.
 
-    Not decoration: a run of this measured **over half an hour** on the first
-    end-to-end pass and the log was silent for all of it, so there was no way
-    to tell a slow phase from a hung one -- or to size the quiet window the
-    real run needs. Every phase says what it is about to do and how much of
+    Not decoration: a full run takes over half an hour, and a silent log gives
+    no way to tell a slow phase from a hung one, or to size the quiet window
+    the real run needs. Every phase says what it is about to do and how much of
     it there is.
     """
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
@@ -191,9 +190,8 @@ def _cpu_busy(seconds: float = _CPU_SAMPLE_SECONDS) -> float:
     """The fraction of all CPU that is *not* idle, over `seconds`.
 
     **Sampled while this script is deliberately doing nothing**, which is the
-    whole point: taken at a moment when the harness is idle, every busy jiffy
-    belongs to somebody else. That is what makes it a measurement of the box
-    rather than a measurement of the run.
+    whole point: with the harness idle, every busy jiffy belongs to somebody
+    else. That is what makes it a reading of the box rather than of the run.
     """
     first_total, first_idle = _cpu_counters()
     time.sleep(seconds)
@@ -218,9 +216,9 @@ def _load_snapshot() -> dict[str, Any]:
             continue
         if not raw:
             continue
-        # **A substring match counts the shell that mentions the word.** Caught with the
-        # window already open: `pgrep -f pytest` reported four processes on a box the
-        # coordinator had just measured as clear, and every one was an idle `zsh -c '...
+        # **A substring match counts the shell that mentions the word.**
+        # `pgrep -f pytest` reports an idle `zsh -c '... pytest ...'` as a
+        # running workload, so argv is matched token by token instead.
         if comm in _NOT_A_WORKLOAD:
             continue
         tokens = raw.decode("utf-8", "replace").split("\0")
@@ -308,8 +306,8 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
                            AS with_popularity,
                        count(*) FILTER (WHERE tmdb_vote_count IS NOT NULL)
                            AS with_vote_count,
-                       -- The column the sampling frame is drawn from since
-                       -- ADR-0040 split the two electorates. Recorded beside
+                       -- The column the sampling frame is drawn from, since
+                       -- the two electorates split. Recorded beside
                        -- the TMDb one rather than in place of it: an
                        -- enrichment-only catalog and a bootstrap-only one
                        -- have opposite profiles here, and which of the two
@@ -362,15 +360,14 @@ async def check_frame(session: AsyncSession) -> dict[str, Any]:
     different eligible population, and a recall figure taken over a different
     population is not the gate's figure however close it looks.
 
-    ⚠️ **Read a refusal here against the module docstring's table before
-    changing anything.** Two different things make this refuse and only one of
-    them is a defect: the predicate naming the wrong side of ADR-0040's split
-    (bands an order of magnitude short -- fixed 2026-08-27), and the catalog
-    having grown since 2026-08-03 (bands within a couple of percent, which is
-    the state on this deployment and is not fixable from here). **Do not
-    update `GATE_POOLS` to make this pass** -- those five numbers are the
-    gate's population, and a check rewritten to today's reading cannot detect
-    the drift it exists for.
+    **Read a refusal here against the module docstring's table before changing
+    anything.** Two different things make this refuse and only one is a defect:
+    the predicate naming the wrong side of the popularity/vote-count split
+    (bands an order of magnitude short), and the catalog having grown since the
+    gate was set (bands within a couple of percent, and not fixable from here).
+    **Do not update `GATE_POOLS` to make this pass** -- those five numbers are
+    the gate's population, and a check rewritten to today's reading cannot
+    detect the drift it exists for.
     """
     shared = await _scalar(
         session,
@@ -406,22 +403,15 @@ async def check_frame(session: AsyncSession) -> dict[str, Any]:
 def _mutate(name: str, typo_class: str, chooser: random.Random) -> str | None:
     """One single-edit typo of `name`, or `None` where the class does not apply.
 
-    The four classes ADR-0002 named, at a uniformly random position. Deletion
-    is the one that can decline: a two-character name deleted is a
-    one-character name, which is not a case about typo tolerance.
+    Four classes, at a uniformly random position. Deletion is the one that can
+    decline: a two-character name deleted is a one-character name, which is not
+    a case about typo tolerance.
 
     **A transposition draws from the positions that transpose to something
-    else, and the case count is what says so.** The first spelling here drew a
-    position uniformly and declined when the two characters matched, which
-    produced **2,964** cases against the gate's 2,993 -- 29 short, all of them
-    names holding a doubled letter at the drawn position. The gate's own
-    arithmetic is `3000 - 7`, and the seven are the two-character names that
-    admit no deletion, so its transposition arm declined nothing. Declining is
-    not the alternative to be preferred either way: the *other* way to reach
-    3,000 is to emit the unmutated name, which is a guaranteed hit for any
-    index and would have made the 2-4 band's measured **0.0%** arithmetically
-    impossible. Drawing from the valid positions is the only reading that
-    produces both numbers.
+    else**, rather than drawing uniformly and declining on a doubled letter.
+    The gate's case count is `3000 - 7` -- the seven being the two-character
+    names that admit no deletion -- so its transposition arm declined nothing,
+    and only drawing from the valid positions reproduces that.
     """
     length = len(name)
     if typo_class == "substitution":
@@ -477,7 +467,7 @@ async def build_typo_cases(session: AsyncSession) -> list[TypoCase]:
         # function at all. On the real catalog every pool is larger than 150
         # and `check_frame` has already refused if it is not, so the clamp is
         # unreachable there -- which is the only condition under which a clamp
-        # like this is not quietly redefining the measurement.
+        # like this is not quietly redefining what is being scored.
         drawn = chooser.sample(list(rows), min(GATE_DRAW_PER_BAND, len(rows)))
         for row in drawn:
             for typo_class in ("substitution", "deletion", "transposition", "doubled"):
@@ -512,8 +502,8 @@ async def keystroke_probes(session: AsyncSession, chooser: random.Random) -> lis
         # **Deduplicated within a length, and that is not a saving.** At length one the
         # whole probe space is about thirty characters, so a hundred draws is the same
         # twenty strings over and over -- timing them repeatedly weights the
-        # distribution by how common an initial letter is rather than measuring the
-        # tail, which is exactly the wrong weighting for a p95 whose job is to find the
+        # distribution by how common an initial letter is rather than by the
+        # tail, which is the wrong weighting for a p95 whose job is the tail.
         drawn = {name[:length] for name in chooser.sample(names, min(KEYSTROKE_DRAWS, len(names)))}
         probes.extend((length, one) for one in sorted(drawn))
     return probes
@@ -552,7 +542,7 @@ async def adversarial_probes(session: AsyncSession, top: int = 5) -> list[tuple[
     """W3: the prefixes with the largest match sets, found rather than guessed.
 
     One and two characters, ranked by how many rows each actually matches over
-    both arms -- the worst case B2 named, chosen by measurement rather than by
+    both arms -- the worst case B2 named, found rather than guessed at by
     picking `t` and hoping.
     """
     if _ADVERSARIAL:
@@ -598,9 +588,9 @@ async def _time_statement(
 ) -> list[float]:
     """Timed executions in milliseconds, after one discarded warm-up.
 
-    The warm-up is discarded *and* read: it is what decides how many
-    repetitions the probe can afford, so a slow probe is measured fewer times
-    rather than a fast probe being measured too few.
+    The warm-up is discarded *and* read: it decides how many repetitions the
+    probe can afford, so a slow probe gets fewer of them rather than a fast
+    probe too few.
 
     `serial=True` forbids parallel workers for the duration of each execution's
     own transaction -- the floor a busy box gives you, against the ceiling an
@@ -625,7 +615,7 @@ async def _time_statement(
 async def _time_cold(
     session: AsyncSession, statement: str, probes: Iterable[str], limit: int
 ) -> list[float]:
-    """One execution per probe, which is the shape the gate's row was measured in."""
+    """One execution per probe, which is the shape the gate's row was taken in."""
     samples: list[float] = []
     for probe in probes:
         parameters = {"pattern": prefix_module._pattern(probe.lower()), "limit": limit}
@@ -656,8 +646,8 @@ async def verify_harness(session: AsyncSession, log: RunLog) -> None:
     B2's own SQL minus one arm rather than a retyped near-copy, and that the
     surgery actually removed something. The third is about the *adapter*: that
     executing the shipped constant directly agrees, row for row, with driving
-    `PostgresPrefixSuggestIndex.suggest`. Without it this script measures a
-    copy of the shipped path and reports it as the shipped path.
+    `PostgresPrefixSuggestIndex.suggest`. Without it this script times a copy
+    of the shipped path and reports it as the shipped path.
     """
     if prefix_module._PREFIX.count(_UNION_ARM) != 1:
         raise MeasurementRefused(
@@ -810,8 +800,8 @@ async def measure_tier1(
             "gather_in_parallel_plan": gather_parallel,
             "gather_in_serial_plan": gather_serial,
             # Said rather than implied: if the planner never chose a Gather for
-            # this probe, the two columns are two measurements of one thing and
-            # the parallel-assist question is answered "it does not arise here".
+            # this probe, the two columns are one number twice and the
+            # parallel-assist question is answered "it does not arise here".
             "parallelism_was_in_play": gather_parallel,
         }
     return out
@@ -823,7 +813,7 @@ async def driver_floor(session: AsyncSession, reps: int) -> dict[str, Any]:
     Tier 1's gate figure is 0.6 ms and a `BEGIN` is not free, so a reader
     otherwise cannot tell how much of a tier-1 latency is the index and how
     much is the driver, the transaction and SQLAlchemy's result assembly. Every
-    tier-1 number here is measured the way a request pays for it -- one
+    tier-1 number here is taken the way a request pays for it -- one
     transaction per probe, timed at the Python call boundary -- and this is
     what that costs when the query does nothing at all.
     """
@@ -1014,10 +1004,10 @@ def _verdicts(log: RunLog) -> dict[str, Any]:
                 and shares["dropped_by_rerank"] == 0.0
             )
 
-        # **Bar (3)'s two halves name two different configurations, which the plan pairs
-        # wrongly, and the reconciliation is decided here rather than after seeing a
-        # number.** ADR-0002's table has a `@0.3 cap 200` row at 63.6/36.4 and p50 33.3
-        # ms, and a `@0.3 cap 200 + vote tiebreak` row at 82.8/17.2 and p50 **33.6 ms**.
+        # **Bar (3)'s two halves name two different configurations, and the
+        # reconciliation is decided here rather than after seeing a number.**
+        # The shipped one is `@0.3 cap 200 + vote tiebreak`; the plan's split
+        # is the `@0.3 cap 200` row without it.
         split_shipped = _split(0.828, 0.172)
         split_plan = _split(0.636, 0.364)
         out["bar3_tier2"] = {
@@ -1064,9 +1054,9 @@ async def run(args: argparse.Namespace) -> None:
     factory = build_session_factory(engine)
     log = RunLog(started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     # **Recorded in the log itself, so a smoke number can never be quoted as a
-    # measurement.** `--smoke` exists because the harness has to be provable on
-    # a toy catalog before it is trusted on the real one, and the only honest
-    # way to allow that is to stamp the output rather than to remember.
+    # real one.** `--smoke` exists because the harness has to be provable on a
+    # toy catalog before it is trusted on the real one, and stamping the output
+    # is the only honest way to allow that.
     log.verdicts["smoke"] = bool(args.smoke)
     log.verdicts["arguments"] = vars(args)
     log.load["before"] = _load_snapshot()
@@ -1077,7 +1067,7 @@ async def run(args: argparse.Namespace) -> None:
         **A phase that raises forty minutes into a quiet window must not take
         the thirty-nine minutes before it with it.** Every phase checkpoints,
         and a crash writes what it had along with the traceback, because the
-        alternative is asking for a second quiet window to re-measure numbers
+        alternative is asking for a second quiet window to retake numbers
         that were already produced.
         """
         if not args.out:
@@ -1137,10 +1127,10 @@ async def run(args: argparse.Namespace) -> None:
                 _persist("tier2")
 
             if args.tier2_ab:
-                # **The claim being tested is that a btree cannot tax the `%` path, and
-                # "cannot" is a claim about the planner rather than about this
-                # catalog.** Measured within one run over the same 2,993 cases, one
-                # variable: both prefix indexes present, then both dropped.
+                # **The claim being tested is that a btree cannot tax the `%`
+                # path, and "cannot" is about the planner rather than about this
+                # catalog.** One run, one variable: both prefix indexes present,
+                # then both dropped.
                 _say("tier2 A/B: dropping both prefix indexes and re-running")
                 for name in (
                     "ix_titles_name_lower_prefix",

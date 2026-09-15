@@ -46,8 +46,8 @@ DEFAULT_BAR = Path("/var/tmp/m10-gate/BAR-S7.md")  # noqa: S108 -- durable, not 
 #: to put a household identifier into.
 DEFAULT_SOURCE_LABEL = "s7-probe"
 
-#: The ladder, in flight. Three settings, because the entry under test is 4 and
-#: 1 is the control S1 already measured sequentially.
+#: The ladder, in flight. Three settings, because the entry under test is 4
+#: and 1 is S1's sequential control.
 LADDER: tuple[int, ...] = (1, 2, 4)
 
 #: `Settings.source_requests_per_second`'s shipped default. Not imported from
@@ -127,18 +127,13 @@ def overlap_of(timings: Sequence[Timing]) -> Overlap:
 def check_lane_budget(*, budget: int, rounds: int, block: int, arm_c: int) -> int:
     """Refuse a plan the budget cannot finish, **before the first request**.
 
-    🔴 **This file's own arithmetic, and that is the point rather than
+    **This file's own arithmetic, and that is the point rather than
     duplication.** `measure_source_latency.check_budget_is_sufficient` computes
-    `WARMUP_REQUESTS + PROBE_CLASSES * reps`, which is S1's *sequential* plan;
-    its docstring carries an explicit S7 note saying a concurrency arm needs
-    its own precondition and that reusing that one unchanged would silently
-    mis-count. Two spellings of one rule is how the wrong one gets tested, so
-    this is a different rule rather than a second spelling of that one.
+    a *sequential* plan; a concurrency arm needs its own precondition, and
+    reusing that one unchanged would silently mis-count.
 
-    The cost of getting it wrong is measured rather than imagined: S1 recorded
-    `--reps 15 --budget 60` spending all sixty requests against a real
-    household server and raising on the last one, producing no table -- sixty
-    live requests, that task's entire share of the group ceiling, for nothing.
+    Getting it wrong spends the whole budget against a real household server
+    and raises on the last request, producing no table.
     """
     if rounds < 1 or block < 1:
         raise SystemExit(f"--rounds and --block must be at least 1; got {rounds} and {block}")
@@ -234,11 +229,9 @@ async def run_block(
 ) -> None:
     """`concurrency` requests in flight over one shared session.
 
-    appending into a **caller-owned** list and writing each one through to disk.
-
-    Caller-owned for S1's recorded reason and journalled for this harness's
-    own: the list is what the tables are computed from, and the journal is what
-    survives the tables never being reached.
+    The list is **caller-owned** and each timing is also written through to
+    disk: the list is what the tables are computed from, and the journal is
+    what survives the tables never being reached.
 
     A semaphore rather than `len(probes)` bare tasks, so the number in flight
     is the number configured even when a block is larger than it -- which is
@@ -321,8 +314,8 @@ async def _run(
         )
     )
     # The gate **off** for the ladder: this arm prices the server, and a gate
-    # at the shipped 0.4 would pace every setting identically and measure the
-    # limiter instead. Arm C measures the limiter, deliberately and separately.
+    # at the shipped 0.4 would pace every setting identically and price the
+    # limiter instead. Arm C prices the limiter, deliberately and separately.
     session = build_session(client, secrets, source_name=args.source_label)
     user_id = secrets["emby_user_id"]
 
@@ -396,10 +389,11 @@ async def _run(
             )
             arm_c_wire = wire.since(arm_c_mark)
     except Exception as exc:
-        # 🔴 **`Exception`, not `(BudgetExceeded, ProbeFailed, UsherPortError)`, and the
-        # widening was paid for in live requests.** That tuple is S1's and it is a
-        # *denylist of expected endings*: it names the ways a run was anticipated to
-        # stop.
+        # **`Exception`, not `(BudgetExceeded, ProbeFailed, UsherPortError)`.**
+        # That tuple is a denylist of *expected* endings, and an ordinary
+        # programming error in a later arm is on no such list -- it would
+        # propagate past every line that reports, discarding observations
+        # already bought from somebody else's server.
         failure = exc
         print(f"\nRUN ENDED EARLY: {redact(f'{type(exc).__name__}: {exc}', secrets)}")
     finally:

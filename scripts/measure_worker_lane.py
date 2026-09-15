@@ -38,13 +38,13 @@ from usher.ports.jobs import JobRequest
 
 BAR = Path("/var/tmp/w1/BAR.md")  # noqa: S108 -- durable, not tmpfs; CLAUDE.md
 
-# S3's measured HTTP latency, 130,334 requests over 1.98 h against the live API
+# S3's live HTTP latency against the real API
 # (`.claude/rules/tmdb-and-enrichment.md`).
 _LATENCY_MEDIAN = 0.0588
 _LATENCY_MEAN = 0.0993
 _LATENCY_P95 = 0.4267
 
-# The three configured limits the bar names, all at or under ADR-0005's ~25.
+# The three configured limits the bar names, all at or under TMDb's ~25 rps.
 _LIMITS: tuple[float, ...] = (5.0, 12.0, 24.0)
 
 
@@ -56,16 +56,14 @@ def _sha256(path: Path) -> str:
 #: is. Only the spread is a choice, and it is `--sigma`.
 _LATENCY_MU = -2.834
 
-# : 🔴 **No two-parameter lognormal reproduces all three of S3's statistics, and : the
-# docstring here claimed one did until the harness's own printed : comparison said
-# otherwise on the first real run.** It read *"a lognormal : fitted on the median and
-# the p95 lands the mean at 0.099 s within a : percent"*, from an arithmetic slip:
-# `(ln(0.4267) - mu) / 1.645` is **1.205**, : not the 0.9007 written beside it.
+#: **No two-parameter lognormal reproduces all three of S3's statistics.**
+#: Fixing the median and the p95 puts sigma at 1.205 and moves the mean; this
+#: default fixes the median and the mean instead.
 _DEFAULT_SIGMA = 0.9
 
 
 def _delay(chooser: random.Random, sigma: float) -> float:
-    """One draw from S3's measured latency distribution.
+    """One draw from S3's live latency distribution.
 
     See `_DEFAULT_SIGMA` for which two of its three statistics a given `sigma`
     reproduces, and why no value reproduces all three.
@@ -89,10 +87,9 @@ class _Window:
 class _Stub:
     """A local HTTP/1.1 responder standing in for `api.themoviedb.org/3`.
 
-    Raw asyncio rather than uvicorn: the point of the stub is that its own
-    scheduling contributes as little as possible to the number being measured,
-    and an ASGI server brings its own concurrency semantics into the middle of
-    a concurrency measurement.
+    Raw asyncio rather than uvicorn: the stub's own scheduling has to
+    contribute as little as possible, and an ASGI server brings its own
+    concurrency semantics into the middle of a concurrency run.
     """
 
     chooser: random.Random
@@ -113,11 +110,11 @@ class _Stub:
                 self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
                 try:
                     await asyncio.sleep(_delay(self.chooser, self.sigma))
-                    # **The requested id is echoed back**, and that is not decoration:
-                    # `titles.tmdb_id` carries a unique index per kind, so a stub
-                    # answering a constant id makes every enrichment after the first a
-                    # `RepositoryConflict` on `ix_titles_tmdb_id_kind` -- which is a
-                    # *retryable* failure, so the lane would measure the backoff path
+                    # **The requested id is echoed back.** `titles.tmdb_id`
+                    # carries a unique index per kind, so a stub answering a
+                    # constant id makes every enrichment after the first a
+                    # retryable `RepositoryConflict` -- and the lane would
+                    # exercise the backoff path instead of the enrich path.
                     body = _body_for(head)
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
@@ -209,7 +206,7 @@ async def _seed(sessions: async_sessionmaker[AsyncSession], count: int) -> list[
     """One skeleton movie per job, and the `enrich` jobs that name them.
 
     Truncated first: a run that inherited the previous run's queue would be
-    measuring a different population from the one it reports.
+    reading a different population from the one it reports.
     """
     prefix = f"{uuid.uuid4().hex[:8]}-0000-7000-8000-"
     async with sessions() as session:
@@ -299,8 +296,7 @@ async def _drain(
     """Run the worker lane for `seconds`, exactly as `usher work` runs it.
 
     Returns (jobs completed, wall clock). **The one API-coupled function in
-    this file** -- everything above and below it is the measurement, so the
-    before/after really is one instrument.
+    this file**, so the before/after really is one instrument.
     """
     provider, aclose = await metadata_provider(settings)
     ran_total = 0
@@ -337,10 +333,8 @@ async def _outcome(sessions: async_sessionmaker[AsyncSession]) -> tuple[int, int
 
     **The premise guard on every rate above it.** A request counted at the stub
     that produced no enriched title is a request the lane made on a failure
-    path, and a rate computed over those is a measurement of the backoff
-    schedule. Found by running it: a stub answering a constant TMDb id made
-    every enrichment after the first a `RepositoryConflict`, and the run
-    reported a perfectly plausible rps.
+    path, so a rate computed over those prices the backoff schedule -- and it
+    reads as a perfectly plausible rps.
     """
     async with sessions() as session:
         left = int((await session.execute(text("SELECT count(*) FROM jobs"))).scalar_one())

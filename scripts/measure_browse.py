@@ -35,10 +35,9 @@ from usher.ports.repository.title import BrowseSort
 PAGE_LIMIT = 24
 FETCH_LIMIT = over_fetch(PAGE_LIMIT)
 
-#: How long one probe may spend being repeated. A slow probe is measured fewer
-#: times rather than a fast probe too few -- B3's `_PROBE_BUDGET_MS`, widened
-#: because an unfiltered aggregate is expected to be seconds rather than
-#: milliseconds and five reps of it must still fit.
+#: How long one probe may spend being repeated, so a slow probe gets fewer
+#: repetitions rather than a fast probe too few. Wide enough that five reps of
+#: a seconds-long unfiltered aggregate still fit.
 _PROBE_BUDGET_MS = 6_000.0
 _MIN_REPS = 5
 
@@ -46,7 +45,7 @@ _MIN_REPS = 5
 BAR_FACETS_MS = 200.0
 BAR_BROWSE_MS = 50.0
 
-# : Where the pre-registered bar lives, and the digest it had when it was : written.
+#: Where the pre-registered bar lives, and the digest it had when written.
 BAR_PATH = "/var/tmp/m9-B7/BAR.md"  # noqa: S108
 BAR_SHA256 = "256f28ba8102a47677acb3fe34afe8dc52787ab3d42c1f2ad2e88ef949cdfba9"
 BAR_WRITTEN_AT = "2026-08-12T06:31:44-05:00"
@@ -199,7 +198,7 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
             )
         ).all()
     ]
-    # **`media_items` empty is a fact about what `owned` can be measured
+    # **`media_items` empty is a fact about what `owned` can be scored
     # against, not a footnote.** An `EXISTS` probe over an empty table is
     # answered from an empty index and is not the filter that ships.
     facts["owned_is_measurable"] = bool(facts["media_items"])
@@ -262,8 +261,8 @@ async def _time(label: str, call: Any, reps: int) -> tuple[Timing, list[float]]:
     """Timed executions in milliseconds, after one discarded warm-up.
 
     The warm-up is discarded *and read*: it decides how many repetitions the
-    probe can afford, so a slow probe is measured fewer times rather than a
-    fast probe too few.
+    probe can afford, so a slow probe gets fewer of them rather than a fast
+    probe too few.
     """
     started = time.perf_counter()
     await call()
@@ -281,11 +280,9 @@ async def _time(label: str, call: Any, reps: int) -> tuple[Timing, list[float]]:
 async def verify_harness(session: AsyncSession, recorder: RecordingSession) -> dict[str, Any]:
     """That the statements this harness explains are the ones the repository ran.
 
-    Without this the script measures a copy of the shipped path and reports it
-    as the shipped path -- B3's third harness check, arriving at a recorded
-    statement object rather than at an adapter's return value. Each recorded
-    statement is re-executed from its own compiled text and refused unless it
-    answers the same row count.
+    Without this the script times a copy of the shipped path and reports it as
+    the shipped path. Each recorded statement is re-executed from its own
+    compiled text and refused unless it answers the same row count.
     """
     repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
     recorder.statements.clear()
@@ -319,7 +316,7 @@ async def verify_harness(session: AsyncSession, recorder: RecordingSession) -> d
 async def diagnose_order_by(
     session: AsyncSession, recorder: RecordingSession, reps: int
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """**Added after both bars were scored, and it is a diagnostic, not a bar.**.
+    """A diagnostic, not a bar.
 
     Bar 2's named output is an index recommendation, and the first question a
     recommendation has to answer is whether the index is missing or merely
@@ -327,15 +324,11 @@ async def diagnose_order_by(
     leading `(key IS NOT NULL) DESC` term is dropped and nothing else moves --
     same columns, same `LIMIT`, same session.
 
-    The term is written out rather than spelled `nulls_last(...)` on a stated
-    argument -- *"the keyset predicate has to agree with this term for term
-    and two spellings of one rule is how they stop agreeing"* -- and that
-    argument is about **correctness**, which it gets right. What it does not
-    say, because nobody had measured it, is that the two spellings produce the
-    same row order and **different sort keys**, and an index is matched by the
-    sort key. `titles.sort_name` is declared `NOT NULL`, so for
-    `BrowseSort.NAME` the dropped term is provably constant and the two
-    statements are the same question.
+    The term is written out rather than spelled `nulls_last(...)` so the keyset
+    predicate agrees with it term for term. The two spellings give the same row
+    order and **different sort keys**, and an index is matched by the sort key.
+    `titles.sort_name` is `NOT NULL`, so for `BrowseSort.NAME` the dropped term
+    is provably constant and the two statements are the same question.
     """
     repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
     results: dict[str, Any] = {}
@@ -427,9 +420,9 @@ async def measure_browse(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Bar 2, the unfiltered contrast, and the resumed page at every sort.
 
-    The resumed page is not decoration: the keyset predicate is three arms
-    (ADR-0034) and the first page exercises none of them, so a bar scored on
-    page one alone is a bar about a query the second request never makes.
+    The resumed page is not decoration: the keyset predicate is three arms and
+    the first page exercises none of them, so a bar scored on page one alone is
+    a bar about a query the second request never makes.
     """
     repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
     filters: list[tuple[str, dict[str, Any]]] = [
@@ -609,8 +602,8 @@ async def run(args: argparse.Namespace) -> None:
     foreign = max(before["processes"]["pytest"], after["processes"]["pytest"])
     log.load["cpu_busy_drift"] = round(drift, 4)
     log.load["foreign_pytest_processes"] = foreign
-    # Two-sided, for B3's measured reason: a box that got *quieter* mid-run was
-    # also not the same box throughout, and B3's own smoke run drifted -0.1037.
+    # Two-sided: a box that got *quieter* mid-run was also not the same box
+    # throughout.
     log.load["quiet_enough"] = foreign == 0 and abs(drift) <= _CPU_DRIFT_LIMIT
     log.load["one_minute_loadavg_before_after"] = [before["loadavg"][0], after["loadavg"][0]]
     log.load["loadavg_is_context_not_a_gate"] = (

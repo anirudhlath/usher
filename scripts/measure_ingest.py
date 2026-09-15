@@ -39,8 +39,8 @@ from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 
-# The measured deployment: 94,438 movies, 32,409 series, 999,827 episodes of
-# 1,126,674 items. Episodes are 88.7%, series 2.9%, movies 8.4%.
+# One real deployment's shape: episodes 88.7%, series 2.9%, movies 8.4% of
+# 1,126,674 items.
 EPISODE_SHARE = 0.887
 SERIES_SHARE = 0.029
 CHANGED_AT = datetime(2026, 7, 1, tzinfo=UTC)
@@ -49,11 +49,7 @@ CHANGED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 def _capture(
     predicate: Callable[[str], bool],
 ) -> tuple[list[tuple[str, Sequence[object]]], Callable[[], None]]:
-    """Record (statement.
-
-    parameters) for statements matching `predicate`, and the callable that stops
-    recording.
-    """
+    """Record `(statement, parameters)` for matches, and the stop callable."""
     seen: list[tuple[str, Sequence[object]]] = []
 
     def record(
@@ -99,7 +95,7 @@ def counted() -> Iterator[list[str]]:
 
 
 def library(count: int) -> list[SourceItem]:
-    """`count` items in the measured library's proportions."""
+    """`count` items in a real library's proportions."""
     series_count = max(1, int(count * SERIES_SHARE))
     episode_count = int(count * EPISODE_SHARE)
     movie_count = count - series_count - episode_count
@@ -290,9 +286,7 @@ async def _plan_of(session: AsyncSession, statement: str, parameters: Sequence[o
 
 
 async def scale(rows: int) -> None:
-    """The four scale risks Groups A-E flagged and could not measure.
-
-    at the scale that makes them real.
+    """The four scale risks, at the scale that makes them real.
 
     Each seeds its own population directly (a `generate_series` insert, not a
     walk -- the point is the read, not how the rows got there) and then plans

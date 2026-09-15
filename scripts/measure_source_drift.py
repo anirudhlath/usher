@@ -48,8 +48,8 @@ class Drift:
 
         Clamped at zero: a source that has **grown** since the last walk has a
         negative difference, which is not a retraction at all -- the sweep only
-        ever sets `available = false` (ADR-0015), so growth is `upsert_many`'s
-        business and this number's floor is 0.
+        ever sets `available = false`, so growth is `upsert_many`'s business and
+        this number's floor is 0.
         """
         return max(0, self.usher_available - self.live_total)
 
@@ -71,16 +71,13 @@ class Drift:
 
 
 async def live_total(session: object, user_id: str) -> int:
-    """`TotalRecordCount` for the scope the adapter walks.
-
-    **One request.**
+    """`TotalRecordCount` for the scope the adapter walks, in one request.
 
     The same `Recursive`/`IncludeItemTypes` the walk sends, so the denominator
     is the population the sweep is actually about -- and `Limit=1` with
     `StartIndex` absent, so the server counts and returns a single item rather
     than a page. `Fields` is deliberately **not** sent: the count does not
-    depend on it and a full `Fields` set is the expensive half of a page
-    (M10 S1 measured a 200-item page with `Fields` at 5.10 s median).
+    depend on it and a full `Fields` set is the expensive half of a page.
     """
     body = await session.json_body(  # type: ignore[attr-defined]
         "GET",
