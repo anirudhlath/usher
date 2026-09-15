@@ -9,6 +9,17 @@ stage reads rationale that the next one deletes.
 3. Delete `docs/prd/decisions/`.
 4. Cut the PRD to user-facing behaviour.
 
+## Where this stands
+
+| stage | state |
+|---|---|
+| 1 — the `/simplify` findings | ✅ 34 of 35 fixed; item 26 refused with its reason |
+| 2 — code prose | 🚧 two mechanical passes landed; the judgement pass is running |
+| 3 — `docs/prd/decisions/` | ✅ 48 records and the register deleted, every pointer stripped |
+| 4 — the PRD | ✅ 13,236 -> 4,909 lines |
+
+The hook and ruff's `D` selection are both in place, so the convention is
+enforced rather than described.
 ## Why
 
 `src/usher` is 63.5% comment and docstring by non-blank line, `tests` 41.8%,
