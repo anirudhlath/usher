@@ -14,8 +14,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: a secret.
 _SHORTEST_REDACTABLE = 4
 
-# : What `LaneSupervisor._close_gap` is allowed to do on a reconnect, and the : one
-# setting in this file whose *default* is a refusal rather than a limit.
+#: What `LaneSupervisor._close_gap` is allowed to do on a reconnect, and the
+#: one setting here whose *default* is a refusal rather than a limit.
 PushGapClose = Literal["cursored", "always", "never"]
 
 
@@ -124,15 +124,15 @@ class Settings(BaseSettings):
     # wrong password turns every request into two (the call, then a doomed
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
-    # The proactive outbound ceiling: calls to one source are spaced at least `1/rate`
-    # seconds apart (ADR-0043).
+    # The proactive outbound ceiling: calls to one source are spaced at least
+    # `1/rate` seconds apart.
     source_requests_per_second: float = Field(default=0.4, ge=0)
 
     # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
     # settings above: PRD 08's TOML config layer does not exist yet.
     sync_batch_size: int = Field(default=1_000, ge=1, le=50_000)
-    # The fraction of a source's items one reconcile may mark unavailable before it
-    # refuses and changes nothing (ADR-0015).
+    # The fraction of a source's items one reconcile may mark unavailable
+    # before it refuses and changes nothing.
     sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     job_batch_size: int = Field(default=20, ge=1, le=500)
     # How many jobs one worker process may have in flight at once, and the per-kind
@@ -172,9 +172,9 @@ class Settings(BaseSettings):
     # a vector: the same weights served by sentence-transformers and by fastembed differ
     # by 1.41e-03 max pairwise delta, which is 6x the halfvec quantisation error.
     embedding_model: str = Field(default="fastembed:BAAI/bge-large-en-v1.5", min_length=1)
-    # Measured on CPU: best throughput at 16, flat from 16 to 64, degrading
-    # at 128. `le=512` because the ceiling here is memory, and the cost of
-    # being wrong is an OOM inside a worker pass rather than a slow one.
+    # On CPU, throughput is flat from 16 to 64 and degrades at 128. `le=512`
+    # because the ceiling here is memory, and the cost of being wrong is an OOM
+    # inside a worker pass rather than a slow one.
     embedding_batch_size: int = Field(default=16, ge=1, le=512)
     # Read only by the `openai:` runtime, and deliberately **not** reusing
     # `llm_base_url`.
@@ -196,7 +196,7 @@ class Settings(BaseSettings):
 
     # The LLM (PRD 06's curation, PRD 05's query expansion).
     llm_enabled: bool = False
-    # The provider abstraction, and the whole of it (ADR-0027).
+    # The provider abstraction, and the whole of it.
     llm_base_url: str = Field(default=DEFAULT_LLM_BASE_URL, min_length=1)
     # `SecretStr`, and `None` is a first-class value: a local vLLM or an
     # Ollama needs no credential, and sending `Bearer None` is how a client
@@ -205,14 +205,12 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-4o-mini", min_length=1)
     # The token ceiling on one completion.
     llm_max_output_tokens: int = Field(default=2048, ge=256, le=32_768)
-    # A generation is a background job with a whole backoff schedule behind
-    # it, so a long timeout costs a worker pass rather than a request. 120 s
-    # is roughly 20x the slowest measured completion (6.5 s, for the UUID arm
-    # ADR-0028 rejects).
+    # A generation is a background job with a whole backoff schedule behind it,
+    # so a long timeout costs a worker pass rather than a request. 120 s is
+    # roughly 20x the slowest completion this has ever seen.
     llm_timeout_seconds: float = Field(default=120.0, gt=0)
-    # Cost, in dollars per million tokens, because **no provider reports cost** -- the
-    # live `usage` object carries token counts and nothing else, which is why PRD 10's
-    # "litellm reports per-call cost natively" is corrected.
+    # Cost, in dollars per million tokens, because **no provider reports
+    # cost** -- the `usage` object carries token counts and nothing else.
     llm_price_in_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
     llm_price_out_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
 
@@ -244,20 +242,15 @@ class Settings(BaseSettings):
     # `LIKE`.
     search_trigram_threshold: float = Field(default=0.3, gt=0.0, le=1.0)
     # How many trigram candidates are collected before the `levenshtein`
-    # re-rank. Measured: 1,774 candidates against a 300,000-row table is a 169x
-    # reduction in `levenshtein` calls, and edit distance over the whole table
-    # is the exact cliff ADR-0002 names. It must exceed `search_result_limit`
-    # or the re-rank can only reorder what the cap already chose.
+    # re-rank. The candidate cut is what keeps edit distance off the whole
+    # table. It must exceed `search_result_limit` or the re-rank can only
+    # reorder what the cap already chose.
     search_suggest_candidates: int = Field(default=200, ge=1, le=2000)
     # Whether `GET /search/suggest` and `usher suggest` write a
-    # `search_queries` row (`surface = 'suggest'`, `tier` naming the index that
-    # answered). The row is buffered off the request path, so what a keystroke
-    # pays for it is an append.
-
-    # A `bool` and never a sample rate: every absence in PRD 10's *"which
-    # absence means what"* table is exact, and a rate adds one nobody can name.
-    # It narrows the suggest surface only -- turning keystroke analytics off is
-    # not a request to stop recording searches.
+    # `search_queries` row, buffered off the request path. A `bool` and never a
+    # sample rate, because a rate adds an absence nobody can name. It narrows
+    # the suggest surface only -- turning keystroke analytics off is not a
+    # request to stop recording searches.
     search_suggest_analytics: bool = True
 
     # The push lane and the worker lane (PRD 03, PRD 01's concurrency model).
@@ -287,8 +280,8 @@ class Settings(BaseSettings):
     push_max_items_per_event: int = Field(default=50, ge=1, le=500)
     # The floor between two gap-closing delta walks.
     push_gap_min_interval_seconds: float = Field(default=60.0, ge=0)
-    # What the gap-closer may do when the delta has no cursor -- see `PushGapClose`
-    # above for the vocabulary and the measurement.
+    # What the gap-closer may do when the delta has no cursor; `PushGapClose`
+    # above is the vocabulary.
     push_gap_close: PushGapClose = "cursored"
     # The ceiling on **one** gap-closing delta, counted in items, and the other half of
     # the same hazard (M10 S6).
@@ -297,8 +290,7 @@ class Settings(BaseSettings):
     # added through `POST /admin/sources` gets a lane without a restart.
     push_source_refresh_seconds: float = Field(default=60.0, gt=0)
 
-    # The scheduled-work lane ([ADR-0046](../../docs/prd/decisions/0046-the-scheduler-
-    # stores-nothing.md)), which is the third lane switch and the only one that is
+    # The scheduled-work lane: the third lane switch, and the only one that is
     # **off** by default.
     scheduler_enabled: bool = False
     # How long the loop sleeps between ticks.
@@ -393,10 +385,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _query_expansion_needs_a_client(self) -> "Settings":
-        """The one combination of the two LLM switches that cannot mean anything.
-
-        refused at startup rather than left to mean nothing.
-        """
+        """Refuse the one combination of the two LLM switches that means nothing."""
         if self.query_expansion_enabled and not self.llm_enabled:
             raise ValueError(
                 "USHER_QUERY_EXPANSION_ENABLED=true needs USHER_LLM_ENABLED=true "
@@ -441,18 +430,14 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
-        """An env var that is present but empty (as `.env.example` ships `USHER_TMDB_API_KEY=`.
+        """An env var that is present but empty means "not set".
 
-        and `OTEL_EXPORTER_OTLP_ENDPOINT=`) means "not set", not "set to the empty
-        string" — keep `str | None` honest.
-
-        **`llm_api_key` joined this list because the suite caught it**, and it
-        is the one of the three where the empty string is not merely untidy:
-        a local vLLM or Ollama is configured with no credential at all, so
-        `USHER_LLM_API_KEY=` is the *documented* way to say so — and a
-        `SecretStr("")` is truthy enough to build an `Authorization: Bearer `
-        header, which a permissive server accepts and a strict one rejects
-        with a 401 naming a credential the operator never set.
+        `.env.example` ships `USHER_TMDB_API_KEY=` and
+        `OTEL_EXPORTER_OTLP_ENDPOINT=` blank, and a local vLLM or Ollama is
+        configured with no credential at all, so `USHER_LLM_API_KEY=` is the
+        documented way to say so. A `SecretStr("")` is truthy enough to build
+        an `Authorization: Bearer ` header, which a strict server rejects with
+        a 401 naming a credential the operator never set.
         """
         if isinstance(value, str) and value == "":
             return None

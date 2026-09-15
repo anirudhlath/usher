@@ -46,8 +46,8 @@ def current_traceparent() -> str | None:
     return carrier.get("traceparent")
 
 
-# : The response header carrying the server span, and the reason it is spelled : this
-# way rather than `X-Trace-Id`.
+#: The response header carrying the server span, spelled this way rather than
+#: `X-Trace-Id`.
 TRACERESPONSE_HEADER: Final = "traceresponse"
 
 
@@ -69,13 +69,11 @@ def traceresponse(span: trace.Span | None = None) -> str | None:
 def inject_trace_context(record: Mapping[str, Any]) -> None:
     """Patch the active trace and span ids into every log record.
 
-    so a line in Loki links to its trace and back again.
+    A line in Loki then links to its trace and back again.
 
     Typed `Mapping[str, Any]` rather than `dict[str, Any]`: loguru's real
-    `Record` (a `TypedDict`) satisfies `Mapping` but not the invariant
-    `dict`, and mypy strict rejects the latter at the `configure()` call
-    site below (confirmed directly; see commit history for the fence this
-    replaced).
+    `Record` (a `TypedDict`) satisfies `Mapping` but not the invariant `dict`,
+    and mypy strict rejects the latter at the `configure()` call site below.
     """
     span = trace.get_current_span()
     context = span.get_span_context()
@@ -130,11 +128,10 @@ def configure_logging(settings: Settings) -> None:
         diagnose=False,
     )
 
-    # uvicorn attaches its own handlers directly to the "uvicorn"/
-    # "uvicorn.access"/"uvicorn.error" loggers (and any other library may do the same)
-    # *before* create_app() runs -- clearing them and forcing propagate=True is what
-    # makes redirecting the root logger below actually catch everything, instead of
-    # records printing twice: once from a library's own handler, once forwarded through
+    # uvicorn attaches handlers to its own loggers before `create_app()` runs,
+    # and any other library may too. Clearing them and forcing `propagate=True`
+    # is what makes redirecting the root logger below catch everything, instead
+    # of printing each record twice.
     for name in list(logging.root.manager.loggerDict):
         stdlib_logger = logging.getLogger(name)
         stdlib_logger.handlers = []
@@ -142,20 +139,19 @@ def configure_logging(settings: Settings) -> None:
         stdlib_logger.disabled = False
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
-    # **`httpx` logs one INFO line per request, and the redirect above is what made it
-    # visible.** Measured 2026-08-07 on the shipped defaults (`USHER_LOG_JSON=true`,
-    # `USHER_LOG_LEVEL=INFO`, sink `sys.stdout`): a single request prints a
-    # ~900-character JSON envelope reading `httpx._client:_send_single_request - HTTP
-    # Request: POST … "HTTP/1.0 200 OK"` on **stdout**, which is where every CLI command
+    # **`httpx` logs one INFO line per request, and the redirect above is what
+    # made it visible.** On the shipped defaults that is a ~900-character JSON
+    # envelope per request on stdout, which is where every CLI command writes
+    # the output an operator is reading.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def configure_tracing(settings: Settings) -> None:
-    """Install a real SDK `TracerProvider` unconditionally and instrument SQLAlchemy + httpx.
+    """Install a real SDK `TracerProvider` and instrument SQLAlchemy and httpx.
 
-    globally, so any span started anywhere in the process — including by FastAPI's auto-
-    instrumentation, wired in `create_app` — gets a real trace/span id for
-    `inject_trace_context` to correlate, whether or not there is anywhere to export it.
+    Unconditional and global, so any span started anywhere in the process gets
+    a real trace and span id for `inject_trace_context` to correlate, whether
+    or not there is anywhere to export it.
     """
     if not isinstance(trace.get_tracer_provider(), TracerProvider):
         provider = TracerProvider(resource=Resource.create({"service.name": settings.service_name}))
@@ -169,25 +165,15 @@ def configure_tracing(settings: Settings) -> None:
 
 
 def configure_metrics(settings: Settings) -> None:
-    """Install a real SDK `MeterProvider`.
+    """Install a real SDK `MeterProvider`, exporting only when telemetry is on.
 
-    exporting over OTLP only when `settings.telemetry_enabled` -- mirrors
-    `configure_tracing`'s shape for the same two reasons: a real (if unexported)
-    provider lets any instrument a later milestone creates
-    (`usher.http.server.duration`, `usher.jobs.queued`, ...
+    `configure_tracing`'s shape, for its reasons: a real if unexported provider
+    binds every instrument to something real instead of the API's no-op
+    default, and the `isinstance` guard stops repeated `create_app()` calls
+    leaking a `PeriodicExportingMetricReader` export thread apiece.
 
-    -- PRD 10's metric catalogue) bind to something real from day one instead of the
-    API's no-op default, and the same `isinstance` idempotency guard avoids leaking a
-    `PeriodicExportingMetricReader` background export thread across repeated
-    `create_app()` calls the way an unguarded `configure_tracing` did (see its
-    docstring; verified directly that `set_meter_provider` has the identical silently-
-    refuse-the-second-call behaviour `set_tracer_provider` does).
-
-    No metrics are registered here — PRD 10's OTel metrics are each owned
-    by the milestone that emits them (M5 push, M6 search, ...). This is
-    only the bootstrap they register against, so *where that bootstrap
-    lives* is a decision made once here rather than independently in each
-    of nine milestones.
+    No metrics are registered here. Each is owned by the milestone that emits
+    it; this is only the bootstrap they register against.
     """
     if not isinstance(metrics.get_meter_provider(), MeterProvider):
         readers = (
@@ -284,13 +270,11 @@ def _by_kind(counts: Mapping[str, int]) -> Iterable[Observation]:
 class PushSnapshot:
     """One source's push lane, as PRD 10's two series see it.
 
-    **`delivering`, not `connected`.** Dashboard 3's panel is "push
-    connection uptime" and its alert is `push.connected == 0` for 15
-    minutes, and a series fed by the socket's *state* would be permanently
-    green against the failure ADR-0004 measured — a channel that upgraded,
-    is held open, and delivers nothing. `usher.source.push.connected` keeps
-    PRD 10's name (a metric renamed is a dashboard panel silently blank) and
-    reports the honest quantity.
+    **`delivering`, not `connected`.** A series fed by the socket's *state*
+    would be permanently green against the failure that actually happens -- a
+    channel that upgraded, is held open, and delivers nothing.
+    `usher.source.push.connected` keeps PRD 10's name, because a metric renamed
+    is a dashboard panel silently blank, and reports the honest quantity.
 
     `reconnects` is cumulative for the lane rather than per connection,
     which is what `PushHealth` being one object across reconnects buys.
@@ -414,9 +398,7 @@ _search: _ReaderSlot[SearchSnapshot] = _ReaderSlot()
 
 
 def register_search_gauges(read: SearchReader) -> None:
-    """PRD 10's `usher.search.embeddings.stale`.
-
-    its refused companion, and `usher.similarity.neighbors.stale`.
+    """PRD 10's embedding-staleness gauges, and `usher.similarity.neighbors.stale`.
 
     `read` returns the caller's most recent full re-read, never a query, for
     `register_queue_gauges`' reason. The third instrument takes a different
