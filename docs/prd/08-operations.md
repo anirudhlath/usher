@@ -712,16 +712,13 @@ the manifest, and it is why the enforcement is a test rather than a convention.
 
 ### Resource envelope
 
-**These are sizing estimates for an operator provisioning a disk.** Nothing in
-this project reads them, no host enforces them, and no policy is derived from
-them. 🔴 A milestone once treated the Postgres row as a *budget*, derived a
-**2.0 GB** ceiling from it, measured a design at **2.702 GB** and **withdrew
-the design** — against a number with no forcing function behind it. A figure
-here is a thing to buy a disk against, never a thing to refuse a design
-against.
-
-Measured on a real 1,272,367-title catalog with 130,647 titles enriched:
-`pg_database_size` **5,025,650,355 B (4,793 MB)**.
+**These are sizing estimates for an operator provisioning a disk.** Nothing
+reads them and no host enforces them. 🔴 A milestone once treated the Postgres
+row as a *budget*, derived a **2.0 GB** ceiling from it, measured a design at
+**2.702 GB** and **withdrew the design** — against a number with no forcing
+function behind it. A figure here is a thing to buy a disk against, never a
+thing to refuse a design against. Measured on a real 1,272,367-title catalog
+with 130,647 titles enriched: `pg_database_size` **5,025,650,355 B (4,793 MB)**.
 
 | | |
 |---|---|
