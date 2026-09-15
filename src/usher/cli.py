@@ -174,12 +174,10 @@ def _vocabulary_line(verdict: VocabularyVerdict) -> str:
     the_cli_report_the_same_vocabulary_verdict` feeds the route's own document
     back through this function and requires the byte-identical line.
 
-    Pure and synchronous — every read it used to make is `vocabulary_verdict`'s
-    now. It sits beside the `MIXED RELEASES` line
-    `composition._report_coverage` prints for the sibling condition on
-    `genome_scores`, and the reason the mixed case
-    reads *"not checked"* rather than a verdict is recorded on
-    `VocabularyState` itself.
+    Pure and synchronous: every read belongs to `vocabulary_verdict`. It sits
+    beside the `MIXED RELEASES` line `composition._report_coverage` prints for
+    the sibling condition on `genome_scores`, and why the mixed case reads *"not
+    checked"* rather than a verdict is recorded on `VocabularyState` itself.
     """
     if verdict.state is VocabularyState.NO_VECTORS:
         return "genome vocabulary: no vectors to name"
@@ -439,11 +437,10 @@ async def _work(settings: Settings, *, once: bool) -> None:
     # jobs for one that has, and the backlog is the number that says so.
     backlog = SearchGauges()
     register_search_gauges(backlog.read)
-    # **A session factory, not a session.** This command held exactly one
-    # `AsyncSession` for the life of the process until M9's W1, which is what
-    # bound the whole lane to one job at a time: `AsyncSession` is not
-    # concurrency-safe, so the worker now opens one per claim and one per job
-    # through the same `unit_of_work` the server's lanes use.
+    # **A session factory, not a session.** `AsyncSession` is not
+    # concurrency-safe, and one held for the life of the process binds the
+    # whole lane to one job at a time. The worker opens one per claim and one
+    # per job through the same `unit_of_work` the server's lanes use.
     work = unit_of_work(sessions, settings, events=NullEventPublisher(), provider=provider)
     try:
         async with sessions() as bootstrap_session:
@@ -914,8 +911,7 @@ async def _similar(
 
         if title_id is None:
             # The whole-table form. After the rebuild branch above, `None`
-            # here can only mean "no arguments at all", which `parse_args`
-            # now allows and used to refuse.
+            # here can only mean "no arguments at all".
             await _similar_status(pipeline)
             return
         rows = await pipeline.similar.neighbors_of(title_id, limit=limit)
@@ -1096,9 +1092,9 @@ async def _curate(settings: Settings) -> None:
         async with _session_for(settings) as session:
             pipeline = build_pipeline(session, settings)
             service = build_curation_service(pipeline, settings, client)
-            # `ensure_default_user`, not `default_user`: this command needs an
-            # id and nothing else, and PRD 01's authentication seam is a
-            # singleton row until M9 gives it a request to come from.
+            # `ensure_default_user`, not `default_user`: this command needs
+            # an id and nothing else, and PRD 01's authentication seam is a
+            # singleton row with no request to derive one from.
             user_id = await ensure_default_user(session)
             try:
                 report = await service.generate(user_id)
@@ -1914,11 +1910,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         if args.repeat < 1:
             parser.error("--repeat must be at least 1")
     if args.command == "similar":
-        # ⚠️ **No arguments is now the whole-table report and no longer an error.** It
-        # was refused as "a read of nothing" until M10's J6, which is what issue #17's
-        # *"a `usher similar` line that says how old the table is relative to the
-        # embedding population"* asks for -- the per-title form already printed two of
-        # the three facts and had no whole-table spelling.
+        # **No arguments is the whole-table report rather than an error**: the
+        # per-title form prints two of the three staleness facts and has no
+        # whole-table spelling, which is what issue #17 asks for.
         if args.title_id and args.rebuild:
             # `parser.error` again -- exit 2 with usage rather than exit 1 with
             # a traceback.

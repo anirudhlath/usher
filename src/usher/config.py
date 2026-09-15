@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     database_url: SecretStr
     secret_key: SecretStr = Field(min_length=32)
 
-    # The connection pool, settings-driven since M9's W1 and hardcoded before it.
+    # The connection pool.
     db_pool_size: int = Field(default=20, ge=1, le=200)
     db_max_overflow: int = Field(default=10, ge=0, le=200)
 

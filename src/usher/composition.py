@@ -205,8 +205,8 @@ class Pipeline:
     watch_states: WatchStateRepository
     payloads: RawPayloadStore
     runs: SyncRunRepository
-    # M2's two bulk-import ports, on the pipeline since M9's E5 for the reason every
-    # other port here is: `run_bootstrap` is one dispatch two roots call, and
+    # M2's two bulk-import ports, on the pipeline for the reason every other
+    # port here is: `run_bootstrap` is one dispatch two roots call, and
     # `build_worker` sees a `Pipeline` and nothing else.
     bulk: BulkCatalogRepository
     import_runs: ImportRunRepository
@@ -825,10 +825,9 @@ def _worker_handlers(
     """
     handlers: dict[JobKind, Handler] = {}
     # The resolver is bound to *this* scope's repositories and to the
-    # process-lifetime adapter cache. `SourceRegistry` used to hold the
-    # pipeline and be `rebind`-ed once a pass; holding one under concurrent
-    # jobs would have put two of them on the same session through the door
-    # nobody was looking at, since `resolve` issues two reads of its own.
+    # process-lifetime adapter cache. A registry holding the pipeline itself
+    # would put two concurrent jobs on one session, because `resolve` issues
+    # two reads of its own.
     resolve = registry.bound(pipeline)
     handlers[JobKind.MATCH] = match_handler(pipeline.matcher, pipeline.media_items, resolve)
     handlers[JobKind.WATCH_HISTORY] = watch_history_handler(
@@ -949,9 +948,9 @@ async def metadata_provider(
 ) -> tuple[MetadataProvider | None, Callable[[], Awaitable[None]]]:
     """The TMDb provider and the callable that closes its transport."""
     if settings.tmdb_api_key is None:
-        # Both kinds named, not just `enrich`: `derive` has been registered
-        # under this same guard since M7 and this sentence still promised an
-        # operator that one kind would go unclaimed while two did.
+        # Both kinds named, not just `enrich`: `derive` is registered under
+        # this same guard, so naming one would promise an operator that one
+        # kind goes unclaimed while two do.
         logger.warning("no TMDb API key configured; enrich and derive jobs will not be claimed")
         return None, nothing
     client = httpx.AsyncClient(timeout=settings.source_timeout_seconds)
