@@ -1,7 +1,4 @@
-"""The `llm_calls` ledger.
-
-one home for *record on every path that attempted a completion, and commit what you
-"""
+"""The `llm_calls` ledger: record every attempted completion, and commit it."""
 
 import time
 import uuid
@@ -22,20 +19,19 @@ from usher.ports.repository import LLMCallRepository
 class LLMLedger:
     """One attempted completion in, one committed `llm_calls` row out.
 
-    **`model` is the string the client was built with and is not defaulted.**
-    It is the only honest value for `llm_calls.model` on the path where no
-    response came back to read one from; a default here would be a second value
-    that silently disagrees with `Settings.llm_model`.
+    `model` is the string the client was built with and is not defaulted. It is
+    the only honest value for `llm_calls.model` on the path where no response
+    came back to read one from; a default here would be a second value that
+    silently disagrees with `Settings.llm_model`.
 
-    **`commit` is a callable and not a session.** `services/` may depend only
-    on `domain/` and `ports/` (ADR-0009) and a session is neither. It matters
-    most on the query-expansion path, which writes nothing else: an uncommitted
-    ledger row is rolled back when the read's session closes, and the money is
-    spent with no record at all.
+    `commit` is a callable and not a session: `services/` may depend only on
+    `domain/` and `ports/`, and a session is neither. It matters most on the
+    query-expansion path, which writes nothing else -- an uncommitted ledger row
+    is rolled back when the read's session closes, and the money is spent with
+    no record at all.
 
-    **`clock` is injected** because the latency of a *failed* call is the one
-    number this ledger cannot get from an `LLMUsage` that never came back, and
-    a 120-second timeout is the most expensive thing either spender can do.
+    `clock` is injected because the latency of a *failed* call is the one number
+    this ledger cannot get from an `LLMUsage` that never came back.
     """
 
     def __init__(
@@ -65,17 +61,16 @@ class LLMLedger:
     ) -> None:
         """Close out one attempted completion: write its `llm_calls` row, then commit.
 
-        **The clock is read here**, so `elapsed_ms` is a delta from `started`
-        on every path and no caller can hand over an absolute reading. It is
-        the *fallback* latency -- `_row` prefers whatever the adapter measured
-        whenever an `LLMUsage` came back -- and the path with no usage is the
-        one it exists for, where a 120-second timeout has no other record.
+        The clock is read here, so `elapsed_ms` is a delta from `started` on
+        every path and no caller can hand over an absolute reading. It is the
+        *fallback* latency -- `_row` prefers the adapter's own reading whenever
+        an `LLMUsage` came back -- and the path with no usage is the one it
+        exists for, where a timeout has no other record.
 
-        **Not the commit boundary for `curated_rows`.** `CurationService` calls
+        Not the commit boundary for `curated_rows`: `CurationService` calls
         `replace_for_user` *before* this, so one commit covers both writes and
         PRD 10's `llm_calls JOIN curated_rows USING (generation_id)` never sees
-        a screen with no cost attributed to it. The exception that ordering
-        buys is named in `CurationService.generate`'s own docstring.
+        a screen with no cost attributed to it.
         """
         await self._record(
             self._row(
@@ -97,16 +92,15 @@ class LLMLedger:
     ) -> LLMCall:
         """One `llm_calls` row.
 
-        **`ok` is derived from `error` rather than passed beside it.** The two
-        must agree -- `LLMCall._ok_and_error_must_agree` and
+        `ok` is derived from `error` rather than passed beside it. The two must
+        agree -- `LLMCall._ok_and_error_must_agree` and
         `ck_llm_calls_ok_error_agree` both refuse a disagreement -- so a
         signature taking both would be one that can be handed a contradiction,
         on the path least able to afford a `ValidationError`.
 
         `usage is None` is the upstream-failure path and nothing else: there is
-        no answer to bill, so the tokens and cost are zero, the model is the
-        one this deployment asked for, and the latency is what this ledger
-        measured, which for a timeout is the whole of it.
+        no answer to bill, so the tokens and cost are zero, the model is the one
+        this deployment asked for, and the latency is this ledger's own reading.
         """
         return LLMCall(
             id=new_id(),
@@ -123,7 +117,7 @@ class LLMLedger:
         )
 
     async def _record(self, call: LLMCall) -> None:
-        """Append to the ledger, and **never change the outcome of the caller by doing so.**.
+        """Append to the ledger, never changing the caller's outcome by doing so.
 
         The reachable failure is a `cost_usd` the column cannot hold, which
         `PostgresLLMCallRepository` translates to `RepositoryConflict` behind a

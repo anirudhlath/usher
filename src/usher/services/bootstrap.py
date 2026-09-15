@@ -23,9 +23,9 @@ from usher.ports.repository import (
 _tracer = trace.get_tracer("usher.bootstrap")
 _meter = metrics.get_meter("usher.bootstrap")
 
-# PRD 10's metric catalogue, M2's four. Created at import time against
-# whatever MeterProvider `configure_metrics` installed -- which is a real SDK
-# provider unconditionally, exported only when an OTLP endpoint is set.
+# PRD 10's metric catalogue. Created at import time against whatever
+# MeterProvider `configure_metrics` installed -- a real SDK provider
+# unconditionally, exported only when an OTLP endpoint is set.
 _rows_counter = _meter.create_counter(
     "usher.bootstrap.rows", unit="1", description="Rows written by a bulk importer"
 )
@@ -43,19 +43,16 @@ _failures = _meter.create_counter(
 class VocabularyState(StrEnum):
     """Whether the stored tag vocabulary can name the lanes of the stored vectors.
 
-    the **decision**, with the sentence left to whoever renders it.
-
     Five members and not four: "there is nothing to name" and "there is
     something to name and no names" are different operator actions, and
     collapsing them is how a fresh database ends up being told to re-run a
-    phase it has no use for. `MIXED_RELEASES` is the one that is *not* a
-    verdict about the vocabulary at all — with `genome_scores` holding two
-    releases there is no single revision to ask for, and asking for either
-    would report the vocabulary as wrong when what is wrong is the vectors.
+    phase it has no use for. `MIXED_RELEASES` is not a verdict about the
+    vocabulary at all -- with `genome_scores` holding two releases there is no
+    single revision to ask for, and asking for either would report the
+    vocabulary as wrong when what is wrong is the vectors.
 
-    A member rather than a string because both surfaces branch on it:
-    `usher bootstrap-status` renders a sentence and
-    `GET /admin/bootstrap/status` puts the member on the wire, so a client
+    A member rather than a string because both surfaces branch on it: the CLI
+    renders a sentence and the route puts the member on the wire, so a client
     can distinguish the five without parsing English.
     """
 
@@ -63,8 +60,7 @@ class VocabularyState(StrEnum):
     NO_VECTORS = "no_vectors"
     #: `genome_scores` holds more than one release; not judged.
     MIXED_RELEASES = "mixed_releases"
-    #: Vectors exist and `genome_tags` is empty — every catalog bootstrapped
-    #: before `m08b` is in this state, and the fix is `--phase movielens`.
+    #: Vectors exist and `genome_tags` is empty; the fix is `--phase movielens`.
     NOT_LOADED = "not_loaded"
     #: A vocabulary is stored and it was loaded from another release.
     MISMATCHED = "mismatched"
@@ -76,12 +72,9 @@ class VocabularyState(StrEnum):
 class VocabularyVerdict:
     """`VocabularyState` plus whatever that state has to carry.
 
-    Two optional fields rather than five subclasses, because exactly two
-    states carry anything: `NAMED` carries a count and `MISMATCHED` carries
-    the port's own message, which names **both** release tokens. That message
-    is the port's diagnosis rather than a surface's prose — the same string
-    `ImportRun.error` stores — so passing it through is not the "route
-    serialising English" this report exists to avoid.
+    Two optional fields rather than five subclasses: exactly two states carry
+    anything. `MISMATCHED` carries the port's own message, which names both
+    release tokens -- the port's diagnosis, not a surface's prose.
     """
 
     state: VocabularyState
@@ -91,25 +84,18 @@ class VocabularyVerdict:
 
 @dataclass(frozen=True, slots=True)
 class BootstrapReport:
-    r"""Everything `bootstrap-status` describes, assembled once.
+    """Everything `bootstrap-status` describes, assembled once.
 
-    ⚠️ **Two aggregate reads on every call, and they are priced for an
-    operator screen rather than a client one.** Measured 2026-08-12 against a
-    real 1,272,367-title catalog with a 15,565-vector genome (`\timing`,
-    median of five, on a *busy* box, so these are upper bounds):
-    `count_titles()` is a seq-scan `count(*)` at **80.6 ms**;
-    `genome_coverage()` is **248.6 ms** for its five-way aggregate plus
-    **2.0 ms** for the revisions read, because three of its five terms are
-    themselves full scans of `titles`. So one report is roughly **a third of
-    a second**, and it grows with the catalog rather than with what is on the
-    screen. Fine behind an admin page somebody opens on purpose; **do not
-    reuse this shape on a client path.**
+    Two aggregate reads on every call, priced for an operator screen rather
+    than a client one: `count_titles()` is a seq-scan `count(*)`, and three of
+    `genome_coverage()`'s five terms are themselves full scans of `titles`. So
+    a report costs hundreds of milliseconds and grows with the catalog rather
+    than with what is on the screen. Fine behind an admin page somebody opens
+    on purpose; do not reuse this shape on a client path.
 
-    Deliberately **not cached.** A cache would be an unmeasured mechanism on
-    the one page an operator opens precisely because they do not trust what
-    they last saw, and it would have to be invalidated by a writer in another
-    process. The number is stated instead, which is what makes the cost a
-    decision rather than a surprise.
+    Deliberately not cached: it would have to be invalidated by a writer in
+    another process, on the one page an operator opens precisely because they
+    do not trust what they last saw.
     """
 
     runs: tuple[ImportRun, ...]
@@ -123,21 +109,19 @@ async def vocabulary_verdict(
 ) -> VocabularyVerdict:
     """`GenomeRepository.vocabulary`'s operator surface, as a decision.
 
-    **The one function both surfaces call.** It lives here rather than in
+    The one function both surfaces call. It lives here rather than in
     `usher.cli` because a route that re-derived it would be a second answer to
     *"what does 'not loaded' mean?"*, and the branch the two would disagree on
     is the one nobody ever looks at.
 
-    The refusal is *caught and turned into a state*, not raised:
-    `PortDataMalformed` is deliberately not in `cli.OPERATOR_ERRORS` — the
-    three `UsherPortError` subclasses ADR-0026's amendment added are the
-    transport ones and this is a content one — so letting it out would answer
-    "what state is my genome in?" with a stack trace about the answer being
-    bad, at a terminal and with a 500 on the wire.
+    The refusal is caught and turned into a state, not raised:
+    `PortDataMalformed` is deliberately not in `cli.OPERATOR_ERRORS`, being a
+    content error rather than a transport one, so letting it out would answer
+    "what state is my genome in?" with a stack trace at a terminal and a 500
+    on the wire.
 
     Takes the port rather than a session, which is the seam that keeps the
-    five branches unit-testable: `cli._status` opens its own engine and is
-    not.
+    five branches unit-testable.
     """
     if not coverage.revisions:
         return VocabularyVerdict(state=VocabularyState.NO_VECTORS)
@@ -157,19 +141,16 @@ async def bootstrap_report(
     catalog: BulkCatalogRepository,
     genome: GenomeRepository,
 ) -> BootstrapReport:
-    """The four reads `usher bootstrap-status` has made since M2, as a value.
+    """Everything `usher bootstrap-status` reads, as one value.
 
-    Assembled here rather than inside either surface, for the reason
-    `composition.run_bootstrap` is one dispatch two roots call: the CLI prints
-    it and `GET /admin/bootstrap/status` serialises it, and a report built
-    twice is two answers waiting to drift. It takes ports and not a session,
-    so both roots hand it whatever they already hold.
+    Assembled here rather than inside either surface: the CLI prints it and
+    `GET /admin/bootstrap/status` serialises it, and a report built twice is
+    two answers waiting to drift. It takes ports and not a session, so both
+    roots hand it whatever they already hold.
 
-    **No read here can fail on an empty database**, which is PRD 08's operator
+    No read here can fail on an empty database, which is PRD 08's operator
     rule and the reason this returns a report for every state rather than
-    raising for some: `list_runs()` answers `[]`, both aggregates answer zero,
-    and `vocabulary_verdict` answers `NO_VECTORS` without asking the port
-    anything at all.
+    raising for some.
     """
     stored = await runs.list_runs()
     titles = await catalog.count_titles()
@@ -212,9 +193,8 @@ class BootstrapService:
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
             try:
-                # `revision`, when given, is the value the caller already resolved this
-                # run -- the same parameter `BulkDataset.batches` carries and for a
-                # stronger reason than saving a HEAD.
+                # The caller's already-resolved value, so this run and the batches it
+                # streams cannot straddle two revisions.
                 resolved = revision if revision is not None else await dataset.revision()
                 span.set_attribute("usher.revision", resolved)
                 try:
@@ -298,8 +278,6 @@ class BootstrapService:
         resume_from: BulkCursor | None,
         revision: str,
     ) -> ImportRun:
-        # `revision=revision`: the value `import_dataset` already resolved, not left for
-        # `batches()` to re-derive.
         async for batch in dataset.batches(resume_from=resume_from, revision=revision):
             batch_started = time.perf_counter()
             with _tracer.start_as_current_span("bootstrap.batch") as span:
@@ -317,11 +295,9 @@ class BootstrapService:
                 # The single commit that makes this resumable: rows and cursor land
                 # together or not at all.
                 await self._commit()
-                # **After that commit, never before it.** ADR-0033: an event is a
-                # statement about committed state, and this frame's subject is the batch
-                # the line above just made durable -- `rows_seen`, `rows_written` and
-                # `position` are all read off the `ImportRun` that is now in
-                # `import_runs`.
+                # After that commit, never before it: an event is a statement about
+                # committed state, and this frame's subject is the batch the line
+                # above just made durable.
                 await self._publish_progress(run)
             _rows_counter.add(written, {"dataset": dataset.name})
             _batch_duration.record(time.perf_counter() - batch_started, {"dataset": dataset.name})
@@ -330,23 +306,16 @@ class BootstrapService:
     async def _publish_progress(self, run: ImportRun) -> None:
         """One `bootstrap.progress` per committed batch, scoped to no title.
 
-        **Per batch rather than per run**, because an admin UI's progress bar
-        is the whole point of the event and one at the end is a bar that jumps
-        from 0% to 100% -- the failure `ReconcileService._publish_progress`
-        already names for `sync.progress`, and the reason the `bootstrap`
-        job's registration hands this service the process bus rather than
-        `JobWorker`'s deferred buffer (`composition.build_worker` carries that
-        argument in full).
+        Per batch rather than per run: an admin UI's progress bar is the whole
+        point of the event, and one at the end is a bar that jumps from 0% to
+        100%. That is why the `bootstrap` job's registration hands this service
+        the process bus rather than `JobWorker`'s deferred buffer.
 
-        **Scoped to no title**, which is what makes PRD 07's *"Admin UI only"*
-        true rather than advisory: a `?titles=` subscriber never sees one, and
-        a bulk import touching most of the catalog would otherwise wake every
-        detail screen in the household once per batch.
+        Scoped to no title, which is what makes PRD 07's *"Admin UI only"* true
+        rather than advisory: a bulk import touching most of the catalog would
+        otherwise wake every detail screen in the household once per batch.
 
-        **No `percent`**, and the payload is what a cursor can honestly
-        supply: `ClientEventKind.BOOTSTRAP_PROGRESS` carries the argument, and
-        PRD 07's payload column is corrected rather than satisfied by a
-        fraction invented from a byte offset.
+        No `percent`: a byte offset cannot honestly supply one.
         """
         await self._events.publish(
             ClientEvent(

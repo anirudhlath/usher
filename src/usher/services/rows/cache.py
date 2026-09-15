@@ -58,16 +58,15 @@ class ScreenRead:
 class StaleScreen:
     """One key handed from a request to the refresh lane.
 
-    **A frozen `User`, never the `RowContext` the request built.** That context
+    A frozen `User`, never the `RowContext` the request built. That context
     holds ten repositories bound to the request's `AsyncSession`, which
-    `get_session` commits and closes when the handler returns -- so carrying
-    one would hand a background task either a dead session or a live one shared
-    with a request, which is the hazard ADR-0025 refuses one layer up. The user
-    is the whole of what a refresh needs to build a context of its own, and the
-    request already resolved it.
+    `get_session` commits and closes when the handler returns -- so carrying one
+    would hand a background task either a dead session or a live one shared with
+    a request. The user is the whole of what a refresh needs to build a context
+    of its own, and the request already resolved it.
 
     `link` is the span context of whatever served the stale screen. The refresh
-    runs as a **root** span with a `Link` back to it rather than as a child --
+    runs as a root span with a `Link` back to it rather than as a child --
     PRD 10's rule for a worker's `job.*`, and for the same reason: the request
     has already returned, so a child span of a finished parent misstates
     causality.
@@ -80,18 +79,18 @@ class StaleScreen:
 class RefreshQueue:
     """Stale screen keys, bounded and deduplicated, on the way to one lane.
 
-    **Deduplicated across the refresh, not just across the wait.** A key stays
-    `pending` from `schedule` until the lane calls `done`, so a request
-    arriving while a refresh is in flight schedules nothing. Cleared at `take`
-    instead, every request in the refresh's own window would queue another full
-    compose over the same household -- the stampede, arriving through the
-    mechanism built to prevent it, and invisible to any case that only counts.
+    Deduplicated across the refresh, not just across the wait. A key stays
+    `pending` from `schedule` until the lane calls `done`, so a request arriving
+    while a refresh is in flight schedules nothing. Cleared at `take` instead,
+    every request in the refresh's own window would queue another full compose
+    over the same household -- the stampede, arriving through the mechanism
+    built to prevent it.
 
-    **`schedule` is synchronous and never blocks.** `put_nowait` on a full
-    queue raises rather than suspending, and the raise is turned into a
-    dropped key: a request path that awaited `put` would block on exactly the
-    load that filled the queue. Safe, because an entry past `TTL + grace` is a
-    hard miss and the next request rebuilds -- the cost M7 already pays.
+    `schedule` is synchronous and never blocks. `put_nowait` on a full queue
+    raises rather than suspending, and the raise is turned into a dropped key: a
+    request path that awaited `put` would block on exactly the load that filled
+    the queue. Safe, because an entry past `TTL + grace` is a hard miss and the
+    next request rebuilds.
     """
 
     __slots__ = ("_dropped", "_pending", "_queue")
@@ -117,7 +116,7 @@ class RefreshQueue:
     def dropped(self) -> int:
         """Keys a full queue refused.
 
-        **Not a metric**, deliberately: PRD 10's table is maintained rather than
+        Not a metric, deliberately: PRD 10's table is maintained rather than
         aspirational, and a drop is a normal outcome under load rather than an event
         worth a series of its own -- what it costs is one hard miss, which
         `usher.cache.misses` already counts. Exposed so a case can assert the drop
@@ -154,7 +153,7 @@ class RefreshQueue:
     async def take(self) -> StaleScreen:
         """The lane's end.
 
-        Suspends until there is a key; **does not** clear the pending mark -- see the
+        Suspends until there is a key; does not clear the pending mark -- see the
         class docstring.
         """
         return await self._queue.get()
@@ -202,19 +201,16 @@ class RowCache:
     def read_screen(self, user_id: uuid.UUID, *, grace: timedelta = timedelta(0)) -> ScreenRead:
         """The three-state screen read: fresh, stale-inside-`grace`, or absent.
 
-        **The grace is the caller's**, not a property of the dict, because the
-        only caller entitled to a stale answer is one that can arrange for the
-        entry to be replaced. `HomeService` passes `SCREEN_STALE_GRACE` when it
-        holds a refresher and zero when it does not, which is what makes
-        "served stale and never refreshed" unreachable rather than merely
-        unlikely. At `grace=0` this is byte-for-byte M7's behaviour, which is
-        what `get_screen` below still is.
+        The grace is the caller's, not a property of the dict, because the only
+        caller entitled to a stale answer is one that can arrange for the entry
+        to be replaced. `HomeService` passes `SCREEN_STALE_GRACE` when it holds a
+        refresher and zero when it does not, which is what makes "served stale
+        and never refreshed" unreachable rather than merely unlikely. At
+        `grace=0` this is exactly what `get_screen` below is.
 
-        The boundaries are both `>=`-shaped and both are stepped exactly onto
-        by a case: an entry *at* `expires_at` is expired, and an entry at
-        `expires_at + grace` is a hard miss. M5's sweep recorded the
-        `stale_after` `<=` -> `<` mutation surviving because every case in that
-        file stepped past its boundary rather than onto it.
+        The boundaries are both `>=`-shaped, and both are stepped exactly onto by
+        a case: an entry *at* `expires_at` is expired, and one at
+        `expires_at + grace` is a hard miss.
         """
         entry = self._screens.get(user_id)
         if entry is None:
@@ -225,26 +221,22 @@ class RowCache:
             return ScreenRead(freshness=Freshness.FRESH, screen=entry.value)
         if self._now() < entry.expires_at + grace:
             # A hit, because the request was served without a rebuild -- and
-            # labelled, because a stale serve counted as a plain hit hides the
-            # one thing this feature trades away. The module docstring argues
-            # both halves; PRD 10's table carries the label.
+            # labelled, because a stale serve counted as a plain hit hides the one
+            # thing this feature trades away.
             CACHE_HITS.add(1, {"cache": "screen", "freshness": "stale"})
             return ScreenRead(freshness=Freshness.STALE, screen=entry.value)
         # Removed on read rather than left: a screen past its grace is a row of
         # dead weight per user, and the `users` table is the only thing
         # bounding this half.
         self._screens.pop(user_id, None)
-        # A rebuild, the same population `usher.row.build.duration` measures.
+        # A rebuild, the same population `usher.row.build.duration` covers.
         # Recorded here rather than on `put_screen`, because the write that
         # repairs a miss is not a second event.
         CACHE_MISSES.add(1, {"cache": "screen"})
         return ScreenRead(freshness=Freshness.ABSENT, screen=None)
 
     def get_screen(self, user_id: uuid.UUID) -> tuple[BuiltRow, ...] | None:
-        """M7's read, unchanged.
-
-        fresh or nothing, and an expired entry is a miss on the counter as well as in
-        the answer.
+        """Fresh or nothing; an expired entry is a miss on the counter too.
 
         Kept beside `read_screen` rather than folded into it because a reader
         that cannot refresh must not be handed a stale screen, and because the
@@ -267,10 +259,10 @@ class RowCache:
             self._rows.pop(key, None)
             CACHE_MISSES.add(1, {"cache": "row"})
             return None
-        # **The row half has no grace window, and that is a scope decision rather than
-        # an omission.** The refresh unit is a *screen*: one key, one household, one
-        # entry per user, bounded by the `users` table -- and rebuilding a screen
-        # rebuilds the rows under it.
+        # The row half has no grace window, and that is a scope decision rather
+        # than an omission: the refresh unit is a *screen* -- one key, one
+        # household, one entry per user, bounded by the `users` table -- and
+        # rebuilding a screen rebuilds the rows under it.
         CACHE_HITS.add(1, {"cache": "row", "freshness": "fresh"})
         return entry.value
 
@@ -279,7 +271,7 @@ class RowCache:
         self._evict()
 
     def invalidate(self, user_id: uuid.UUID, slugs: Iterable[str]) -> None:
-        """Drop these rows for this household, **and its composed screen**.
+        """Drop these rows for this household, and its composed screen.
 
         The screen goes too because it is a *composition of rows*: dropping the
         row and keeping the screen is the subtle half of the bug, since the next
@@ -313,8 +305,8 @@ class RowCache:
     def clear(self) -> None:
         """Empty both halves.
 
-        `usher home --repeat` calls this between runs, because a repeat that measured
-        cache hits would report a number near zero and mean nothing.
+        `usher home --repeat` calls this between runs, because a repeat served
+        from cache would report a number near zero and mean nothing.
         """
         self._rows.clear()
         self._screens.clear()
@@ -322,10 +314,9 @@ class RowCache:
     def _expired(self, entry: _Entry[object]) -> bool:
         """`>=`, so an entry *at* its expiry is expired.
 
-        The boundary is asserted by a case that steps the clock exactly onto
-        it, which is the habit M5's surviving `stale_after` mutation exists to
-        teach: every case in that file stepped past the boundary, so `<` and
-        `<=` agreed on every input the suite offered.
+        The boundary is asserted by a case that steps the clock exactly onto it:
+        a case that stepped past it would leave `<` and `<=` agreeing on every
+        input the suite offered.
         """
         return self._now() >= entry.expires_at
 

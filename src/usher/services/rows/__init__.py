@@ -28,7 +28,7 @@ from usher.services.rows.recently_added import (
 from usher.services.rows.rediscover import REDISCOVER_SCORE, RediscoverProvider
 from usher.services.rows.seasonal import SEASONAL_SCORE, SeasonalProvider
 
-# The **ceiling** each provider can return, keyed by class name.
+# The ceiling each provider can return, keyed by class name.
 BASE_SCORES: Mapping[str, float] = {
     ContinueWatchingProvider.__name__: CONTINUE_WATCHING_SCORE,
     NextUpProvider.__name__: NEXT_UP_SCORE,
@@ -42,8 +42,8 @@ BASE_SCORES: Mapping[str, float] = {
     PeopleProvider.__name__: PEOPLE_SCORE_CEILING,
 }
 
-# **The rows a watch state can move**, named by the providers that own them rather than
-# by two string literals in `services/push.py`.
+# The rows a watch state can move, named by the providers that own them rather
+# than by two string literals in `services/push.py`.
 WATCH_STATE_ROWS: tuple[str, ...] = (
     ContinueWatchingProvider().slug_prefix,
     NextUpProvider().slug_prefix,
@@ -84,7 +84,7 @@ __all__ = [
 
 
 def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
-    """**The registry, and it is the composition point.**."""
+    """The registry, and the composition point."""
     return (
         ContinueWatchingProvider(),
         NextUpProvider(),
@@ -95,17 +95,17 @@ def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
         GenreAffinityProvider(),
         SeasonalProvider(),
         PeopleProvider(),
-        # **M8's, and it takes no argument from the deployment.** Whether an LLM is
-        # configured is not a fact this provider may see: with `USHER_LLM_ENABLED=false`
-        # there is no generation and therefore no curated shelf, which is the same
-        # answer a household gets on the day before its first one runs.
+        # It takes no argument from the deployment: whether an LLM is configured
+        # is not a fact this provider may see. With `USHER_LLM_ENABLED=false` there
+        # is no generation and therefore no curated shelf, which is the same answer
+        # a household gets on the day before its first one runs.
         CuratedProvider(),
     )
 
 
 # The default wiring, derived from the function above rather than restated:
-# `semantic=False` is the shipped default (no embedding extra, ADR-0022), and
-# it is also the *safe* default, because the sentence it selects claims less.
+# `semantic=False` is the shipped default (no embedding extra), and it is also
+# the *safe* default, because the sentence it selects claims less.
 ROW_PROVIDERS: tuple[RowProvider, ...] = row_providers()
 
 
@@ -113,14 +113,11 @@ ROW_PROVIDERS: tuple[RowProvider, ...] = row_providers()
 class RowProviderSetting:
     """One registered provider and whether it composes.
 
-    the row PRD 09 item 9 means by *"one row per registered provider"*.
-
-    **Carries the provider rather than only its slug**, because the two
-    consumers want different halves of the same join and a second traversal to
-    recover the object is the pairing failure `services/home.py::_Candidate`
-    records (`_publish_watch_states` reconstructed a pairing outside the loop
-    that built it and went one row out of step). `GET /admin/rows/providers`
-    renders `slug` and `enabled`; both composition roots keep `provider`.
+    Carries the provider rather than only its slug, because the two consumers
+    want different halves of the same join and a second traversal to recover the
+    object is the pairing failure `services/home.py::_Candidate` records.
+    `GET /admin/rows/providers` renders `slug` and `enabled`; both composition
+    roots keep `provider`.
     """
 
     provider: RowProvider
@@ -128,14 +125,12 @@ class RowProviderSetting:
 
     @property
     def slug(self) -> str:
-        """`RowProvider.slug_prefix`.
+        """`RowProvider.slug_prefix`, the operator-facing identifier.
 
-        the operator-facing identifier, which is what
-        `row_provider_settings.slug_prefix` is keyed on and what `usher home`'s leftmost
-        column and `usher.row.build.duration`'s `provider` label already carry.
-
-        Never the class name (E1's port says why: a rename must not silently re-enable a
-        provider somebody turned off).
+        What the overrides are keyed on, and what `usher home`'s leftmost column
+        and `usher.row.build.duration`'s `provider` label already carry. Never
+        the class name: a rename must not silently re-enable a provider somebody
+        turned off.
         """
         return self.provider.slug_prefix
 
@@ -143,7 +138,7 @@ class RowProviderSetting:
 def row_provider_settings(
     overrides: Mapping[str, bool], providers: Sequence[RowProvider] = ROW_PROVIDERS
 ) -> tuple[RowProviderSetting, ...]:
-    """The registry **left-joined** onto the stored overrides."""
+    """The registry, left-joined onto the stored overrides."""
     return tuple(
         RowProviderSetting(provider=provider, enabled=overrides.get(provider.slug_prefix, True))
         for provider in providers
@@ -153,16 +148,14 @@ def row_provider_settings(
 def enabled_row_providers(settings: Sequence[RowProviderSetting]) -> tuple[RowProvider, ...]:
     """The composable half of a join, in registry order.
 
-    **This is filtering, not enumeration, and the difference is boundary call
-    9's.** *"A list a composition root builds by hand is a list the tenth
-    provider is forgotten from"* is an argument against a root *naming*
-    providers; a root that removes the ones a stored row disables names none of
-    them, and the day an eleventh is registered it composes with no edit here
-    or at any call site.
+    This is filtering, not enumeration. *"A list a composition root builds by
+    hand is a list the tenth provider is forgotten from"* is an argument against
+    a root *naming* providers; a root that removes the ones a stored row disables
+    names none of them, and the day an eleventh is registered it composes with no
+    edit here or at any call site.
 
-    **Takes the joined settings rather than the overrides**, so it cannot be a
-    second place the absence default is spelled -- and so `usher home`, which
-    needs *both* halves (the providers to compose, and the disabled slugs to
-    print), reads the table once instead of twice.
+    Takes the joined settings rather than the overrides, so it cannot be a second
+    place the absence default is spelled -- and so `usher home`, which needs
+    *both* halves, reads the table once instead of twice.
     """
     return tuple(one.provider for one in settings if one.enabled)

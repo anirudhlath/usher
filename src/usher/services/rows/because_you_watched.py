@@ -9,9 +9,9 @@ from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows._derived import SaidOnce
 from usher.services.rows.base import BaseRow
 
-# **3, and the cap is this provider's rather than the composer's.** The screen
-# is ten rows, and three is the most this provider may claim before "here are
-# some things like the things you watched" *is* the home screen.
+# The cap is this provider's rather than the composer's: the screen is ten rows,
+# and three is the most this provider may claim before "here are some things
+# like the things you watched" *is* the home screen.
 _MAX_SEEDS = 3
 
 # How far down the household's recency list to look for those three.
@@ -19,17 +19,17 @@ _SEED_WINDOW = 12
 
 BECAUSE_YOU_WATCHED_SCORE_CEILING = 0.80
 
-# **A per-seed decrement rather than one score for all seeds.** Without it three
-# similarity rows arrive at an identical score and the composer's tie-break -- by slug,
-# for determinism -- orders them alphabetically: "Because you watched Arrival" above
-# "Because you watched Zodiac", regardless of which was watched last night.
+# A per-seed decrement rather than one score for all seeds. Without it three
+# similarity rows arrive at an identical score and the composer's tie-break -- by
+# slug, for determinism -- orders them alphabetically: "Because you watched
+# Arrival" above "Because you watched Zodiac", whichever was watched last night.
 _SEED_STEP = 0.08
 
 # Jaccard over two seeds' neighbour sets. Above this the second row is the
 # first one wearing a different title -- two films from one franchise share
-# most of their neighbours by construction. **A seed rule, distinct from Task
-# 29/30's family cap**, and stated here because no one else can see it: the
-# composer is handed two rows that are each internally perfect.
+# most of their neighbours by construction. A seed rule, distinct from the
+# family cap, and stated here because no one else can see it: the composer is
+# handed two rows that are each internally perfect.
 _MAX_OVERLAP = 0.5
 
 # A "more like this" shelf of one card is a list, not a shelf. Applied to the
@@ -54,7 +54,7 @@ def _jaccard(left: frozenset[uuid.UUID], right: frozenset[uuid.UUID]) -> float:
     return len(left & right) / len(union)
 
 
-# **The provider's own stable identifier**, and every row it proposes carries a slug
+# The provider's own stable identifier, and every row it proposes carries a slug
 # that starts with it.
 _SLUG_PREFIX = "because-you-watched"
 
@@ -127,28 +127,25 @@ class BecauseYouWatchedProvider(RowProvider):
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         if await ctx.neighbors.computed_at() is None:
-            # **Never computed is a different fact from no neighbours.** This
-            # returns `[]` for both -- it is a home screen, not a diagnostic --
-            # but a deployment where this provider silently never fires is
-            # otherwise indistinguishable from a household with thin history,
-            # and nothing in M6 re-runs the rebuild.
+            # Never computed is a different fact from no neighbours. This returns
+            # `[]` for both -- it is a home screen, not a diagnostic -- but a
+            # deployment where this provider silently never fires is otherwise
+            # indistinguishable from a household with thin history.
             self._underived.warn(
                 "no title_neighbors have been computed, so no similarity rows can be "
                 "proposed; run `usher similar --rebuild`"
             )
             return []
 
-        # **The seed list, and it exists exactly once.** The front matter's gap table
-        # records that "the seed list -- recent high-engagement titles -- does not
-        # [exist]"; `list_recent` is what Group E built for it, and it already owns the
-        # `played` population, the episode roll-up (`COALESCE(ws.title_id, e.title_id)`
-        # -- trap 7, and a films-only seed list returns nothing at all for a television
+        # The seed list, and it exists exactly once. `list_recent` owns the
+        # `played` population and the episode roll-up (`COALESCE(ws.title_id,
+        # e.title_id)`), and a films-only seed list returns nothing at all for a
+        # television household.
         recent = await ctx.watch_states.list_recent(ctx.user.id, limit=self._window)
         if not recent:
-            # **No seed means no row.** Never a popular-titles seed: a seed
-            # chosen for the household is the entire content of the claim
-            # `reason` makes, so a fallback seed makes that sentence false
-            # about a real person.
+            # No seed means no row, and never a popular-titles seed: a seed chosen
+            # for the household is the entire content of the claim `reason` makes,
+            # so a fallback makes that sentence false about a real person.
             return []
 
         # One catalog read for every seed, not one per seed: the row needs the

@@ -80,8 +80,8 @@ class WatchWriteService:
         """`PUT /watch/episodes/{id}`.
 
         Episodes get no `/played` pair, which PRD 07's Actions table names for
-        titles only. Odd at a library that is 999,927 episodes and raised
-        rather than invented here.
+        titles only. Odd for a library that is mostly episodes, and raised rather
+        than invented here.
         """
         return await self._write(
             user_id=user_id,
@@ -98,13 +98,11 @@ class WatchWriteService:
 
         No body, so no position.
 
-        `position_seconds=None` means *keep the one already stored*, which is
-        the local half of M3's destructive-route finding. Emby's
+        `position_seconds=None` means *keep the one already stored*. Emby's
         `DELETE /Users/{u}/PlayedItems/{item}` resets `PlayCount`, clears
-        `LastPlayedDate` **and** clears a non-zero resume position -- measured
-        against 4.9.5.0 -- and `EmbyAdapter.push_watch_state` already declines
-        to use it. This must not do at the database what the adapter declines
-        to do at the source.
+        `LastPlayedDate` *and* clears a non-zero resume position, and
+        `EmbyAdapter.push_watch_state` already declines to use it. This must not
+        do at the database what the adapter declines to do at the source.
         """
         return await self._write(
             user_id=user_id,
@@ -163,9 +161,7 @@ class WatchWriteService:
         The refusal restates the port's own
         `num_nonnulls(title_id, episode_id) = 1` rather than waiting for
         `set_from_client` to give it, because both reads below have to know
-        which target this is. Unreachable through the three public methods and
-        pinned by a direct case anyway, on the terms M4's two unreachable
-        service guards were.
+        which target this is.
         """
         if title_id is not None and episode_id is None:
             return await self._watch_states.get_for_title(user_id, title_id)
@@ -177,18 +173,15 @@ class WatchWriteService:
         )
 
     async def _invalidate_rows(self, user_id: uuid.UUID) -> None:
-        """Drop this household's watch-state rows and its composed screen.
-
-        and tell every connected client which rows to refetch.
+        """Drop this household's watch-state rows, and say which to refetch.
 
         The same pair the push lane publishes, deliberately identical: a
         client write and a pushed `UserDataChanged` are the same event from
         two directions, and a client that handled one shape and not the other
         would go stale on whichever it did not implement.
 
-        One event per invalidated slug and no `title_id` -- a row is not a
-        title, so this is the one frame the `?titles=` filter cannot express
-        (`ports/events.py`).
+        One event per invalidated slug and no `title_id` -- a row is not a title,
+        so this is the one frame the `?titles=` filter cannot express.
         """
         if self._cache is not None:
             self._cache.invalidate(user_id, WATCH_STATE_ROWS)
@@ -204,10 +197,10 @@ class WatchWriteService:
         so a client parses one payload whether the change came from its own
         press or from another device through the source.
 
-        **It echoes back to the client that made the write**, which is what
-        the SSE channel is for in a multi-device household -- and the frame
-        carries the target id, so a client that knows what it just sent can
-        ignore its own echo rather than re-rendering on it.
+        It echoes back to the client that made the write, which is what the SSE
+        channel is for in a multi-device household -- and the frame carries the
+        target id, so a client that knows what it just sent can ignore its own
+        echo rather than re-rendering on it.
 
         `observed_at` is this instant rather than `stored.updated_at`: on
         Postgres that column is `now()`, frozen for the transaction, so it is

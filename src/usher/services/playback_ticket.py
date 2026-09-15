@@ -46,7 +46,7 @@ def mint(cipher: Fernet, url: str, *, minted_at: datetime) -> str:
 def redeem(cipher: Fernet, token: str, *, now: datetime, ttl_seconds: int) -> str | None:
     """Answer the URL a ticket carries, or `None` if it will not be honoured.
 
-    **Expired and forged answer the same thing, and that is a decision.**
+    Expired and forged answer the same thing, and that is a decision.
     `Fernet.extract_timestamp` verifies the signature before returning the
     timestamp, so the distinction is genuinely available; it is deliberately
     not taken. *"This ticket expired"* confirms to a holder that the string was
@@ -54,7 +54,7 @@ def redeem(cipher: Fernet, token: str, *, now: datetime, ttl_seconds: int) -> st
     way -- ask `/play` again. Nothing raises, so there is no exception message
     for a URL to leak into.
 
-    `ValueError` is caught beside `InvalidToken` for a measured reason: a `str`
+    `ValueError` is caught beside `InvalidToken` for a concrete reason: a `str`
     token outside ASCII reaches `str.encode("ascii")` inside the primitive
     before any signature check and raises a bare `ValueError`. A percent-decoded
     path segment is exactly such a `str`.

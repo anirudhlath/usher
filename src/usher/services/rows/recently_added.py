@@ -8,9 +8,9 @@ from usher.domain.rows import DisplayHint, RowFamily
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows.base import BaseRow
 
-# 30 days. **The window is stated rather than implied by a decay**, for
-# `TasteService`'s reason: an unbounded decay is a window whose edge nobody
-# wrote down and nobody can see.
+# 30 days. The window is stated rather than implied by a decay, for
+# `TasteService`'s reason: an unbounded decay is a window whose edge nobody wrote
+# down and nobody can see.
 _WINDOW_DAYS = 30
 
 # The score an import that landed this morning gets. Below Next Up, because
@@ -76,22 +76,21 @@ class RecentlyAddedProvider(RowProvider):
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         now = ctx.now()
-        # **`since` is the caller's, not the statement's**, and the clock is `ctx.now`
+        # `since` is the caller's, not the statement's, and the clock is `ctx.now`
         # rather than `datetime.now(UTC)`.
         since = now - timedelta(days=_WINDOW_DAYS)
         added = await ctx.media_items.list_recently_added(since=since, limit=self._limit)
         if not added:
-            # **Nothing arrived, so there is nothing to say.** Not "the newest
-            # twenty items whenever they arrived" -- that is the tempting
-            # implementation, it never returns nothing, and it renders
-            # identically to a working row on a library that has not changed in
-            # a year.
+            # Nothing arrived, so there is nothing to say. Not "the newest twenty
+            # items whenever they arrived" -- that never returns nothing, and it
+            # renders identically to a working row on a library that has not
+            # changed in a year.
             return []
-        # **The score decays where every other single-row provider's is constant.**
-        # "New" is the one relevance claim that genuinely is a function of time, and the
-        # decay is what makes the home screen visibly react to an import and then stop
-        # -- which is the observable difference between a composed screen and a
-        # configured one, and ADR-0006's whole premise.
+        # The score decays where every other single-row provider's is constant.
+        # "New" is the one relevance claim that genuinely is a function of time,
+        # and the decay is what makes the home screen visibly react to an import
+        # and then stop -- the observable difference between a composed screen and
+        # a configured one.
         newest = max(entry.added_at for entry in added)
         days = max((now - newest).total_seconds() / 86_400.0, 0.0)
         score = RECENTLY_ADDED_SCORE_CEILING * (_FRESHNESS_MIDPOINT / (_FRESHNESS_MIDPOINT + days))

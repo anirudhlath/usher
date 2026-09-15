@@ -11,7 +11,7 @@ from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows._derived import SaidOnce
 from usher.services.rows.base import BaseRow
 
-# Three distinct engaged titles, argued in the module docstring.
+# Three distinct engaged titles, below which "keeps choosing" is not a claim.
 _MIN_TITLES = 3
 
 # The crew job that counts. A tuple rather than a bare string because the next
@@ -51,7 +51,7 @@ def _qualifies(person: RecurringPerson) -> bool:
     return person.job in _QUALIFYING_JOBS
 
 
-# **The provider's own stable identifier**, and every row it proposes carries a slug
+# The provider's own stable identifier, and every row it proposes carries a slug
 # that starts with it.
 _SLUG_PREFIX = "people"
 
@@ -72,8 +72,8 @@ class PeopleRow(BaseRow):
 
     @property
     def reason(self) -> str | None:
-        # **The credit kind reaches the sentence.** One string for both is the
-        # wrong implementation this property exists to refuse.
+        # The credit kind reaches the sentence. One string for both is the wrong
+        # implementation this property exists to refuse.
         preposition = "directed by" if self._person.kind is CreditKind.CREW else "with"
         return (
             f"You've watched {self._person.watched_title_count} films "
@@ -96,8 +96,8 @@ class PeopleRow(BaseRow):
         # Read at build time rather than at propose, for
         # `GenreAffinityProvider`'s reason: the claim is the person and the
         # cards are its content, so a person whose other work the household has
-        # seen or does not own produces a row that **builds empty** and is
-        # dropped -- a different observable state from a row never proposed.
+        # seen or does not own produces a row that builds empty and is dropped --
+        # a different observable state from a row never proposed.
         credits = await ctx.credits.list_for_person(self._person.person_id, limit=self._candidates)
         if not credits:
             return []
@@ -139,7 +139,7 @@ class PeopleProvider(RowProvider):
         return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
-        # **One statement for the whole household**, whatever its history size.
+        # One statement for the whole household, whatever its history size.
         recurring = await ctx.people.list_recurring_for_user(
             ctx.user.id, min_titles=_MIN_TITLES, limit=self._candidates
         )

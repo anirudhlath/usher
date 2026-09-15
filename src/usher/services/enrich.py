@@ -44,14 +44,11 @@ _enriched = _meter.create_counter(
 def _trigger_for(priority: int) -> str:
     """PRD 10's `trigger` vocabulary -- `demand` or `background` -- for a rung.
 
-    **The threshold is `VISIBLE`, and it is the one this module already
-    draws.** `_apply` classifies its follow-up jobs on exactly this boundary
-    with the reason written out: *"Above `VISIBLE` the rung is a statement
-    that somebody is looking at this title now"*. Enrich jobs arrive at
-    `DEMAND` (`services/titles.py`, and the bootstrap/rows/sources routers)
-    and at `VISIBLE` (`services/visibility.py`); both are a client waiting,
-    which is what PRD 10's *"demand-triggered"* names, and `NEW`/`BACKFILL`
-    are the sweep.
+    The threshold is `VISIBLE`, the boundary `_apply` already draws for its
+    follow-up jobs: above it, the rung is a statement that somebody is looking
+    at this title now. Enrich jobs arrive at `DEMAND` and at `VISIBLE`, both of
+    which are a client waiting -- PRD 10's *"demand-triggered"* -- while
+    `NEW`/`BACKFILL` are the sweep.
 
     `int` rather than `JobPriority` for `_apply`'s reason: `Job.priority` is
     an integer column bounded `[0, 100]`, so a value between two members is
@@ -162,10 +159,9 @@ class EnrichService:
         with _tracer.start_as_current_span("enrich.title") as span:
             span.set_attribute("usher.title_id", str(title_id))
             # PRD 10: "Spans carry `title_id`, `source`, and `trigger` (`demand` vs
-            # `background`) as attributes, so 'why did the title I just opened take 45
-            # seconds' is one query." That sentence was true of no span until now -- the
-            # vocabulary is minted here, in one place, and the histogram label below
-            # reads the same variable, so the span and the metric cannot drift into two
+            # `background`) as attributes." The vocabulary is minted here, once, and
+            # the histogram label below reads the same variable, so the span and the
+            # metric cannot drift apart.
             span.set_attribute("usher.trigger", trigger)
             title = await self._titles.get(title_id)
             if title is None:
@@ -249,20 +245,18 @@ class EnrichService:
         return ProviderRef(
             provider=self._provider.name,
             value=str(value),
-            # ADR-0011: a TMDb ref without a kind names two things. The
-            # provider rejects one, and it is right to.
+            # A TMDb ref without a kind names two things. The provider rejects
+            # one, and it is right to.
             kind=title.kind if kind_scoped else None,
         )
 
     async def _payload_for(self, ref: ProviderRef) -> dict[str, Any]:
-        """The cached response if it is inside the freshness window.
+        """The cached response inside the freshness window, else a fresh fetch.
 
-        else a fresh fetch, cached on the way through.
-
-        The window is a ceiling under TMDb's six-month caching term rather
-        than a target. Both halves matter: never refetching leaves a catalog
-        that cannot learn a film got a sequel, and always refetching turns a
-        retry storm into a rate limit.
+        The window is a ceiling under TMDb's six-month caching term rather than
+        a target. Both halves matter: never refetching leaves a catalog that
+        cannot learn a film got a sequel, and always refetching turns a retry
+        storm into a rate limit.
         """
         space = ref.kind.value if ref.kind is not None else _GLOBAL_ID_SPACE
         cached = await self._payloads.get(ref.provider, space, ref.value)
@@ -283,8 +277,7 @@ class EnrichService:
         for field in _ENRICHABLE:
             value = getattr(result.title, field)
             # `None` and `()` both mean "this response did not say", never
-            # "blank it". `0` and `False` are positive claims and are kept --
-            # the same distinction ADR-0014 draws one lane over.
+            # "blank it". `0` and `False` are positive claims and are kept.
             if value is None or value == ():
                 continue
             changes[field] = value
@@ -310,7 +303,7 @@ class EnrichService:
         back a `Title` carrying an out-of-range `tmdb_vote_average` that
         pydantic then serialises without complaint.
 
-        `genres` is the one field not written straight through — see
+        `genres` is the one field not written straight through -- see
         `_genres_after`. The substitution happens here rather than in
         `_changes` because it needs the *stored* title, which `_changes` does
         not see; `changes` keeps its meaning as "what the provider supplied",
@@ -336,21 +329,18 @@ class EnrichService:
         )
 
     async def _store_hierarchy(self, result: EnrichmentResult) -> None:
-        """Seasons then episodes.
+        """Seasons then episodes, each in one statement.
 
-        each in one statement, with the season ids **read back** rather than trusted.
-
-        The read-back is not defensive. `to_result` mints a fresh UUIDv7 per
-        `Season`, and a season the catalog already holds keeps the id it was
-        inserted with — so an episode carrying the minted id names no row and
-        fails on `fk_episodes_season_id_seasons`, on the *second* enrichment
-        rather than the first. `IngestService._ensure_seasons` re-reads for
-        exactly this reason; no port fake can see it (a dict has no foreign
-        keys), which is why it is asserted directly.
+        The season ids are read back rather than trusted, and that is not
+        defensive: `to_result` mints a fresh UUIDv7 per `Season`, and a season
+        the catalog already holds keeps the id it was inserted with -- so an
+        episode carrying the minted id names no row and fails on
+        `fk_episodes_season_id_seasons`, on the *second* enrichment rather than
+        the first.
         """
         if not result.seasons:
-            # A movie. Two round trips per title against 94,438 of them, on a
-            # catalog that is two thirds films, for nothing.
+            # A movie. Two round trips per title, on a catalog that is mostly
+            # films, for nothing.
             return
         await self._episodes.upsert_seasons(result.seasons)
         season_ids = await self._episodes.resolve_seasons(
@@ -376,14 +366,12 @@ class EnrichService:
             await self._episodes.upsert_episodes(rows)
 
     async def _record_failure(self, title: Title, exc: UsherPortError) -> None:
-        """ADR-0008's whole point, in four lines.
+        """Record the error; leave the enrichment tier untouched.
 
-        the error is recorded and the tier is untouched.
-
-        Committed before the caller re-raises, because `JobWorker` parks the
-        job on the exception and the reason has to be readable somewhere an
-        operator looks -- PRD 02's enrichment dashboard reads
-        `enrichment_error`, not the queue.
+        Committed before the caller re-raises, because `JobWorker` parks the job
+        on the exception and the reason has to be readable somewhere an operator
+        looks -- PRD 02's enrichment dashboard reads `enrichment_error`, not the
+        queue.
         """
         # `str(exc)`, never the exception object and never a payload: PRD 08's
         # credentials-are-never-logged rule applies to a column an operator

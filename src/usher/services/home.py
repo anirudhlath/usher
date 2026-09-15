@@ -1,7 +1,4 @@
-"""The composed home screen.
-
-PRD 06, and [ADR-0006](../../../docs/prd/decisions/0006-server-composed-home.md).
-"""
+"""The composed home screen (PRD 06)."""
 
 import time
 from collections.abc import Callable, Sequence
@@ -36,10 +33,9 @@ _row_build_duration = _meter.create_histogram(
 # `freshness="stale"`, and that module argues both halves.
 
 # `_MAX_ROWS` and `_MAX_PER_FAMILY` are constants and constructor defaults, not
-# `Settings` fields. The mechanism exists (unlike the concurrency setting PRD
-# 08 retracted), but the reason to move either number is an operator looking at
-# a screen, which is M9's admin surface -- and `Settings` is `extra="forbid"`,
-# so every field there owes a reader *and* a reason.
+# `Settings` fields: the reason to move either number is an operator looking at
+# a screen, and `Settings` is `extra="forbid"`, so every field there owes a
+# reader *and* a reason.
 _MAX_ROWS = 10
 _MAX_PER_FAMILY = 4
 
@@ -63,11 +59,11 @@ _SIMILARITY_RUN = 3
 class ProviderReport:
     """What one registered provider contributed to one composition.
 
-    **There is a line for every registered provider, including the ones that
-    proposed nothing.** An absent provider and a silent one are the two states
-    this milestone exists to distinguish, and a report built by iterating the
-    *proposals* makes them identical -- which is exactly how a provider left
-    out of `ROW_PROVIDERS` survives review.
+    There is a line for every registered provider, including the ones that
+    proposed nothing. An absent provider and a silent one are two different
+    states, and a report built by iterating the *proposals* makes them
+    identical -- which is how a provider left out of `ROW_PROVIDERS` survives
+    review.
 
     `selected` and `built` are separate because PRD 06's "drops any that build
     empty" is otherwise invisible: `proposed 1, selected 1, built 0` is a row
@@ -119,8 +115,8 @@ class _Candidate:
     The provider is carried because `ScoredRow` does not carry it and must not:
     that is a *port* value describing a row's worth, and the composer's need to
     label a metric is the composer's. Recovering the pairing later -- by slug,
-    say -- is the failure M5's `_publish_watch_states` shipped, where a pairing
-    reconstructed outside the loop that built it went one row out of step.
+    say -- is how a pairing reconstructed outside the loop that built it ends up
+    one row out of step.
     """
 
     provider: RowProvider
@@ -134,10 +130,9 @@ class _Candidate:
 def _ranking(candidate: _Candidate) -> tuple[float, str]:
     """`(-score, slug)`.
 
-    **`slug` breaks the tie, not registration order.** A tie broken by the
-    order a registry happened to yield is a screen whose order is a property of
-    a tuple literal, and it is exactly what lets a score-blind composer pass an
-    ordering test. Iteration order over a registry is not a contract.
+    `slug` breaks the tie, not registration order: a tie broken by the order a
+    registry happened to yield is a screen whose order is a property of a tuple
+    literal. Iteration order over a registry is not a contract.
     """
     return (-candidate.proposal.score, candidate.row.slug)
 
@@ -157,16 +152,14 @@ class HomeService:
         visibility: VisibilityService | None = None,
     ) -> None:
         self._providers = tuple(providers)
-        # `None` is a composer with no cache at all, which is what every
-        # ordering case here uses and what makes "compose it cold" expressible
-        # for `usher home`. A cache that could not be absent would make the
-        # milestone's one cache measurement untakeable.
+        # `None` is a composer with no cache at all, which is what every ordering
+        # case here uses and what makes "compose it cold" expressible for
+        # `usher home`.
         self._cache = cache
-        # **Injected as a plain callable, and synchronous.** A callable rather than a
-        # port because `usher.services` may not name the composition root and ADR-0001
-        # warns against an ABC with one implementation -- `RowContext.affinities` is
-        # already a `Callable` field one file over (`ports/rows.py`), so the precedent
-        # is set.
+        # Injected as a plain callable, and synchronous: `usher.services` may not
+        # name the composition root, and an ABC with one implementation buys
+        # nothing -- `RowContext.affinities` is already a `Callable` field one file
+        # over, in `ports/rows.py`.
         self._refresh = refresh
         # Zero unless something can act on a scheduled key.
         self._stale_grace = stale_grace if refresh is not None else timedelta(0)
@@ -185,15 +178,12 @@ class HomeService:
         The whole screen is cached under the request's own `user_id` for
         `_SCREEN_TTL`, and each built row under `(user_id, slug)` for its own
         `BuiltRow.ttl`. Both are in-process; `services/rows/cache.py` says what
-        that costs and what M9 owns.
+        that costs.
         """
         return (await self.compose_report(ctx)).rows
 
     async def compose_report(self, ctx: RowContext) -> ComposeReport:
-        """The same composition.
-
-        with the per-provider breakdown `usher home` prints and PRD 10's dashboard 4
-        draws.
+        """The same composition, with the per-provider breakdown.
 
         One method rather than two paths: a report assembled by a second loop
         over the providers would describe a composition that never happened,
@@ -206,7 +196,7 @@ class HomeService:
         )
         if read.screen is not None:
             if read.freshness is Freshness.STALE and self._refresh is not None:
-                # **No `await`, and none is possible**: `_refresh` returns `None`.
+                # No `await`, and none is possible: `_refresh` returns `None`.
                 self._refresh(ctx.user)
             # A screen hit does not re-propose, stale or fresh. `propose` is
             # the cheap phase, not the free one -- ten bounded reads is still
@@ -254,26 +244,23 @@ class HomeService:
         body rather than two, because a second copy is a second place for the
         cap, the adjacency rule and the TTL to drift.
 
-        **The `propose` span is emitted here, so it inherits two roots.**
-        `compose_report` calls this inside `home.compose`; `rebuild` calls it
-        inside no span of its own, so the refresh lane's `propose` spans hang
-        off `rows.refresh` exactly as its `row.build` spans do. That asymmetry
-        is the one PRD 10 already records for `row.build`, one phase earlier,
-        and it is deliberate rather than an omission -- see `rebuild`.
+        The `propose` span is emitted here, so it inherits two roots:
+        `compose_report` calls this inside `home.compose`, and `rebuild` calls it
+        inside no span of its own, so the refresh lane's `propose` spans hang off
+        `rows.refresh` exactly as its `row.build` spans do.
         """
         candidates: list[_Candidate] = []
         for provider in self._providers:
             at = time.perf_counter()
-            # **One span per registered provider, inside the bracket that already times
-            # this loop.** `entry.propose_seconds` measures the same interval and feeds
-            # `usher home`'s breakdown; the span is what puts that interval in a
-            # *trace*, where until M10 a provider slow to propose and cheap to build was
-            # visible only in the parent's duration -- `next-up` alone is 302.9 ms of a
+            # One span per registered provider, inside the bracket that already
+            # times this loop. `entry.propose_seconds` covers the same interval and
+            # feeds `usher home`'s breakdown; the span is what puts that interval in
+            # a *trace*, where a provider slow to propose and cheap to build would
+            # otherwise show up only in the parent's duration.
             with _tracer.start_as_current_span("propose") as span:
                 proposals = await provider.propose(ctx)
                 # Both lines read state this scope already holds and neither writes
-                # anything, so their order carries no meaning -- which is what makes
-                # swapping them the equivalent-mutant control for this span.
+                # anything, so their order carries no meaning.
                 span.set_attribute("usher.row.provider", provider.slug_prefix)
                 span.set_attribute("usher.row.proposed", len(proposals))
             entry = tally[provider.slug_prefix]
@@ -282,10 +269,10 @@ class HomeService:
             for proposal in proposals:
                 candidates.append(_Candidate(provider=provider, proposal=proposal))
         built: list[BuiltRow] = []
-        # **A `for`, not a `gather`.** See the module docstring and boundary call 8: two
-        # coroutines awaiting on one `AsyncSession` interleave on one connection, and
-        # the failure is an intermittent `InvalidRequestError` or a result set
-        # attributed to the wrong query, under load, after it has usually worked.
+        # A `for`, not a `gather`: two coroutines awaiting on one `AsyncSession`
+        # interleave on one connection, and the failure is an intermittent
+        # `InvalidRequestError` or a result set attributed to the wrong query, under
+        # load, after it has usually worked.
         for candidate in self._select(candidates):
             entry = tally[candidate.provider.slug_prefix]
             entry.selected += 1
@@ -305,8 +292,8 @@ class HomeService:
         if self._cache is not None:
             self._cache.put_screen(ctx.user.id, screen, ttl=_SCREEN_TTL)
         if self._visibility is not None:
-            # **Once for the whole screen, and after `_order` rather than inside
-            # `_build`** (issue #73).
+            # Once for the whole screen, and after `_order` rather than inside
+            # `_build`: only the rows that survived ordering were shown.
             await self._visibility.seen_cards(card for row in screen for card in row.cards)
         return screen
 
@@ -318,11 +305,10 @@ class HomeService:
         nesting rule is what makes a trace answer "what did this request do"
         instead of "what happened around then".
 
-        **A cache hit records no `usher.row.build.duration` point**,
-        deliberately: the histogram measures *building*, and a hit built
-        nothing. A hit recorded as a ~0 s build would drag the p95 towards zero
-        exactly as the cache warms, which is the shape that hides the slow
-        provider dashboard 4 exists to find.
+        A cache hit records no `usher.row.build.duration` point, deliberately:
+        the histogram is about *building*, and a hit built nothing. A hit
+        recorded as a ~0 s build would drag the p95 towards zero exactly as the
+        cache warms, which is the shape that hides a slow provider.
         """
         slug = candidate.row.slug
         if self._cache is not None:

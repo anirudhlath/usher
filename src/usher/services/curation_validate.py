@@ -13,23 +13,20 @@ from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.ids import new_id
 
 #: The keys the completion is read through. Constants rather than literals so
-#: Task 12's prompt and JSON schema are written against the same four strings
+#: the prompt and the JSON schema are written against the same four strings
 #: this reads -- a schema that says `ids` and a validator that reads `item_ids`
-#: is a generation that drops 100% of a correct answer, which is the failure
-#: this whole module exists to make impossible. PRD 06 step 2's own spelling.
+#: drops 100% of a correct answer. PRD 06 step 2's own spelling.
 ROWS_KEY = "rows"
 TITLE_KEY = "title"
 REASON_KEY = "reason"
 ITEM_IDS_KEY = "item_ids"
 
-# : `SLUG_PREFIX` is **imported** above and re-exported here, rather than : declared.
-
-# : The floor a row has to clear, restating `SeasonalProvider`'s and :
-# `RediscoverProvider`'s rather than inventing a second number: *"an empty or : two-card
-# row is worse than none"*.
+#: The floor a row has to clear, restating `SeasonalProvider`'s and
+#: `RediscoverProvider`'s rather than inventing a second number: *"an empty or
+#: two-card row is worse than none"*.
 DEFAULT_MIN_CARDS = 5
 
-#: See the module docstring's last paragraph. Inclusive bounds.
+#: Inclusive bounds.
 MAX_TITLE_CHARS = 200
 MAX_REASON_CHARS = 1000
 
@@ -37,9 +34,8 @@ MAX_REASON_CHARS = 1000
 class DropReason(StrEnum):
     """`usher.curation.dropped`'s `reason` label.
 
-    Closed, because a metric dimension built from free-form strings is a cardinality
-    footgun -- the same argument `LLMPurpose` makes one module over. The table in this
-    module's docstring is why each member earns its place, and what unit each counts.
+    Closed, because a metric dimension built from free-form strings is a
+    cardinality footgun -- the same argument `LLMPurpose` makes one module over.
     """
 
     NOT_IN_POOL = "not_in_pool"
@@ -53,7 +49,7 @@ class DropReason(StrEnum):
 class CurationKept:
     """A generation that produced something.
 
-    **`rows` is never empty** -- see `__post_init__`, and `CurationRejected` for the
+    `rows` is never empty -- see `__post_init__`, and `CurationRejected` for the
     other half of why a caller cannot mistake zero rows for a success.
     """
 
@@ -72,10 +68,9 @@ class CurationKept:
 class CurationRejected:
     """A generation that produced nothing usable.
 
-    **There is no `rows` attribute, deliberately.** An empty tuple here would
-    be a value a caller could iterate without noticing, and the whole reason
-    rule 3 exists is that "no rows" and "nothing to say" are otherwise
-    indistinguishable. `error` is non-empty and is what
+    There is no `rows` attribute, deliberately: an empty tuple would be a value
+    a caller could iterate without noticing, leaving "no rows" and "nothing to
+    say" indistinguishable. `error` is non-empty, which is what
     `LLMCall._ok_and_error_must_agree` and `ck_llm_calls_ok_error_agree` both
     demand of a failed call.
     """
@@ -108,10 +103,9 @@ def validate_curation(
     a validator that could not be replayed.
     """
     dropped: Counter[DropReason] = Counter()
-    # `str(index)` once, here, rather than per candidate: this is the
-    # `set[str]` ADR-0028's comparison table is written against, and building
-    # it from the map the caller owns is what makes the bound a property of
-    # what was *sent* rather than of what exists.
+    # `str(index)` once, here, rather than per candidate. Building it from the
+    # map the caller owns is what makes the bound a property of what was *sent*
+    # rather than of what exists.
     by_handle = {str(index): title_id for index, title_id in handles.items()}
 
     raw_rows = payload.get(ROWS_KEY)
@@ -173,8 +167,8 @@ def _row(
 ) -> CuratedRow | None:
     """One row, or `None` if it is discarded.
 
-    **whole, and never padded from the pool**, which would be a fabricated
-    recommendation wearing a model's reason string (ADR-0014, ADR-0028).
+    Discarded whole, never padded from the pool: padding would be a fabricated
+    recommendation wearing a model's reason string.
     """
     if not isinstance(entry, Mapping):
         dropped[DropReason.ROW_UNUSABLE] += 1
@@ -188,9 +182,9 @@ def _row(
     raw_reason = entry.get(REASON_KEY)
     reason: str | None = None
     if raw_reason is not None:
-        # **Two different failures, and both discard the row.** They are spelled as one
-        # condition and argued separately, because only the first argument is obvious: -
-        # A *non-string* reason is a schema violation.
+        # Two different failures, spelled as one condition: a non-string reason is
+        # a schema violation, and an over-long one is not prose a shelf can carry.
+        # Both discard the row.
         if not isinstance(raw_reason, str) or len(raw_reason.strip()) > MAX_REASON_CHARS:
             dropped[DropReason.ROW_UNUSABLE] += 1
             return None
@@ -230,11 +224,10 @@ def _cards(
 ) -> list[uuid.UUID]:
     """The candidates one row cites, in the order the model cited them.
 
-    **Three of the five drop reasons are counted here and nowhere else**, and
-    all three count *cards* -- which is the whole reason this is separable from
-    `_row`, whose own two reasons count rows. A shortened list is a legitimate
-    answer: PRD 06's *"IDs not in the pool are dropped"* stops at the ids, and
-    whether what survives is enough is `_row`'s decision, not this one's.
+    Three of the five drop reasons are counted here and nowhere else, and all
+    three count *cards* -- which is why this is separable from `_row`, whose own
+    two reasons count rows. A shortened list is a legitimate answer: whether
+    what survives is enough is `_row`'s decision, not this one's.
     """
     cards: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
@@ -260,19 +253,14 @@ def _cards(
 
 
 def _handle(value: Any) -> str | None:
-    """`str(value).strip()` for the two JSON types that can carry a handle.
-
-    and `None` for everything else.
-
-    The module docstring's table is the argument.
-    """
+    """`str(value).strip()` for the two JSON types that carry a handle, else `None`."""
     if isinstance(value, bool):
         # First, because `isinstance(True, int)` is `True`. A bool where a
         # handle was asked for is a shape failure, not the index `1`.
         return None
     if isinstance(value, int):
-        # **The 108/108 line.** Deleting it drops every id a provider returned
-        # as a JSON number -- which is every id, on the arm that was measured.
+        # Deleting this drops every id a model returned as a JSON number, which
+        # is every id.
         return str(value).strip()
     if isinstance(value, str):
         return value.strip() or None
@@ -280,9 +268,10 @@ def _handle(value: Any) -> str | None:
 
 
 def _prose(value: Any, *, limit: int) -> str | None:
-    """The stripped string, or `None` if this is not prose this row can be shown with.
+    """The stripped string, or `None` if this row cannot be shown with it.
 
-    Never coerced: see the module docstring.
+    Never coerced -- a non-string here is a schema failure, not a value to
+    render.
     """
     if not isinstance(value, str):
         return None
@@ -295,7 +284,8 @@ def _prose(value: Any, *, limit: int) -> str | None:
 def _tally(dropped: Counter[DropReason]) -> Mapping[DropReason, int]:
     """Every reason, zeros included.
 
-    a reason absent from the map is indistinguishable from a reason nobody counts.
+    A reason absent from the map is indistinguishable from a reason nobody
+    counts.
     """
     return MappingProxyType({reason: dropped[reason] for reason in DropReason})
 

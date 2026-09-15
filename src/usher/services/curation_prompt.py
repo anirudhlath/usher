@@ -13,11 +13,10 @@ from usher.services.curation_validate import (
     TITLE_KEY,
 )
 
-#: PRD 06's *"3-5 rows"*. Code rather than settings, per the module docstring.
-#: Not a cap anything enforces -- the validator deliberately does not cap rows
-#: either, because every card in a sixth row is still a title the household
-#: could watch, and the product bound lives with `CuratedProvider`'s
-#: `0-5 rows` budget.
+#: PRD 06's *"3-5 rows"*, in code rather than settings. Not a cap anything
+#: enforces -- the validator deliberately does not cap rows either, because a
+#: card in a sixth row is still a title the household could watch, and the
+#: product bound lives with `CuratedProvider`'s `0-5 rows` budget.
 MIN_ROWS = 3
 MAX_ROWS = 5
 
@@ -27,7 +26,7 @@ MAX_ROWS = 5
 #: and belongs in the prompt with the rest of them.
 MAX_HEADING_CHARS = 60
 
-# The candidate line, and the reason it is one line.
+# Genres share the name's line: one candidate, one number, one line.
 _SEPARATOR = " - "
 
 #: The example object in the prompt, built from the same four constants the
@@ -37,16 +36,12 @@ _SHAPE = (
     f'"{ITEM_IDS_KEY}": [4, 17, 2, 39, 8]}}]}}'
 )
 
-#: Introduces the history that follows it. **A branch, not framing prose** --
-#: the other arm is `_COLD_START`, and which one renders is a fact about the
-#: household.
+#: A branch, not framing prose -- the other arm is `_COLD_START`, and which of
+#: the two renders is a fact about the household.
 _HISTORY_HEADING = "This household recently finished, most recent first:"
 
-#: The arm taken by a household that has finished nothing, which `history` (in
-#: `CurationService`) calls *"the normal state, not an edge case"*. Most
-#: fixtures in this project seed no watch history, so this line is the one that
-#: actually renders in nearly every test -- which is exactly why it needs a
-#: case naming it rather than a case running through it.
+#: The arm taken by a household that has finished nothing -- the normal state,
+#: not an edge case.
 _COLD_START = "This household has not finished anything yet."
 
 
@@ -86,9 +81,10 @@ def build_prompt(candidates: Sequence[Title], history: Sequence[str], *, min_car
 def instructions(pool_size: int, *, min_cards: int) -> list[str]:
     """The rules.
 
-    with the three numbers that have to agree with something else rendered rather than
-    written: `pool_size` is the bound the validator checks, `min_cards` is the floor it
-    enforces, and `MAX_REASON_CHARS` is the length it discards a whole row over.
+    The three numbers that have to agree with something else are rendered
+    rather than written: `pool_size` is the bound the validator checks,
+    `min_cards` its floor, and `MAX_REASON_CHARS` the length it discards a
+    whole row over.
     """
     return [
         "Answer with JSON in exactly this shape and nothing else:",
@@ -101,7 +97,6 @@ def instructions(pool_size: int, *, min_cards: int) -> list[str]:
         "same number twice in one row.",
         f'- "{TITLE_KEY}": a short shelf heading, at most '
         f"{MAX_HEADING_CHARS} characters. No spoilers.",
-        # The number, not only the word "one".
         f'- "{REASON_KEY}": one sentence saying what these have in common, '
         f"at most {MAX_REASON_CHARS} characters.",
         "- Group by something a person would recognise -- a mood, a period, "
@@ -123,10 +118,7 @@ def history_lines(recent: Sequence[RecentWatch], catalog: Mapping[uuid.UUID, Tit
 
 
 def described(title: Title) -> str:
-    """`Name (Year)`, on one line.
-
-    See `_SEPARATOR` for why the collapse matters.
-    """
+    """`Name (Year)`, on one line."""
     year = f" ({title.year})" if title.year is not None else ""
     return f"{one_line(title.name)}{year}"
 
@@ -136,12 +128,10 @@ def _genres(title: Title) -> str:
 
 
 def _engagement(entry: RecentWatch) -> str:
-    """PRD 06's *"recent watch history with ratings"*, with the substitution this schema forces.
+    """PRD 06's *"recent watch history with ratings"*, with a substitution.
 
-    there is no rating column and M7 declined to invent one, so the engagement signal
-    `watch_states` actually carries is the rewatch.
-
-    A single viewing says nothing extra and costs tokens to say.
+    There is no rating column, so the engagement signal `watch_states` carries
+    is the rewatch. A single viewing says nothing extra and costs tokens.
     """
     return f", watched {entry.play_count} times" if entry.play_count >= 2 else ""
 

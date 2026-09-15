@@ -51,12 +51,12 @@ class IndexService:
 
         Raises `UsherPortError`.
 
-        **Safe to call twice with no observable difference**, and cheap the
-        second time: the stored row is compared against the current
-        `(model_name, fingerprint)` before the model is asked for anything.
-        Redelivery is not hypothetical -- `JobWorker.recover()` requeues a
-        claim whose worker stopped heartbeating -- and at ~83 texts/s a requeued backfill
-        that re-embedded would re-run the whole enriched tier.
+        Safe to call twice with no observable difference, and cheap the second
+        time: the stored row is compared against the current `(model_name,
+        fingerprint)` before the model is asked for anything. Redelivery is not
+        hypothetical -- `JobWorker.recover()` requeues a claim whose worker
+        stopped heartbeating -- and a requeued backfill that re-embedded would
+        re-run the whole enriched tier.
 
         Re-raises rather than absorbing: `JobWorker` is the only thing that
         knows `PortDataMalformed` parks immediately and every other port error
@@ -70,10 +70,9 @@ class IndexService:
                 logger.debug("index job names a title that no longer exists: {id}", id=title_id)
                 return
 
-            # **Site three of the document's three spellings, and the one that gets
-            # missed.** `credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` filters
-            # it out and the `Title` above cannot supply it -- `compose_document(title)`
-            # silently composes the M6 document.
+            # `credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` filters it out
+            # and the `Title` above cannot supply it -- `compose_document(title)`
+            # without this read silently composes a document with no credits in it.
             names = await self._titles.credit_names_for([title_id])
             document = compose_document(title, credits=names.get(title.id, ()))
             stored = await self._embeddings.get(title_id)
@@ -89,10 +88,10 @@ class IndexService:
                 span.set_attribute("usher.index.skipped", True)
                 return
 
-            # **A refusal is a written outcome, not a skipped one.** Returning here
-            # instead would leave this title matching the stale predicate forever: re-
-            # claimed every backfill pass, counted on every scrape, with a handler that
-            # completes successfully each time.
+            # A refusal is a written outcome, not a skipped one. Returning here
+            # instead would leave this title matching the stale predicate forever:
+            # re-claimed every backfill pass, counted on every scrape, with a
+            # handler that completes successfully each time.
             vector = None if document.is_degenerate else await self._embed(document.text)
             await self._embeddings.upsert_many(
                 [

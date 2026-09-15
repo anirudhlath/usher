@@ -29,14 +29,12 @@ from usher.services.watch_sync import WatchStateSyncService
 #: naming it is exactly as malformed as one naming no lane at all.
 _TRIGGERABLE_SYNC_LANES = frozenset({SyncRunKind.FULL, SyncRunKind.DELTA})
 
-#: One bulk-import phase, run to completion. `usher.composition.
-#: run_bootstrap` bound to a session's ports is the only production
-#: spelling; the alias exists so this module can name the collaborator
-#: without importing the composition root, exactly as `AdapterOpener`
-#: does for `sync_handler`.
+#: One bulk-import phase, run to completion. The alias exists so this module
+#: can name the collaborator without importing the composition root, exactly as
+#: `AdapterOpener` does for `sync_handler`.
 BootstrapRunner = Callable[[BootstrapPhase], Awaitable[None]]
 
-# : The adapter factory a `sync` job's handler is closed over.
+#: The adapter factory a `sync` job's handler is closed over.
 AdapterOpener = Callable[[Source], Awaitable[SourceAdapter | None]]
 
 
@@ -62,7 +60,7 @@ SourceResolver = Callable[[str], Awaitable[SourceBinding | None]]
 def enrich_handler(service: EnrichService) -> Handler:
     """`enrich` jobs key on a `Title.id`.
 
-    **The rung travels with the key**, because `EnrichService` enqueues an
+    The rung travels with the key, because `EnrichService` enqueues an
     `INDEX` and a `DERIVE` of its own and `DERIVE` is what writes `images`.
     A handler that passed only the key would leave every follow-up at the
     sweep's priority however urgently its own job was claimed -- so a title a
@@ -85,7 +83,7 @@ def index_handler(service: IndexService) -> Handler:
     so the `ValueError` -> `PortDataMalformed` conversion happens in one place
     for both kinds.
 
-    **A worker holds this handler only if an embedder was built.**
+    A worker holds this handler only if an embedder was built.
     `composition.build_worker` registers `JobKind.INDEX` under `embedder is
     not None`, the way it registers `ENRICH` under `provider is not None`, and
     `run_once` claims only the kinds it has handlers for -- so a deployment
@@ -110,7 +108,7 @@ def derive_handler(service: DeriveService) -> Handler:
     lets those propagate, so one corrupted key would take the worker process
     down instead of parking its own job.
 
-    **A worker holds this handler only if a metadata provider was built.**
+    A worker holds this handler only if a metadata provider was built.
     `composition.build_worker` registers `JobKind.DERIVE` under `provider is
     not None` -- the `ENRICH` arm rather than the `INDEX` one -- because
     `DeriveService` holds a `MetadataProvider` for `to_derivation`, and a
@@ -137,17 +135,15 @@ def match_handler(
 ) -> Handler:
     """`match` jobs key on a source's own `external_id`.
 
-    and are the only caller of the remote-search tier.
-
-    PRD 03: "the TMDb search tier is queued, not inline" — it is one network
-    call per unmatched item, and a first full walk against an unbootstrapped
-    catalog produces those in the hundreds of thousands, so running them
-    inside the walk would make the walk's duration a function of TMDb's rate
-    limit rather than of the source's.
+    The only caller of the remote-search tier. PRD 03: "the TMDb search tier is
+    queued, not inline" -- it is one network call per unmatched item, and a
+    first full walk against an unbootstrapped catalog produces those in the
+    hundreds of thousands, so running them inside the walk would make the walk's
+    duration a function of TMDb's rate limit rather than of the source's.
 
     The item is re-read from the *source*, not from `media_items`: the ladder
-    needs a name, a year and a provider-id map, and `MediaItem` carries none
-    of the three — it is a file, not a description.
+    needs a name, a year and a provider-id map, and `MediaItem` carries none of
+    the three -- it is a file, not a description.
     """
 
     async def handle(job: Job) -> None:
@@ -195,14 +191,14 @@ def watch_history_handler(
 ) -> Handler:
     """`watch_history` jobs key on a source's own `external_id`.
 
-    The expensive half of ADR-0014: a walk cannot report `play_count` or
-    `last_played_at` on the one server measured, so it enqueues one of these
-    per played item whose count it could not determine, at background
+    The expensive half of the watch-state sync: a walk cannot report
+    `play_count` or `last_played_at` on every server, so it enqueues one of
+    these per played item whose count it could not determine, at background
     priority, and this asks the single-item route.
 
-    `user_id` is bound at construction because M4 has one user (PRD 01's
-    authentication seam). Mapping a source's own user ids onto Usher's is
-    M5's, and a job key carrying one would settle that question here.
+    `user_id` is bound at construction because there is one user (PRD 01's
+    authentication seam). Mapping a source's own user ids onto Usher's is a
+    later question, and a job key carrying one would settle it here.
     """
 
     async def handle(job: Job) -> None:
@@ -229,8 +225,8 @@ def sync_handler(
 ) -> Handler:
     """`sync` jobs key on `"{source_id}:{lane}"`.
 
-    the M4 boundary call that deferred `POST /admin/sources/{id}/sync` to M9, landing
-    here as an enqueue rather than as a synchronous walk.
+    `POST /admin/sources/{id}/sync` lands here as an enqueue rather than as a
+    synchronous walk.
     """
 
     async def handle(job: Job) -> None:
@@ -268,8 +264,8 @@ def sync_handler(
 def bootstrap_handler(run: BootstrapRunner) -> Handler:
     """`bootstrap` jobs key on a `BootstrapPhase`.
 
-    and this handler is the thinnest one in the module because everything it would
-    otherwise hold is a composition-root concern.
+    The thinnest handler in the module, because everything it would otherwise
+    hold is a composition-root concern.
     """
 
     async def handle(job: Job) -> None:
@@ -287,7 +283,7 @@ def watch_writeback_handler(
 ) -> Handler:
     """`watch_writeback` jobs key on a source's own `external_id`.
 
-    carry no payload, and push whatever the household's row holds **now**.
+    They carry no payload and push whatever the household's row holds now.
     """
 
     async def handle(job: Job) -> None:
@@ -399,13 +395,12 @@ async def _local_watch_state(
 ) -> WatchState | None:
     """The household's row for whatever this copy is matched to.
 
-    An episode's `media_items` row holds its series' `title_id` **and** its
+    An episode's `media_items` row holds its series' `title_id` *and* its
     `episode_id`, and `watch_states` permits exactly one
-    (`num_nonnulls(title_id, episode_id) = 1`), so the pair collapses here
-    with the episode winning -- the same rule `watch_sync._watch_target`
-    applies to the inbound direction, for the same reason. Reading the title's
-    row for an episode's copy would push one series' progress onto every one
-    of its 999,927 episode files.
+    (`num_nonnulls(title_id, episode_id) = 1`), so the pair collapses here with
+    the episode winning -- the same rule `watch_sync._watch_target` applies to
+    the inbound direction. Reading the title's row for an episode's copy would
+    push one series' progress onto every one of its episode files.
 
     An unmatched copy is matched to nothing and there is no row to read, which
     is a real state rather than a defensive one: `MediaItem.title_id` is
@@ -438,16 +433,14 @@ def _user_id(job: Job) -> uuid.UUID:
 def _uuid_key(job: Job, expected: str) -> uuid.UUID:
     """`job.key` as a UUID, or `PortDataMalformed`.
 
-    A `ValueError` from `uuid.UUID` is not a `UsherPortError`, and
-    `JobWorker` lets those propagate deliberately — so an unparseable key
-    would kill the worker rather than park its one job. Every **UUID-keyed**
-    kind's key passes through here -- `enrich`, `index` and `derive` via
-    `_title_id`, `curate` via `_user_id` -- so there is one conversion and one
-    raise rather than four chances for one of them to raise the wrong type.
-    `match` and `watch_history` never reach it: their key is a source's own
-    `external_id`, an opaque string that is handed to the adapter as it
-    stands, which is the module docstring's three-category split arriving at
-    the converter that only serves one of the three.
+    A `ValueError` from `uuid.UUID` is not a `UsherPortError`, and `JobWorker`
+    lets those propagate deliberately -- so an unparseable key would kill the
+    worker rather than park its one job. Every UUID-keyed kind's key passes
+    through here -- `enrich`, `index` and `derive` via `_title_id`, `curate` via
+    `_user_id` -- so there is one conversion and one raise rather than four
+    chances for one of them to raise the wrong type. `match` and
+    `watch_history` never reach it: their key is a source's own `external_id`,
+    an opaque string handed to the adapter as it stands.
     """
     try:
         return uuid.UUID(job.key)

@@ -14,11 +14,11 @@ from usher.domain.title import Title
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows.base import ARTWORK_FOR_HINT, BaseRow
 
-# **Five minutes, and PRD 06's "until regenerated" is the artefact's lifetime rather
-# than this number.** Read as a TTL that phrase inverts: the stored row really is
-# immutable until a generation replaces it, and the replacement is the only event that
-# matters, because `RowCache` holds the whole built row under `(user_id, slug)` and a
-# generation of the same width re-uses the same slugs.
+# Five minutes, and PRD 06's "until regenerated" is the artefact's lifetime
+# rather than this number: the stored row really is immutable until a generation
+# replaces it, and the replacement is the only event that matters, because
+# `RowCache` holds the whole built row under `(user_id, slug)` and a generation
+# of the same width re-uses the same slugs.
 _TTL = timedelta(minutes=5)
 
 
@@ -34,9 +34,9 @@ class _Family:
         self._title_ids = list(dict.fromkeys(title_ids))
         self._known: dict[uuid.UUID, Title] | None = None
         self._owned: set[uuid.UUID] | None = None
-        # **Keyed by `ImageKind`, not a bare slot**, and that is not speculative
-        # generality: `_known` and `_owned` answer questions with one answer per family,
-        # and this one has an answer per *hint*.
+        # Keyed by `ImageKind`, not a bare slot, and that is not speculative
+        # generality: `_known` and `_owned` answer questions with one answer per
+        # family, and this one has an answer per *hint*.
         self._artwork: dict[ImageKind, dict[uuid.UUID, Image]] = {}
 
     async def known(self, ctx: RowContext) -> dict[uuid.UUID, Title]:
@@ -72,18 +72,15 @@ class LLMRow(BaseRow):
     stored row is the artefact and this is a view of it, so a constructor
     spelling `(slug, title, reason, card_title_ids)` would be four chances to
     fill the wrong slot from a ten-field model and still build something that
-    renders -- `curated_row_repository_contract.py` makes the same argument
-    about its own fixture. It also keeps `generation_id` and `model_name`
-    reachable for anything that later wants to say which night a shelf is from.
+    renders. It also keeps `generation_id` and `model_name` reachable for
+    anything that later wants to say which night a shelf is from.
 
-    **`family` is the generation's shared hydration, and it is optional
-    because a shelf on its own is still a shelf.** `propose` hands one
-    `_Family` to every row it returns; a row built without one gets a `_Family`
-    over its own ids, which is exactly the two statements `BaseRow` would have
-    issued. The invariant the sharing rests on is structural rather than
-    checked: `propose` is the only site that passes one, and it builds it from
-    the union of the very rows it passes it to, so a shelf's own ids are always
-    inside it.
+    `family` is the generation's shared hydration, and it is optional because a
+    shelf on its own is still a shelf. A row built without one gets a `_Family`
+    over its own ids, which is exactly the statements `BaseRow` would have
+    issued. The invariant the sharing rests on is structural rather than checked:
+    `propose` is the only site that passes one, and it builds it from the union
+    of the very rows it passes it to, so a shelf's own ids are always inside it.
     """
 
     def __init__(self, row: CuratedRow, *, family: _Family | None = None) -> None:
@@ -148,32 +145,28 @@ class LLMRow(BaseRow):
     async def _ownership(self, ctx: RowContext, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
         # The same superset, for the same reason -- `hydrate` asks
         # `title_id in owned` about this shelf's ids and no others. Named
-        # `_ownership` because `FranchiseRow._owned` is an attribute and a
-        # method of that name is shadowed by it; `base.py` records the
-        # measurement.
+        # `_ownership` because `FranchiseRow._owned` is an attribute and a method
+        # of that name is shadowed by it; `base.py` records why.
         return await self._family.owned(ctx)
 
     async def _artwork(
         self, ctx: RowContext, title_ids: Sequence[uuid.UUID]
     ) -> Mapping[uuid.UUID, Image]:
-        # The third read of the same shape, and the third `4 -> 1`: four shelves out of
-        # one `list_for_user` were about to issue four `primary_for_titles` for one set
-        # of ~22 ids.
+        # The third read of the same shape: four shelves out of one `list_for_user`
+        # were about to issue four `primary_for_titles` for one set of ids.
         return await self._family.artwork(ctx, ARTWORK_FOR_HINT[self.display_hint])
 
 
-# **0.85, flat, and the two things it has to be are different kinds of fact.** *Strictly
-# below 1.0* is `test_no_provider_but_continue_watching_can_reach_the_ top_score`, a
-# registry invariant: PRD 06 gives `ContinueWatchingProvider` *"1 row, always ranked
-# first"*, that guarantee is `ScoredRow.pinned`, and the score ladder is kept in
-# agreement with the pin so the composer's sort is not quietly fighting it.
+# Flat, and strictly below 1.0: PRD 06 gives `ContinueWatchingProvider` *"1 row,
+# always ranked first"*, that guarantee is `ScoredRow.pinned`, and the score
+# ladder is kept in agreement with the pin so the composer's sort is not quietly
+# fighting it.
 CURATED_SCORE = 0.85
 
-# **PRD 06's `CuratedProvider | 0-5 rows`, and the cap is this provider's because it is
-# a product bound rather than a safety one.** `services.curation_validate` deliberately
-# caps nothing -- every card in a hundredth row is still a title the household could
-# watch, so nothing about the *stored* generation is wrong at any length -- and the
-# amendment that settled that names this constant as where the bound belongs.
+# PRD 06's `CuratedProvider | 0-5 rows`, and the cap is this provider's because
+# it is a product bound rather than a safety one. `services.curation_validate`
+# deliberately caps nothing -- every card in a hundredth row is still a title the
+# household could watch -- so the bound belongs here.
 MAX_CURATED_ROWS = 5
 
 
@@ -191,11 +184,11 @@ class CuratedProvider(RowProvider):
         trace.get_current_span().set_attribute(
             "usher.home.curated.discarded", len(stored) - len(kept)
         )
-        # **One hydration for the family, built here and read at `build` time.** Every
+        # One hydration for the family, built here and read at `build` time. Every
         # card id in the generation arrived in the read above, so the shelves that
-        # survive the composer's cap can share two statements instead of paying two each
-        # -- and because `_Family` reads nothing until asked, a shelf the cap discards
-        # still costs exactly nothing.
+        # survive the composer's cap share the statements instead of paying each --
+        # and `_Family` reads nothing until asked, so a discarded shelf costs
+        # nothing.
         family = _Family([title_id for row in kept for title_id in row.card_title_ids])
         return [ScoredRow(row=LLMRow(row, family=family), score=CURATED_SCORE) for row in kept]
 

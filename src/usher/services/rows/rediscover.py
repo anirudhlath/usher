@@ -18,9 +18,9 @@ _MIN_CARDS = 5
 
 _MAX_CARDS = 20
 
-# **0.35, fixed and deliberately low.** A household with a deep back catalog has
-# hundreds of qualifying titles, and any score that scaled with that count would put a
-# row about 2019 above rows about what they are doing tonight.
+# Fixed and deliberately low. A household with a deep back catalog has hundreds
+# of qualifying titles, and any score that scaled with that count would put a row
+# about an old film above rows about what they are doing tonight.
 REDISCOVER_SCORE = 0.35
 
 _SLUG = "rediscover"
@@ -62,7 +62,7 @@ class RediscoverRow(BaseRow):
         return self._title_ids_
 
     async def _progress(self, ctx: RowContext) -> Mapping[uuid.UUID, Progress]:
-        # Every card here is a title the household **finished**, and the badge is what
+        # Every card here is a title the household finished, and the badge is what
         # stops a "Rediscover" shelf reading as a "you have not seen these" one.
         return {title_id: Progress(played=True) for title_id in self._title_ids_}
 
@@ -83,18 +83,18 @@ class RediscoverProvider(RowProvider):
         # rather than stylistic: the alternative is a fixture dated two years
         # back that stops meaning what it meant as the calendar moves.
         before = ctx.now() - timedelta(days=365 * _YEARS_AGO)
-        # The filter is `played AND last_played_at < before`; `play_count` is
-        # the **ordering** and never a predicate. Both decisions are
+        # The filter is `played AND last_played_at < before`; `play_count` is the
+        # ordering and never a predicate. Both decisions are
         # `list_rediscoverable`'s and neither is re-derived here.
         candidates = await ctx.watch_states.list_rediscoverable(
             ctx.user.id, before=before, limit=self._limit
         )
         if len(candidates) < self._minimum:
             return []
-        # **The owned filter is the provider's**, and it is applied before the
-        # minimum rather than after: a "rediscover this" card that cannot be
-        # played is worse than a shorter row, and if the omissions take the row
-        # below the floor the answer is nothing rather than a thin shelf.
+        # The owned filter is the provider's, and it is applied before the minimum
+        # rather than after: a "rediscover this" card that cannot be played is
+        # worse than a shorter row, and if the omissions take the row below the
+        # floor the answer is nothing rather than a thin shelf.
         title_ids = [entry.title_id for entry in candidates]
         owned = await ctx.media_items.owned_title_ids(title_ids)
         showable = [title_id for title_id in title_ids if title_id in owned]

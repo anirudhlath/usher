@@ -64,12 +64,11 @@ class TitleDetail:
     title: Title
     availability: tuple[TitleAvailability, ...]
     watch_state: WatchState | None
-    # Top-billed first, and crew apart from cast (PRD 07's outstanding shape decision,
-    # answered by M9).
+    # Top-billed first, and crew apart from cast.
     cast: tuple[CreditedPerson, ...]
     crew: tuple[CreditedPerson, ...]
-    # This title's artwork in `(is_primary DESC, id)`, **already filtered** to what `GET
-    # /images/{id}` can serve.
+    # This title's artwork in `(is_primary DESC, id)`, already filtered to what
+    # `GET /images/{id}` can serve.
     images: tuple[Image, ...]
     # Whether this read moved an enrichment job to the front of the queue.
     # Returned rather than kept internal because it is what makes the

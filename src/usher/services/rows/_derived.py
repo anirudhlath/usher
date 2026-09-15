@@ -11,8 +11,7 @@ class SaidOnce:
     and would leak across tests in a way that makes a case pass because an
     *earlier* case already spoke. One latch per provider instance keeps the
     scope exactly as wide as the singleton that owns it, and a test that wants
-    the warning back constructs a fresh provider — which is what every case
-    here already does.
+    the warning back constructs a fresh provider.
     """
 
     __slots__ = ("_said",)

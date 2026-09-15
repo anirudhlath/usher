@@ -124,9 +124,9 @@ class PlaybackService:
         """Ranked targets for one episode.
 
         `list_for_episode`, not `list_for_title`: that read carries
-        `AND episode_id IS NULL`, which is exactly what makes it useless here
-        -- an episode's row is precisely one of the rows it excludes, and
-        999,927 of the one measured library's 1,126,789 items are episodes.
+        `AND episode_id IS NULL`, which is exactly what makes it useless here --
+        an episode's row is precisely one of the rows it excludes, and almost
+        every item in a television library is an episode.
         """
         with _tracer.start_as_current_span("playback.resolve") as span:
             span.set_attribute("usher.episode_id", str(episode_id))
@@ -209,10 +209,9 @@ class PlaybackService:
             credentials = await self._credentials.get(source.credentials_ref)
             if credentials is None:
                 # Answered without building an adapter, exactly as
-                # `SourceService.status` does: there is nothing to authenticate with, so
-                # a probe could only spend an upstream round trip (0.1253 s for the
-                # cheapest one measured -- M10 S1, `.claude/rules/emby-push-and-
-                # ingest.md`) to learn what local state already knows.
+                # `SourceService.status` does: there is nothing to authenticate
+                # with, so a probe could only spend an upstream round trip to learn
+                # what local state already knows.
                 logger.warning(
                     "playback: source {source_id} has no stored credentials", source_id=source.id
                 )
@@ -227,7 +226,7 @@ class PlaybackService:
                 await adapter.aclose()
         except UsherPortError as exc:
             # `str(exc)` here and nowhere else: an upstream's message quotes
-            # the URL it choked on, and that URL carries a token (ADR-0012).
+            # the URL it choked on, and that URL carries a token.
             logger.warning(
                 "playback: source {source_id} could not serve {external_id}: {exc}",
                 source_id=source.id,
@@ -239,13 +238,11 @@ class PlaybackService:
     def _with_tickets(self, served: Sequence[tuple[Source, StreamTarget]]) -> list[PlaybackTarget]:
         """Substitute a ticket for every URL.
 
-        See the module docstring.
-
-        **Two passes, and that is what makes the pairing order-independent.**
-        Every distinct direct URL is minted first, so a deep link that arrives
-        *before* the target it wraps still finds its ticket -- an
-        implementation that minted as it walked would depend on an adapter
-        returning direct targets first, which no port promises.
+        Two passes, and that is what makes the pairing order-independent. Every
+        distinct direct URL is minted first, so a deep link that arrives *before*
+        the target it wraps still finds its ticket -- an implementation that
+        minted as it walked would depend on an adapter returning direct targets
+        first, which no port promises.
         """
         minted: dict[str, str] = {}
         for _, target in served:
@@ -279,7 +276,7 @@ def _carried_url(deep_link: str, minted: Mapping[str, str]) -> str | None:
     that appeared raw would be a leak this must still catch rather than pass
     through.
 
-    **The longest match, not the first.** One source URL can contain another
+    The longest match, not the first: one source URL can contain another
     -- two Emby session tokens where one is a prefix of the other produce
     exactly that, and there is no delimiter after the token -- so a first
     match would hand a deep link the wrong copy's ticket.

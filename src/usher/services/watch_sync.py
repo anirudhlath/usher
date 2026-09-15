@@ -1,4 +1,4 @@
-"""Inbound watch state (PRD 03), and the backfill ADR-0014 leaves behind."""
+"""Inbound watch state (PRD 03), and the backfill it leaves behind."""
 
 import time
 import uuid
@@ -34,18 +34,17 @@ _backfilled = _meter.create_counter(
 class MergedState:
     """One state a merge was built for, and where it landed.
 
-    **The pair travels together because separating it is a real bug, found
-    by the M5 plan's own self-review.** The push lane publishes one client
-    event per merged state, carrying that state's position and played flag
-    against that state's target. Recovering the pairing outside this service
-    -- by zipping the targets against the batch the caller handed in --
-    mis-pairs the moment the batch contains one unmatched item, because the
-    targets are only the matched subset and `zip` aligns by position. It
-    then publishes item A's resume position under item B's title id, which
-    a client renders.
+    The pair travels together because separating it is a real bug. The push
+    lane publishes one client event per merged state, carrying that state's
+    position and played flag against that state's target. Recovering the pairing
+    outside this service -- by zipping the targets against the batch the caller
+    handed in -- mis-pairs the moment the batch contains one unmatched item,
+    because the targets are only the matched subset and `zip` aligns by
+    position. It then publishes item A's resume position under item B's title
+    id, which a client renders.
 
-    Same rule `SourceEvent` states for `watch_states` one layer up, arrived
-    at from the other side: keyed, never aligned by position.
+    Keyed, never aligned by position -- the rule `SourceEvent` states for
+    `watch_states` one layer up.
     """
 
     external_id: str
@@ -68,8 +67,8 @@ class MergeOutcome:
 
     `needing_history` is the ids already enqueued for the `WATCH_HISTORY`
     backfill, reported rather than re-derived -- a caller that recomputed
-    `played and play_count is None` would be a second copy of ADR-0014's
-    predicate, and two copies is how they come to disagree.
+    `played and play_count is None` would be a second copy of the predicate, and
+    two copies is how they come to disagree.
     """
 
     merged: tuple[MergedState, ...]
@@ -86,15 +85,12 @@ class _Progress:
     per batch, and a failure handler holding the pre-walk value regresses
     the durable checkpoint to zero on every failure.
 
-    **Since #41 that checkpoint carries `position` too, and regressing
-    *that* is no longer a wrong number on a dashboard.** `items_seen`
-    reading 0 where the walk merged 5,000 states is a misreport an operator
-    can discount; `position` reading 0 is an instruction, and the next
-    attempt obeys it by walking the library from page one -- which is the
-    loop ADR-0042 exists to close, restored by the one binding a failure
-    handler is most likely to reach for. So the two failures this holder
-    prevents are now one failure, and the handler below evolves
-    `progress.run` or the resume is a restart wearing a checkpoint's name.
+    That checkpoint carries `position` too, and regressing *that* is not merely
+    a wrong number on a dashboard. `items_seen` reading 0 where the walk merged
+    thousands of states is a misreport an operator can discount; `position`
+    reading 0 is an instruction, and the next attempt obeys it by walking the
+    library from page one. So the handler below evolves `progress.run`, or the
+    resume is a restart wearing a checkpoint's name.
     """
 
     __slots__ = ("run",)
@@ -104,19 +100,19 @@ class _Progress:
 
 
 def _watch_target(target: MediaItemTarget) -> MediaItemTarget | None:
-    """Collapse what a `MediaItem` is matched to into what a watch state may carry.
+    """What a `MediaItem` is matched to, collapsed to what a watch state carries.
 
-    or `None` if it is matched to nothing.
+    `None` if it is matched to nothing.
 
-    An episode's row holds its series' `title_id` **and** its `episode_id`,
+    An episode's row holds its series' `title_id` *and* its `episode_id`,
     because a client browsing a season wants both. `watch_states` permits
-    exactly one (`num_nonnulls(title_id, episode_id) = 1`), so this is where
-    the pair becomes a target, and the episode wins.
+    exactly one (`num_nonnulls(title_id, episode_id) = 1`), so this is where the
+    pair becomes a target, and the episode wins.
 
     Both alternatives are real failures rather than style. Passing the pair
-    through raises `PortDataMalformed` by contract, which aborts a batch of
-    five thousand states over 89% of this library; passing the *title*
-    merges every episode of a show onto one row, quietly.
+    through raises `PortDataMalformed` by contract, which aborts the whole
+    batch; passing the *title* merges every episode of a show onto one row,
+    quietly.
     """
     if target.episode_id is not None:
         return MediaItemTarget(title_id=None, episode_id=target.episode_id)
@@ -151,16 +147,16 @@ class WatchStateSyncService:
         started = time.perf_counter()
         with _tracer.start_as_current_span("sync.watch_state") as span:
             span.set_attribute("usher.source", source.name)
-            # **This attempt's own instant, bound once.** It is the fresh run's
-            # `started_at` *and* every merge's `observed_at`, which on a first attempt
-            # are the same thing and on a resumed one are deliberately not: the row
-            # keeps the instant the logical walk began (the cursor's business) while the
-            # merges carry the instant this attempt began (PRD 03's conflict rule's
+            # This attempt's own instant, bound once. It is the fresh run's
+            # `started_at` *and* every merge's `observed_at`: the same thing on a
+            # first attempt and deliberately not on a resumed one, where the row
+            # keeps the instant the logical walk began while the merges carry the
+            # instant this attempt began.
             attempt_started = datetime.now(UTC)
-            # **The newest incomplete run is resumed in place** (#41, ADR-0042): its id,
-            # its `cursor_at` and -- load-bearing -- its `started_at`, so that when the
-            # walk finally completes, `latest_completed_cursor` reads an instant
-            # covering everything saved since the logical walk *began*.
+            # The newest incomplete run is resumed in place: its id, its `cursor_at`
+            # and -- load-bearing -- its `started_at`, so that when the walk finally
+            # completes, `latest_completed_cursor` reads an instant covering
+            # everything saved since the logical walk *began*.
             incomplete = await self._runs.latest_incomplete_run(source.id, SyncRunKind.WATCH_STATE)
             if incomplete is None:
                 cursor = await self._runs.latest_completed_cursor(
@@ -178,7 +174,8 @@ class WatchStateSyncService:
                 await self._runs.add(run)
             else:
                 cursor = incomplete.cursor_at
-                # `error` and `finished_at` cleared, and neither is tidiness.
+                # `error` and `finished_at` cleared, so a resumed run does not read
+                # as one that already ended.
                 run = incomplete.evolve(status=SyncRunStatus.RUNNING, error=None, finished_at=None)
                 await self._runs.save(run)
             # What this attempt inherited, for the telemetry below only.
@@ -206,11 +203,10 @@ class WatchStateSyncService:
                     finished_at=datetime.now(UTC),
                 )
                 span.set_attribute("usher.failed", True)
-                # **Both counts, because the run's is cumulative and reading it as this
-                # attempt's is how a stalled resume looks healthy.** A third attempt
-                # that walked two states reports `run.items_seen` of six, and an
-                # operator watching that number climb across attempts cannot tell a walk
-                # that is converging from one re-walking the same page forever.
+                # Both counts, because the run's is cumulative and reading it as
+                # this attempt's is how a stalled resume looks healthy: an operator
+                # watching one number climb across attempts cannot tell a walk that
+                # is converging from one re-walking the same page forever.
                 logger.error(
                     "watch-state sync of {source} failed after {attempt} states this attempt "
                     "({total} for the run, resumed from {resumed_from}): {error}",
@@ -297,8 +293,8 @@ class WatchStateSyncService:
     ) -> None:
         """The nightly walk.
 
-        **It invalidates no rows and publishes no `row.invalidated`, and this is the
-        place somebody would add both.**
+        It invalidates no rows and publishes no `row.invalidated`, and this is
+        the place somebody would add both.
         """
         batch: list[SourceWatchState] = []
         seen = start_index = progress.run.position
@@ -329,10 +325,10 @@ class WatchStateSyncService:
     ) -> MergeOutcome:
         """Merge a batch of inbound watch state.
 
-        **Does not commit.**
+        Does not commit.
         """
-        # One resolve for the batch, never one per state: `watch_state()`
-        # yields one record per item and this deployment has 1,126,674.
+        # One resolve for the batch, never one per state: `watch_state()` yields
+        # one record per item, and a household has one item per file.
         targets = await self._media_items.resolve_targets(
             source_id, [state.external_id for state in states]
         )
@@ -400,16 +396,15 @@ class WatchStateSyncService:
     ) -> WatchStateMerge:
         """The one place a `SourceWatchState` becomes a `WatchStateMerge`.
 
-        `play_count`/`last_played_at` are copied **as they are, `None`
-        included**. That is the whole of ADR-0014 at this layer: `None`
-        reaches a `COALESCE` and leaves the stored value alone, `0` is a
+        `play_count`/`last_played_at` are copied as they are, `None` included:
+        `None` reaches a `COALESCE` and leaves the stored value alone, `0` is a
         positive claim that the source reset it and is written. There is no
         default to fall back on and no `or 0` to add.
 
-        `state.source_user_id` is deliberately not consulted. M4 has one
-        user (PRD 01's authentication seam); mapping a source's user ids
-        onto Usher's is M5's, and guessing here would put a second Emby
-        account's history on the singleton.
+        `state.source_user_id` is deliberately not consulted. There is one user
+        (PRD 01's authentication seam); mapping a source's user ids onto Usher's
+        is a later question, and guessing here would put a second account's
+        history on the singleton.
         """
         return WatchStateMerge(
             user_id=user_id,

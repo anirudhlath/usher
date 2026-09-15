@@ -34,14 +34,14 @@ _IMDB_ID = re.compile(r"^tt\d{7,8}$")
 # episodes directly (`SourceItemKind`'s own docstring). `EPISODE` is
 # deliberately absent rather than mapped to `SERIES`: an episode's provider
 # ids and name describe the episode, not the series, so there is no honest
-# title kind to match them under. See the module docstring.
+# title kind to match them under.
 _TITLE_KIND: dict[SourceItemKind, TitleKind] = {
     SourceItemKind.MOVIE: TitleKind.MOVIE,
     SourceItemKind.SERIES: TitleKind.SERIES,
 }
 
-# Ordered by descending confidence. `kind_scoped` is ADR-0011: TMDb keys
-# movies and series separately, so its refs carry the kind. IMDb's `tt` ids
+# Ordered by descending confidence. `kind_scoped` because TMDb keys movies
+# and series separately, so its refs carry the kind. IMDb's `tt` ids
 # are one global namespace; TVDb's series ids are too, and
 # `TitleMatchRepository`'s statement for it filters on the value alone -- a
 # ref that carried a kind anyway would be a key no other caller's ref equals.
@@ -91,10 +91,10 @@ class MatchService:
         )
         found = (await self._lookup_refs([ref])).get(ref)
         if found is None:
-            # The catalog holds 1,271,138 titles and only 291,737 carry a
-            # `tmdb_id`, so a confident search result the catalog does not
-            # hold is the common case rather than the exception -- the same
-            # reasoning that makes tier 5 load-bearing.
+            # Most of the catalog carries no `tmdb_id`, so a confident search
+            # result the catalog does not hold is the common case rather than
+            # the exception -- the same reasoning that makes tier 5
+            # load-bearing.
             found = await self._create_stub(item, {ref.provider: candidate.provider_id})
         _result_counter.add(1, {"method": "provider_search", "confident": "true"})
         return MatchOutcome(
@@ -163,7 +163,7 @@ class MatchService:
     def _refs_for(self, item: SourceItem) -> list[tuple[ProviderRef, MatchMethod]]:
         kind = _TITLE_KIND.get(item.kind)
         if kind is None:
-            # An episode. See the module docstring -- its ids are its own.
+            # An episode: its provider ids describe it, not its series.
             return []
         refs: list[tuple[ProviderRef, MatchMethod]] = []
         for provider, method, kind_scoped in _PROVIDER_TIERS:
@@ -229,14 +229,11 @@ class MatchService:
         )
 
     async def _create_stub(self, item: SourceItem, usable: dict[str, int | str]) -> uuid.UUID:
-        """PRD 03's stub-on-sight.
-
-        a canonical title from the source's own metadata, `enrichment_state = stub`,
-        queryable immediately.
+        """PRD 03's stub-on-sight: a canonical title from the source's own data.
 
         `usable` is already filtered to values `Title` will accept, so this
         never fabricates a title from a bare name and never raises a
-        `ValidationError` at a source's expense -- see the module docstring.
+        `ValidationError` at a source's expense.
         """
         kind = _TITLE_KIND[item.kind]
         title = Title(
@@ -316,8 +313,8 @@ class MatchService:
         """One `enqueue` per batch, never one per item.
 
         Episodes are excluded: searching TMDb for a title called "Kissed by
-        Fire" is not a resolution path, and enqueueing one per episode is
-        999,827 rows a walk that no handler can complete. `IngestService`
+        Fire" is not a resolution path, and one job per episode file is a walk
+        no handler can complete. `IngestService`
         enqueues a `match` job for the episodes whose series it genuinely
         could not resolve, which is bounded by the series it has not matched
         rather than by the library.
@@ -379,8 +376,8 @@ def _usable_ids(refs: Sequence[tuple[ProviderRef, MatchMethod]]) -> dict[str, in
 def _as_int(value: int | str | None) -> int | None:
     """A source is free to report `ProviderIds.Tmdb: "unknown"`.
 
-    That is a matching failure, not a pipeline failure, and it must not abort a batch of
-    5,000 items.
+    That is a matching failure, not a pipeline failure, and it must not abort a
+    whole batch.
     """
     if value is None:
         return None
@@ -393,8 +390,8 @@ def _as_int(value: int | str | None) -> int | None:
 def _as_imdb(value: int | str | None) -> str | None:
     """`Title.imdb_id` is pattern-validated.
 
-    so an id that is not one is dropped here rather than raising a `ValidationError` the
-    reconciler re-raises.
+    An id that is not one is dropped here rather than raising a
+    `ValidationError` the reconciler re-raises.
     """
     if not isinstance(value, str) or not _IMDB_ID.match(value):
         return None
