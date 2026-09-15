@@ -1,15 +1,8 @@
 # 00 — Overview
 
-## The problem
-
-Media servers own both the library *and* the experience. Their APIs are shaped
-around their own UI, their metadata quality is whatever the scraper produced,
-and every client you build is a client *of that server*. Replace the server and
-you rebuild everything. Add a second server and you have two disjoint libraries
-with two sets of watch state.
-
-Usher inverts that. The catalog is ours; media servers become interchangeable
-*sources* that answer one question: "where can this title be played?"
+Usher is a self-hosted media catalog backend. The catalog is canonical and ours;
+media servers become interchangeable *sources* that answer one question: "where
+can this title be played?"
 
 ## What Usher is
 
@@ -31,12 +24,12 @@ client against, with no client ever needing to know Emby exists.
 ## Goals
 
 - **Total abstraction of sources.** No source-specific concept reaches the API.
-- **Fast clients.** The API is the cache. Clients should never wait on an
-  upstream server; anything slow is pre-computed or served stale-then-updated.
+- **Fast clients.** The API is the cache. Clients never wait on an upstream
+  server; anything slow is pre-computed or served stale-then-updated.
 - **Browsable during sync.** A cold catalog is usable immediately, not after an
   import completes.
 - **Good data by default.** Bulk-loaded open datasets mean recommendations and
-  search work meaningfully from first boot, not after months of usage.
+  search work meaningfully from first boot.
 - **Extensible by design.** New sources, metadata providers, row types, and
   search backends are new subclasses, not new branches in existing code.
 - **Open source.** MIT licensed, self-hostable, ships importers rather than data.
@@ -48,19 +41,11 @@ client against, with no client ever needing to know Emby exists.
 - **Not a UI framework.** Usher ships exactly one client — **Usher Console**,
   in `web/`, served by this process at `/console` — and it is a consumer of the
   HTTP contract like any other, generated from `/openapi.json` and holding no
-  private route. ⚠️ **This non-goal read "Not a UI. Reference clients may
-  follow; they are separate projects" until 2026-08-19, and the second half was
-  true for nine milestones.** What changed the call was not ambition: a
-  self-hosted product whose only interface is `curl` is not one, and a client
-  in a second repository could not be shipped, versioned or tested with the API
-  it generates from. The boundary the non-goal was protecting still holds and
-  is now structural — no route exists for the console that does not exist for
-  everyone, and `USHER_CONSOLE_ENABLED=false` is a supported deployment.
+  private route. `USHER_CONSOLE_ENABLED=false` is a supported deployment.
 - **Not multi-tenant.** Designed for a household. User records exist so watch
   state and taste are per-person, not so it can be run as a service.
-- **Not collaborative filtering.** With household-scale usage there is no
-  co-occurrence signal. Recommendations are content-based plus borrowed
-  aggregate signals. See [06](06-rows-and-recommendations.md).
+- **Not collaborative filtering.** Recommendations are content-based plus
+  borrowed aggregate signals. See [06](06-rows-and-recommendations.md).
 
 ## Success criteria
 
@@ -75,13 +60,10 @@ client against, with no client ever needing to know Emby exists.
 
 ## Consumers
 
-- **Household clients** — the media browser this is built for; tvOS/web/mobile.
+- **Household clients** — tvOS/web/mobile media browsers.
 - **[Alfred](https://github.com/anirudhlath/alfred)** — the household voice
-  assistant. Usher becomes its media knowledge and action surface ("play the
-  thing with the astronaut", "what's new"). Shared stack (Python 3.13, Pydantic,
-  FastAPI, litellm) so integration is native rather than another HTTP hop.
-- **Home Assistant** — replaces the current browser-side Emby card, which holds
-  a raw Emby token in the frontend and breaks whenever that token rotates.
+  assistant. Usher is its media knowledge and action surface.
+- **Home Assistant** — replaces the browser-side Emby card.
 
 ## Glossary
 
