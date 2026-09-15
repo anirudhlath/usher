@@ -50,7 +50,6 @@ def build_stream_targets(
         as_int(user_data.get("PlaybackPositionTicks")) if isinstance(user_data, Mapping) else None
     )
 
-    # Three parameters, not four.
     query = urlencode(
         {
             "static": "true",

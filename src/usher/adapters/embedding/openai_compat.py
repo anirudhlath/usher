@@ -1,6 +1,6 @@
-"""`Embedder` over `POST {base_url}/embeddings`.
+"""`Embedder` over `POST {base_url}/embeddings`, and the checks it needs.
 
-and the three checks that exist because the model is somebody else's process.
+The model is somebody else's process and can change underneath this one.
 """
 
 import math
@@ -28,31 +28,27 @@ _EMBEDDINGS_PATH = "/embeddings"
 # `detail` to `usher.adapters.http`.
 _ENDPOINT = "the embedding endpoint"
 
-# The same tolerance `FastEmbedEmbedder` uses, deliberately: the measured norm here is
-# exactly 1.0 so any tolerance would admit it, and a *different* number would make a
-# reader comparing the two adapters work out whether the difference meant something.
+# The same tolerance `FastEmbedEmbedder` uses, deliberately: a different number
+# would make a reader comparing the two adapters work out whether the
+# difference meant something.
 _NORM_TOLERANCE = 1e-4
 
 
 def checkpoint_of(model_name: str) -> str:
     """`openai:BAAI/bge-m3` -> `BAAI/bge-m3`.
 
-    `partition`, not `rpartition`: a checkpoint id contains `/` and may
-    contain `:` in a revision or served-model alias, and it is the *first*
-    colon that separates the runtime. A bare name with no prefix is taken as
-    the checkpoint, so an operator who wrote one gets the model rather than a
-    parse error -- the `model_name` column still records what this deployment
-    was configured with, which is what makes a swap detectable.
+    `partition`, not `rpartition`: a checkpoint id contains `/` and may contain
+    `:` in a revision or served-model alias, so it is the *first* colon that
+    separates the runtime. A bare name with no prefix is taken as the
+    checkpoint, so an operator who wrote one gets the model, not a parse error.
 
-    Another runtime's prefix is left whole rather than stripped. The request
-    then 4xxs on a model name the server does not serve, which is loud;
-    stripping it would serve a `fastembed:`-configured deployment from an
-    OpenAI-compatible endpoint under a fastembed fingerprint, which is the
-    exact confusion `model_name` carries a runtime to prevent.
+    Another runtime's prefix is left whole rather than stripped: the request
+    then 4xxs loudly, where stripping would serve a `fastembed:`-configured
+    deployment from here under a fastembed fingerprint.
 
-    Byte-identical to `FastEmbedEmbedder`'s split, deliberately:
+    Byte-identical to `FastEmbedEmbedder`'s split, because
     `composition._load_embedder` chooses between the two adapters on the same
-    `partition`, so a divergence here would make one string mean two models.
+    `partition` -- a divergence would make one string mean two models.
     """
     runtime, separator, checkpoint = model_name.partition(_SEPARATOR)
     return checkpoint if separator and runtime == RUNTIME else model_name
@@ -64,20 +60,14 @@ class OpenAICompatEmbedder(Embedder):
     Constructed by `usher.composition._load_embedder` and by nothing else. The
     client is a process-lifetime resource for the same reason the ONNX session
     is: `build_worker` runs once per worker *pass* at a 5 s floor, and a client
-    per pass is a fresh connection pool -- a TCP handshake and, against a
-    hosted provider, a TLS one -- for every batch, forever, with nothing in the
-    logs saying so.
+    per pass is a fresh connection pool -- a TCP handshake, and against a hosted
+    provider a TLS one -- for every batch, with nothing in the logs saying so.
 
-    **Ownership is stated rather than left ambiguous, and it differs from
-    `OpenAICompatibleClient`'s deliberately.** That class injects a
-    `transport` and always owns its client, because ownership of a thing
-    `aclose` promises to release should never be a question. Here the injected
-    object is the client itself, and an injected client is **adopted**:
-    `aclose` closes whatever this object holds. The port is what forces the
-    choice -- `Embedder.aclose` is the release callable `composition.embedder`
+    An injected client is **adopted**: `aclose` closes whatever this object
+    holds. `Embedder.aclose` is the release callable `composition.embedder`
     hands to every entry point's `finally`, so this object must have something
-    to close, and a caller keeping a client alive past the embedder that was
-    given it has no way to say so. Nothing in `src/` passes one.
+    to close and a caller cannot ask to keep its client. Nothing in `src/`
+    passes one.
     """
 
     def __init__(
@@ -96,11 +86,9 @@ class OpenAICompatEmbedder(Embedder):
         # checkpoint and has never heard of the runtime half of the string.
         self._checkpoint = checkpoint_of(model_name)
         self._base_url = base_url.rstrip("/")
-        # Re-wrapped rather than held bare: see the module docstring. `None`
-        # and `""` are the same thing here -- the local-server case, no header
-        # at all -- and the composition root already normalises the empty
-        # `SecretStr` it reads from `Settings`, so this is a second door on the
-        # same decision rather than a competing one.
+        # Re-wrapped in `SecretStr` so no repr can leak it. `None` and `""` are
+        # the same thing here -- the local-server case, no header at all -- and
+        # the composition root already normalises the empty one it reads.
         self._api_key = SecretStr(api_key) if api_key else None
         self._dimension = dimension
         self._batch_size = batch_size
@@ -154,16 +142,12 @@ class OpenAICompatEmbedder(Embedder):
 
         The status ladder is `usher.adapters.http.port_error_for` unchanged --
         429, then 401/403, then any other 4xx except 408, then everything at or
-        above 400 -- and it is shared rather than restated for the reason that
-        module exists: the third copy of `decode_json` was the only one that
-        had learned about `RecursionError`, so two adapters were one deeply
-        nested payload away from taking the worker process down. The ladder's
-        placement of a non-429 4xx in `PortDataMalformed` is right here too and
-        for the same measured reason: a model name the server does not serve, a
-        batch over its input bound and a schema it will not accept are all
-        permanent for that request, so five rate-limited retries reach the
-        identical answer and then park with "upstream unavailable" instead of
-        with what was wrong.
+        above 400 -- shared rather than restated so one adapter cannot learn
+        about a payload shape the others have not. Its placement of a non-429
+        4xx in `PortDataMalformed` holds here too: a model the server does not
+        serve, a batch over its input bound and a schema it will not accept are
+        all permanent for that request, so retrying reaches the same answer and
+        then parks with "upstream unavailable" instead of with what was wrong.
         """
         headers = {"content-type": "application/json"}
         if self._api_key is not None:
@@ -177,8 +161,7 @@ class OpenAICompatEmbedder(Embedder):
             # `type(exc).__name__`, never `exc`: httpx's own text for several
             # transport failures includes the request URL. `RuntimeError` is in
             # that tuple for the closed-client case, which would otherwise
-            # escape every `except UsherPortError` in `services/` and take the
-            # worker down instead of parking one job.
+            # escape every `except UsherPortError` in `services/`.
             raise PortUnavailable(f"POST {_EMBEDDINGS_PATH} failed: {type(exc).__name__}") from exc
         error = port_error_for(response, what=_ENDPOINT, request_line=f"POST {_EMBEDDINGS_PATH}")
         if error is not None:
@@ -215,8 +198,7 @@ class OpenAICompatEmbedder(Embedder):
         if by_index.keys() != set(range(expected)):
             # Sorted by the numbers on the wire, so the numbers have to be the
             # positions in the batch. Reported as a count and a range, never as
-            # the set itself: an endpoint that answered thousands of indices
-            # would put its whole answer in a log line.
+            # the set: thousands of indices would land in one log line.
             raise PortDataMalformed(
                 f"{_ENDPOINT} returned {len(by_index)} indices that are not 0..{expected - 1}"
             )
@@ -225,11 +207,10 @@ class OpenAICompatEmbedder(Embedder):
     def _vector(self, embedding: Any) -> list[float]:
         """One embedding, as the `list[float]` the port promises.
 
-        A `str` here is `encoding_format: "base64"`, which the schema permits
-        and the official client asks for by default -- so it is a shape a
-        provider may reasonably answer with, and `float("gASV")` raises
-        `ValueError`, which is not a `UsherPortError`. Named in the message
-        because the fix is a provider setting rather than anything here.
+        A `str` here is `encoding_format: "base64"`, which the schema permits and
+        the official client asks for by default, so a provider may reasonably
+        answer with it. Named in the message because the fix is a provider
+        setting rather than anything here.
         """
         if not isinstance(embedding, list):
             raise PortDataMalformed(
@@ -246,16 +227,13 @@ class OpenAICompatEmbedder(Embedder):
     def _check_first(self, vector: list[float]) -> None:
         """The once-per-process checks, in the order their diagnoses depend on.
 
-        **Width first**, because it answers *which model is this* and the norm
-        answers *is this model's Normalize module intact* -- and a wrong-width
-        vector makes the second question's answer meaningless. A model swapped
-        underneath this process is far and away the likeliest cause of both,
-        and it is the width that names it.
+        Width first: it answers *which model is this*, and a wrong-width vector
+        makes the norm's answer meaningless. A model swapped underneath this
+        process is the likeliest cause of both, and the width names it.
 
-        Both are checked **before** anything reaches the `halfvec` cast, never
-        after: post-cast norm drift is 1.21e-04 against 1.19e-07, a 1000x
-        change, so the same norm check over a stored vector fails on a healthy
-        model.
+        Both run *before* anything reaches the `halfvec` cast: the cast's own
+        rounding drifts the norm past this tolerance, so the same check over a
+        stored vector fails on a healthy model.
         """
         if len(vector) != self._dimension:
             raise PortDataMalformed(

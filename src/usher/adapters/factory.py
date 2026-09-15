@@ -12,20 +12,18 @@ from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceNotSup
 class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
     """Builds adapters with this deployment's tuning applied.
 
-    Named for what it does rather than for a service, because it is not one
-    -- it is the registry. The settings it carries come from
-    `usher.config.Settings` at the composition root, so no adapter has to
-    read configuration itself.
+    Named for what it does rather than for a service, because it is not one --
+    it is the registry. Its settings come from `usher.config.Settings` at the
+    composition root, so no adapter has to read configuration itself.
 
     **The outbound gate is the one thing here that is an object rather than a
-    value, and that is the whole of M10's S3.** Every other knob below is a
-    number this factory copies into each adapter it builds, so two factories
-    configured alike are interchangeable. A rate limiter is not: a *value*
-    threaded down mints a fresh gate per adapter, and since
-    `usher.composition.adapter_factory` is called once per unit of work, that
-    is a fresh gate per lane task and per request. So this holds the shared
-    `SourceGateRegistry` and hands out **its** gate, which is what makes the
-    ceiling per source per process rather than per pipeline (ADR-0043 §4).
+    value.** Every other knob is a number copied into each adapter, so two
+    factories configured alike are interchangeable; a rate limiter is not. A
+    *value* threaded down mints a fresh gate per adapter, and
+    `usher.composition.adapter_factory` runs once per unit of work -- a fresh
+    gate per lane task and per request. Holding the shared `SourceGateRegistry`
+    and handing out **its** gate is what makes the ceiling per source per
+    process rather than per pipeline.
     """
 
     def __init__(
@@ -44,24 +42,17 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         # `None` is a factory nobody handed a registry to -- a directly constructed one
         # in a test.
         self._gates = gates if gates is not None else SourceGateRegistry()
-        # The two push knobs travel the same route as the three above: from `Settings`
-        # at a composition root, through this registry, into the adapter that owns the
-        # message ledger.
         self._push_stale_after_seconds = push_stale_after_seconds
         self._push_poll_seconds = push_poll_seconds
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
-        """Construct the adapter for `source.kind`.
+        """Construct the adapter for `source.kind`; the caller owns it.
 
-        The caller owns it.
-
-        The `raise` below is unreachable today -- `SourceKind` has exactly
-        one member -- and is kept rather than collapsed into an unconditional
-        `return` precisely because of that: the *next* member added must land
-        on it rather than on a silently-wrong Emby adapter pointed at a
-        Jellyfin server, which would authenticate, walk, and return plausible
-        nonsense. `tests/unit/test_adapters_factory.py` stands a
-        not-yet-existing kind up to prove it does.
+        The `raise` below is unreachable while `SourceKind` has one member, and
+        is kept rather than collapsed into an unconditional `return` so that the
+        *next* member lands on it rather than on an Emby adapter pointed at a
+        Jellyfin server, which would authenticate, walk and return plausible
+        nonsense.
         """
         if source.kind is SourceKind.EMBY:
             return EmbyAdapter(

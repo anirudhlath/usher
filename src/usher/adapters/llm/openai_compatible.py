@@ -30,13 +30,11 @@ _tracer = trace.get_tracer("usher.llm")
 def _strip_fence(content: str) -> str:
     """Remove a Markdown code fence, if the answer came wrapped in one.
 
-    Measured against a live endpoint with no `response_format`: **5 of 5**
-    responses were fenced, so this is the shape the third fallback actually
-    has to handle. Deliberately tolerant about the language tag and about
-    whether a newline follows it, and deliberately *not* a regex over the
-    whole string -- a fence-stripper that searched for the first `{` would
-    also "succeed" on prose containing a brace, which is a parse of
-    something nobody sent.
+    An endpoint asked for JSON without a `response_format` fences its answer,
+    which is the shape the third fallback has to handle. Deliberately tolerant
+    about the language tag and about whether a newline follows it, and
+    deliberately *not* a regex over the whole string -- a stripper that searched
+    for the first `{` would also "succeed" on prose containing a brace.
     """
     text = content.strip()
     if not text.startswith("```"):
@@ -44,7 +42,7 @@ def _strip_fence(content: str) -> str:
     text = text[3:]
     newline = text.find("\n")
     first_line = text[:newline] if newline != -1 else text
-    # ```json{...}``` -- no newline after the tag, observed.
+    # ```json{...}``` -- no newline after the tag.
     if first_line.strip().isalpha():
         text = text[newline + 1 :] if newline != -1 else ""
     elif text[:4].lower() == "json":
@@ -138,18 +136,15 @@ class OpenAICompatibleClient(LLMClient):
     def _decode(self, response: httpx.Response) -> dict[str, Any]:
         """Status first, then JSON, both from `usher.adapters.http`.
 
-        The ladder is `TmdbClient`'s ladder -- same four branches in the same
-        order, and the M4-against-TMDb measurements that justify them are
-        recorded with it rather than restated here. What this method still owns
-        is what it hands over: **no branch may interpolate the response body,
-        the URL or the prompt**, so neither call gets a `detail` and both are
-        given the `_ENDPOINT` constant as their subject. The one bounded
-        exception is the status code itself, which is a number.
+        The ladder is `TmdbClient`'s -- same four branches in the same order.
+        What this method owns is what it hands over: **no branch may interpolate
+        the response body, the URL or the prompt**, so neither call gets a
+        `detail` and both are given the `_ENDPOINT` constant as their subject.
+        The one bounded exception is the status code, which is a number.
 
         `decode_json`'s `RecursionError` arm is the exposed half of a pair --
-        `_parse`'s subject is bounded by `max_output_tokens` and shielded by
-        the truncation guard, while the envelope is whatever the endpoint, or a
-        proxy in front of it, put on the wire.
+        `_parse`'s subject is bounded by `max_output_tokens` and the truncation
+        guard, while the envelope is whatever a proxy put on the wire.
         """
         error = port_error_for(response, what=_ENDPOINT, request_line=f"POST {_COMPLETIONS_PATH}")
         if error is not None:
@@ -186,9 +181,8 @@ class OpenAICompatibleClient(LLMClient):
         try:
             parsed = json.loads(_strip_fence(content))
         except (ValueError, RecursionError) as exc:
-            # See `_decode`. Reachable here on the two unconstrained-generation
-            # fallbacks this module's docstring names, where a degenerate
-            # repeating loop is a shape this project has already measured.
+            # See `_decode`. Reachable on the two unconstrained-generation
+            # fallbacks, where a degenerate repeating loop is a real shape.
             raise PortDataMalformed("the completion was not JSON") from exc
         if not isinstance(parsed, dict):
             # The port is annotated `-> tuple[dict[str, Any], LLMUsage]`, and

@@ -114,21 +114,19 @@ WHERE t.enrichment_state <> 'skeleton'
 async def _apply_hnsw_gucs(session: AsyncSession, ef_search: int) -> None:
     """Per-transaction pgvector settings for a filtered ANN query.
 
-    **`SET LOCAL`, never `SET`** -- it reverts at COMMIT (verified), so a
-    pooled connection is left clean for the next unrelated request.
+    **`SET LOCAL`, never `SET`** -- it reverts at COMMIT, so a pooled connection
+    is left clean for the next unrelated request.
 
-    **Interpolated from an allow-list, never bound.** `SET LOCAL` cannot take
-    a bind parameter at all, so the value is checked against the closed set
-    of legal values first and the integer is bounded before it reaches the
-    string. Neither value has any path from user input.
+    **Interpolated from an allow-list, never bound.** `SET LOCAL` cannot take a
+    bind parameter at all, so the value is checked against the closed set of
+    legal values first and the integer is bounded before it reaches the string.
+    Neither value has any path from user input.
 
-    **And there is no feature detection here, deliberately.** `pg_settings`
-    returns **zero** `hnsw.%` rows on a fresh connection and one after any
-    query that touched a vector operator -- the library loads lazily, per
-    backend. So a probe for "does this GUC exist" answers differently
-    depending on what the connection happened to do first, which is a
-    flaky-test generator. Setting the GUC on a cold connection succeeds
-    regardless, so the honest implementation just sets it.
+    **No feature detection here, deliberately.** `pg_settings` returns no
+    `hnsw.%` rows on a fresh connection and some after any query that touched a
+    vector operator, because the library loads lazily per backend -- so a probe
+    for "does this GUC exist" is a flaky-test generator. Setting it on a cold
+    connection succeeds regardless.
     """
     if _ITERATIVE_SCAN not in _ITERATIVE_SCAN_VALUES:  # pragma: no cover - constant
         raise ValueError(f"unknown hnsw.iterative_scan value {_ITERATIVE_SCAN!r}")
@@ -140,28 +138,24 @@ async def _apply_hnsw_gucs(session: AsyncSession, ef_search: int) -> None:
 
 
 async def _force_exact_scan(session: AsyncSession) -> None:
-    """Boundary call 4's exact path: no ANN, no approximation, no recall question at all.
+    """Boundary call 4's exact path: no ANN, no approximation, no recall question.
 
-    PRD 05 puts owned titles on exact brute-force cosine, and the reason it
-    is affordable is boundary call 4 -- the embedded population is the
-    enriched tier at 2k-10k, not the 1,271,138-row catalog. `owned_only` is
-    also the most selective filter in the vocabulary, which is exactly the
-    selectivity that collapses HNSW's post-filter, so the two arguments point
-    the same way.
+    PRD 05 puts owned titles on exact brute-force cosine, and it is affordable
+    because the embedded population is the enriched tier at 2k-10k rather than
+    the whole catalog. `owned_only` is also the most selective filter in the
+    vocabulary, which is the selectivity that collapses HNSW's post-filter.
 
-    **The cost is stated rather than discovered**: this also takes the index
-    away from the `media_items` EXISTS, and from every other statement in the
-    same transaction, because `SET LOCAL` is transaction-scoped and Postgres
-    has no per-statement hint mechanism. At 2k-10k rows that is affordable;
-    at 1.27M it would not be, which is another way of saying boundary call 4
-    is what makes this path exist.
+    The cost: this also takes the index away from the `media_items` EXISTS, and
+    from every other statement in the same transaction, because `SET LOCAL` is
+    transaction-scoped and Postgres has no per-statement hint mechanism. At
+    2k-10k rows that is affordable; at the whole catalog it would not be.
     """
     await session.execute(text("SET LOCAL enable_indexscan = off"))
     await session.execute(text("SET LOCAL enable_bitmapscan = off"))
 
 
-# Reciprocal Rank Fusion: **one statement, two CTEs, one snapshot.** A Python fuse is
-# legitimate -- `FakeSearchIndex` does it and is right to, having no database -- and the
+# Reciprocal Rank Fusion: **one statement, two CTEs, one snapshot.** A Python
+# fuse is legitimate -- `FakeSearchIndex` does it, having no database -- and the
 # port deliberately declines to specify.
 _FUSED = f"""
 WITH lexical AS MATERIALIZED (
@@ -213,8 +207,7 @@ LIMIT :limit
 # How many candidates each lane contributes before fusion. Wider than the
 # result limit because a title that is rank 40 in one lane and rank 3 in the
 # other is exactly the row fusion exists to surface -- a lane window equal to
-# the limit can only ever re-order what both lanes already had in their top
-# `limit`, which is trap 2 arriving through a constant instead of a JOIN.
+# the limit can only re-order what both lanes already had in their top `limit`.
 _LANE_MULTIPLIER = 5
 
 
@@ -252,9 +245,10 @@ def _genres(value: tuple[str, ...], parameters: dict[str, object]) -> str | None
 def _owned_only(value: bool, parameters: dict[str, object]) -> str | None:
     if not value:
         return None
-    # **EXISTS, never JOIN.** `media_items.title_id` carries the series' id on every
-    # episode row -- 20,000 of them on one measured series -- so a join returns one hit
-    # per file and the LIMIT truncates a single series into a page of itself.
+    # **EXISTS, never JOIN.** `media_items.title_id` carries the series' id on
+    # every episode row -- tens of thousands on a long-running series -- so a
+    # join returns one hit per file and the LIMIT truncates one series into a
+    # page of itself.
     return (
         "EXISTS (SELECT 1 FROM media_items AS m WHERE m.title_id = t.id AND m.episode_id IS NULL)"
     )
@@ -339,11 +333,11 @@ class PostgresSearchIndex(SearchIndex):
                         },
                     )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `title_embeddings.embedding` is `halfvec(1024)`; this writer
-            # stages the vector as `text` and casts it in the statement, so a vector of
-            # another width is a class-22 refusal of a **bound value** rather than of an
-            # expression this statement computed.
+            # **`DBAPIError` rather than `IntegrityError`.**
+            # `title_embeddings.embedding` is `halfvec(1024)`; this writer stages
+            # the vector as `text` and casts it in the statement, so a vector of
+            # another width is a class-22 refusal of a **bound value** rather
+            # than of an expression this statement computed.
             if not is_row_refusal(exc):
                 raise
             # A `title_id` naming no `titles` row. Translated so nothing above
@@ -385,18 +379,14 @@ class PostgresSearchIndex(SearchIndex):
         """The port's pre-search probe, over `_COVERAGE` and nothing new.
 
         **The one statement, not a second definition of coverage.** It reaches
-        `_predicates` and `_coverage` -- the same two the two vector lanes
-        above already compose -- so this method cannot come to disagree with
-        the number the same request's `SearchOutcome` reports. A fresh `SELECT`
-        here would be the shape `services/search.py`'s module docstring refuses
-        for the fingerprint: one question, two spellings, both of them
-        answering.
+        `_predicates` and `_coverage` -- the same two the vector lanes above
+        compose -- so this method cannot come to disagree with the number the
+        same request's `SearchOutcome` reports.
 
-        It costs what `_coverage` costs, which is a count over the enriched
-        tier through `ix_titles_enrichment_state` -- so it is a read a caller
-        must decide to make rather than one it makes by reflex.
-        `SearchService` makes it only where a completion is otherwise about to
-        be bought.
+        It costs what `_coverage` costs, a count over the enriched tier through
+        `ix_titles_enrichment_state`, so it is a read a caller must decide to
+        make rather than one it makes by reflex. `SearchService` makes it only
+        where a completion is otherwise about to be bought.
         """
         predicates, parameters = _predicates(filters)
         return await self._coverage(predicates, parameters)
@@ -408,9 +398,9 @@ class PostgresSearchIndex(SearchIndex):
             text(_FULL_TEXT.format(predicates=predicates)),
             {**parameters, "query": request.query, "limit": max(request.limit, 0)},
         )
-        # 0.0 rather than a measured fraction: no semantic lane ran, and
-        # reporting coverage for a lane that did not run invites a caller to
-        # read it as a fact about the catalog.
+        # 0.0 rather than a real fraction: no semantic lane ran, and reporting
+        # coverage for a lane that did not run invites a caller to read it as a
+        # fact about the catalog.
         return SearchOutcome(
             hits=tuple(
                 SearchHit(title_id=row.id, score=float(row.score), exact_name=bool(row.exact_name))
@@ -460,7 +450,7 @@ class PostgresSearchIndex(SearchIndex):
                 "limit": limit,
             },
         )
-        # Coverage is *measured*, never derived from the hits. The fraction of
+        # Coverage is queried, never derived from the hits. The fraction of
         # returned hits that had a vector is 0/0 on an unembedded catalog and
         # 1.0 on a request the vector lane happened to dominate -- neither of
         # which answers "can the semantic lane see this catalog yet".
@@ -479,8 +469,8 @@ class PostgresSearchIndex(SearchIndex):
         return 0.0 if row.total == 0 else float(row.embedded / row.total)
 
 
-# **The floor this module's own integration contract runs at -- which is NOT the floor
-# the shipped path runs at**, and the difference was invisible for a whole milestone.
+# The floor this module's own integration contract runs at, which is **not** the
+# floor the shipped path runs at.
 _TRIGRAM_THRESHOLD = 0.1
 
 # `pg_trgm.similarity_threshold`'s allowed range, which is also
@@ -492,13 +482,13 @@ _THRESHOLD_RANGE = (0.0, 1.0)
 # Levenshtein's ceiling for a re-ranked candidate.
 _MAX_DISTANCE = 2
 
-# `fuzzystrmatch`'s hard limit, measured rather than read: an input of 300
-# characters answers `ERROR: levenshtein argument exceeds maximum length of
-# 255 characters`. The catalog is bulk-loaded from a dump nobody has audited
-# for its longest name, and here the walk that must not abort is a keystroke.
+# `fuzzystrmatch`'s hard limit: a longer input answers `ERROR: levenshtein
+# argument exceeds maximum length of 255 characters`. The catalog is bulk-loaded
+# from a dump nobody has audited for its longest name, and here the walk that
+# must not abort is a keystroke.
 _LEVENSHTEIN_MAX_INPUT = 255
 
-# The verified statement, adapted to `titles`.
+# The suggest statement, over `titles`.
 _SUGGEST = f"""
 WITH candidates AS MATERIALIZED (
     SELECT t.id, t.name, t.tmdb_popularity, t.tmdb_vote_count,

@@ -38,9 +38,9 @@ PROVIDER_NAME = "tmdb"
 MOVIE_APPEND_TO_RESPONSE = "credits,keywords,images,videos,external_ids,release_dates"
 SERIES_APPEND_TO_RESPONSE = "credits,keywords,images,videos,external_ids,content_ratings"
 
-# TMDb's documented `append_to_response` ceiling, and it is *enforced*:
-# measured live 2026-08-01, a 21-item list is a 400 carrying
-# `status_code: 27`, "the maximum number of remote calls is 20".
+# TMDb's documented `append_to_response` ceiling, and it is *enforced*: a
+# 21-item list is a 400 carrying `status_code: 27`, "the maximum number of
+# remote calls is 20".
 APPEND_TO_RESPONSE_CEILING = 20
 
 # What the six series namespaces leave: exactly fourteen `season/N` slots.
@@ -51,7 +51,7 @@ BLIND_SEASON_WINDOW = tuple(range(SERIES_SEASON_SLOTS))
 
 # TMDb's own documentation: "You can query this method up to 14 days at a
 # time." A wider window is clamped rather than rejected -- see
-# `MetadataProvider.changed_since` and ADR-0017.
+# `MetadataProvider.changed_since`.
 CHANGES_WINDOW_DAYS = 14
 
 _DETAIL_PATH = {TitleKind.MOVIE: "/movie", TitleKind.SERIES: "/tv"}
@@ -66,8 +66,7 @@ _SEARCH_YEAR_PARAM = {
 _SEASON_APPEND_PREFIX = "season/"
 # The order `changed_since` walks the two spaces in. Movies first because
 # `/movie/changes` is the feed PRD 04's Phase 5 names; series follow because a
-# catalog holding 371,310 of them that only re-enriched movies would be half
-# stale.
+# catalog that only re-enriched movies would be half stale.
 _CHANGE_ORDER = (TitleKind.MOVIE, TitleKind.SERIES)
 
 
@@ -88,13 +87,12 @@ def _take_appended_seasons(payload: dict[str, Any]) -> dict[int, dict[str, Any]]
     """Pop every `season/N` block off a detail response, keyed by number.
 
     **Popped, not read.** `to_result` hands this same dict straight through to
-    `raw_payloads` without copying -- deliberately, since copying a payload
-    the size of a `credits` block once per title across 1,271,138 of them is
-    not free -- so a surviving `season/N` key stores every episode a second
-    time, once inline and once under `seasons[]`. The pop happens before
-    anything else in `_compose_seasons`, including the early return, so a
-    response with no usable `seasons` list is still handed back in the shape
-    the `1+N` path produced.
+    `raw_payloads` without copying -- deliberately, since copying a payload the
+    size of a `credits` block once per title across the whole catalog is not
+    free -- so a surviving `season/N` key stores every episode a second time,
+    once inline and once under `seasons[]`. The pop happens before anything else
+    in `_compose_seasons`, including the early return, so a response with no
+    usable `seasons` list still comes back in the shape the `1+N` path produced.
     """
     taken: dict[int, dict[str, Any]] = {}
     for key in [one for one in payload if one.startswith(_SEASON_APPEND_PREFIX)]:
@@ -132,10 +130,10 @@ class TmdbMetadataProvider(MetadataProvider):
         """TMDb's 35 genre names as the 24 canonical concepts they name.
 
         Derived from `TMDB_GENRE_NAMES` rather than written out a second time:
-        two hand-maintained lists of one vocabulary is how one of them comes to
-        hold a concept the other does not, and the consequence here is silent —
-        a concept wrongly in this set is a label enrichment goes on deleting,
-        which looks exactly like enrichment working.
+        two hand-maintained lists of one vocabulary is how one comes to hold a
+        concept the other does not, and the consequence is silent -- a concept
+        wrongly in this set is a label enrichment goes on deleting, which looks
+        exactly like enrichment working.
         """
         return frozenset(canonicalise_genres(TMDB_GENRE_NAMES))
 
@@ -176,22 +174,21 @@ class TmdbMetadataProvider(MetadataProvider):
             # The document exactly as it was fetched, on its way to
             # `raw_payloads`. Not a copy: `EnrichService` writes it and never
             # mutates it, and copying a payload the size of a `credits` block
-            # once per title across 1,271,138 of them is not free.
+            # once per title across the whole catalog is not free.
             payload=payload,
         )
 
     def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
-        """The other half of ADR-0016's promissory note, and it fetches nothing.
+        """The derivation half, and it fetches nothing.
 
         Beside `to_result` rather than folded into it, for the reason
-        `DerivationResult` gives: enrichment runs once per title per fetch,
-        a derivation runs over the whole cache independently of it, and a
-        single result carrying both would mean `EnrichService` either writes
-        credits or computes and discards them on every enrichment.
+        `DerivationResult` gives: enrichment runs once per title per fetch, a
+        derivation runs over the whole cache independently of it, and a single
+        result carrying both would mean `EnrichService` either writes credits or
+        computes and discards them on every enrichment.
 
         Delegates to `mapping.py` and reads no key itself -- the wire format
-        stops in that module, which is the rule the whole package is built
-        around.
+        stops in that module.
         """
         people, credits = people_and_credits(payload, title_id)
         return DerivationResult(
@@ -248,11 +245,10 @@ class TmdbMetadataProvider(MetadataProvider):
         or `"unknown"` into an entity, so `JobWorker` parks them on the first
         attempt instead of spending five rate-limited ones.
 
-        The kind-less case is ADR-0011 at the request layer, and it is the
-        dangerous one: 26,968 ids are live in both TMDb spaces, so guessing
-        `/movie/{id}` for a ref that meant a series returns a **real payload
-        for an unrelated film**, which is then written onto the title as
-        enriched metadata with no error anywhere.
+        The kind-less case is the dangerous one: tens of thousands of ids are
+        live in both TMDb spaces, so guessing `/movie/{id}` for a ref that meant
+        a series returns a **real payload for an unrelated film**, written onto
+        the title as enriched metadata with no error anywhere.
         """
         if ref.provider != PROVIDER_NAME:
             raise PortDataMalformed(
@@ -272,9 +268,9 @@ class TmdbMetadataProvider(MetadataProvider):
         return ref.kind, tmdb_id
 
     async def _compose_seasons(self, payload: dict[str, Any], tmdb_id: int) -> None:
-        """Merge each season's block into the detail payload's `seasons` entry.
+        """Merge each season's block into the payload's `seasons` entry, in place.
 
-        in place, fetching only what the blind window missed.
+        Fetches only what the blind window missed.
         """
         blocks = _take_appended_seasons(payload)
         seasons = payload.get("seasons")

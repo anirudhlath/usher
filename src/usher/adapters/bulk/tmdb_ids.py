@@ -30,10 +30,9 @@ _MAX_DAYS_BACK = 7
 
 
 class TMDbIdDataset(BulkDataset[TmdbId]):
-    """One export file.
+    """One export file, instantiated once per `TitleKind`.
 
-    Instantiated twice -- once per `TitleKind` -- because movies and series are separate
-    files with different field names.
+    Movies and series are separate files with different field names.
     """
 
     def __init__(
@@ -68,18 +67,12 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
         return f"{self._base_url}{self._stem}_{day.strftime('%m_%d_%Y')}.json.gz"
 
     async def _newest_available(self) -> tuple[dt.date, CachedDatasetFile, str]:
-        """Walk backward from `today`.
+        """The newest day whose export exists, its file, and that day's ETag.
 
-        returning the first day whose export exists, its `CachedDatasetFile`, and the
-        ETag that day's own `HEAD` already returned.
-
-        The ETag is captured and returned rather than discarded: the loop
-        below already calls `candidate.revision()` to find out whether the
-        day exists at all, so that response has already answered "what is
-        this file's current ETag" too. A caller of `_newest_available` that
-        threw the value away and asked `ensure_local` to re-derive it would
-        pay for a second `HEAD` to the exact URL the first one just proved
-        was live.
+        The ETag is returned rather than discarded: the probe that finds out
+        whether the day exists has already answered what the file's ETag is, and
+        a caller that threw it away would pay for a second `HEAD` to the URL the
+        first one just proved was live.
         """
         for days in range(_MAX_DAYS_BACK):
             day = self._today - dt.timedelta(days=days)
@@ -151,11 +144,9 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
             try:
                 day = dt.date.fromisoformat(revision)
             except ValueError as exc:
-                # `revision` is contractually the value this dataset's own `revision()`
-                # already returned this run -- always a valid ISO date -- but round-
-                # tripping through a caller and a stored checkpoint means a corrupted or
-                # hand-edited value must not crash the process with a raw, unclassified
-                # ValueError; park it as a diagnosable port error instead.
+                # `revision` round-trips through a caller and a stored
+                # checkpoint, so a corrupted or hand-edited value must not
+                # crash the process with a raw, unclassified `ValueError`.
                 raise PortDataMalformed(
                     f"TMDb resume revision {revision!r} is not a valid ISO date",
                     detail=revision,
@@ -200,8 +191,6 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
 
     async def aclose(self) -> None:
         # The httpx client is owned by whoever constructed it (the CLI's
-        # composition root), which also closes it -- closing a shared
-        # client from here would break the sibling dataset using the same
-        # one. See `usher.adapters.bulk.imdb._ImdbDataset.aclose` for the
-        # same rationale spelled out once.
+        # composition root), which also closes it -- closing a shared client
+        # from here would break the sibling dataset using the same one.
         return None

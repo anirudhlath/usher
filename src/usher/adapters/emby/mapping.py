@@ -163,16 +163,11 @@ def primary_media_source(payload: Mapping[str, Any]) -> Mapping[str, Any] | None
 def runtime_seconds(payload: Mapping[str, Any], media_source: Mapping[str, Any]) -> int | None:
     """An item's runtime in whole seconds, or `None` if it has none.
 
-    Item level first, the chosen version's own `RunTimeTicks` second --
-    Emby emits it in both places and not always in both at once.
+    Item level first, the chosen version's own `RunTimeTicks` second -- Emby
+    emits it in both places and not always in both at once.
 
-    Called by `to_source_item` *and* by `build_stream_targets`, which is
-    what makes this module's "cannot drift" claim true of derivation and
-    not only of coercion. It previously held for `as_int` alone: the item
-    field was read on one side and the media-source fallback existed only
-    on the other, so an item carrying its runtime only on the media source
-    was catalogued as `None` and played back as `9360` -- same payload,
-    same call.
+    Called by `to_source_item` *and* by `build_stream_targets`, so the catalog
+    and the playback target cannot describe one file's runtime differently.
     """
     ticks = as_int(payload.get("RunTimeTicks"))
     if ticks is None:
@@ -183,12 +178,10 @@ def runtime_seconds(payload: Mapping[str, Any], media_source: Mapping[str, Any])
 def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
     """The canonical `HdrFormat` for a video stream, or `None` for SDR.
 
-    Any Dolby Vision marker wins outright -- see the module docstring.
+    Any Dolby Vision marker wins outright.
     """
     profile = str(video.get("Profile") or "").lower()
     tokens = [_NON_ALNUM.sub("", str(video.get(key) or "")).upper() for key in _RANGE_KEYS]
-    # Every DV marker is swept before any base-layer token is mapped, rather than field
-    # by field.
     if (
         video.get("DvProfile") is not None
         or "dolby vision" in profile
@@ -208,13 +201,10 @@ def audio_token(audio: Mapping[str, Any]) -> str | None:
 
     `truehd_atmos_7_1`, `eac3_5_1`, `aac_2_0`.
 
-    This is `StreamTarget.audio`, and it is a different thing from
-    `SourceItem.audio_codec`'s raw `"truehd"` -- the codec alone does not
-    tell a client whether it can play the track, which is the whole point
-    of PRD 07 returning ranked targets rather than one URL. An unknown
-    channel count falls back to `{n}ch` rather than being dropped, so a
-    9.1.6 track is still described rather than silently reported as
-    channel-less.
+    This is `StreamTarget.audio`, a different thing from
+    `SourceItem.audio_codec`'s raw `"truehd"`: the codec alone does not tell a
+    client whether it can play the track. An unknown channel count falls back to
+    `{n}ch` rather than being dropped, so a 9.1.6 track is still described.
     """
     codec = as_lower(audio.get("Codec"))
     if codec is None:
@@ -234,12 +224,12 @@ def audio_token(audio: Mapping[str, Any]) -> str | None:
 def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
     """One Emby item into a `SourceItem`.
 
-    `None` for an item type Usher does not model -- Season, BoxSet,
-    Playlist, Folder. `list_items` asks for only the three types below, but
-    a server that ignores `IncludeItemTypes` must not abort a 94,395-item
-    walk over a box set. An item with no `Id` is different: it cannot be
-    upserted on `(source_id, external_id)` at all, so skipping it would
-    lose a real item with no trace, and it raises `PortDataMalformed`.
+    `None` for an item type Usher does not model -- Season, BoxSet, Playlist,
+    Folder. `list_items` asks for only the three types below, but a server that
+    ignores `IncludeItemTypes` must not abort a whole-library walk over a box
+    set. An item with no `Id` is different: it cannot be upserted on
+    `(source_id, external_id)` at all, so skipping it would lose a real item
+    with no trace, and it raises `PortDataMalformed`.
     """
     external_id = as_text(payload.get("Id"))
     if external_id is None:

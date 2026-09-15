@@ -40,17 +40,14 @@ _requests = _meter.create_counter(
 
 
 def _is_v4_token(secret: str) -> bool:
-    """Whether the configured secret is a v4 read access token (a JWT) rather than a classic v3.
+    """Whether the configured secret is a v4 read access token (a JWT).
 
-    key.
-
-    A v3 key is 32 hexadecimal characters and can never match; a JWT has
-    three dot-separated base64url segments and its header begins `eyJ`.
-    **This shape is an inference, not a documented guarantee** -- TMDb
-    documents that the token works, not what it looks like -- so the cost of
-    being wrong is bounded deliberately: a false negative sends a working
-    credential the documented v3 way, and a false positive would need a v3
-    key containing two dots, which the character set forbids.
+    A v3 key is 32 hexadecimal characters and can never match; a JWT has three
+    dot-separated base64url segments and its header begins `eyJ`. **The shape is
+    an inference, not a documented guarantee**, so the cost of being wrong is
+    bounded deliberately: a false negative sends a working credential the
+    documented v3 way, and a false positive would need a v3 key containing two
+    dots, which the character set forbids.
     """
     return secret.startswith("ey") and secret.count(".") == 2
 
@@ -139,11 +136,10 @@ class TmdbClient:
             # status line at all and is labelled `error` -- is counted rather than
             # silently absent.
             _request_duration.record(self._clock() - started, {"status": status})
-            # The literal, not `provider.PROVIDER_NAME`: `provider.py`
-            # imports this module, so reaching back for its constant is a
-            # cycle. Same literal the span attribute two lines up already
-            # uses, and `test_the_provider_metric_names_this_provider` pins
-            # the two together.
+            # The literal, not `provider.PROVIDER_NAME`: `provider.py` imports
+            # this module, so reaching back for its constant is a cycle. Same
+            # literal the span attribute above uses, and
+            # `test_the_provider_metric_names_this_provider` pins the two.
             _requests.add(1, {"provider": "tmdb", "status": status})
 
     async def _send(

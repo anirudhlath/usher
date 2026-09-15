@@ -73,16 +73,14 @@ LIBRARY_SINCE_PARAM = "MinDateLastSaved"
 USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 
 # Two keys, because `StartIndex` paging reads a window out of an order the
-# server recomputes for every request and `DateCreated` alone is not a
-# total order. Emby applies the second key -- verified 2026-07-31; see the
-# Paging section of this module's docstring for how, and for what that run
-# could and could not demonstrate.
+# server recomputes for every request and `DateCreated` alone is not a total
+# order. Emby does apply the second key.
 SORT_BY = "DateCreated,SortName"
 
 # `GET /Users/{userId}` carries the account's `Policy`, which is where
-# `IsAdministrator` lives. Verified 2026-07-31: it answers 200 to the user's
-# *own* non-admin token, so this needs no elevated rights. `GET /Users/Me`
-# answers 500 on that build and is not a usable shortcut.
+# `IsAdministrator` lives. It answers 200 to the user's *own* non-admin token,
+# so this needs no elevated rights. `GET /Users/Me` answers 500 on some builds
+# and is not a usable shortcut.
 USER_PATH = "/Users"
 
 # The walk's dead-man's switch.
@@ -92,14 +90,11 @@ MAX_PAGES = 10_000
 def _segment(value: str) -> str:
     """One path segment, percent-encoded.
 
-    An `external_id` is whatever the source last called an item, and a
-    `user_id` is whatever the server said its user was; both are
-    interpolated into a request path here. httpx normalises `..` in a path
-    exactly the way a browser does, so unquoted this is a path traversal --
-    verified: `get_item("../../System/Info")` resolved to `GET
-    /Users/System/Info`, and `push_watch_state("../../../Users/U1/Items",
-    ...)` aimed *two writes* at an arbitrary endpoint of the caller's
-    choosing.
+    An `external_id` is whatever the source last called an item, and a `user_id`
+    is whatever the server said its user was; both are interpolated into a
+    request path here. httpx normalises `..` in a path exactly the way a browser
+    does, so unquoted this is a path traversal that aims reads *and writes* at an
+    endpoint of the caller's choosing.
 
     httpx's `params=` already neutralises the same trick in a query string.
     Nothing neutralises it in a path; only this does.
@@ -134,8 +129,7 @@ class EmbyAdapter(SourceAdapter):
         self._max_pages = max_pages
         # Ownership is tracked, not assumed: `aclose()` closes a client this
         # adapter created and leaves an injected one alone. Closing someone
-        # else's client is the mistake the bulk adapters' no-op `aclose`
-        # exists to avoid, arrived at from the other direction.
+        # else's client is what the bulk adapters' no-op `aclose` avoids.
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=source.base_url.rstrip("/"), timeout=timeout_seconds
@@ -147,10 +141,9 @@ class EmbyAdapter(SourceAdapter):
             device_id=source.device_id,
             reauth_cooldown_seconds=reauth_cooldown_seconds,
             # Passed through, never built here: the outbound gate is owned by
-            # the composition root's `SourceGateRegistry` so that every adapter
-            # this deployment opens for one source paces against one gate
-            # (ADR-0043 §4). `None` -- a directly-constructed adapter -- is
-            # unthrottled.
+            # the composition root's `SourceGateRegistry`, so every adapter this
+            # deployment opens for one source paces against one gate. `None` --
+            # a directly-constructed adapter -- is unthrottled.
             limiter=limiter,
         )
         self._clock = clock
@@ -168,21 +161,19 @@ class EmbyAdapter(SourceAdapter):
     def supports_push(self) -> bool:
         """Whether this adapter has a live push channel **right now**.
 
-        and the answer comes from messages.
-
-        `self._health.is_delivering` requires a connection, at least one
-        received message, and a recent one. **There is no path from "a
-        socket object exists" to `True`** — ADR-0004 measured a handshake
-        against a nonexistent path upgrading and being held open, and PRD
-        03's reconciler skips a source that says `True` here.
+        The answer comes from messages: `is_delivering` wants a connection, at
+        least one received message, and a recent one. There is no path from "a
+        socket object exists" to `True` -- a handshake against a nonexistent path
+        upgrades and is held open -- and PRD 03's reconciler skips a source that
+        says `True` here.
         """
         return self._health.is_delivering(now=self._clock())
 
     @property
     def push_reconnects(self) -> int:
-        """The ledger's own count, which is the lane's history rather than this connection's.
+        """The lane's history rather than this connection's.
 
-        one `PushHealth` outlives every channel this adapter opens.
+        One `PushHealth` outlives every channel this adapter opens.
         """
         return self._health.reconnects
 
@@ -218,11 +209,10 @@ class EmbyAdapter(SourceAdapter):
             span.set_attribute("usher.authenticated", True)
             is_administrator = await self._is_administrator()
             if is_administrator:
-                # A log line, not a refusal. PRD 03's "no admin privileges
-                # are required" is a permission; nothing enforces it, and
-                # ADR-0012 records why refusing here would be worse than
-                # saying so (an operator whose only working account is an
-                # admin account still needs a catalog).
+                # A log line, not a refusal. PRD 03's "no admin privileges are
+                # required" is a permission, nothing enforces it, and an
+                # operator whose only working account is an admin account
+                # still needs a catalog.
                 logger.warning(
                     "source {source} is configured with an Emby administrator account; "
                     "a captured playback URL or push socket then grants administrator "
@@ -263,7 +253,7 @@ class EmbyAdapter(SourceAdapter):
         self, *, since_param: str, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[dict[str, Any]]:
         user_id = await self._session.user_id()
-        # The resume point (#41, ADR-0042). Deliberately no default: every
+        # The resume point (#41). Deliberately no default: every
         # caller states its own, so `list_items` passing 0 is written down
         # rather than inferred from an absent keyword. The item lanes restart
         # from their cursor; the watch lane's first walk is the whole library
@@ -330,13 +320,10 @@ class EmbyAdapter(SourceAdapter):
         """One item's payload, or `None` for a 404.
 
         `op` is the telemetry label only -- PRD 10 buckets
-        `usher.source.request.duration` and the `source.request` span by it.
-        It is a parameter because `get_watch_state`'s bounded history
-        backfill is thousands of single-item reads, and folding those into
-        `get_item`'s bucket makes "how slow is `get_item`" answer a
-        different question every night. The route, the 404 handling and the
-        `Fields` set are identical for every caller, which is the part that
-        must not diverge.
+        `usher.source.request.duration` and the `source.request` span by it. It
+        is a parameter because `get_watch_state`'s history backfill is thousands
+        of single-item reads, and folding those into `get_item`'s bucket makes
+        "how slow is `get_item`" answer a different question every night.
         """
         user_id = await self._session.user_id()
         path = f"/Users/{_segment(user_id)}/Items/{_segment(external_id)}"
@@ -347,10 +334,9 @@ class EmbyAdapter(SourceAdapter):
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
-            # `redact_path`, not `path`: this is `get_item`'s own raise
-            # site rather than `EmbySession.ok`'s, so the session's redaction
-            # does not cover it -- and the path holds a user id and an item
-            # id (issue #35).
+            # `redact_path`, not `path`: this is `get_item`'s own raise site
+            # rather than `EmbySession.ok`'s, so the session's redaction does
+            # not cover it, and the path holds a user id and an item id.
             raise PortUnavailable(f"GET {redact_path(path)} returned HTTP {response.status_code}")
         payload = decode_json(response, path)
         # Some builds answer an unknown id with 200 and an empty object
@@ -372,8 +358,8 @@ class EmbyAdapter(SourceAdapter):
             payload = await self._fetch(external_id)
             if payload is None:
                 return []
-            # The URL this builds carries a session token (ADR-0012), so it
-            # is never set as a span attribute and never logged.
+            # The URL this builds carries a session token, so it is never set
+            # as a span attribute and never logged.
             return build_stream_targets(
                 payload,
                 base_url=self._source.base_url,
@@ -401,15 +387,11 @@ class EmbyAdapter(SourceAdapter):
                 yield state
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
-        """Authoritative watch state for one item.
-
-        from the single-item route that carries the play history the listing route does
-        not.
+        """Authoritative watch state, from the route carrying the play history.
 
         Reuses `_fetch`, so a 404 is `None` and every other failure raises,
-        exactly as `get_item` behaves -- the two must not diverge or a
-        caller learns to tell a deletion from an outage by which method it
-        called.
+        exactly as `get_item` behaves -- the two must not diverge, or a caller
+        learns to tell a deletion from an outage by which method it called.
         """
         with _tracer.start_as_current_span("source.get_watch_state") as span:
             span.set_attribute("usher.source", self._source.name)
@@ -425,10 +407,7 @@ class EmbyAdapter(SourceAdapter):
             )
 
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
-        """Write watch state back to Emby.
-
-        one call, plus a second when the item is being marked played.
-        """
+        """Write watch state back to Emby: one call, two when marking played."""
         with _tracer.start_as_current_span("source.push_watch_state") as span:
             span.set_attribute("usher.source", self._source.name)
             span.set_attribute("usher.external_id", external_id)
