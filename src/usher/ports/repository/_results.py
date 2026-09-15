@@ -11,8 +11,8 @@ __all__ = [
 class BulkWriteResult:
     """What one batch write actually changed.
 
-    split so a re-import is visibly a no-op (`inserted == 0`) rather than
-    indistinguishable from a first run.
+    Split so a re-import is visibly a no-op rather than indistinguishable
+    from a first run.
     """
 
     inserted: int

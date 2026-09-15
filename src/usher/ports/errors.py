@@ -4,10 +4,10 @@ import gzip
 import zlib
 from typing import Final
 
-# : What a gzip body that is damaged, truncated or not gzip at all raises, : named once
-# because it cannot be stated as one base class: `BadGzipFile` is : an `OSError`,
-# `zlib.error` is not, and a member that ends mid-stream raises : a bare `EOFError` out
-# of `GzipFile.read`.
+#: What a gzip body that is damaged, truncated or not gzip at all raises, named
+#: once because it cannot be stated as one base class: `BadGzipFile` is an
+#: `OSError`, `zlib.error` is not, and a member that ends mid-stream raises a
+#: bare `EOFError` out of `GzipFile.read`.
 DAMAGED_GZIP: Final = (gzip.BadGzipFile, EOFError, zlib.error)
 
 

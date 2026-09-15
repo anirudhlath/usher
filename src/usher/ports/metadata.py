@@ -20,20 +20,16 @@ from usher.ports.ingest import ProviderRef
 class MetadataCandidate:
     """One search result from a `MetadataProvider`.
 
-    normalised enough that the match stage (PRD 03 Stage 2) never indexes into a
-    provider's own JSON keys — e.g.
+    Normalised enough that the match stage never indexes into a provider's
+    own JSON keys: TMDb's movie/TV divergence (`title`/`name`,
+    `release_date`/`first_air_date`) stops here, not a layer up.
 
-    TMDb's movie/TV divergence (`title`/`name`, `release_date`/`first_air_date`) stops
-    here, not one layer up in M4.
-
-    `provider_id` stays an `int` while `fetch` takes a `ProviderRef`, and
-    that asymmetry is deliberate rather than an oversight the settling
-    missed. A candidate is *the provider's own search result*, and
-    `provider_id` + `kind` + the provider's `name` is losslessly a
-    `ProviderRef` — `MatchService` builds one at the single point a candidate
-    crosses into the matcher. The moment a provider whose search results are
-    not integer-keyed exists, this field becomes a `ProviderRef` and `kind`
-    folds into it; nothing else moves. ADR-0017.
+    `provider_id` is an `int` while `fetch` takes a `ProviderRef`. A candidate
+    is the provider's own search result, and `provider_id` plus `kind` plus
+    the provider's `name` is losslessly a `ProviderRef`, built at the one
+    point a candidate crosses into the matcher. A provider whose search
+    results are not integer-keyed turns this field into a `ProviderRef` and
+    folds `kind` into it; nothing else moves.
     """
 
     provider_id: int
@@ -67,15 +63,14 @@ class DerivationResult:
 class ChangedPage:
     """One page of a provider's change feed, plus where to resume.
 
-    `next_cursor` is `None` at the end. Opaque to the caller -- TMDb's is a
-    page number, another provider's could be a token -- the same shape
-    `usher.ports.bulk.BulkCursor` already gives the bulk importers, so the
-    daily re-enrichment job is resumable the way a bootstrap is rather than
-    restarting a 14-day window every time it is interrupted.
+    `next_cursor` is `None` at the end, and opaque -- TMDb's is a page
+    number, another provider's could be a token. Same shape as
+    `usher.ports.bulk.BulkCursor`, so an interrupted re-enrichment resumes
+    rather than restarting the window.
 
-    `refs` are `ProviderRef`s rather than bare ids for the reason ADR-0011
-    records: TMDb's movie and series id spaces overlap on 26,968 ids, so a
-    page of integers is a page the caller has to guess the kind of.
+    `refs` are `ProviderRef`s, not bare ids: TMDb's movie and series id
+    spaces overlap, so a page of integers is a page whose kinds the caller
+    would have to guess.
     """
 
     refs: tuple[ProviderRef, ...]
@@ -101,7 +96,7 @@ class MetadataProvider(ABC):
     def genre_vocabulary(self) -> frozenset[str]:
         """Which canonical genres (`usher.domain.genres`) this provider can name.
 
-        **The set of concepts it is entitled to delete.**
+        Equivalently, the set of concepts it is entitled to delete.
         """
 
     @abstractmethod
@@ -111,88 +106,66 @@ class MetadataProvider(ABC):
         """Candidate matches for a name and optional year.
 
         `kind` narrows the search to one of a provider's id spaces and is
-        optional: a provider with a single space ignores it, and a caller
-        that genuinely does not know passes `None` and filters on
-        `MetadataCandidate.kind`. TMDb searches movies and series through
-        separate endpoints, so scoping is one upstream request instead of
-        two — which matters because PRD 03 makes this the *last* tier of the
-        match ladder, run once per unmatched item off the queue.
+        optional: a single-space provider ignores it, and a caller that does
+        not know passes `None` and filters on `MetadataCandidate.kind`. TMDb
+        searches movies and series through separate endpoints, so scoping
+        halves the upstream requests on the match ladder's last tier.
 
         Ordering is the provider's own relevance ordering, unchanged. Picking
-        a winner is the caller's, and PRD 03 stage 5 requires it to decline
-        rather than guess.
+        a winner is the caller's, and it must decline rather than guess.
         """
 
     @abstractmethod
     async def fetch(self, ref: ProviderRef) -> dict[str, Any]:
         """Full raw payload for one entity.
 
-        Stored verbatim in `raw_payloads` and consumed only by `to_result`.
+        Stored verbatim in `raw_payloads` and consumed only by `to_result`;
+        the `dict` is an opaque blob and nothing above `to_result` reads it.
 
-        Returning a raw `dict` here is deliberate and different in kind
-        from `search`'s old raw-dict return (now `MetadataCandidate`):
-        this is an opaque blob by design, not a shortcut that skipped
-        normalisation. Nothing above `to_result` reads it.
+        Takes a `ProviderRef`, not an `int`: the ref carries a string value
+        and a kind, fitting IMDb's `tt99000100` and TMDb's `90000550`/`movie`
+        alike. A ref this provider cannot serve -- wrong `provider`, or
+        kind-less for a namespaced provider -- is `PortDataMalformed`, not
+        `PortUnavailable`, since no retry turns it into an answer and
+        `JobWorker` parks the first rather than backing off on the second.
 
-        Takes a `ProviderRef` rather than an `int`: the ref carries a string
-        value and a kind, so it already fits IMDb's `tt99000100` and TMDb's
-        `90000550`/`movie` alike. A ref this provider cannot serve — the wrong
-        `provider`, or a kind-less ref for a namespaced provider — is
-        `PortDataMalformed`, not `PortUnavailable`: no amount of retrying
-        turns it into an answer, and `JobWorker` parks the first rather than
-        backing off five times on the second.
-
-        An entity the provider no longer serves (TMDb answers 404 for an id
-        it has merged away, and the catalog holds 291,737 TMDb ids from a
-        bulk export that ages) is `PortDataMalformed` for the same reason.
+        An entity the provider no longer serves, such as a TMDb id merged
+        away since the bulk export, is `PortDataMalformed` for that reason.
         """
 
     @abstractmethod
     def to_result(self, payload: dict[str, Any], title_id: uuid.UUID) -> EnrichmentResult:
         """Normalise a raw payload into canonical state.
 
-        See `EnrichmentResult` for what it does and does not carry, and why.
+        `title_id` is passed in, never minted here: identity is Usher's own
+        UUIDv7, and a provider generating one would add a second canonical
+        row on every re-enrichment of a title the catalog already holds.
 
-        `title_id` is passed in and never minted here: identity is Usher's
-        own UUIDv7 (ADR-0003), and a provider that generated one would create
-        a second canonical row for a title the catalog already holds, on
-        every re-enrichment.
+        Never sets `enrichment_state`. The tier is the pipeline's to decide
+        and is only ever raised through `ENRICHMENT_RANK` -- a provider
+        stamping `ENRICHED` on a partial payload promotes a title its answer
+        did not earn, and one stamping `SKELETON` demotes a title another
+        provider enriched.
 
-        **Never sets `enrichment_state`.** The tier is the pipeline's to
-        decide and it is only ever raised through `ENRICHMENT_RANK`
-        (ADR-0008) -- a provider that stamped `ENRICHED` on a partial payload
-        would promote a title its own answer did not earn, and one that
-        stamped `SKELETON` would demote a title another provider enriched.
-        Synchronous rather than `async`: this is a pure function of a payload
-        the caller already holds.
+        Synchronous: a pure function of a payload the caller already holds.
         """
 
     @abstractmethod
     def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
-        """Normalise a raw payload into people, credits, a collection and artwork.
-
-        See `DerivationResult` for what it carries and why it is not a field on
-        `EnrichmentResult`.
-        """
+        """Normalise a raw payload into people, credits, a collection and artwork."""
 
     @abstractmethod
     async def changed_since(self, since: AwareDatetime, cursor: str | None = None) -> ChangedPage:
         """One page of entities mutated since `since`, plus where to resume.
 
-        TMDb's `/movie/changes` feed is paginated and capped at a 14-day
-        window; `days: int` in and `list[int]` out could not express a
-        resumable position through it, which is the marker this settles.
-
-        **A provider may answer a narrower window than it was asked for**,
-        and the caller may not read an exhausted feed as proof that nothing
-        older changed. TMDb caps the window at 14 days; a `since` older than
-        that is clamped rather than rejected, because the alternative — an
-        error on the one call a re-enrichment sweep makes after an outage —
-        turns a partial answer into no answer. PRD 04's Phase 5 runs this
-        daily, so the clamp is unreachable in steady state and is the
-        recovery path after a fortnight of downtime. ADR-0017.
+        A provider may answer a narrower window than it was asked for, and
+        the caller may not read an exhausted feed as proof that nothing older
+        changed. TMDb caps its feed at 14 days and a `since` older than that
+        is clamped, not rejected: erroring on the one call a sweep makes
+        after an outage turns a partial answer into no answer. Run daily, the
+        clamp is unreachable and exists only as the recovery path.
 
         `cursor` is opaque and comes from a previous `ChangedPage`. Passing
-        one from a different `since` is undefined; a caller that changed its
+        one from a different `since` is undefined; a caller that moved its
         window starts over.
         """

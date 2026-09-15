@@ -21,7 +21,7 @@ class TitleMatchRepository(ABC):
     ) -> dict[ProviderRef, uuid.UUID]:
         """Resolve provider references to title ids.
 
-        in a bounded number of round trips regardless of batch size.
+        In a bounded number of round trips, regardless of batch size.
         """
 
     @abstractmethod
@@ -37,12 +37,11 @@ class TitleMatchRepository(ABC):
         """`title_id` -> its tier, for a whole batch.
 
         Ingest enqueues an `enrich` job for every title a walk touched that is
-        not already enriched, and skips the ones that are. Answering that with
-        `TitleRepository.get` is one round trip per distinct title per batch --
-        the same per-item defect this port exists to remove, arriving in stage
-        1 instead of stage 2. It reads one column, so it stays a state map
+        not already enriched. Answering that with `TitleRepository.get` is one
+        round trip per distinct title per batch -- the per-item defect this
+        port exists to remove. It reads one column, so it stays a state map
         rather than a `Title` map: the caller compares through
-        `ENRICHMENT_RANK` (ADR-0008) and needs nothing else.
+        `ENRICHMENT_RANK` and needs nothing else.
 
         Absent keys mean "no such title", never "not asked". A batch may name
         the same id twice; it is answered once.

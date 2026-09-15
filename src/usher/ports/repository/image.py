@@ -11,10 +11,7 @@ __all__ = ["ImageRepository"]
 
 
 class ImageRepository(ABC):
-    """Persistence for `images`.
-
-    PRD 02's `Image`, and the last of the four entities `raw_payloads` was kept for.
-    """
+    """Persistence for `images`, derived from a cached provider payload."""
 
     @abstractmethod
     async def replace_for_titles(
@@ -22,7 +19,8 @@ class ImageRepository(ABC):
     ) -> int:
         """Make `title_ids`' stored artwork exactly `images`.
 
-        keeping the id of every `(provider, provider_path)` that survived.
+        Keeps the id of every `(provider, provider_path)` that survived, so a
+        re-derivation does not invalidate a client's cached image URLs.
         """
 
     @abstractmethod

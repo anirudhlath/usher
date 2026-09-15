@@ -1,4 +1,4 @@
-"""Search queries -- PRD 10's live measurement of what a household typed and what happened next."""
+"""Search queries -- what a household typed, and what happened next."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -26,9 +26,9 @@ class SearchQueryRecord:
 
     `tier` names the `SuggestIndex` that answered a keystroke and is `None` on
     a search, which is what `surface` reads off it -- the two cannot disagree
-    because there is only one of them. `mode` on a suggest row is
-    `FULL_TEXT`: both tiers are btree/GIN reads with no embed and no fusion,
-    so every mode-split panel filters on `surface`.
+    because there is only one of them. `mode` on a suggest row is `FULL_TEXT`,
+    since both tiers are btree/GIN reads with no embed and no fusion, so every
+    mode-split panel filters on `surface`.
 
     `result_count` and `latency_ms` are plain `int`s with no bounds; the
     repository refuses a value the column cannot hold, as `RepositoryConflict`.
@@ -50,15 +50,11 @@ class SearchQueryRecord:
 
 
 class SearchQueryRepository(ABC):
-    """`search_queries`.
-
-    one row per answered search, and what it led to (`docs/prd/10-telemetry-and-
-    dashboards.md`'s `## Analytics tables`).
-    """
+    """`search_queries` -- one row per answered search, and what it led to."""
 
     @abstractmethod
     async def record(self, record: SearchQueryRecord) -> None:
-        """Insert one row at query time -- **F2's write**."""
+        """Insert one row at query time."""
 
     @abstractmethod
     async def record_outcome(
@@ -69,21 +65,12 @@ class SearchQueryRepository(ABC):
         clicked_title_id: uuid.UUID | None,
         played: bool,
     ) -> None:
-        """Attribute a search to what happened next.
-
-        **F3's write**, covering `clicked_title_id` and `played`.
-        """
+        """Attribute a search to what happened next."""
 
     @abstractmethod
     async def oldest(self) -> AwareDatetime | None:
-        """`min(at)` -- when the oldest surviving row was answered, or `None` for an empty table.
-
-        **M10's J5**, and the only read on this port.
-        """
+        """`min(at)` -- when the oldest surviving row was answered, `None` for an empty table."""
 
     @abstractmethod
     async def prune(self, *, before: datetime, limit: int) -> int:
-        """Delete up to `limit` rows answered before `before`.
-
-        Returns how many were deleted. **M10's J5**, PRD 10's retention statement.
-        """
+        """Delete up to `limit` rows answered before `before`, returning how many went."""

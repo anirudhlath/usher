@@ -5,11 +5,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-# Re-exported rather than declared. `LLMPurpose` moved to `usher.domain` in
-# M8 because `LLMCall` -- a domain model -- has to type its `purpose` column,
-# and `usher.domain` may not import `usher.ports`. Every caller still spells
-# it `from usher.ports.llm import LLMPurpose`, which is where a reader of this
-# port looks for it.
+# Re-exported, not declared: `LLMCall` is a domain model and has to type its
+# `purpose` column, and `usher.domain` may not import `usher.ports`. Callers
+# still spell it `from usher.ports.llm import LLMPurpose`.
 from usher.domain.curation import LLMPurpose
 
 

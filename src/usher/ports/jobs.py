@@ -1,4 +1,4 @@
-"""The priority work queue (PRD 03's read-through queue, PRD 08's job reliability rules)."""
+"""The priority work queue: claim, heartbeat, complete, back off, park."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -36,10 +36,9 @@ class JobQueue(ABC):
         """Take up to `limit` runnable jobs, marking them `RUNNING`.
 
         Runnable means `status = pending` and `run_after` is null or in the
-        past. Ordered **`priority` descending, then `created_at` ascending**,
-        and the returned list is in that order: higher priority first (PRD
-        03's scale puts 100 at the top), oldest first within a priority so
-        nothing starves.
+        past. The returned list is ordered `priority` descending, then
+        `created_at` ascending -- higher priority first, oldest first within
+        a priority so nothing starves.
 
         Two workers must never claim the same job. Against a SQL store that
         is `FOR UPDATE SKIP LOCKED`; `FOR UPDATE` alone serialises the
@@ -47,22 +46,19 @@ class JobQueue(ABC):
         the first's uncommitted claim rather than moving past it -- and a
         plain `SELECT` followed by an `UPDATE` hands the same row to both.
 
-        The claim must be committed before the work starts -- see the module
-        docstring.
+        The claim must be committed before the work starts, or a crash loses
+        the claim and the job runs twice.
         """
 
     @abstractmethod
     async def complete(self, job_id: uuid.UUID) -> None:
-        """The work succeeded.
-
-        **Deletes the row.**
+        """The work succeeded, and the row is deleted.
 
         Not a status change: `JobStatus` has no `DONE` member, because the
-        only two interesting populations are "waiting" and "poisoned" and a
-        terminal row per title would make PRD 10's `usher.jobs.queued` gauge
-        a count over a table that only grows. Redelivery is safe by
-        construction (PRD 08), so losing the record of a success costs
-        nothing.
+        only interesting populations are "waiting" and "poisoned", and a
+        terminal row per job would make the `usher.jobs.queued` gauge a count
+        over a table that only grows. Redelivery is safe by construction, so
+        losing the record of a success costs nothing.
 
         Idempotent: an id that no longer exists is not an error, because a
         worker whose claim was requeued and re-completed by someone else has
@@ -89,21 +85,19 @@ class JobQueue(ABC):
 
         Returns rows moved.
 
-        The heartbeat half of the lease `requeue_running` reads. An
-        implementation moves whatever `requeue_running` compares against -- for
-        the SQL store that is `updated_at` -- and **only for rows still
-        `running`**, so a job another worker already recovered, completed or
-        parked is not resurrected by a beat that was already in flight.
+        The heartbeat half of the lease `requeue_running` reads. It moves
+        whatever `requeue_running` compares against, and only for rows still
+        `running`, so a job another worker already recovered, completed or
+        parked is not resurrected by a beat still in flight.
 
-        Idempotent, and silent about ids it does not find: a worker whose claim
-        was recovered out from under it has nothing useful to do with the news
-        and must not fail its own job over its own telemetry.
+        Idempotent, and silent about ids it does not find: a worker whose
+        claim was recovered out from under it must not fail its own job over
+        its own telemetry.
 
-        `requeue_running`'s age threshold is meaningless without this. With no
-        heartbeat the threshold has to exceed the longest job a deployment can
-        run -- hours, for a `bootstrap` phase -- so the orphan window becomes
-        hours; with one, the threshold is about the *process* still being
-        alive and can be minutes.
+        `requeue_running`'s age threshold is meaningless without this. With
+        no heartbeat the threshold has to exceed the longest job a deployment
+        can run, so the orphan window becomes hours; with one, the threshold
+        is about the process still being alive and can be minutes.
         """
 
     @abstractmethod
@@ -115,7 +109,7 @@ class JobQueue(ABC):
 
     @abstractmethod
     async def depth(self) -> dict[JobKind, int]:
-        """Pending count per kind, for PRD 10's `usher.jobs.queued` gauge.
+        """Pending count per kind, for the `usher.jobs.queued` gauge.
 
         Always returns every `JobKind` as a key, `0` for an empty one -- a
         `GROUP BY` returns only non-empty kinds, and a gauge that stops
@@ -130,6 +124,6 @@ class JobQueue(ABC):
     async def parked(self, *, limit: int = 100) -> list[Job]:
         """Parked jobs, newest first.
 
-        PRD 08: "Parked jobs are listed in the admin API and counted in
-        metrics. Silent failure is the thing worth engineering against."
+        Parked work is listed and counted rather than dropped: silent failure
+        is the thing worth engineering against.
         """

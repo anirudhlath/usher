@@ -24,10 +24,9 @@ class CreditedPerson:
     """One credit and the person it names, in one row rather than two reads.
 
     A bare `Credit` carries a `person_id` and nothing renderable, so a port
-    returning them hands every caller the same second query. That is the N+1
-    this milestone's front matter names, relocated into the port rather than
-    removed -- and a port that *offers* an N+1 is worse than one a caller
-    invents, because it looks sanctioned.
+    returning them hands every caller the same second query -- and an N+1 a
+    port offers is worse than one a caller invents, because it looks
+    sanctioned.
     """
 
     person_id: uuid.UUID
@@ -60,13 +59,11 @@ class PersonCredit:
 class RecurringPerson:
     """A person who recurs across the titles one user has actually played.
 
-    `watched_title_count` is a count of **distinct titles**, never of credits.
-    A person credited twice on one film -- two jobs, or two characters, both
-    of which TMDb genuinely emits -- would otherwise read as two titles, and a
-    one-film person would out-rank a four-film one. The row this feeds says
-    "you keep watching this person"; counting credits makes it say something
-    else with total confidence, which is exactly the failure this milestone
-    opens by describing.
+    `watched_title_count` counts **distinct titles**, never credits. A person
+    credited twice on one film -- two jobs or two characters, both of which
+    TMDb emits -- would otherwise read as two titles, letting a one-film
+    person out-rank a four-film one. The row says "you keep watching this
+    person"; counting credits makes it say something else, confidently.
 
     `kind` and `job` travel because the row's own text needs them: "More from
     <name>" is a worse row than "Directed by <name>", and a provider holding
@@ -78,11 +75,9 @@ class RecurringPerson:
     kind: CreditKind
     job: str | None
     watched_title_count: int
-    # **The most recent watch that credits them, and it is a tiebreak the row cannot
-    # compute for itself.** Two directors at four titles each, one from last month and
-    # one from 2019, is the front matter's opening failure with a person's name on it --
-    # a beautifully constructed row about a film watched three years ago -- and
-    # `watched_title_count` alone cannot separate them, so "whatever the aggregate
+    # The tiebreak the row cannot compute for itself: two directors at four
+    # titles each, one watched last month and one years ago, are
+    # indistinguishable on `watched_title_count` alone.
     last_watched_at: AwareDatetime | None
 
 
@@ -93,22 +88,18 @@ class PersonRepository(ABC):
     async def get(self, person_id: uuid.UUID) -> Person | None:
         """One person by id, or `None` when the catalog does not hold them.
 
-        `None` rather than a raise, on `TitleRepository.get`'s terms: an id a
-        client supplied naming no row is an ordinary request, and the route
-        above turns it into a 404 with a `code` from the vocabulary. An
+        `None` rather than a raise: a client-supplied id naming no row is an
+        ordinary request, and the route turns it into a 404. An
         implementation that raised would make it a 500.
 
-        **Scoped to the id, which is the thing worth asserting.** A `WHERE`
-        that lost its predicate returns a `Person` -- populated, correctly
-        typed, and about somebody else -- and `GET /people/{id}` renders that
-        person's filmography under the requested person's name. The contract
-        case seeds two people for exactly that reason.
+        Scoped to the id, which is the thing worth asserting. A `WHERE` that
+        lost its predicate returns a populated, correctly typed `Person`
+        about somebody else, and the route renders that person's filmography
+        under the requested name.
 
-        `imdb_id`, `birth_year`, `death_year` and `biography` are **not**
-        carried, because `Person` does not have them: they live on TMDb's
-        `/person/{id}`, one request per person, and are still unassigned
-        (PRD 09's M7 named orphan). This method returns the stored row, so
-        the route's answer is narrow rather than null-padded.
+        Biography-tier fields are not carried, because `Person` does not have
+        them: they are a separate upstream request per person. This returns
+        the stored row, so the answer is narrow rather than null-padded.
         """
 
     @abstractmethod
@@ -119,17 +110,14 @@ class PersonRepository(ABC):
     async def resolve_tmdb_ids(self, tmdb_ids: Sequence[int]) -> dict[int, uuid.UUID]:
         """`tmdb_id` -> person id, in one round trip.
 
-        Exists for `EpisodeRepository.resolve_seasons`' reason, restated
-        because it is the same defect: `upsert_many` reports counts rather
-        than ids, and it cannot report the caller's -- the derivation mints a
-        fresh UUIDv7 per sighting and a person the catalog already holds keeps
-        the id it was inserted with. So the id a `Credit.person_id` must carry
-        is knowable only by reading it back.
+        Same defect as `EpisodeRepository.resolve_seasons`: `upsert_many`
+        reports counts rather than ids, and cannot report the caller's --
+        the derivation mints a fresh UUIDv7 per sighting while a person the
+        catalog already holds keeps the id it was inserted with. So the id a
+        `Credit.person_id` must carry is knowable only by reading it back.
 
-        **A batch rather than one, and the number is the argument.** A single
-        enriched movie names tens of people; the enriched tier is 2k-10k
-        titles. A lookup per person is the round-trip-per-item shape batching
-        exists to remove.
+        A batch, not one: a single enriched movie names tens of people, so a
+        lookup per person is the round-trip-per-item shape batching removes.
 
         Absent keys mean "no such person", never "not asked", so a caller
         iterates its own probes rather than reading a short answer as a full
@@ -140,8 +128,7 @@ class PersonRepository(ABC):
     async def count(self) -> int:
         """How many people the catalog holds.
 
-        `usher derive`'s report, and the one number that tells an operator a derivation
-        ran at all.
+        The one number that tells an operator a derivation ran at all.
         """
 
     @abstractmethod
@@ -154,21 +141,17 @@ class PersonRepository(ABC):
 class CreditRepository(ABC):
     """Persistence for `credits` -- the join that makes "more from this director" a lookup.
 
-    **And for the two denormalisations of it that no generated column can
-    reach**: `titles.credit_names`, which is weight class B's input, and the
-    `person` rows of `title_search_names`, which are the two-tier suggest's.
-    Both are written by `replace_for_titles` and by nothing else, which is the
-    whole of what keeps three copies of one fact honest.
+    Also for the two denormalisations no generated column can reach:
+    `titles.credit_names` and the `person` rows of `title_search_names`.
+    `replace_for_titles` writes both and nothing else does, which is what
+    keeps three copies of one fact honest.
 
-    **The write is a replace, not an upsert, and that is the port's central
-    decision.** A title's credit set changes upstream: a name is corrected, a
-    role is removed, a mis-attributed actor is deleted. An upsert can express
-    every one of those except the last, and the last is the one that leaves a
-    permanently wrong row -- so the unit of work is "this title's credits are
-    now exactly these", which only a scoped replace can say.
+    The write is a replace, not an upsert, and that is the port's central
+    decision. A title's credit set changes upstream -- a name corrected, a
+    role removed, a mis-attributed actor deleted -- and an upsert can express
+    all but the last, which is the one that leaves a permanently wrong row.
 
-    Same session ownership as every other repository here: flushes, never
-    commits.
+    Flushes, never commits.
     """
 
     @abstractmethod
@@ -181,8 +164,8 @@ class CreditRepository(ABC):
     ) -> int:
         """Replace every stored credit for `title_ids` with `credits`.
 
-        and write `titles.credit_names` **and the credited-person half of
-        `title_search_names`** for the same scope in the same call.
+        Writes `titles.credit_names` and the credited-person half of
+        `title_search_names` for the same scope, in the same call.
         """
 
     @abstractmethod
@@ -195,11 +178,10 @@ class CreditRepository(ABC):
     async def count_titles_with_credits(self) -> int:
         """How many **distinct titles** hold at least one credit.
 
-        Titles, never credit rows: a report counting rows says "412,000
-        credits" where an operator asked "did my library get derived", and one
-        heavily-credited film moves it by fifty. This is the numerator beside
-        `RawPayloadStore.count`'s denominator, and the two are printed
-        unreduced.
+        Titles, never credit rows: a row count answers "how many credits"
+        where an operator asked "did my library get derived", and one
+        heavily-credited film moves it by fifty. The numerator beside
+        `RawPayloadStore.count`'s denominator, printed unreduced.
         """
 
     @abstractmethod
@@ -211,11 +193,10 @@ class CreditRepository(ABC):
         membership assertion and no positional one. The contract case seeds a
         second person's credits for exactly that reason.
 
-        One call per person and **not** an N+1: `PeopleProvider` emits 0-2
-        rows (PRD 06's own table), so this is at most two statements. The
-        unbounded question -- *which* people -- is
-        `PersonRepository.list_recurring_for_user`, in one statement, which is
-        where the fan-out actually lived.
+        One call per person and not an N+1: its caller emits at most two
+        rows, so this is at most two statements. The unbounded question --
+        *which* people -- is `PersonRepository.list_recurring_for_user`, in
+        one statement.
 
         Ordered by `billing_order` nulls last then `title_id`, so a person's
         headline roles lead and two reads agree.

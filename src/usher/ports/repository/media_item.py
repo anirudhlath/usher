@@ -47,13 +47,13 @@ class MediaItemRepository(ABC):
     Same session/transaction ownership as `TitleRepository`: every method
     flushes so conflicts surface immediately, none commits.
 
-    **Availability is retracted by exactly one method, and only after a walk
-    has provably finished.** `SourceAdapter.list_items`' contract guarantees
-    a walk raises rather than truncating, precisely so a caller can tell
-    "the library ended" from "the adapter gave up"; that guarantee is worth
-    nothing if the sweep runs either way. `mark_unseen_unavailable` is
-    therefore a separate call the reconciler makes *after* the walk returns
-    normally, never a side effect of `upsert_many`. See ADR-0015.
+    Availability is retracted by exactly one method, and only after a walk
+    has provably finished. `SourceAdapter.list_items` guarantees a walk
+    raises rather than truncating so a caller can tell "the library ended"
+    from "the adapter gave up", and that guarantee is worth nothing if the
+    sweep runs either way. `mark_unseen_unavailable` is therefore a separate
+    call made after the walk returns normally, never a side effect of
+    `upsert_many`.
     """
 
     @abstractmethod
@@ -76,11 +76,10 @@ class MediaItemRepository(ABC):
     ) -> dict[str, uuid.UUID]:
         """Map series `external_id` -> `title_id` for those already matched.
 
-        Exists because an episode's canonical parent is its series' `Title`,
-        and a walk sorted by creation date offers no guarantee that a series
-        is seen before its episodes. Batched rather than per-episode: this
-        deployment holds 999,827 episodes, so a per-item lookup here is the
-        difference between one query per batch and one per episode.
+        An episode's canonical parent is its series' `Title`, and a walk
+        sorted by creation date gives no guarantee a series is seen before
+        its episodes. Batched rather than per-episode: a library is mostly
+        episodes, so a per-item lookup here is one query per episode.
 
         Absent keys mean "not matched yet", not "no such series" -- the
         caller leaves those episodes unmatched and enqueues a re-match,
@@ -93,21 +92,19 @@ class MediaItemRepository(ABC):
     ) -> dict[str, MediaItemTarget]:
         """Map each `external_id` to what its row is matched to.
 
-        The read a watch-state walk needs, and the reason it is batched is
-        the reason every other read here is: a walk of `watch_state()`
-        yields one record per item, and this deployment has 1,126,674 of
-        them. One statement per batch, never one per state.
+        The read a watch-state walk needs. A walk of `watch_state()` yields
+        one record per item, so this is one statement per batch, never one
+        per state.
 
-        Absent keys mean "not stored, or stored and not matched to
-        anything" -- the same convention `resolve_series_titles` uses, and
-        the same response either way (the caller counts the state
-        unmatched and moves on, because a watch record with no target is
-        exactly what `merge_from_source` raises `PortDataMalformed` for).
+        Absent keys mean "not stored, or stored and not matched to anything"
+        -- the same convention `resolve_series_titles` uses, and the same
+        response either way: the caller counts the state unmatched and moves
+        on.
 
-        Unlike `resolve_series_titles` this answers for *any* item, and it
-        answers with both ids: an episode's row carries its series' title
-        **and** its episode, and a caller that saw only the first would
-        merge 40 episodes of a show into one watch state on the series.
+        Unlike `resolve_series_titles` this answers for any item, and with
+        both ids: an episode's row carries its series' title *and* its
+        episode, and a caller seeing only the first would merge every episode
+        of a show into one watch state on the series.
         """
 
     @abstractmethod
@@ -129,18 +126,15 @@ class MediaItemRepository(ABC):
 
         `list_for_title`'s counterpart, for `POST /episodes/{id}/play`.
 
-        `list_for_title` carries `AND episode_id IS NULL` -- load-bearing and
-        measured, 1 row in 0.251 ms against 20,001 rows and 22.901 ms without
-        it, on one 20,000-episode series (`.claude/rules/db-and-sql.md`) --
-        which is exactly what makes it useless here: an episode's row is
-        precisely one of the rows that clause excludes. The alternative,
-        `resolve_external_ids` once per configured source, is N statements
-        and returns an id with none of the availability facts `/play`'s
-        ranking needs.
+        `list_for_title` carries a load-bearing `AND episode_id IS NULL`,
+        which is what makes it useless here: an episode's row is one of the
+        rows that clause excludes. The alternative, `resolve_external_ids`
+        per configured source, is N statements returning an id with none of
+        the availability facts `/play`'s ranking needs.
 
-        Same ordering as `list_for_title`, for the same reason: `available`
-        first, then most recently seen, then `id` as a total-order tiebreak,
-        so a detail screen does not shuffle its badges between refreshes.
+        Same ordering as `list_for_title` -- `available` first, then most
+        recently seen, then `id` as a total-order tiebreak -- so a detail
+        screen does not shuffle its badges between refreshes.
 
         Empty is the ordinary answer for an episode with no copy on any
         configured source, not a missing row.
@@ -158,12 +152,10 @@ class MediaItemRepository(ABC):
         nullable and sorts last, because an item a source cannot date is
         less interesting than one it dated yesterday, not more.
 
-        **The `OFFSET` is measured and it is why `list_unmatched_page`
-        exists beside this**: 43.7 ms at offset 0 against 388.9 ms at offset
-        1,126,574, linear per page and quadratic to drain. This form is kept
-        for `usher unmatched`, whose `--offset` is an operator typing a
-        number at a terminal rather than a client following a cursor; two
-        callers with two access patterns is not duplication. Both orders are
+        The `OFFSET` costs linear time per page and quadratic to drain, which
+        is why `list_unmatched_page` exists beside this. This form is kept for
+        `usher unmatched`, whose `--offset` is an operator typing a number at
+        a terminal rather than a client following a cursor. Both orders are
         one definition, asserted by a contract case that walks the first page
         of each and requires them to agree.
         """
@@ -200,20 +192,18 @@ class MediaItemRepository(ABC):
     async def owned_episode_ids(self, episode_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
         """Which of these **episodes** the household has a copy of.
 
-        `owned_title_ids`' twin, and it is a genuinely different question
-        rather than a convenience: that one bounds itself to `episode_id IS
-        NULL` precisely so a series is one row, so asking it about an episode
-        answers about the *series'* own row and would report a missing episode
-        file as owned. 999,827 of the one measured source's 1,126,674 items are
-        episodes, so this is the majority read of the two.
+        `owned_title_ids`' twin, and a genuinely different question: that one
+        bounds itself to `episode_id IS NULL` so a series is one row, so
+        asking it about an episode answers about the series' row and reports
+        a missing episode file as owned.
 
-        `NextUpProvider` is what needs it: *"next up" that cannot be played is
-        worse than absent*, and that filter is the provider's rather than
+        `NextUpProvider` needs it, because a "next up" that cannot be played
+        is worse than absent -- and that filter is the provider's, not
         `next_up`'s, which answers what comes next and not what is available.
 
-        No availability filter, matching `owned_title_ids` exactly — a copy the
-        nightly sweep retracted is still a copy you have. One statement however
-        many ids are asked about.
+        No availability filter, matching `owned_title_ids`: a copy the nightly
+        sweep retracted is still a copy you have. One statement however many
+        ids are asked about.
         """
 
     @abstractmethod
