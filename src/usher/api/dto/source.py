@@ -48,15 +48,12 @@ class SourceStatusResponse(BaseModel):
     """PRD 07's `GET /admin/sources/{id}/status`.
 
     `push_available` is `bool | None` and `null` means "not probed" -- see
-    `SourceStatus`. An admin UI renders that as "unknown", which is the
-    honest answer until M5's probe asserts on received messages.
+    `SourceStatus`. An admin UI renders that as "unknown".
 
-    `is_administrator` is `bool | None` on the same three-valued pattern and
-    for a sharper reason -- see `SourceStatus`. ADR-0012 accepts the risk
-    that a source is configured with an Emby administrator account, whose
-    token then rides in every playback URL and (from M5) opens a long-lived
-    push socket; the recorded mitigation is PRD 03's "configure a normal
-    user", which is guidance an operator can only follow if they can see
+    `is_administrator` is `bool | None` on the same three-valued pattern. A source
+    configured with an Emby administrator account rides that token in every
+    playback URL and opens a long-lived push socket; the mitigation is PRD 03's
+    "configure a normal user", which an operator can only follow if they can see
     which they did.
 
     `detail` is the adapter's own operator-facing status line, built from
@@ -86,13 +83,11 @@ class SourceStatusResponse(BaseModel):
 
 
 class SyncTriggerResponse(BaseModel):
-    """`POST /admin/sources/{id}/sync`'s whole body.
+    """`POST /admin/sources/{id}/sync`'s whole body -- the enqueued job's identity.
 
-    the enqueued job's identity, on the same shape
-    `usher.api.dto.rows.RegenerateResponse` uses for `POST /admin/rows/regenerate` --
-    both routes promise exactly one thing, that this row is on the queue at
-    `JobPriority.DEMAND` or was already there, and `(kind, key)` is the only fact about
-    it a reader can still act on.
+    The route promises exactly one thing, that this row is on the queue at
+    `JobPriority.DEMAND` or was already there, and `(kind, key)` is the only fact
+    about it a reader can still act on.
 
     `key` is `"{source_id}:{lane}"`, never a bare source id --
     `usher.domain.jobs.JobKind.SYNC` says why the composite is deliberate.

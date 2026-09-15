@@ -22,11 +22,9 @@ _PERSON_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ProblemResponse, "description": "The request was rejected."},
 }
 
-# **The route's number, not the port's.** `list_for_person`'s own default is 50 as well,
-# so passing this explicitly changes nothing today -- and that is exactly why it is
-# passed: the port's default belongs to `PeopleProvider`, which reads the same method
-# for a home-screen row, and the day that caller wants a different page size this route
-# must not follow it silently.
+# **The route's number, not the port's.** The port's default belongs to
+# `PeopleProvider`, which reads the same method for a home-screen row; the day that
+# caller wants a different page size, this route must not follow it silently.
 FILMOGRAPHY_CREDIT_LIMIT = 50
 
 
@@ -65,10 +63,9 @@ async def get_person(
     """
     person = await people.get(person_id)
     if person is None:
-        # V1's vocabulary, in the one line adopting it costs. Generic
-        # `not_found` rather than a `person_not_found`: RFC 9457's `instance`
-        # already carries `/people/{id}`, so a per-resource member would be a
-        # second spelling of what the document says. ADR-0030.
+        # Generic `not_found` rather than a `person_not_found`: RFC 9457's
+        # `instance` already carries `/people/{id}`, so a per-resource member
+        # would be a second spelling of what the document says.
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,

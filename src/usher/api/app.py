@@ -63,20 +63,14 @@ class UsherAPI(FastAPI):
 
     `/openapi.json` tells the truth about the media type of a problem document.
 
-    A subclass rather than `app.openapi = …`, which is the spelling FastAPI's
-    own "Extending OpenAPI" page shows. Two reasons, the first measured:
-    `app.openapi = custom` is `error: Cannot assign to a method
-    [method-assign]` under this project's mypy settings and would need the
-    only `type: ignore` in `src/usher/api/`; and a replacement function has to
-    re-implement the caching *and* the `_openapi_routes_version` invalidation
-    `FastAPI.openapi` has since grown, which is a copy that goes silently
-    wrong the day either changes. Delegating to `super()` keeps both and costs
-    one idempotent walk of a 35-operation document per call.
+    A subclass, not `app.openapi = custom`: the assignment is a mypy
+    `method-assign` error here, and a replacement would have to re-implement
+    the caching and `_openapi_routes_version` invalidation `FastAPI.openapi`
+    already does. Delegating to `super()` keeps both.
 
-    **Deliberately not an eager rewrite of `app.openapi_schema` in the
-    factory.** Generating the document at build time would make every
-    `create_app()` in the suite pay for a schema no case reads, and would turn
-    a schema-generation failure into a failure to boot.
+    Not rewritten eagerly in the factory: that would make every `create_app()`
+    pay for a schema most callers never read, and turn a schema-generation
+    failure into a failure to boot.
     """
 
     def openapi(self) -> dict[str, Any]:
@@ -96,28 +90,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         session_factory = build_session_factory(engine)
         app.state.session_factory = session_factory
-        # The outbound rate gates, and the one place they can live (ADR-0043 §4).
+        # The outbound rate gates, and the one place they can live.
         gates = source_gates(settings)
         app.state.source_gates = gates
-        # The TMDb provider, and the one place its token bucket can live: `api/deps.py`
-        # says why it cannot be request-scoped ("N in-flight requests get N x 30 rps"),
-        # and the worker lane is the only thing in this process that needs it.
+        # The TMDb provider's token bucket must be process-scoped (`api/deps.py`
+        # says why), and the worker lane is the only thing here that needs it.
         provider, close_provider = (
             await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
         )
-        # The embedding model.
         model, close_model = await embedder(settings, report=settings.worker_enabled)
-        # **Parked, and that is the line issue #31 is about.** Held only by
-        # `LaneSupervisor` it is a process resource with one reader; on `app.state` it
-        # is the one `api/deps.get_search_service` reads, which is what makes
-        # `?mode=semantic` and the vector half of `?mode=fused` reachable from the HTTP
-        # surface at all.
+        # On `app.state` and not held only by `LaneSupervisor`: `deps.get_search_service`
+        # reads it here, which is what makes `?mode=semantic` and the vector half of
+        # `?mode=fused` reachable from the HTTP surface at all.
         app.state.embedder = model
-        # The completion client, on the same terms again: one per process,
-        # built only where a worker will use it. `USHER_LLM_ENABLED=false` is
-        # the shipped default and answers `(None, no-op)`, which is what
-        # leaves `JobKind.CURATE` unregistered -- so a push-only or
-        # LLM-less deployment holds no `httpx.AsyncClient` with no reader.
+        # One per process, built only where a worker will use it. The shipped
+        # `USHER_LLM_ENABLED=false` answers `(None, no-op)`, leaving `JobKind.CURATE`
+        # unregistered -- a push-only deployment holds no client with no reader.
         client, close_client = (
             await llm_client(settings) if settings.worker_enabled else (None, nothing)
         )
@@ -125,10 +113,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         image_fetcher, image_store, close_images = image_proxy(settings)
         app.state.image_fetcher = image_fetcher
         app.state.image_store = image_store
-        # PRD 10's keystroke rows. One buffer and one drain per process, so a
-        # row a keystroke submits is written by a task the answered request is
-        # no longer waiting on. Unconditional on `app.state.embedder`'s terms:
-        # a buffer nobody submits to holds a deque and a parked task.
+        # PRD 10's keystroke rows. One buffer and one drain per process, so a row a
+        # keystroke submits is written by a task the answered request no longer waits on.
         search_queries = search_query_buffer(session_factory)
         app.state.search_queries = search_queries
         draining = asyncio.create_task(search_queries.drain())
@@ -142,38 +128,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             client=client,
             rows=row_cache,
             refreshes=row_refreshes,
-            # The scheduler's registrations reach a database through this and
-            # not through `unit_of_work` above -- a retention prune has no use
-            # for a `Pipeline`. `LaneSupervisor` holds it opaquely
-            # (`SessionFactory`), so this module is still the only one here
-            # that knows what an engine is.
+            # A retention prune has no use for a `Pipeline`, so the scheduler
+            # reaches a database through this rather than `unit_of_work` above.
+            # `LaneSupervisor` holds it opaquely, so this module stays the only
+            # one here that knows what an engine is.
             sessions=session_factory,
         )
         app.state.lanes = lanes
         # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered
-        # unconditionally, because the reader answering "no lane, no
-        # observation" is what keeps a push-disabled process from reporting
-        # a fabricated zero on a series whose alert fires on exactly that.
+        # unconditionally: "no lane, no observation" keeps a push-disabled process
+        # from reporting a fabricated zero on a series whose alert fires on it.
         register_push_gauges(lanes.push_snapshots)
-        # Creates tasks and opens no connection -- see `LaneSupervisor.start`.
-        # That is what keeps `/health` answering 200 with Postgres down.
+        # Opens no connection -- that is what keeps `/health` answering 200
+        # with Postgres down.
         await lanes.start()
-        # **The `try:` opens here rather than at the engine, so a raise from
+        # The `try:` opens here and not at the engine, so a raise from
         # `metadata_provider`, `embedder`, `llm_client` or `lanes.start()` leaks
-        # whatever was already built.** Three resources now instead of M5's two, so the
-        # window widened by one this milestone.
+        # whatever was already built.
         try:
             yield
         finally:
-            # Not just hygiene: verified directly that a bare `yield` with no
-            # try/finally skips this call entirely if the task running the lifespan is
-            # cancelled while suspended at yield (as opposed to __aexit__ being called
-            # normally) -- exactly the shape ASGI shutdown uses.
+            # A bare `yield` with no try/finally skips this entirely when the
+            # lifespan task is cancelled while suspended at the yield -- exactly
+            # the shape ASGI shutdown uses.
             await lanes.stop()
             # Told to stop, never cancelled: `CancelledError` is not an
             # `Exception`, so a cancel landing inside the write escapes the
             # guard that absorbs everything else and rolls that batch back.
-            # `aclose` flushes, and `flush` waits for a batch already in flight.
             await search_queries.aclose()
             with suppress(asyncio.CancelledError):
                 await draining
@@ -189,26 +170,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="A self-hosted media catalog backend.",
         lifespan=lifespan,
     )
-    # Gives every request a real server span (a valid trace/span id, even with no OTLP
-    # collector configured -- see configure_tracing) so inject_trace_context has
-    # something to correlate logs against, and so later milestones' explicit pipeline
-    # spans nest under a request trace instead of each becoming its own root.
+    # Gives every request a real server span even with no OTLP collector, so logs
+    # have something to correlate against and explicit pipeline spans nest under a
+    # request trace instead of each becoming its own root.
     FastAPIInstrumentor.instrument_app(app)
     # …and this is what lets that span leave the process.
     app.add_middleware(TraceResponseMiddleware)
-    # The configuration handlers read, via `deps.get_app_settings`. Set here
-    # rather than in the lifespan because it is not a resource with a
-    # lifetime -- and because `create_app(settings)`'s whole point is that
-    # the app runs on the settings it was handed, not on whatever the
-    # environment says at the moment a request arrives.
+    # Set here and not in the lifespan: settings are not a resource with a
+    # lifetime, and `create_app(settings)`'s whole point is that the app runs on
+    # what it was handed, not on the environment at the moment a request arrives.
     app.state.settings = settings
     # The process-wide client event bus (PRD 07's SSE channel).
     bus = InMemoryEventBus(buffer_size=settings.sse_buffer_size, queue_size=settings.sse_queue_size)
     app.state.events = bus
-    # PRD 10's `usher.sse.connections`, and the one observable callback in this project
-    # that is a live read rather than a snapshot -- `len()` on an in-memory set has no
-    # coroutine to bounce onto the event loop from the metric reader's background
-    # thread.
+    # PRD 10's `usher.sse.connections`, the one observable callback here that is a
+    # live read rather than a snapshot -- `len()` on an in-memory set has no coroutine
+    # to bounce onto the event loop from the metric reader's background thread.
     register_sse_gauge(lambda: bus.subscribers)
     # The process's row and screen caches (PRD 06).
     row_cache = RowCache(clock=lambda: datetime.now(UTC))
@@ -220,16 +197,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Replaces FastAPI's default 422 body, which echoes the submitted request -- and
     # `POST /admin/sources` submits a source credential.
     app.add_exception_handler(RequestValidationError, validation_error_without_the_request_body)
-    # **Starlette's** `HTTPException`, not FastAPI's subclass, so the two the
-    # router raises before any handler runs -- an unrouted 404 and a 405 --
-    # answer the same envelope as the ones handlers raise. Registered on the
-    # app for the reason above: a route added later inherits the shape
-    # instead of having to remember it.
+    # **Starlette's** `HTTPException`, not FastAPI's subclass, so the unrouted 404
+    # and the 405 the router raises before any handler runs answer the same envelope
+    # as the ones handlers raise. On the app, so a route added later inherits it.
     app.add_exception_handler(StarletteHTTPException, http_error_as_a_problem_document)
-    # The two port failures no route can answer better than the app can.
-    # Registered by exact type rather than on `UsherPortError`, because
-    # `PortUnavailable` genuinely means different things to different routes --
-    # `routers/rows.py` wants the 500 it gets today. See `api/errors.py`.
+    # The two port failures no route can answer better than the app can. By exact
+    # type rather than on `UsherPortError`, because `PortUnavailable` genuinely means
+    # different things to different routes -- `routers/rows.py` wants its 500.
     app.add_exception_handler(PortRateLimited, port_error_as_a_problem_document)
     app.add_exception_handler(PortAuthFailed, port_error_as_a_problem_document)
     app.include_router(bootstrap.router)
@@ -249,10 +223,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(titles.router)
     app.include_router(unmatched.router)
     app.include_router(watch.router)
-    # **Last, and that ordering is the whole safety argument.** The console's mount
-    # answers `/console/*` and its history fallback answers any navigation-shaped miss
-    # underneath it -- but Starlette matches routes in registration order, so every
-    # route above is reached first and an unrouted path outside `/console` still falls
-    # through to `http_error_as_a_problem_document`'s 404.
+    # **Last, and that ordering is the whole safety argument.** The console's history
+    # fallback answers any navigation-shaped miss under `/console` -- Starlette matches
+    # in registration order, so a miss outside it still falls through to the 404.
     mount_console(app, settings)
     return app

@@ -32,14 +32,10 @@ _INDEX: Final = "index.html"
 class _ConsoleFiles(StaticFiles):
     """`StaticFiles` with the two behaviours a single-page app needs.
 
-    **The history fallback is conditional, and that is deliberate.** The naive
-    version answers `index.html` for every miss, which turns a typo'd script
-    tag into a 200 carrying HTML -- the exact failure the previous client hit
-    with Swagger UI, where a proxy handed `/openapi.json` to the SPA and the
-    error named neither the proxy nor the path ("The provided definition does
-    not specify a valid version field."). So a miss falls back only when the
-    request looks like a navigation: the client accepts HTML and the path has
-    no file extension. A missing `.js` still 404s, and says so.
+    The history fallback is conditional: answering `index.html` for every miss
+    turns a typo'd script tag into a 200 carrying HTML, and the error then names
+    neither the path nor the cause. A miss falls back only when the request looks
+    like a navigation -- HTML accepted, no extension. A missing `.js` still 404s.
     """
 
     async def get_response(self, path: str, scope: Scope) -> Response:
@@ -47,11 +43,9 @@ class _ConsoleFiles(StaticFiles):
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
             if exc.status_code == 405:
-                # 🔴 **`StaticFiles` raises a bare 405, and this app renders every
-                # `HTTPException` as RFC 9457** -- so the `Allow` header the router
-                # supplies on its own 405s was simply absent here, and
-                # `test_every_route_answers_a_problem_document_for_a_
-                # method_it_does_not_have` fails on `/console/config.json`.
+                # `StaticFiles` raises a bare 405 without the `Allow` header the
+                # router supplies on its own, and every `HTTPException` here is
+                # rendered as RFC 9457.
                 raise StarletteHTTPException(
                     status_code=405, detail=exc.detail, headers={"Allow": "GET, HEAD"}
                 ) from exc
@@ -118,12 +112,8 @@ def mount_console(app: FastAPI, settings: Settings) -> bool:
     async def console_config() -> dict[str, str | None]:
         """Runtime configuration the bundle cannot know at build time.
 
-        `grafanaUrl` and `tempoUrl` are deployment facts, and both are
-        deliberately nullable: the Insights screen's "Open in Grafana" is a
-        marked escape hatch and `Problem`'s "Open trace" is a trace link, and
-        an unconfigured one has to read as *absent* rather than as a dead
-        link. That is the same rule the rest of this product follows about
-        never computed versus computed and empty.
+        `grafanaUrl` and `tempoUrl` are deployment facts, nullable on purpose:
+        an unconfigured one has to read as *absent* rather than as a dead link.
         """
         return {"version": __version__, "grafanaUrl": grafana_url, "tempoUrl": tempo_url}
 

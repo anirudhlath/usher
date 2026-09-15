@@ -23,9 +23,8 @@ from usher.api.errors import ProblemException
 CURSOR_VERSION: Final = 1
 
 #: Eight bytes. Long enough that two of this API's sorts will not collide,
-#: short enough that the cursor stays a short query parameter. It is a
-#: coherence check and not a MAC, so the bar is accidental collision rather
-#: than forgery -- see the module docstring.
+#: short enough that the cursor stays a short query parameter. A coherence
+#: check and not a MAC, so the bar is accidental collision, not forgery.
 _DIGEST_BYTES: Final = 8
 
 # The payload's three members. Single letters because this rides in a query
@@ -36,10 +35,9 @@ _DIGEST_KEY: Final = "q"
 _KEYS_KEY: Final = "k"
 
 # The refusal sentences. Fixed, distinct, and interpolating nothing the client
-# submitted. Distinct because six causes rendered as one sentence are one
-# refusal nobody can diagnose; fixed because the moment one renders a value,
-# `api/errors.py`'s whole reason for existing is undone one parameter to the
-# left.
+# submitted. Distinct because six causes rendered as one sentence are one refusal
+# nobody can diagnose; fixed because the moment one renders a value,
+# `api/errors.py`'s reason for existing is undone one parameter to the left.
 _RESUME: Final = "Start from the first page."
 _NOT_BASE64: Final = f"The cursor is not valid base64url text. {_RESUME}"
 _NOT_A_PAYLOAD: Final = f"The cursor does not decode to a pagination cursor. {_RESUME}"
@@ -99,7 +97,6 @@ class CursorSpec:
                 "a keyset must be a total order, so its last component must be the UUIDv7 "
                 f"primary key; {self.sort!r} ends in {self.types[-1].name}"
             )
-        # Copied, then wrapped.
         object.__setattr__(self, "filters", MappingProxyType(dict(self.filters)))
 
     @property
@@ -206,9 +203,8 @@ def paginate[RowT, ItemT](
 def _invalid(detail: str) -> ProblemException:
     """One line for a route to adopt.
 
-    and the reason `ProblemCode` already carries `INVALID_CURSOR`: `api/errors.py`'s
-    status table cannot map this, because no *status* implies it -- a 400 is not always
-    a bad cursor.
+    `ProblemCode` carries `INVALID_CURSOR` because `api/errors.py`'s status table
+    cannot map this: no *status* implies it, and a 400 is not always a bad cursor.
     """
     return ProblemException(status_code=400, code=ProblemCode.INVALID_CURSOR, detail=detail)
 
@@ -217,11 +213,10 @@ def _payload(raw: str) -> Mapping[str, Any]:
     """Base64url -> JSON -> a mapping, refusing at each step separately."""
     padded = raw + "=" * (-len(raw) % 4)
     try:
-        # `validate=True`, and it is load-bearing rather than pedantic:
-        # `base64.urlsafe_b64decode` **discards** every character outside the
-        # alphabet by default, so `!!not-base64!!` decodes to plausible
-        # garbage and is refused two steps later as "not a payload". The
-        # cause a client is told is then the wrong one.
+        # `validate=True` is load-bearing: `base64.urlsafe_b64decode` **discards**
+        # every character outside the alphabet by default, so `!!not-base64!!`
+        # decodes to plausible garbage and is refused two steps later as "not a
+        # payload" -- the wrong cause to tell a client.
         decoded = base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
     except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
         raise _invalid(_NOT_BASE64) from exc

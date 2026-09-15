@@ -38,17 +38,15 @@ def conditional_bytes_response(
     """Either a 304 or `payload`, under a strong `sha256` tag over exactly these bytes.
 
     **The bytes hashed are the bytes returned**, computed once and never
-    re-derived to check -- which is the whole reason a tag over bytes exists
-    rather than one over a `repr()` or a pre-serialisation DTO. A tag derived
-    from anything upstream of the wire agrees with the previous response the
-    day the thing between them stops being deterministic.
+    re-derived to check. A tag derived from anything upstream of the wire agrees
+    with the previous response the day the thing between them stops being
+    deterministic.
 
     `headers` rides on **both** answers. RFC 9110 section 15.4.5 requires a 304
-    to carry the validators it would have sent with a 200, and a caller whose
-    extra header is part of *which representation this is* -- the proxy's
-    `Content-Location`, naming the rung it clamped to -- has the same
-    obligation for the same reason: a client that learned the rung only on a
-    200 would forget it on every revalidation.
+    to carry the validators it would have sent with a 200, and a header that is
+    part of *which representation this is* -- the proxy's `Content-Location`,
+    naming the rung it clamped to -- has the same obligation: a client that
+    learned the rung only on a 200 would forget it on every revalidation.
     """
     etag = f'"{hashlib.sha256(payload).hexdigest()}"'
     merged = {**(headers or {}), "ETag": etag, "Cache-Control": cache_control}

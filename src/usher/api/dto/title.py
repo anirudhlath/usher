@@ -43,9 +43,8 @@ class AvailabilityResponse(BaseModel):
     container: str | None
     video_codec: str | None
     hdr_format: HdrFormat | None
-    # `null` rather than "NonexNone": an Emby `Series` item has no
-    # `MediaSource` and therefore no dimensions at all -- 20 of the 601 rows
-    # M4's live run ingested.
+    # `null` rather than "NonexNone": an Emby `Series` item has no `MediaSource`
+    # and therefore no dimensions at all.
     resolution: str | None
     runtime_seconds: int | None
 
@@ -93,11 +92,10 @@ class TitleResponse(BaseModel):
     # clients render deliberately -- skeleton shimmer on fields known to be
     # missing -- rather than inferring intent from nulls."
     enrichment_state: EnrichmentState
-    # And a *separate, independent* field (ADR-0008): the wire contract does
-    # not carry a `failed` tier, because a skeleton whose enrichment failed is
-    # still a perfectly usable skeleton. It is also how a *parked* enrichment
-    # reaches the client -- PRD 08 forbids un-parking it behind a human's
-    # back, so the honest answer is to say what happened.
+    # A *separate, independent* field: the wire contract carries no `failed` tier,
+    # because a skeleton whose enrichment failed is still a usable skeleton. It is
+    # also how a *parked* enrichment reaches the client -- PRD 08 forbids
+    # un-parking it behind a human's back, so the honest answer is to say so.
     enrichment_error: str | None
     availability: list[AvailabilityResponse]
     watch_state: WatchStateResponse | None
@@ -107,11 +105,9 @@ class TitleResponse(BaseModel):
     # type admits no null.
     cast: tuple[CreditResponse, ...] = ()
     crew: tuple[CreditResponse, ...] = ()
-    # Same mechanism, same default, same declared type, for the reason above:
-    # a title with no artwork -- or none this proxy can serve -- carries no
-    # `images` key. The `[]` spelling is what an earlier draft of C7 shipped
-    # and it is wrong; PRD 07's convention is absence, and it does not stop
-    # applying on the day the table lands.
+    # Same mechanism, same default, same declared type: a title with no artwork --
+    # or none this proxy can serve -- carries no `images` key. PRD 07's convention
+    # is absence, not `[]`.
     images: tuple[ImageResponse, ...] = ()
 
     @classmethod

@@ -28,23 +28,15 @@ _TRIGGER_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 async def bootstrap_status(report: BootstrapReportDep) -> BootstrapStatusResponse:
     """What every dataset's import has done.
 
-    the catalog's size, the genome's coverage, and whether the stored tag vocabulary can
-    name its lanes.
-
-    **Declared before `POST /{phase}` and safe either way.** The two differ by
-    method, so no request can match both; the order here is for a reader.
+    The catalog's size, the genome's coverage, and whether the stored tag
+    vocabulary can name its lanes.
 
     **One report, two surfaces.** `usher bootstrap-status` prints the same
     `BootstrapReport` this serialises, and the vocabulary verdict crosses the
-    wire as a `VocabularyState` member rather than as the CLI's sentence --
-    what moves into the report is the *decision*, or this route ends up
-    serialising English and a client ends up parsing it.
+    wire as a `VocabularyState` member rather than as the CLI's sentence.
 
-    ⚠️ **Two aggregate reads, roughly a third of a second on a real
-    1.27M-title catalog** (`BootstrapReport`'s docstring carries the
-    measurement). That is priced for an admin screen an operator opens on
-    purpose. There is no cache, deliberately, and no other route should copy
-    this shape.
+    Two uncached aggregate reads over the whole catalog: priced for an admin
+    screen an operator opens on purpose, and no other route should copy it.
     """
     return BootstrapStatusResponse.of(report)
 

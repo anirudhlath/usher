@@ -20,19 +20,16 @@ async def record_search_outcome(
 ) -> None:
     """Attribute one search to what the client just did, or do nothing.
 
-    `query_id` is `None` for a request that carried no `?search_id=` **and**
-    for one whose value was not a UUID at all -- `deps.get_search_id` collapses
-    those two before they arrive here, because a client is not owed a 422 for
-    a piece of optional telemetry it attached to a resource that exists. A
-    `query_id` that is a real UUID and names no row is a no-op one layer
-    further down, in the `UPDATE` itself.
+    `query_id` is `None` both for a request that carried no `?search_id=` and
+    for one whose value was not a UUID -- `deps.get_search_id` collapses those,
+    because a client is not owed a 422 for optional telemetry attached to a
+    resource that exists. A real UUID naming no row is a no-op in the `UPDATE`.
 
-    `clicked_title_id` and `played` are passed straight through and are never
-    both meaningful in one call: **the click writer names a title and passes
-    `played=False`; the play writer passes `played=True` and no title.** That
-    split is the whole design and it is stated on the port -- a single writer
-    setting both would make `clicked_title_id` mean *"the last thing this
-    household did"* rather than *"which result it opened"*.
+    `clicked_title_id` and `played` are never both meaningful in one call: the
+    click writer names a title and passes `played=False`, the play writer passes
+    `played=True` and no title. A single writer setting both would make
+    `clicked_title_id` mean *"the last thing this household did"* rather than
+    *"which result it opened"*.
     """
     if query_id is None:
         return

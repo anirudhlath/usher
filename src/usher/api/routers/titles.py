@@ -45,33 +45,24 @@ async def get_title(
     queries: SearchQueryRepositoryDep,
     search_id: SearchIdDep,
 ) -> TitleResponse:
-    """One title.
+    """One title: everything local about it, plus a promotion if it needs one.
 
-    everything local about it, a promotion if it needs one, and the click attributed to
-    the search it came from if the client says so.
+    **`response_model_exclude_unset=True` makes an empty `cast` or `crew` an
+    absent key rather than `[]`** -- `TitleResponse.of` declines to *set* either
+    when it has no members, and sets every other field unconditionally.
 
-    **`response_model_exclude_unset=True` is what makes an empty `cast` or
-    `crew` an absent key rather than `[]`** -- `TitleResponse.of` declines to
-    *set* either when it has no members, and every other field it sets
-    unconditionally, so nothing else moves. The reasoning, the two spellings
-    rejected and the guard that keeps `of` honest are all in
-    `api/dto/title.py`; this flag is the half that cannot live there.
-
-    **`?search_id=` is PRD 10's click, and it is the reason this route now
-    writes twice.** `GET /search` hands the id of the `search_queries` row it
-    wrote; opening a result with that id attached is the only moment anything
-    knows *which* result the household opened, so it fills
-    `clicked_title_id`. It rides the same commit the demand promotion does
-    and changes nothing else: no status code, no field, no header. Omitting
-    it is always legal, and a value that is unknown or not a UUID at all is
-    ignored rather than refused -- analytics may not decide whether a
+    **`?search_id=` is PRD 10's click.** `GET /search` hands back the id of the
+    `search_queries` row it wrote; opening a result with that id attached is the
+    only moment anything knows *which* result the household opened, so it fills
+    `clicked_title_id`. It changes no status code, no field and no header.
+    Omitting it is always legal, and a value that is unknown or not a UUID at all
+    is ignored rather than refused.
     """
     detail = await titles.detail(title_id, user_id=user_id)
     if detail is None:
-        # PRD 07's envelope, in the one line adopting it costs. `not_found`
-        # is generic on purpose *and provisionally*: whether this becomes
-        # `title_not_found` is ADR-0030's call, not this router's, and it is
-        # settled once for every route rather than five times.
+        # PRD 07's envelope, in the one line adopting it costs. `not_found` is
+        # generic on purpose: the vocabulary is settled once for every route
+        # rather than five times.
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,
@@ -91,10 +82,7 @@ async def get_title(
 async def get_similar_titles(
     title_id: uuid.UUID, titles: TitleRepositoryDep, similarity: SimilarityServiceDep
 ) -> SimilarResponse:
-    """M6's precomputed neighbours (`SimilarityService.neighbors_of`).
-
-    plus both of `title_neighbors`' staleness signals -- see `SimilarResponse` for what
-    each one answers and what neither can.
+    """Precomputed neighbours, plus both of `title_neighbors`' staleness signals.
 
     A title with no stored neighbours is `200` with an empty list -- that is
     a fact about the title, not a failure -- and only an unknown `title_id`

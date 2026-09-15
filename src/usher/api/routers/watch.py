@@ -28,10 +28,9 @@ _WATCH_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
         "model": ProblemResponse,
         "description": "No such title or episode.",
     },
-    # FastAPI's rather than this module's, and declared rather than left
-    # automatic: automatic it is documented as `HTTPValidationError`, and
-    # `api/errors.py` answers an RFC 9457 document carrying the same error list
-    # under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
+    # FastAPI's rather than this module's, and declared rather than left automatic:
+    # automatic, it is documented as `HTTPValidationError`, while `api/errors.py`
+    # answers an RFC 9457 document carrying the same error list under `errors`.
     422: {"model": ProblemResponse, "description": "The request was rejected."},
 }
 
@@ -125,8 +124,8 @@ async def mark_title_played(
 
     Advances `play_count` to `GREATEST(play_count, 1)` and stamps
     `last_played_at`, which is Emby's own `POST /PlayedItems` behaviour --
-    measured as advancing to 1 idempotently rather than incrementing -- so
-    pressing this twice does not diverge from the source on the second press.
+    advancing to 1 idempotently rather than incrementing -- so pressing this
+    twice does not diverge from the source on the second press.
     """
     return await _set_played(title_id, played=True, user_id=user_id, titles=titles, watch=watch)
 
@@ -145,10 +144,9 @@ async def mark_title_unplayed(
 ) -> WatchStateResponse:
     """`DELETE` the *played* flag, and nothing else.
 
-    **The resume position survives**, and that is the local half of M3's
-    live finding rather than an omission: Emby's
-    `DELETE /Users/{u}/PlayedItems/{item}` is destructive well beyond its name
-    -- it resets `PlayCount`, clears `LastPlayedDate` *and* clears a non-zero
+    **The resume position survives**, and that is deliberate: Emby's
+    `DELETE /Users/{u}/PlayedItems/{item}` is destructive well beyond its name --
+    it resets `PlayCount`, clears `LastPlayedDate` *and* clears a non-zero
     position -- and `EmbyAdapter.push_watch_state` already declines to use it.
     `play_count` and `last_played_at` survive for the same reason: a count the
     household earned is not a thing this route was asked to spend.

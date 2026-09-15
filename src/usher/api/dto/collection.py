@@ -50,9 +50,9 @@ class CollectionResponse(BaseModel):
 
     id: uuid.UUID
     name: str
-    # Both `len()` of what is below, computed here and nowhere else. See the
-    # module docstring: a second source for either number is a chance for the
-    # sentence "you own 2 of 4" to be printed over three cards.
+    # Both `len()` of what is below, computed here and nowhere else: a second
+    # source for either number is a chance for "you own 2 of 4" to be printed
+    # over three cards.
     owned_count: int
     total_count: int
     titles: tuple[CollectionMemberResponse, ...]

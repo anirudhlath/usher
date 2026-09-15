@@ -15,8 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode, ProblemResponse
 from usher.ports.errors import PortAuthFailed, PortRateLimited
 
-# The key pydantic puts the offending value under. Named once so the
-# stripping below reads as what it is.
+# The key pydantic puts the offending value under.
 _ECHOED_INPUT = "input"
 
 # Never a submitted value, and never a count either -- "3 fields were
@@ -26,8 +25,8 @@ _VALIDATION_DETAIL: Final = (
     "The request did not pass validation. See the errors member for the fields that were rejected."
 )
 
-# **Three entries, and ADR-0030 ruling 4 is the rule that decides which:** this table
-# exists for statuses raised by machinery Usher does not control.
+# Three entries, and that is the rule that decides which: this table exists for
+# statuses raised by machinery Usher does not control.
 _CODE_FOR_STATUS: Final[Mapping[int, ProblemCode]] = {
     404: ProblemCode.NOT_FOUND,
     405: ProblemCode.METHOD_NOT_ALLOWED,
@@ -161,10 +160,9 @@ async def http_error_as_a_problem_document(request: Request, exc: Exception) -> 
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
     code = exc.code if isinstance(exc, ProblemException) else _CODE_FOR_STATUS.get(exc.status_code)
     if code is None:
-        # No member for this status, and inventing one here is precisely
-        # what ADR-0030 exists to stop. FastAPI's default shape, unchanged,
-        # until the vocabulary grows a name for it -- which is an amendment
-        # to a decision record, not an edit here.
+        # No member for this status, and inventing one here is exactly what the
+        # problem vocabulary exists to stop. FastAPI's default shape, unchanged,
+        # until the vocabulary grows a name for it.
         return await http_exception_handler(request, exc)
     return problem_response(
         request,
@@ -178,7 +176,7 @@ async def http_error_as_a_problem_document(request: Request, exc: Exception) -> 
 #: How long a client is asked to wait after a transient upstream failure that
 #: gave no hint of its own. Short, because the failure it follows is an
 #: upstream that did not answer and the client is a screen with a hole in it --
-#: not a rate limit this service has any measurement of.
+#: not a rate limit this service knows anything about.
 RETRY_AFTER_SECONDS: Final = 5
 
 #: Fixed sentences, never interpolated from the exception. A port error's
@@ -205,20 +203,16 @@ async def port_error_as_a_problem_document(request: Request, exc: Exception) -> 
 
     **Registered for those two exactly, and not for `UsherPortError`.** What a
     route should answer for an unreachable *upstream* is the route's own
-    decision: `api/routers/rows.py` deliberately lets `PortUnavailable` become
-    a 500, because the thing it could not reach is Postgres and a 503 there
-    would claim one endpoint is degraded in a deployment where every one is.
-    These two have no second reading -- nothing in Usher rate-limits or
-    authenticates against its own database -- so the answer is the same
-    wherever they are raised, which is what makes a handler the right home for
-    them and a per-route `except` the wrong one.
+    decision: `api/routers/rows.py` lets `PortUnavailable` become a 500, because
+    the thing it could not reach is Postgres and a 503 there would claim one
+    endpoint is degraded in a deployment where every one is. These two have no
+    second reading -- nothing here rate-limits or authenticates against its own
+    database -- so the answer is the same wherever they are raised.
 
-    **No new `ProblemCode`.** ADR-0030's vocabulary already gives
-    `source_unavailable` to a transient upstream at 503, and both of these are
-    that: a 429 is the most transient failure there is, and a credential the
-    upstream refused is a 503 without a `Retry-After` for the reason
-    `PortDataMalformed` is one in `api/routers/images.py` -- asking again
-    produces the same answer.
+    **No new `ProblemCode`.** The vocabulary already gives `source_unavailable`
+    to a transient upstream at 503, and both of these are that: a 429 is the most
+    transient failure there is, and a credential the upstream refused is a 503
+    without a `Retry-After` -- asking again produces the same answer.
     """
     if isinstance(exc, PortRateLimited):
         problem = ProblemException(

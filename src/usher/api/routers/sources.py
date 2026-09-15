@@ -21,7 +21,7 @@ from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/sources", tags=["admin"])
 
-# : What `/openapi.json` says these routes answer when they fail.
+#: What `/openapi.json` says these routes answer when they fail.
 _REJECTED: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ProblemResponse, "description": "The request was rejected."},
 }
@@ -36,8 +36,8 @@ _SOURCE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 }
 
 #: The sync trigger adds a `409` for a source an operator has disabled --
-#: `not_playable`, reused rather than minted, because it says the same thing
-#: ADR-0030's amendment records: stop asking until that state changes.
+#: `not_playable`, reused rather than minted, because it says the same thing:
+#: stop asking until that state changes.
 _SYNC_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     409: {"model": ProblemResponse, "description": "This source is disabled."},
     **_SOURCE_FAILURES,
