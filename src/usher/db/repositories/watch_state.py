@@ -60,7 +60,7 @@ def _deduped(target: str) -> str:
 
 
 def _update(target: str) -> str:
-    # The two COALESCEs ADR-0014 exists for, plus one for `runtime_seconds`.
+    # The two COALESCEs a source's partial report needs, plus one for `runtime_seconds`.
     return f"""
     WITH d AS ({_deduped(target)})
     UPDATE watch_states ws SET
@@ -270,9 +270,8 @@ class PostgresWatchStateRepository(WatchStateRepository):
         target_id = write.title_id if target == "title_id" else write.episode_id
         # `refusals_as_conflict`, not the module's own `try/except IntegrityError`
         # above: `position_seconds` is `Field(default=0, ge=0)` with no ceiling against
-        # an `integer` column -- the "field bounded on fewer sides than the column"
-        # shape -- so `2**31` is refused client-side by asyncpg's own encoder as an
-        # unclassified `DBAPIError`, which `except IntegrityError` does not catch and
+        # an `integer` column, so `2**31` is refused client-side by asyncpg's own
+        # encoder as an unclassified `DBAPIError` that `except IntegrityError` misses.
         async with refusals_as_conflict(
             self._session, "a client watch write conflicts with the catalog"
         ):

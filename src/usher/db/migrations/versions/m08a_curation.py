@@ -34,8 +34,7 @@ def upgrade() -> None:
         # should give a row with no subtitle rather than one with an empty one.
         sa.Column("reason", sa.Text(), nullable=True),
         # `uuid[]`, ordered, and the order is the product. No foreign key is
-        # possible over array elements -- see this docstring's first section
-        # for the three consequences and why the child table is worse.
+        # possible over array elements, which the CHECKs below stand in for.
         sa.Column(
             "card_title_ids",
             sa.ARRAY(sa.dialects.postgresql.UUID(as_uuid=True)),
@@ -45,17 +44,16 @@ def upgrade() -> None:
         # is a Postgres keyword; SQLAlchemy quotes the identifier and the
         # CHECK below quotes it by hand.
         sa.Column("position", sa.Integer(), nullable=False),
-        # ADR-0020's shape, applied to a generation: it makes "these rows were
-        # written by a model we no longer run" a query rather than something
-        # inferred from a date. Deliberately not an invalidation predicate --
-        # nothing recomputes curated rows on a model change, because
-        # regeneration is an operator's job either way.
+        # Makes "these rows were written by a model we no longer run" a query
+        # rather than something inferred from a date. Deliberately not an
+        # invalidation predicate -- nothing recomputes curated rows on a model
+        # change, because regeneration is an operator's job either way.
         sa.Column("model_name", sa.Text(), nullable=False),
         # What makes a replacement atomic and a partial write visible, and
         # what dashboard 5 joins `llm_calls` on.
         sa.Column("generation_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
-        # No `server_default` -- one instant per generation, written
-        # identically onto every row of it. See this docstring.
+        # No `server_default` -- one instant per generation, written identically
+        # onto every row of it, so `ORDER BY generated_at DESC` selects a whole one.
         sa.Column("generated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name="pk_curated_rows"),
         # `CuratedRow`'s Pydantic bounds, mirrored -- this schema's standing
@@ -77,10 +75,9 @@ def upgrade() -> None:
             name="ck_curated_rows_cards_have_no_nulls",
         ),
     )
-    # The read, the delete, and the cascade's own lookup -- one index for
-    # three. `DESC` is not plan-observable at this population (measured, see
-    # the docstring) and is declared because a wrong direction is what `ffc`
-    # dropped an index for.
+    # The read, the delete, and the cascade's own lookup -- one index for three.
+    # `DESC` is declared rather than left to the default because the read asks
+    # for the newest generation.
     op.create_index(
         "ix_curated_rows_user_newest",
         "curated_rows",
@@ -109,14 +106,14 @@ def upgrade() -> None:
         # operator discovers they never priced a hosted model.
         sa.Column("tokens_in", sa.Integer(), nullable=False),
         sa.Column("tokens_out", sa.Integer(), nullable=False),
-        # `NUMERIC(12, 8)`, never `Float`. The measured table is in this
-        # docstring; the constants are imported so the model and this
-        # migration cannot drift.
+        # `NUMERIC(12, 8)`, never `Float`: a ledger summed over many rows cannot
+        # carry binary rounding error. The constants are imported so the model and
+        # this migration cannot drift.
         sa.Column("cost_usd", sa.Numeric(COST_PRECISION, COST_SCALE), nullable=False),
         sa.Column("latency_ms", sa.Integer(), nullable=False),
         # Not "the HTTP call returned 200" -- it is "this generation produced
         # something", and a call that answered perfectly and validated to zero
-        # rows is `ok = false` with a reason (ADR-0028).
+        # rows is `ok = false` with a reason.
         sa.Column("ok", sa.Boolean(), nullable=False),
         # Present exactly when `ok` is false, enforced below as well as by
         # `LLMCall._ok_and_error_must_agree`.
@@ -124,8 +121,8 @@ def upgrade() -> None:
         # Nullable: a purpose that produces no rows at all has no generation.
         # Query expansion is one, and `QueryExpansionService` writes one row
         # per search that embeds, so on a deployment that curates and is
-        # searched these are the majority of the table. No foreign key -- see
-        # this docstring.
+        # searched these are the majority of the table, and no foreign key can
+        # point at a generation there is no table for.
         sa.Column("generation_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_llm_calls"),
         sa.CheckConstraint("model <> ''", name="ck_llm_calls_model_not_empty"),
@@ -139,16 +136,12 @@ def upgrade() -> None:
             name="ck_llm_calls_ok_error_agree",
         ),
     )
-    # No index on `llm_calls` beyond its primary key. The two that will be
-    # right, and the query each serves, are in this migration's docstring.
+    # No index on `llm_calls` beyond its primary key at this revision.
 
 
 def downgrade() -> None:
     op.drop_table("llm_calls")
-    # **Not load-bearing, and kept anyway so `downgrade()` mirrors `upgrade()` statement
-    # for statement and a reader can diff the two by eye.** `op.drop_table` on the next
-    # line takes the index with it regardless, so deleting this line is an equivalent
-    # mutation -- unlike `ff`'s downgrade, where the `create_index` is the only thing
-    # that restores the index and removing it really does leave the schema short.
+    # `op.drop_table` on the next line takes the index with it regardless. Kept so
+    # `downgrade()` mirrors `upgrade()` statement for statement.
     op.drop_index("ix_curated_rows_user_newest", table_name="curated_rows")
     op.drop_table("curated_rows")

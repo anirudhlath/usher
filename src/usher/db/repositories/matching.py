@@ -10,9 +10,8 @@ from usher.domain.enums import EnrichmentState
 from usher.ports.ingest import NameYearProbe, ProviderRef
 from usher.ports.repository import TitleMatchRepository
 
-# `t.kind = p.kind` is not optional and not a convenience filter: TMDb's movie
-# and series id spaces overlap on 26,968 ids (measured), so `tmdb_id` alone
-# identifies nothing. ADR-0011.
+# `t.kind = p.kind` is not optional and not a convenience filter: TMDb's movie and
+# series id spaces overlap heavily, so `tmdb_id` alone identifies nothing.
 _MATCH_TMDB = """
 SELECT p.value AS value, p.kind AS kind, t.id AS id
 FROM unnest(CAST(:values AS integer[]), CAST(:kinds AS text[])) AS p(value, kind)

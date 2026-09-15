@@ -50,14 +50,11 @@ async def ensure_default_user(session: AsyncSession, *, name: str = DEFAULT_USER
 
 
 async def default_user(session: AsyncSession, *, name: str = DEFAULT_USER_NAME) -> User:
-    """The same row as a domain model, for the one caller that needs the whole thing.
+    """The same row as a domain model, for the one caller that needs it whole.
 
-    `RowContext.user`.
-
-    One statement, not two. The alternative -- `ensure_default_user` followed
-    by a read of the row it just resolved -- is a second round trip per home
-    request for a `created_at` nothing reads, and this way the id and the name
-    cannot disagree about which row they came from.
+    One statement, not two: no home request pays a second round trip for a
+    `created_at` nothing reads, and the id and the name cannot disagree about
+    which row they came from.
     """
     row = await _resolve(session, name)
     return User(

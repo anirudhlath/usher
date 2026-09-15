@@ -60,9 +60,9 @@ ON CONFLICT (kind, key) DO UPDATE SET
 -- `jobs.priority < excluded.priority` is what stops a nightly walk rewriting
 -- the whole queue for no state change. Every batch of a walk re-enqueues a
 -- job for every item it saw, and without this clause `ON CONFLICT DO UPDATE`
--- fires for each one: a new row version per job per night -- up to 1,126,674
--- of them at the one measured deployment -- on a table whose entire purpose
--- is to stay small, plus the WAL and the vacuum to match. Nothing observable
+-- fires for each one: a new row version per job per night, one per catalog
+-- item, on a table whose entire purpose is to stay small, plus the WAL and
+-- the vacuum to match. Nothing observable
 -- changes: `priority` is already `GREATEST(...)` of itself, `created_at` is
 -- deliberately untouched (see below), and `updated_at` on a job nobody
 -- claimed means nothing to anybody. With the clause, a re-seen job costs one
@@ -221,10 +221,10 @@ class PostgresJobQueue(JobQueue):
                     result = cast(CursorResult[Any], await self._session.execute(text(_ENQUEUE)))
                     written = result.rowcount
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `jobs.priority` is `integer` and `JobRequest.priority` is a
-            # bare `int` -- `domain.Job`'s `ge=0, le=100` is on the shape a caller reads
-            # *back*, which this path never constructs (ADR-0044, question 5).
+            # **`DBAPIError` rather than `IntegrityError`.** `jobs.priority` is
+            # `integer` and `JobRequest.priority` is a bare `int` -- `domain.Job`'s
+            # `ge=0, le=100` is on the shape a caller reads *back*, which this path
+            # never constructs.
             if not is_row_refusal(exc):
                 raise
             raise RepositoryConflict(

@@ -187,8 +187,8 @@ ORDER BY e.title_id, e.season_number, e.episode_number
 
 
 # The two bounded reads the series hierarchy routes take, and the reason they are not
-# `list_for_title`: that method returns the whole tree, measured at 20,001 rows / 22.901
-# ms / 402 buffers for one pathological series.
+# `list_for_title`: that method returns the whole tree, which for a long-running series
+# is tens of thousands of rows.
 _LIST_SEASONS = """
 SELECT * FROM seasons
 WHERE title_id = CAST(:title_id AS uuid)
@@ -197,7 +197,7 @@ ORDER BY season_number
 
 _GET_SEASON = "SELECT * FROM seasons WHERE id = CAST(:season_id AS uuid)"
 
-# ADR-0034's keyset, and the arm it does not carry is the point.
+# A keyset page, and the arm it does not carry is the point.
 _SEASON_EPISODES = """
 SELECT * FROM episodes
 WHERE season_id = CAST(:season_id AS uuid)
@@ -369,10 +369,8 @@ class PostgresEpisodeRepository(EpisodeRepository):
         return {unique[row.ord - 1]: row.id for row in rows}
 
     async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
-        # One statement for the whole page. The alternative already on this
-        # port is `list_for_title`, which returns the entire tree -- measured
-        # at 20,001 rows / 22.901 ms / 402 buffers for one pathological series,
-        # to find one episode.
+        # One statement for the whole page, rather than `list_for_title`, which
+        # returns the entire tree to find one episode.
         if not episode_ids:
             # `= ANY('{}')` is a valid empty answer rather than a syntax error,
             # so this guard is a round trip saved rather than a correctness
@@ -442,11 +440,10 @@ class PostgresEpisodeRepository(EpisodeRepository):
         limit: int,
         after: EpisodeCursorPosition | None = None,
     ) -> list[Episode]:
-        # One statement for the page, whatever the page holds. The branch is
-        # on whether there is a position to resume from, which the caller
-        # knows before the statement is built -- the same two-branch rendering
-        # ADR-0034 sanctions for `_browse_after`, minus the arm this schema
-        # makes unreachable.
+        # One statement for the page, whatever the page holds. The branch is on
+        # whether there is a position to resume from, which the caller knows before
+        # the statement is built -- `_browse_after`'s two-branch rendering, minus the
+        # arm this schema makes unreachable.
         parameters: dict[str, object] = {"season_id": season_id, "limit": limit}
         if after is None:
             statement = _SEASON_EPISODES

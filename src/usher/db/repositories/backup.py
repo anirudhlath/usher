@@ -74,8 +74,8 @@ class _Rewrite:
     key: str
 
 
-# : Every foreign-key column in the carried set that travels as a natural : key, and the
-# key it travels under.
+#: Every foreign-key column in the carried set that travels as a natural key, and the
+#: key it travels under.
 REWRITTEN: Final[MappingProxyType[str, _Rewrite]] = MappingProxyType(
     {
         "title_id": _Rewrite(_Kind.TITLE, "title"),
@@ -107,18 +107,16 @@ CARRIED_RAW: Final[MappingProxyType[str, str]] = MappingProxyType(
 #: `uq_episodes_title_season_episode`.
 _MEDIA_ITEM_KEY: Final[tuple[str, ...]] = ("source_id", "external_id")
 
-# : The one carried table that is not carried whole, and the predicate that : makes it
-# cheap.
+#: The one carried table that is not carried whole, and the predicate that makes it
+#: cheap.
 _MEDIA_ITEM_PREDICATE: Final = "title_id IS NOT NULL OR episode_id IS NOT NULL"
 
 
 def carried_tables() -> tuple[str, ...]:
-    """The manifest's precious set plus its one partial entry, in manifest order.
+    """The manifest's precious set plus its one partial entry, derived not listed.
 
-    derived from `tables_of`, never listed.
-
-    A module-level function rather than only a method, because the tests
-    that check the accounting below need it without a session.
+    A module-level function rather than only a method, because the tests that
+    check the accounting below need it without a session.
     """
     return tables_of(BackupClass.PRECIOUS) + tables_of(BackupClass.PARTIAL)
 
@@ -156,9 +154,9 @@ def _carried_columns(table: str) -> tuple[str, ...]:
 
 
 def unaccounted_reference_columns() -> dict[str, tuple[str, ...]]:
-    """Foreign-key columns in the carried set that are neither rewritten nor declared raw.
+    """Foreign keys in the carried set that are neither rewritten nor declared raw.
 
-    per table, empty when the accounting is complete.
+    Per table, empty when the accounting is complete.
     """
     gaps: dict[str, tuple[str, ...]] = {}
     for table in carried_tables():
@@ -225,15 +223,11 @@ class PostgresBackupRepository(BackupRepository):
         )
 
     async def _rewrite(self, table: str, rows: Sequence[dict[str, Any]]) -> list[dict[str, object]]:
-        """Replace every reference column in one table's rows.
+        """Every reference column in one table's rows, in two passes over the batch.
 
-        in two passes over the whole batch rather than a lookup per row.
-
-        Episodes first, because an episode reference embeds its *series'*
-        title reference -- so resolving episodes adds title ids the rows
-        themselves never named, and a title pass that ran first would miss
-        them. That ordering is the reason this is two passes and not one
-        loop.
+        Episodes first, because an episode reference embeds its *series'* title
+        reference -- so resolving episodes adds title ids the rows themselves
+        never named, and a title pass that ran first would miss them.
         """
         episodes = await self._episodes(_ids(rows, _Kind.EPISODE))
         titles = await self._titles(
@@ -273,11 +267,9 @@ class PostgresBackupRepository(BackupRepository):
 
         **This is the one place `backup_identity.title_reference` is not
         called, and the reason is the projection.** That function takes a
-        `Title`, and a `Title` is 33 columns including `credit_names` and the
-        `search_document` this schema defers on every read -- materialised
-        once per *distinct referenced title*, which on the measured household
-        is thousands of rows read to produce four fields each. `db-and-sql`'s
-        own rule, from the `list_unwatched_candidates` rewrite: rank on a
+        `Title`, which is the whole row including `credit_names` and the
+        `search_document` this schema defers on every read -- materialised once
+        per *distinct referenced title* to produce four fields each.
         narrow projection, then join the entity back -- except here there is
         no entity to join back, because a reference is exactly these four
         values.
@@ -382,10 +374,10 @@ def _refuse_missing(table: str, wanted: set[uuid.UUID], found: set[uuid.UUID]) -
     """A referenced row the database does not hold.
 
     Unreachable through the schema -- every one of these columns is a real
-    foreign key, and `watch_states`' two are `ON DELETE RESTRICT` on purpose
-    (ADR-0010) -- so this is a tripwire for a bug in this project rather
-    than an operator condition, which is exactly why `RepositoryNotFound`
-    stays out of `cli.OPERATOR_ERRORS` and this keeps its stack.
+    foreign key, and `watch_states`' two are `ON DELETE RESTRICT` on purpose --
+    so this is a tripwire for a bug in this project rather than an operator
+    condition, which is why `RepositoryNotFound` stays out of
+    `cli.OPERATOR_ERRORS` and this keeps its stack.
     """
     missing = wanted - found
     if missing:
@@ -409,8 +401,8 @@ _COLUMN_FOR_KEY: Final[MappingProxyType[str, _Rewrite]] = MappingProxyType(
 #: foreign-key error wearing an operator report's clothes.
 _DEFAULT_UNRESOLVED_RULE: Final = UnresolvedRule.REFUSE
 
-# : The `watch_states` columns an upsert adopts from the artifact, and the ones : it
-# compares to decide whether anything changed.
+#: The `watch_states` columns an upsert adopts from the artifact, and the ones it
+#: compares to decide whether anything changed.
 _WATCH_STATE_MERGED: Final[tuple[str, ...]] = (
     "position_seconds",
     "runtime_seconds",
@@ -587,11 +579,9 @@ class PostgresRestoreRepository(RestoreRepository):
     async def _existing_sources(
         self, rows: Sequence[Mapping[str, Any]]
     ) -> tuple[dict[uuid.UUID, str], dict[str, uuid.UUID]]:
-        """Every source the target already holds under one of this artifact's ids or names.
+        """Every source the target holds under one of this artifact's ids or names.
 
-        indexed both ways.
-
-        One statement, never one per row.
+        One statement, never one per row, indexed both ways.
 
         **Both directions rather than one**, because neither column is a key
         for the other: `id` is `pk_sources` and `name` is constrained by
@@ -678,7 +668,7 @@ class PostgresRestoreRepository(RestoreRepository):
         history is the thing no importer reproduces. The `IS DISTINCT FROM`
         guard is not about who wins -- it is what makes the report honest, so a
         second run of the same file reports `skipped` rather than claiming to
-        have written 3,347 rows that did not move.
+        have written rows that did not move.
         """
         by_title = [row for row in rows if row["title_id"] is not None]
         by_episode = [row for row in rows if row["title_id"] is None]
@@ -785,9 +775,7 @@ class PostgresRestoreRepository(RestoreRepository):
         *,
         skip_unresolvable: bool,
     ) -> tuple[list[dict[str, Any]], tuple[RestoreRefusal, ...], int]:
-        """Every reference in one table resolved against this catalog.
-
-        in one round trip per kind rather than one per row.
+        """Every reference in one table resolved, in one round trip per kind.
 
         The resolution has to happen per table rather than once for the file,
         because `users` is applied first and every `user` key in the tables
@@ -950,10 +938,9 @@ def _coerce(column: sa.Column[Any], value: object) -> object:
 
 
 #: The dialect the column types are rendered through to reach the array casts
-#: `_arrays` binds. One instance, because compiling a type is all it is used
-#: for and every statement below is built once at import. The base dialect
-#: rather than the asyncpg one: the rendering is the same and the base needs
-#: no driver to construct. The ignore is SQLAlchemy's untyped `__init__`.
+#: `_arrays` binds. One instance, because compiling a type is all it is used for
+#: and every statement below is built once at import. The base dialect rather
+#: than the asyncpg one: the rendering is the same and the base needs no driver.
 _DIALECT: Final = PGDialect()  # type: ignore[no-untyped-call]
 
 

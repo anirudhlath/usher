@@ -12,7 +12,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.drop_index(
         "ix_titles_tmdb_id",
         table_name="titles",
@@ -28,7 +27,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     op.drop_index(
         "ix_titles_tmdb_id_kind",
         table_name="titles",

@@ -44,9 +44,9 @@ class RestoreRule(StrEnum):
     """Restore does not write this table."""
 
 
-#: Which rule each class takes. The one definition of it: `BackupEntry.restore`
-#: reads it, so the entries K3 and the test fixtures build -- constructions this
-#: file never sees -- cannot carry a rule that disagrees with their class.
+#: Which rule each class takes, defined once: `BackupEntry.restore` reads it, so an
+#: entry built elsewhere -- a service, a test fixture -- cannot carry a rule that
+#: disagrees with its class.
 _RULE_FOR: Final[MappingProxyType[BackupClass, RestoreRule]] = MappingProxyType(
     {
         BackupClass.PRECIOUS: RestoreRule.WHOLE,
@@ -61,15 +61,13 @@ _RULE_FOR: Final[MappingProxyType[BackupClass, RestoreRule]] = MappingProxyType(
 class BackupEntry:
     """One table's classification, with the argument for it attached.
 
-    `reason` is not decoration. The failure this module exists to prevent
-    is a table reclassified by someone who did not know why it was where it
-    was, and a class with no reason beside it is the prose table again.
+    `reason` is not decoration: the failure this module exists to prevent is a
+    table reclassified by someone who did not know why it was where it was.
 
-    **The invariants are enforced at construction rather than by a case over
-    `MANIFEST`.** A test can only notice for the 29 entries that exist here;
-    K3's report, K4's merge and every fixture that builds an entry are
-    constructions this file never sees, and a `PARTIAL` entry naming no
-    column would mean restore silently merging nothing.
+    Invariants are enforced at construction rather than by a case over
+    `MANIFEST`, because an entry built elsewhere is one this file never sees --
+    and a `PARTIAL` entry naming no column means restore silently merges
+    nothing.
     """
 
     kind: BackupClass
@@ -102,10 +100,7 @@ class BackupEntry:
 
     @property
     def rebuild_commands(self) -> tuple[str, ...]:
-        """`rebuilt_by` split into its steps, in run order.
-
-        empty when there is no rebuild command, which is every class but `REBUILDABLE`.
-        """
+        """`rebuilt_by` split into steps, in run order; empty for every class but `REBUILDABLE`."""
         return tuple(step for step in self.rebuilt_by.split(REBUILD_STEP) if step.strip())
 
 
@@ -323,10 +318,9 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
 def tables_of(kind: BackupClass) -> tuple[str, ...]:
     """The tables in one class, in manifest order.
 
-    K3 needs the `PRECIOUS` set, K4 needs `PRECIOUS` and `PARTIAL`, and K7
-    needs `PRECIOUS` to know what a re-encryption touches. One accessor
-    rather than the same comprehension in three services -- and computed on
-    call rather than cached in a second mapping, which would be a thing to
-    keep in step with `MANIFEST` and therefore a thing to forget.
+    One accessor rather than the same comprehension in the three services that
+    want it -- and computed on call rather than cached in a second mapping,
+    which would be a thing to keep in step with `MANIFEST` and therefore a
+    thing to forget.
     """
     return tuple(table for table, entry in MANIFEST.items() if entry.kind is kind)

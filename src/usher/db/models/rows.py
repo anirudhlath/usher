@@ -11,18 +11,14 @@ from usher.db.base import Base
 class RowProviderSettingRow(Base):
     """One provider's operator-set override.
 
-    Three columns and no surrogate id.
+    **`RowProvider.slug_prefix` is the natural key** -- declared rather than
+    derived, bounded at ten, a name a dashboard and an operator already hold. A
+    surrogate id would add a column nothing reads while permitting two rows for
+    one provider, a state no admin route could interpret.
 
-    **`RowProvider.slug_prefix` is the natural key**, and its own port
-    docstring is why: it is *"declared rather than derived"* and *"bounded at
-    ten"*, a name a dashboard and an operator already hold. A surrogate id
-    would add a column nothing reads while permitting two rows for one
-    provider — a state no admin route could interpret — which is the identical
-    argument `genome_tags.tag_id` and `title_embeddings.title_id` both make.
-
-    `Text` rather than `String(N)`: a slug prefix is bounded by the registry
-    and not by a width anybody measured, and pinning one into the schema would
-    make a longer provider name a migration.
+    `Text` rather than `String(N)`: a slug prefix is bounded by the registry and
+    not by any width, and pinning one into the schema would make a longer
+    provider name a migration.
     """
 
     __tablename__ = "row_provider_settings"
@@ -31,7 +27,7 @@ class RowProviderSettingRow(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # `server_default` so a hand-written `INSERT` cannot leave it NULL, and no
     # `onupdate=` and no trigger: the one writer names this column on every
-    # statement. See the module docstring.
+    # statement.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

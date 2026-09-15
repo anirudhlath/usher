@@ -27,16 +27,14 @@ from usher.domain.sync import SyncRunKind, SyncRunStatus
 class SyncRunRow(Base):
     """One attempt at reconciling a source.
 
-    A history, not a checkpoint -- contrast `ImportRunRow`, which is exactly one row per
-    dataset.
+    A history, not a checkpoint -- contrast `ImportRunRow`, one row per dataset.
 
-    **`position` is the one column that half-excepts that**, and only for
-    the `watch_state` kind: ADR-0042 has a run of that kind reuse its own
-    row across attempts and advance `position` per committed batch, so
-    while such a walk is unfinished its row is being read back as a
-    checkpoint. The table is still a history -- one row per *walk* rather
-    than one per attempt at it -- and the other two kinds leave the column
-    at 0 and restart from `cursor_at`.
+    **`position` half-excepts that**, and only for the `watch_state` kind: such
+    a run reuses its own row across attempts and advances `position` per
+    committed batch, so while the walk is unfinished its row is read back as a
+    checkpoint. The table is still a history -- one row per *walk* rather than
+    one per attempt at it -- and the other kinds leave the column at 0 and
+    restart from `cursor_at`.
 
     No `set_updated_at` trigger and no `updated_at` column: a run's
     interesting timestamps are `started_at` and `finished_at`, and both are
@@ -58,7 +56,7 @@ class SyncRunRow(Base):
         enum_column(SyncRunStatus, length=16), nullable=False, server_default=text("'running'")
     )
     cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The walk's resume point (ADR-0042): a **page offset**, not an ordering key.
+    # The walk's resume point: a **page offset**, not an ordering key.
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     items_seen: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -91,20 +89,14 @@ class SyncRunRow(Base):
 class RawPayloadRow(Base):
     """A provider response, cached verbatim so reprocessing never refetches.
 
-    **Providers only.** PRD 03's ingest stage previously said to store every
-    *source* item's raw payload here; at 1,126,674 items and ~8 kB apiece
-    that is ~9 GB against a database PRD 08 budgets at 8-12 GB total, to
-    cache something re-readable from the source in one request. Corrected in
-    PRD 03 and PRD 02; see
-    [ADR-0016](../../../../docs/prd/decisions/0016-raw-payloads-cache-providers-not-sources.md).
+    **Providers only**, never source items: a source item's payload is
+    re-readable from the source in one request, and caching every one of them
+    would cost more than PRD 08 budgets for the whole database.
 
-    `fetched_at` is also what enforces TMDb's <=6-month caching term (PRD
-    04's licensing constraint, PRD 10's dashboard-5 panel). PRD 02 listed a
-    separate `provider_cache_meta` table for exactly that timestamp; one
-    column answers it once, so that table is not created. `fetched_at`'s
-    `server_default` covers the INSERT arm only -- an upsert that refreshes
-    a payload must set it explicitly, because a stale timestamp on fresh
-    data is precisely the compliance answer the column exists to give.
+    `fetched_at` is what enforces TMDb's <=6-month caching term. Its
+    `server_default` covers the INSERT arm only -- an upsert that refreshes a
+    payload must set it explicitly, because a stale timestamp on fresh data is
+    precisely the compliance answer the column exists to give.
     """
 
     __tablename__ = "raw_payloads"

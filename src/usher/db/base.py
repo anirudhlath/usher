@@ -12,9 +12,8 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-# Ten constraints on the M1 schema before this convention had names Postgres generated
-# at CREATE time (titles_pkey, media_items_title_id_fkey, ...) rather than names under
-# our control.
+# So a migration can drop or alter a constraint by a name this project chose, rather
+# than whatever Postgres generated at CREATE time.
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -24,17 +23,12 @@ NAMING_CONVENTION = {
 
 
 class Base(DeclarativeBase):
-    """Declarative base for all Usher tables."""
-
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def build_engine(
     database_url: str, *, echo: bool = False, pool_size: int = 20, max_overflow: int = 10
 ) -> AsyncEngine:
-    # **pool_size/max_overflow are arguments now, and the comment they replace named
-    # this task.** It read: *"hardcoded, not read from usher.config.Settings --
-    # deferred, not designed away.
     return sa_asyncio.create_async_engine(
         database_url,
         echo=echo,
@@ -51,25 +45,19 @@ def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 
 
 def enum_column(enum_cls: type[PyEnum], *, length: int) -> SAEnum:
-    """A `String`-backed column type for a domain `StrEnum` that round-trips to real enum.
+    """A `String`-backed column type for a domain `StrEnum` that reads back as members.
 
-    members on read instead of plain `str` — plain `mapped_column(String(N))` has no
-    result processor, so `Mapped[SomeEnum]` lies: `isinstance(row.kind, TitleKind)` is
-    `False` even though mypy believes otherwise (verified).
+    A plain `mapped_column(String(N))` has no result processor, so
+    `Mapped[SomeEnum]` lies: `isinstance(row.kind, TitleKind)` is `False`
+    however the annotation reads.
 
-    `native_enum=False` compiles to `VARCHAR(length)`, identical DDL to the
-    `String(length)` it replaces — no native Postgres `CREATE TYPE ... AS
-    ENUM`. `create_constraint` defaults to `False` in SQLAlchemy 2.0
-    (verified), so no membership CHECK is emitted; Pydantic owns membership
-    validation, not the database, matching every other constraint in this
-    schema.
+    `native_enum=False` keeps the DDL at `VARCHAR(length)` -- no Postgres
+    `CREATE TYPE ... AS ENUM` -- and emits no membership CHECK; Pydantic owns
+    membership validation, as it does for every other constraint here.
 
-    `values_callable` is not optional here: SQLAlchemy's default binds and
-    reads back a Python `Enum`'s `.name` (`"MOVIE"`), not its `.value`
-    (`"movie"`) — verified directly, including that without this the result
-    processor cannot even parse the lowercase values this schema already
-    stores. `usher.domain.enums`'s docstring states values are "stable wire
-    and storage identifiers"; those identifiers are each member's `.value`.
+    `values_callable` is not optional: SQLAlchemy otherwise binds and reads an
+    `Enum`'s `.name` (`"MOVIE"`) rather than its `.value` (`"movie"`), and the
+    lowercase values this schema already stores would not parse.
     """
     return SAEnum(
         enum_cls,

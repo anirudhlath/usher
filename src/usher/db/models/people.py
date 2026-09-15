@@ -46,9 +46,8 @@ class PersonRow(Base):
     )
 
     __table_args__ = (
-        # THE dedup key, and the front matter's first named wrong implementation is what
-        # it exists against: an implementation that dedupes on `name` collapses two
-        # directors who share one.
+        # THE dedup key. Deduping on `name` instead collapses two directors who
+        # share one.
         Index(
             "ix_people_tmdb_id",
             "tmdb_id",
@@ -66,7 +65,6 @@ class PersonRow(Base):
             postgresql_where=text("imdb_id IS NOT NULL"),
         ),
         CheckConstraint("imdb_id IS NULL OR imdb_id <> ''", name="ck_people_imdb_id_not_empty"),
-        # No index on sort_name.
         CheckConstraint("name <> ''", name="ck_people_name_not_empty"),
         CheckConstraint("sort_name <> ''", name="ck_people_sort_name_not_empty"),
     )
@@ -76,11 +74,10 @@ class CreditRow(Base):
     __tablename__ = "credits"
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    # CASCADE: a credit with no person is not a record worth keeping. It
-    # carries no user state and is re-derivable from a cached payload in one
-    # pass, which is `seasons.title_id`'s argument verbatim -- ADR-0010's
-    # reasoning applies to what a row *protects*, and this one protects
-    # nothing.
+    # CASCADE: a credit with no person is not a record worth keeping. It carries
+    # no user state and is re-derivable from a cached payload in one pass, which
+    # is `seasons.title_id`'s argument verbatim -- the delete rule follows what a
+    # row protects, and this one protects nothing.
     person_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("people.id", ondelete="CASCADE"), nullable=False
     )
@@ -108,8 +105,7 @@ class CreditRow(Base):
     )
 
     __table_args__ = (
-        # Four readers, each named, because an index nobody reads is write cost and this
-        # repository has already shipped one of those: 1.
+        # Every read that filters by title, plus titles' own CASCADE lookup.
         Index("ix_credits_title_id", "title_id"),
         # list_for_person ("what else did person P work on"), plus people's
         # own CASCADE lookup. Same argument as ix_watch_states_episode_id.
@@ -122,9 +118,9 @@ class CreditRow(Base):
             unique=True,
             postgresql_where=text("tmdb_credit_id IS NOT NULL"),
         ),
-        # **The dedup key for every source that is not TMDb**, and the reason it has to
-        # exist is that the index above is partial over `tmdb_credit_id IS NOT NULL`,
-        # i.e.
+        # **The dedup key for every source that is not TMDb.** The index above is
+        # partial over `tmdb_credit_id IS NOT NULL`, so a row from a source that
+        # mints no credit id falls outside it and would re-insert on every pass.
         Index(
             "ix_credits_source_natural_key",
             "title_id",
@@ -135,10 +131,8 @@ class CreditRow(Base):
             postgresql_where=text("source <> 'tmdb'"),
         ),
         # No index on `kind`: two values, on a table whose every read already
-        # filters on title_id or person_id. Postgres seq-scans a majority
-        # value regardless of whether it is indexed -- the measured
-        # ix_titles_enrichment_state argument, 1,936 kB -> 40 kB at 300k rows
-        # with identical plans either way.
+        # filters on title_id or person_id, and Postgres seq-scans a majority
+        # value whether or not it is indexed.
         CheckConstraint(
             "billing_order IS NULL OR billing_order >= 0",
             name="ck_credits_billing_order_non_negative",
@@ -147,5 +141,4 @@ class CreditRow(Base):
             "tmdb_credit_id IS NULL OR tmdb_credit_id <> ''",
             name="ck_credits_tmdb_credit_id_not_empty",
         ),
-        # No CHECK on the cast/crew shape -- e.g.
     )

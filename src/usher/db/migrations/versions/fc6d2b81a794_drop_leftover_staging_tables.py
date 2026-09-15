@@ -34,4 +34,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Deliberately empty -- see the module docstring."""
+    """Deliberately empty: a leftover nothing reads is not worth recreating."""

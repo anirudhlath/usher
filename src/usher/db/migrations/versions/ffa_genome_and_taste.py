@@ -31,7 +31,7 @@ def upgrade() -> None:
         # `PortDataMalformed`, not a row), so the only two states are "has a
         # row" and "does not" and the absence of the row is the signal.
         sa.Column("relevance", HALFVEC(GENOME_TAG_COUNT), nullable=False),
-        # ADR-0020: derived state carries its fingerprint.
+        # Derived state carries the fingerprint of its input.
         sa.Column("genome_revision", sa.Text(), nullable=False),
         # `computed_at` and no `updated_at`, and no trigger: this follows
         # `title_neighbors`, where a row is a batch artefact computed
@@ -63,7 +63,8 @@ def upgrade() -> None:
         # invalidates every centroid through `IS DISTINCT FROM :model_name`
         # rather than through a migration somebody has to remember to write.
         sa.Column("model_name", sa.Text(), nullable=False),
-        # ADR-0020's fingerprint, and **nullable against the plan's NOT NULL**.
+        # The input fingerprint, and **nullable**: a user with no history has no
+        # watermark to record.
         sa.Column("source_watermark", sa.DateTime(timezone=True), nullable=True),
         # Makes the refusal countable. A gauge reading "N households have too
         # little history for a centroid" is how an operator learns half the

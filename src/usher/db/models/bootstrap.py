@@ -26,11 +26,10 @@ from usher.domain.enums import TitleKind
 class ImportRunRow(Base):
     """One row per dataset — a checkpoint, updated in place.
 
-    Field-for-field with `usher.domain.bootstrap.ImportRun` (11 columns, 11
-    fields, same names), the same 1:1 correspondence `TitleRow`/`Title` hold
-    and for the same reason: it is what makes `Model.model_validate({c.name:
-    getattr(row, c.name) ...})` safe under `extra="forbid"`. Adding a column
-    here means adding a field there.
+    Field-for-field with `usher.domain.bootstrap.ImportRun`, the same 1:1
+    correspondence `TitleRow`/`Title` hold and for the same reason: it is what
+    makes `Model.model_validate({c.name: getattr(row, c.name) ...})` safe under
+    `extra="forbid"`. A column here means a field there.
     """
 
     __tablename__ = "import_runs"
@@ -67,17 +66,15 @@ class ImportRunRow(Base):
 class TmdbIdRow(Base):
     """TMDb's daily ID export: the crawl universe, with popularity.
 
-    Primary key is `(tmdb_id, kind)`, not `tmdb_id`: TMDb's movie and series
-    id spaces overlap heavily — 26,968 of the 56,975 distinct TMDb series
-    ids Wikidata knows are also live TMDb movie ids (measured 2026-07-30).
-    A single-column key would silently merge half of television into film.
-    Same reasoning as ADR-0011's change to `titles`' own unique index.
+    Primary key is `(tmdb_id, kind)`, not `tmdb_id`: TMDb's movie and series id
+    spaces overlap heavily -- roughly half the series ids Wikidata knows are
+    also live movie ids -- so a single-column key would silently merge half of
+    television into film. `titles`' own unique index is namespaced the same way.
 
-    Deliberately *not* `titles`: the export carries an id, an original name,
-    and a popularity score — no localised title, no year, no overview. There
-    is not enough here to build a catalog entry, and 1.23M of these ids
-    already have a skeleton row from IMDb waiting for Phase 2 to connect
-    them.
+    Deliberately *not* `titles`: the export carries an id, an original name and
+    a popularity score -- no localised title, no year, no overview. Not enough
+    to build a catalog entry, and most of these ids already have a skeleton row
+    from IMDb waiting for Phase 2 to connect them.
     """
 
     __tablename__ = "tmdb_ids"
@@ -108,18 +105,16 @@ class TmdbIdRow(Base):
 class IdCrosswalkRow(Base):
     """Verified IMDb <-> TMDb/TVDb id pairs, from Wikidata (CC0).
 
-    Kept as its own table rather than applied straight onto `titles`, for
-    three reasons that each cost a real bug otherwise:
+    Kept as its own table rather than applied straight onto `titles`:
 
     1. A pair whose IMDb id this milestone does not retain (a `tvEpisode`, a
-       `short`, an adult title) has nowhere to land, and dropping it on the
-       floor makes the crawl unrepeatable when `Episode` arrives in a later
-       milestone.
-    2. Applying pairs is a separate, re-runnable step, so a conflict (two
-       IMDb ids claiming one TMDb id — 569 measured cases) is reported
-       rather than silently swallowed inside a streaming loop.
-    3. It records what Wikidata actually said, so a later gap-fill from
-       TMDb's own `external_ids` can be distinguished from it by provenance.
+       `short`, an adult title) has nowhere to land, and dropping it makes the
+       crawl unrepeatable once `Episode` arrives.
+    2. Applying pairs is a separate, re-runnable step, so a conflict -- two
+       IMDb ids claiming one TMDb id -- is reported rather than swallowed
+       inside a streaming loop.
+    3. It records what Wikidata actually said, so a later gap-fill from TMDb's
+       own `external_ids` is distinguishable from it by provenance.
     """
 
     __tablename__ = "id_crosswalk"
@@ -135,7 +130,7 @@ class IdCrosswalkRow(Base):
     __table_args__ = (
         CheckConstraint("imdb_id <> ''", name="ck_id_crosswalk_imdb_id_not_empty"),
         # No unique index on the three provider columns: the data genuinely
-        # contains duplicates (measured), and this table's job is to record
-        # what Wikidata said, not to arbitrate it. Arbitration happens in
-        # link_crosswalk, where `titles`' own unique indexes decide.
+        # contains duplicates, and this table's job is to record what Wikidata
+        # said, not to arbitrate it. Arbitration happens in link_crosswalk,
+        # where `titles`' own unique indexes decide.
     )

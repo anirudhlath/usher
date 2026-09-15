@@ -40,9 +40,8 @@ _INSERT_ROW = text(
 
 # **The newest generation, resolved to one `generation_id` rather than to one instant.**
 # The two agree whenever the writer stamped a single `generated_at` onto a whole
-# generation -- which is what that column carrying no `server_default` exists to
-# guarantee -- and they diverge exactly when it did not, where `= max(generated_at)`
-# would hand back a mixture of two nights and this returns whichever generation the
+# generation, and diverge exactly when it did not -- where `= max(generated_at)` would
+# hand back a mixture of two nights and this returns one whole generation.
 _LIST_FOR_USER = """
 SELECT * FROM (
     SELECT curated_rows.*,
@@ -57,10 +56,9 @@ WHERE generation_id = newest_generation_id
 ORDER BY "position", id
 """
 
-# : The one name in a `list_for_user` row that is the *statement's* and not the :
-# table's, removed by `del` before the model sees it -- so a rewrite that stops :
-# producing it raises here rather than passing an unexpected key to an :
-# `extra="forbid"` model two lines later.
+#: The one name in a `list_for_user` row that is the *statement's* and not the table's,
+#: removed by `del` before the model sees it -- so a rewrite that stops producing it
+#: raises here rather than passing an unexpected key to an `extra="forbid"` model.
 _WINDOW_LABEL = "newest_generation_id"
 
 
@@ -69,8 +67,8 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
         self._session = session
 
     async def replace_for_user(self, user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> int:
-        # Before the DELETE, and before the SAVEPOINT -- but the reason is not the
-        # obvious one, and the sweep is what corrected it.
+        # Before the DELETE and before the SAVEPOINT: an incoherent batch must not
+        # clear a household's screen on its way to being refused.
         _refuse_disagreement(user_id, rows)
         records = [
             {
@@ -91,11 +89,10 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
             }
             for row in rows
         ]
-        # **What this table can refuse: any constraint on `curated_rows`, and one
-        # refusal that is not a constraint at all.** A `user_id` naming no household
+        # **What this table can refuse:** a `user_id` naming no household
         # (`fk_curated_rows_user_id_users`); an empty or NULL-carrying card array, a
         # negative position, an empty slug/title/model name (the six CHECKs); and a
-        # batch carrying one row id twice (`pk_curated_rows`), which is neither a CHECK
+        # batch carrying one row id twice (`pk_curated_rows`).
         async with refusals_as_conflict(
             self._session, "a curated generation violates the screen's own bounds"
         ):
@@ -118,12 +115,11 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
 def _to_domain(row: RowMapping) -> CuratedRow:
     """One stored shelf, with the window label the statement carries removed.
 
-    `del` rather than a filter, and it is the difference between this and the
-    `row._mapping[name]` spelling `_LIST_FOR_USER`'s comment rejects: this
-    removes one name the *statement* added and refuses to run if the statement
-    stops adding it, where a filter removes whatever the model does not happen
-    to declare -- including a column somebody added to `curated_rows` and to
-    nothing else, which is the drift the `SELECT *` exists to make loud.
+    `del` rather than a filter: this removes one name the *statement* added and
+    refuses to run if the statement stops adding it, where a filter removes
+    whatever the model does not happen to declare -- including a column somebody
+    added to `curated_rows` and nowhere else, which is the drift the `SELECT *`
+    exists to make loud.
     """
     fields = dict(row)
     del fields[_WINDOW_LABEL]
@@ -131,9 +127,7 @@ def _to_domain(row: RowMapping) -> CuratedRow:
 
 
 def _refuse_disagreement(user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> None:
-    """The two disagreements `replace_for_user` can be handed.
-
-    refused before anything is written.
+    """The two disagreements `replace_for_user` can be handed, refused before any write.
 
     Both exist because the signature takes no `generation_id`: every
     `CuratedRow` carries one, so a parameter could only restate it, and what a

@@ -1,4 +1,4 @@
-"""`genome_tags` — what each of `genome_scores.relevance`'s 1,128 lanes means."""
+"""`genome_tags` — what each of `genome_scores.relevance`'s lanes means."""
 
 import sqlalchemy as sa
 from alembic import op
@@ -20,7 +20,7 @@ def upgrade() -> None:
         # lane, a state no consumer could interpret.
         sa.Column("tag_id", sa.Integer(), autoincrement=False, nullable=False),
         sa.Column("tag", sa.Text(), nullable=False),
-        # ADR-0020's fingerprint, and the one column this table exists for.
+        # The release fingerprint, and the one column this table exists for.
         # Compared against `genome_scores.genome_revision`, never joined to it.
         sa.Column("genome_revision", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("tag_id", name="pk_genome_tags"),
@@ -34,7 +34,7 @@ def upgrade() -> None:
         sa.CheckConstraint("tag <> ''", name="ck_genome_tags_tag_not_empty"),
         sa.CheckConstraint("genome_revision <> ''", name="ck_genome_tags_revision_not_empty"),
     )
-    # No index beyond the primary key -- see this migration's docstring.
+    # No index beyond the primary key: the whole read is the vocabulary in lane order.
 
 
 def downgrade() -> None:

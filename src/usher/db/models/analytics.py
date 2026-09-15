@@ -1,7 +1,4 @@
-"""`search_queries`.
-
-[PRD 10](../../../../docs/prd/10-telemetry-and-dashboards.md)'s second analytics table,
-"""
+"""`search_queries` -- PRD 10's second analytics table."""
 
 import uuid
 from datetime import datetime
@@ -26,12 +23,9 @@ class SearchQueryRow(Base):
     """One search, and what it led to.
 
     **`mode` reuses `usher.ports.search.SearchMode` directly.** `usher.db`
-    sits outside the four-layer contract (`layers = ["usher.api",
-    "usher.services", "usher.ports", "usher.domain"]`), so the import is
-    legal, and `usher/domain/search.py`'s docstring deliberately declares no
-    `SearchMode` of its own — a decision this table honours rather than
-    reverses by minting a second, drift-capable copy of a three-member
-    vocabulary.
+    sits outside the four-layer contract, so the import is legal, and minting
+    a second copy of a three-member vocabulary would only give it something to
+    drift against.
     """
 
     __tablename__ = "search_queries"
@@ -41,11 +35,10 @@ class SearchQueryRow(Base):
     # `server_default`. `at` rather than `created_at` because PRD 10's column
     # list says `at` — the same call `llm_calls` made one table over.
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # **RESTRICT**, and it is the asymmetric half of the two rules on this
-    # table. A household's search history is user state, which is the side of
-    # ADR-0010's asymmetry `fk_watch_states_episode_id_episodes` already sits
-    # on: deleting a user must fail loudly while the record of what they
-    # searched for still exists, rather than taking it silently.
+    # **RESTRICT**, the asymmetric half of the two rules on this table: a
+    # household's search history is user state, so deleting a user must fail
+    # loudly while the record of what they searched for still exists, rather
+    # than taking it silently.
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -61,13 +54,11 @@ class SearchQueryRow(Base):
     clicked_title_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="SET NULL"), nullable=True
     )
-    # NOT NULL with no default, `llm_calls.ok`'s precedent. The writer sets it
-    # at insert (nothing has been played yet) and attribution updates it, so a
-    # dashboard reads a real `false` rather than a column nobody filled —
-    # which is the failure the "whole" in PRD 10's comment is about.
+    # NOT NULL with no default, `llm_calls.ok`'s precedent: the writer sets it
+    # at insert and attribution updates it, so a dashboard reads a real `false`
+    # rather than a column nobody filled.
     played: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    # **The tenth and eleventh columns, `m10c`, PRD 10's amendment 2.** They are two
-    # columns rather than a fourth `SearchMode` member because `SearchMode` is `GET
+    # Two columns rather than a fourth `SearchMode` member: `SearchMode` is `GET
     # /search`'s `?mode=` and `SearchAnswer`'s two fields, so a member no search lane
     # can serve would become reachable on a route that would have to refuse it.
     surface: Mapped[SearchSurface] = mapped_column(
@@ -84,11 +75,9 @@ class SearchQueryRow(Base):
         CheckConstraint("query <> ''", name="ck_search_queries_query_not_empty"),
         CheckConstraint("result_count >= 0", name="ck_search_queries_result_count_non_negative"),
         CheckConstraint("latency_ms >= 0", name="ck_search_queries_latency_ms_non_negative"),
-        # **One index since `m10c`, and it has a reader named in PRD 10 itself** —
-        # `DELETE FROM search_queries WHERE at < now() - interval '90 days'`, which that
-        # document records as a sequential scan *"until somebody adds one"*.
+        # For PRD 10's retention sweep, `DELETE FROM search_queries WHERE at <
+        # now() - interval '90 days'`, which without it is a sequential scan.
         Index("ix_search_queries_at", "at"),
-        # The cost of `m09a`'s original decision is stated rather than hidden,
-        # and is unchanged by the index above: `clicked_title_id`'s SET NULL
-        # has no lookup behind it, so a title delete still scans this table.
+        # `clicked_title_id`'s SET NULL has no index behind it, so a title
+        # delete still scans this table.
     )

@@ -1,4 +1,4 @@
-"""`images` gets the natural key `m09a` was asked for and shipped without."""
+"""`images` gets its natural key: the owner triple plus the two provider columns."""
 
 from alembic import op
 
@@ -13,22 +13,20 @@ _KEY_COLUMNS = ("title_id", "episode_id", "person_id", "provider", "provider_pat
 
 
 def upgrade() -> None:
-    # The CHECK body follows the column automatically -- Postgres stores a
-    # parse tree, not the text -- so only the constraint's *name* has to move,
-    # and it is moved rather than left because a constraint called
-    # `ck_images_remote_url_not_empty` on a column called `provider_path` is
-    # the stale "verified" fact `prd-maintenance.md` calls worse than none.
+    # The CHECK body follows the column automatically -- Postgres stores a parse
+    # tree, not the text -- so only the constraint's *name* has to move. It is
+    # moved rather than left, because `ck_images_remote_url_not_empty` on a column
+    # called `provider_path` sends the next reader looking for a column that is gone.
     op.alter_column("images", "remote_url", new_column_name="provider_path")
     op.execute(
         "ALTER TABLE images RENAME CONSTRAINT "
         "ck_images_remote_url_not_empty TO ck_images_provider_path_not_empty"
     )
 
-    # `op.execute`, not `op.create_unique_constraint`: alembic's operation has
-    # no parameter for `NULLS NOT DISTINCT`, and the whole finding above is
-    # that the spelling without it is inert for two owner kinds in three. A
-    # migration that quietly emitted the default would be the exact defect this
-    # revision exists to fix, arriving through the tooling.
+    # `op.execute`, not `op.create_unique_constraint`: alembic's operation has no
+    # parameter for `NULLS NOT DISTINCT`, and without it two of the three owner
+    # columns are NULL on every row, so the constraint never fires. A migration
+    # that quietly emitted the default would ship the inert spelling.
     op.execute(
         "ALTER TABLE images ADD CONSTRAINT uq_images_owner_provider_path "
         f"UNIQUE NULLS NOT DISTINCT ({', '.join(_KEY_COLUMNS)})"

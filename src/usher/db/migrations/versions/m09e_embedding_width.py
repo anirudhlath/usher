@@ -11,7 +11,7 @@ down_revision: str | Sequence[str] | None = "m09d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# : The width this revision moves to and away from.
+#: The width this revision moves to and away from.
 _NEW_WIDTH = 1024
 _OLD_WIDTH = 384
 
@@ -23,7 +23,7 @@ def _resize(width: int) -> None:
     operation at a different number, and a hand-mirrored `downgrade()` is how
     a pair of these drift.
     """
-    # Order is load-bearing twice.
+    # Order is load-bearing: children before the table they reference.
     op.execute(sa.text("DELETE FROM title_neighbors"))
     op.execute(sa.text("DELETE FROM user_taste"))
     op.execute(sa.text("DELETE FROM title_embeddings"))

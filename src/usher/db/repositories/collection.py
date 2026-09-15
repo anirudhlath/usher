@@ -202,11 +202,9 @@ class PostgresCollectionRepository(CollectionRepository):
                         },
                     )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** The statement binds two caller-supplied `uuid[]`s and
-            # computes nothing, so class 22 here can only be about a value this call
-            # handed in -- and `titles` carries four columns narrower than the fields
-            # feeding them, which is what the ledger scores this table on.
+            # **`DBAPIError` rather than `IntegrityError`.** The statement binds two
+            # caller-supplied `uuid[]`s and computes nothing, so class 22 here can
+            # only be about a value this call handed in.
             if not is_row_refusal(exc):
                 raise
             # A `collection_id` naming no collection. A `title_id` naming no

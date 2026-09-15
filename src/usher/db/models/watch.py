@@ -49,8 +49,8 @@ class WatchStateRow(Base):
     title_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="RESTRICT")
     )
-    # RESTRICT, matching title_id immediately above and for the identical reason
-    # (ADR-0010): a WatchState *is* the thing worth keeping.
+    # RESTRICT, matching title_id immediately above and for the identical
+    # reason: a WatchState *is* the thing worth keeping.
     episode_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("episodes.id", ondelete="RESTRICT")
     )
@@ -73,8 +73,8 @@ class WatchStateRow(Base):
         onupdate=func.now(),
         nullable=False,
     )
-    # Renamed from updated_by: that name reads as a user FK in nearly every schema, and
-    # this table has user_id right next to it.
+    # Not `updated_by`: that name reads as a user FK in nearly every schema, and
+    # this table has `user_id` right next to it.
     origin: Mapped[WatchStateOrigin] = mapped_column(
         enum_column(WatchStateOrigin, length=16), nullable=False
     )
@@ -82,8 +82,7 @@ class WatchStateRow(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "title_id", name="uq_watch_states_user_title"),
         UniqueConstraint("user_id", "episode_id", name="uq_watch_states_user_episode"),
-        # Continue Watching, and it REPLACED ix_watch_states_user_played rather than
-        # joining it.
+        # Continue Watching.
         Index(
             "ix_watch_states_user_recent",
             "user_id",
@@ -96,11 +95,10 @@ class WatchStateRow(Base):
         # every attempted title delete, including every Title merge.
         # Without this index that check is a seq scan of watch_states.
         Index("ix_watch_states_title_id", "title_id"),
-        # And the identical argument for episode_id, once M4 gave it a
-        # RESTRICT target: uq_watch_states_user_episode leads with user_id,
-        # so it cannot serve the FK's lookup on episode_id alone. 999,827 of
-        # the one measured source's 1,126,674 items are episodes, so this is
-        # the larger of the two populations, not the smaller.
+        # The identical argument for episode_id: uq_watch_states_user_episode
+        # leads with user_id, so it cannot serve the FK's lookup on episode_id
+        # alone -- and episodes are the larger of the two populations on a real
+        # library, not the smaller.
         Index("ix_watch_states_episode_id", "episode_id"),
         # Mirrors WatchState's model_validator: exactly one of
         # title_id/episode_id, never neither or both.

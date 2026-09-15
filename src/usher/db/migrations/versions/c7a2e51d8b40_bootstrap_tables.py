@@ -12,7 +12,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.create_table(
         "id_crosswalk",
         sa.Column("imdb_id", sa.String(length=16), nullable=False),
@@ -101,7 +100,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     op.drop_index(
         "ix_tmdb_ids_popularity", table_name="tmdb_ids", postgresql_where=sa.text("NOT adult")
     )

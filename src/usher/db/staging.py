@@ -1,7 +1,4 @@
-"""`COPY` into a **temporary** staging table.
-
-the one path every bulk write in this project takes.
-"""
+"""`COPY` into a **temporary** staging table -- the one path every bulk write takes."""
 
 from collections.abc import Sequence
 from typing import Any
@@ -13,16 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 async def raw_connection(session: AsyncSession) -> Any:
     """The live `asyncpg.Connection` under this session.
 
-    `AsyncSession.connection()` gives SQLAlchemy's `AsyncConnection`;
-    `get_raw_connection().driver_connection` unwraps two more layers to the
-    real driver object (verified: `asyncpg.connection.Connection`, carrying
-    `copy_records_to_table`). Typed `Any` because asyncpg ships no stubs and
-    SQLAlchemy types `driver_connection` as `Any` itself, so a narrower
-    annotation would be a fiction mypy could not check.
+    Typed `Any` because asyncpg ships no stubs and SQLAlchemy types
+    `driver_connection` as `Any` itself, so a narrower annotation would be a
+    fiction mypy could not check.
 
-    Runs `session.connection()` under `no_autoflush` for the same reason
-    every read in `PostgresTitleRepository` does: it flushes by default, and
-    a shared session may be carrying someone else's pending, invalid state.
+    `no_autoflush` for the reason every read in `PostgresTitleRepository`
+    uses it: a shared session may be carrying someone else's pending,
+    invalid state.
     """
     with session.no_autoflush:
         connection = await session.connection()

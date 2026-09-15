@@ -16,9 +16,8 @@ def upgrade() -> None:
     op.create_table(
         "title_embeddings",
         sa.Column("title_id", sa.UUID(), nullable=False),
-        # Nullable, and it is load-bearing: it is how a refused degenerate
-        # document stops matching the stale predicate. See
-        # db/models/search.py's class docstring.
+        # Nullable, and load-bearing: it is how a refused degenerate document
+        # stops matching the stale predicate.
         sa.Column("embedding", HALFVEC(384), nullable=True),
         sa.Column("model_name", sa.Text(), nullable=False),
         sa.Column("source_fingerprint", sa.Text(), nullable=False),

@@ -22,8 +22,6 @@ CREATE FUNCTION usher_array_text(text[]) RETURNS text
     AS $$ SELECT array_to_string($1, ' ') $$
 """
 
-# Verified populated and weighted: a row named `Iron` with genres {autumn,winter} and no
-# other populated input stores `'autumn':2 'iron':1A 'winter':3`.
 _COLUMN = """
 ALTER TABLE titles ADD COLUMN search_document tsvector
 GENERATED ALWAYS AS (
@@ -67,7 +65,7 @@ def downgrade() -> None:
     op.drop_index("ix_titles_name_trgm", table_name="titles")
     op.drop_index("ix_titles_search_document", table_name="titles")
     op.execute("ALTER TABLE titles DROP COLUMN search_document")
-    # After the column is gone nothing depends on the wrapper, so this is a
-    # plain DROP rather than a CASCADE. The three extensions stay -- see the
-    # module docstring.
+    # After the column is gone nothing depends on the wrapper, so this is a plain
+    # DROP rather than a CASCADE. The three extensions stay: other objects in the
+    # database may depend on them.
     op.execute("DROP FUNCTION usher_array_text(text[])")

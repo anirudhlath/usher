@@ -150,9 +150,8 @@ class PostgresTasteRepository(TasteRepository):
         return _to_stored(row)
 
     async def put(self, taste: StoredTaste) -> None:
-        # **`refusals_as_conflict`, added by M10's F9 (ADR-0044).** Two of this table's
-        # columns are narrower than the field feeding them and this method had no
-        # `except` at all, so both crossed the port boundary as a raw driver exception.
+        # Two of this table's columns are narrower than the field feeding them, so
+        # without this the refusal crosses the port boundary as a raw driver exception.
         async with refusals_as_conflict(
             self._session, "a stored centroid violates user_taste's own bounds"
         ):

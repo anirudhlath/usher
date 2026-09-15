@@ -92,10 +92,10 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 self._session.add(SyncRunRow(**run.model_dump()))
                 await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `sync_runs` carries four `integer` counters -- `items_seen`,
-            # `items_matched`, `items_unmatched`, `items_retracted` -- each fed by a
-            # `SyncRun` field bounded `ge=0` and not above.
+            # **`DBAPIError` rather than `IntegrityError`.** `sync_runs` carries four
+            # `integer` counters -- `items_seen`, `items_matched`, `items_unmatched`,
+            # `items_retracted` -- each fed by a `SyncRun` field bounded `ge=0` and
+            # not above.
             if not is_row_refusal(exc):
                 raise
             raise RepositoryConflict(
@@ -136,9 +136,9 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 if await self._session.get(SyncRunRow, run.id) is None:
                     raise RepositoryNotFound(f"no existing sync run {run.id} to update")
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** The same four counters as `add`, on the path that writes
-            # them at the end of a walk rather than at its start.
+            # **`DBAPIError` rather than `IntegrityError`.** The same four counters as
+            # `add`, on the path that writes them at the end of a walk rather than at
+            # its start.
             if not is_row_refusal(exc):
                 raise
             raise RepositoryConflict(
@@ -234,9 +234,9 @@ class PostgresRawPayloadStore(RawPayloadStore):
         try:
             # A SAVEPOINT and a translation, for the same two reasons every other
             # repository in this package has them: `services/` must not import
-            # `sqlalchemy.exc` to handle a rejected key (ADR-0009), and Postgres aborts
-            # the whole transaction on any statement error, so a caught
-            # `ck_raw_payloads_provider_not_empty` would otherwise poison the session
+            # `sqlalchemy.exc` to handle a rejected key, and Postgres aborts the whole
+            # transaction on any statement error, so a caught
+            # `ck_raw_payloads_provider_not_empty` would poison the session.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await self._session.execute(
