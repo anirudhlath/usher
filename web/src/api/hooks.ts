@@ -556,12 +556,26 @@ export function readinessFromError(error: unknown): ReadinessResponse | null {
     lanes: {
       push: readStringArray(Reflect.get(lanes, 'push')),
       worker: Reflect.get(lanes, 'worker') === true,
+      crashed_sources: readStringArray(Reflect.get(lanes, 'crashed_sources')),
+      // `null` rather than 0 or a timestamp of our own: the API sends null for
+      // "this process has recovered nothing", and a zero here would be a count
+      // we invented for a body that never carried one.
+      recovered_claims: readNumber(Reflect.get(lanes, 'recovered_claims')),
+      recovered_at: readString(Reflect.get(lanes, 'recovered_at')),
     },
   }
 }
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v: unknown): v is string => typeof v === 'string') : []
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' ? value : null
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 export type AttributionResponse = Ok<'/meta/attribution'>

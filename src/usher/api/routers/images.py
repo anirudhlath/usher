@@ -80,7 +80,7 @@ async def get_image(
             gt=0,
             description=(
                 "Requested width in pixels. Clamped **up** to the nearest rung of "
-                "154, 342, 780, 1280; omitted means 342. See ADR-0032."
+                "154, 342, 780, 1280; omitted means 342."
             ),
         ),
     ] = None,

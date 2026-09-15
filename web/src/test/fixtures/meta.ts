@@ -12,12 +12,18 @@
 import type { AttributionResponse, LivenessResponse, ReadinessResponse } from '@/api'
 
 /** Liveness is always 200 and says nothing about whether anything works. */
-export const liveness: LivenessResponse = { status: 'ok' }
+export const liveness: LivenessResponse = { status: 'ok', version: '0.1.0' }
 
 export const readinessReady: ReadinessResponse = {
   status: 'ready',
   checks: { database: true, migrations: true },
-  lanes: { push: ['Living Room Emby'], worker: true },
+  lanes: {
+    push: ['Living Room Emby'],
+    worker: true,
+    crashed_sources: [],
+    recovered_claims: null,
+    recovered_at: null,
+  },
 }
 
 /**
@@ -28,7 +34,13 @@ export const readinessReady: ReadinessResponse = {
 export const readinessDegraded: ReadinessResponse = {
   status: 'degraded',
   checks: { database: true, migrations: false },
-  lanes: { push: [], worker: false },
+  lanes: {
+    push: [],
+    worker: false,
+    crashed_sources: [],
+    recovered_claims: null,
+    recovered_at: null,
+  },
 }
 
 /**

@@ -13,23 +13,17 @@ export interface paths {
         };
         /**
          * Bootstrap Status
-         * @description What every dataset's import has done, the catalog's size, the genome's
-         *     coverage, and whether the stored tag vocabulary can name its lanes.
+         * @description What every dataset's import has done.
          *
-         *     **Declared before `POST /{phase}` and safe either way.** The two differ by
-         *     method, so no request can match both; the order here is for a reader.
+         *     The catalog's size, the genome's coverage, and whether the stored tag
+         *     vocabulary can name its lanes.
          *
          *     **One report, two surfaces.** `usher bootstrap-status` prints the same
          *     `BootstrapReport` this serialises, and the vocabulary verdict crosses the
-         *     wire as a `VocabularyState` member rather than as the CLI's sentence --
-         *     what moves into the report is the *decision*, or this route ends up
-         *     serialising English and a client ends up parsing it.
+         *     wire as a `VocabularyState` member rather than as the CLI's sentence.
          *
-         *     ⚠️ **Two aggregate reads, roughly a third of a second on a real
-         *     1.27M-title catalog** (`BootstrapReport`'s docstring carries the
-         *     measurement). That is priced for an admin screen an operator opens on
-         *     purpose. There is no cache, deliberately, and no other route should copy
-         *     this shape.
+         *     Two uncached aggregate reads over the whole catalog: priced for an admin
+         *     screen an operator opens on purpose, and no other route should copy it.
          */
         get: operations["bootstrap_status_admin_bootstrap_status_get"];
         put?: never;
@@ -51,34 +45,9 @@ export interface paths {
         put?: never;
         /**
          * Start Bootstrap
-         * @description Ask for one bulk-import phase to run. Enqueues `JobKind.BOOTSTRAP` and
-         *     returns before a byte is read.
+         * @description Ask for one bulk-import phase to run.
          *
-         *     **`phase` is a `BootstrapPhase` rather than a `str`**, which is the whole
-         *     of the refusal: FastAPI validates the path parameter against the enum, so
-         *     `/admin/bootstrap/embeddings` is a **422** in V1's envelope carrying
-         *     `validation_failed`, `/openapi.json` describes the real seven-member set,
-         *     and the CLI's `--phase` choices are derived from the same members. A
-         *     membership test inside this function would have had to choose a status
-         *     for itself, and the obvious choice -- 404 -- is wrong: the route exists
-         *     and the client asked it for something outside its vocabulary.
-         *
-         *     **The key is the phase's own wire value.** `(kind, key)` is unique, so
-         *     two presses of *imdb* while one is running are one job; `all` and `imdb`
-         *     are two keys and therefore two jobs, which is safe here in a way the
-         *     equivalent would not be for `sync` because every phase is resumable and
-         *     idempotent -- `usher.domain.jobs.JobKind` carries that argument in full.
-         *
-         *     **`JobPriority.DEMAND`**, the rung `POST /admin/rows/regenerate` and
-         *     `POST /admin/sources/{id}/sync` already use: an operator is waiting on
-         *     this the way a client opening an unenriched title is. It is also the rung
-         *     that makes the head-of-line cost visible rather than hidden -- PRD 08's
-         *     job-reliability section prices a triggered walk holding the single
-         *     `JobWorker` lane, and a bootstrap is the longest unit of work in this
-         *     system. A repeat at this priority writes zero rows and is coalesced,
-         *     which is why this 202 is identical in every case: `enqueue`'s return
-         *     value cannot tell a fresh row from a promoted one, so nothing here is
-         *     built to answer a question it cannot answer honestly.
+         *     Enqueues `JobKind.BOOTSTRAP` and returns before a byte is read.
          */
         post: operations["start_bootstrap_admin_bootstrap__phase__post"];
         delete?: never;
@@ -96,8 +65,7 @@ export interface paths {
         };
         /**
          * One keyset page of the catalog, filtered and sorted
-         * @description One page of the catalog, keyset-paged, with the facet counts the
-         *     measurement allows.
+         * @description One page of the catalog, keyset-paged, with facet counts where affordable.
          *
          *     **An empty page is `200`, an empty list and a `null` cursor.** `/browse` is
          *     a screen, and a screen with nothing on it is a statement about the catalog
@@ -134,8 +102,7 @@ export interface paths {
         };
         /**
          * Get Collection
-         * @description A franchise, its members in release order, and how much of it the
-         *     household owns.
+         * @description A franchise, its members in release order, and how much of it the household owns.
          *
          *     `owned_count` and `total_count` are the lengths of the rendered list and of
          *     its owned subset, so a client that counts the cards gets the same numbers.
@@ -186,7 +153,9 @@ export interface paths {
         };
         /**
          * Health
-         * @description Liveness. Checks nothing external by design.
+         * @description Liveness.
+         *
+         *     Checks nothing external by design.
          */
         get: operations["health_health_get"];
         put?: never;
@@ -206,23 +175,12 @@ export interface paths {
         };
         /**
          * Ready
-         * @description Readiness. Reports each dependency separately.
+         * @description Readiness, reporting each dependency separately.
          *
-         *     Sets the response status to 503 when degraded rather than leaving the
-         *     default 200: no doc pins a status code here, so this is a deliberate
-         *     call, not a plan default. A readiness probe's entire contract *is*
-         *     the status code -- Kubernetes, Docker `healthcheck`, and load
-         *     balancers gate on it and never parse the body, so a 200 "degraded"
-         *     response tells every one of them "keep sending traffic here," which
-         *     is exactly wrong.
-         *
-         *     Takes the `Response` object as a parameter and mutates its
-         *     `status_code` rather than constructing a `JSONResponse` directly, so
-         *     FastAPI still runs this handler's return value through
-         *     `response_model` normally instead of the caller being responsible for
-         *     matching that shape by hand (FastAPI's own docs: returning a
-         *     `Response` directly "bypasses automatic data filtering and
-         *     serialization").
+         *     **503 when degraded, 200 when ready**, and the status code is the whole
+         *     contract: Kubernetes, Docker `healthcheck` and load balancers gate on it and
+         *     never parse the body. `checks` names the dependency that failed; `lanes` is
+         *     reported and never gated on.
          */
         get: operations["ready_health_ready_get"];
         put?: never;
@@ -244,19 +202,8 @@ export interface paths {
          * Get Home
          * @description Compose this household's screen, and answer it conditionally.
          *
-         *     The context is a dependency rather than something built here, because it is
-         *     thirteen request-scoped values and `tests/integration/test_pipeline_deps.py`
-         *     is the only thing that resolves the graph FastAPI actually builds --
-         *     annotating one of them without `Depends` is a `FastAPIError` at *route
-         *     registration*, which a unit test that overrides this route's service never
-         *     sees.
-         *
-         *     Returns a `Response` rather than a `HomeResponse`, always -- FastAPI
-         *     passes a `Response` instance through untouched (`response_model` still
-         *     describes the 200 shape for `/openapi.json`), and that is what lets the
-         *     same bytes `conditional_response` hashes be the bytes actually sent: a
-         *     second, independent serialisation through FastAPI's own encoder is exactly
-         *     the correctness hazard the caching module's docstring warns about.
+         *     Carries a strong `ETag` over the body and `Cache-Control: private, max-age=`
+         *     the screen's TTL; a matching `If-None-Match` is answered 304.
          */
         get: operations["get_home_home_get"];
         put?: never;
@@ -277,12 +224,6 @@ export interface paths {
         /**
          * Get Image
          * @description Serve `image_id` at the rung `w` clamps to, fetching and storing once.
-         *
-         *     Every raise below names its own `ProblemCode` at the raise site, which is
-         *     ADR-0030 ruling 4: `_CODE_FOR_STATUS` covers only the statuses Starlette
-         *     and FastAPI raise before any handler runs, so a bare `HTTPException` here
-         *     would silently opt this route out of the envelope and answer
-         *     `{"detail": ...}` at `application/json`.
          */
         get: operations["get_image_images__image_id__get"];
         put?: never;
@@ -302,8 +243,7 @@ export interface paths {
         };
         /**
          * Attribution
-         * @description The four required attribution strings, unfiltered by deployment
-         *     state. See the module docstring for why.
+         * @description The four required attribution strings, unfiltered by deployment state.
          */
         get: operations["attribution_meta_attribution_get"];
         put?: never;
@@ -367,8 +307,7 @@ export interface paths {
          *     that reason.
          *
          *     **`?search_id=` reports PRD 10's `played`**, which is the one fact
-         *     `search_queries` exists to answer and the one no other route can. See
-         *     `_record_play` for what the column does and does not claim.
+         *     `search_queries` exists to answer and the one no other route can.
          */
         post: operations["play_title_titles__title_id__play_post"];
         delete?: never;
@@ -390,11 +329,10 @@ export interface paths {
          * Ranked ways to play an episode, as tickets
          * @description The same answer for one episode, and the same attribution.
          *
-         *     A route of its own rather than a query parameter on the one above:
-         *     999,927 of the one measured library's 1,126,789 items are episodes
-         *     (`docs/prd/03-sources-and-sync.md`), and the two reads underneath are
-         *     different statements -- `list_for_title` carries `AND episode_id IS NULL`,
-         *     which excludes precisely the rows this route is about.
+         *     A route of its own rather than a query parameter on the one above: episodes
+         *     are the bulk of a library, and the two reads underneath are different
+         *     statements -- `list_for_title` carries `AND episode_id IS NULL`, which
+         *     excludes precisely the rows this route is about.
          *
          *     A search whose result was a series and whose play was an episode of it
          *     still records `played` here: PRD 10 asks whether the search led to
@@ -418,11 +356,10 @@ export interface paths {
          * Redeem a playback ticket into a redirect
          * @description A `302` to the real target, or a `404` if the ticket will not be honoured.
          *
-         *     The ticket is a path parameter and needs no decoding step here: Starlette
-         *     has already percent-decoded the segment, and D1 measured that a ticket's
-         *     alphabet is url-safe base64 plus `=`, which is a legal `pchar`, so the
-         *     minting side's `quote(ticket, safe="=")` is what makes the round trip
-         *     exact.
+         *     The ticket is a path parameter and needs no decoding step here: Starlette has
+         *     already percent-decoded the segment, and a ticket's alphabet is url-safe
+         *     base64 plus `=`, a legal `pchar`, so the minting side's `quote(ticket,
+         *     safe="=")` is what makes the round trip exact.
          *
          *     **A hostile segment must not become a 500, and `redeem` is what stops it.**
          *     A percent-decoded path segment can be a non-ASCII `str`, which reaches
@@ -483,19 +420,13 @@ export interface paths {
          * List Row Providers
          * @description Every registered row provider, and whether it composes.
          *
-         *     **Derived from `ROW_PROVIDERS`, never from a literal and never from the
-         *     table.** The registry is the set of providers that exist -- a provider that
-         *     is not registered is dead code (boundary call 9) -- and
-         *     `row_provider_settings` holds only what an operator has touched, so a
-         *     listing read off the *table* would answer nothing on a fresh install and
-         *     would grow a row at a time as somebody clicked. The join is a **left** one
-         *     in `services/rows/__init__.py`, which is also where the default lives:
-         *     absence means enabled, and this endpoint is where a caller would otherwise
-         *     be tempted to spell that for itself.
+         *     **Derived from `ROW_PROVIDERS`, never from the overrides table.** The registry
+         *     is the set of providers that exist; the table holds only what an operator has
+         *     touched, so a listing read off it would answer nothing on a fresh install and
+         *     would grow a row at a time as somebody clicked. Absence means enabled.
          *
-         *     In registry order rather than sorted by slug, so an operator's screen is
-         *     the same order as `usher home`'s report and does not reshuffle when a
-         *     provider is renamed.
+         *     In registry order rather than sorted by slug, so an operator's screen matches
+         *     `usher home`'s report and does not reshuffle when a provider is renamed.
          */
         get: operations["list_row_providers_admin_rows_providers_get"];
         put?: never;
@@ -517,46 +448,6 @@ export interface paths {
         /**
          * Set Row Provider Enabled
          * @description Switch one provider on or off for this deployment.
-         *
-         *     **A slug the registry does not hold is a 404 and writes nothing.** An
-         *     override for a provider nothing registers is dead configuration that reads
-         *     exactly like working configuration -- an operator finds `enabled = false`
-         *     in the table and believes a shelf is off. The check is against
-         *     `ROW_PROVIDERS` and comes *before* the write, which is the half a status
-         *     code cannot show: "it answered 404" is also what a route that wrote the row
-         *     and then failed a lookup produces, so `tests/unit/test_api_rows.py` reads
-         *     `overrides()` back.
-         *
-         *     The code is the generic `NOT_FOUND` rather than a minted
-         *     `provider_not_found`: ADR-0030 ruling 1 closes the vocabulary at seven and
-         *     refuses per-resource 404s, because RFC 9457's `instance` already carries
-         *     the path -- `/admin/rows/providers/<slug>` says which provider was not
-         *     found more precisely than a code could.
-         *
-         *     **`RowCache.clear()`, not `invalidate(user_id, slugs)`.** A provider toggle
-         *     is deployment-wide and the per-user/per-slug invalidation cannot express
-         *     it: `invalidate` takes a household, and the households whose ~30 s screens
-         *     are now wrong are all of them. The cache is one object on `app.state`, so
-         *     the clear reaches every subsequent request **in this process**.
-         *
-         *     Two costs, both stated rather than left to be discovered:
-         *
-         *     - **It empties every household's screen on any toggle.** With one household
-         *       (PRD 01's authentication seam) that is free; the day authentication lands
-         *       it is one screen rebuild per user, on an operator action nobody performs
-         *       in a loop. Cheaper than the alternative, which is a per-household
-         *       invalidation that has to enumerate the `users` table from a route.
-         *     - **A second replica keeps serving its own ≤30 s screen.** This is the
-         *       cross-process gap `services/rows/cache.py` already records in full, and
-         *       this route restates rather than widens it: the bound is `_SCREEN_TTL`,
-         *       the same one a push-lane invalidation already has.
-         *
-         *     The clear is on the **success** path, after the write. It is also *before*
-         *     `get_session`'s commit, which is the one ordering this route cannot fix
-         *     from inside a handler: a concurrent `GET /home` landing in that window
-         *     reads the pre-toggle overrides in its own transaction and may re-cache a
-         *     screen for up to `_SCREEN_TTL`. Bounded by the same 30 s, and the same
-         *     shape as the replica case above.
          */
         put: operations["set_row_provider_enabled_admin_rows_providers__slug__put"];
         post?: never;
@@ -576,34 +467,6 @@ export interface paths {
         /**
          * Ranked results across the catalog and the library
          * @description Retrieve, rank, and report what actually ran.
-         *
-         *     **`mode=semantic` succeeds wherever this process holds an embedding model,
-         *     and that is a property of the wiring rather than of this route.**
-         *     `create_app`'s lifespan builds one per process whenever
-         *     `USHER_EMBEDDING_ENABLED` names one, and parks it on `app.state` for
-         *     `api/deps.get_search_service` to read (issue #31). Where a deployment
-         *     configured none, `mode=fused` narrows to full text and reports the
-         *     narrowing while `mode=semantic` answers the 422 below -- a statement about
-         *     that deployment, not about this API.
-         *
-         *     *(This read ⚠️ "cannot succeed on an API-only deployment" until #31, and
-         *     named a 65 MB / ~4.8 s cold load as the price of closing it. That price was
-         *     an argument against **building** a model here; this route reads one the
-         *     process built anyway. It is runtime-dependent besides -- the `openai:`
-         *     runtime holds no model in memory at all.)*
-         *
-         *     The `try` wraps the call and nothing else. `SemanticSearchUnavailable` is
-         *     raised before any retrieval, so there is no partial answer to discard and
-         *     no second failure mode hiding inside the block.
-         *
-         *     **The same `q` can answer differently for two households**, because the
-         *     blend now carries a watch-state term. Nothing in the response says which
-         *     household answered, and that is not the omission `requested_mode` beside
-         *     `mode` exists to prevent: a degraded mode is a deployment state a client
-         *     cannot otherwise observe, whereas every request to this route carries a
-         *     household by construction, so there is no unpersonalised answer for a field
-         *     to distinguish. `SearchService`'s own docstring records what changes when
-         *     authentication makes one reachable.
          */
         get: operations["search_search_get"];
         put?: never;
@@ -624,39 +487,6 @@ export interface paths {
         /**
          * Type-ahead candidates, from the prefix tier or the fuzzy one
          * @description Answer one tier, and say which one.
-         *
-         *     **The short-`q` arm returns before the service, not inside it**, and that
-         *     placement is the whole point: what a one-character prefix costs is 2,707 ms
-         *     *of database work*, so a bound applied after the port call would save
-         *     nothing at all. It is also why this lives here rather than in
-         *     `SearchService` — `usher suggest` is a command typed once, not a keystroke,
-         *     and refusing it a three-character prefix would take a capability away from
-         *     the one caller that can afford it (ADR-0031).
-         *
-         *     **`min_query_length` is reported on every response, not only the refused
-         *     ones.** A client that can read the rule can apply it and never send the
-         *     request, which is the only place this cost can actually be removed rather
-         *     than moved; and on a full answer the same field is what says the box is
-         *     complete rather than truncated by a bound.
-         *
-         *     **No `try`, because this route has no failure to catch.**
-         *     `SemanticSearchUnavailable` is raised in front of an embed and `suggest`
-         *     has none — no model, no lane to narrow, no capability an operator may not
-         *     have installed. Both tiers are btree/GIN reads over tables `m09a` creates
-         *     unconditionally.
-         *
-         *     🔴 **And no `search_queries` row, on either tier or either arm** — argued
-         *     rather than deferred (F2). `search_queries.mode` is a `SearchMode`, three
-         *     reachable values; a tier is a disjoint vocabulary, so storing both under
-         *     one column is two vocabularies under one name. And this route is driven
-         *     per keystroke at tier 1's p50 of 0.6 ms against full text's 33.3 ms, so its
-         *     rows would out-number *and* out-weight the searches by an order of
-         *     magnitude each in every mode-split panel PRD 10 builds. What it costs is
-         *     that the question PRD 10 most wants that table for — whether real users
-         *     type two- to four-character queries at all — is a question about *this* box, and
-         *     cannot be answered in M9. The two amendments that would answer it are
-         *     named in PRD 10; neither is a decision this route may take on its own,
-         *     exactly as with the problem code above.
          */
         get: operations["suggest_search_suggest_get"];
         put?: never;
@@ -676,8 +506,7 @@ export interface paths {
         };
         /**
          * The seasons of a series
-         * @description Every season of one title, ordered by `season_number`, specials
-         *     included.
+         * @description Every season of one title, ordered by `season_number`, specials included.
          *
          *     **A `movie` answers `200` with an empty list.** Nothing about a film is
          *     missing when it has no seasons, and the route is addressable for any title
@@ -710,13 +539,11 @@ export interface paths {
          * One page of a season's episodes
          * @description Keyset-paged by `episode_number` within the season.
          *
-         *     **A season that exists and holds nothing answers `200` with an empty
-         *     page.** That is a real state rather than a defect: T1 moved enrichment onto
-         *     one `append_to_response` request per series, and a season block TMDb
-         *     declines to serve arrives as the *same 200 with the key absent* as a season
-         *     the show does not have -- so a listed season whose block never came leaves
-         *     a `Season` row with no episodes and the old *"let the 404 park the job"*
-         *     signal is gone. `404` here means the `season_id` names no row at all.
+         *     **A season that exists and holds nothing answers `200` with an empty page.**
+         *     That is a real state rather than a defect: a season block TMDb declines to
+         *     serve arrives as the *same 200 with the key absent* as a season the show does
+         *     not have, so a listed season whose block never came leaves a `Season` row with
+         *     no episodes. `404` here means the `season_id` names no row at all.
          *
          *     Two statements per page, and the second is **one statement for the page**
          *     rather than one per episode.
@@ -739,8 +566,7 @@ export interface paths {
         };
         /**
          * One episode
-         * @description One episode by its own id, with the `title_id` and `season_id` a client
-         *     climbs back up with.
+         * @description One episode, with the `title_id` and `season_id` a client climbs back up with.
          *
          *     No new port method: `list_by_ids` already answers this in one round trip
          *     and returns absence as a **missing key** rather than a key mapped to
@@ -820,42 +646,9 @@ export interface paths {
         put?: never;
         /**
          * Sync Source
-         * @description Ask for one source to be walked again. Enqueues `JobKind.SYNC` and
-         *     returns before anything runs.
+         * @description Ask for one source to be walked again.
          *
-         *     **Two refusals, both before anything is enqueued.** 404 for a source id
-         *     that does not exist -- read through `SourceRepository.get`, never through
-         *     `SourceService.status`, which builds an adapter and calls `verify()`
-         *     (`services/sources.py:161`); a lookup that dials the upstream is not a
-         *     lookup. And 409 `not_playable` for a source whose `enabled` is `false`,
-         *     because `enabled` is how an operator parks a source being rebuilt --
-         *     `composition.selected_sources` skips a disabled source even when named
-         *     explicitly, so a 202 here would promise a walk the worker will decline.
-         *     **`not_playable`, not a minted `source_disabled`** -- V1's vocabulary is
-         *     closed at seven (ADR-0030) and this refusal does not clear the bar for an
-         *     eighth: both say RFC 9110 §15.5.10's *"conflict with the current state of
-         *     the target resource, stop asking"*, and a client cannot act on the two
-         *     differently. `detail` carries the sentence that is true of this route;
-         *     `code` carries only the disposition, which `/play` already spells this
-         *     way. See ADR-0030's amendment.
-         *
-         *     **The key is `"{source_id}:{kind}"`, and `kind` is the whole of lane
-         *     selection.** `(kind, key)` is unique on the queue, so a bare source id
-         *     would coalesce a requested `full` walk into a pending `delta` one and
-         *     answer 202 for a walk that never happens -- `usher.domain.jobs.JobKind.
-         *     SYNC` has the whole argument. `kind` defaults to `delta`, the cheaper of
-         *     the two lanes an operator reaching for this button is most often asking
-         *     for; `full` is there for the same reason `usher sync --kind full` is.
-         *
-         *     **`JobPriority.DEMAND`, because an operator is waiting on this the way a
-         *     client opening an unenriched title is** -- the same rung
-         *     `POST /admin/rows/regenerate` and the demand-promotion route already use.
-         *     A repeat at this priority writes zero rows and is coalesced into whatever
-         *     is already pending or running, `usher.domain.jobs.JobKind` states the
-         *     measured table, and this route's own 202 is identical in every case for
-         *     the same reason that one's is: `enqueue`'s return value cannot tell a
-         *     fresh row from a promoted one, so nothing here is built to answer a
-         *     question it cannot honestly answer.
+         *     Enqueues `JobKind.SYNC` and returns before anything runs.
          */
         post: operations["sync_source_admin_sources__source_id__sync_post"];
         delete?: never;
@@ -873,25 +666,18 @@ export interface paths {
         };
         /**
          * Get Title
-         * @description One title, everything local about it, a promotion if it needs one, and
-         *     the click attributed to the search it came from if the client says so.
+         * @description One title: everything local about it, plus a promotion if it needs one.
          *
-         *     **`response_model_exclude_unset=True` is what makes an empty `cast` or
-         *     `crew` an absent key rather than `[]`** -- `TitleResponse.of` declines to
-         *     *set* either when it has no members, and every other field it sets
-         *     unconditionally, so nothing else moves. The reasoning, the two spellings
-         *     rejected and the guard that keeps `of` honest are all in
-         *     `api/dto/title.py`; this flag is the half that cannot live there.
+         *     **`response_model_exclude_unset=True` makes an empty `cast` or `crew` an
+         *     absent key rather than `[]`** -- `TitleResponse.of` declines to *set* either
+         *     when it has no members, and sets every other field unconditionally.
          *
-         *     **`?search_id=` is PRD 10's click, and it is the reason this route now
-         *     writes twice.** `GET /search` hands the id of the `search_queries` row it
-         *     wrote; opening a result with that id attached is the only moment anything
-         *     knows *which* result the household opened, so it fills
-         *     `clicked_title_id`. It rides the same commit the demand promotion does
-         *     and changes nothing else: no status code, no field, no header. Omitting
-         *     it is always legal, and a value that is unknown or not a UUID at all is
-         *     ignored rather than refused -- analytics may not decide whether a
-         *     resource is served.
+         *     **`?search_id=` is PRD 10's click.** `GET /search` hands back the id of the
+         *     `search_queries` row it wrote; opening a result with that id attached is the
+         *     only moment anything knows *which* result the household opened, so it fills
+         *     `clicked_title_id`. It changes no status code, no field and no header.
+         *     Omitting it is always legal, and a value that is unknown or not a UUID at all
+         *     is ignored rather than refused.
          */
         get: operations["get_title_titles__title_id__get"];
         put?: never;
@@ -911,9 +697,7 @@ export interface paths {
         };
         /**
          * Get Similar Titles
-         * @description M6's precomputed neighbours (`SimilarityService.neighbors_of`), plus
-         *     both of `title_neighbors`' staleness signals -- see `SimilarResponse` for
-         *     what each one answers and what neither can.
+         * @description Precomputed neighbours, plus both of `title_neighbors`' staleness signals.
          *
          *     A title with no stored neighbours is `200` with an empty list -- that is
          *     a fact about the title, not a failure -- and only an unknown `title_id`
@@ -974,29 +758,6 @@ export interface paths {
         /**
          * Resolve one unmatched item by hand
          * @description Say what an unmatched file is.
-         *
-         *     **Everything the body names is checked before anything is written**, and
-         *     the order is the point rather than an implementation detail:
-         *     `attach_title` writes what it is given, so a refusal that arrived after
-         *     the write would be a refusal that had already happened. Each refusal case
-         *     reads the queue back to assert the row is still on it -- "it answered 422"
-         *     is also what a route that wrote the row and then failed a lookup produces.
-         *
-         *     **An `episode_id` belonging to another title is refused, and nothing
-         *     downstream would have caught it.** `media_items` carries `title_id` and
-         *     `episode_id` as independent foreign keys with no CHECK tying them
-         *     together, and an episode row is *supposed* to carry its series' title
-         *     beside its own episode (`ports/ingest.py`'s `MediaItemTarget`), so a file
-         *     pointed at episode 3 of a different series is a valid row that every read
-         *     on this port will happily answer with. `Episode` carries `title_id`
-         *     directly, so one `list_by_ids` settles it.
-         *
-         *     **The 404 is the media item's and only the media item's.** It comes from
-         *     `attach_title`'s boolean -- the port returns whether a row changed
-         *     precisely so a caller can answer 404 rather than claim to have resolved
-         *     something that does not exist -- and it is the generic `not_found`, since
-         *     RFC 9457's `instance` carries `/admin/unmatched/<id>/resolve`, which names
-         *     the missing item more precisely than a code could (ADR-0030 ruling 1).
          */
         post: operations["resolve_unmatched_item_admin_unmatched__media_item_id__resolve_post"];
         delete?: never;
@@ -1068,18 +829,17 @@ export interface paths {
          *
          *     Advances `play_count` to `GREATEST(play_count, 1)` and stamps
          *     `last_played_at`, which is Emby's own `POST /PlayedItems` behaviour --
-         *     measured as advancing to 1 idempotently rather than incrementing -- so
-         *     pressing this twice does not diverge from the source on the second press.
+         *     advancing to 1 idempotently rather than incrementing -- so pressing this
+         *     twice does not diverge from the source on the second press.
          */
         post: operations["mark_title_played_watch_titles__title_id__played_post"];
         /**
          * Mark a title unplayed
          * @description `DELETE` the *played* flag, and nothing else.
          *
-         *     **The resume position survives**, and that is the local half of M3's
-         *     live finding rather than an omission: Emby's
-         *     `DELETE /Users/{u}/PlayedItems/{item}` is destructive well beyond its name
-         *     -- it resets `PlayCount`, clears `LastPlayedDate` *and* clears a non-zero
+         *     **The resume position survives**, and that is deliberate: Emby's
+         *     `DELETE /Users/{u}/PlayedItems/{item}` is destructive well beyond its name --
+         *     it resets `PlayCount`, clears `LastPlayedDate` *and* clears a non-zero
          *     position -- and `EmbyAdapter.push_watch_state` already declines to use it.
          *     `play_count` and `last_played_at` survive for the same reason: a count the
          *     household earned is not a thing this route was asked to spend.
@@ -1106,7 +866,9 @@ export interface components {
         };
         /**
          * AvailabilityResponse
-         * @description One badge. Present whether or not the copy is currently available.
+         * @description One badge.
+         *
+         *     Present whether or not the copy is currently available.
          */
         AvailabilityResponse: {
             /**
@@ -1130,46 +892,14 @@ export interface components {
         };
         /**
          * BootstrapPhase
-         * @description What one bulk-import run does, and **the members are in execution
-         *     order** (PRD 04's phased import).
+         * @description What one bulk-import run does.
          *
-         *     One vocabulary rather than two, and that is the whole reason it is here
-         *     rather than a tuple in `usher.cli`. Until M9 the set lived as
-         *     `cli.PHASES` behind `argparse`'s `choices=`, which is unreachable from
-         *     anything else -- so `POST /admin/bootstrap/{phase}` would have had to
-         *     restate it, `/openapi.json` would have described a bare string, and an
-         *     unknown phase would have been whatever the route's own membership test
-         *     chose to answer. As a path-parameter *type* it is a 422 in V1's envelope,
-         *     the CLI's `choices` are derived from the same members, and the two cannot
-         *     drift because there is nothing to drift from.
-         *
-         *     **The order is measured, not stylistic, and three edges carry evidence
-         *     (`.claude/rules/bootstrap-and-datasets.md`).** `credit-names`, `aliases`
-         *     and `movielens` all join to `titles` on `imdb_id`, so all three follow
-         *     `imdb` and an empty catalog joins to nothing -- each refuses before its
-         *     own download rather than checkpointing a vacuous `COMPLETED`.
-         *     `credit-names` comes before **everything that enriches a title**, and
-         *     the reason is precedence rather than staleness. The fill writes only
-         *     where `enrichment_state = 'skeleton'`, so a title the crawl has reached
-         *     is deferred to TMDb permanently -- on that run and every later one. Run
-         *     first and **203,969 of the 204,335 titles with >=100 votes (99.82%)**
-         *     gain names that a later derivation is free to overwrite; run last and
-         *     those same titles never gain them at all. The fill **cannot** stale an
-         *     embedding in either order: the embedded population is
-         *     `enrichment_state <> 'skeleton'`, the exact complement of what it writes.
-         *     The cost of the fill itself is +624 MB settled / +1,368 MB transient and
-         *     a GIN index 4.54x its previous size, and it is paid whenever it runs.
-         *     That is an ordering constraint on an *operator*, which is why it is
-         *     stated in the CLI's own report, in PRD 04 and here rather than enforced
-         *     -- nothing in this system knows when a crawl is about to start.
-         *
-         *     `ALL` is a member rather than a `None`: it is what an operator types, it
-         *     is a legitimate `Job.key` (a `--phase all` job is one unit of work, the
-         *     longest in this system), and a nullable path parameter would make the
-         *     route's own vocabulary a different set from the CLI's.
+         *     **The members that are *steps* are in execution order** (PRD 04's phased
+         *     import) and `FULL_SEQUENCE` names them; `ALL` and `RATINGS` are aliases and
+         *     take no position in it.
          * @enum {string}
          */
-        BootstrapPhase: "imdb" | "credit-names" | "aliases" | "tmdb-ids" | "crosswalk" | "movielens" | "all";
+        BootstrapPhase: "imdb" | "ratings" | "credit-names" | "aliases" | "tmdb-ids" | "crosswalk" | "movielens" | "all";
         /**
          * BootstrapStatusResponse
          * @description `GET /admin/bootstrap/status`'s whole body.
@@ -1191,9 +921,7 @@ export interface components {
         };
         /**
          * BootstrapTriggerResponse
-         * @description `POST /admin/bootstrap/{phase}`'s whole body: the enqueued job's
-         *     identity, on the shape `RegenerateResponse` and `SyncTriggerResponse`
-         *     already use for the other two admin triggers.
+         * @description `POST /admin/bootstrap/{phase}`'s whole body -- the enqueued job's identity.
          *
          *     `key` is a `BootstrapPhase`'s wire value, so a client that posted
          *     `/admin/bootstrap/all` reads `all` back and can watch for exactly that
@@ -1207,16 +935,12 @@ export interface components {
         };
         /**
          * BrowseFacetsResponse
-         * @description What else this client could have asked for, counted -- or an explicit
-         *     statement that nobody counted.
+         * @description What else this client could have asked for, counted -- or that nobody counted.
          *
          *     `computed` is always present and is the field a client branches on.
          *     `reason` is present exactly when `computed` is false; `genres` and `years`
          *     exactly when it is true. The route serialises with
-         *     `response_model_exclude_unset=True`, so "not set" really is "not on the
-         *     wire" -- and `test_the_facet_response_carries_every_field_of_its_own_model`
-         *     is what stops a field added here and forgotten in the two constructors
-         *     below from silently vanishing instead of failing.
+         *     `response_model_exclude_unset=True`, so "not set" really is "not on the wire".
          */
         BrowseFacetsResponse: {
             /** Computed */
@@ -1249,16 +973,14 @@ export interface components {
          *     would put "Matrix, The" on a card.
          *
          *     `popularity` is nullable and stays nullable, for `SearchResultResponse`'s
-         *     recorded reason: it is `null` for every title TMDb's daily export has never
-         *     described -- **980,523 of the 1,272,367 rows** this route was measured
-         *     against -- and `popularity or 0.0` would render "nobody has measured this"
-         *     identically to "measured, and unpopular" (ADR-0014).
+         *     reason: it is `null` for every title TMDb's daily export has never described,
+         *     most of the catalog, and `popularity or 0.0` would render "nobody has rated
+         *     this" identically to "rated, and unpopular".
          *
          *     **No artwork key**, deliberately: C6's `artwork` is one `images.id` chosen
          *     against a row's `display_hint`, read in one batched call by
-         *     `services/rows/base.py`, and browse has no such read. Adding one here is
-         *     additive and belongs in the task that adds the port call, not in a DTO
-         *     that would have to answer `null` for every row.
+         *     `services/rows/base.py`, and browse has no such read. Adding one belongs in
+         *     the task that adds the port call, not in a DTO answering `null` for every row.
          */
         BrowseItemResponse: {
             /**
@@ -1295,14 +1017,13 @@ export interface components {
          * BrowseSort
          * @description The closed vocabulary `browse` orders by.
          *
-         *     Four members, and three of the four keys are **nullable** —
-         *     `titles.year`, `titles.popularity` and `titles.vote_count` all are, and
-         *     `popularity` was measured NULL on all 1,271,138 rows of a bootstrap-only
-         *     catalog. That is why every order here is NULLS LAST and why the keyset
-         *     predicate carries an `IS NOT NULL` leg: see `TitleRepository.browse`.
+         *     Three of the four keys are nullable -- `titles.year`,
+         *     `titles.tmdb_popularity`, `titles.tmdb_vote_count` -- and a
+         *     bootstrap-only catalog has them NULL throughout. Hence NULLS LAST on
+         *     every order and the `IS NOT NULL` leg in `TitleRepository.browse`'s
+         *     keyset predicate.
          *
-         *     `name` sorts on `sort_name` rather than on `name`, which is the column
-         *     `Title.sort_name`'s own comment reserves for "catalog ordering", and it is
+         *     `name` sorts on `sort_name`, the column reserved for catalog ordering and
          *     the one key that cannot be NULL.
          * @enum {string}
          */
@@ -1368,29 +1089,6 @@ export interface components {
         /**
          * CreditResponse
          * @description One person's involvement in this title, as a client renders it.
-         *
-         *     **Four fields, and the two that are missing are missing on purpose.**
-         *     `CreditedPerson` also carries `department` and `billing_order`.
-         *
-         *     `billing_order` *is* the list order, already spent by the time a client
-         *     sees this: handing it over as a field invites a client-side re-sort, and
-         *     the tempting spelling of that (`billing_order or 0`) puts an unbilled crew
-         *     member above the lead -- the exact defect `ORDER BY billing_order ASC
-         *     NULLS LAST` exists to prevent, relocated into a client nobody here can
-         *     fix. `department` is a coarser grouping than the shape decision PRD 07
-         *     records for this route uses, and adding it later is additive; removing a
-         *     field a client has started rendering is not.
-         *
-         *     `character` and `job` are both nullable rather than one being absent per
-         *     kind, because a cast entry with no character and a crew entry with no job
-         *     are both real stored rows -- `Credit`'s own docstring: "a crew entry with
-         *     no `job` and a cast entry with no `character` are the same row shape".
-         *     `null` says "this row does not carry one"; an absent key would say
-         *     something about the *kind*, which `cast`/`crew` already say.
-         *
-         *     No `tmdb_id` and no `tmdb_credit_id`: identity in this contract is Usher's
-         *     own UUIDv7 (ADR-0003), and a provider's id for a credit is a derivation
-         *     detail with no client use.
          */
         CreditResponse: {
             /**
@@ -1407,9 +1105,7 @@ export interface components {
         };
         /**
          * DisplayHint
-         * @description ADR-0006's only concrete client vocabulary, and its whole of it:
-         *     *"Rows carry a display **hint** (`portrait | landscape | wide | square`)
-         *     but never a layout."*
+         * @description The whole of the client vocabulary: a row carries a hint, never a layout.
          *
          *     Closed on purpose. The way this goes wrong is a fifth member -- `HERO`, or
          *     `GRID_3_COLUMN` -- which is a layout wearing a hint's name and which the
@@ -1420,23 +1116,21 @@ export interface components {
         DisplayHint: "portrait" | "landscape" | "wide" | "square";
         /**
          * EnrichmentState
-         * @description How complete a Title's metadata is. Always exposed to clients so they
-         *     render deliberately rather than inferring from nulls.
+         * @description How complete a Title's metadata is.
+         *
+         *     Always exposed to clients so they render deliberately rather than inferring from
+         *     nulls.
          *
          *     A three-rung ladder, not a status: `skeleton` and `stub` differ by
          *     *provenance* as much as by completeness — `skeleton` comes from a bulk
-         *     dataset and often already carries genres, ratings, and runtime; `stub`
-         *     is only whatever a source's own API returned on first sight. Neither is
-         *     a strict subset of the other's fields.
+         *     dataset and often already carries genres, ratings and runtime; `stub` is
+         *     only whatever a source's own API returned on first sight. Whether the *last
+         *     enrichment attempt* failed is tracked separately on `Title.enrichment_error`;
+         *     a failed attempt neither consumes nor resets a tier.
          *
-         *     Whether the *last enrichment attempt* failed is tracked separately, on
-         *     `Title.enrichment_error` — a failed attempt does not consume or reset a
-         *     tier. See ADR-0008.
-         *
-         *     `StrEnum` members compare lexicographically ("enriched" < "skeleton" <
-         *     "stub"), not by ladder position: `EnrichmentState.ENRICHED >
-         *     EnrichmentState.SKELETON` is `False`. Never compare members directly to
-         *     decide "is this an improvement" — use `ENRICHMENT_RANK`.
+         *     `StrEnum` members compare lexicographically, not by ladder position. Never
+         *     compare members directly to decide "is this an improvement" — use
+         *     `ENRICHMENT_RANK`.
          * @enum {string}
          */
         EnrichmentState: "skeleton" | "stub" | "enriched";
@@ -1491,10 +1185,10 @@ export interface components {
          * FilmographyGroupResponse
          * @description One role, and the titles the person holds it on.
          *
-         *     `role` is a label to print, never a key to branch on -- see the module
-         *     docstring. The titles are newest first with `title_id` breaking a tie, and
-         *     a title appears **once** in a group however many credits put it there: two
-         *     characters in one film is one entry in `cast`.
+         *     `role` is a label to print, never a key to branch on. The titles are newest
+         *     first with `title_id` breaking a tie, and a title appears **once** in a group
+         *     however many credits put it there: two characters in one film is one `cast`
+         *     entry.
          */
         FilmographyGroupResponse: {
             /** Role */
@@ -1567,10 +1261,11 @@ export interface components {
         };
         /**
          * HdrFormat
-         * @description Canonical HDR formats. A source's own vocabulary (Emby, for
-         *     instance, emits strings like "DolbyVision") is translated into one of
-         *     these by its adapter — this enum, never the source's raw string, is
-         *     what reaches `MediaItem` and the API. See `source.py`'s docstring.
+         * @description Canonical HDR formats.
+         *
+         *     A source's own vocabulary (Emby, for instance, emits strings like "DolbyVision") is
+         *     translated into one of these by its adapter — this enum, never the source's raw
+         *     string, is what reaches `MediaItem` and the API. See `source.py`'s docstring.
          * @enum {string}
          */
         HdrFormat: "HDR10" | "DV" | "HLG";
@@ -1590,56 +1285,20 @@ export interface components {
         };
         /**
          * ImageKind
-         * @description What an artwork reference *is*, from [PRD 02](../../../docs/prd/02-data-model.md)'s
-         *     `Image`. Five members, and every one of them is emitted by a real
-         *     provider payload rather than reserved: `poster`/`backdrop`/`logo` hang off
-         *     a title, `still` off an episode, `profile` off a person — which is the
-         *     same three-way split `ck_images_exactly_one_owner` enforces in SQL, and
-         *     the reason the vocabulary is not a per-owner enum each.
+         * @description What an artwork reference *is*, from PRD 02's `Image`.
          *
-         *     Nothing here constrains the pairing: `Image(kind=PROFILE, title_id=…)` is
-         *     still storable, exactly as `ProductionStatus` documents its movie/series
-         *     grouping without enforcing it. The grouping documents intent.
+         *     Every member is emitted by a real provider payload rather than reserved:
+         *     `poster`/`backdrop`/`logo` hang off a title, `still` off an episode,
+         *     `profile` off a person -- the same three-way split
+         *     `ck_images_exactly_one_owner` enforces in SQL, and the reason the vocabulary
+         *     is one enum rather than a per-owner enum each. Nothing here constrains the
+         *     pairing; the grouping documents intent.
          * @enum {string}
          */
         ImageKind: "poster" | "backdrop" | "logo" | "still" | "profile";
         /**
          * ImageResponse
          * @description One artwork reference: an id to fetch and what it is a picture of.
-         *
-         *     **Two fields, and every other column of `Image` is deliberately not one.**
-         *
-         *     `provider` and `provider_path` are the whole of what a client would need
-         *     to go around this API to the CDN, which is exactly what PRD 07's
-         *     *"clients never see provider image URLs and never need a provider key"*
-         *     forbids -- and `provider_path` is half a natural key, i.e. a persistence
-         *     detail. There is no rendered `src` either: a URL built here would fix a
-         *     width at serialisation time, and the width is the client's to choose
-         *     through `GET /images/{id}?w=` (ADR-0032's ladder clamps it).
-         *
-         *     `is_primary` **is** this list's order, already spent by the time a client
-         *     sees it. Handing it over invites a client-side re-sort, which is
-         *     `CreditResponse`'s argument about `billing_order` arriving one key over --
-         *     and here the re-sort has a second failure: `is_primary` is a judgement
-         *     *this project's derivation* makes (TMDb publishes no primary bit), so a
-         *     client re-deciding on it would be re-deciding on a flag it has no way to
-         *     interpret.
-         *
-         *     `width`, `height` and `language` are absent for the weaker reason, and it
-         *     is genuinely weaker for one of the three. Stored dimensions are the
-         *     provider's originals and the proxy answers at a *rung*, so they are not
-         *     the size of the bytes a client will get; `kind` carries the aspect-ratio
-         *     convention a layout needs for the two kinds that have one. A logo is the
-         *     kind where that breaks down -- logo aspect ratios really do vary -- and if
-         *     a client needs it, adding the pair is additive where removing it would
-         *     not be. `language` groups a wall of localised posters and no M9 surface
-         *     paints one.
-         *
-         *     **`kind` is not optional decoration.** It is the difference between a 2:3
-         *     slot and a 16:9 one, and a response that dropped it would have every
-         *     client render a backdrop as a poster with nothing reporting an error.
-         *     It reaches `/openapi.json` as an enum, so a generated client gets the
-         *     vocabulary rather than a string.
          */
         ImageResponse: {
             /**
@@ -1696,254 +1355,54 @@ export interface components {
          * ImportRunStatus
          * @description Terminal state of one dataset's import.
          *
-         *     A genuine status, not a ladder — unlike `EnrichmentState` (ADR-0008),
-         *     there is no "is this an improvement" comparison to get wrong, so no
-         *     rank mapping exists and none is needed. `FAILED` here is legitimate for
-         *     the same reason it was wrong there: an import run *is* an attempt, so
-         *     "the attempt failed" is the whole thing this field describes, not a rung
-         *     it destroys.
+         *     A genuine status, not a ladder: there is no "is this an improvement"
+         *     comparison to get wrong, so no rank mapping exists and none is needed. An
+         *     import run *is* an attempt, so `FAILED` is the whole thing this field
+         *     describes rather than a rung it destroys.
          * @enum {string}
          */
         ImportRunStatus: "running" | "completed" | "failed";
         /**
          * JobKind
          * @description What a worker does with a claimed job.
-         *
-         *     `index` maintains PRD 03's fourth stage, and the asymmetry inside that
-         *     stage is why it is a job at all. The full-text document is a `GENERATED
-         *     ALWAYS AS (...) STORED` column on `titles`, so PostgreSQL recomputes it
-         *     inside the statement that writes `name` or `overview` and **no job is
-         *     involved** -- a skeleton title needs none to be fully searchable. The
-         *     embedding needs a model, which the database cannot run, so it is queued;
-         *     and because it is queued it can fail, park, or never be enqueued at all.
-         *
-         *     That is why `title_embeddings` records `model_name` and a
-         *     `source_fingerprint` of the exact text embedded: staleness becomes a SQL
-         *     predicate rather than something inferred from the queue, and the backfill
-         *     (`usher index --backfill`) is self-draining and re-runnable at zero write
-         *     cost. **This kind's correctness does not depend on the queue being
-         *     reliable**, which is the property M6 was built around.
-         *
-         *     Its population is the enriched tier -- `enrichment_state <> 'skeleton'`,
-         *     for which `ix_titles_enrichment_state` is already exactly the partial
-         *     index -- not the whole 1.27M-row catalog. Embedding a skeleton produces a
-         *     vector of its name, which full-text already does better and cheaper.
-         *
-         *     **`index` was deliberately absent until M6**, and it stopped being so
-         *     because the handler, the enqueue and the drain land in one milestone. A
-         *     kind whose handler is a stub is a queue that grows forever.
-         *
-         *     `derive` turns one cached provider payload into that title's people,
-         *     credits and collection (ADR-0016). **Its unit of work is one title and
-         *     that is what makes it a kind at all** -- everything it reads is one row of
-         *     `raw_payloads`, found by `(provider, kind, reference)`, and no other
-         *     title's data is touched. `SimilarityService`'s rebuild is the
-         *     counter-example and is deliberately *not* a kind: a neighbour list is a
-         *     function of every other embedded vector, so a job keyed on one `Title.id`
-         *     would misdescribe what the work reads and 10,000 of them would each scan
-         *     the whole population.
-         *
-         *     Like `index` it is enqueued after enrichment's commit and at `BACKFILL`,
-         *     and like `index` its correctness does not depend on the queue: `usher
-         *     derive --backfill` walks the cache directly and re-derives idempotently,
-         *     because the credit write is a scoped replace rather than an append. The
-         *     two are deliberately **not ordered against each other** -- a title whose
-         *     `index` job is claimed first embeds without its cast, `derive` then moves
-         *     its fingerprint, and the backfill re-claims it. One wasted embed per
-         *     enriched title, which is the fingerprint scheme working rather than a leak
-         *     in it, and the only lever would be a `JobPriority` rung that does not
-         *     exist between `BACKFILL` and `NEW`.
-         *
-         *     `curate` buys one LLM completion and replaces one household's
-         *     `curated_rows` (PRD 06). **Its key is a `user_id`**, which is what makes
-         *     `(kind, key)` do the milestone's central cost work rather than merely
-         *     tidying the queue. Nothing keyed per *request* -- a `generation_id`, a
-         *     timestamp -- deduplicates at all, and a key naming no household would put
-         *     two households on one screen.
-         *
-         *     **What the queue actually does with a repeat, measured against real
-         *     Postgres rather than reasoned from the statement** (2026-08-07, one
-         *     session, `PostgresJobQueue`). Enqueueing `(curate, A)` writes **1** row;
-         *     enqueueing it again at the same priority writes **0** and leaves one row;
-         *     twice inside one batch writes **0** more (`SELECT DISTINCT ON (kind,
-         *     key)`); at a *higher* priority it writes **1** as a promotion of the same
-         *     row, not a second one; and `(curate, B)` writes **1**, so two households
-         *     really are two jobs. Two halves of that are worth knowing before building
-         *     on it, and the first is a number Task 17 would otherwise read backwards:
-         *
-         *     - **A request arriving while the generation is `running` is coalesced
-         *       into it at the same or a lower priority, promotes it at a higher one,
-         *       and is discarded either way.** `status = 'running'` appears nowhere in
-         *       `_ENQUEUE`'s `WHERE`, so what a repeat costs turns entirely on
-         *       `jobs.priority < excluded.priority` -- which makes this two
-         *       measurements, not one:
-         *
-         *       | running row | repeat asks | rows written | row afterwards |
-         *       |---|---|---|---|
-         *       | `BACKFILL` | `BACKFILL` | 0 | `('running', 20)` |
-         *       | `DEMAND` | `DEMAND` | 0 | `('running', 100)` |
-         *       | `NEW` | `BACKFILL` | 0 | `('running', 50)` |
-         *       | `BACKFILL` | `NEW` | **1** | `('running', 50)` |
-         *       | `BACKFILL` | `DEMAND` | **1** | `('running', 100)` |
-         *
-         *       `complete()` then deletes that one row in **every** line of the table,
-         *       so the requested generation never runs and the queue is empty
-         *       afterwards. For "one completion per household per day" that is the
-         *       wanted answer.
-         *
-         *       **What it is not is a signal, and `written == 0` is the wrong thing to
-         *       read as one.** A promoting repeat reports success -- `enqueue` cannot
-         *       distinguish creating a job from promoting one, both return 1 -- so a
-         *       caller at `JobPriority.DEMAND` (`POST /admin/rows/regenerate`, and
-         *       `api/routers/titles.py`'s existing promotion) is told 1 row was written
-         *       and gets nothing back for it. A caller that wants a *fresh* generation
-         *       after the one in flight has to arrange that above the queue; there is
-         *       no return value here that tells it what happened. The one thing that
-         *       does save the repeat is a *failure*: `_FAIL` returns the promoted row
-         *       to `pending`, so the retry serves it. Measured 2026-08-07 against
-         *       `pgvector/pgvector:pg17` through `PostgresJobQueue`, and pinned by the
-         *       three `test_a_..._repeat_...` cases in
-         *       `tests/integration/test_job_queue.py`, which are where to change this
-         *       table rather than here.
-         *     - **A parked `curate` job is not un-parked or promoted by asking again**,
-         *       even at `DEMAND`. Measured: 0 rows written and the row still
-         *       `('parked', 20)`. That is `_ENQUEUE`'s `WHERE jobs.status <> 'parked'`,
-         *       and it is the right answer -- an empty catalog does not stop being
-         *       empty because something asked twice -- but it means an operator has to
-         *       release the row, exactly as for every other kind.
-         *
-         *     **It is the first kind whose registration is conditional**, and that is
-         *     not the stub M4 forbade. `composition.build_worker` registers it only
-         *     when `composition.llm_client` built one, exactly as it registers `index`
-         *     only when an embedder exists, and `run_once` claims `list(self._handlers)`
-         *     -- so a deployment with `USHER_LLM_ENABLED=false` leaves curate work
-         *     pending for a process that can run it rather than parking work whose only
-         *     problem is the process it was offered to. The member itself is
-         *     unconditional because it is domain vocabulary two things outside the
-         *     worker need: the enqueue site (`POST /admin/rows/regenerate`) and
-         *     `depth()`, which promises a key per kind so PRD 10's `usher.jobs.queued`
-         *     never stops reporting a series.
-         *
-         *     `watch_writeback` carries PRD 03's outbound write back to the source a
-         *     client's own watch write is about. **Its key is the source's own
-         *     `external_id`** -- the third kind to spell a key that way, alongside
-         *     `match` and `watch_history` -- and it carries **no payload at all**, which
-         *     is the whole design rather than an economy. The handler re-reads the
-         *     household's current local row at run time and pushes that, so five `PUT`s
-         *     during one minute of playback coalesce into **one** row (`(kind, key)` is
-         *     unique) and the write that lands is the newest, and a retry is idempotent
-         *     because it replays nothing. A job carrying the state it was enqueued with
-         *     would have neither property: the queue would hold five stale positions and
-         *     a backoff would eventually push an old one over a newer one.
-         *
-         *     One job per source *copy*, never per file: a title write reads
-         *     `media_items` with `episode_id IS NULL`, because an episode's row carries
-         *     its series' `title_id` too and 999,927 of the one measured library's
-         *     1,126,789 items are episodes -- so the unbounded read would put 20,000
-         *     jobs on the queue for one press of a 20,000-episode series.
-         *
-         *     **Its registration is unconditional**, which puts it with `match` and
-         *     `watch_history` rather than with `curate` two paragraphs up: nothing about
-         *     a write-back is optional. `composition.build_worker` withholds `enrich`,
-         *     `derive`, `index` and `curate` from a deployment that lacks the
-         *     collaborator each needs -- a TMDb key, an embedding model, an LLM
-         *     endpoint -- and this one needs only the session's own repositories, so
-         *     every build claims it and no household's own write is left to a process
-         *     that never arrives.
-         *
-         *     `sync` is `POST /admin/sources/{id}/sync`, as an enqueue -- M4 deferred
-         *     the route to M9 with the capability already delivered through
-         *     `usher.cli`, and M8 ratified the shape a triggered walk has to take:
-         *     `usher sync`'s body minus the printing, run by a worker rather than
-         *     inline, because a reconcile checkpoints and commits per batch and a route
-         *     that drove a six-hour walk inside one request would be committing the
-         *     request's session repeatedly before the handler returned. **Its key is
-         *     `"{source_id}:{lane}"`, not a bare source id, and the composite is the
-         *     whole design.** `(kind, key)` is unique, so a bare source id would
-         *     coalesce a requested *full* walk into a pending *delta* one and answer
-         *     202 for a walk that never happens -- the same trap a bare `user_id`
-         *     would be for `curate` if two households shared one, one lane over.
-         *     `lane` is one of `SyncRunKind.FULL`/`SyncRunKind.DELTA`'s wire values;
-         *     `SyncRunKind.WATCH_STATE` is never a valid lane here, because the watch
-         *     lane is not a thing an operator triggers on its own -- it is the second
-         *     half of every triggered sync, run by the handler immediately after the
-         *     item lane, exactly as `usher sync` already runs it. Registered
-         *     unconditionally, the way `match`, `watch_history` and `watch_writeback`
-         *     are: there is no optional process resource behind it, only the adapter
-         *     factory every composition root already builds.
-         *
-         *     `bootstrap` is `POST /admin/bootstrap/{phase}`, on `sync`'s terms one
-         *     row up: M2 delivered the capability as `usher bootstrap` and M9 puts the
-         *     *same* dispatch on the queue so a route can start one. **Its key is a
-         *     `BootstrapPhase`'s wire value** -- `imdb`, `credit-names`, `aliases`,
-         *     `tmdb-ids`, `crosswalk`, `movielens` or `all` -- which makes it the
-         *     second kind whose key names neither a title, a source item nor a
-         *     household. `(kind, key)` unique is doing real work here: pressing *imdb*
-         *     twice while one runs coalesces into the run in flight, and a second
-         *     process bootstrapping the same dataset is separately guarded by
-         *     `ImportRunRepository.start()`'s `RepositoryConflict`, which
-         *     `BootstrapService._concede_to_other_owner` answers by touching nothing
-         *     and returning the winner's row.
-         *
-         *     **`all` and `imdb` are two keys and therefore two jobs**, deliberately,
-         *     and that is the opposite call from `sync`'s composite key one paragraph
-         *     up. A `sync` key had to name its lane because a `full` walk coalescing
-         *     into a pending `delta` one answers 202 for a walk that never happens;
-         *     here every phase's work is *resumable and idempotent*, so `all` running
-         *     after `imdb` re-reads `imdb`'s completed checkpoint, yields no batch and
-         *     costs a re-parse rather than a wrong answer. Collapsing the two into one
-         *     key would instead make an operator's `--phase movielens` silently
-         *     coalesce into somebody's `--phase all`.
-         *
-         *     **Registered unconditionally**, with `match`, `watch_history`, `sync` and
-         *     `watch_writeback`: there is no optional process resource behind a bulk
-         *     import, only `USHER_BULK_DATA_DIR` and an outbound HTTPS client that
-         *     every deployment can build. What a deployment may not have is a
-         *     *writable* data directory, and that is a run-time failure recorded on the
-         *     `import_runs` row rather than a build-time absence -- see PRD 08.
-         *
-         *     **Adding a member here needs no migration**, verified rather than
-         *     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
-         *     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
-         *     `create_constraint` defaults to `False` in SQLAlchemy 2.0, so the database
-         *     holds no membership CHECK and no native enum type. Pydantic owns
-         *     membership.
          * @enum {string}
          */
         JobKind: "match" | "enrich" | "watch_history" | "index" | "derive" | "curate" | "watch_writeback" | "sync" | "bootstrap";
         /**
          * LaneReport
          * @description Which background lanes this process is running.
-         *
-         *     **Reported, never gated on.** `ReadinessResponse.status` and its HTTP
-         *     code are computed from `checks` alone, and this is deliberately its own
-         *     model rather than two more booleans inside `ReadinessChecks`: `ready`'s
-         *     `all(checks.model_dump().values())` would then take this process out of
-         *     a load balancer because Emby is unreachable, which restarting it cannot
-         *     fix and which PRD 08's own failure table says leaves the catalog fully
-         *     browsable. That inverts the very argument M1's liveness/readiness split
-         *     is built on -- liveness stays off the database because restarting does
-         *     not fix Postgres either.
-         *
-         *     `push` is the **names of the sources whose lanes are running**, which is
-         *     a fact about this process, not a probe: it says a lane exists, never
-         *     that its socket is healthy. Whether a channel is *delivering* is
-         *     grounded in a message ledger and is reported by
-         *     `GET /admin/sources/{id}/status`'s `push_available`, because a
-         *     readiness endpoint Docker polls every 2 s must not answer a question
-         *     that costs an upstream request against a server PRD 01 measures at
-         *     1-5 s per request.
          */
         LaneReport: {
             /** Push */
             push: string[];
             /** Worker */
             worker: boolean;
+            /** Crashed Sources */
+            crashed_sources: string[];
+            /** Recovered Claims */
+            recovered_claims: number | null;
+            /** Recovered At */
+            recovered_at: string | null;
         };
-        /** LivenessResponse */
+        /**
+         * LivenessResponse
+         * @description Liveness, and the one fact an operator needs during an incident.
+         *
+         *     **`version` is here and not on `ReadinessChecks`**: `ready` is
+         *     `all(self.model_dump().values())`, so every field added there becomes part of
+         *     the status code, and a version string is not a check.
+         *
+         *     Publishing it on an unauthenticated probe is deliberate. This repository is
+         *     public and MIT, `/openapi.json` is served unauthenticated and describes a
+         *     strictly larger surface, and knowing which image is actually running is what
+         *     an incident needs. **An operator who disagrees drops `/health` at the reverse
+         *     proxy** -- the compose healthcheck targets `/health/ready`.
+         */
         LivenessResponse: {
             /** Status */
             status: string;
+            /** Version */
+            version: string;
         };
         /** Page[EpisodeResponse] */
         Page_EpisodeResponse_: {
@@ -1966,11 +1425,9 @@ export interface components {
          *     **`groups` is absent rather than empty when there is nothing to group**,
          *     which is group B's convention for this whole surface and needs
          *     `response_model_exclude_unset=True` on the route to survive
-         *     serialisation. A client cannot tell `[]` from "this person's credits have
-         *     not been derived yet", and on a catalog whose enriched tier is single-digit
-         *     thousands of titles out of 1.27M the second is the common case -- so an
-         *     empty list would be a page that says "no known credits" about a working
-         *     actor.
+         *     serialisation. A client cannot tell `[]` from "this person's credits have not
+         *     been derived yet", and on a mostly unenriched catalog the second is the common
+         *     case -- an empty list would say "no known credits" about a working actor.
          */
         PersonResponse: {
             /**
@@ -2023,8 +1480,7 @@ export interface components {
          * PlayTargetResponse
          * @description One ranked way to play, as a client sees it.
          *
-         *     The ten fields of `StreamTarget`, named one at a time -- see the module
-         *     docstring for why a dump is not an option here.
+         *     Every field of `StreamTarget`, named one at a time rather than dumped.
          *
          *     **`url` is a ticket URL and never a source URL.** It is an absolute
          *     `https://.../stream/{ticket}` for a `direct` target, or a deep link
@@ -2054,77 +1510,7 @@ export interface components {
         };
         /**
          * ProblemCode
-         * @description The machine-readable `code`. **Seven members, closed by ADR-0030.**
-         *
-         *     **Do not add a member here to serve a route you are writing.** Amend
-         *     ADR-0030's table in the same commit or the suite is red: the table and
-         *     this enum are compared in both directions, so a member with no row and a
-         *     row with no member are both failures. That is deliberate friction --
-         *     answering a vocabulary question per route is how a four-code benchmark
-         *     became a seventeen-code proposal under two mutually exclusive
-         *     conventions for the same status.
-         *
-         *     **A member's Python name lower-cases to its wire string**, always. The
-         *     two are one thing and a case pins it, which is what lets every scan in
-         *     `tests/unit/test_api_problem_vocabulary.py` report a code the enum lacks
-         *     by the spelling a client would have seen.
-         *
-         *     **The naming rule for a new member: `<subject>_<state>`.**
-         *     `INVALID_CURSOR` is the one member that does not follow it and it is kept
-         *     rather than renamed -- ADR-0030 ruling 5 has the reason, which is that
-         *     the rename would land in two documents V1 does not own and is otherwise
-         *     taste. It is not a precedent.
-         *
-         *     **The three beyond the four-member benchmark, each with the route that
-         *     forces it.** `api/routers/playback.py` is the first route in Usher whose
-         *     honest answer is "the source is down", and the bar applied to each
-         *     candidate was: does an *existing* member already carry this meaning, and
-         *     would a client branch differently on it?
-         *
-         *     - `SOURCE_UNAVAILABLE` (503). Unavoidable twice over. PRD 07's worked
-         *       example of this envelope *is* this code, spelled this way, down to
-         *       `"type": "https://usher.dev/errors/source-unavailable"` -- and
-         *       `api/errors.py`'s `_CODE_FOR_STATUS` has no 503 entry, so without a
-         *       member a `503` is handed to FastAPI's default handler and answers
-         *       `{"detail": ...}` with no `code` at all. Measured, not assumed: that
-         *       is the second of the two reds `test_api_playback.py`'s headline case
-         *       was driven through.
-         *     - `NOT_PLAYABLE` (409). Same mechanism -- no 409 in `_CODE_FOR_STATUS`
-         *       either -- and no existing member means "your household holds this and
-         *       no copy of it can be played". `NOT_FOUND` is the nearest and it is
-         *       wrong in the way that matters to a client: it says *retry somewhere
-         *       else*, where this says *stop asking*. ADR-0030 ruling 3 ratifies the
-         *       409 over `200 {"targets": []}`.
-         *     - `TICKET_INVALID` (404). The one that is genuinely arguable, and it
-         *       follows `INVALID_CURSOR` rather than starting a new convention. Both
-         *       are an **opaque codec refusing its own input**; neither is a statement
-         *       about a resource, so neither is a per-resource 404. A client meeting
-         *       `not_found` on `GET /stream/{ticket}` cannot tell "your ticket
-         *       expired, ask `/play` again" -- the whole remedy -- from "there is no
-         *       such route", and telling those apart without parsing prose is the
-         *       entire job of a `code`.
-         *
-         *     **There is no `title_not_found`, `episode_not_found` or
-         *     `image_not_found`, and that is ADR-0030 ruling 1 rather than an
-         *     absence.** One generic `NOT_FOUND`: RFC 9457's `instance` already carries
-         *     the resource, a per-resource member grows the vocabulary linearly with
-         *     the resource count, every one of them is handled identically by a
-         *     client, and no path in M9 produces two 404s a client would act on
-         *     differently -- the one candidate, a title with no playable copy, is
-         *     separated by *status* (`409 NOT_PLAYABLE`) rather than by code. Encoded
-         *     twice, against the careless spelling (`title_not_found`) and the careful
-         *     one (`no_such_title`).
-         *
-         *     **`NOT_PLAYABLE` is also what `POST /admin/sources/{id}/sync` (M9's E3)
-         *     answers for a source an operator has disabled**, and that is a reuse
-         *     rather than a coincidence of status. Both say the identical thing at the
-         *     RFC 9110 §15.5.10 level -- *"the request could not be completed due to a
-         *     conflict with the current state of the target resource, stop asking until
-         *     that state changes"* -- and V1's vocabulary is closed at seven; a route
-         *     that wants a distinct member amends ADR-0030 rather than minting one
-         *     beside it, and this one does not clear that bar. `detail` carries the
-         *     source-specific sentence (`"this source is disabled..."`); `code` carries
-         *     only the disposition the two share.
+         * @description The machine-readable `code`, and the vocabulary is closed.
          * @enum {string}
          */
         ProblemCode: "not_found" | "validation_failed" | "method_not_allowed" | "invalid_cursor" | "source_unavailable" | "not_playable" | "ticket_invalid";
@@ -2186,8 +1572,7 @@ export interface components {
         };
         /**
          * RegenerateResponse
-         * @description The enqueued job's identity. See the module docstring for what is
-         *     deliberately absent, and why each of those would misstate the queue.
+         * @description The enqueued job's identity.
          */
         RegenerateResponse: {
             kind: components["schemas"]["JobKind"];
@@ -2198,14 +1583,10 @@ export interface components {
          * ResolveUnmatchedRequest
          * @description What an operator says a file is.
          *
-         *     **`episode_id` is the argument `usher.cli._unmatched` said this route
-         *     would grow.** That comment reads: *"an episode-level resolution needs an
-         *     `Episode.id` an operator has no way to read off this listing, and M9's
-         *     route is where that grows a second argument."* It is optional because a
-         *     film resolves to a title and nothing else, and because an episode's
-         *     `media_items` row carries **both** ids (`ports/ingest.py`'s
-         *     `MediaItemTarget`) -- so a title with no episode is a complete resolution
-         *     rather than a half-finished one.
+         *     `episode_id` is optional because a film resolves to a title and nothing else,
+         *     and because an episode's `media_items` row carries **both** ids
+         *     (`ports/ingest.py`'s `MediaItemTarget`) -- so a title with no episode is a
+         *     complete resolution rather than a half-finished one.
          *
          *     Both ids are Usher's own UUIDv7. `tmdb_id`/`imdb_id` are indexed
          *     attributes and never identifiers in an API contract.
@@ -2223,20 +1604,14 @@ export interface components {
          * ResolvedItemResponse
          * @description What the row now says.
          *
-         *     **Answered from the write rather than from a re-read, and the port is the
-         *     reason.** `attach_title` writes exactly what it is given -- deliberately,
-         *     since a hand resolution is an act rather than a walk's incidental
-         *     observation -- and returns whether a row changed. A `True` from it means
-         *     these three values are what the row holds, so a second statement to fetch
-         *     them back would confirm the port's own contract at the cost of a round
-         *     trip on every resolution. There is no `get`-by-id on `MediaItemRepository`
-         *     to make it with, and adding one for a response body would be a port method
-         *     with one caller.
+         *     **Answered from the write rather than from a re-read.** `attach_title` writes
+         *     exactly what it is given and returns whether a row changed, so a `True` means
+         *     these three values are what the row holds; fetching them back would confirm
+         *     the port's own contract at the cost of a round trip on every resolution.
          *
-         *     Deliberately not the queue entry's shape: an item that has just been
-         *     resolved is no longer in the queue, so rendering it as an
-         *     `UnmatchedItemResponse` would be a model whose name is false of the one
-         *     thing it is used for.
+         *     Deliberately not the queue entry's shape: an item that has just been resolved
+         *     is no longer in the queue, so rendering it as an `UnmatchedItemResponse` would
+         *     be a model whose name is false of the one thing it is used for.
          */
         ResolvedItemResponse: {
             /**
@@ -2255,27 +1630,6 @@ export interface components {
         /**
          * RowCardResponse
          * @description One title on one shelf.
-         *
-         *     The progress pair is two facts rather than one fraction, exactly as
-         *     `RowCard` carries them: `runtime_seconds` is nullable, so a fraction is
-         *     either a division by `None` or a division by a `COALESCE`d zero -- and the
-         *     latter renders every partially-watched title as finished. *"Half an hour
-         *     in, of an unknown total"* is two true facts (ADR-0014, at the card).
-         *
-         *     `episode_id` and `episode_label` ride **alongside** `title_id`, which stays
-         *     the *series*: every other field here describes the series, so a `title_id`
-         *     that sometimes meant an episode would be a second vocabulary in the one
-         *     field every provider's cards agree on. `episode_id` is what makes a Next Up
-         *     card playable rather than merely navigable; `episode_label` is composed on
-         *     the server so the zero-padding is decided once instead of by each client.
-         *     Both are `null` on every card of the other seven rows.
-         *
-         *     `artwork` is an **image id**, not a URL and not a path: a client renders it
-         *     by asking `GET /images/{id}`, which is where the CDN base, the ladder rung
-         *     and the cache headers live. `null` is a real answer -- no poster (or, on a
-         *     `landscape` row, no backdrop) is known for the title -- and unlike the
-         *     fields above it is the *common* answer on a catalog nothing has derived,
-         *     which is why the branch is a branch and not decoration.
          */
         RowCardResponse: {
             /**
@@ -2307,34 +1661,6 @@ export interface components {
         /**
          * RowProviderResponse
          * @description One registered row provider, and whether it composes (PRD 07, E2).
-         *
-         *     **Two fields, and the list this appears in is the *registry* left-joined
-         *     onto `row_provider_settings`** -- so there is an entry for every provider
-         *     whether or not anybody has ever touched it, and `enabled` is `true` for the
-         *     ones nobody has. That table ships empty and is never seeded (PRD 09 item 9),
-         *     so on a virgin database this endpoint answers ten entries all reading
-         *     `true`, which is the same thing *"providers are enabled by registration in
-         *     code"* has always meant -- now visible, and now changeable.
-         *
-         *     **`slug` is `RowProvider.slug_prefix` and never the class name.** It is the
-         *     identifier that already lives outside the codebase: `usher home`'s leftmost
-         *     column and `usher.row.build.duration`'s `provider` label both carry it, and
-         *     `ports/rows.py` calls it *"declared rather than derived"* for exactly this
-         *     reason. A class rename must not silently re-enable a provider somebody
-         *     turned off.
-         *
-         *     **`updated_at` is not here**, though the column exists. It records when an
-         *     operator last touched the row, and two thirds of this list has no row at
-         *     all -- so the field would be `null` for every provider nobody has
-         *     configured, which is indistinguishable from a provider whose row exists and
-         *     whose timestamp failed to write. A column that is absent for the common
-         *     case is not a field, it is a second endpoint's worth of question.
-         *
-         *     **No `title`, no `description` and no `family`.** A provider's human name
-         *     is `Row.title`, which is a property of the *rows it builds* rather than of
-         *     the provider -- `because-you-watched-<seed>` mints one per seed -- and
-         *     `family` is the key the composer's diversity constraints are stated in,
-         *     which `api/dto/home.py` already declines to publish for the same reason.
          */
         RowProviderResponse: {
             /** Slug */
@@ -2345,25 +1671,6 @@ export interface components {
         /**
          * RowProviderUpdate
          * @description The whole body of `PUT /admin/rows/providers/{slug}`.
-         *
-         *     **One field, because the slug is the path and everything else about a
-         *     provider is code.** There is no `reason`, no `until` and no `user_id`: a
-         *     toggle is deployment-wide (there is one household, PRD 01's authentication
-         *     seam) and a scheduled re-enable would be a scheduler this milestone
-         *     deliberately does not build.
-         *
-         *     **`PUT {"enabled": bool}` rather than `POST .../enable` + `.../disable`.**
-         *     PRD 07's Admin table settles neither -- it had no row for either until this
-         *     commit added one -- and the pair was declined because two routes cannot
-         *     express *"set it to what I am looking at"*: an admin screen holds a
-         *     checkbox, and a client that has to choose a verb from the value it is
-         *     sending has re-implemented this DTO badly. It is also idempotent in the
-         *     HTTP sense, which the pair is only by accident.
-         *
-         *     Strict `bool`, so `"maybe"` is a 422 rather than a coerced `True`.
-         *     pydantic v2 refuses a non-boolean string here by default; the case that
-         *     says so is in `tests/unit/test_api_rows.py`, because "the framework does
-         *     this" is a claim about a version.
          */
         RowProviderUpdate: {
             /** Enabled */
@@ -2379,9 +1686,9 @@ export interface components {
          *     was invalidated early by the push lane. PRD 07's answer to freshness is
          *     `row.invalidated` over SSE, which is an instruction rather than a duration.
          *
-         *     `family` is absent for the same class of reason: it is the key the
-         *     composer's diversity constraints are stated in, and a client that branched
-         *     on it would be re-deciding a question ADR-0006 put on the server.
+         *     `family` is absent for the same class of reason: it is the key the composer's
+         *     diversity constraints are stated in, and a client that branched on it would be
+         *     re-deciding a question the server has already settled.
          */
         RowResponse: {
             /** Slug */
@@ -2396,91 +1703,16 @@ export interface components {
         };
         /**
          * SearchMode
-         * @description `SearchRequest.mode`'s three reachable values. Reciprocal Rank
-         *     Fusion is the design (ADR-0002), not a hypothetical option alongside a
-         *     bool -- which is why this replaced a `semantic: bool` that could not
-         *     express `FUSED` at all.
+         * @description `SearchRequest.mode`'s three reachable values.
+         *
+         *     Three, not a bool: Reciprocal Rank Fusion is the design, and `FUSED` is
+         *     not expressible as a flag over the other two.
          * @enum {string}
          */
         SearchMode: "full_text" | "semantic" | "fused";
         /**
          * SearchResponse
          * @description The ranked results, plus what actually ran.
-         *
-         *     **`requested_mode` beside `mode` is the degradation made visible**, and it
-         *     is the whole reason two fields exist where one would render. A `fused`
-         *     request on a deployment with no embedding model is served as full text and
-         *     every row of that answer is correct — so with one field the only signal is
-         *     `semantic_coverage == 0.0`, which is *also* what a healthy fused search over
-         *     a catalog with no embeddings reports. Two different problems with two
-         *     different fixes (install the `embedding` extra; run `usher index
-         *     --backfill`) that would otherwise present identically. They are equal on
-         *     every undegraded search, which is what makes the inequality readable.
-         *
-         *     **`expanded_query` is the substitution made visible**, one field over and on
-         *     the same argument. When an LLM rewrote the query this is exactly the text
-         *     the semantic lane embedded; `null` means the vector came from the query as
-         *     typed. Without it a viewer searches for one thing, gets results for another,
-         *     and has nothing to say so — and cannot tell a good expansion from a bad one,
-         *     which is also the first thing an operator reading their bug report needs.
-         *
-         *     ⚠️ **The implication runs one way only, and the biconditional is false.** A
-         *     populated `expanded_query` means a completion was bought; a `null` one means
-         *     **nothing about spend**. A call that answers with the wrong key is billed in
-         *     full — real tokens, a real cost, one `llm_calls` row with `ok = false` — and
-         *     still leaves this `null`, as does an unreachable endpoint and a rewrite that
-         *     came back blank or over-long. `llm_calls` is where spend is legible. It is
-         *     `null` on every path that embedded the query as typed: the shipped default
-         *     with expansion off, a `full_text` search, a blank query, a deployment with
-         *     no embedder, a filtered population with no vectors for the lane to rank
-         *     (#16), and a failed or unusable expansion.
-         *
-         *     **`semantic_coverage` is `SearchOutcome`'s number, passed through and never
-         *     recomputed** from the results below it. Derived from the returned hits it
-         *     would read `1.0` exactly whenever every hit happened to have one, which is
-         *     precisely what a green test seeds. A `full_text` request reports `0.0`
-         *     because no semantic lane ran — that is a statement about the request and
-         *     not about the catalog, and a client must ask for `semantic` or `fused` if
-         *     that is the question.
-         *
-         *     ⚠️ **Its denominator is the *enriched* tier and not the catalog, and this
-         *     said "the fraction of the filtered population" until issue #31.** Skeleton
-         *     titles are never embedded and are excluded from the denominator
-         *     deliberately; the lexical lane searches them anyway. So `1.000` means *the
-         *     backfill has drained*, **not** *the vector lane can see everything this
-         *     query could match* — on the catalog this project measures the two differ
-         *     by an order of magnitude (130,720 vectors over ~130,647 enriched titles,
-         *     against 1,271,138 titles). A client rendering "semantic search is warming
-         *     up" off this field is reading it correctly; one rendering "semantic search
-         *     covers your library" is not. `SearchOutcome` carries the full argument.
-         *
-         *     **`query` is echoed as typed**, never the rewrite: it is what the lexical
-         *     lane matched on and what a client renders above the results. The pair
-         *     (`query`, `expanded_query`) is what makes an expansion legible; one field
-         *     carrying whichever of the two happened to be embedded would make it
-         *     invisible.
-         *
-         *     **`search_id` is opaque and is the only thing on this response a client is
-         *     asked to hand back.** It names the `search_queries` row this answer was
-         *     recorded as, and its two uses are `GET /titles/{id}?search_id=…` — which
-         *     records *which result was opened* — and `POST /titles/{id}/play` (or
-         *     `/episodes/{id}/play`) — which records *that one was played*. Together
-         *     those fill the two columns PRD 10 says the table cannot ship without.
-         *
-         *     ⚠️ **Opaque means opaque, and the shape invites the opposite.** It is a
-         *     UUIDv7 and therefore carries a timestamp and sorts, so a client could read
-         *     a search's time out of it or order two of them — and neither is a promise.
-         *     Nothing else may be inferred: it is not the household, not the query, and
-         *     not a handle any other route accepts.
-         *
-         *     **`null` is a fact about this deployment rather than about the search**,
-         *     and it is not an error: no row was written, so there is nothing to attach
-         *     an outcome to. Three ways to get one, all of them PRD 10's own list — a
-         *     blank query, a search with no household, and a deployment that composed
-         *     `SearchService` with no analytics — plus a write the store refused, which
-         *     answers `null` for the same reason. A client sees the same complete,
-         *     correct results either way and simply has nothing to report back, so
-         *     **omitting the parameter is always legal** and never changes a response.
          */
         SearchResponse: {
             /** Query */
@@ -2510,11 +1742,10 @@ export interface components {
          *     "clearly marked": a client that had to ask a second question to render the
          *     badge would either ask it per row or not render it.
          *
-         *     `popularity` is nullable and stays nullable — it is `null` for every title
-         *     TMDb's daily export has never described, which is ~77% of a fully
-         *     bootstrapped catalog and **all** of an IMDb-only one. `popularity or 0.0`
-         *     here would render "nobody has measured this" identically to "measured, and
-         *     unpopular" (ADR-0014).
+         *     `popularity` is nullable and stays nullable -- it is `null` for every title
+         *     TMDb's daily export has never described, most of a fully bootstrapped catalog
+         *     and **all** of an IMDb-only one. `popularity or 0.0` here would render
+         *     "nobody has rated this" identically to "rated, and unpopular".
          */
         SearchResultResponse: {
             /**
@@ -2540,13 +1771,10 @@ export interface components {
          *
          *     **`episode_count` is what the provider said, not what
          *     `GET /seasons/{id}/episodes` will return**, and the two legitimately
-         *     disagree. Since M9's T1 the TMDb path fetches a series and its season
-         *     blocks in one `append_to_response` request, and a namespace TMDb declines
-         *     to serve comes back as the *same 200 with the key silently absent* as one
-         *     the show does not have (`.claude/rules/tmdb-and-enrichment.md`) -- so a
-         *     listed season whose block never arrived leaves a `Season` row carrying the
-         *     series payload's count and no episodes at all. Rendering the stored count
-         *     is the honest answer; a client that wants the episodes asks for them.
+         *     disagree: a namespace TMDb declines to serve comes back as the *same 200
+         *     with the key silently absent*, so a listed season whose block never arrived
+         *     leaves a `Season` row carrying the series payload's count and no episodes.
+         *     Rendering the stored count is the honest answer.
          */
         SeasonResponse: {
             /**
@@ -2581,8 +1809,7 @@ export interface components {
          *     *takes both arms on every listing it renders*, so claiming it for an
          *     unpaged answer teaches a client to look for a page that will never exist.
          *
-         *     Unpaged on measurement: 32,409 series at a median of 9 seasons, and a
-         *     client renders all of them at once.
+         *     Unpaged: a series has a handful of seasons and a client renders all at once.
          */
         SeasonsResponse: {
             /** Seasons */
@@ -2590,36 +1817,11 @@ export interface components {
         };
         /**
          * SimilarResponse
-         * @description Neighbours, plus both of `title_neighbors`' staleness signals --
-         *     reported rather than implied, because a client that could not see either
-         *     one would be shown yesterday's neighbours (or none at all) with no way to
-         *     tell that from "this title genuinely has nothing like it".
+         * @description Neighbours, plus both of `title_neighbors`' staleness signals.
          *
-         *     **`computed_at` answers the undecidable half.** `None` means the artefact
-         *     has *never* been built -- a different fact from `neighbors == []`, which
-         *     means the batch ran and found nothing for this seed. Collapsing the two
-         *     would tell an operator a film has no similar titles when the truth is
-         *     that nothing has run
-         *     (`TitleNeighborRepository.computed_at`'s own docstring). When it is not
-         *     `None`, it is the **oldest** stored row across the *whole* artefact, not
-         *     a per-seed timestamp -- so it can be old even for a seed whose own row is
-         *     recent, because some *other* title may have been embedded into this
-         *     seed's neighbourhood since. That half is undecidable per row
-         *     ([ADR-0020](../../../../docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md))
-         *     and this field is the closest this response gets to answering it: a
-         *     whole-artefact age, not a guarantee.
-         *
-         *     **`stale` answers the other half, exactly and per seed.** It is
-         *     `count_stale(blend_fingerprint=blend_fingerprint(), title_id=<this
-         *     title>) > 0` -- true when this seed's stored rows were written under a
-         *     blend whose weights, stored count or candidate pool have since changed,
-         *     which makes a score computed under the old meaning incomparable with one
-         *     computed under the running one. **`stale=False` is not a freshness
-         *     guarantee**: a seed can carry the running fingerprint and still be
-         *     missing a neighbour that only exists because some other title was
-         *     embedded after this seed's row was written -- the same undecidable half
-         *     `computed_at` reports rather than resolves. Nothing schedules `usher
-         *     similar --rebuild`; it is an operator's command or a cron entry.
+         *     Reported rather than implied: a client that could not see either would be
+         *     shown yesterday's neighbours, or none at all, with no way to tell that from
+         *     "this title genuinely has nothing like it".
          */
         SimilarResponse: {
             /** Neighbors */
@@ -2631,13 +1833,13 @@ export interface components {
         };
         /**
          * SimilarTitleResponse
-         * @description One neighbour, in the **stored order** -- `SimilarityService.
-         *     neighbors_of` already reads `title_neighbors` back by its own stamped
-         *     `rank`, best first, ties broken by id (`ports/repository/search.py`'s
-         *     `TitleNeighborRepository.list_for`), and this DTO never re-sorts on
-         *     `score`. Reproducing the order from the score works only up to float
-         *     ties, and a tie broken differently on two reads would show a client two
-         *     different "most similar" titles for the same catalog.
+         * @description One neighbour, in the **stored order**.
+         *
+         *     `SimilarityService.neighbors_of` reads `title_neighbors` back by its own
+         *     stamped `rank`, best first, ties broken by id, and this DTO never re-sorts on
+         *     `score`. Reproducing the order from the score works only up to float ties,
+         *     and a tie broken differently on two reads would show a client two different
+         *     "most similar" titles for the same catalog.
          */
         SimilarTitleResponse: {
             /**
@@ -2702,15 +1904,12 @@ export interface components {
          * @description PRD 07's `GET /admin/sources/{id}/status`.
          *
          *     `push_available` is `bool | None` and `null` means "not probed" -- see
-         *     `SourceStatus`. An admin UI renders that as "unknown", which is the
-         *     honest answer until M5's probe asserts on received messages.
+         *     `SourceStatus`. An admin UI renders that as "unknown".
          *
-         *     `is_administrator` is `bool | None` on the same three-valued pattern and
-         *     for a sharper reason -- see `SourceStatus`. ADR-0012 accepts the risk
-         *     that a source is configured with an Emby administrator account, whose
-         *     token then rides in every playback URL and (from M5) opens a long-lived
-         *     push socket; the recorded mitigation is PRD 03's "configure a normal
-         *     user", which is guidance an operator can only follow if they can see
+         *     `is_administrator` is `bool | None` on the same three-valued pattern. A source
+         *     configured with an Emby administrator account rides that token in every
+         *     playback URL and opens a long-lived push socket; the mitigation is PRD 03's
+         *     "configure a normal user", which an operator can only follow if they can see
          *     which they did.
          *
          *     `detail` is the adapter's own operator-facing status line, built from
@@ -2737,44 +1936,15 @@ export interface components {
          * StreamTargetKind
          * @description What a client is expected to do with a `StreamTarget.url`.
          *
-         *     A `StrEnum` rather than the bare `str` this field carried through M1 and
-         *     M2, for the reason `SourceItemKind` exists: PRD 07 puts these values on
-         *     the wire, and a bare `str` invites `"deeplink"` (no underscore) to be
-         *     serialized to a client that matches on `"deep_link"` and silently
-         *     renders nothing.
+         *     These values go on the wire (PRD 07), so they are an enum rather than a
+         *     bare `str`: `"deeplink"` serialized to a client matching `"deep_link"`
+         *     renders nothing and raises nothing.
          * @enum {string}
          */
         StreamTargetKind: "direct" | "deep_link";
         /**
          * SuggestResponse
          * @description The type-ahead box, plus which tier filled it and what it refuses.
-         *
-         *     **`tier` is the echo, and it is `requested_mode`'s argument minus the
-         *     degradation.** `GET /search` carries two mode fields because a `fused`
-         *     request can be *served* narrower; a tier request is always served by the
-         *     tier it named, because both indexes exist on every deployment `m09a`
-         *     reaches — so there is one field here rather than two, and a second one
-         *     would be a value that could never differ. The echo is still owed for a
-         *     different reason: **`?tier=` has a default**, so a client that named no
-         *     tier is reading an answer from a tier it did not choose, and the two tiers
-         *     give *different answers to the same `q`* by design. A response that did not
-         *     say which is uninterpretable beside another one, and ADR-0031 records
-         *     changing the default as a live possibility.
-         *
-         *     **`min_query_length` is what makes an empty box legible**, and it is the
-         *     only thing that can. Below it this route runs no query at all, so
-         *     `results: []` would otherwise be indistinguishable from *"no title starts
-         *     with that"* — a filter with no counter, which is the failure
-         *     `.claude/rules/ports-and-error-taxonomy.md` records as surviving every
-         *     test because nothing that is missing raises anything. It is a fact about
-         *     the tier that answered, present on every response rather than only on the
-         *     refusing ones, so a client can implement the same rule locally and stop
-         *     sending the request: on tier 1 that is worth **2,707 ms of database work at
-         *     one character** (ADR-0031's curve).
-         *
-         *     **`query` is echoed as typed** — not stripped, not lower-cased. It is what
-         *     the `LIKE` pattern was built from, and a client rendering "no matches for
-         *     …" needs the string the server actually used.
          */
         SuggestResponse: {
             /** Query */
@@ -2788,31 +1958,6 @@ export interface components {
         /**
          * SuggestResultResponse
          * @description One type-ahead candidate, hydrated.
-         *
-         *     **The same six fields as `SearchResultResponse` and a different `score`,
-         *     which is why it is a second model rather than a reuse.** That one renders
-         *     `SearchService._blend`'s weighted mean over six ranking terms; this one
-         *     renders the index's own rank-shaped value, because `suggest` is
-         *     deliberately **not re-ranked** — the tier already ordered its own answer
-         *     and applying the blend on top would count popularity twice.
-         *
-         *     ⚠️ **`score` is not comparable across tiers, and this is the trap.** Tier 1
-         *     answers **1.0 for every row**, honestly: every row is an exact prefix match
-         *     so the distance tier 2 varies its score with is zero for all of them. Tier
-         *     2 answers `1 / (1 + edit distance)`. A client that painted tier 1 and then
-         *     replaced the box with tier 2 sees every score fall, and that is a change of
-         *     *scale*, not of quality. Render the order, not the number. Within one
-         *     answer it is a rank; between two answers of different tiers it means
-         *     nothing at all.
-         *
-         *     `owned` rides along for `SearchResultResponse`'s reason: PRD 05 requires
-         *     unowned results to be surfaced "clearly marked", and a type-ahead box is
-         *     the surface most likely to skip a second request per row to find out.
-         *
-         *     `popularity` is nullable and stays nullable (ADR-0014) — `null` for every
-         *     title TMDb's daily export has never described, which is **all** of an
-         *     IMDb-only catalog and is exactly the population whose tier-1 ordering falls
-         *     through to `vote_count`.
          */
         SuggestResultResponse: {
             /**
@@ -2835,35 +1980,18 @@ export interface components {
         /**
          * SuggestTier
          * @description Which of the two `SuggestIndex` implementations answers a keystroke.
-         *
-         *     ADR-0002's typo-tolerance gate failed and ADR-0031 is what it bought: two
-         *     indexes, one port, and a caller that says which. `PREFIX` is the btree
-         *     `lower(name) text_pattern_ops` probe with **1.9% measured typo recall**;
-         *     `FUZZY` is the trigram + `levenshtein_less_equal` path at **p50 33.6 ms**.
-         *     Neither is a better version of the other and neither is a fallback for the
-         *     other -- the split is a division of labour, and the whole reason this enum
-         *     exists rather than a `typo_tolerant: bool` is that a bool invites reading
-         *     one as a degraded form of the other.
-         *
-         *     **Here rather than in `ports/search.py`, unlike `SearchMode`.** That one is
-         *     a field of `SearchRequest`, so the port genuinely carries it; **no port
-         *     method anywhere takes a tier**, because a tier *is* the choice of
-         *     implementation and an implementation cannot be told which implementation it
-         *     is. Filed in `ports/` it would be a vocabulary the ports layer declares and
-         *     never reads. `api/dto/search.py` already imports `SearchAnswer` from this
-         *     module, so the wire reaching in here for a service type is the established
-         *     direction rather than a new one.
          * @enum {string}
          */
         SuggestTier: "prefix" | "fuzzy";
         /**
          * SyncTriggerResponse
-         * @description `POST /admin/sources/{id}/sync`'s whole body: the enqueued job's
-         *     identity, on the same shape `usher.api.dto.rows.RegenerateResponse` uses
-         *     for `POST /admin/rows/regenerate` -- both routes promise exactly one
-         *     thing, that this row is on the queue at `JobPriority.DEMAND` or was
-         *     already there, and `(kind, key)` is the only fact about it a reader can
-         *     still act on. `key` is `"{source_id}:{lane}"`, never a bare source id --
+         * @description `POST /admin/sources/{id}/sync`'s whole body -- the enqueued job's identity.
+         *
+         *     The route promises exactly one thing, that this row is on the queue at
+         *     `JobPriority.DEMAND` or was already there, and `(kind, key)` is the only fact
+         *     about it a reader can still act on.
+         *
+         *     `key` is `"{source_id}:{lane}"`, never a bare source id --
          *     `usher.domain.jobs.JobKind.SYNC` says why the composite is deliberate.
          */
         SyncTriggerResponse: {
@@ -2922,13 +2050,12 @@ export interface components {
         };
         /**
          * UnmatchedItemResponse
-         * @description One item in the review queue (PRD 02: *"unmatched items are never
-         *     dropped"*).
+         * @description One item in the review queue (PRD 02: *"unmatched items are never dropped"*).
          *
-         *     `added_at` is `None` for an item its source could not date, which is not
-         *     an edge case: it is the population this queue's keyset is built to page
-         *     through without dropping (ADR-0034), and it sorts last because an item
-         *     nobody can date is less interesting than one dated yesterday, not more.
+         *     `added_at` is `None` for an item its source could not date, which is not an
+         *     edge case: it is the population this queue's keyset is built to page through
+         *     without dropping, and it sorts last because an item nobody can date is less
+         *     interesting than one dated yesterday, not more.
          *
          *     `available` is here because a copy the nightly sweep retracted is still an
          *     unmatched row -- PRD 02 soft-deletes availability and hard-deletes nothing
@@ -2960,8 +2087,7 @@ export interface components {
         };
         /**
          * VocabularyResponse
-         * @description The genome vocabulary's verdict, as the decision rather than the
-         *     sentence.
+         * @description The genome vocabulary's verdict, as the decision rather than the sentence.
          *
          *     `tags` is set only for `named` and `detail` only for `mismatched`, which
          *     is `VocabularyVerdict`'s own shape. Both are nullable rather than absent:
@@ -2977,20 +2103,18 @@ export interface components {
         };
         /**
          * VocabularyState
-         * @description Whether the stored tag vocabulary can name the lanes of the stored
-         *     vectors — the **decision**, with the sentence left to whoever renders it.
+         * @description Whether the stored tag vocabulary can name the lanes of the stored vectors.
          *
          *     Five members and not four: "there is nothing to name" and "there is
          *     something to name and no names" are different operator actions, and
          *     collapsing them is how a fresh database ends up being told to re-run a
-         *     phase it has no use for. `MIXED_RELEASES` is the one that is *not* a
-         *     verdict about the vocabulary at all — with `genome_scores` holding two
-         *     releases there is no single revision to ask for, and asking for either
-         *     would report the vocabulary as wrong when what is wrong is the vectors.
+         *     phase it has no use for. `MIXED_RELEASES` is not a verdict about the
+         *     vocabulary at all -- with `genome_scores` holding two releases there is no
+         *     single revision to ask for, and asking for either would report the
+         *     vocabulary as wrong when what is wrong is the vectors.
          *
-         *     A member rather than a string because both surfaces branch on it:
-         *     `usher bootstrap-status` renders a sentence and
-         *     `GET /admin/bootstrap/status` puts the member on the wire, so a client
+         *     A member rather than a string because both surfaces branch on it: the CLI
+         *     renders a sentence and the route puts the member on the wire, so a client
          *     can distinguish the five without parsing English.
          * @enum {string}
          */
@@ -3018,14 +2142,12 @@ export interface components {
          * WatchWriteRequest
          * @description `PUT /watch/titles/{id}` and `PUT /watch/episodes/{id}`.
          *
-         *     Both fields are required. There is no "leave the other one alone"
-         *     spelling, and adding one would make a partial write reachable -- which is
-         *     the defect M3 measured at the source rather than a hypothetical: Emby's
-         *     `UserData` body deserialises into a DTO whose unset fields take their
-         *     defaults, so a body carrying only `PlaybackPositionTicks` flips a played
-         *     item to unplayed. A client that wants to change one of the two sends both,
-         *     and the two `/played` routes exist precisely so the common one-field press
-         *     needs no body at all.
+         *     Both fields are required. There is no "leave the other one alone" spelling,
+         *     and adding one would make a partial write reachable -- the defect the source
+         *     itself has: Emby's `UserData` body deserialises into a DTO whose unset fields
+         *     take their defaults, so a body carrying only `PlaybackPositionTicks` flips a
+         *     played item to unplayed. A client changing one of the two sends both, and the
+         *     `/played` routes exist so the common one-field press needs no body at all.
          *
          *     `position_seconds` is `ge=0` because the column and `WatchState` both are;
          *     without it a negative value reaches Postgres and comes back as a
@@ -3287,7 +2409,7 @@ export interface operations {
     get_image_images__image_id__get: {
         parameters: {
             query?: {
-                /** @description Requested width in pixels. Clamped **up** to the nearest rung of 154, 342, 780, 1280; omitted means 342. See ADR-0032. */
+                /** @description Requested width in pixels. Clamped **up** to the nearest rung of 154, 342, 780, 1280; omitted means 342. */
                 w?: number | null;
             };
             header?: never;
@@ -3690,7 +2812,7 @@ export interface operations {
             query: {
                 /** @description The prefix as typed. Blank, whitespace-only, or shorter than the answering tier's `min_query_length` answers 200 with no results. */
                 q: string;
-                /** @description `prefix` is the btree probe that answers every keystroke and has no typo tolerance (1.9% measured); `fuzzy` is the trigram path that has it, at p50 33.6 ms, and is meant to be debounced behind the first. Neither is a fallback for the other. */
+                /** @description `prefix` is the btree probe that answers every keystroke and has no typo tolerance; `fuzzy` is the trigram path that has it, at a cost meant to be debounced behind the first. Neither is a fallback for the other. */
                 tier?: components["schemas"]["SuggestTier"];
                 /** @description Ceiling on candidates. Clamped by `USHER_SEARCH_RESULT_LIMIT`, which is why this declares no maximum of its own. */
                 limit?: number;

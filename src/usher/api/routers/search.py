@@ -157,10 +157,10 @@ async def suggest(
         SuggestTier,
         Query(
             description=(
-                "`prefix` is the btree probe that answers every keystroke and has no typo "
-                "tolerance (1.9% measured); `fuzzy` is the trigram path that has it, at "
-                "p50 33.6 ms, and is meant to be debounced behind the first. Neither is a "
-                "fallback for the other."
+                "`prefix` is the btree probe that answers every keystroke and has no "
+                "typo tolerance; `fuzzy` is the trigram path that has it, at a cost "
+                "meant to be debounced behind the first. Neither is a fallback for the "
+                "other."
             )
         ),
     ] = SuggestTier.PREFIX,
