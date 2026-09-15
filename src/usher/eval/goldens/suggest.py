@@ -1,4 +1,4 @@
-"""The typo-tolerance gate's 2,993 cases, regenerated from the live catalog."""
+"""The typo-tolerance gate's cases, regenerated from the live catalog."""
 
 import random
 import uuid
@@ -36,10 +36,9 @@ GATE_POOLS: Mapping[str, int] = MappingProxyType(
     }
 )
 GATE_SHARED_LOWER_NAMES = 81_088
-# **Re-derived by running the generator, not adjusted to fit.** 2,991 rather
-# than the gate's 2,993 because the 2-4 band now draws **nine** names that admit
-# no deletion where it drew seven: 591 cases from that band against 600 from
-# each of the other four.
+# What the generator produces from `GATE_POOLS`. **Re-derived by running it,
+# never adjusted to fit** -- it is an input to `GATE_DIGEST`, so a number tuned
+# to make one run comparable makes every later run incomparable.
 GATE_CASES = 2_991
 TYPO_CLASSES: tuple[str, ...] = ("substitution", "deletion", "transposition", "doubled")
 
@@ -94,20 +93,13 @@ class Frame:
 def mutate(name: str, typo_class: str, chooser: random.Random) -> str | None:
     """One single-edit typo of `name`, or `None` where the class does not apply.
 
-    The four classes ADR-0002 named, at a uniformly random position.
+    Four classes, at a uniformly random position.
 
     **A transposition draws from the positions that transpose to something
-    else, and the case count is what says so.** Drawing uniformly and
-    declining when the two characters match produces 2,964 against the gate's
-    2,993 -- 29 short, all names holding a doubled letter at the drawn
-    position. The gate's arithmetic is `3000 - 7`, and the seven are the
-    two-character names that admit no deletion, so its transposition arm
-    declined nothing. Emitting the unmutated name is another way to reach
-    3,000 and is worse: a guaranteed hit for any index, which would make the
-    2-4 band's measured 0.0% arithmetically impossible. Rejection sampling --
-    redraw until the two characters differ -- reaches 2,993 too and emits no
-    unmutated name, so this is the *simplest* reading that produces both
-    numbers rather than the only one.
+    else.** Drawing uniformly and declining when the two characters match
+    silently loses every name holding a doubled letter at the drawn position.
+    Emitting the unmutated name instead is worse: a guaranteed hit for any
+    index, and a recall figure inflated by cases nothing had to find.
     """
     length = len(name)
     if typo_class == "substitution":
@@ -140,27 +132,25 @@ def build_typo_cases(
 ) -> tuple[TypoCase, ...]:
     """The gate's cases, from pools the caller read.
 
-    **The RNG is consumed in exactly one order and the order is the
-    measurement.** One `random.Random(seed)` for the whole run; bands in
-    `GATE_BANDS` order; `sample` per band; then the four classes per drawn
-    row in `TYPO_CLASSES` order. Any other order draws a different set from
-    the same seed, which is the silent way two runs stop being comparable.
-    `pools` must therefore arrive ordered by `titles.id`, which `read_pools`
-    guarantees with its `ORDER BY`.
+    **The RNG is consumed in exactly one order, and the order is part of the
+    gate.** One `random.Random(seed)` for the whole run; bands in `GATE_BANDS`
+    order; `sample` per band; then the four classes per drawn row in
+    `TYPO_CLASSES` order. Any other order draws a different set from the same
+    seed, which is the silent way two runs stop being comparable. `pools` must
+    therefore arrive ordered by `titles.id`, which `read_pools` guarantees.
     """
-    # `random.Random(20260803)` is the gate's own seed. Reproducibility is the
-    # entire point; a cryptographic generator here would make the two runs
-    # incomparable, which is the defect S311 would be preventing if this were
-    # a token.
+    # S311: reproducibility is the entire point. A cryptographic generator here
+    # would make two runs incomparable, which is the defect S311 prevents when
+    # the value is a token.
     chooser = random.Random(seed)  # noqa: S311
     cases: list[TypoCase] = []
     for band, _low, _high in GATE_BANDS:
         rows = list(pools.get(band, ()))
         # Clamped only so a smoke run against a toy catalog exercises this at
-        # all. On the real catalog every pool exceeds 150 and `check_frame`
-        # has already refused if it does not, so the clamp is unreachable
-        # there -- the only condition under which a clamp is not quietly
-        # redefining the measurement.
+        # all. On the real catalog every pool exceeds 150 and `check_frame` has
+        # already refused if it does not, so the clamp is unreachable there --
+        # the only condition under which a clamp is not quietly redefining what
+        # the gate scores.
         drawn = chooser.sample(rows, min(GATE_DRAW_PER_BAND, len(rows)))
         for title_id, name in drawn:
             for typo_class in TYPO_CLASSES:
@@ -191,23 +181,19 @@ def check_frame(observed: Frame) -> Frame:
     is a baseline that is comparable -- which is why `fingerprint.py` digests
     them rather than inventing a second notion of catalog drift.
 
-    **The refusal names the number that moved.** An operator meets this in CI
-    as `baseline-invalid`, and the first spelling dumped two five-entry dicts
-    and two scalars beside each other and left them to diff six numbers by
-    eye -- for a check whose entire thesis is *one row out*. Reporting the
-    drift alone also distinguishes an **absent** band, which arrives as a
-    `None` in the observed slot rather than folding into a dict inequality
-    that says only "these are not equal".
+    **The refusal names the number that moved**, rather than printing two dicts
+    for an operator to diff by eye, and reporting the drift alone distinguishes
+    an **absent** band, which arrives as a `None` in the observed slot rather
+    than folding into a dict inequality that says only "these are not equal".
     """
     expected = Frame(shared_lower_names=GATE_SHARED_LOWER_NAMES, pools=dict(GATE_POOLS))
     observed_pools = dict(observed.pools)
     checked: tuple[tuple[str, int | None, int | None], ...] = (
         ("shared_lower_names", expected.shared_lower_names, observed.shared_lower_names),
         *((band, count, observed_pools.get(band)) for band, count in expected.pools.items()),
-        # A band the gate never had. Unreachable through `read_frame`, which
-        # only ever writes `GATE_BANDS`' keys -- but the equality this replaced
-        # would have caught it, and a rewrite that quietly drops a check is how
-        # a check stops existing.
+        # A band the gate never had. Unreachable through `read_frame`, which only
+        # ever writes `GATE_BANDS`' keys, but a rewrite that quietly drops a
+        # check is how a check stops existing.
         *(
             (band, None, observed_pools[band])
             for band in observed_pools
@@ -236,10 +222,7 @@ async def read_pools(session: AsyncSession) -> dict[str, list[tuple[uuid.UUID, s
 
 
 async def read_frame(session: AsyncSession) -> Frame:
-    """The frame as this catalog presents it.
-
-    counted from the same statement `read_pools` draws from.
-    """
+    """The frame as this catalog presents it, counted from `read_pools`' own statement."""
     shared = (
         await session.execute(
             text(

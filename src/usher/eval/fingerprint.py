@@ -23,23 +23,18 @@ from usher.eval.goldens.suggest import (
 class Fingerprint:
     """One run's provenance, in the two halves that behave differently.
 
-    Frozen, and **not hashable** -- both fields are `Mapping`s, and the
-    generated `__hash__` raises `TypeError`. Still true now that the field
-    underneath is a `mappingproxy` rather than a `dict`: a proxy delegates
-    `__hash__` to the mapping it wraps, which is `None`, so the message even
-    keeps naming the dict (measured 2026-08-19: *unhashable type: 'dict'*).
-    Stated because "frozen therefore hashable" is false here and this
-    repository has been bitten by it; `digest` is the identity anything needs.
+    Frozen, and **not hashable** -- both fields are `Mapping`s and the generated
+    `__hash__` raises `TypeError`, a `mappingproxy` delegating `__hash__` to the
+    mapping it wraps. Stated because "frozen therefore hashable" is false here
+    and this repository has been bitten by it; `digest` is the identity anything
+    needs.
 
-    **Both mappings are copied, then wrapped**, which is `CursorSpec`'s shape
-    (`api/cursor.py`) for `CursorSpec`'s reason, and it matters more here. A
-    cursor's digest is wrong for one request; this digest is written to
+    **Both mappings are copied, then wrapped.** This digest is written to
     `eval.runs`, committed to `docs/evals/ledger.jsonl` and transcribed into
-    `bars.toml`, and the ledger reads it at two moments with a
-    `session.commit()` between them -- so "two reads agree" was resting on
-    nobody having touched the caller's dict in between. The copy stops the
-    caller mutating the mapping it handed over; the proxy stops this instance
-    mutating its own.
+    `bars.toml`, and the ledger reads it either side of a `session.commit()` --
+    so "two reads agree" would otherwise rest on nobody having touched the
+    caller's dict in between. The copy stops the caller mutating the mapping it
+    handed over; the proxy stops this instance mutating its own.
     """
 
     inputs: Mapping[str, Any]
@@ -57,19 +52,18 @@ class Fingerprint:
 
 
 def _tree_is_clean() -> bool | None:
-    """Whether the working tree still matches `HEAD`.
+    """Whether the working tree still matches `HEAD`, or `None` if git would not say.
 
-    or `None` for "git would not say", which is a third answer and not a quiet "yes".
+    "Git would not say" is a third answer, not a quiet "yes".
 
-    A second bounded call rather than `git describe --dirty`, which with any
-    tag in the repository answers `v1.0-3-gabc1234-dirty`: not a sha a reader
-    can hand to `git show`, in the one field they will want to.
+    A second bounded call rather than `git describe --dirty`, which with any tag
+    in the repository answers `v1.0-3-gabc1234-dirty`: not a sha a reader can
+    hand to `git show`, in the one field they will want to.
 
     `--untracked-files=no` is a deliberate floor rather than a proof. An
-    untracked file *can* be code that ran -- a new module nobody has `git
-    add`-ed yet -- and this cannot see it; what it buys is that a stray
-    `.log`, a `__pycache__` or an editor swapfile does not mark every run in
-    the repository as dirty, which is how a marker stops being read.
+    untracked file *can* be code that ran and this cannot see it; what it buys
+    is that a stray `.log`, a `__pycache__` or an editor swapfile does not mark
+    every run in the repository as dirty, which is how a marker stops being read.
     """
     try:
         # S607: `git` rather than an absolute path, for `git_sha`'s reason.
@@ -88,9 +82,9 @@ def _tree_is_clean() -> bool | None:
 
 
 def git_sha() -> str:
-    """The commit the code that ran came from, marked when the tree has moved past it.
+    """The commit the code that ran came from, or a named `"unknown:…"` answer.
 
-    or one of three named `"unknown:…"` answers.
+    Marked `-dirty` when the tree has moved past it.
     """
     try:
         # S607: `git` rather than an absolute path, so it is found the way an
@@ -142,20 +136,15 @@ def for_suggest(frame: Frame, *, seed: int = GATE_SEED, case_count: int) -> Fing
     """The suggest surface's fingerprint.
 
     **`inputs` is the sampling frame and nothing else**, because the frame is
-    what a suggest measurement is drawn from. That keeps an embedding
-    backfill -- which changes `title_embeddings` and touches nothing suggest
-    reads -- from invalidating a suggest baseline it has no bearing on.
+    what a suggest run is drawn from. That keeps an embedding backfill -- which
+    changes `title_embeddings` and touches nothing suggest reads -- from
+    invalidating a suggest baseline it has no bearing on. `case_count` rides in
+    `inputs` too: a different count over the same frame is a different run.
 
-    `case_count` rides in `inputs` too: 2,993 against 2,964 is a different
-    measurement over the same frame, and that difference has happened once
-    already (the transposition arm).
-
-    Nothing here reads `Settings` or the environment, and `provenance` names
-    the machine only through `platform.platform()`, which carries neither the
-    hostname nor the login name (measured on this host 2026-08-19:
-    `Linux-7.1.3-2-cachyos-x86_64-with-glibc2.43`). A fingerprint is published
-    -- into a report, a baseline file and a CI log -- so a field added here is
-    a field disclosed.
+    Nothing here reads `Settings` or the environment, and `provenance` names the
+    machine only through `platform.platform()`, which carries neither the
+    hostname nor the login name. A fingerprint is published -- into a report, a
+    baseline file and a CI log -- so a field added here is a field disclosed.
     """
     from usher.eval.metrics import ir  # local: keeps the ranx import lazy
 
@@ -170,7 +159,7 @@ def for_suggest(frame: Frame, *, seed: int = GATE_SEED, case_count: int) -> Fing
     )
 
 
-# : The gate's own `inputs`, and the digest of them.
+#: The gate's own `inputs`, and the digest of them.
 _GATE_INPUTS: Mapping[str, Any] = MappingProxyType(
     _suggest_inputs(
         Frame(shared_lower_names=GATE_SHARED_LOWER_NAMES, pools=dict(GATE_POOLS)),

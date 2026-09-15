@@ -9,31 +9,23 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from usher.domain.base import DomainModel
 
-# : `curated-01`, `curated-02`, … The composer breaks score ties on `slug` and : every
-# curated row carries the same base score : (`services.rows.curated.CURATED_SCORE`), so
-# this string is what carries the : model's row ordering onto the screen.
+#: `curated-01`, `curated-02`, … Every curated row carries the same base score
+#: (`services.rows.curated.CURATED_SCORE`) and the composer breaks score ties on
+#: `slug`, so this string carries the model's row ordering onto the screen.
 SLUG_PREFIX = "curated"
 
 
 class LLMPurpose(StrEnum):
     """`llm_calls.purpose` (PRD 10).
 
-    a closed vocabulary so it stays a usable telemetry dimension instead of a
-    cardinality footgun.
+    A closed vocabulary so it stays a usable telemetry dimension rather than a
+    cardinality footgun: a new call site adds a member here and to PRD 10 in the
+    same change, never a free-form string.
 
-    PRD 10's own text marks this open-ended ("curation | query_expansion | ..."): a new
-    call site adds a member here and to PRD 10 in the same change, never a free-form
-    string.
-
-    **Declared here in M8 rather than in `ports/llm.py`, where M1 put it, and
-    the move is forced by the layering rather than chosen.** `LLMCall` below
-    is a domain model and `usher.domain` may not import `usher.ports` -- so
-    the enum had to be in the lower layer for the column to be typed at all.
-    That is the right place on the merits too: this is a column in *this*
-    project's own table, not a parameter of somebody else's API, and the
-    adapter is careful never to send it anywhere. `usher.ports.llm`
-    re-exports it, so every existing import still resolves and
-    `test_ports.py`'s vocabulary pin is unmoved.
+    In `domain/` rather than `ports/` because `LLMCall` below is a domain model
+    and `usher.domain` may not import `usher.ports`. It belongs here on the
+    merits too -- a column in this project's own table, not a parameter of
+    somebody else's API. `usher.ports.llm` re-exports it.
     """
 
     CURATION = "curation"
@@ -45,18 +37,14 @@ class CuratedRow(DomainModel):
 
     id: uuid.UUID
     user_id: uuid.UUID
-    # `curated-1`, `curated-2`, … Minted from the row's position rather than slugified
-    # from the model's title, for three reasons: a title is arbitrary text and would
-    # need escaping to be a cache key; two generations could produce the same title and
-    # collide in `RowCache`, whose key is `(user_id, slug)`; and the composer breaks
-    # score ties on `slug`, so a positional slug makes the model's own ordering the
+    # `curated-1`, `curated-2`, … Positional rather than slugified from the model's
+    # title: a title is arbitrary text and would need escaping to be a cache key, two
+    # generations could produce the same title and collide in `RowCache`'s
+    # `(user_id, slug)` key, and the composer breaks score ties on `slug`.
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
-    # `None` is reachable here and is not reachable from any M7 provider --
-    # all nine return a sentence -- so `LLMRow`, which hands this field through
-    # unchanged, is the first thing in `src/` to put a null `reason` on the
-    # wire. A model that returns an empty reason should produce a row with no
-    # subtitle rather than a row with an empty one.
+    # Nullable rather than defaulted to "": a model that returns no reason should
+    # produce a row with no subtitle, not a row with an empty one.
     reason: str | None = None
     card_title_ids: tuple[uuid.UUID, ...] = Field(min_length=1)
     # The model's own ordering of the rows within one generation. `ge=0`
@@ -96,11 +84,10 @@ class LLMCall(DomainModel):
     def _ok_and_error_must_agree(self) -> Self:
         """A failed call with no error is a row an operator cannot act on.
 
-        and a successful call carrying one reads as a failure in every `WHERE error IS
-        NOT NULL` anybody will write.
-
-        Enforced here rather than as a CHECK alone, because the model is what the
-        service constructs and the CHECK would report it one layer too late.
+        A successful call carrying one reads as a failure in every `WHERE error
+        IS NOT NULL` anybody will write. Enforced here rather than by the CHECK
+        alone, because the model is what the service constructs and the CHECK
+        would report it one layer too late.
         """
         if self.ok and self.error is not None:
             raise ValueError("a successful call carries no error")

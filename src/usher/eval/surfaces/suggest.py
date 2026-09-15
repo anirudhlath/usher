@@ -1,4 +1,4 @@
-"""The typo-tolerance surface: PRD 05, ADR-0002, ADR-0031."""
+"""The typo-tolerance surface (PRD 05)."""
 
 import time
 import uuid
@@ -12,8 +12,8 @@ from usher.eval.goldens.suggest import TypoCase
 from usher.eval.metrics.ir import Ranking
 
 # What a tier looks like to this module: a probe and a limit in, title ids out,
-# best first. Narrow on purpose -- it is everything the measurement needs and
-# nothing else, so the unit tests need no database and no service graph.
+# best first. Narrow on purpose -- everything the scoring needs and nothing
+# else, so the unit tests need no database and no service graph.
 Suggester = Callable[[str, int], Awaitable[list[uuid.UUID]]]
 
 
@@ -51,7 +51,7 @@ async def rank_cases(
         relevant[case.query_id] = str(case.title_id)
         # Order preserved: neither tier is re-ranked by `SearchService.suggest`
         # (each already ordered its own answer), so reordering here would make
-        # MRR a measurement of this module.
+        # MRR a property of this module rather than of the tier.
         rankings.append(Ranking(case.query_id, tuple(str(hit) for hit in hits)))
         strata[case.query_id] = (
             "all",

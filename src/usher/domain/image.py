@@ -1,7 +1,4 @@
-"""One artwork reference.
-
-[PRD 02](../../../docs/prd/02-data-model.md)'s `Image`, and the twin `m09a` deliberately
-"""
+"""One artwork reference -- PRD 02's `Image`."""
 
 import uuid
 from typing import Self
@@ -18,10 +15,10 @@ __all__ = ["Image"]
 class Image(DomainModel):
     """One artwork reference, owned by exactly one of a title, an episode or a person.
 
-    Field bounds mirror `images`' CHECKs one for one — `provider <> ''`,
+    Field bounds mirror `images`' CHECKs one for one -- `provider <> ''`,
     `provider_path <> ''`, `width IS NULL OR width > 0` and the same for
-    `height`. That mirroring is this schema's house rule, and here it also
-    decides *which layer refuses a bad batch*.
+    `height` -- so a bad batch is refused in this layer rather than by the
+    database.
     """
 
     id: uuid.UUID = Field(default_factory=new_id)
@@ -38,9 +35,8 @@ class Image(DomainModel):
     # -- and so the natural key cannot collide across providers that both spell
     # a path `/abc.jpg`.
     provider: str = Field(min_length=1)
-    # The provider's own path, with no base and no rung. See the module
-    # docstring: this is the half of the natural key that makes an image id
-    # survive a re-derivation.
+    # The provider's own path, with no base and no rung -- the half of the
+    # natural key that makes an image id survive a re-derivation.
     provider_path: str = Field(min_length=1)
 
     # Nullable: a provider that reports no dimensions is ordinary, and a
@@ -50,11 +46,9 @@ class Image(DomainModel):
     # NULL means "no language", which is different from "English".
     language: str | None = None
 
-    # **The whole of the read order, and `ImageRepository` records what that costs.**
-    # The order is `(is_primary DESC, id)`; there is no `sort_order` column, because
-    # ADR-0032's request deliberately left it out (*"it belongs to whoever reads images
-    # rather than to the proxy"*) and this task did not smuggle it into a migration
-    # authorised for the key.
+    # **The whole of the read order**, which is `(is_primary DESC, id)`. There is
+    # no `sort_order` column: ordering belongs to whoever reads images rather
+    # than to the proxy.
     is_primary: bool
 
     @model_validator(mode="after")

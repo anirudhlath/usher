@@ -22,10 +22,7 @@ class RowFamily(StrEnum):
 
 
 class DisplayHint(StrEnum):
-    """ADR-0006's only concrete client vocabulary, and its whole of it.
-
-    *"Rows carry a display **hint** (`portrait | landscape | wide | square`) but never a
-    layout."*.
+    """The whole of the client vocabulary: a row carries a hint, never a layout.
 
     Closed on purpose. The way this goes wrong is a fifth member -- `HERO`, or
     `GRID_3_COLUMN` -- which is a layout wearing a hint's name and which the
@@ -48,9 +45,9 @@ class RowCard(DomainModel):
     year: int | None = None
     enrichment_state: EnrichmentState
     owned: bool = False
-    # Zero is a *true* value here and not an ADR-0014 stand-in: a household
-    # that has not started a title is genuinely nought seconds into it. The
-    # absence that must not become zero is the runtime below.
+    # Zero is a *true* value here, not a stand-in for absence: a household that
+    # has not started a title is genuinely nought seconds into it. The absence
+    # that must not become zero is the runtime below.
     position_seconds: int = Field(default=0, ge=0)
     # `ge=0` rather than `gt=0`, matching `WatchState.runtime_seconds`
     # exactly. The refusal that matters is `None`, not the boundary: a
@@ -61,33 +58,27 @@ class RowCard(DomainModel):
     # exactly the titles whose runtime is `None`, which are the ones that
     # most need the badge.
     played: bool = False
-    # **Two nullable fields for the two rows that are about a chapter rather than about
-    # a title**, added by Group G/H because `NextUpProvider`'s own headline case asserts
-    # on the label and `ContinueWatchingProvider` has to be able to resume an episode
-    # file.
+    # **Two nullable fields for the two rows that are about a chapter rather than
+    # about a title**: `NextUpProvider` asserts on the label and
+    # `ContinueWatchingProvider` has to be able to resume an episode file.
     episode_id: uuid.UUID | None = None
     episode_label: str | None = None
-    # **M9's field, and the one the module docstring is about.** An `images.id`,
-    # resolvable through `GET /images/{id}` and nothing else -- never a path, never a
-    # URL, never a list.
+    # An `images.id`, resolvable through `GET /images/{id}` and nothing else --
+    # never a path, never a URL, never a list.
     artwork: uuid.UUID | None = None
 
 
 class BuiltRow(DomainModel):
     """One shelf, built: what a client renders in the order it is given.
 
-    **Constructible with no cards, on purpose.** An empty row and an absent
-    row are different states. Were `cards` to carry `min_length=1`,
-    `Row.build()` would have to return `BuiltRow | None`, and then "this row
-    built and had nothing to show" and "this row was never proposed" collapse
-    into one `None` -- a quiet household and a dead provider respectively,
-    which Group I's metrics have to tell apart. `Row.empty()` is a real method
-    returning a real value only because of this.
+    **Constructible with no cards, on purpose.** An empty row and an absent row
+    are different states. Were `cards` to carry `min_length=1`, `Row.build()`
+    would have to return `BuiltRow | None`, collapsing a quiet household and a
+    dead provider into one `None` that the metrics have to tell apart.
 
-    `cards` is a tuple rather than a list for two reasons: `DomainModel`'s
-    docstring notes that a model with a `list`/`dict` field is unhashable even
-    when frozen, and a cached `BuiltRow` handed to two concurrent requests
-    must not be mutable by either.
+    `cards` is a tuple rather than a list for two reasons: a model with a
+    `list`/`dict` field is unhashable even when frozen, and a cached `BuiltRow`
+    handed to two concurrent requests must not be mutable by either.
     """
 
     slug: str = Field(min_length=1)

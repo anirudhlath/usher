@@ -1,7 +1,4 @@
-"""Where a run's numbers go.
-
-Two sinks, deliberately.
-"""
+"""Where a run's numbers go: two sinks, deliberately."""
 
 import json
 import uuid
@@ -67,20 +64,16 @@ class RunRecord:
 async def ensure_schema(session: AsyncSession) -> None:
     """Apply `schema.sql`, whole and idempotently.
 
-    Not an alembic migration -- ADR-0041.
+    Not an alembic migration, and it runs at the start of every eval run, which
+    is why every statement in that file is `IF NOT EXISTS` or `OR REPLACE`.
 
-    Runs at the start of every eval run, which is why every statement in that
-    file is `IF NOT EXISTS` or `OR REPLACE`.
-
-    The script is applied through the raw driver connection, not
+    The script goes through the raw driver connection rather than
     `session.execute(text(...))`: SQLAlchemy's asyncpg dialect prepares every
     statement and asyncpg refuses a multi-statement prepared statement
-    (`PostgresSyntaxError: cannot insert multiple commands...`, measured
-    2026-08-19). The driver connection's `execute()` uses the simple query
-    protocol and takes a whole script. The `SELECT 1` first pulls the driver
-    into the session's transaction so the DDL joins it rather than running in
-    autocommit -- the same reason `tests/integration/test_eval_ledger_postgres.py`'s
-    `_apply_schema` does it.
+    (`PostgresSyntaxError: cannot insert multiple commands...`). The driver
+    connection's `execute()` uses the simple query protocol and takes a whole
+    script. The `SELECT 1` first pulls the driver into the session's transaction
+    so the DDL joins it rather than running in autocommit.
     """
     await session.execute(text("SELECT 1"))
     driver: Any = (await (await session.connection()).get_raw_connection()).driver_connection

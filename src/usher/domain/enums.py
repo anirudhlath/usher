@@ -19,18 +19,14 @@ class EnrichmentState(StrEnum):
 
     A three-rung ladder, not a status: `skeleton` and `stub` differ by
     *provenance* as much as by completeness — `skeleton` comes from a bulk
-    dataset and often already carries genres, ratings, and runtime; `stub`
-    is only whatever a source's own API returned on first sight. Neither is
-    a strict subset of the other's fields.
+    dataset and often already carries genres, ratings and runtime; `stub` is
+    only whatever a source's own API returned on first sight. Whether the *last
+    enrichment attempt* failed is tracked separately on `Title.enrichment_error`;
+    a failed attempt neither consumes nor resets a tier.
 
-    Whether the *last enrichment attempt* failed is tracked separately, on
-    `Title.enrichment_error` — a failed attempt does not consume or reset a
-    tier. See ADR-0008.
-
-    `StrEnum` members compare lexicographically ("enriched" < "skeleton" <
-    "stub"), not by ladder position: `EnrichmentState.ENRICHED >
-    EnrichmentState.SKELETON` is `False`. Never compare members directly to
-    decide "is this an improvement" — use `ENRICHMENT_RANK`.
+    `StrEnum` members compare lexicographically, not by ladder position. Never
+    compare members directly to decide "is this an improvement" — use
+    `ENRICHMENT_RANK`.
     """
 
     SKELETON = "skeleton"  # from a bulk dataset; no overview or artwork
@@ -84,10 +80,10 @@ class MatchMethod(StrEnum):
     does not name: creating a stub from a trusted provider id the catalog
     does not yet hold, and giving up.
 
-    A label on PRD 10's `usher.match.result` counter, so these values are
-    wire identifiers and stable. Ordered here by descending confidence,
-    which is the order `MatchService` tries them in -- but nothing compares
-    members, so unlike `EnrichmentState` there is no rank map and no trap.
+    A label on PRD 10's `usher.match.result` counter, so these values are wire
+    identifiers and stable. Ordered here by descending confidence, which is the
+    order `MatchService` tries them in -- but nothing compares members, so there
+    is no rank map.
     """
 
     TMDB_ID = "tmdb_id"
@@ -102,19 +98,14 @@ class MatchMethod(StrEnum):
 
 
 class ImageKind(StrEnum):
-    """What an artwork reference *is*.
+    """What an artwork reference *is*, from PRD 02's `Image`.
 
-    from [PRD 02](../../../docs/prd/02-data-model.md)'s `Image`.
-
-    Five members, and every one of them is emitted by a real provider payload rather
-    than reserved: `poster`/`backdrop`/`logo` hang off a title, `still` off an episode,
-    `profile` off a person — which is the same three-way split
-    `ck_images_exactly_one_owner` enforces in SQL, and the reason the vocabulary is not
-    a per-owner enum each.
-
-    Nothing here constrains the pairing: `Image(kind=PROFILE, title_id=…)` is
-    still storable, exactly as `ProductionStatus` documents its movie/series
-    grouping without enforcing it. The grouping documents intent.
+    Every member is emitted by a real provider payload rather than reserved:
+    `poster`/`backdrop`/`logo` hang off a title, `still` off an episode,
+    `profile` off a person -- the same three-way split
+    `ck_images_exactly_one_owner` enforces in SQL, and the reason the vocabulary
+    is one enum rather than a per-owner enum each. Nothing here constrains the
+    pairing; the grouping documents intent.
     """
 
     POSTER = "poster"
@@ -125,20 +116,13 @@ class ImageKind(StrEnum):
 
 
 class SearchNameKind(StrEnum):
-    """Why a row exists in `title_search_names`.
+    """Why a row exists in `title_search_names`, deliberately two members.
 
-    and it is deliberately two members rather than three.
-
-    Each has a named emitter inside M9: `alias` is the `title.akas` loader and
-    `person` is the two-tier suggest's people half. **There is no `primary`
-    member** — canonical names are served by `ix_titles_name_lower_prefix` on
-    `titles` itself, so a `primary` row would be exactly the one-row-per-title
-    duplication M6's boundary call 3 refused, arriving under a new table name.
-
-    This project forbids an enum member nothing emits:
-    `LLMPurpose.QUERY_EXPANSION` sat unemitted for two milestones and M8 had
-    to either build it or delete it. A third member is added the day something
-    writes it and not before.
+    Each has an emitter: `alias` is the `title.akas` loader, `person` the
+    two-tier suggest's people half. **There is no `primary` member** --
+    canonical names are served by `ix_titles_name_lower_prefix` on `titles`
+    itself, so a `primary` row would be one-row-per-title duplication under a
+    new table name. A third member is added the day something writes it.
     """
 
     ALIAS = "alias"

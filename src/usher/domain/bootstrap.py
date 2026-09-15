@@ -14,9 +14,9 @@ from usher.domain.ids import new_id
 class BootstrapPhase(StrEnum):
     """What one bulk-import run does.
 
-    **The members that are *steps* are in execution order** (PRD 04's phased import) --
-    `FULL_SEQUENCE` names them; `ALL` and `RATINGS` are aliases and take no position in
-    it, which the paragraph before the members works through.
+    **The members that are *steps* are in execution order** (PRD 04's phased
+    import) and `FULL_SEQUENCE` names them; `ALL` and `RATINGS` are aliases and
+    take no position in it.
     """
 
     IMDB = "imdb"
@@ -30,7 +30,7 @@ class BootstrapPhase(StrEnum):
     ALL = "all"
 
 
-# : The phases `--phase all` walks, in the order it walks them.
+#: The phases `--phase all` walks, in the order it walks them.
 FULL_SEQUENCE: Final[tuple[BootstrapPhase, ...]] = (
     BootstrapPhase.IMDB,
     BootstrapPhase.CREDIT_NAMES,
@@ -51,12 +51,10 @@ PHASE_ALIASES: Final[frozenset[BootstrapPhase]] = frozenset(
 class ImportRunStatus(StrEnum):
     """Terminal state of one dataset's import.
 
-    A genuine status, not a ladder — unlike `EnrichmentState` (ADR-0008),
-    there is no "is this an improvement" comparison to get wrong, so no
-    rank mapping exists and none is needed. `FAILED` here is legitimate for
-    the same reason it was wrong there: an import run *is* an attempt, so
-    "the attempt failed" is the whole thing this field describes, not a rung
-    it destroys.
+    A genuine status, not a ladder: there is no "is this an improvement"
+    comparison to get wrong, so no rank mapping exists and none is needed. An
+    import run *is* an attempt, so `FAILED` is the whole thing this field
+    describes rather than a rung it destroys.
     """
 
     RUNNING = "running"
@@ -67,17 +65,14 @@ class ImportRunStatus(StrEnum):
 class ImportRun(DomainModel):
     """One dataset's import progress, durable across restarts.
 
-    Exactly one row per `dataset`, updated in place: this is a checkpoint,
-    not an audit log. The cursor fields (`revision`, `position`,
-    `rows_seen`) are deliberately plain scalars rather than a
-    `usher.ports.bulk.BulkCursor` — `domain/` sits below `ports/` in the
-    layering (PRD 01) and may not import from it, so the service assembles
-    a cursor from these three when it resumes.
+    Exactly one row per `dataset`, updated in place: a checkpoint, not an audit
+    log. The cursor fields (`revision`, `position`, `rows_seen`) are plain
+    scalars rather than a `usher.ports.bulk.BulkCursor` because `domain/` sits
+    below `ports/` and may not import from it; the service assembles a cursor
+    from the three when it resumes.
 
-    `heartbeat_at` rather than `updated_at`: it is written explicitly by the
-    importer on every committed batch, and the `import_runs` table
-    deliberately carries no `BEFORE UPDATE` trigger. Adding one would change
-    the set `tests/integration/test_migrations.py` asserts exactly, for a
+    `heartbeat_at` rather than `updated_at`: the importer writes it on every
+    committed batch and `import_runs` carries no `BEFORE UPDATE` trigger, for a
     column whose whole purpose is to be set by the one writer that exists.
     """
 

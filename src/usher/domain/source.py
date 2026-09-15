@@ -56,8 +56,7 @@ class MediaItem(DomainModel):
 
     added_at: AwareDatetime | None = None
     # A MediaItem only exists because it was just observed on a source, so
-    # "seen, but we don't know when" isn't a reachable state -- required,
-    # matching the nullable=False last_seen_at column (Task 8). Contrast
-    # added_at, which stays optional on both sides.
+    # "seen, but we don't know when" is not a reachable state -- required, unlike
+    # `added_at`, which stays optional on both sides.
     last_seen_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     available: bool = True
