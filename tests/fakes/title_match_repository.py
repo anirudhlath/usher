@@ -32,10 +32,9 @@ class FakeTitleMatchRepository(TitleMatchRepository):
     def _all_rows(self) -> list[_Row]:
         """Seeded rows first, then whatever `FakeTitleRepository` holds.
 
-        one table, read through two ports.
-
-        Order decides this fake's first-one-wins tie-break, which describes a state
-        `ix_titles_tmdb_id_kind` makes unreachable in Postgres anyway.
+        One table, read through two ports. Order decides this fake's
+        first-one-wins tie-break, a state `ix_titles_tmdb_id_kind` makes
+        unreachable in Postgres anyway.
         """
         if self._titles is None:
             return self._rows
@@ -95,8 +94,8 @@ class FakeTitleMatchRepository(TitleMatchRepository):
         for ref in dict.fromkeys(refs):
             match ref.provider:
                 case "tmdb":
-                    # ADR-0011: TMDb's two id spaces overlap on 26,968 ids, so
-                    # a ref with no kind names nothing rather than one of two.
+                    # TMDb's movie and series id spaces overlap, so a ref with
+                    # no kind names nothing rather than one of two.
                     number = _as_int(ref.value)
                     if number is None or ref.kind is None:
                         continue
@@ -115,7 +114,7 @@ class FakeTitleMatchRepository(TitleMatchRepository):
                 case _:
                     # A provider this catalog has no column for. "None that I
                     # can tell" is the honest answer; raising would fail a
-                    # batch of 5,000 items over one source's stray scraper.
+                    # whole batch over one source's stray scraper.
                     continue
             if found is not None:
                 resolved[ref] = found.id
@@ -128,7 +127,7 @@ class FakeTitleMatchRepository(TitleMatchRepository):
         rows = self._all_rows()
         resolved: dict[NameYearProbe, uuid.UUID] = {}
         for probe in dict.fromkeys(probes):
-            # A bare name is not an identity claim at 1,271,138 titles.
+            # A bare name is not an identity claim at catalog scale.
             if probe.year is None:
                 continue
             candidates = [
@@ -155,9 +154,10 @@ class FakeTitleMatchRepository(TitleMatchRepository):
 
 
 def _as_int(value: str) -> int | None:
-    """A source is free to report `ProviderIds.Tmdb: "unknown"`.
+    """The integer in `value`, or None when the source reported a non-number.
 
-    That is a matching failure, not a pipeline failure.
+    A source is free to report `ProviderIds.Tmdb: "unknown"`; that is a
+    matching failure, not a pipeline failure.
     """
     try:
         return int(value)

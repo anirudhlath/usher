@@ -24,27 +24,18 @@ class FakeWatchStateRepository(WatchStateRepository):
     def __init__(self, episode_series: dict[uuid.UUID, uuid.UUID] | None = None) -> None:
         self._states: dict[_Key, WatchState] = {}
         self._refuse_next = False
-        # Seventh divergence: the Postgres implementation rolls a watched episode up to
-        # its series through `episodes.title_id`, and this fake has no episodes table.
+        # The Postgres implementation rolls a watched episode up to its series
+        # through `episodes.title_id`, and this fake has no episodes table.
         self._episode_series = dict(episode_series or {})
 
     def refuse_next_merge(self) -> None:
         """Answer the next `merge_from_source` with `0` and store nothing.
 
-        A test-double affordance, not a port method -- the same shape
-        `FakeMediaItemRepository.reset_calls` is. It models the one outcome
-        this fake otherwise cannot produce: the real repository's
-        `WHERE watch_states.updated_at < deduped.observed_at` refusing a
-        merge whose observation is older than what a client already wrote.
-
-        Not reachable here by arranging timestamps, because the refusal that
-        matters is against a stored `updated_at` the `BEFORE UPDATE` trigger
-        owns -- this fake stores `observed_at` there instead, so a caller
-        would have to know the write instant to construct the refusal, and
-        against Postgres it cannot. What depends on the distinction is
-        `PushApplyService`, which publishes on rows *changed* rather than on
-        merges built; without this, a publisher that ignored the count would
-        pass every unit case.
+        A test-double affordance, not a port method. It models the one outcome this
+        fake cannot otherwise arrange: the real repository refusing a merge whose
+        observation is older than what a client already wrote. `PushApplyService`
+        publishes on rows *changed*, so without this a publisher that ignored the
+        count would pass every unit case.
         """
         self._refuse_next = True
 
@@ -112,10 +103,9 @@ class FakeWatchStateRepository(WatchStateRepository):
                     else stored.runtime_seconds
                 ),
                 played=entry.played,
-                # ADR-0014, and the only thing this fake and the real one
-                # spell differently enough to matter. `None` means the read
-                # could not determine it and leaves the stored value; `0` is
-                # a positive claim that the source reset it.
+                # `None` means the read could not determine the count and
+                # leaves the stored value; `0` is a positive claim that the
+                # source reset it.
                 play_count=(
                     entry.play_count if entry.play_count is not None else stored.play_count
                 ),
@@ -139,8 +129,7 @@ class FakeWatchStateRepository(WatchStateRepository):
             )
         key = (write.user_id, write.title_id, write.episode_id)
         stored = self._states.get(key)
-        # This fake's `now()`: one Python read, not a transaction-frozen SQL
-        # one. See the divergence noted in the module docstring.
+        # This fake's `now()`: one Python read, not a transaction-frozen SQL one.
         now = datetime.now(UTC)
         if stored is None:
             result = WatchState(
@@ -169,8 +158,7 @@ class FakeWatchStateRepository(WatchStateRepository):
                 play_count=max(stored.play_count, 1) if write.played else stored.play_count,
                 # Unmarking played leaves this alone -- the local write must
                 # not do what `DELETE /Users/{u}/PlayedItems/{item}` does at
-                # the source (M3's live run: it clears PlayCount,
-                # LastPlayedDate *and* a non-zero resume position).
+                # the source, which also clears the resume position.
                 last_played_at=now if write.played else stored.last_played_at,
                 updated_at=now,
                 origin=WatchStateOrigin.API,
@@ -272,10 +260,9 @@ class FakeWatchStateRepository(WatchStateRepository):
 def _is_later(candidate: WatchState, incumbent: WatchState) -> bool:
     """Which of two states for the same rolled-up title is the newer watch.
 
-    `NULLS LAST` again: a dated state always beats an undated one, and two
-    undated ones fall back to `id`, which is the real statement's
-    `ORDER BY ws.last_played_at DESC NULLS LAST, ws.id DESC` inside its
-    `DISTINCT ON`.
+    `NULLS LAST`: a dated state always beats an undated one, and two undated ones
+    fall back to `id`, matching the real statement's
+    `ORDER BY ws.last_played_at DESC NULLS LAST, ws.id DESC`.
     """
     if candidate.last_played_at is None and incumbent.last_played_at is None:
         return candidate.id > incumbent.id
@@ -291,17 +278,12 @@ def _is_later(candidate: WatchState, incumbent: WatchState) -> bool:
 def _recency_ordered(states: list[WatchState]) -> list[WatchState]:
     """`ORDER BY last_played_at DESC NULLS LAST, id DESC`, spelled for Python.
 
-    Written out rather than expressed as one `sort` key, because this is the
-    one place the fake could ratify the SQL bug the contract exists to catch.
-    Postgres's default for a `DESC` sort is NULLS FIRST, and the natural
-    Python spelling -- a key tuple whose first element is the timestamp --
-    cannot even be written for a nullable column without deciding the same
-    question. Deciding it in the open is the point.
+    Written out rather than as one `sort` key: Postgres defaults a `DESC` sort to
+    NULLS FIRST, so the null placement has to be decided in the open here too.
 
-    Two passes rather than one composite key: `list.sort` is stable and
-    stability is documented to hold under `reverse=True`, so sorting by `id`
-    descending first and by recency second leaves `id DESC` as the tiebreak
-    without needing a comparable that mixes a datetime and a UUID.
+    Two passes rather than one composite key, because `list.sort` is stable: sorting
+    by `id` descending first and by recency second leaves `id DESC` as the tiebreak
+    without a comparable that mixes a datetime and a UUID.
     """
     states.sort(key=lambda state: state.id, reverse=True)
     dated: list[tuple[datetime, WatchState]] = []

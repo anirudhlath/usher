@@ -53,9 +53,9 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_a_cost_the_column_cannot_hold_is_a_port_error(
         self, repository: PostgresLLMCallRepository, ledger: PostgresLLMCallLedger
     ) -> None:
-        """**The case the whole error contract rests on**.
+        """The case the whole error contract rests on.
 
-        and Postgres-only because a Python `Decimal` has no ceiling to hit.
+        Postgres-only, because a Python `Decimal` has no ceiling to hit.
         """
         priced_a_million_times_over = llm_call(
             generation_id=new_id(), cost_usd=Decimal("36000.00000000")
@@ -81,10 +81,7 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         ledger: PostgresLLMCallLedger,
         overrides: dict[str, object],
     ) -> None:
-        """`ck_llm_calls_ok_error_agree`.
-
-        reached through the repository rather than through raw SQL.
-        """
+        """`ck_llm_calls_ok_error_agree`, reached through the repository, not raw SQL."""
         valid = llm_call(generation_id=new_id())
         refused = valid.model_construct(**{**valid.model_dump(), **overrides})
 
@@ -97,22 +94,17 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_a_refused_call_leaves_the_earlier_rows_and_the_session_usable(
         self, repository: PostgresLLMCallRepository, ledger: PostgresLLMCallLedger
     ) -> None:
-        """**The SAVEPOINT**, and it buys more on this port than on its siblings.
+        """The SAVEPOINT, which buys more on this port than on its siblings.
 
-        The wrong implementation this kills: a `record()` with no nested
-        transaction. The refused `INSERT` aborts the caller's transaction, so
-        the very next statement on that session raises `PendingRollbackError`
-        with the failure attributed to whatever ran next -- and `record()`'s
-        caller is, by construction, a service already inside an exception
-        handler that still has curated rows to commit. A ledger write that
-        poisons the session turns a failed *call* into a lost *generation*.
+        The wrong implementation this kills: a `record()` with no nested transaction.
+        The refused `INSERT` aborts the caller's transaction, so the next statement on
+        that session raises `PendingRollbackError` -- and `record()`'s caller is, by
+        construction, a service already inside an exception handler that still has
+        curated rows to commit.
 
-        Three assertions, in the order the damage would arrive: the earlier
-        row is still there (the SAVEPOINT rolled back to a point after it),
-        the refused row is not, and a subsequent unrelated `record()` on the
-        same session both succeeds and is visible. The last one is the only
-        one that can see a missing SAVEPOINT; the first two are what a
-        SAVEPOINT scoped too widely would break.
+        Three assertions, in the order the damage would arrive: the earlier row is still
+        there, the refused row is not, and a subsequent unrelated `record()` on the same
+        session both succeeds and is visible.
         """
         earlier = llm_call(generation_id=new_id())
         await repository.record(earlier)
@@ -136,7 +128,7 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     ) -> None:
         """The other side of the error contract.
 
-        and the case that makes the SQLSTATE filter load-bearing rather than decorative.
+        This is what makes the SQLSTATE filter load-bearing rather than decorative.
         """
         raised: Exception | None = None
         await session.execute(text("ALTER TABLE llm_calls RENAME TO llm_calls_moved_away"))
@@ -161,22 +153,15 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
     async def test_the_cost_lands_in_the_numeric_column_at_its_declared_scale(
         self, repository: PostgresLLMCallRepository, session: AsyncSession
     ) -> None:
-        """The contract's `test_a_cost_is_stored_exactly` compares two `Decimal`s and this reads.
+        """The cost is read back as the column renders it, not as a `Decimal` compare.
 
-        the column's own rendering, which is a different claim: `0.00000002` and
-        `0.00000002000` compare equal, so equality alone cannot say the value landed at
-        scale 8 rather than being carried by something wider that happened to agree.
+        `0.00000002` and `0.00000002000` compare equal, so equality alone cannot say the
+        value landed at scale 8 rather than in something wider that happened to agree.
 
-        The wrong implementation this kills: a write routed through a column
-        or a cast this table does not have. Measured while writing this task,
-        and recorded because it is the reason the sibling case is not enough
-        on its own -- and also because it bounds what *this* case can claim:
-        handing the driver a Python `float` for this parameter is **accepted
-        and value-preserving** at this scale (`0.0087` stores `0.00870000`,
-        `2e-08` stores `0.00000002`, and even `1/3` stores `0.33333333`), so
-        neither case can see a `float()` on the way in. What both see is a
-        *re-scaling*: `Decimal("0.00000002").quantize(Decimal("0.0001"))`
-        stores `0.00000000`, a real call reported as free.
+        The wrong implementation this kills: a write routed through a column or a cast
+        this table does not have, or one re-scaled on the way in --
+        `Decimal("0.00000002").quantize(Decimal("0.0001"))` stores `0.00000000`, a real
+        call reported as free.
         """
         call = llm_call(generation_id=new_id(), cost_usd=Decimal("0.00000002"))
 

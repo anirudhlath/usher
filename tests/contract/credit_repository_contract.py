@@ -49,18 +49,15 @@ def credit(
 class SearchNameProbe(ABC):
     """`title_search_names` as a case can see it, supplied by each arm.
 
-    Three methods and not one, because the two writers that land in this table
-    inside M9 must not delete each other's rows: the credited-person half is
-    `CreditRepository.replace_for_titles`' and the `alias` half is the
-    `title.akas` loader's, so a case about the delete's `kind` scope needs to
-    put an alias row there *by hand* and read it back afterwards.
+    Three methods and not one, because the two writers that land in this table must not
+    delete each other's rows: the credited-person half is
+    `CreditRepository.replace_for_titles`' and the `alias` half is the `title.akas`
+    loader's, so a case about the delete's `kind` scope needs to put an alias row there
+    *by hand* and read it back afterwards.
 
-    **`person_names` answers in the order the names were written**, which the
-    table carries no column for: `m09a` gives it `(id, title_id, name, kind,
-    region, language)` and no rank, so the Postgres arm recovers the order from
-    the UUIDv7 primary key -- ids minted in one pass, in the order the caller's
-    `credit_names` sequence gave. Stated here because it is the one thing the
-    two arms recover differently and the ordering assertions rest on it.
+    **`person_names` answers in the order the names were written**, which the table
+    carries no column for: the Postgres arm recovers it from the UUIDv7 primary key, ids
+    minted in one pass in the order the caller's `credit_names` sequence gave.
     """
 
     @abstractmethod
@@ -73,21 +70,19 @@ class SearchNameProbe(ABC):
 
     @abstractmethod
     async def seed_alias(self, title_id: uuid.UUID, name: str) -> None:
-        """Write an `alias` row directly, standing in for group T's loader."""
+        """Write an `alias` row directly, standing in for the `title.akas` loader."""
 
 
 class CreditRepositoryContract:
     async def test_credits_round_trip_with_their_person(
         self, repository: CreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
-        """The wrong implementation this kills.
+        """The wrong implementation this kills: the join being absent.
 
-        the join being absent, so a `CreditedPerson` comes back with an empty `name`.
-
-        The port returns a joined row rather than a bare `Credit` precisely so
-        no caller has to issue the second query -- an N+1 a port *offers* is
-        worse than one a caller invents, because it looks sanctioned. If the
-        join is not exercised, the shape is a lie the type checker cannot see.
+        A `CreditedPerson` then comes back with an empty `name`. The port returns a
+        joined row rather than a bare `Credit` precisely so no caller has to issue the
+        second query -- an N+1 a port *offers* is worse than one a caller invents,
+        because it looks sanctioned.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -108,25 +103,17 @@ class CreditRepositoryContract:
         third_person: uuid.UUID,
         other_person: uuid.UUID,
     ) -> None:
-        """The wrong implementation this kills.
+        """The wrong implementation this kills: `billing_order` dropped.
 
-        `billing_order` dropped, so "top billed" becomes provider-JSON order -- the
-        front matter's second named defect for this suite.
+        "Top billed" then becomes provider-JSON order.
 
-        **Inserted in the wrong order deliberately**, which is the technique
-        the front matter names for `list_in_progress`: an implementation
-        ordering by insertion, or by `id`, is *satisfied by a fixture seeded
-        in the right order*, so the fixture must not be.
-
-        **And the same trap applies to the tiebreak, one column over.** The
-        read's second key is `person_id`, and the fixture's people are created
-        in one order, so their UUIDv7s ascend in that order too -- which means
-        a naive seeding makes person-id order *equal* billing order and
-        `ORDER BY c.person_id` alone passes. Measured: that mutation survived
-        the whole suite. So the billing orders here are assigned **against**
-        the fixture's creation order -- the top-billed role goes to the person
-        created last -- and every wrong ordering this case names now produces
-        a different list.
+        **Inserted in the wrong order deliberately**: an implementation ordering by
+        insertion, or by `id`, is *satisfied by a fixture seeded in the right order*, so
+        the fixture must not be. The same trap applies to the tiebreak one column over
+        -- the read's second key is `person_id` and the fixture's people carry ascending
+        UUIDv7s -- so the billing orders here are assigned **against** the fixture's
+        creation order, and every wrong ordering this case names produces a different
+        list.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -148,15 +135,13 @@ class CreditRepositoryContract:
         lead_person: uuid.UUID,
         second_person: uuid.UUID,
     ) -> None:
-        """The wrong implementation this kills.
+        """The wrong implementation this kills: `NULLS FIRST`.
 
-        `NULLS FIRST`, which is Postgres's default under `ORDER BY ...
-
-        DESC` and is what an implementer reaches for when "nulls last" is left implicit.
-
-        A crew member with no billing order would then sit above the lead in
-        every cast list the client renders. Seeded with the unbilled person
-        **first**, so an implementation preserving insertion order also fails.
+        It is Postgres's default under `ORDER BY ... DESC` and is what an implementer
+        reaches for when "nulls last" is left implicit. A crew member with no billing
+        order would then sit above the lead in every cast list the client renders.
+        Seeded with the unbilled person **first**, so an implementation preserving
+        insertion order also fails.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -176,12 +161,10 @@ class CreditRepositoryContract:
         lead_person: uuid.UUID,
         second_person: uuid.UUID,
     ) -> None:
-        """The front matter's third named defect.
+        """The wrong implementation this kills: `kind` not filtered.
 
-        `kind` not filtered, so crew comes back where cast was asked for.
-
-        It has the property that makes this milestone dangerous -- the answer
-        is populated, correctly shaped, and about the wrong people.
+        Crew comes back where cast was asked for -- an answer that is populated,
+        correctly shaped, and about the wrong people.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -204,10 +187,9 @@ class CreditRepositoryContract:
     ) -> None:
         """The same filter inverted, and it is not redundant with the case above.
 
-        a `WHERE kind = 'cast'` **hardcoded** rather than parametrised passes that one
-        and fails this one.
-
-        One case cannot tell "filters correctly" from "always filters to cast".
+        A `WHERE kind = 'cast'` **hardcoded** rather than parametrised passes that one
+        and fails this one; one case cannot tell "filters correctly" from "always
+        filters to cast".
         """
         await repository.replace_for_titles(
             [title_id],
@@ -230,7 +212,7 @@ class CreditRepositoryContract:
     ) -> None:
         """`kind=None` means both, in one ordering.
 
-        the third arm, without which an implementation that always filters to cast
+        The third arm, without which an implementation that always filters to cast
         passes both cases above by chance of default.
         """
         await repository.replace_for_titles(
@@ -277,17 +259,13 @@ class CreditRepositoryContract:
     async def test_replacing_for_a_title_with_no_new_credits_still_clears_it(
         self, repository: CreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
-        """`title_ids` is passed separately from the rows.
+        """`title_ids` is passed separately from the rows, and this is why.
 
-        and this is the one case that proves that is not redundancy --
-        `TitleNeighborRepository.replace`'s argument arriving at a second table.
-
-        A title whose credits all disappeared upstream contributes **no rows
-        at all**, so an implementation deriving the delete's scope from
-        `credits` deletes nothing for it and leaves its stale credits in place
-        through every future derivation. It is the one row shape a
-        re-derivation cannot repair, and it is invisible to every case that
-        replaces a non-empty set with another non-empty set.
+        A title whose credits all disappeared upstream contributes **no rows at all**,
+        so an implementation deriving the delete's scope from `credits` deletes nothing
+        for it and leaves its stale credits in place through every future derivation. It
+        is the one row shape a re-derivation cannot repair, and it is invisible to every
+        case that replaces a non-empty set with another non-empty set.
         """
         await repository.replace_for_titles(
             [title_id], [credit(title_id, lead_person)], credit_names={}
@@ -304,11 +282,10 @@ class CreditRepositoryContract:
         lead_person: uuid.UUID,
         second_person: uuid.UUID,
     ) -> None:
-        """The mirror failure of the case above.
+        """The mirror failure of the case above: a `DELETE` with no `WHERE`.
 
-        a `DELETE` with no `WHERE`, or one scoped to the whole table, which wipes the
-        catalog's credits on the first page of the first derivation pass and then
-        repopulates only the page it was given.
+        One scoped to the whole table wipes the catalog's credits on the first page of
+        the first derivation pass and then repopulates only the page it was given.
         """
         await repository.replace_for_titles(
             [other_title_id],
@@ -329,13 +306,11 @@ class CreditRepositoryContract:
         lead_person: uuid.UUID,
         other_person: uuid.UUID,
     ) -> None:
-        """The wrong implementation this kills.
+        """The wrong implementation this kills: a missing `person_id` filter.
 
-        a missing `person_id` filter, which returns the whole table in physical order.
-
-        A second person's credits are seeded for exactly that reason --
-        "returns everything" satisfies every membership assertion, and the
-        assertion here is on the exact list.
+        It returns the whole table in physical order. A second person's credits are
+        seeded for exactly that reason -- "returns everything" satisfies every
+        membership assertion, and the assertion here is on the exact list.
         """
         await repository.replace_for_titles(
             [title_id, other_title_id],
@@ -357,23 +332,17 @@ class CreditRepositoryContract:
     ) -> None:
         """`list_for_person`'s twin of `test_credits_are_ordered_by_billing_order`.
 
-        and the lesson recorded there was never carried across to this statement.
+        Deleting `c.billing_order ASC NULLS LAST` from `_LIST_FOR_PERSON` is invisible
+        to the only other case touching this read, which asserts a one-element list.
 
-        Deleting `c.billing_order ASC NULLS LAST` from `_LIST_FOR_PERSON`
-        **survived the whole suite**: the only other case touching this read
-        asserts a one-element list, so the ordering had nothing to order.
+        The same trap applies one column over: the read's tiebreak is `c.title_id` and
+        the fixture's titles carry ascending UUIDv7s, so the billing orders here are
+        assigned **against** creation order -- the lead role goes to the title created
+        second.
 
-        The same trap applies, one column over. The read's tiebreak is
-        `c.title_id`, the fixture's titles are created in one order, and their
-        UUIDv7s ascend with it -- so a naive seeding makes title-id order equal
-        billing order and `ORDER BY c.title_id` alone passes. The billing
-        orders here are therefore assigned **against** creation order: the lead
-        role goes to the title created second.
-
-        What it costs when it is wrong: `PeopleRow` takes this list in the
-        order given and truncates to `_MAX_CARDS`, and its own comment says
-        this is *"the only ranking this row has"*. Under the mutation a "More
-        from X" shelf leads with walk-ons and can cut the leads entirely.
+        `PeopleRow` takes this list in the order given and truncates to `_MAX_CARDS`, so
+        a wrong ordering leads a "More from X" shelf with walk-ons and can cut the leads
+        entirely.
         """
         await repository.replace_for_titles(
             [title_id, other_title_id],
@@ -399,14 +368,12 @@ class CreditRepositoryContract:
         other_title_id: uuid.UUID,
         lead_person: uuid.UUID,
     ) -> None:
-        """`NULLS LAST` on this statement too, and for the reason the sibling case gives.
+        """`NULLS LAST` on this statement too, for the reason the sibling case gives.
 
-        a crew credit carries no billing, and `NULLS FIRST` -- the Postgres default for
-        `ASC` is FIRST only for `DESC`, so this is easy to get backwards -- would lead
-        the shelf with the uncredited.
-
-        The unbilled credit is on the **lower** title id, so an implementation
-        that dropped the key entirely also fails.
+        A crew credit carries no billing, and `NULLS FIRST` -- the Postgres default for
+        `DESC` rather than for `ASC`, so this is easy to get backwards -- would lead the
+        shelf with the uncredited. The unbilled credit is on the **lower** title id, so
+        an implementation that dropped the key entirely also fails.
         """
         await repository.replace_for_titles(
             [title_id, other_title_id],
@@ -474,17 +441,15 @@ class CreditRepositoryContract:
     async def test_replace_is_idempotent(
         self, repository: CreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
-        """PRD 08's redelivery rule.
+        """The redelivery rule: the job queue *will* redeliver.
 
-        the job queue *will* redeliver, and `JobWorker.recover()` requeues an abandoned
-        claim.
-
-        Same arguments twice, same rows, same count.
+        `JobWorker.recover()` requeues an abandoned claim, so the same arguments twice
+        must give the same rows and the same count.
 
         The wrong implementation this kills is insert-then-delete rather than
-        delete-then-insert: the reverse order meets
-        `ix_credits_tmdb_credit_id` on the very rows it is about to remove, so
-        the second call raises instead of answering.
+        delete-then-insert: the reverse order meets `ix_credits_tmdb_credit_id` on the
+        very rows it is about to remove, so the second call raises instead of
+        answering.
         """
         rows = [credit(title_id, lead_person, tmdb_credit_id="8" * 24, billing_order=0)]
         first = await repository.replace_for_titles([title_id], rows, credit_names={})
@@ -507,21 +472,16 @@ class CreditRepositoryContract:
     ) -> None:
         """The two writes are one unit, and this is what says so.
 
-        `titles.credit_names` exists because a stored generated column cannot
-        reach another table (boundary call 5), so weight class B is fed from a
-        column of the row being generated. That makes it a *second* copy of a
-        fact `credits` already holds -- and the only thing keeping the copies
-        honest is that one call writes both.
+        `titles.credit_names` exists because a stored generated column cannot reach
+        another table, so weight class B is fed from a column of the row being
+        generated. That makes it a *second* copy of a fact `credits` already holds, and
+        the only thing keeping the copies honest is that one call writes both.
 
-        Three assertions because the three can fail independently: the credit
-        is gone from the table, the name is gone from the array, and a title
-        whose credits were all dropped is emptied rather than skipped.
-
-        The wrong implementation this kills is the array written by a second
-        statement, a second call, or a later pass. Its symptom is a full-text
-        hit on a name `credits` no longer holds -- a search result that is
-        populated, correctly ranked, and about a person who is not in the
-        film. Nothing raises, and nothing else in this suite can see it.
+        Three assertions because the three can fail independently: the credit is gone
+        from the table, the name is gone from the array, and a title whose credits were
+        all dropped is emptied rather than skipped. The wrong implementation this kills
+        is the array written by a second statement, a second call, or a later pass --
+        its symptom is a full-text hit on a name `credits` no longer holds.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -557,14 +517,13 @@ class CreditRepositoryContract:
         title_id: uuid.UUID,
         lead_person: uuid.UUID,
     ) -> None:
-        """The order **is** the ranking.
+        """The order **is** the ranking: top-billed first.
 
-        top-billed first -- and weight class B's lexemes are what a viewer searches for.
-
-        An implementation that aggregates without an explicit ordering reads
-        identically in every case with fewer than two names, and reorders the
-        search document for every real title. The array is seeded in an order
-        no sort would produce, so a re-sorting implementation is visible.
+        Weight class B's lexemes are what a viewer searches for. An implementation that
+        aggregates without an explicit ordering reads identically in every case with
+        fewer than two names, and reorders the search document for every real title. The
+        array is seeded in an order no sort would produce, so a re-sorting
+        implementation is visible.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -588,20 +547,15 @@ class CreditRepositoryContract:
     ) -> None:
         """`title_search_names`' credited-person half.
 
-        written by the call that already writes `credit_names` -- the third spelling of
-        one fact.
-
-        The wrong implementation this kills is the obvious one: a second pass
-        over the same payloads, a nightly job, or a backfill command. Split the
-        write off from this call and the two diverge, and the symptom is a
-        *suggest* hit on a name `credits` no longer holds -- a type-ahead row
-        that is populated, correctly ranked, and about a person who is not in
-        the film. It is `credit_names`' own argument arriving at a third table.
+        Written by the call that already writes `credit_names` -- the third spelling of
+        one fact. The wrong implementation this kills is the obvious one: a second pass
+        over the same payloads, a nightly job, or a backfill command. Split the write
+        off from this call and the two diverge, and the symptom is a *suggest* hit on a
+        name `credits` no longer holds.
 
         A second title is seeded and left out of the second call's scope, for
-        `test_replacing_one_title_does_not_touch_another`'s reason: a delete
-        with no `WHERE`, or one scoped to the whole table, empties the catalog's
-        searchable names on the first page of the first derivation pass.
+        `test_replacing_one_title_does_not_touch_another`'s reason: a delete with no
+        `WHERE` empties the catalog's searchable names on the first derivation pass.
         """
         first = ("Vera Lund", "Osric Ffion")
         assert list(first) != sorted(first), (
@@ -702,22 +656,16 @@ class CreditRepositoryContract:
         title_id: uuid.UUID,
         lead_person: uuid.UUID,
     ) -> None:
-        """The tolerance `replace_for_titles` already grants an in-batch duplicate.
+        """The in-batch duplicate tolerance `tmdb_credit_id` has, at `(title_id, name)`.
 
-        `tmdb_credit_id`, arriving at `(title_id, name)`.
+        A name really does arrive twice: one person credited as both cast and crew on
+        the same film is ordinary in TMDb's payloads, and two people who share a name
+        are two rows in `people` by design and one string here. The derivation must not
+        fail for it, and the table must not hold the row twice.
 
-        A name really does arrive twice: one person credited as both cast and
-        crew on the same film is ordinary in TMDb's payloads, and two people
-        who share a name are two rows in `people` by design (ADR-0003) and one
-        string here. The derivation must not fail for it, and the table must
-        not hold the row twice -- a duplicate is one extra btree entry per
-        occurrence for a `LIKE 'pre%'` probe that would then answer the same
-        title twice.
-
-        **The two spellings are deliberately allowed to differ here**, which is
-        the one place they do: `titles.credit_names` is weight class B's input
-        and a repeated lexeme is a `ts_rank` contribution, so the array keeps
-        both. The searchable table is a name index and keeps one. Asserted
+        **The two spellings are deliberately allowed to differ here.** `credit_names` is
+        weight class B's input and a repeated lexeme is a `ts_rank` contribution, so the
+        array keeps both; the searchable table is a name index and keeps one. Asserted
         together so neither can be "tidied" into the other.
         """
         written = await repository.replace_for_titles(
@@ -742,20 +690,14 @@ class CreditRepositoryContract:
     ) -> None:
         """`title_ids` is a `Sequence`, and the shipped caller really does repeat one.
 
-        `DeriveService._resolve` extends its list **once per payload** --
-        `resolved.extend((title_id, payload) for payload in payloads)` -- so a
-        title `raw_payloads` holds two payloads for arrives at this port twice
-        in one `title_ids`. Every other destination absorbs that: the deletes
-        are `= ANY(...)`, the credits insert dedupes on the natural key, and
-        `credit_names` is a mapping with one entry per title whose `UPDATE`
-        touches the row once. The searchable names are the one write that is
-        per *(title, name)* and would store every credited name twice, so a
-        `LIKE 'pre%'` probe would answer the same title as many times as the
-        cache happens to hold payloads for it.
-
-        Found by the task's own sweep as a survivor and closed rather than
-        reported: iterating `title_ids` instead of `dict.fromkeys(title_ids)`
-        passed the whole suite until this case existed.
+        `DeriveService._resolve` extends its list **once per payload**, so a title
+        `raw_payloads` holds two payloads for arrives at this port twice in one
+        `title_ids`. Every other destination absorbs that: the deletes are `= ANY(...)`,
+        the credits insert dedupes on the natural key, and `credit_names` is a mapping
+        with one entry per title. The searchable names are the one write that is per
+        *(title, name)*, and would store every credited name twice -- so a
+        `LIKE 'pre%'` probe would answer the same title as many times as the cache
+        holds payloads for it.
         """
         written = await repository.replace_for_titles(
             [title_id, title_id],
@@ -775,13 +717,13 @@ class CreditRepositoryContract:
     ) -> None:
         """Two writers, one table, and neither may delete the other's rows.
 
-        The `alias` half is group T's `title.akas` loader and it is scoped by
-        `(title_id, kind)` for the same reason this one is. A `credits`-shaped
-        delete on `title_id` alone makes the two mutually destructive:
-        whichever runs second erases the other's rows, and the catalog's
-        aliases quietly disappear on the next `usher derive` with nothing
-        raised and nothing logged. `TitleSearchNameRow`'s docstring states the
-        scope so a loader does not have to discover it; this is what checks it.
+        The `alias` half is the `title.akas` loader's and it is scoped by
+        `(title_id, kind)` for the same reason this one is. A `credits`-shaped delete on
+        `title_id` alone makes the two mutually destructive: whichever runs second
+        erases the other's rows, and the catalog's aliases quietly disappear on the next
+        `usher derive` with nothing raised and nothing logged. `TitleSearchNameRow`'s
+        docstring states the scope so a loader does not have to discover it; this is
+        what checks it.
         """
         await search_names.seed_alias(title_id, "Le Film Inventé")
 

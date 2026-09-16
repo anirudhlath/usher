@@ -32,7 +32,7 @@ def _title(n: int) -> ImdbTitle:
 class ScriptedDataset(BulkDataset[ImdbTitle]):
     """A dataset that yields a fixed script.
 
-    records what cursor and revision it was resumed from, and can be told to fail
+    Records what cursor and revision it was resumed from, and can be told to fail
     partway through.
     """
 
@@ -149,12 +149,12 @@ def _service(
     events: EventPublisher | None = None,
     phase: BootstrapPhase = BootstrapPhase.IMDB,
 ) -> BootstrapService:
-    """A default publisher **here and never in `src/`.**.
+    """A default publisher **here and never in `src/`**.
 
     `BootstrapService` refuses one, on `ReconcileService`'s grounds: a shared
-    `NullEventPublisher()` in a production signature is stateless only by
-    accident. A test helper is the place where that cost is not worth paying
-    per case, and the cases that are *about* the frames pass their own spy.
+    `NullEventPublisher()` in a production signature is stateless only by accident. A
+    test helper is the place where that cost is not worth paying per case, and the cases
+    that are *about* the frames pass their own spy.
     """
     return BootstrapService(
         runs, catalog, commit, events=events or NullEventPublisher(), phase=phase
@@ -215,8 +215,7 @@ async def test_an_empty_batch_still_checkpoints_and_is_not_end_of_stream(
 ) -> None:
     """The port's contract: a batch's `rows` may be empty.
 
-    an implementation yields one solely to advance the cursor past filtered-out records.
-
+    An implementation yields one solely to advance the cursor past filtered-out records.
     `_drain` must not treat it as end-of-stream (stopping there would lose the batches
     after it) and must still checkpoint it (skipping the checkpoint would replay the
     filtered-out run forever on resume).
@@ -255,9 +254,9 @@ async def test_batches_receives_the_already_resolved_revision(
 async def test_a_failure_is_recorded_not_raised(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """`bootstrap --phase all` must be able to continue to the next phase when one upstream is.
+    """`bootstrap --phase all` must continue to the next phase when one upstream is down.
 
-    down, and an operator must be able to see why.
+    An operator must be able to see why.
     """
     commit = CommitSpy()
     dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]], fail_after=2)
@@ -274,8 +273,8 @@ async def test_a_rate_limited_revision_is_recorded_not_raised(
 ) -> None:
     """`revision()` can raise `PortRateLimited` as well as `PortUnavailable`.
 
-    both are real (the shared download helper maps a 429 to the former), and both must
-    be caught the same way.
+    Both are real -- the shared download helper maps a 429 to the former -- and both
+    must be caught the same way.
     """
     commit = CommitSpy()
     dataset = RateLimitedOnRevision([[_title(1)]])
@@ -289,18 +288,15 @@ async def test_a_rate_limited_revision_is_recorded_not_raised(
 class _ConflictingImportRunRepository(FakeImportRunRepository):
     """Wraps the fake so its first `start()` call raises `RepositoryConflict`.
 
-    standing in for `PostgresImportRunRepository`'s real failure mode
+    Stands in for `PostgresImportRunRepository`'s real failure mode
     (`uq_import_runs_dataset`) without needing Postgres: two processes bootstrapping the
     same dataset at once.
 
-    `winner`, when given, seeds the fake's store with a *different*,
-    already-persisted run for the same dataset before the conflict fires --
-    standing in for the real winning process's committed row. Earlier
-    versions of this fake raised the conflict with nothing else in the
-    store at all, which meant a test asserting only "the caller didn't
-    crash" could not have caught `import_dataset`'s except handler
-    overwriting a real winner's row: there was no winner row present to
-    overwrite. See `test_a_conflicting_start_leaves_the_winners_run_untouched`.
+    `winner`, when given, seeds the fake's store with a *different*, already-persisted
+    run for the same dataset before the conflict fires -- standing in for the real
+    winning process's committed row, which
+    `test_a_conflicting_start_leaves_the_winners_run_untouched` needs present in order
+    to see it left alone.
     """
 
     def __init__(self, winner: ImportRun | None = None) -> None:
@@ -321,24 +317,17 @@ class _ConflictingImportRunRepository(FakeImportRunRepository):
 async def test_a_conflicting_start_leaves_the_winners_run_untouched(
     catalog: FakeBulkCatalogRepository,
 ) -> None:
-    """The bug Group G found after fixing PostgresImportRunRepository's session-poisoning.
+    """A losing process must not write `FAILED` onto the winner's run.
 
-    once self._runs.get() after a RepositoryConflict stopped raising
-    PendingRollbackError and started actually returning a row, import_dataset's except
-    handler re-fetched *by dataset name* -- which, for this exact conflict, is always
-    the *other*, winning process's row, never one this process owns (start() never
-    returned one to us).
+    `import_dataset`'s except handler re-fetches *by dataset name*, which for this exact
+    conflict is always the *other*, winning process's row -- `start()` never returned
+    one to this process. Evolving and saving `FAILED` onto it would silently corrupt a
+    legitimately RUNNING or already-COMPLETED import with this loser's unrelated error
+    message, and a subsequent resume reads exactly that corrupted record.
 
-    Evolving and saving FAILED onto it would silently corrupt a legitimately RUNNING or
-    already-COMPLETED import with this loser's unrelated error message -- worse than the
-    crash it replaced, because the crash was loud and this would not be: a subsequent
-    resume reads exactly this corrupted record.
-
-    A test that only checks the loser's call didn't raise cannot catch
-    this -- it needs a real competing row present beforehand, and an
-    assertion that it is *exactly* unchanged afterward, which is what makes
-    this different from (and a regression guard beyond) the old
-    `test_a_run_start_conflict_is_recorded_not_raised` this replaces.
+    A case that only checks the loser's call did not raise cannot see this: it needs a
+    real competing row present beforehand, and an assertion that it is *exactly*
+    unchanged afterward.
     """
     commit = CommitSpy()
     winner = ImportRun(
@@ -371,11 +360,10 @@ async def test_a_conflicting_start_with_no_discoverable_owner_does_not_persist(
 ) -> None:
     """The pathological twin of the test above.
 
-    a conflict fires but no row is discoverable by the time we look (e.g.
-
-    deleted out from under both processes). Still must not fabricate and save a claim
-    over a dataset this process lost the race for -- only the *return value* is allowed
-    to be synthetic, so a caller has something to log.
+    A conflict fires but no row is discoverable by the time we look -- deleted out from
+    under both processes, say. It must still not fabricate and save a claim over a
+    dataset this process lost the race for; only the *return value* is allowed to be
+    synthetic, so a caller has something to log.
     """
     commit = CommitSpy()
     runs = _ConflictingImportRunRepository()  # no winner seeded
@@ -394,11 +382,7 @@ async def test_a_conflicting_start_with_no_discoverable_owner_does_not_persist(
 async def test_a_failed_run_resumes_from_where_it_stopped(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """End to end.
-
-    crash, restart, and the dataset is handed the cursor describing exactly what was
-    committed.
-    """
+    """End to end: crash, restart, and the dataset is handed the cursor it committed."""
     commit = CommitSpy()
     service = _service(runs, catalog, commit)
     await service.import_dataset(
@@ -432,7 +416,7 @@ async def test_a_non_port_error_propagates(
 ) -> None:
     """A bug in this process is not an upstream failure and must not be recorded as one.
 
-    swallowing it would leave a run marked `failed` with a message describing a
+    Swallowing it would leave a run marked `failed` with a message describing a
     programming error as a data problem.
     """
     commit = CommitSpy()
@@ -457,21 +441,19 @@ async def test_link_crosswalk_commits(
 async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commit(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """ADR-0033 at this producer.
+    """A frame is a statement about committed state.
 
-    a frame is a statement about committed state, so each one is offered *after* the
-    commit that made its batch durable.
+    Each one is offered *after* the commit that made its batch durable.
 
-    **The commit count at publish time is the assertion.** Two batches commit
-    once each and `_finish` commits a third time, so a correct run records
-    frames at counts 1 and 2 -- a publish moved above `self._commit()` records
-    0 and 1, which is the same two events in the same order and the reason a
-    list of frames alone cannot see it.
+    **The commit count at publish time is the assertion.** Two batches commit once each
+    and `_finish` commits a third time, so a correct run records frames at counts 1 and
+    2 -- a publish moved above `self._commit()` records 0 and 1, which is the same two
+    events in the same order and the reason a list of frames alone cannot see it.
 
-    **Two batches rather than one, and no third frame.** One frame per *run*
-    is the progress bar that jumps from 0% to 100%, which
-    `ReconcileService._publish_progress` already names for `sync.progress`;
-    with a single batch it is indistinguishable from one per batch.
+    **Two batches rather than one, and no third frame.** One frame per *run* is the
+    progress bar that jumps from 0% to 100%, which
+    `ReconcileService._publish_progress` already names for `sync.progress`; with a
+    single batch it is indistinguishable from one per batch.
     """
     commit = CommitSpy()
     spy = ProgressSpy(commit)
@@ -513,19 +495,17 @@ async def test_a_progress_frame_is_scoped_to_no_title_so_a_detail_screen_never_s
 async def test_a_progress_frame_carries_the_cursor_the_batch_committed(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """The payload PRD 07's column is corrected to.
+    """The payload, read off the `ImportRun` the commit above it persisted.
 
-    read off the `ImportRun` the commit above it persisted.
+    **No `percent`, and it is not an omission.** Nothing on `BulkCursor` can supply a
+    denominator -- `position` is a dataset-defined offset whose only contract is that
+    resuming from it never misses a record, and the Wikidata crosswalk pages a SPARQL
+    result set with no total at all.
 
-    **No `percent`, and it is not an omission.** Nothing on `BulkCursor` can
-    supply a denominator -- `position` is a dataset-defined offset whose only
-    contract is that resuming from it never misses a record, and the Wikidata
-    crosswalk pages a SPARQL result set with no total at all.
-
-    `phase` is the `BootstrapPhase` the run was asked for and `dataset` is
-    what is streaming now; the two differ on every `--phase all` run, which is
-    what a single case seeded with `phase=IMDB` and the `scripted` dataset can
-    show and a case where they agreed could not.
+    `phase` is the `BootstrapPhase` the run was asked for and `dataset` is what is
+    streaming now; the two differ on every `--phase all` run, which is what a single
+    case seeded with `phase=IMDB` and the `scripted` dataset can show and a case where
+    they agreed could not.
     """
     commit = CommitSpy()
     spy = ProgressSpy(commit)
@@ -547,14 +527,12 @@ async def test_a_progress_frame_carries_the_cursor_the_batch_committed(
 async def test_a_failed_phase_publishes_nothing_it_did_not_commit(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """A run that dies mid-stream keeps the frames for the batches that really landed and raises.
+    """A run that dies mid-stream keeps the frames for the batches that really landed.
 
-    none for the one that did not.
-
-    That is the *reason* the `bootstrap` registration hands this service the
-    process bus rather than `JobWorker`'s deferred buffer: the buffer's
-    `discard()` would throw all of these away on a failed job, and the rows
-    they name are committed and still in the catalog. Kills a publish moved
+    None is published for the one that did not. That is the *reason* the `bootstrap`
+    registration hands this service the process bus rather than `JobWorker`'s deferred
+    buffer: the buffer's `discard()` would throw all of these away on a failed job, and
+    the rows they name are committed and still in the catalog. Kills a publish moved
     into `_finish`, which would report nothing at all for the failing run.
     """
     commit = CommitSpy()

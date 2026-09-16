@@ -86,8 +86,8 @@ def test_no_reader_reports_no_observation_rather_than_a_zero(
 ) -> None:
     """A fabricated zero is a claim this process does not have.
 
-    Pinned by calling the callback directly with the reader unset, for the reason M4
-    recorded for the queue gauges: the branch is unreachable through
+    Pinned by calling the callback directly with the reader unset, for the same
+    reason as the queue gauges: the branch is unreachable through
     `register_sse_gauge`, which assigns the reader *before* it creates the instrument.
     """
     monkeypatch.setattr("usher.telemetry._sse._read", None)

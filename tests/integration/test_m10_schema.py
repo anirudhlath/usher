@@ -20,10 +20,10 @@ from usher.db.base import build_engine
 from usher.domain.ids import new_id
 
 _RETENTION_DELETE = "DELETE FROM search_queries WHERE at < now() - interval '90 days'"
-"""PRD 10's own pruning statement, verbatim
-(`docs/prd/10-telemetry-and-dashboards.md`, `## Analytics tables`). Quoted
-rather than paraphrased: an index that serves a statement nobody writes is
-`ix_titles_popularity` again."""
+"""PRD 10's own pruning statement, verbatim rather than paraphrased.
+
+An index that serves a statement nobody writes serves nothing.
+"""
 
 
 async def _indexdef(url: str, name: str) -> str:
@@ -70,31 +70,26 @@ async def test_the_cost_ledgers_generation_index_exists(postgres_url: str) -> No
 async def test_the_generation_index_is_partial_and_says_so_in_its_own_definition(
     postgres_url: str,
 ) -> None:
-    """Asserted **as text in `indexdef`**.
+    """Asserted as text in `indexdef`, because membership cannot see a predicate.
 
-    because `compare_metadata` is blind to a partial index's predicate and a full index
-    answers every membership check a partial one does -- so the case above this one
-    cannot tell them apart, by construction.
-
-    `m08a`'s docstring is where the predicate comes from: query-expansion rows
-    carry `NULL` and are the majority of the table once Task 20 ships, and they
-    are exactly the rows the `curated_rows` join never wants.
+    `compare_metadata` is blind to a partial index's predicate and a full index answers
+    every membership check a partial one does, so the case above this one cannot tell
+    them apart by construction. The predicate matters because query-expansion rows
+    carry `NULL` in `generation_id`, and those are exactly the rows the `curated_rows`
+    join never wants.
     """
     definition = await _indexdef(postgres_url, "ix_llm_calls_generation_id")
     assert "WHERE (generation_id IS NOT NULL)" in definition, definition
 
 
 async def test_the_two_new_columns_carry_no_server_default(postgres_url: str) -> None:
-    """Read off `information_schema.columns.column_default`.
+    """Read off `information_schema.columns.column_default`, not off the model.
 
-    **not off the model**, and the distinction is the whole case: `m09d`'s rule is that
-    a `server_default` *"would outlive this migration and supply a plausible wrong value
-    to a writer that forgot"*, so what has to be checked is what the migration left in
-    the catalog rather than what the mapped class says.
-
-    `surface` also carries its `NOT NULL`, asserted here rather than in a
-    fourth case because a nullable column with no default is the state
-    `upgrade()`'s *middle* statement leaves and is exactly what dropping the
+    A `server_default` would outlive this migration and supply a plausible wrong value
+    to a writer that forgot, so what has to be checked is what the migration left in
+    the catalog rather than what the mapped class says. `surface` also carries its
+    `NOT NULL` here, because a nullable column with no default is the state
+    `upgrade()`'s middle statement leaves and is exactly what dropping the
     `SET NOT NULL` produces.
     """
     engine = build_engine(postgres_url)
@@ -122,9 +117,9 @@ async def test_the_two_new_columns_carry_no_server_default(postgres_url: str) ->
 
 
 async def test_a_search_row_with_no_tier_round_trips(session: AsyncSession) -> None:
-    """`tier` is nullable **by design and not by oversight**, so the design gets a case.
+    """`tier` is nullable by design and not by oversight, so the design gets a case.
 
-    a `surface='search'` row carrying `tier IS NULL` is the ordinary shape of every row
+    A `surface='search'` row carrying `tier IS NULL` is the ordinary shape of every row
     in this table today, and a `NOT NULL` added by a later hand would need a sentinel
     member meaning "not applicable" in the one column whose purpose is to keep two
     vocabularies apart.
@@ -159,21 +154,14 @@ async def test_a_search_row_with_no_tier_round_trips(session: AsyncSession) -> N
 async def test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran(
     postgres_url: str,
 ) -> None:
-    """**An empty-table upgrade satisfies a three-statement backfill exactly as well as a.
+    """An empty-table upgrade satisfies a three-statement backfill as well as a correct one.
 
-    correct one**, so the row is what makes the `UPDATE` observable at all.
-
-    Seeded against the `m10b` schema, read back above `m10c`.
-
-    The deployment's own nine rows -- 107 of them as of 2026-08-26 -- are not a
-    test population: asserting against whatever the developer's database
-    happens to hold is *"a run that did not run is not a pass"* wearing a
-    `SELECT`.
-
-    `'search'` is asserted as the **true** value rather than a filled one:
-    every row this table holds came from `GET /search` or `usher search`,
-    because `SearchService._record_search` is reachable from exactly those two
-    callers and `SearchService.suggest` writes nothing at this revision.
+    The seeded row is what makes the `UPDATE` observable at all: written against the
+    `m10b` schema, read back above `m10c`. Asserting instead against whatever a
+    developer's own database happens to hold is "a run that did not run is not a pass"
+    wearing a `SELECT`. `'search'` is the true value rather than a filled one -- every
+    row came from `GET /search` or `usher search`, the only two callers that reach
+    `SearchService._record_search`.
     """
     admin, scratch, url = await scratch_database(postgres_url, "backfill")
     try:
@@ -248,18 +236,13 @@ async def _delete_plan(url: str) -> str:
 async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
     postgres_url: str,
 ) -> None:
-    """**An index that exists proves nothing about what it serves.** This is the discipline.
+    """An index that exists proves nothing about what it serves.
 
-    `test_both_new_foreign_keys_have_an_index_the_referential_check_can_use` already
-    applies, one table over.
-
-    Two arms on one scratch database, and the pre-migration arm is what makes
-    the post-migration arm a measurement rather than a hope: with
-    `enable_seqscan = off` Postgres falls back to a `Seq Scan` when there is no
-    alternative -- at the disabled-node penalty, but it still plans it -- so at
-    `m10b` this statement reads `Seq Scan` and at `m10c` it reads
-    `ix_search_queries_at`. The two arms differ observably, which is the
-    premise proved rather than assumed.
+    Two arms on one scratch database: with `enable_seqscan = off` Postgres still falls
+    back to a `Seq Scan` when there is no alternative -- at the disabled-node penalty,
+    but it still plans it -- so at `m10b` this statement reads `Seq Scan` and at `m10c`
+    it reads `ix_search_queries_at`. The pre-migration arm is what proves the premise
+    rather than assuming it.
     """
     admin, scratch, url = await scratch_database(postgres_url, "prune")
     try:
@@ -288,21 +271,14 @@ async def test_the_retention_delete_plans_onto_the_index_and_did_not_before(
 async def test_one_step_back_and_forward_restores_each_artefact(
     postgres_url: str, artefact: str
 ) -> None:
-    """Down to `m10b` then back up.
+    """Down to `m10b` and back up, parametrised so a forgotten artefact names itself.
 
-    parametrised so a `downgrade()`/`upgrade()` pair that forgets one of the five fails
-    naming *that* one rather than the first.
-
-    **A named stop rather than `-1`**, which is what this read while `m10c` was
-    head: `-1` follows the chain, so the moment a later revision lands it
-    exercises that one's `downgrade()` and every assertion here becomes a
-    statement about a schema `m10c` never touched.
-
-    `run_alembic` is called with an explicit `direction=` for the bare revision
-    id: left to infer, a bare id runs `upgrade`, which against a database
-    already past it is a silent no-op and the assertions then describe a schema
-    nobody moved. The stop is `m10c` rather than `head` so that `-1` keeps
-    meaning "below the revision these five artefacts belong to".
+    A `downgrade()`/`upgrade()` pair that drops one of the five fails naming *that* one
+    rather than the first. The stops are named revisions rather than `-1`, which
+    follows the chain and would exercise whichever revision is head. `run_alembic` gets
+    an explicit `direction=` for a bare revision id: left to infer, a bare id runs
+    `upgrade`, which against a database already past it is a silent no-op and the
+    assertions then describe a schema nobody moved.
     """
     admin, scratch, url = await scratch_database(postgres_url, "cycle1")
     try:
@@ -325,11 +301,11 @@ async def test_one_step_back_and_forward_restores_each_artefact(
 async def test_a_down_and_up_cycle_relabels_a_suggest_row_and_the_artefact_check_cannot_see_it(
     postgres_url: str,
 ) -> None:
-    """🔴 **The five artefacts above come back and the data does not**.
+    """The five artefacts above come back and the data does not.
 
-    and nothing in this file could say so: every assertion beside this one reads
-    `information_schema` or `pg_indexes`, so a cycle that restored the whole schema over
-    silently rewritten rows passes all five.
+    Nothing else in this file could say so: every assertion beside this one reads
+    `information_schema` or `pg_indexes`, so a cycle that restored the whole schema
+    over silently rewritten rows passes all five.
     """
     admin, scratch, url = await scratch_database(postgres_url, "relabel")
     try:

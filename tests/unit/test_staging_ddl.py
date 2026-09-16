@@ -68,7 +68,7 @@ def test_the_scan_finds_the_staging_ddl_it_is_scanning_for() -> None:
 def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
     """The wrong implementation.
 
-    `CREATE UNLOGGED TABLE stg_jobs`, which is what every one of these was until M6.
+    `CREATE UNLOGGED TABLE stg_jobs`, which is what every one of these once was.
     """
     wrong = [
         (path.name, name, statement)
@@ -85,12 +85,12 @@ def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
 # leftover for it to drop -- no released version of usher ever ran a `CREATE TABLE
 # public.stg_people`.
 _NEVER_EXISTED_IN_PUBLIC = {
-    "stg_people",  # M7
-    "stg_credits",  # M7
-    "stg_collections",  # M7
-    "stg_genome",  # M7
-    "stg_credit_names",  # M9 T6
-    "stg_akas",  # M9 T7
+    "stg_people",
+    "stg_credits",
+    "stg_collections",
+    "stg_genome",
+    "stg_credit_names",
+    "stg_akas",
 }
 
 

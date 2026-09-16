@@ -159,13 +159,11 @@ class TestPostgresTasteRepository(TasteRepositoryContract):
 async def test_a_stored_vector_survives_the_halfvec_round_trip_to_a_thousandth(
     session: AsyncSession,
 ) -> None:
-    """`halfvec(384)`'s quantisation, measured rather than assumed.
+    """`halfvec`'s quantisation, asserted rather than assumed.
 
-    The published figure is a max cosine error of 1.21e-04 over 1,000 real
-    vectors -- three orders of magnitude below the useful signal. This asserts
-    the per-lane consequence, which is what a reader of a centroid actually
-    holds, and it is the whole reason this file's tolerance is 1e-3 where the
-    unit file's is 1e-9.
+    The per-lane consequence is what a reader of a centroid actually holds, and
+    it is the whole reason this file's tolerance is 1e-3 where the unit file's
+    is 1e-9.
     """
     await _seed_users(session)
     repository = PostgresTasteRepository(session)
@@ -187,8 +185,7 @@ async def test_a_stored_vector_survives_the_halfvec_round_trip_to_a_thousandth(
     assert found.centroid is not None
     # A `list[float]`, never a `HalfVector` -- pgvector 0.8.6's
     # `HALFVEC.result_processor` returns the former, so code written for
-    # `.to_list()` is an `AttributeError` at the first read. Group F hit this
-    # on `genome_scores` and it is recorded there.
+    # `.to_list()` is an `AttributeError` at the first read.
     assert len(found.centroid) == EMBEDDING_DIMENSIONS
     for expected, actual in zip(lanes, found.centroid, strict=True):
         assert actual == pytest.approx(expected, abs=1e-3)
@@ -197,14 +194,13 @@ async def test_a_stored_vector_survives_the_halfvec_round_trip_to_a_thousandth(
 async def test_a_bare_text_read_would_hand_the_centroid_back_as_a_string(
     session: AsyncSession,
 ) -> None:
-    """**The `.columns()` declaration on `_GET` is load-bearing and its absence is silent.**.
+    """The `.columns()` declaration on `_GET` is load-bearing, and silent when absent.
 
     asyncpg has no codec for a pgvector type and a `text()` construct carries
     no type information, so the read gets the extension's *text output form*:
     `tuple(row.centroid)` then yields one-character strings and raises nothing
-    at all. This case pins the failure directly, so that removing the
-    declaration is a red test rather than a centroid of 2,000 punctuation
-    marks flowing into a cosine.
+    at all. Pinned directly, so that removing the declaration is a red test
+    rather than a centroid of punctuation marks flowing into a cosine.
     """
     await _seed_users(session)
     await PostgresTasteRepository(session).put(
@@ -229,12 +225,12 @@ async def test_a_bare_text_read_would_hand_the_centroid_back_as_a_string(
 
 
 async def test_deleting_a_user_takes_their_centroid_with_it(session: AsyncSession) -> None:
-    """`ON DELETE CASCADE`, and it is `title_embeddings`' call rather than `watch_states`'.
+    """`ON DELETE CASCADE`, and it is `title_embeddings`' call, not `watch_states`'.
 
-    ADR-0010 makes `watch_states.user_id` protect state a delete would destroy
-    irrecoverably. A centroid is neither user state nor irrecoverable -- it is
-    a mean over rows that are themselves cascading away -- so it dies with the
-    user rather than blocking the delete or surviving attached to nothing.
+    `watch_states.user_id` protects state a delete would destroy irrecoverably.
+    A centroid is neither user state nor irrecoverable -- it is a mean over rows
+    that are themselves cascading away -- so it dies with the user rather than
+    blocking the delete or surviving attached to nothing.
     """
     await _seed_users(session)
     await PostgresTasteRepository(session).put(

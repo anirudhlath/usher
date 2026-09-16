@@ -214,8 +214,8 @@ async def test_the_curate_handler_generates_for_the_household_its_key_names() ->
     """**The key is the household, and nothing else in this handler may decide which one.**.
 
     `watch_history_handler` one section down takes a `user_id` at
-    *construction*, because M4 has one user and a walk's job key is a
-    source's `external_id` with no household in it. Curate is the opposite
+    *construction*, because the deployment has one user and a walk's job key
+    is a source's `external_id` with no household in it. Curate is the opposite
     shape: `(kind, key)` is what makes two requests for one household buy one
     completion, so the household has to be in the key -- and a handler that
     took the composition root's default user instead would still dedup
@@ -554,8 +554,8 @@ class _RecordingReconcile(ReconcileService):
         self.calls: list[tuple[uuid.UUID, SyncRunKind]] = []
         # The `max_items` each call was handed. `POST /admin/sources/{id}/sync`
         # is an operator asking for the whole thing, so the handler must pass
-        # nothing and get M10 S6's unlimited default -- and "0" is a claim a
-        # case can be wrong about in a way "the walk happened" is not.
+        # nothing and get the unlimited default -- and "0" is a claim a case
+        # can be wrong about in a way "the walk happened" is not.
         self.ceilings: list[int] = []
         self._log = log
         self._boom = raises
@@ -1154,7 +1154,7 @@ def _upsert(
 
 
 # ---------------------------------------------------------------------------
-# `bootstrap` -- the phase, and the key that is not a UUID (M9's E5).
+# `bootstrap` -- the phase, and the key that is not a UUID.
 # ---------------------------------------------------------------------------
 
 

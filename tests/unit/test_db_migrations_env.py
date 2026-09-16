@@ -16,14 +16,10 @@ _PERCENT_DSN = "postgresql+asyncpg://usher:p%40ss%25word@localhost:5432/usher"
 
 
 def test_configparser_round_trip_is_the_hazard_env_py_must_avoid() -> None:
-    """Pins the exact failure env.py used to hit: `Config.set_main_option` raises immediately.
+    """`Config.set_main_option` rejects a %-bearing DSN at set time.
 
-    it doesn't even need a later get_section/ get_main_option call -- so nobody
-    reintroduces routing the DSN through Config.
-
-    Verified directly: configparser's BasicInterpolation.before_set raises a plain
-    ValueError here, not a configparser.Error subclass -- the failure happens at *set*
-    time, before interpolation proper ever runs at get time.
+    Routing the DSN through alembic's `Config` is what this rules out: the raise is a
+    plain `ValueError`, before interpolation at get time ever runs.
     """
     config = Config()
     with pytest.raises(ValueError, match="invalid interpolation syntax"):
@@ -31,11 +27,7 @@ def test_configparser_round_trip_is_the_hazard_env_py_must_avoid() -> None:
 
 
 def test_the_percent_dsn_would_leak_into_the_configparser_error_message() -> None:
-    """The failure mode is worse than a crash.
-
-    the exception text embeds the raw DSN, including the password -- a credentials-in-
-    logs leak.
-    """
+    """The configparser failure embeds the raw DSN, password and all, in its message."""
     config = Config()
     with pytest.raises(ValueError) as exc_info:
         config.set_main_option("sqlalchemy.url", _PERCENT_DSN)
@@ -45,12 +37,10 @@ def test_the_percent_dsn_would_leak_into_the_configparser_error_message() -> Non
 def test_settings_database_url_is_returned_unmangled_regardless_of_percent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The code path env.py actually uses.
+    """The path env.py uses instead.
 
-    plain SecretStr unwrapping, no Config/configparser involved -- must hand back the
-    DSN byte-for-byte, %-and-all.
-
-    This is what makes the fix in env.py's _database_url() correct, not just different.
+    Plain `SecretStr` unwrapping, no configparser involved, so the DSN comes back
+    byte-for-byte, %-and-all.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", _PERCENT_DSN)
     monkeypatch.setenv("USHER_SECRET_KEY", "0123456789abcdef0123456789abcdef")
@@ -59,23 +49,12 @@ def test_settings_database_url_is_returned_unmangled_regardless_of_percent(
 
 
 def test_env_py_never_lets_fileconfig_disable_the_loggers_it_did_not_name() -> None:
-    """`fileConfig`'s `disable_existing_loggers` defaults to **True**.
+    """`fileConfig` must be passed `disable_existing_loggers=False`.
 
-    which sets `.disabled` on every logger absent from alembic.ini's `[loggers]` (root,
-    sqlalchemy, alembic) -- a migration file silencing modules it has no opinion about,
-    permanently, because nothing in `logging` clears that flag on reconfigure.
-
-    Measured 2026-08-10: it is why `pytest tests/unit` was green and `pytest
-    tests/integration tests/unit/test_telemetry.py` was not. Companion repair in
-    `usher.telemetry.configure_logging`, which reclaims the flag whoever set it.
-
-    Structural rather than behavioural, deliberately and in both directions.
-    env.py calls this at import under a live alembic context, so a unit test
-    cannot reach the call; and `fileConfig` against the real alembic.ini
-    would reconfigure root logging for every case that ran afterwards, which
-    is the defect rather than a way to observe it. The damage is invisible to
-    assertions in this file in any event -- it lands on *other* modules'
-    logging.
+    The default is True, which sets `.disabled` on every logger alembic.ini does not
+    name and nothing in `logging` clears again. Read from the source rather than run:
+    `fileConfig` against the real alembic.ini would reconfigure root logging for every
+    case that ran afterwards, which is the defect rather than a way to observe it.
     """
     source = (Path(usher.db.__file__).parent / "migrations" / "env.py").read_text()
     calls = [

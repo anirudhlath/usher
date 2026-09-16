@@ -39,9 +39,9 @@ REF_PREFIX = "rotation-case-"
 CANARY = "sup3rs3cret-rotation-canary"
 
 # The environment variable the command reads the new key out of. Exported by
-# the case, never written into `.env`: measured 2026-08-25, the same name
-# inside `.env` makes every entry point fail `extra="forbid"` and renders the
-# key in the `ValidationError`'s `input_value=`.
+# the case, never written into `.env`: the same name inside `.env` makes every
+# entry point fail `extra="forbid"` and renders the key in the
+# `ValidationError`'s `input_value=`.
 VAR = "USHER_NEW_SECRET_KEY"
 
 # Three canaries rather than one, because a rotation that moved row A's
@@ -53,7 +53,7 @@ CANARIES = ("sup3rs3cret-canary-one", "sup3rs3cret-canary-two", "sup3rs3cret-can
 
 
 class _InterruptedRun(Exception):
-    """How K8's drill spells "the operator killed the command".
+    """How this file spells "the operator killed the command".
 
     A signal is the obvious spelling and it is the wrong one: a killed
     process leaves no report, no exception and no frame to assert on, so a
@@ -68,7 +68,7 @@ class _InterruptedRun(Exception):
 async def clean_slate(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
     """Runs before as well as after.
 
-    a previous run that died between the two would leave rows that make the next run's
+    A previous run that died between the two would leave rows that make the next run's
     counts wrong, and a test whose isolation depends on the last one having finished
     cleanly is not isolated.
     """
@@ -172,14 +172,12 @@ async def _rotate(
 async def test_the_rotated_row_reads_under_the_new_key_and_no_longer_under_the_old_one(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The whole point of the command.
+    """The whole point of the command, asserted through the shipped reader.
 
-    asserted through the shipped reader rather than through the bytes.
-
-    Both directions, because only one of them is the *change*: a rotation that
-    wrote nothing satisfies "the new key reads it" if the two keys happened to
-    derive the same cipher, and a rotation that corrupted the row satisfies
-    "the old key cannot" on its own.
+    Both directions, because only one of them is the *change*: a rotation that wrote
+    nothing satisfies "the new key reads it" if the two keys happened to derive the same
+    cipher, and a rotation that corrupted the row satisfies "the old key cannot" on its
+    own.
     """
     ref = f"{REF_PREFIX}a"
     await _seed(sessions, ref, OLD_KEY)
@@ -206,12 +204,10 @@ async def test_the_rotated_row_reads_under_the_new_key_and_no_longer_under_the_o
 async def test_a_row_already_on_the_new_key_is_left_byte_identical(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The headline unit case's Postgres arm, and the assertion is the same one.
+    """The unit case's Postgres arm, and the assertion is the same one.
 
-    a service that re-encrypted an already-rotated row would leave it perfectly
-    readable, so only the bytes can see it.
-
-    Its premise is the row that genuinely moves.
+    A service that re-encrypted an already-rotated row would leave it perfectly
+    readable, so only the bytes can see it. Its premise is the row that genuinely moves.
     """
     moved, kept = f"{REF_PREFIX}moves", f"{REF_PREFIX}stays"
     await _seed(sessions, moved, OLD_KEY)
@@ -231,8 +227,8 @@ async def test_a_row_no_key_opens_is_refused_and_the_rest_of_the_table_still_rot
 ) -> None:
     """A mixed table is the state an interrupted rotation leaves.
 
-    and the refusal must not hide behind the rows that worked -- nor take them down with
-    it, which is what one transaction over the whole table would do.
+    The refusal must not hide behind the rows that worked -- nor take them down with it,
+    which is what one transaction over the whole table would do.
     """
     fine, lost = f"{REF_PREFIX}fine", f"{REF_PREFIX}zlost"
     await _seed(sessions, fine, OLD_KEY)
@@ -258,8 +254,8 @@ async def test_each_rotated_row_is_committed_before_the_next_one_is_written(
     is durable at that moment, which is what "an interruption leaves a mixed
     state" actually means.
 
-    The commit callable is wrapped rather than replaced, so what is measured
-    is the shipped session's own commit.
+    The commit callable is wrapped rather than replaced, so what is observed is the
+    shipped session's own commit.
     """
     first, second = f"{REF_PREFIX}m1", f"{REF_PREFIX}m2"
     await _seed(sessions, first, OLD_KEY)
@@ -344,7 +340,7 @@ async def test_the_command_prints_refs_and_never_a_credential_or_a_key(
 ) -> None:
     """Everything `usher rotate-secret` writes to stdout.
 
-    over a table holding a rotatable row and an unopenable one, with the canary's
+    Over a table holding a rotatable row and an unopenable one, with the canary's
     presence in the stored row asserted first.
     """
     fine, lost = f"{REF_PREFIX}printed", f"{REF_PREFIX}zunopenable"
@@ -383,11 +379,10 @@ async def test_the_rotation_store_needs_no_key_and_the_reader_still_does(
 ) -> None:
     """`PostgresCredentialRotationStore.__init__` takes a session and nothing else.
 
-    which is what makes an instance of it a thing that cannot leak a credential.
-
-    The control is the sibling: `PostgresCredentialStore` *does* take a key,
-    so this is a statement about a deliberate asymmetry rather than about a
-    constructor nobody passes anything to.
+    That is what makes an instance of it a thing that cannot leak a credential. The
+    control is the sibling: `PostgresCredentialStore` *does* take a key, so this is a
+    statement about a deliberate asymmetry rather than about a constructor nobody passes
+    anything to.
     """
     ref = f"{REF_PREFIX}opaque"
     await _seed(sessions, ref, OLD_KEY)
@@ -405,12 +400,11 @@ async def test_the_rotation_store_needs_no_key_and_the_reader_still_does(
 async def test_writing_to_a_ref_the_table_does_not_hold_writes_nothing(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """*An update.
+    """An update, never an insert.
 
-    never an insert.* A rotation mints no rows, so a ref that vanished between the
-    listing and the write must not reappear as a row with no source behind it -- which
-    the foreign key would refuse anyway, loudly, in the middle of a run that was
-    otherwise fine.
+    A rotation mints no rows, so a ref that vanished between the listing and the write
+    must not reappear as a row with no source behind it -- which the foreign key would
+    refuse anyway, loudly, in the middle of a run that was otherwise fine.
     """
     async with sessions() as session:
         await PostgresCredentialRotationStore(session).write_ciphertext(
@@ -427,9 +421,6 @@ async def test_writing_to_a_ref_the_table_does_not_hold_writes_nothing(
 
 async def test_the_write_moves_updated_at(sessions: async_sessionmaker[AsyncSession]) -> None:
     """`source_credentials` carries no `set_updated_at` trigger.
-
-    its model docstring says so, and named `PostgresCredentialStore` as the table's only
-    writer until this class became the second one.
 
     So the stamp is this repository's to set, and a rotation that left it alone would
     make the column mean *"when the credential last changed"* on some rows and *"when it
@@ -465,9 +456,7 @@ async def _updated_at(sessions: async_sessionmaker[AsyncSession], ref: str) -> d
         return stamp
 
 
-# --------------------------------------------------------------------------- K8's
-# drill, run for real on 2026-08-26 against a scratch `pgvector/pgvector:pg17` and
-# transcribed into `docs/runbooks/rotation.md`.
+# --- the drill transcribed into `docs/runbooks/rotation.md` ------------------
 
 
 async def _seed_three(
@@ -495,9 +484,8 @@ def _command_environment(
 ) -> Iterator[None]:
     """The environment `usher rotate-secret` reads, and nothing else.
 
-    `USHER_SECRET_KEY` is a parameter rather than a constant because the whole
-    of K8's ordering finding is what happens when it is already the *new* key
-    -- see `test_rotating_after_the_key_was_already_changed_...` below.
+    `USHER_SECRET_KEY` is a parameter rather than a constant because the ordering case
+    below turns on it already being the *new* key.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
     monkeypatch.setenv("USHER_SECRET_KEY", secret_key.get_secret_value())
@@ -512,13 +500,11 @@ def _command_environment(
 async def _opens(
     sessions: async_sessionmaker[AsyncSession], key: SecretStr, ref: str
 ) -> str | None:
-    """The password a store built from `key` reads out of `ref`.
+    """The password a store built from `key` reads out of `ref`, or `None`.
 
-    or `None` if that store cannot open the row.
-
-    A **separately-constructed** store per call, which is the point: a claim
-    about a row's ciphertext must not be able to pass because one long-lived
-    reader happened to hold the right cipher.
+    A **separately-constructed** store per call, which is the point: a claim about a
+    row's ciphertext must not be able to pass because one long-lived reader happened to
+    hold the right cipher.
     """
     async with sessions() as session:
         try:
@@ -531,15 +517,12 @@ async def _opens(
 async def test_three_rows_rotate_together_and_each_keeps_its_own_credential(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """K8 arm 1.
+    """The happy path over more than one row, asserted per row.
 
-    The happy path over more than one row, asserted per row.
-
-    A one-row case cannot see a rotation that re-encrypts the *wrong*
-    plaintext onto a row: every row still opens under the new key, the report
-    still counts three, and only distinct payloads can tell them apart. Three
-    is the smallest fixture that can, because a two-row permutation is its own
-    inverse.
+    A one-row case cannot see a rotation that re-encrypts the *wrong* plaintext onto a
+    row: every row still opens under the new key, the report still counts three, and
+    only distinct payloads can tell them apart. Three is the smallest fixture that can,
+    because a two-row permutation is its own inverse.
     """
     refs = await _seed_three(sessions)
     before = {ref: await _ciphertext(sessions, ref) for ref in refs}
@@ -562,7 +545,7 @@ async def test_an_interrupted_rotation_leaves_a_mixed_table_that_a_second_run_fi
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """K8 arms 2 and 3: the interruption, and the re-run that is its recovery.
+    """The interruption, and the re-run that is its recovery.
 
     **The interruption is an injected failure and not a signal**, for
     `_InterruptedRun`'s reason. It is injected on the `commit` callable --
@@ -662,7 +645,7 @@ async def test_a_row_no_key_can_open_is_named_and_the_other_two_still_rotate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """K8 arm 4, through the shipped command over three rows.
+    """The refusal, through the shipped command over three rows.
 
     The service-level sibling
     (`test_a_row_no_key_opens_is_refused_and_the_rest_of_the_table_still_rotates`)
@@ -715,9 +698,7 @@ async def test_rotating_after_the_key_was_already_changed_refuses_every_row_and_
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """K8's ordering finding.
-
-    which is the whole reason `rotation.md` states an order rather than a list of steps.
+    """The ordering finding, which is why `rotation.md` states an order.
 
     An operator who edits `.env` **first** and restarts has a deployment whose
     `USHER_SECRET_KEY` is already the new key -- so `cli._rotate` builds
@@ -747,7 +728,7 @@ async def test_rotating_after_the_key_was_already_changed_refuses_every_row_and_
     for ref in refs:
         assert ref in printed
         assert await _ciphertext(sessions, ref) == before[ref], "a refused run still wrote"
-    # 🔴 And the advice the operator is given, end to end through the shipped
+    # And the advice the operator is given, end to end through the shipped
     # command rather than through `_rotation_refusal` alone: this state is the
     # ordering mistake, every credential is intact, and telling the operator to
     # re-enter them destroys working state to fix a problem they do not have.

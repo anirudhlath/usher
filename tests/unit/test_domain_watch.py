@@ -180,7 +180,7 @@ def test_watch_state_rejects_unknown_origin() -> None:
         WatchState.model_validate({"user_id": new_id(), "title_id": new_id(), "origin": "webhook"})
 
 
-# --- serialization round-trip (the wire contract from M4 onward) -----------
+# --- serialization round-trip (the wire contract) --------------------------
 
 
 def test_user_serialization_round_trips() -> None:

@@ -1,4 +1,4 @@
-"""PRD 10's metric catalogue for M5's push lane."""
+"""PRD 10's metric catalogue for the push lane."""
 
 import sys
 import uuid
@@ -34,7 +34,7 @@ from usher.telemetry import (
     register_push_gauges,
 )
 
-# Every metric PRD 10 marks M5 and this group owes. Named here rather than
+# Every metric PRD 10 marks for the push lane. Named here rather than
 # discovered from the code, so a rename in `src/` fails this file instead of
 # quietly moving a dashboard's target.
 PRD_10_M5_PUSH_METRICS = frozenset(
@@ -122,8 +122,8 @@ async def test_every_applied_event_is_counted_by_source_and_kind(
 ) -> None:
     """PRD 10's `usher.source.push.events`.
 
-    Labelled by kind because the two that cost nothing (`item_removed`, which ADR-0015
-    forbids acting on) and the one that costs a merge look identical on an unlabelled
+    Labelled by kind because the two that cost nothing (`item_removed`, which the
+    lane never acts on) and the one that costs a merge look identical on an unlabelled
     series -- and "is this lane doing anything" is the question dashboard 3's push panel
     exists to answer alongside uptime.
 
@@ -165,7 +165,7 @@ def _instrument_names(reader: InMemoryMetricReader) -> set[str]:
     gauges are not module-level -- `register_push_gauges` creates them -- so
     they come from the reader instead, after registering a reader that
     reports one series per instrument. Same split
-    `tests/unit/test_telemetry_pipeline.py` makes for M4's catalogue.
+    `tests/unit/test_telemetry_pipeline.py` makes for its own catalogue.
     """
     names = {
         instrument._name
@@ -193,8 +193,8 @@ def test_every_prd_10_push_metric_actually_exists(meter_reader: InMemoryMetricRe
 def test_the_module_owning_those_instruments_is_imported() -> None:
     """`_instrument_names` walks `sys.modules`.
 
-    so a catalogue case whose module was never imported compares an empty set against a
-    set it happens to contain and passes having measured nothing.
+    A catalogue case whose module was never imported compares an empty set against a
+    set it happens to contain, and passes having checked nothing.
 
     Pinned rather than relied on -- the same family as "a harness must refuse to
     classify a run that did not run".
@@ -202,7 +202,7 @@ def test_the_module_owning_those_instruments_is_imported() -> None:
     assert "usher.services.push" in sys.modules
 
 
-# -- the two series PRD 10 reserved for M5 ----------------------------------
+# -- the two series PRD 10 reserved -----------------------------------------
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list[tuple[float, str]]:
@@ -216,9 +216,9 @@ def test_the_push_gauge_reports_delivery_not_connection(
 ) -> None:
     """PRD 10's "Push down" alert fires on `push.connected == 0` for fifteen minutes.
 
-    A gauge reporting the *socket* would be permanently green against the one failure
-    ADR-0004 warns about -- a channel that upgraded, is held open, and delivers nothing
-    -- which is precisely the condition that alert exists to catch.
+    A gauge reporting the *socket* would be permanently green against a channel that
+    upgraded, is held open, and delivers nothing -- precisely the condition that alert
+    exists to catch.
     """
     register_push_gauges(lambda: {"Living Room Emby": PushSnapshot(delivering=False, reconnects=2)})
     assert _points(meter_reader, "usher.source.push.connected") == [(0.0, "Living Room Emby")]
@@ -250,8 +250,8 @@ def test_the_reconnect_series_is_a_counter_and_the_uptime_series_is_a_gauge(
 ) -> None:
     """PRD 10 documents one of each, and the two are different instruments on the wire.
 
-    a monotonic `Sum` is what a Prometheus counter is, and `rate()` over a gauge is not
-    the same query.
+    A monotonic `Sum` is what a Prometheus counter is, and `rate()` over a gauge is
+    not the same query.
 
     A row emitted under its documented *name* but the wrong *type* is the same class of
     failure as a near-miss name -- the panel exists, the series is wrong, and nothing
@@ -274,10 +274,10 @@ def test_the_reconnect_series_is_a_counter_and_the_uptime_series_is_a_gauge(
 def test_registering_a_second_reader_replaces_the_first(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The SDK keeps only the *first* observable instrument registered under a name and silently.
+    """The SDK keeps only the *first* observable instrument registered under a name.
 
-    discards the rest -- verified directly for `register_queue_gauges` and true here for
-    the same reason.
+    The rest are silently discarded -- true here for the same reason it is true of
+    `register_queue_gauges`.
 
     A re-registration that only created a second instrument would leave the first, now-
     dead reader reporting forever.
@@ -293,15 +293,14 @@ def test_no_reader_reports_no_observation_rather_than_a_zero(
 ) -> None:
     """A fabricated zero is indistinguishable from a source whose channel is down.
 
-    and PRD 10's "Push down" alert fires on exactly that value -- so a process that
+    PRD 10's "Push down" alert fires on exactly that value, so a process that
     reported 0 from start-up would page somebody about a source that was never
     configured.
 
     Pinned by calling the callbacks directly with the reader unset, not
-    through a collection, for the reason M4 recorded for the queue gauges:
-    the branch is unreachable through `register_push_gauges`, which assigns
-    the reader *before* it creates the instruments, and the indirect version
-    -- registering a reader that answers with an empty mapping -- passes
+    through a collection: the branch is unreachable through `register_push_gauges`,
+    which assigns the reader *before* it creates the instruments, and the indirect
+    version -- registering a reader that answers with an empty mapping -- passes
     against a guard that fabricates a zero.
     """
     monkeypatch.setattr("usher.telemetry._push._read", None)

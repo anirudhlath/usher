@@ -113,7 +113,7 @@ class _ScriptedIndex(SearchIndex):
 class _ScriptedSuggest(SuggestIndex):
     """Present because `SearchService` takes one.
 
-    `GET /search` never calls it -- `GET /search/suggest` is B5's route.
+    `GET /search` never calls it -- `GET /search/suggest` does.
     """
 
     async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
@@ -234,8 +234,8 @@ def _app(service: SearchService, *, settings: Settings | None = None) -> FastAPI
     built = create_app(settings or _settings())
     built.dependency_overrides[get_search_service] = lambda: service
     built.dependency_overrides[get_default_user_id] = lambda: _VIEWER
-    # Three, since #73: both routes in this file promote the skeletons they
-    # answered with, so the queue and the catalog are on their path and the
+    # Three: both routes in this file promote the skeletons they answered
+    # with, so the queue and the catalog are on their path and the
     # real `PostgresJobQueue` points at the database nothing listens on. The
     # two demand-lane cases below replace this with a pair they can assert on.
     built.dependency_overrides[get_visibility_service] = lambda: VisibilityService(
@@ -266,14 +266,12 @@ async def hits() -> _ScriptedIndex:
 
 @pytest.fixture
 async def client(hits: _ScriptedIndex) -> AsyncIterator[httpx.AsyncClient]:
-    """A deployment that configured no embedding model.
+    """A deployment that configured no embedding model, the shipped default.
 
-    which is the shipped default (`USHER_EMBEDDING_ENABLED=false`).
-
-    Since #31 that is the *only* deployment answering this way: the lifespan
-    builds a model whenever one is configured and parks it on `app.state`, and
-    `api/deps.get_search_service` reads it. The cases below are therefore about
-    a deployment rather than about the product, which they were not before.
+    `USHER_EMBEDDING_ENABLED=false`, and the only deployment answering this way:
+    the lifespan builds a model whenever one is configured and parks it on
+    `app.state`, and `api/deps.get_search_service` reads it. The cases below are
+    therefore about a deployment rather than about the product.
     """
     async for connected in _client(_app(await _service(hits))):
         yield connected
@@ -363,7 +361,7 @@ async def test_a_fused_request_served_without_an_embedder_reports_both_modes(
 async def test_a_semantic_request_without_an_embedder_is_a_problem_document(
     client: httpx.AsyncClient,
 ) -> None:
-    """The one failure this route has, in A2's envelope.
+    """The one failure this route has, in the problem envelope.
 
     `fused` narrows because a whole lane is left; `semantic` refuses because
     narrowing it is not narrowing -- the caller asked the one question
@@ -388,28 +386,25 @@ async def test_a_semantic_request_without_an_embedder_is_a_problem_document(
     # to ask for instead has learned only that something went wrong.
     assert "mode=fused" in body["detail"]
     # `instance` is `request.url.path` and never `request.url`, so the query a
-    # viewer typed does not come back in the document. M9's `search_queries`
-    # makes that a live concern rather than a hypothetical one.
+    # viewer typed does not come back in the document. `search_queries` makes
+    # that a live concern rather than a hypothetical one.
     assert "vacuum" not in response.text
 
 
 async def test_a_semantic_request_is_served_where_this_process_holds_an_embedder(
     hits: _ScriptedIndex,
 ) -> None:
-    """**The positive control the two cases above were missing**.
+    """The positive control the two negative cases above cannot supply.
 
-    and it was green before #31 was fixed -- which is the point worth stating rather
-    than hiding.
-
-    The refusal has never been the route's: `?mode=semantic` reaches `SearchService`
-    unmolested and answers 200 whenever the service it was handed holds a model. What
-    shipped until #31 was a *dependency* that never handed it one, so the two negative
-    cases above passed on every deployment there was and nothing on this surface
-    distinguished "this deployment cannot" from "no deployment can".
+    The refusal is never the route's: `?mode=semantic` reaches `SearchService`
+    unmolested and answers 200 whenever the service it was handed holds a model.
+    A dependency that never hands it one leaves both negative cases passing on
+    every deployment, so nothing here distinguishes "this deployment cannot"
+    from "no deployment can".
 
     Fails: a route that refuses the mode itself -- a 422 minted here from
-    `settings` or a `mode` narrowed in the handler -- which is the shape the
-    problem document above invites and which no negative case can see.
+    `settings` or a `mode` narrowed in the handler -- which no negative case
+    can see.
     """
     service = await _service(hits, embedder=FakeEmbedder())
     async for connected in _client(_app(service)):
@@ -425,20 +420,18 @@ async def test_a_semantic_request_is_served_where_this_process_holds_an_embedder
 async def test_the_lifespan_puts_this_processs_embedder_on_app_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wiring #31 asked for, and the half a route case cannot see.
+    """The half of the wiring a route case cannot see.
 
-    **`worker_enabled=False` here on purpose.** The model used to be built only
-    where a worker lane ran, so the split deployment `.claude/rules/
+    **`worker_enabled=False` here on purpose.** Building the model only where a
+    worker lane runs leaves the split deployment `.claude/rules/
     api-telemetry-and-lanes.md` recommends -- a server beside a `usher work`
-    container, `USHER_WORKER_ENABLED=false` on the server -- had an embedding
-    model configured, a backfilled catalog, and no way to serve either from the
-    route. `composition.embedder` already answers `(None, no-op)` for a
-    deployment that configured none, so the lane switch was doing a job the
-    setting does itself.
+    container, `USHER_WORKER_ENABLED=false` on the server -- with a model
+    configured, a backfilled catalog, and no way to serve either from the route.
+    `composition.embedder` already answers `(None, no-op)` where none is
+    configured, so the lane switch would be doing the setting's job.
 
-    Fails: a lifespan that builds the model and does not park it (the shipped
-    state, `AttributeError`), and a lifespan that parks it only under
-    `worker_enabled` (this case, `None is not built`).
+    Fails: a lifespan that builds the model and does not park it
+    (`AttributeError`), and one that parks it only under `worker_enabled`.
 
     The closer is asserted because the model is a process resource with a
     release step, and an exposure that leaked it would look identical here.
@@ -614,8 +607,8 @@ async def test_an_expanded_query_reaches_the_body_only_when_a_completion_was_bou
     the path that embedded the query as typed.
     """
     expander = _Expander({QUERY_KEY: "a claustrophobic film about isolation"})
-    # A backfilled catalog, stated rather than defaulted: since #16 the
-    # expansion is declined outright where no title in the population has a
+    # A backfilled catalog, stated rather than defaulted: the expansion is
+    # declined outright where no title in the population has a
     # vector, and `SearchOutcome()`'s default coverage is `0.0`.
     hits = _ScriptedIndex(SearchOutcome(semantic_coverage=1.0))
     service = await _service(hits, embedder=FakeEmbedder(), expander=expander)
@@ -737,7 +730,7 @@ async def test_the_body_echoes_the_id_of_the_row_this_search_was_recorded_as(
 ) -> None:
     """**How a client gets a `search_id` at all**.
 
-    which is the first link of F3's funnel and the only one that lives on this route.
+    which is the first link of the funnel and the only one that lives on this route.
 
     Asserted against the stored row's own id rather than as "a UUID is
     present": an echo of a freshly minted id, or of the request's own trace
@@ -790,7 +783,7 @@ async def test_no_source_concept_and_no_credential_reaches_the_body(
         "mode",
         "semantic_coverage",
         "expanded_query",
-        # M9 F3. Opaque, and the one thing on this response a client hands
+        # Opaque, and the one thing on this response a client hands
         # back -- to `GET /titles/{id}` and to `POST /titles/{id}/play`. It
         # names a `search_queries` row and nothing else: not the household,
         # not the query, not a handle any other route accepts.
@@ -809,7 +802,7 @@ async def test_no_source_concept_and_no_credential_reaches_the_body(
     }
 
 
-# -- the demand lane (issue #73) -------------------------------------------
+# -- the demand lane -------------------------------------------------------
 
 
 class _SuggestingIndex(SuggestIndex):
@@ -840,7 +833,7 @@ async def test_a_search_promotes_the_skeletons_it_answered_with(hits: _ScriptedI
 
     a viewer typed this query and got these rows back.
 
-    `SearchResult` carries no `enrichment_state` (issue #52), so the route
+    `SearchResult` carries no `enrichment_state`, so the route
     cannot judge its own answer and `seen_ids` resolves the tier. Both tiers
     are seeded, because a route that promoted every row it returned passes an
     all-skeleton case unchanged.
@@ -869,8 +862,7 @@ async def test_type_ahead_promotes_what_it_offered() -> None:
     dropdown of names a viewer is choosing between is exactly "titles a client
     was just shown". The repeat is free at the database (`GREATEST` under
     `AND jobs.priority < excluded.priority`), so the steady-state cost of
-    holding a key down is one read per keystroke rather than one write, and
-    issue #73 carries the volume question rather than answering it here.
+    holding a key down is one read per keystroke rather than one write.
     """
     queue = FakeJobQueue()
     catalog = await _catalog_of(first=EnrichmentState.SKELETON, second=EnrichmentState.ENRICHED)

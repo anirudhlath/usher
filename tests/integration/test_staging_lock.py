@@ -21,16 +21,12 @@ _HOLD_SECONDS = 0.8
 
 
 def _row(key: str) -> JobRequest:
-    """A one-row enqueue, which is what M6 put on the hot path.
+    """A one-row enqueue, the shape the ingest hot path uses.
 
-    **Each racer gets its own key, and that is not tidiness.** Two sessions
-    enqueueing the *same* `(kind, key)` genuinely conflict: the second's
-    `INSERT ... ON CONFLICT` blocks on the first's uncommitted row until it
-    ends, which is Postgres doing its job and is indistinguishable, in a wall
-    clock, from the table-level wait these cases exist to measure. Written
-    with one shared key first and it produced an 816 ms wait against a fixed
-    implementation -- a case that would have passed for the wrong reason
-    before the fix and failed for the wrong reason after it.
+    Each racer gets its own key: two sessions enqueueing the *same* `(kind, key)`
+    genuinely conflict, the second blocking on the first's uncommitted row, and in a
+    wall clock that is indistinguishable from the table-level wait these cases are
+    about.
     """
     return JobRequest(kind=JobKind.INDEX, key=key, priority=JobPriority.NEW)
 
@@ -58,8 +54,8 @@ async def backends(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncS
 async def _enqueue_and_hold(session: AsyncSession, key: str, barrier: asyncio.Barrier) -> float:
     """Enqueue one row, then hold the transaction open before committing.
 
-    Returns the wall-clock milliseconds the enqueue itself took. The hold is
-    after the measurement deliberately: `ACCESS EXCLUSIVE` is held to commit,
+    Returns the wall-clock milliseconds the enqueue itself took. The hold comes after
+    the timing deliberately: `ACCESS EXCLUSIVE` is held to commit,
     so what a second caller waits on is this session's *whole* transaction,
     and a hold shorter than the wait would hide exactly that.
     """
@@ -98,20 +94,13 @@ async def _race(
 async def test_two_concurrent_enqueues_do_not_race_on_the_type_catalogue(
     backends: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The wrong implementation: `CREATE UNLOGGED TABLE stg_jobs`, today's.
+    """The wrong implementation: `CREATE UNLOGGED TABLE stg_jobs` in `public`.
 
-    With **no** leftover table the failure is not a wait at all. Two backends
-    creating the same public name at the same instant race on
-    `pg_type_typname_nsp_index` and one gets
-    `asyncpg.exceptions.UniqueViolationError`, which reaches a repository as
-    `sqlalchemy.exc.IntegrityError` -- indistinguishable from
-    `ck_jobs_key_not_empty` or a duplicate `(kind, key)`. So a healthy batch
-    is reported to its caller as a data conflict, and the *only* thing wrong
-    with it was the instant it ran.
-
-    Measured on this host before the fix: `duplicate key value violates
-    unique constraint "pg_type_typname_nsp_index"`, `Key (typname,
-    typnamespace)=(stg_jobs, 2200)`.
+    With no leftover table the failure is not a wait at all: two backends creating the
+    same public name at the same instant race on `pg_type_typname_nsp_index`, and the
+    loser's `UniqueViolationError` reaches a repository as `IntegrityError` --
+    indistinguishable from a duplicate `(kind, key)`, so a healthy batch is reported to
+    its caller as a data conflict.
     """
     outcomes = await _race(backends)
     raised = [one for one in outcomes if isinstance(one, BaseException)]
@@ -146,18 +135,12 @@ async def test_a_leftover_public_staging_table_cannot_serialise_two_enqueues(
 async def test_a_committed_enqueue_leaves_no_table_in_the_public_schema(
     backends: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The wrong implementation.
+    """The wrong implementation: a caller that commits leaves the staging table behind.
 
-    today's, and the reason nine test files carry a `DROP TABLE IF EXISTS stg_*` line.
-
-    Postgres DDL is transactional, so a caller that *commits* leaves the
-    staging table behind. That is invisible in this suite's usual
-    rolled-back-transaction isolation and shows up as schema drift in
-    `test_migration_matches_the_orm_metadata` -- in a later file, so the
-    suite that caused it passes alone and takes the migration test down in
-    combination. A temporary table cannot do this: `ON COMMIT DROP` removes
-    it at the commit that would otherwise have persisted it, and
-    `inspect(conn).get_table_names()` never saw it in the first place.
+    Postgres DDL is transactional, so the leftover is invisible under this suite's
+    rolled-back isolation and surfaces as schema drift in a later file. A temporary
+    table cannot do this: `ON COMMIT DROP` removes it at the commit that would otherwise
+    have persisted it, and `inspect(conn).get_table_names()` never saw it at all.
     """
     async with backends() as writer:
         queue = PostgresJobQueue(writer, max_attempts=5, backoff_seconds=30.0)
@@ -187,12 +170,10 @@ async def test_staging_is_idempotent_within_one_transaction(
 ) -> None:
     """`ON COMMIT DROP` drops at commit, and a caller may stage twice before one.
 
-    `IngestService` enqueues match jobs and then watch-history jobs against
-    the same session before its batch commit, so the second `CREATE TEMP
-    TABLE` meets the first one still standing. The `DROP TABLE IF EXISTS`
-    that made that work for a public table has to keep working for a
-    temporary one -- and it has to resolve to the temporary one, or the
-    second call raises `DuplicateTableError`.
+    `IngestService` enqueues match jobs and then watch-history jobs against the same
+    session, so the second `CREATE TEMP TABLE` meets the first still standing: the
+    `DROP TABLE IF EXISTS` has to resolve to the temporary one, or the second call
+    raises `DuplicateTableError`.
     """
     async with backends() as writer:
         queue = PostgresJobQueue(writer, max_attempts=5, backoff_seconds=30.0)

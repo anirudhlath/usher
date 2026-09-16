@@ -1,4 +1,4 @@
-"""`m09a`'s four rows, as declarations."""
+"""The four API-surface tables, as declarations."""
 
 from typing import cast
 
@@ -17,10 +17,9 @@ from usher.domain.enums import ImageKind, SearchNameKind
 
 
 def test_the_four_new_tables_are_registered_on_the_metadata() -> None:
-    """`test_all_core_tables_registered` uses `<=`.
+    """`test_all_core_tables_registered` uses `<=`, so it cannot see an omission.
 
-    so it cannot notice a table that was declared and never imported into
-    `db/models/__init__.py` -- and a table missing from that module is a table
+    A table declared and never imported into `db/models/__init__.py` is a table
     `compare_metadata` never diffs and `alembic --autogenerate` never sees.
     """
     assert {
@@ -32,19 +31,12 @@ def test_the_four_new_tables_are_registered_on_the_metadata() -> None:
 
 
 def test_images_carries_prd_02s_eleven_fields_and_no_twelfth() -> None:
-    """PRD 02's `Image` class declares exactly these.
-
-    and the table is that list rather than a superset of it.
+    """`Image` declares exactly these columns, and the table is not a superset.
 
     No `created_at`, no `updated_at` and no cached-derivative columns: artwork is
-    *referenced*, never mirrored (PRD 02 prices mirroring a 1.2M-title catalog at ~120
-    GB), and the image proxy's on-disk cache "is not a release artifact".
-
-    **`provider_path`, not `remote_url` -- `m09c` renamed it**, and there is
-    still no twelfth column: `sort_order` was asked for by group C's preamble
-    and deliberately left out of that revision's authorisation, so the read
-    order is `(is_primary DESC, id)`. Eleven either way, which is why this
-    case's name did not have to move.
+    *referenced*, never mirrored, and the image proxy's on-disk cache is not a
+    release artifact. `provider_path`, not `remote_url`; and there is no
+    `sort_order`, so the read order is `(is_primary DESC, id)`.
     """
     table = cast(Table, ImageRow.__table__)
     assert {c.name for c in table.columns} == {
@@ -82,20 +74,16 @@ def test_the_three_image_owner_columns_are_all_nullable_and_the_rest_are_not() -
 
 
 def test_every_image_check_and_delete_rule_is_declared() -> None:
-    """The CHECK names.
+    """The CHECK, the three `ondelete`s and the unique constraint in one place.
 
-    the three `ondelete`s and `m09c`'s unique constraint in one place, because the
-    delete rules and the owner CHECK are a single decision: SET NULL would leave
-    `num_nonnulls(...) = 0`, which the CHECK refuses, so a parent delete would fail
-    naming a table the operator never touched.
-
-    CASCADE is not the convenient answer here, it is the only available one.
-
-    `uq_images_owner_provider_path` is asserted here only as *present*; that it
-    is spelled `NULLS NOT DISTINCT`, and what the default spelling would have
-    admitted, is
-    `tests/integration/test_image_repository.py`'s -- a declaration cannot show
-    which rows a constraint refuses.
+    The delete rules and the owner CHECK are a single decision: SET NULL would
+    leave `num_nonnulls(...) = 0`, which the CHECK refuses, so a parent delete
+    would fail naming a table the operator never touched. CASCADE is not the
+    convenient answer here, it is the only available one.
+    `uq_images_owner_provider_path` is asserted only as *present*; that it is
+    spelled `NULLS NOT DISTINCT` belongs to
+    `tests/integration/test_image_repository.py`, because a declaration cannot
+    show which rows a constraint refuses.
     """
     table = cast(Table, ImageRow.__table__)
     assert {c.name for c in table.constraints if c.name} == {
@@ -115,16 +103,11 @@ def test_every_image_check_and_delete_rule_is_declared() -> None:
 
 
 def test_search_queries_carries_prd_10s_columns_and_no_others() -> None:
-    """PRD 10 assigns this table to M9 *whole*, and "whole" cuts both ways.
+    """The table is whole: nothing left out and nothing speculative added.
 
-    nothing is left out and nothing speculative is added.
-
-    `requested_mode` is wire-only; if the analytics task finds it must be persisted,
-    that is a request for a revision rather than a column appended here.
-
-    **Nine until `m10c` and eleven now.** The two it added are PRD 10's own
-    amendment 2 (`surface`, `tier`) and the list is still closed: a twelfth
-    column is a red here exactly as a tenth was.
+    `requested_mode` is wire-only; if the analytics task finds it must be
+    persisted, that is a request for a revision rather than a column appended
+    here. The column list is closed, so an extra one fails here.
     """
     table = cast(Table, SearchQueryRow.__table__)
     assert {c.name for c in table.columns} == {
@@ -143,9 +126,7 @@ def test_search_queries_carries_prd_10s_columns_and_no_others() -> None:
 
 
 def test_the_surface_column_is_not_null_and_the_tier_column_is_not() -> None:
-    """The nullability is the design and not an oversight.
-
-    so it is pinned rather than left to the migration.
+    """The nullability is the design, not an oversight, so it is pinned here.
 
     `surface` is `NOT NULL` for `played`'s reason one column up -- a nullable
     analytics column is the state a dashboard cannot tell from a real value.
@@ -159,15 +140,13 @@ def test_the_surface_column_is_not_null_and_the_tier_column_is_not() -> None:
 
 
 def test_the_search_queries_delete_rules_are_the_asymmetric_pair() -> None:
-    """RESTRICT on the user and SET NULL on the clicked title, and the two disagree on purpose.
+    """RESTRICT on the user, SET NULL on the clicked title: they differ on purpose.
 
-    A household's search history is user state, ADR-0010's `watch_states` side; a
-    deleted title must not delete the row recording that somebody searched, because the
-    search happened and the attribution is one nullable fact about it.
-
-    `played` is `NOT NULL` for the same reason PRD 10 calls the table "whole":
-    a nullable outcome column is exactly the state a dashboard cannot tell
-    from a real `false`.
+    A household's search history is user state, on `watch_states`' side of that
+    rule; a deleted title must not delete the row recording that somebody
+    searched, because the search happened and the attribution is one nullable
+    fact about it. `played` is `NOT NULL` because a nullable outcome column is
+    exactly the state a dashboard cannot tell from a real `false`.
     """
     table = cast(Table, SearchQueryRow.__table__)
     assert next(iter(table.c.user_id.foreign_keys)).ondelete == "RESTRICT"
@@ -177,16 +156,12 @@ def test_the_search_queries_delete_rules_are_the_asymmetric_pair() -> None:
 
 
 def test_search_queries_declares_exactly_the_one_index_with_a_written_reader() -> None:
-    """It declared none at all until `m10c`.
+    """The index set is asserted whole rather than by naming one index.
 
-    and the assertion stays a *whole-set* comparison rather than "the index named X is
-    present": the failure being guarded is an index added for a reader that does not
-    exist yet, and such an index has no name to check for.
-
-    `ix_search_queries_at`'s reader does exist and is written out verbatim in
-    PRD 10 -- `DELETE FROM search_queries WHERE at < now() - interval '90
-    days'`, an operator's own pruning SQL, which that document also records as
-    a sequential scan until somebody added this.
+    The failure being guarded is an index added for a reader that does not exist
+    yet, and such an index has no name to check for. `ix_search_queries_at`'s
+    reader does exist and is written out verbatim in PRD 10 -- an operator's own
+    `DELETE FROM search_queries WHERE at < now() - interval '90 days'`.
     """
     assert {index.name for index in cast(Table, SearchQueryRow.__table__).indexes} == {
         "ix_search_queries_at"
@@ -194,13 +169,11 @@ def test_search_queries_declares_exactly_the_one_index_with_a_written_reader() -
 
 
 def test_row_provider_settings_keys_on_the_slug_prefix_and_has_no_surrogate_id() -> None:
-    """`RowProvider.slug_prefix` is "declared rather than derived" and "bounded at ten".
+    """`RowProvider.slug_prefix` is the key: declared rather than derived.
 
-    which is what makes it a key at all -- a name a dashboard and an operator already
-    hold.
-
-    A surrogate id would add a column nothing reads while permitting two rows for one
-    provider, a state no admin route could interpret; the identical argument
+    It is a name a dashboard and an operator already hold. A surrogate id would
+    add a column nothing reads while permitting two rows for one provider, a
+    state no admin route could interpret -- the identical argument
     `genome_tags.tag_id` and `title_embeddings.title_id` both make.
     """
     table = cast(Table, RowProviderSettingRow.__table__)
@@ -216,17 +189,13 @@ def test_row_provider_settings_keys_on_the_slug_prefix_and_has_no_surrogate_id()
 
 
 def test_title_search_names_has_five_columns_and_popularity_is_not_one_of_them() -> None:
-    """**Five, not PRD 05's four.** `region` and `language` are not decoration.
+    """Five columns, because `region` and `language` are not decoration.
 
-    IMDb `title.akas` is the alias source, and without them a French and a Brazilian
-    alias for the same film are indistinguishable rows.
-
-    **And `popularity` is refused with a number.** `titles.tmdb_popularity`
-    is NULL on all 1,271,138 rows, which is why M6's shipped suggest ordering
-    was inert and why the vote-count tiebreak was added. Copying a 100%-NULL
-    column into a narrow table is precisely the duplication M6's boundary call
-    3 refused; the re-rank reads `titles.tmdb_vote_count`, as it already
-    does.
+    IMDb `title.akas` is the alias source, and without them a French and a
+    Brazilian alias for the same film are indistinguishable rows. `popularity` is
+    refused: `titles.tmdb_popularity` is NULL throughout, so copying it into a
+    narrow table duplicates an empty column -- the re-rank reads
+    `titles.tmdb_vote_count`, as it already does.
     """
     table = cast(Table, TitleSearchNameRow.__table__)
     assert {c.name for c in table.columns} == {
@@ -277,22 +246,15 @@ def test_the_search_name_bound_leaves_the_btree_room_at_utf_8s_worst_case() -> N
 
 
 def test_both_tier_one_prefix_indexes_declare_the_operator_class() -> None:
-    """**The declaration.
+    """The declaration, because the two wrong spellings fail differently.
 
-    because the two wrong spellings fail differently and only one of them is loud.**.
-
-    `Index(..., text("lower(name) text_pattern_ops"))` builds the right index
-    and makes alembic skip the expression, so
-    `test_migration_matches_the_orm_metadata` goes blind to it.
-    `postgresql_ops={"lower(name)": ...}` -- keyed on the expression's text
-    rather than on a label -- is silently ignored and builds a
-    *default-opclass* index, which is not an error and simply cannot serve
-    `LIKE 'pre%'`. Both were measured by compiling the DDL.
-
-    So this case pins the spelling that is neither: a labelled expression plus
-    a `postgresql_ops` entry whose key is that label. The integration file
-    proves the built index actually serves a prefix; this one is what fails
-    first, with no Docker, when the label and the key stop matching.
+    `Index(..., text("lower(name) text_pattern_ops"))` builds the right index and
+    makes alembic skip the expression, so `test_migration_matches_the_orm_metadata`
+    goes blind to it. `postgresql_ops={"lower(name)": ...}`, keyed on the
+    expression's text rather than on a label, is silently ignored and builds a
+    default-opclass index, which is not an error and simply cannot serve
+    `LIKE 'pre%'`. This pins the spelling that is neither: a labelled expression
+    plus a `postgresql_ops` entry whose key is that label.
     """
     for table, index_name in (
         (cast(Table, TitleRow.__table__), "ix_titles_name_lower_prefix"),
@@ -307,13 +269,10 @@ def test_both_tier_one_prefix_indexes_declare_the_operator_class() -> None:
 def test_the_suggest_vocabularies_have_exactly_the_members_with_an_emitter() -> None:
     """This project forbids an enum member nothing emits.
 
-    `LLMPurpose.QUERY_EXPANSION` sat unemitted for two milestones and M8 had to either
-    build it or delete it.
-
-    `SearchNameKind` has **no `primary` member**, and that is the whole shape
-    of the table: canonical names are served by `ix_titles_name_lower_prefix`
-    on `titles`, so a `primary` row would be the one-row-per-title duplication
-    M6's boundary call 3 refused, arriving under a new table name.
+    `SearchNameKind` has no `primary` member, and that is the whole shape of the
+    table: canonical names are served by `ix_titles_name_lower_prefix` on
+    `titles`, so a `primary` row would be one-row-per-title duplication arriving
+    under a new table name.
     """
     assert {member.value for member in SearchNameKind} == {"alias", "person"}
     assert not hasattr(SearchNameKind, "PRIMARY")

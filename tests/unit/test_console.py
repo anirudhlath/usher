@@ -47,18 +47,14 @@ def built_bundle(tmp_path: Path) -> Iterator[Path]:
 async def _client(settings: Settings) -> AsyncIterator[AsyncClient]:
     """A real app with its lifespan run.
 
-    The lifespan is needed even though nothing here reads the database, because
     `deps.get_session_factory` raises a diagnosable `RuntimeError` when
-    `app.state.session_factory` is missing.
-
-    **And that is why the shadowing case below is parametrised over `/health`,
-    `/meta/attribution` and `/openapi.json` rather than over the more obvious
-    `/titles/{id}`.** FastAPI solves a route's dependencies before it reports a
-    path-parameter failure, so `/titles/not-a-uuid` does not answer 422 without
-    a reachable database — it opens a connection and raises
-    `ConnectionRefusedError`. Measured, not assumed. The three routes chosen
-    instead each answer from their own handler with no session at all, which is
-    what lets the case assert a status rather than an exception type.
+    `app.state.session_factory` is missing, so the lifespan runs even though
+    nothing here reads the database. It is also why the shadowing case below is
+    parametrised over `/health`, `/meta/attribution` and `/openapi.json`:
+    FastAPI solves a route's dependencies before reporting a path-parameter
+    failure, so `/titles/not-a-uuid` raises `ConnectionRefusedError` rather
+    than answering 422, while those three answer from their own handler with no
+    session at all.
     """
     app = create_app(settings)
     async with LifespanManager(app) as manager:
@@ -216,15 +212,11 @@ async def test_disabling_the_console_leaves_the_root_alone(built_bundle: Path) -
 def test_the_client_knows_every_root_segment_the_api_owns() -> None:
     """One vocabulary across the language boundary, the way `BootstrapPhase` is.
 
-    `web/src/api/paths.ts` lists the root segments the API owns. Vite's dev
-    server proxies exactly that list upstream, so a router added here without a
-    matching entry there produces a development-only failure: the request is
-    answered by Vite's own history fallback with `index.html`, and the client
-    reports a JSON parse error against a path that works perfectly in
-    production. That is a bad afternoon, and it is entirely preventable.
-
-    The list is read out of the TypeScript rather than duplicated here, so
-    there is one definition and this test can only fail by them disagreeing.
+    `web/src/api/paths.ts` lists the root segments the API owns and Vite's dev
+    server proxies exactly that list, so a router added here without a matching
+    entry there is answered by Vite's history fallback with `index.html` and
+    fails only in development. The list is read out of the TypeScript rather
+    than duplicated, so this can only fail by the two disagreeing.
     """
     source = (_REPO / "web" / "src" / "api" / "paths.ts").read_text()
     body = source.split("USHER_API_ROOTS = [", 1)[1].split("]", 1)[0]
@@ -279,25 +271,13 @@ async def test_the_console_never_shadows_the_stream_route(built_bundle: Path) ->
 
 
 def test_no_console_source_file_is_hidden_by_a_gitignore_pattern() -> None:
-    """Every source file the console needs is actually in the repository.
+    """Every source file the console needs is actually tracked by git.
 
-    ⚠️ **This exists because `.gitignore` silently swallowed a whole component
-    group.** The pattern was `data/` — unanchored, so it matches a directory
-    named `data` at *any* depth — and
-    `web/src/design-system/components/data/` is the DataTable/LoadMore group.
-    The working tree had the files, so `npm test`, `tsc`, `oxlint`, the
-    Playwright suite and a local `vite build` all passed; the **first fresh
-    checkout of the branch** failed to compile, and it failed inside the
-    Docker build, which is the last place anyone wants to discover it.
-
-    The general shape is that an ignore rule is invisible to every check that
-    reads the working tree, which is all of them. Only something that asks git
-    what it is *tracking* can see it.
-
-    Scoped to `web/src` and `web/e2e` rather than the whole repository because
-    those are where a source file is a build input; `node_modules`, `dist` and
-    the report directories are ignored on purpose and are excluded by asking
-    git for the difference rather than by listing them again here.
+    An unanchored `.gitignore` pattern is invisible to every check that reads
+    the working tree — `npm test`, `tsc`, `oxlint` and a local `vite build` all
+    pass while a fresh checkout fails to compile — so only asking git what it
+    *tracks* can see one. Scoped to `web/src` and `web/e2e`, where a source
+    file is a build input and `node_modules` and `dist` are not.
     """
     import shutil
     import subprocess

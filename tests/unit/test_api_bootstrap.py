@@ -1,4 +1,4 @@
-"""`POST /admin/bootstrap/{phase}` -- the M2 command, as an enqueue."""
+"""`POST /admin/bootstrap/{phase}`, as an enqueue."""
 
 import ast
 import dataclasses
@@ -110,10 +110,10 @@ async def test_every_phase_the_cli_offers_is_a_phase_the_route_accepts(
 async def test_a_phase_the_vocabulary_does_not_hold_is_a_422_that_enqueues_nothing(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """422 in V1's envelope.
+    """422 in the envelope.
 
-    and `depth()` read back to prove the refusal came before the enqueue rather than
-    after it.
+    `depth()` is read back to prove the refusal came before the enqueue rather
+    than after it.
 
     A 404 would be the wrong answer and is what a `str` path parameter plus a
     membership test would have produced: `/admin/bootstrap/embeddings` names
@@ -295,10 +295,9 @@ def test_every_vocabulary_state_survives_the_wire_as_its_own_member(
 
 
 def test_the_status_route_is_in_the_openapi_document_with_a_real_shape(app: FastAPI) -> None:
-    """M9's own acceptance.
+    """`/openapi.json` describes the report rather than `{"type": "object"}`.
 
-    `/openapi.json` describes the report rather than `{"type": "object"}`, which is half
-    the reason the report is a value object at all.
+    That is half the reason the report is a value object at all.
 
     The premise guard is not decoration -- a schema lookup that resolved
     nothing would leave every assertion below iterating an empty dict and

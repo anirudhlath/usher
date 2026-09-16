@@ -1,4 +1,4 @@
-"""`SearchQueryRetention` against the real table (ADR-0046, M10's J5)."""
+"""`SearchQueryRetention` against the real table."""
 
 import asyncio
 import uuid
@@ -63,15 +63,13 @@ def _record(*, at: datetime, user_id: uuid.UUID) -> SearchQueryRecord:
 
 
 def _scope_over(repository: SearchQueryRepository) -> SearchQueryScope:
-    """A scope that yields a repository already bound to this test's transaction and **does not.
+    """A scope yielding a repository bound to this test's transaction, without committing.
 
-    commit**.
-
-    Deliberate: this suite's isolation is a rolled-back transaction, so a
-    scope that committed would leak rows into the session-scoped container and
-    take down whichever file ran next -- the shape
-    `.claude/rules/fixtures-and-fakes.md` records for route-driven tests. The
-    commit itself is the last case's subject and uses the real scope.
+    This suite's isolation is a rolled-back transaction, so a scope that committed
+    would leak rows into the session-scoped container and take down whichever file
+    ran next -- the shape `.claude/rules/fixtures-and-fakes.md` records for
+    route-driven tests. The commit itself is the last case's subject and uses the
+    real scope.
     """
 
     @asynccontextmanager
@@ -119,23 +117,15 @@ async def _count(session: AsyncSession) -> int:
 async def test_the_retention_job_deletes_only_rows_past_the_cutoff(
     session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """**The failing test this task was written against**.
+    """Four rows at 91, 90, 89 and 0 days, and only the 91-day one may go.
 
-    run through the real statement against the real column.
-
-    Four rows at 91, 90, 89 and 0 days. Only the 91-day one may go.
-
-    - **The 89-day row is the control.** A job with an off-by-one on the
-      interval, and one that simply deleted everything, both pass a case that
-      only checks the old row disappeared.
-    - **The row at *exactly* 90 days is the second control**, because `<` and
-      `<=` are one character and both read as correct. PRD 10's statement is
-      `at < now() - interval '90 days'`, so a row answered at exactly the
-      cutoff is inside the window and stays.
-
-    At HEAD before this commit it failed on `AttributeError: 'PostgresSearch
-    QueryRepository' object has no attribute 'prune'` -- there was no such
-    method on the port.
+    - **The 89-day row is the control.** A job with an off-by-one on the interval,
+      and one that simply deleted everything, both pass a case that only checks the
+      old row disappeared.
+    - **The row at *exactly* 90 days is the second control**, because `<` and `<=`
+      are one character and both read as correct. The statement is
+      `at < now() - interval '90 days'`, so a row answered at exactly the cutoff is
+      inside the window and stays.
     """
     ages = {
         days: _record(at=NOW - timedelta(days=days), user_id=user_id) for days in (91, 90, 89, 0)
@@ -153,21 +143,16 @@ async def test_the_retention_job_deletes_only_rows_past_the_cutoff(
 async def test_the_oldest_row_comes_back_with_a_timezone(
     repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """🔴 **A naive `last_done()` is a `TypeError` at the tick.
+    """A naive `last_done()` is a `TypeError` at the tick, not a wrong number.
 
-    not a wrong number**, and this is the round trip that can tell.
+    `Scheduler._due_now` subtracts the reading from `datetime.now(UTC)`, and
+    `search_queries.at` is `TIMESTAMP WITH TIME ZONE`, so asyncpg hands back an aware
+    value -- a fact about *this column* that a case asserting `tzinfo is not None` on
+    a hand-built datetime cannot establish.
 
-    `Scheduler._due_now` subtracts the reading from `datetime.now(UTC)`.
-    `search_queries.at` is `TIMESTAMP WITH TIME ZONE`, so asyncpg hands back an
-    aware value -- but that is a fact about *this column*, and the prose on
-    `ScheduledJob.last_done` is the only thing that has ever said so. A case
-    asserting `tzinfo is not None` on a hand-built datetime asserts nothing;
-    this one reads it out of Postgres.
-
-    Both the port method and the job's own reading are checked, because the
-    job adds a `window` to what the port answered and `aware + timedelta` is
-    aware while nothing would have caught a naive value passing straight
-    through.
+    Both the port method and the job's own reading are checked, because the job adds
+    a `window` to what the port answered and `aware + timedelta` is aware while
+    nothing would have caught a naive value passing straight through.
     """
     await repository.record(_record(at=NOW - timedelta(days=200), user_id=user_id))
 
@@ -186,11 +171,9 @@ async def test_an_empty_table_reads_as_satisfied_now_rather_than_never_built(
 ) -> None:
     """`min()` over an empty table is one row holding `NULL`, not no row.
 
-    so a `scalar_one_or_none()` here would raise rather than answer `None`, and this is
-    the arm that tells them apart against the real driver.
-
-    The reading is `now`, which is what stops an idle deployment pruning
-    nothing on every tick forever.
+    A `scalar_one_or_none()` here would raise rather than answer `None`, and this is
+    the arm that tells them apart against the real driver. The reading is `now`,
+    which is what stops an idle deployment pruning nothing on every tick forever.
     """
     assert await repository.oldest() is None
     assert await _job(repository).last_done() == NOW
@@ -199,23 +182,16 @@ async def test_an_empty_table_reads_as_satisfied_now_rather_than_never_built(
 async def test_a_live_shaped_population_wholly_inside_the_window_is_not_due_and_deletes_nothing(
     session: AsyncSession, repository: PostgresSearchQueryRepository, user_id: uuid.UUID
 ) -> None:
-    """The state this deployment is actually in, asserted rather than described.
+    """A populated table wholly inside the window is not due and deletes nothing.
 
-    J5's own text says the not-due reading must be pinned "against the
-    live-shaped nine-row population". **Nine was true on 2026-08-13 and is
-    not the shape any more** -- measured 2026-09-07 on `usher_catalog`, the
-    live table holds **109 rows** whose oldest is **25 days** old, so every
-    row is inside the 90-day window and the job has nothing to do. What
-    transfers from the spec is the *shape* (a populated table, entirely
-    inside the window), never the cardinality, so the size is named once here
-    and the assertions are computed from what was stored.
+    What matters is the *shape* -- a populated table, every row inside the window --
+    never the cardinality, so the size is named once here and the assertions are
+    computed from what was stored.
 
-    **The rows are inserted newest-first on purpose.** Ids are UUIDv7 and
-    therefore monotonic in insertion order, so seeding oldest-first would put
-    `min(at)` on the lowest id and let `ORDER BY id LIMIT 1` pass as
-    `min(at)` by accident -- `CLAUDE.md`'s "a UUIDv7 key makes `ORDER BY id`
-    and `ORDER BY <the real key>` agree by accident". Seeded this way the
-    oldest row carries the *highest* id.
+    **The rows are inserted newest-first on purpose.** Ids are UUIDv7 and therefore
+    monotonic in insertion order, so seeding oldest-first would put `min(at)` on the
+    lowest id and let `ORDER BY id LIMIT 1` pass as `min(at)` by accident. Seeded
+    this way the oldest row carries the *highest* id.
     """
     rows = 109
     oldest_age = timedelta(days=25)
@@ -350,7 +326,7 @@ async def test_the_chunked_delete_walks_the_index_oldest_first(
 async def test_the_prune_commits_each_chunk_where_a_composition_root_wired_it(
     postgres_url: str, session: AsyncSession
 ) -> None:
-    """🔴 **The one claim a rolled-back suite cannot make, so this case owns its own engine.**."""
+    """The one claim a rolled-back suite cannot make, so this case owns its own engine."""
     engine = build_engine(postgres_url)
     sessions = build_session_factory(engine)
     real = search_query_scope(sessions)

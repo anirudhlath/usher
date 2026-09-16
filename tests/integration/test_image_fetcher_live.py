@@ -11,7 +11,7 @@ from usher.ports.images import IMAGE_LADDER, SUPPORTED_MEDIA_TYPES, ImageFetcher
 
 # The shipped default, read off the field rather than instantiating `Settings`
 # -- which would want a database URL and a secret key this file has no business
-# with. `image_cdn_base_url` is the one definition of the measured host.
+# with. `image_cdn_base_url` is the one definition of the host.
 _DEFAULT_BASE_URL = str(Settings.model_fields["image_cdn_base_url"].default)
 _PATH = os.environ.get("USHER_TEST_IMAGE_PATH")
 _BASE_URL = os.environ.get("USHER_TEST_IMAGE_CDN_BASE_URL", _DEFAULT_BASE_URL)
@@ -47,14 +47,11 @@ class TestLiveImageFetcher(ImageFetcherContract):
         return _PATH
 
     async def test_the_cdn_was_really_reached(self) -> None:
-        """The control.
+        """The control, and the whole reason this file is a contract arm rather than a script.
 
-        and it is the whole reason this file is allowed to exist as a "contract arm"
-        rather than as a script.
-
-        A misconfiguration, a stubbed transport or a proxy answering an empty
-        200 all produce a green suite otherwise. A four-figure body and a media
-        type the cache can name is something only a real image server produces.
+        A misconfiguration, a stubbed transport or a proxy answering an empty 200 all
+        produce a green suite otherwise. A four-figure body and a media type the cache
+        can name is something only a real image server produces.
         """
         async with self.fetcher().fetch(self.path(), IMAGE_LADDER[1]) as fetched:
             body = b"".join([chunk async for chunk in fetched.chunks])
@@ -63,13 +60,11 @@ class TestLiveImageFetcher(ImageFetcherContract):
         assert fetched.content_type.split(";", 1)[0].strip() in SUPPORTED_MEDIA_TYPES
 
     async def test_a_larger_rung_is_larger(self) -> None:
-        """ADR-0032's ladder is a *measurement*.
+        """The rung ladder is a size ordering, and monotonicity is what has to still hold.
 
-        `w154` 14 KB, `w1280` 563 KB median for a poster — and the one property that has
-        to still hold against whatever the CDN serves today is monotonicity.
-
-        If it does not, the rung is not doing what the clamp assumes and the ADR is
-        reopened rather than the case relaxed.
+        Whatever the CDN serves today, a larger rung must be a larger body. If it is not,
+        the rung is not doing what the clamp assumes, and the ladder is reopened rather
+        than the case relaxed.
         """
         fetcher = self.fetcher()
         sizes = []

@@ -85,10 +85,7 @@ def _adapter(server: FakeEmbyServer, *, page_size: int = 2) -> EmbyAdapter:
 def _on(
     handler: Callable[[httpx.Request], httpx.Response], *, max_pages: int = MAX_PAGES
 ) -> EmbyAdapter:
-    """An adapter over a hand-written handler.
-
-    for the shapes `FakeEmbyServer` is deliberately too well-behaved to produce.
-    """
+    """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce."""
     return EmbyAdapter(
         SOURCE,
         CREDENTIALS,
@@ -124,14 +121,11 @@ async def test_the_walk_pages_until_the_library_is_exhausted() -> None:
 
 
 async def test_the_walk_asks_for_the_types_and_fields_the_mapper_needs() -> None:
-    """A missing `Fields=MediaSources` is the failure mode worth pinning.
+    """A missing `Fields=MediaSources` costs every quality fact and raises nothing.
 
-    every item comes back with no container, no codec and no HDR, and nothing raises --
-    the catalog just quietly has no quality facts.
-
-    `Recursive` is pinned for the same reason from the other direction:
-    without it Emby answers with the *top level* of each library -- folders,
-    not films -- and again nothing raises.
+    Items come back with no container, no codec and no HDR. `Recursive` is pinned for
+    the same reason from the other direction: without it Emby answers with the top level
+    of each library — folders, not films — and again nothing raises.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -162,10 +156,9 @@ async def test_the_walk_asks_for_the_types_and_fields_the_mapper_needs() -> None
 
 
 async def test_the_walk_asks_for_a_total_order_ascending() -> None:
-    """Both sort keys.
+    """Both sort keys, pinned as literal parameters.
 
-    pinned as literal parameters because neither is demonstrable from this side of the
-    wire.
+    Neither is demonstrable from this side of the wire.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -190,21 +183,13 @@ async def test_the_walk_asks_for_a_total_order_ascending() -> None:
 
 
 async def test_tied_timestamps_do_not_drop_items_out_of_the_paging_window() -> None:
-    """`DateCreated` ties are the normal case, not a corner.
+    """`DateCreated` ties are the normal case, so the sort needs a second key.
 
-    a bulk import stamps a whole library inside one second, and Emby's own stamp has
-    finite resolution.
-
-    `StartIndex`/`Limit` paging is only safe over a sort key that is a *total* order --
-    a server free to break ties differently between two page requests reshuffles the
-    window under the cursor, and items fall through the gap.
-
-    Measured on the pre-fix adapter (one `SortBy` key), with
-    `FakeEmbyServer` no longer supplying a tiebreak nobody asked it for: 10
-    items sharing one `DateCreated` over pages of two yielded 8 distinct
-    ids. `len(seen)` was still 10 -- the duplicates masked the loss exactly,
-    so only comparing *sets* finds it, and the reconciler would have marked
-    the two missing films `available = false`.
+    A bulk import stamps a whole library inside one second. `StartIndex`/`Limit` paging
+    is only safe over a total order: a server free to break ties differently between two
+    page requests reshuffles the window under the cursor and items fall through the gap.
+    Duplicates mask the loss exactly, so only comparing sets finds it — and the
+    reconciler would mark the missing films `available = false`.
     """
     server = FakeEmbyServer(page_size=2)
     for index in range(10):
@@ -218,16 +203,13 @@ async def test_tied_timestamps_do_not_drop_items_out_of_the_paging_window() -> N
 
 
 async def test_a_server_that_reports_no_total_does_not_truncate_the_walk() -> None:
-    """The one failure this port exists to make impossible.
+    """The termination check is guarded on a positive count.
 
-    and the reason the termination check is guarded on a *positive* count.
-
-    A server that omits `TotalRecordCount` -- or reports 0 while returning
-    items, which some Emby builds do for a filtered query -- would, under a
-    `start >= total` check alone, end the walk after page one. The
-    reconciler cannot tell that from "the library ended" and would mark
-    every unread item `available = false`. `FakeEmbyServer` always reports
-    a correct positive count, so nothing else in this suite can catch it.
+    A server that omits `TotalRecordCount`, or reports 0 while returning items as some
+    builds do for a filtered query, would end the walk after page one under a
+    `start >= total` check alone — and the reconciler cannot tell that from "the library
+    ended". `FakeEmbyServer` always reports a correct positive count, so nothing else in
+    this suite can catch it.
     """
     pages = [
         {"Items": [{"Id": "movie-0", "Type": "Movie", "Name": "A"}], "TotalRecordCount": 0},
@@ -253,9 +235,9 @@ async def test_a_server_that_reports_no_total_does_not_truncate_the_walk() -> No
 
 
 async def test_the_walk_sends_a_widened_delta_cursor() -> None:
-    """The port promises `since` is inclusive and Emby's own comparison is unverified.
+    """The port promises `since` is inclusive, so the parameter goes out one second early.
 
-    so the parameter goes out one second early -- see `mapping.emby_datetime`.
+    Emby's own comparison is unknown; see `mapping.emby_datetime`.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T1)
@@ -268,10 +250,7 @@ async def test_the_walk_sends_a_widened_delta_cursor() -> None:
 
 
 async def test_the_delta_cursor_actually_narrows_the_window() -> None:
-    """The other half of the previous test.
-
-    inclusive at the boundary, and still a filter rather than a no-op.
-    """
+    """Inclusive at the boundary, and still a filter rather than a no-op."""
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
     server.add_item(_movie(1), T1)
@@ -284,13 +263,11 @@ async def test_the_delta_cursor_actually_narrows_the_window() -> None:
 
 
 async def test_a_library_walk_and_a_watch_state_walk_filter_on_different_stamps() -> None:
-    """A library edit and a watch-state change do not touch the same Emby timestamp.
+    """A library edit and a watch-state change touch different Emby timestamps.
 
-    so the two walks cannot share one parameter.
-
-    Sending `MinDateLastSaved` for a watch-state delta would miss every item whose
-    *only* change was being marked played -- which is the entire population that walk
-    exists to find.
+    Sending `MinDateLastSaved` for a watch-state delta would miss every item whose only
+    change was being marked played, which is the entire population that walk exists to
+    find.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -315,12 +292,10 @@ async def test_a_library_walk_and_a_watch_state_walk_filter_on_different_stamps(
 
 @pytest.mark.parametrize("walk", ["list_items", "watch_state"])
 async def test_a_naive_since_cursor_never_reaches_the_wire(walk: str) -> None:
-    """Both walks.
-
-    because both take a `since` and both spell it into a different query parameter.
+    """Both walks, because both take a `since` and spell it into a different parameter.
 
     A naive cursor is a caller bug that shifts the delta window by the host's UTC offset
-    and reports nothing -- the walk simply returns fewer items than it should, forever.
+    and reports nothing: the walk simply returns fewer items than it should, forever.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -337,13 +312,10 @@ async def test_a_naive_since_cursor_never_reaches_the_wire(walk: str) -> None:
 async def test_an_unmodelled_item_type_in_a_page_is_skipped_not_fatal() -> None:
     """A server that ignores `IncludeItemTypes` returns Seasons and BoxSets.
 
-    Aborting a 94,395-item reconcile over one of them would be worse than ignoring it.
-
-    The second page is empty rather than a repeat of the first: a handler
-    that serves the same page forever turns any break in the walk's
-    termination into a hung test rather than a failing one, and a suite
-    that hangs is worse than one that fails. Found while mutation-testing
-    the `TotalRecordCount` guard, which did exactly that.
+    Aborting a whole-library reconcile over one of them would be worse than ignoring it.
+    The second page is empty rather than a repeat of the first, because a handler that
+    serves the same page forever turns any break in the walk's termination into a hung
+    test rather than a failing one.
     """
     served: list[int] = []
     page = {
@@ -374,20 +346,12 @@ async def test_an_unmodelled_item_type_in_a_page_is_skipped_not_fatal() -> None:
 async def test_a_server_that_ignores_start_index_ends_the_walk_rather_than_running_forever() -> (
     None
 ):
-    """A proxy that strips a query parameter it does not know.
+    """A proxy that strips `StartIndex` makes an unbounded walk immortal.
 
-    or a build that spells `StartIndex` differently, makes the walk immortal: every page
-    comes back full, so the empty-page check never fires, and `start` never passes a
-    `TotalRecordCount` that never arrives.
-
-    Measured against exactly that handler on the unbounded walk: 501 requests, 500
-    items, still going.
-
-    The handler here relents after far more pages than the bound allows, so
-    this **fails rather than hangs** when the bound is removed. That is the
-    whole point: the last test that could have caught this was rewritten to
-    serve an empty second page precisely because an unbounded walk hangs
-    the suite, which removed the only case that could have found it.
+    Every page comes back full, so the empty-page check never fires and `start` never
+    passes a `TotalRecordCount` that never arrives. The handler here relents after far
+    more pages than the bound allows, so removing the bound fails this case rather than
+    hanging the suite.
     """
     served: list[int] = []
     page = {"Items": [{"Id": "movie-0", "Type": "Movie", "Name": "A"}]}
@@ -414,16 +378,12 @@ async def test_a_server_that_ignores_start_index_ends_the_walk_rather_than_runni
 
 
 async def test_the_walk_advances_by_what_it_was_served_not_by_what_it_asked_for() -> None:
-    """A server may return fewer items than `Limit`.
+    """A server may return fewer items than `Limit`, so the cursor advances by what arrived.
 
-    a page thinned by a filter, a per-library cap, the last page of a library.
-
-    `start += self._page_size` then jumps past exactly the difference on the next
-    request -- silently, with no error and no empty page -- and the reconciler marks
-    every skipped item `available = false`.
-
-    Three items served one at a time against a `Limit` of 200: advancing by
-    the page size yields one of them and stops.
+    A page thinned by a filter, a per-library cap, or the last page of a library.
+    `start += self._page_size` jumps past exactly the difference on the next request —
+    silently, with no error and no empty page — and the reconciler marks every skipped
+    item `available = false`.
     """
     library = [{"Id": f"movie-{index}", "Type": "Movie", "Name": f"M{index}"} for index in range(3)]
 
@@ -446,11 +406,10 @@ async def test_the_walk_advances_by_what_it_was_served_not_by_what_it_asked_for(
 
 
 async def test_the_default_page_size_is_what_goes_out_as_the_limit() -> None:
-    """Nothing outside this class sets `page_size`.
+    """The default `page_size` has its own case, since every other test passes one.
 
-    and every other test in this file passes an explicit one -- so the default could
-    have been 1 and failed nothing, while turning one 94,395-item reconcile into 94,395
-    requests against an upstream PRD 01 measures at 1-5 s per call.
+    A default of 1 would fail nothing here and turn a whole-library reconcile into one
+    request per item against an upstream that answers in seconds.
     """
     captured: list[httpx.Request] = []
 
@@ -473,9 +432,8 @@ async def test_a_page_entry_that_is_not_an_object_is_skipped_not_fatal() -> None
     """`Items` is a list of objects until a server answers with a list of something else.
 
     `to_source_item` calls `.get` on whatever it is handed, and an `AttributeError` is
-    not an error any caller written against `usher.ports.errors` can catch -- so one
-    junk entry would abort a 94,395-item reconcile, which is the same trade already made
-    for an unmodelled item type one test above.
+    not an error any caller written against `usher.ports.errors` can catch — so one junk
+    entry would abort a whole-library reconcile.
     """
     served: list[int] = []
 
@@ -503,11 +461,7 @@ async def test_a_page_entry_that_is_not_an_object_is_skipped_not_fatal() -> None
 
 
 async def test_a_listing_with_no_items_array_is_malformed() -> None:
-    """Not a truncation.
-
-    a caller has to be able to tell "the library ended" from "the response was not a
-    listing at all".
-    """
+    """Not a truncation: a caller must tell "the library ended" from "not a listing"."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         authenticated = _authenticated(request)
@@ -524,11 +478,9 @@ async def test_a_listing_with_no_items_array_is_malformed() -> None:
 
 
 async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> None:
-    """The whole of #41's resume.
+    """A resumed walk asks Emby for the page it stopped at rather than for page one.
 
-    the walk asks Emby for the page it stopped at rather than for page one.
-
-    The walk's own order is `SortBy=DateCreated,SortName` ascending and `DateCreated` is
+    The walk's order is `SortBy=DateCreated,SortName` ascending and `DateCreated` is
     immutable, so the prefix already walked does not reorder between attempts.
     """
     requested: list[str] = []
@@ -551,10 +503,7 @@ async def test_a_watch_state_walk_resumes_from_the_start_index_it_is_given() -> 
 
 
 async def test_a_resumed_watch_state_walk_re_yields_what_it_dropped() -> None:
-    """**The port's `start_index` number and Emby's `StartIndex` are not the same quantity.
-
-    and this is the case that says by how much.**.
-    """
+    """The port's `start_index` and Emby's `StartIndex` are not the same quantity."""
     entries = [
         {"Id": f"movie-{index}", "Type": "Movie", "Name": f"m{index}"}
         | ({} if index in (1, 3) else {"UserData": {"PlaybackPositionTicks": 0, "Played": False}})
@@ -580,10 +529,9 @@ async def test_a_resumed_watch_state_walk_re_yields_what_it_dropped() -> None:
     assert [one.external_id for one in first] == ["movie-0", "movie-2", "movie-4", "movie-5"], (
         "the premise: the two entries with no UserData are dropped, not yielded as zero states"
     )
-    # The promise the port made until 2026-08-26 was `[]` here -- the walk
-    # yielded 4 and is resuming at 4, so an exact offset into what it yields
-    # would be exhausted. It is not: `StartIndex=4` is an offset into the
-    # six the server holds.
+    # Not `[]`: the walk yielded 4 and resumes at 4, so an exact offset into what
+    # it yields would be exhausted. `StartIndex=4` is an offset into the six the
+    # server holds instead.
     assert [one.external_id for one in resumed] == ["movie-4", "movie-5"]
     assert set(one.external_id for one in resumed) <= set(one.external_id for one in first), (
         "the resume landed *past* its checkpoint and skipped a record, which is the "
@@ -594,7 +542,7 @@ async def test_a_resumed_watch_state_walk_re_yields_what_it_dropped() -> None:
 async def test_an_item_walk_always_starts_at_the_beginning() -> None:
     """`list_items` shares `_walk` and must not inherit the watch lane's resume point.
 
-    the item lanes have a working cursor and restart from it.
+    The item lanes have a working cursor and restart from it.
     """
     requested: list[str] = []
 
@@ -617,11 +565,9 @@ async def test_an_item_walk_always_starts_at_the_beginning() -> None:
 
 
 async def test_get_item_raises_rather_than_returning_none_on_a_server_error() -> None:
-    """The distinction the port's docstring calls out.
+    """`None` means the item was deleted, and a 500 does not mean that.
 
-    `None` means the item was deleted, and a 500 does not mean that.
-
-    Reporting it as `None` marks a healthy item unavailable.
+    Reporting a 500 as `None` marks a healthy item unavailable.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -639,14 +585,12 @@ async def test_get_item_raises_rather_than_returning_none_on_a_server_error() ->
 
 
 async def test_get_item_returns_none_for_a_404() -> None:
-    """The port's headline invariant, and it had no unit-level pin.
-
-    the contract suite covers it, but only through `FakeEmbyServer`, so the literal
-    `response.status_code == 404` branch could be deleted (letting a 404 fall into the
-    `>= 400` raise) and everything in this file still passed.
+    """A 404 is a value, not an error, and this is its unit-level pin.
 
     `None` means "gone, mark it unavailable"; raising for the same response means the
-    reconciler never learns the file was deleted.
+    reconciler never learns the file was deleted. The contract suite reaches this only
+    through `FakeEmbyServer`, so the literal `status_code == 404` branch could be
+    deleted without failing anything else here.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -667,8 +611,7 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
     """Some Emby builds answer an unknown id with `200 {}` rather than 404.
 
     An item with no `Id` cannot be upserted on `(source_id, external_id)`, so treating
-    it as present would write a nameless row; `None` is the honest answer and is what a
-    404 already means.
+    it as present would write a nameless row. `None` is what a 404 already means.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -699,13 +642,10 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
 async def test_a_version_listed_first_does_not_win_by_being_first(
     container: str | None, width: int, height: int
 ) -> None:
-    """The end-to-end half of the media-source selection.
+    """The media-source selection through a real walk and a real `get_item`.
 
-    through a real walk and a real `get_item` rather than against a fixture.
-
-    Until `FakeEmbyServer` could render more than one `MediaSources` entry, nothing on
-    this side of the wire could reach the choice at all -- every fixture has exactly one
-    entry and `_render_media` only ever wrote index `[0]`.
+    A fixture cannot reach the choice: each has exactly one `MediaSources` entry, so
+    only a server rendering more than one exercises the selection at all.
     """
     server = FakeEmbyServer()
     best = replace(_movie(0), width=3840, height=2160)
@@ -724,18 +664,12 @@ async def test_a_version_listed_first_does_not_win_by_being_first(
 
 
 async def test_an_external_id_stays_inside_one_path_segment() -> None:
-    """An `external_id` is whatever the source last called an item.
+    """An `external_id` is interpolated into a request path, so it has to be quoted.
 
-    and it is interpolated straight into a request path.
-
-    Unquoted, that is a path traversal, and httpx normalises `..` in a path exactly the
-    way a browser does: `get_item("../../System/Info")` really did resolve to `GET
-    /Users/System/Info`, and `push_watch_state` aimed **two writes** at an arbitrary
-    endpoint of the caller's choosing.
-
-    httpx's `params=` already neutralises the same trick in a query string,
-    and `playback.build_stream_targets` already quoted its own copy of this
-    id. Nothing neutralises a path segment; only quoting does.
+    Unquoted it is a path traversal: httpx normalises `..` the way a browser does, so
+    `get_item("../../System/Info")` resolves to `GET /Users/System/Info` and
+    `push_watch_state` aims two writes at an endpoint of the caller's choosing.
+    `params=` neutralises the same trick in a query string; a path segment needs quoting.
     """
     hostile = "../../System/Info"
     captured: list[httpx.Request] = []
@@ -771,11 +705,9 @@ async def test_an_external_id_stays_inside_one_path_segment() -> None:
 
 
 async def test_watch_state_is_attributed_to_the_authenticated_user() -> None:
-    """`source_user_id` exists so a household with two Emby users is a migration rather than a.
+    """`source_user_id` makes a household with two Emby users a migration, not a mix-up.
 
-    silent mis-attribution.
-
-    Leaving it `None` when the id is right there is throwing that away.
+    Leaving it `None` when the id is right there throws that away.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -792,18 +724,12 @@ async def test_watch_state_is_attributed_to_the_authenticated_user() -> None:
 
 
 async def test_get_watch_state_uses_the_single_item_route() -> None:
-    """One request against `/Users/{u}/Items/{id}`.
+    """One request against `/Users/{u}/Items/{id}`, the route that carries the play facts.
 
-    which is the route the live run measured as carrying `PlayCount`/`LastPlayedDate`.
-
-    An implementation that walked the listing instead would be wrong *and* would cost
-    5,634 pages to answer one question.
-
-    The listing route's path is `/Users/{u}/Items` exactly, so a listing is
-    a recorded request that *ends* there -- `server.requests` holds
-    `f"{method} {url.path}"` with no query string, which is why the obvious
-    `"/Items?" in entry` spelling would match nothing and pass against an
-    adapter that walked the whole library.
+    An implementation that walked the listing instead would be wrong and would pay a
+    whole library to answer one question. The listing route's path is `/Users/{u}/Items`
+    exactly, and `server.requests` holds no query string — which is why an `"/Items?"`
+    spelling would match nothing and pass against an adapter that walked everything.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -833,12 +759,11 @@ async def test_get_watch_state_uses_the_single_item_route() -> None:
 
 
 async def test_get_watch_state_is_labelled_as_its_own_operation() -> None:
-    """PRD 10 buckets `usher.source.request.duration` and the `source.request` span by `op`.
+    """The request metric buckets by `op`, and `get_watch_state` needs its own label.
 
-    `get_watch_state` shares `_fetch`'s route with `get_item` and must not share its
-    label: the history backfill ADR-0014 describes is thousands of single-item reads,
-    and counting them as `get_item` makes "how slow is `get_item`" answer a different
-    question on the nights the backfill runs.
+    It shares `_fetch`'s route with `get_item`, and a history backfill is thousands of
+    single-item reads — counting them as `get_item` makes "how slow is `get_item`"
+    answer a different question on the nights the backfill runs.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -862,9 +787,7 @@ async def test_get_watch_state_is_labelled_as_its_own_operation() -> None:
 
 
 async def test_get_watch_state_returns_none_rather_than_raising_for_a_missing_item() -> None:
-    """The same 404-is-a-value/anything-else-is-an-error split `get_item` makes.
-
-    reached through the same `_fetch`.
+    """The same 404-is-a-value split `get_item` makes, through the same `_fetch`.
 
     A caller must never learn to tell a deletion from an outage by which method it
     called.
@@ -878,20 +801,13 @@ async def test_get_watch_state_returns_none_rather_than_raising_for_a_missing_it
 
 
 async def test_get_watch_state_raises_rather_than_returning_none_on_a_server_error() -> None:
-    """A harness cannot arrange a failing *status* (see the contract suite's own docstring).
-
-    so the 500-is-not-a-deletion half of `get_watch_state` is pinned here, exactly as it
-    is for `get_item`.
+    """A 500 is not a deletion, pinned here because a harness cannot arrange a status.
 
     Reporting a 500 as `None` would let a struggling server look like an item that was
-    never watched, and the merge downstream would believe it.
-
-    `_authenticated` first, and that is the whole test rather than a
-    detail: a handler that answered 500 to *every* path -- authentication
-    included -- also raises `PortUnavailable`, from the session rather than
-    from `_fetch`, and passes this while proving nothing. Caught by
-    mutation (making `_fetch` report every `>= 400` as `None` left the
-    all-500 version green).
+    never watched, and the merge downstream would believe it. `_authenticated` comes
+    first deliberately: a handler answering 500 to every path, authentication included,
+    also raises `PortUnavailable` — from the session rather than from `_fetch` — and
+    would pass this while proving nothing.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -909,14 +825,10 @@ async def test_get_watch_state_raises_rather_than_returning_none_on_a_server_err
 
 
 async def test_the_walk_reports_absent_play_history() -> None:
-    """The finding, end to end through the adapter.
-
-    the listing route on Emby 4.9.5.0 reports `PlayCount: 0` and no `LastPlayedDate` for
-    an item played seven times, so the walk must report absence rather than passing that
-    zero through as a count.
+    """The listing route reports `PlayCount: 0` for a played item, so the walk reports absence.
 
     Position and played flag are correct in the listing and are asserted here too, so an
-    adapter that answered `None` to everything does not pass this by giving up.
+    adapter that answered `None` to everything does not pass by giving up.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -942,19 +854,11 @@ async def test_the_walk_reports_absent_play_history() -> None:
 
 
 async def test_push_writes_the_position_through_the_route_emby_accepts() -> None:
-    """Verified against the live Emby 4.9.5.0 server, 2026-07-31.
+    """`UserData` is the route that writes a resume position without a play session.
 
-    `POST /Users/{user}/PlayingItems/{item}/Progress` answers **400 `"Value cannot be
-    null.
-
-    (Parameter 'key')"`** -- for a bodyless request, an empty JSON body, an `{ItemId,
-    PositionTicks}` body, and with `MediaSourceId` and `IsPaused` added. So does `POST
-    /Sessions/Playing/Progress`. Both are *session-scoped playback reporting*, and Usher
-    is not playing anything, so there is no play session for them to key off.
-
-    `POST /Users/{user}/Items/{item}/UserData` is the route that writes a
-    resume position without a play session: 204, and the position is
-    readable back immediately. The body is JSON, not query parameters.
+    The `Progress` routes are session-scoped playback reporting and answer 400 for every
+    body shape, because Usher is not playing anything and there is no play session for
+    them to key off. The body is JSON, not query parameters.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -971,14 +875,11 @@ async def test_push_writes_the_position_through_the_route_emby_accepts() -> None
 
 
 async def test_push_names_played_explicitly_rather_than_omitting_it() -> None:
-    """Verified live.
+    """The write names `Played` explicitly, because unset fields take C# defaults.
 
-    `POST /Users/{user}/Items/{item}/UserData` deserialises its body into a DTO whose
-    *unset* fields take C# defaults, so a body carrying only `PlaybackPositionTicks`
-    silently flipped an item's `Played` from `true` to `false`.
-
-    `PlayCount` and `LastPlayedDate` survived the same omission; `Played` did not.
-    Naming it is the whole guard.
+    A body carrying only `PlaybackPositionTicks` flips an item's `Played` from `true` to
+    `false`. `PlayCount` and `LastPlayedDate` survive the same omission; `Played` does
+    not.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -993,13 +894,12 @@ async def test_push_names_played_explicitly_rather_than_omitting_it() -> None:
 
 
 async def test_push_writes_the_position_before_the_played_flag() -> None:
-    """Load-bearing order, asserted two ways -- and now verified rather than assumed.
+    """Load-bearing order, asserted two ways.
 
-    Live, `POST /Users/{user}/PlayedItems/{item}` really does clear the item's resume
-    position (3,000,000,000 ticks -> 0) while setting `Played`, bumping `PlayCount` and
-    stamping `LastPlayedDate`. The reverse order leaves a just-finished film resumable
-    at the last reported second, which is how it reappears in Continue Watching. The
-    request order pins the mechanism; the resulting state pins the consequence.
+    `POST /Users/{user}/PlayedItems/{item}` clears the item's resume position while
+    setting `Played`, so the reverse order leaves a just-finished film resumable at the
+    last reported second — which is how it reappears in Continue Watching. The request
+    order pins the mechanism; the resulting state pins the consequence.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -1020,22 +920,12 @@ async def test_push_writes_the_position_before_the_played_flag() -> None:
 async def test_reporting_a_position_does_not_reach_the_played_route() -> None:
     """`DELETE /Users/{user}/PlayedItems/{item}` is destructive well beyond its name.
 
-    verified live: it resets `PlayCount` to 0, clears `LastPlayedDate`, **and clears a
-    non-zero resume position**, so a walk that reported "resumable at 20 minutes, not
-    played" through it would both erase the household's play history and then throw away
-    the very position it was called to write.
-
-    Reporting a position is not a claim that the item was never watched. The
-    unplayed path is therefore one `UserData` write carrying `Played: false`,
-    which live Emby applies while leaving `PlayCount` and `LastPlayedDate`
-    exactly as the user's own apps recorded them.
-
-    The surviving history is read back through `get_watch_state`, not
-    through the walk. It used to be read from the walk, which stopped
-    meaning anything the moment the walk started reporting absence
-    (ADR-0014) -- and reading it from a source that *always* answers `None`
-    would have turned this into an assertion that passes no matter what the
-    write did.
+    It resets `PlayCount`, clears `LastPlayedDate` and clears a non-zero resume
+    position, so a walk reporting "resumable at 20 minutes, not played" through it would
+    erase the household's play history and throw away the position it was called to
+    write. The unplayed path is one `UserData` write carrying `Played: false`, and the
+    surviving history is read back through `get_watch_state` — the walk answers absence
+    there, so reading it from the walk would assert nothing.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -1064,13 +954,10 @@ async def test_reporting_a_position_does_not_reach_the_played_route() -> None:
 
 
 async def test_a_negative_position_is_clamped_rather_than_sent_upstream() -> None:
-    """`WatchStateUpdate` is a plain dataclass with no validation.
+    """`WatchStateUpdate` validates nothing, so a negative position is clamped here.
 
-    so a caller can hand this a negative position -- and Emby's `PositionTicks` is
-    unsigned.
-
-    Clamped here rather than trusted, because the alternative is a 400 on a write-back
-    that PRD 03 then retries forever.
+    Emby's `PositionTicks` is unsigned, and the alternative is a 400 on a write-back
+    that the caller then retries forever.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -1101,15 +988,12 @@ async def test_verify_reports_the_server_version() -> None:
 
 
 async def test_verify_prefers_the_authenticated_version_and_falls_back_to_the_public_one() -> None:
-    """`_version_of(info) or version` is an `or` for a reason, and neither side of it was pinned.
+    """`_version_of(info) or version` needs both sides pinned, one case each.
 
-    the fake answers both probes with the same string, so returning either one
-    unconditionally passed.
-
-    The authenticated `/System/Info` is the better source and wins when it
-    has a version; some builds answer it without one, and the fallback is
-    the difference between an admin panel showing the version and showing
-    nothing for exactly those builds.
+    The fake answers both probes with the same string, so returning either one
+    unconditionally passes. The authenticated `/System/Info` is the better source and
+    wins when it has a version; some builds answer it without one, and the fallback is
+    the difference between an admin panel showing a version and showing nothing.
     """
 
     def serving(public: dict[str, str], info: dict[str, str]) -> EmbyAdapter:
@@ -1135,10 +1019,10 @@ async def test_verify_prefers_the_authenticated_version_and_falls_back_to_the_pu
 
 
 async def test_verify_separates_unreachable_from_bad_credentials() -> None:
-    """The whole reason the public info endpoint is probed first.
+    """The public info endpoint is probed first, so the two failures are distinguishable.
 
     With one authenticated call there is no way to tell a dead host from a wrong
-    password, which is exactly what PRD 07's 🔶 was about.
+    password.
     """
     server = FakeEmbyServer()
     server.reject_credentials()
@@ -1156,11 +1040,9 @@ async def test_verify_separates_unreachable_from_bad_credentials() -> None:
 async def test_verify_reports_a_rate_limited_source_as_reachable() -> None:
     """A 429 means something answered, so the host is up.
 
-    and reporting it as unreachable would send an operator hunting a network fault that
-    does not exist.
-
-    `PortRateLimited` is a subclass of `UsherPortError`, so this only holds because it
-    is caught first; the ordering is the test.
+    Reporting it as unreachable would send an operator hunting a network fault that does
+    not exist. `PortRateLimited` is a subclass of `UsherPortError`, so this only holds
+    because it is caught first; the ordering is the test.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1178,16 +1060,12 @@ async def test_verify_reports_a_rate_limited_source_as_reachable() -> None:
 async def test_verify_reports_a_transport_failure_rather_than_raising_it(
     failure: Exception,
 ) -> None:
-    """`usher.ports.source` is explicit that `verify` returns rather than raises for every.
+    """`verify` returns rather than raises for every expected failure, transport included.
 
-    *expected* failure, "because its one caller (`GET /admin/sources/{id}/status`)
-    exists to render those states, not to handle them" -- and a transport failure is the
-    most expected failure there is.
-
-    Neither of these is an `httpx.HTTPError`, so both used to escape
-    `EmbySession._send`'s translation untouched and then sail straight
-    through `verify`'s `except UsherPortError`. The admin endpoint would
-    have returned 500 instead of rendering "unreachable".
+    Its one caller renders those states rather than handling them. Neither of these is
+    an `httpx.HTTPError`, so both can escape `EmbySession._send`'s translation and sail
+    through `verify`'s `except UsherPortError`, leaving the admin endpoint to return 500
+    instead of rendering "unreachable".
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1202,10 +1080,7 @@ async def test_verify_reports_a_transport_failure_rather_than_raising_it(
 
 
 async def test_verify_never_leaks_the_password_into_its_detail() -> None:
-    """`SourceStatus.detail` is rendered by `GET /admin/sources/{id}/status` straight into an.
-
-    admin response body.
-    """
+    """`SourceStatus.detail` is rendered straight into an admin response body."""
     server = FakeEmbyServer()
     server.reject_credentials()
     adapter = _adapter(server)
@@ -1233,14 +1108,11 @@ async def test_verify_reports_a_non_admin_account() -> None:
 
 
 async def test_verify_reports_an_admin_account() -> None:
-    """PRD 03.
-
-    "no admin privileges are required" is a statement about what the push channel needs
-    -- a permission, not a constraint.
+    """Needing no admin privileges is a permission, not a constraint.
 
     Nothing stops an operator pasting admin credentials into `POST /admin/sources`, and
-    from M5 that token opens a long-lived socket as well as riding in every playback
-    URL. This is the check that makes it visible.
+    that token opens a long-lived socket as well as riding in every playback URL. This
+    is the check that makes it visible.
     """
     server = FakeEmbyServer()
     server.is_administrator = True
@@ -1253,11 +1125,11 @@ async def test_verify_reports_an_admin_account() -> None:
 
 
 async def test_verify_leaves_the_role_undetermined_when_the_user_route_fails() -> None:
-    """A status screen must render what it knows.
+    """A status screen must render what it knows, so a failed probe narrows the answer.
 
-    `GET /Users/Me` answers 500 on the measured build, and a future build could do the
-    same for `GET /Users/{id}` -- so a failure here narrows the answer rather than
-    failing the request, exactly as every other branch of `verify()` does.
+    `GET /Users/Me` answers 500 on a real build and a future one could do the same for
+    `GET /Users/{id}`, so this branch degrades exactly as every other branch of
+    `verify()` does.
     """
     server = FakeEmbyServer()
     server.user_route_fails = True
@@ -1282,21 +1154,12 @@ async def test_verify_leaves_the_role_undetermined_when_the_user_route_fails() -
     ],
 )
 async def test_a_policy_that_does_not_say_leaves_the_role_undetermined(policy: object) -> None:
-    """The branch the plan's mutation table attributed to the 500 case, which cannot reach it.
+    """A 200 whose `Policy` omits `IsAdministrator` answers `None`, not `False`.
 
-    a 500 raises inside `json_body` and returns `None` from the `except` long before any
-    key is read.
-
-    So `bool(policy.get("IsAdministrator"))` -- the obvious spelling -- is
-    only observable on a **200** whose `Policy` does not answer the question,
-    and that is exactly the shape a different Emby build, a Jellyfin server,
-    or a reverse proxy rewriting a body would produce. `bool(None)` is
-    `False`, which renders an unperformed check as a performed one and is the
-    single failure this field's three-valuedness exists to prevent.
-
-    Only two `Policy` keys were ever recorded off the live server, so what a
-    build that omits `IsAdministrator` sends is genuinely unknown -- which is
-    the argument for `None` rather than a guess.
+    A 500 raises inside `json_body` long before any key is read, so this is the only
+    shape that reaches the spelling `bool(policy.get("IsAdministrator"))` — and that is
+    what a different build, a Jellyfin server or a body-rewriting proxy produces.
+    `bool(None)` is `False`, which renders an unperformed check as a performed one.
     """
     user: dict[str, object] = {"Id": USER_ID, "Name": "usher"}
     if policy is not None:
@@ -1320,15 +1183,12 @@ async def test_a_policy_that_does_not_say_leaves_the_role_undetermined(policy: o
 
 
 async def test_verify_warns_about_an_administrator_account_and_serves_it_anyway() -> None:
-    """A log line, not a refusal.
+    """A log line, not a refusal, and the log line is the whole of the mitigation.
 
-    and the log line is the whole of the mitigation, so it needs a case of its own.
-
-    Refusing would be worse than saying so: an operator whose only working
-    account is an administrator account still needs a catalog, and a
-    `verify()` that raised would take `GET /admin/sources/{id}/status` from
-    "renders every state a source can be in" to "500s on the one state an
-    operator most needs to see". The status still comes back authenticated.
+    An operator whose only working account is an administrator account still needs a
+    catalog, and a `verify()` that raised would take the status route from "renders
+    every state a source can be in" to "500s on the one state an operator most needs to
+    see". The status still comes back authenticated.
     """
     server = FakeEmbyServer()
     server.is_administrator = True
@@ -1349,10 +1209,9 @@ async def test_verify_warns_about_an_administrator_account_and_serves_it_anyway(
 
 
 async def test_verify_says_nothing_about_an_ordinary_account() -> None:
-    """The other half.
+    """The other half: a non-admin account produces no warning at all.
 
-    a warning every operator sees on every poll of a correctly-configured source is a
-    warning nobody reads.
+    A warning every operator sees on every poll of a correct source is one nobody reads.
     """
     server = FakeEmbyServer()
     server.is_administrator = False
@@ -1369,13 +1228,11 @@ async def test_verify_says_nothing_about_an_ordinary_account() -> None:
 
 
 async def test_the_role_probe_reads_the_users_route_for_the_authenticated_user() -> None:
-    """`GET /Users/Me` answers **500** on Emby 4.9.5.0 (verified 2026-07-31).
+    """`GET /Users/Me` answers 500 on Emby 4.9.5.0, so the user id is interpolated.
 
-    so the id is interpolated -- and it is the id the session authenticated as, not a
-    guess.
-
-    Pinned as the request the adapter actually made, since a probe aimed at the wrong
-    path returns `None` and reads exactly like a build that does not carry `Policy`.
+    It is the id the session authenticated as, not a guess. Pinned as the request the
+    adapter actually made, since a probe aimed at the wrong path returns `None` and
+    reads exactly like a build that does not carry `Policy`.
     """
     server = FakeEmbyServer()
     adapter = _adapter(server)
@@ -1411,9 +1268,9 @@ def _push_adapter(
     clock: Callable[[], float] | None = None,
     stale_after: float = 90.0,
 ) -> EmbyAdapter:
-    """The real adapter with a fake socket connector, and a real `EmbyPushChannel` in between.
+    """The real adapter with a fake socket connector and a real `EmbyPushChannel` between.
 
-    so the ledger, the subscribe frame and the watchdog are all the shipped ones.
+    The ledger, the subscribe frame and the watchdog are all the shipped ones.
     """
     return EmbyAdapter(
         SOURCE,
@@ -1427,10 +1284,9 @@ def _push_adapter(
 
 
 async def test_supports_push_is_false_before_anything_is_opened() -> None:
-    """PRD 03's documented fallback.
+    """The documented fallback, reached through the ledger rather than a hardcoded `False`.
 
-    now reached through the ledger rather than through a hardcoded `False`: an adapter
-    with no live channel is covered by the reconciler's nightly walk.
+    An adapter with no live channel is covered by the reconciler's nightly walk.
     """
     server = FakeEmbyServer()
     adapter = _push_adapter(server, FakePushConnector())
@@ -1441,11 +1297,10 @@ async def test_supports_push_is_false_before_anything_is_opened() -> None:
 
 
 async def test_events_yields_what_arrives_and_flips_supports_push() -> None:
-    """**The milestone's central rule at the adapter boundary.**.
+    """An open socket and a sent subscription are not yet a push channel.
 
-    The socket is open and the subscription is sent, and `supports_push` is
-    still `False` -- ADR-0004's control handshake against a nonexistent path
-    produced exactly this state, and PRD 03's reconciler skips a source that
+    `supports_push` stays `False` until something is delivered: a handshake against a
+    nonexistent path produces exactly this state, and the reconciler skips a source that
     answers `True` here.
     """
     server = FakeEmbyServer()
@@ -1455,8 +1310,8 @@ async def test_events_yields_what_arrives_and_flips_supports_push() -> None:
     try:
         async with adapter.events() as events:
             assert adapter.supports_push is False, (
-                "the socket is open and nothing has arrived; ADR-0004's control "
-                "handshake against a nonexistent path produced exactly this state"
+                "the socket is open and nothing has arrived, which is the state a "
+                "control handshake against a nonexistent path leaves behind"
             )
             assert connection.sent == [SUBSCRIBE_FRAME]
             event = await asyncio.wait_for(anext(aiter(events)), timeout=BOUND)
@@ -1467,7 +1322,7 @@ async def test_events_yields_what_arrives_and_flips_supports_push() -> None:
 
 
 async def test_supports_push_is_false_again_once_the_channel_closes() -> None:
-    """A message counted on a socket nobody is holding is not evidence about a socket.
+    """A message counted on a socket nobody holds is not evidence about a socket.
 
     `PushHealth.connected` is the clause that says so, and the channel's own `finally`
     is what clears it.
@@ -1491,18 +1346,13 @@ async def test_supports_push_is_false_again_once_the_channel_closes() -> None:
 
 
 async def test_events_opens_a_fresh_connection_per_call_and_keeps_one_ledger() -> None:
-    """A channel is one connection, and `PushSupervisor` calls `events()` once per reconnect.
+    """A channel is one connection, and `events()` is called once per reconnect.
 
-    so the connector must be asked again rather than a live socket reused.
-
-    The *ledger* is shared deliberately, which is what makes `messages_received` and
-    `reconnects` the lane's history rather than one connection's.
-
-    Named for the connection rather than the channel on purpose: caching the
-    `EmbyPushChannel` object is measurably equivalent (it holds no
-    per-connection state; `open()` connects afresh either way), so a case
-    claiming to pin a fresh *channel* would be claiming something no
-    assertion here can see. See `EmbyAdapter.events`.
+    The connector must be asked again rather than a live socket reused. The ledger is
+    shared deliberately, which is what makes `messages_received` and `reconnects` the
+    lane's history rather than one connection's. Named for the connection rather than
+    the channel, because `EmbyPushChannel` holds no per-connection state and no
+    assertion here could see the difference.
     """
     server = FakeEmbyServer()
     first, second = FakePushConnection(), FakePushConnection()
@@ -1528,14 +1378,10 @@ async def test_events_opens_a_fresh_connection_per_call_and_keeps_one_ledger() -
 
 
 async def test_verify_reports_push_as_not_probed_before_a_channel_has_opened() -> None:
-    """`False` is a claim and `None` is an absence.
+    """`False` is a claim and `None` is an absence, and a fresh adapter has only the second.
 
-    and a fresh adapter has only the second to offer.
-
-    The obvious spelling -- `push_available=self._health.is_delivering(...)`
-    -- turns "nobody has looked" into "push is broken" on every status
-    screen for every source with no lane running, which is every source
-    until the composition root injects one.
+    `push_available=self._health.is_delivering(...)` turns "nobody has looked" into
+    "push is broken" on every status screen for every source with no lane running.
     """
     server = FakeEmbyServer()
     adapter = _push_adapter(server, FakePushConnector())
@@ -1548,10 +1394,8 @@ async def test_verify_reports_push_as_not_probed_before_a_channel_has_opened() -
 async def test_verify_reports_the_running_channels_health_and_opens_no_socket() -> None:
     """`verify()` never opens a channel of its own.
 
-    a status screen a dashboard polls must not cost a socket per poll against a server
-    PRD 01 measures at 1-5 s per request.
-
-    It reports the health of the channel that is *actually running*.
+    A status screen a dashboard polls must not cost a socket per poll against a server
+    that answers in seconds. It reports the health of the channel actually running.
     """
     server = FakeEmbyServer()
     connection = FakePushConnection()
@@ -1572,17 +1416,12 @@ async def test_verify_reports_the_running_channels_health_and_opens_no_socket() 
 
 
 async def test_supports_push_decays_on_a_channel_that_stopped_delivering() -> None:
-    """The staleness clause read through `supports_push` itself.
+    """The staleness clause read through `supports_push`, which the reconciler calls.
 
-    which is what the reconciler and `PushSupervisor` call.
-
-    `verify()` reaches `is_delivering` by its own route, so a case that only
-    went through the status screen leaves this property untested -- measured:
-    dropping the staleness clause from `supports_push` survived every other
-    case here. A socket that delivered once and nothing since is not a push
-    channel, and `websockets`' own `ping_timeout` cannot tell: a peer that
-    answers pongs while delivering nothing passes the keepalive and fails
-    this.
+    `verify()` reaches `is_delivering` by its own route, so a case that only went
+    through the status screen leaves this untested. A socket that delivered once and
+    nothing since is not a push channel, and `websockets`' own `ping_timeout` cannot
+    tell: a peer answering pongs while delivering nothing passes the keepalive.
     """
     server = FakeEmbyServer()
     connection = FakePushConnection()
@@ -1609,7 +1448,7 @@ async def test_supports_push_decays_on_a_channel_that_stopped_delivering() -> No
 async def test_verify_reports_a_stale_channel_as_unavailable() -> None:
     """The staleness clause, read through `verify()` rather than through the ledger.
 
-    a socket that delivered once an hour ago and nothing since is not a push channel a
+    A socket that delivered once an hour ago and nothing since is not a push channel a
     status screen may call available.
     """
     server = FakeEmbyServer()
@@ -1630,17 +1469,12 @@ async def test_verify_reports_a_stale_channel_as_unavailable() -> None:
 
 
 async def test_closing_the_adapter_closes_a_channel_that_is_still_open() -> None:
-    """`aclose()` resets the ledger.
+    """`aclose()` resets the ledger, and only a still-open channel can show it.
 
-    and the only state that can show it is a channel that is **still open** -- a lane
-    mid-`async for` when the source is deleted.
-
-    The plan's version of this case closed the channel first and then called
-    `aclose()`, by which point `EmbyPushChannel.open`'s own `finally` has
-    already cleared `connected` -- so `supports_push` reads `False` with or
-    without `record_close()` and the mutation it names survives. Measured.
-    Without the reset here, a status screen reads `push_available: true` for
-    a source that was deleted thirty seconds ago.
+    A lane mid-`async for` when the source is deleted. Closing the channel first would
+    let `EmbyPushChannel.open`'s own `finally` clear `connected`, so `supports_push`
+    would read `False` with or without `record_close()`. Without the reset a status
+    screen reads `push_available: true` for a source deleted thirty seconds ago.
     """
     server = FakeEmbyServer()
     connection = FakePushConnection()
@@ -1656,10 +1490,7 @@ async def test_closing_the_adapter_closes_a_channel_that_is_still_open() -> None
 
 
 async def test_events_after_close_raises_port_unavailable() -> None:
-    """`aclose`'s port contract.
-
-    "afterwards every other method raises `PortUnavailable` rather than whatever the
-    underlying client happens to raise".
+    """After `aclose`, every other method raises `PortUnavailable`.
 
     A closed adapter that handed out a channel would have that channel authenticate
     against a closed `httpx.AsyncClient`, which raises a bare `RuntimeError`.
@@ -1673,10 +1504,10 @@ async def test_events_after_close_raises_port_unavailable() -> None:
 
 
 async def test_probe_push_reports_what_arrived_not_that_it_connected() -> None:
-    """ADR-0004's caveat as an operator-facing answer.
+    """The probe reports delivery rather than the handshake.
 
-    A probe that reported the handshake would report success against a nonexistent path
-    -- which is the *measured* behaviour of this server, not a hypothetical.
+    A probe that reported the handshake would report success against a nonexistent path,
+    which is what this server really does.
     """
     server = FakeEmbyServer()
     silent = FakePushConnection()
@@ -1706,13 +1537,11 @@ async def test_probe_push_reports_what_arrived_not_that_it_connected() -> None:
 
 
 async def test_probe_push_counts_a_message_that_maps_to_no_event() -> None:
-    """`delivering=True` with `events=()` is the **common** case on an idle library.
+    """`delivering=True` with `events=()` is the common case on an idle library.
 
-    Emby's periodic `Sessions` maps to nothing and is exactly what keeps the channel
-    measurably alive.
-
-    A probe that reported delivery from its own event list would call a healthy idle
-    source dead.
+    Emby's periodic `Sessions` frame maps to no event and is what keeps the channel
+    alive. A probe that reported delivery from its own event list would call a healthy
+    idle source dead.
     """
     server = FakeEmbyServer()
     connection = FakePushConnection()
@@ -1726,10 +1555,10 @@ async def test_probe_push_counts_a_message_that_maps_to_no_event() -> None:
 
 
 async def test_probe_push_reports_a_failed_upgrade_rather_than_raising() -> None:
-    """Its callers are an operator's diagnostic and a status screen.
+    """The probe returns rather than raises, like `verify()`.
 
-    and both exist to render a failure rather than handle one -- the same reason
-    `verify()` returns a `SourceStatus` instead of raising.
+    Its callers are an operator's diagnostic and a status screen, and both exist to
+    render a failure rather than handle one.
     """
     server = FakeEmbyServer()
     connector = FakePushConnector()
@@ -1748,16 +1577,12 @@ async def test_probe_push_reports_a_failed_upgrade_rather_than_raising() -> None
 
 
 async def test_probe_push_reports_a_channel_that_went_stale_as_upgraded() -> None:
-    """A channel that opened and then went silent past `stale_after` raises `PortUnavailable`.
+    """A channel that opened and then went silent still reports `upgraded=True`.
 
-    out of its own iterator, and that raise arrives at the probe's `except
-    UsherPortError` arm.
-
-    Reporting `upgraded=False` there would be the dishonesty this whole
-    milestone is about, pointing the other way: the handshake plainly
-    succeeded and the operator needs to know it did, because "the upgrade
-    failed" and "the upgrade worked and nothing came" are different
-    problems with different fixes.
+    Past `stale_after` its iterator raises `PortUnavailable`, which arrives at the
+    probe's `except UsherPortError` arm. Reporting `upgraded=False` there would hide
+    that the handshake succeeded, and "the upgrade failed" and "the upgrade worked and
+    nothing came" are different problems with different fixes.
     """
     server = FakeEmbyServer()
     connection = FakePushConnection()
@@ -1779,11 +1604,10 @@ async def test_probe_push_reports_a_channel_that_went_stale_as_upgraded() -> Non
 
 
 async def test_aclose_closes_a_client_it_created_and_leaves_an_injected_one() -> None:
-    """`EmbyAdapter` is normally constructed with no client and owns the one it makes.
+    """An injected client stays the caller's, and `aclose` does not close it.
 
-    A test (and, later, a pooled registry) injects one and keeps ownership; closing
-    someone else's client out from under them is the same mistake the bulk adapters' no-
-    op `aclose` exists to avoid.
+    `EmbyAdapter` normally makes its own and owns that one. Closing someone else's
+    client out from under them is the mistake the bulk adapters' no-op `aclose` avoids.
     """
     owned = EmbyAdapter(SOURCE, CREDENTIALS)
     await owned.aclose()
@@ -1798,17 +1622,12 @@ async def test_aclose_closes_a_client_it_created_and_leaves_an_injected_one() ->
 
 
 async def test_aclose_is_idempotent_for_both_ownership_shapes() -> None:
-    """The port requires it in as many words.
+    """`aclose` is idempotent, because a shutdown path and a delete path can both reach it.
 
-    "a shutdown path and a delete path can both reach it" -- and `DELETE
-    /admin/sources/{id}` racing process shutdown is exactly that.
-
-    Honest about its own strength: no mutation of the *current* `aclose`
-    fails this. `httpx.AsyncClient.aclose()` is itself idempotent, so
-    deleting the `if self._closed: return` guard changes nothing
-    observable today. It is a regression guard for what comes next --
-    M5 closes a WebSocket here too, and that is the kind of teardown a
-    second call breaks.
+    `DELETE /admin/sources/{id}` racing process shutdown is exactly that. Honest about
+    its own strength: `httpx.AsyncClient.aclose()` is itself idempotent, so deleting the
+    `if self._closed: return` guard changes nothing observable today. It guards the
+    teardown that a second call would break once a socket is closed here too.
     """
     owned = EmbyAdapter(SOURCE, CREDENTIALS)
     await owned.aclose()
@@ -1829,17 +1648,11 @@ async def test_aclose_is_idempotent_for_both_ownership_shapes() -> None:
 async def test_a_closed_adapter_does_not_reach_the_network_at_all() -> None:
     """`aclose()` must stop the adapter, not just the client it may not own.
 
-    The plan predicted the contract's
-    `test_operations_after_aclose_raise_port_unavailable` would catch a
-    missing closed-check in `EmbySession.user_id()`. It does not, verified
-    by mutation: `_fetch` calls `user_id()` first, and with the check gone
-    that call *authenticates successfully* against the still-open injected
-    transport before `request()`'s own check raises. The right answer still
-    comes out, so nothing fails -- while a closed adapter has quietly minted
-    a fresh Emby session, against an upstream measured at 1-5 s per call.
-
-    So the assertion here is on the *absence of traffic*, which is the part
-    that is actually unprotected: a closed adapter authenticates zero times.
+    Without a closed-check in `EmbySession.user_id()`, `_fetch` calls it first and
+    authenticates successfully against the still-open transport before `request()`'s own
+    check raises — the right answer comes out, nothing fails, and a closed adapter has
+    quietly minted a fresh Emby session. The assertion is therefore on the absence of
+    traffic: a closed adapter authenticates zero times.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -1856,20 +1669,13 @@ async def test_a_closed_adapter_does_not_reach_the_network_at_all() -> None:
 
 
 async def test_concurrent_expired_sessions_produce_one_authentication() -> None:
-    """The contract asserts this too, but cannot force it.
+    """The single-flight re-auth, over a transport that genuinely sleeps.
 
-    over a plain `httpx.MockTransport` nothing ever really awaits, so the event loop
-    tends to run one gathered call all the way through its own re-auth before starting
-    the next, and every other call then observes an already fresh token.
-
-    Group C proved that exact test passes with the single-flight lock deleted.
-
-    So this is the adapter-level version with a transport that genuinely
-    sleeps, and it asserts on observed overlap so it cannot quietly stop
-    being concurrent. It is a different path from the session's own test:
-    `_fetch` takes the session lock twice per call -- `user_id()` and then
-    `request()` -- with a window in between that a single-lock test never
-    reaches.
+    Over a plain `httpx.MockTransport` nothing really awaits, so the loop runs one
+    gathered call through its own re-auth before starting the next and every other call
+    observes a fresh token — which passes with the lock deleted. Asserted on observed
+    overlap, so it cannot quietly stop being concurrent, and `_fetch` takes the session
+    lock twice per call with a window in between that a single-lock test never reaches.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -1896,10 +1702,9 @@ async def test_concurrent_expired_sessions_produce_one_authentication() -> None:
 
 
 async def test_a_rate_limited_walk_surfaces_the_retry_hint() -> None:
-    """A 429 mid-walk must reach the caller as `PortRateLimited` carrying the upstream's own hint.
+    """A 429 mid-walk reaches the caller as `PortRateLimited` carrying the upstream's hint.
 
-    not as a generic failure -- PRD 08's retry policy backs off on the hint when there
-    is one.
+    The retry policy backs off on the hint when there is one.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1921,10 +1726,10 @@ async def test_a_rate_limited_walk_surfaces_the_retry_hint() -> None:
 
 
 async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identifier() -> None:
-    """Issue #35.
+    """A failure message must not carry the Emby user id.
 
-    `PortUnavailable(f"{method} {path} failed: …")` put the Emby **user id** into
-    `sync_runs.error`, and the reported example carried a real one into a public issue.
+    `PortUnavailable(f"{method} {path} failed: …")` would put it into `sync_runs.error`,
+    and from there into anything that quotes one.
     """
     seen: list[str] = []
     server = FakeEmbyServer()
@@ -1982,10 +1787,9 @@ async def test_every_path_this_adapter_issues_redacts_to_a_route_with_no_identif
 
 
 async def test_a_failed_get_item_names_the_route_and_not_the_ids() -> None:
-    """`EmbyAdapter.get_item` builds its own message and its own `decode_json` call rather than.
+    """`get_item` builds its own message and `decode_json` call rather than using `json_body`.
 
-    going through `json_body`, so it is a second raise site that interpolates a path and
-    it needs its own case.
+    It is a second raise site that interpolates a path, so it needs its own case.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:

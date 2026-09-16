@@ -14,11 +14,7 @@ _PERFECT = tuple(Ranking(f"q{n}", (_CASES[n],)) for n in range(20))
 
 
 def test_the_positive_control_scores_perfectly() -> None:
-    """Fired first.
-
-    A control that collapses an *undegraded* run is measuring the harness, not the
-    system -- and it would make the negative control below pass for the wrong reason.
-    """
+    """The positive control: a collapse below is the degradation, not the harness."""
     assert score(_RELEVANT, _PERFECT, ["recall@5"])["recall@5"] == 1.0
 
 
@@ -37,11 +33,10 @@ def test_rotating_the_labels_collapses_mrr_too() -> None:
 
 
 def test_shuffling_within_k_would_not_have_been_a_control() -> None:
-    """**Measured.
+    """recall@5 over one relevant document is order-insensitive within k.
 
-    and it is why the control is a rotation.** recall@5 over one relevant document is
-    order-insensitive within k -- a control built on shuffling the top five would pass
-    every run, on a green harness and on a broken one alike.
+    A control built on shuffling the top five would pass on a broken harness too, which
+    is why the control is a rotation.
     """
     reversed_top5 = tuple(
         Ranking(f"q{n}", tuple(reversed((_CASES[n], "a", "b", "c", "d")))) for n in range(20)

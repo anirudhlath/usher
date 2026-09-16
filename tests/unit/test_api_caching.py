@@ -1,7 +1,4 @@
-"""`usher.api.caching`.
-
-the conditional-GET helper, over `GET /home`, the adopter whose TTL these cases are
-"""
+"""`usher.api.caching`, the conditional-GET helper, over `GET /home`."""
 
 import ast
 import inspect
@@ -38,14 +35,10 @@ _START = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
 class _Clock:
     """A clock that only moves when a case moves it.
 
-    `test_services_rows_ cache.py`'s own fixture, copied rather than imported because
-    this file's cases are about the HTTP layer above it and a shared clock fixture would
-    be a cross-file coupling for six lines.
-
-    Non-zero origin (`_START`, not `datetime.min`), for the reason
-    `testing-discipline.md` records for `CurationService`'s: a clock whose
-    epoch is the identity element of the comparison under test cannot
-    distinguish "moved" from "never read".
+    Copied from `test_services_rows_cache.py` rather than imported, because this
+    file's cases are about the HTTP layer above it. Non-zero origin (`_START`, not
+    `datetime.min`): a clock whose epoch is the identity element of the comparison
+    under test cannot distinguish "moved" from "never read".
     """
 
     def __init__(self) -> None:
@@ -75,7 +68,7 @@ def _app(
         )
     )
     built.dependency_overrides[get_row_context] = lambda: context
-    # M9 E2: `get_home_service` reads `row_provider_settings` to filter the
+    # `get_home_service` reads `row_provider_settings` to filter the
     # registry, so without this every case here reaches the dead port above.
     # An empty overrides table is the shipped state, i.e. every provider
     # composes -- which is what these cases were written against.
@@ -99,20 +92,15 @@ async def _client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 
 async def test_a_repeat_get_home_with_the_returned_etag_answers_304_with_no_body() -> None:
-    """The failing test named in the plan.
+    """A repeat `GET /home` carrying the returned ETag answers 304 with no body.
 
-    The first `GET /home` answers 200 with an `ETag` and `Cache-Control: private, max-
-    age=30`; the second, sent with `If-None-Match`, must answer 304, repeat both
-    headers, and carry a zero-length body.
-
-    `max-age` is asserted against `_SCREEN_TTL` itself, imported rather than
-    hard-coded as `30` -- a case pinning the literal would still pass the day
-    the header and the TTL drift apart, which is exactly the drift this task
-    exists to make impossible.
-
+    The first answers 200 with an `ETag` and `Cache-Control: private, max-age=30`;
+    the second, sent with `If-None-Match`, must answer 304, repeat both headers and
+    carry a zero-length body. `max-age` is asserted against `_SCREEN_TTL` itself,
+    imported rather than hard-coded, so the header and the TTL cannot drift apart.
     `Vary` is asserted absent, per the module's own note beside `current_user`'s
-    seam: it would be needed the day a second user identity exists, and adding
-    it today would be a header describing a distinction the API cannot draw.
+    seam: it would be needed the day a second user identity exists, and adding it
+    today would describe a distinction the API cannot draw.
     """
     library = Library()
     await library.title("A Film That Just Arrived", added=days_ago(1))
@@ -137,24 +125,14 @@ async def test_a_repeat_get_home_with_the_returned_etag_answers_304_with_no_body
 async def test_a_changed_screen_changes_the_etag() -> None:
     """The other half of the ETag contract.
 
-    a hard-coded constant, or a comparison that always answers True, both pass the 304
-    case above.
-
-    Only a case where the content genuinely differs and the ETag is asserted to differ
-    with it rules those out.
-
-    **The clock is stepped past `_SCREEN_TTL + SCREEN_STALE_GRACE`, which is
-    where the screen cache stops answering at all.** It used to step 31 s, past
-    the TTL alone, and that premise stopped being true when A6 landed
-    serve-stale: between 30 s and 90 s an expired entry is *served* while a
-    refresh is scheduled, so the second request answered the first screen's
-    bytes, the new title was absent, and the ETag was correctly identical --
-    the case failed on a true statement about the cache. Past the grace window
-    the entry is a hard miss (`services/rows/cache.py`), which is the state
-    this case has always needed and used to get from the TTL alone.
-
-    Both bounds are imported rather than written as `91`, for the reason the
-    304 case imports `_SCREEN_TTL` rather than writing `30`: a case pinning the
+    A hard-coded constant, or a comparison that always answers True, both pass the
+    304 case above; only a case where the content genuinely differs and the ETag is
+    asserted to differ with it rules those out. **The clock is stepped past
+    `_SCREEN_TTL + SCREEN_STALE_GRACE`, which is where the screen cache stops
+    answering at all**: inside the grace window an expired entry is *served* while a
+    refresh is scheduled, so the second request would get the first screen's bytes
+    and a correctly identical ETag. Both bounds are imported rather than written as
+    literals, for the reason the 304 case imports `_SCREEN_TTL`.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))
@@ -175,9 +153,9 @@ async def test_a_changed_screen_changes_the_etag() -> None:
 
 
 async def test_a_read_inside_the_grace_window_serves_the_previous_bytes_and_the_same_etag() -> None:
-    """**The interaction the case above exists on the other side of**.
+    """The interaction the case above exists on the other side of.
 
-    and it is intended behaviour rather than a tolerated one.
+    It is intended behaviour rather than a tolerated one.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))
@@ -218,9 +196,9 @@ async def test_a_read_inside_the_grace_window_serves_the_previous_bytes_and_the_
 
 
 async def test_a_conditional_get_against_a_stale_but_served_screen_is_a_304() -> None:
-    """`usher/api/caching.py`'s module docstring reasons about this case and invites A6 to agree.
+    """`usher/api/caching.py`'s module docstring reasons about this case.
 
-    with it or contradict it; this is the agreement, in a case rather than in prose.
+    Here is the agreement, in a case rather than in prose.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))
@@ -260,17 +238,13 @@ async def test_the_etag_reflects_the_served_bytes_and_not_a_separate_representat
 ) -> None:
     """Pins the exact hazard the module docstring names.
 
-    hashing something *other* than the bytes actually served -- a `repr()`, or the DTO
-    before serialisation -- can agree with the served body on some inputs and disagree
-    on others, which is invisible to a case that only checks "same content gives the
-    same ETag, different content gives a different one", because `repr()` also varies
-    with content.
-
-    `model_dump_json` is patched to answer one fixed string regardless of the
-    DTO's real content, so the *served bytes* are identical across two
-    structurally different households. An ETag correctly derived from those
-    bytes must therefore be identical too -- which a hash over `repr(body)`,
-    still sensitive to the real, unpatched field values, would not produce.
+    Hashing something *other* than the bytes actually served -- a `repr()`, or the
+    DTO before serialisation -- can agree with the served body on some inputs and
+    disagree on others, which is invisible to a case that only checks "same content
+    gives the same ETag, different content gives a different one". `model_dump_json`
+    is patched to answer one fixed string regardless of the DTO's real content, so
+    the served bytes are identical across two structurally different households and
+    an ETag correctly derived from them must be identical too.
     """
     monkeypatch.setattr(HomeResponse, "model_dump_json", lambda self: '{"rows": []}')
 
@@ -292,7 +266,7 @@ async def test_the_etag_reflects_the_served_bytes_and_not_a_separate_representat
 async def test_a_malformed_if_none_match_is_ignored_and_answers_200_with_a_fresh_etag() -> None:
     """A conditional header is a client optimisation, not a request the server can reject.
 
-    so a header that is not a validator this server ever issued is silently treated as
+    A header that is not a validator this server ever issued is silently treated as
     absent, never as a 400 or a 422.
     """
     library = Library()
@@ -308,12 +282,10 @@ async def test_a_malformed_if_none_match_is_ignored_and_answers_200_with_a_fresh
 
 
 async def test_a_weak_validator_is_never_treated_as_a_match() -> None:
-    """Sweep target, named in the plan.
+    """The comparison must not be made case- or quote-insensitive against a weak tag.
 
-    the comparison must not be made case- or quote-insensitive against a weak tag.
-
-    This server only ever issues strong tags, so a client echoing one back with a `W/`
-    prefix -- even carrying this exact ETag's own hex digest -- must not 304.
+    This server only ever issues strong tags, so a client echoing one back with a
+    `W/` prefix -- even carrying this exact ETag's own hex digest -- must not 304.
     """
     library = Library()
     await library.title("A Film That Just Arrived", added=days_ago(1))
@@ -331,11 +303,9 @@ async def test_the_body_is_serialised_exactly_once_per_request(
 ) -> None:
     """The ETag is a hash over the exact bytes served, computed once.
 
-    hashing a second serialisation is a correctness hazard the day a serialiser stops
-    being deterministic.
-
-    Asserted by counting calls to the DTO's own JSON serialiser, on both the 200 path
-    and the 304 path.
+    Hashing a second serialisation is a correctness hazard the day a serialiser
+    stops being deterministic. Asserted by counting calls to the DTO's own JSON
+    serialiser, on both the 200 path and the 304 path.
     """
     library = Library()
     await library.title("A Film That Just Arrived", added=days_ago(1))
@@ -363,10 +333,9 @@ async def test_the_body_is_serialised_exactly_once_per_request(
 async def test_get_events_still_streams_and_carries_no_etag() -> None:
     """The helper is a function the route calls, never a global middleware.
 
-    proved by driving `GET /events` through the very same `create_app()` and finding it
-    unaffected: it still streams, its own `Cache-Control: no-cache` and `X-Accel-
-    Buffering: no` are untouched, and it carries no `ETag`, because nothing wired the
-    caching helper into it.
+    Proved by driving `GET /events` through the very same `create_app()` and finding
+    it unaffected: it still streams, its own `Cache-Control: no-cache` and
+    `X-Accel-Buffering: no` are untouched, and it carries no `ETag`.
     """
     app = create_app(
         Settings(
@@ -390,25 +359,16 @@ async def test_get_events_still_streams_and_carries_no_etag() -> None:
 
 
 def test_the_conditional_get_helper_is_adopted_by_exactly_two_routers() -> None:
-    """**Two conditions a route must meet to adopt this.
+    """Two conditions a route must meet to adopt this, and `GET /titles/{id}` meets one.
 
-    and `GET /titles/{id}` meets only the second**: no side effect a short-circuit could
-    skip, and a `private` response.
-
-    Opening a title promotes its `enrich` job and attributes PRD 10's click
-    (`test_api_titles.py::test_opening_a_stub_promotes_its_enrichment` and
-    `::test_opening_a_result_from_a_search_records_the_click_against_that_row`
-    are the two writes), so a conditional check moved ahead of that handler --
-    the natural place to put one, for speed -- stops both for exactly the
-    clients that send `If-None-Match` on every request. `GET /search` fails the
-    second condition: no TTL to quote, and a per-query ETag.
-
+    No side effect a short-circuit could skip, and a `private` response. Opening a
+    title promotes its `enrich` job and attributes PRD 10's click, so a conditional
+    check moved ahead of that handler -- the natural place to put one, for speed --
+    stops both for exactly the clients that send `If-None-Match` on every request.
+    `GET /search` fails the second condition: no TTL to quote, and a per-query ETag.
     Adoption is asserted as a **set** over the router package rather than as a
-    sentence in the helper's docstring, which is how this was checked until
-    M10: a substring guard is satisfied by prose and says nothing about which
-    routers import the helper. An eleventh router adopting it is a red rather
-    than a discovery -- the argument above is what has to be made again, per
-    route.
+    sentence in the helper's docstring, which a substring guard would satisfy while
+    saying nothing about which routers import the helper.
     """
     routers = pathlib.Path(inspect.getfile(caching)).parent / "routers"
     modules = sorted(path.stem for path in routers.glob("*.py") if path.stem != "__init__")

@@ -1,7 +1,4 @@
-"""`usher.ports.repository` is a package mirroring `usher.db.repositories` module for module.
-
-and these cases are what keep it one.
-"""
+"""`usher.ports.repository` mirrors `usher.db.repositories`, module for module."""
 
 import ast
 import importlib
@@ -22,9 +19,8 @@ NOT_REPOSITORY_PORTS: dict[str, str] = {
     "PostgresJobQueue": "usher.ports.jobs",
 }
 
-# Measured by AST over `ports/repository.py` at the commit before the split, and stated
-# as **floors** rather than equalities on this repository's own precedent
-# (`test_decision_register.py` asserts `>= 23` ADRs against 28 that exist).
+# Floors rather than equalities, so a port added later need not edit these while a
+# whole class quietly lost in a move still fails.
 PORTS_AT_THE_SPLIT = 19
 ABSTRACT_METHODS_AT_THE_SPLIT = 107
 SUPPORTING_TYPES_AT_THE_SPLIT = 19
@@ -85,23 +81,15 @@ def _public_objects(namespace: ModuleType) -> dict[str, type]:
 
 
 def test_every_postgres_repository_module_has_a_port_module_of_the_same_name() -> None:
-    """**The invariant the split exists for.** Every `PostgresThingRepository` in.
+    """Every `PostgresThingRepository` has a port module of the same name.
 
     `usher.db.repositories.thing` implements a `ThingRepository` declared in
-    `usher.ports.repository.thing` -- same module name, both sides, no exceptions beyond
-    the two named above.
-
-    Nineteen such pairs exist across sixteen modules; three modules hold two
-    ports each (`people`, `search`, `sync`), which is why the mirror is stated
-    module-for-module and not port-for-port.
-
-    Both premise assertions are load-bearing rather than decoration. A scan
-    that globs nothing passes exactly like a scan that passes -- the failure
-    `test_ports.py::test_every_port_abc_is_registered_in_all_ports` carries the
-    same guard against, and the one its own sweep found -- so `pairs` is
-    asserted non-empty *and* a named anchor is asserted present, because an
-    import that quietly stopped resolving would empty the walk without emptying
-    the list.
+    `usher.ports.repository.thing`, with no exceptions beyond the two named
+    above. Some modules hold two ports, which is why the mirror is stated
+    module-for-module and not port-for-port. A scan that globs nothing passes
+    exactly like a scan that passes, so `pairs` is asserted non-empty *and* a
+    named anchor asserted present: an import that quietly stopped resolving would
+    empty the walk without emptying the list.
     """
     pairs = _postgres_port_pairs()
     assert pairs, "the repository scan found nothing, so it proves nothing"
@@ -129,15 +117,12 @@ def test_every_postgres_repository_module_has_a_port_module_of_the_same_name() -
 
 
 def test_the_package_re_exports_every_public_object_its_modules_declare() -> None:
-    """`__init__.__all__` is the whole compatibility story.
+    """`__init__.__all__` is the whole compatibility story for the package.
 
-    99 files import `from usher.ports.repository import ...` and not one of them changed
-    for the split.
-
-    Under mypy's `no_implicit_reexport` a name missing from `__all__` is not importable
-    at all, so a module added without its `__all__` entry breaks every call site rather
-    than the one file that forgot -- which is why the completeness check is a test and
-    not a review habit.
+    Under mypy's `no_implicit_reexport` a name missing from `__all__` is not
+    importable at all, so a module added without its `__all__` entry breaks every
+    call site rather than the one file that forgot -- which is why the
+    completeness check is a test and not a review habit.
     """
     declared: dict[str, str] = {}
     for namespace in _package_modules():
@@ -161,22 +146,14 @@ def test_the_package_re_exports_every_public_object_its_modules_declare() -> Non
 
 
 def test_the_independence_contract_names_every_aggregate_port_module() -> None:
-    """The tenth `import-linter` contract holds the same invariant as the case below.
+    """The `import-linter` independence contract names every aggregate port module.
 
-    as a graph property rather than as one file's AST scan -- and **its module list is
-    the whole contract**, so a port module that lands unlisted is a port module nothing
-    constrains while the gate still reports 10 kept.
-
-    `pyproject.toml` already records that failure mode about its own
-    `forbidden_modules` list one contract up (*"a seventh adapter package left
-    out is a package the contract silently stops covering"*). The repair there
-    is a sentence; the repair here is this case, because the membership is
-    derivable: it is exactly what `_aggregate_modules()` walks.
-
-    `_results` is deliberately absent from both sides. It is the shared private
-    module every aggregate may import, and `_aggregate_modules()` drops it for
-    the same reason -- so the two lists agree by construction rather than by
-    two people remembering the same exception.
+    Its module list is the whole contract, so a port module that lands unlisted
+    is one nothing constrains while the gate still reports every contract kept.
+    The membership is derivable: it is exactly what `_aggregate_modules()` walks.
+    `_results` is deliberately absent from both sides -- it is the shared private
+    module every aggregate may import, so the two lists agree by construction
+    rather than by two people remembering the same exception.
     """
     with (Path(__file__).parents[2] / "pyproject.toml").open("rb") as handle:
         contracts = tomllib.load(handle)["tool"]["importlinter"]["contracts"]
@@ -202,21 +179,16 @@ def test_the_independence_contract_names_every_aggregate_port_module() -> None:
 
 
 def test_no_aggregate_module_imports_another_aggregate_module() -> None:
-    """**The cycle the private `_results` module exists to prevent.**.
+    """The cycle the private `_results` module exists to prevent.
 
-    `BulkWriteResult` is returned by six ports across six modules. Homing it in
-    `bulk.py` and importing it back the other way resolves perfectly well today
-    -- and makes `collection.py`, `episode.py`, `media_item.py`, `people.py` and
-    `search.py` each drag the bulk-load port into every consumer, which is one
-    package over from the shape the ninth import contract was written for. The
-    private `_results.py` is the fix, and this case is what keeps it applied:
-    aggregate modules may import `_results`, and may not import each other.
-
-    Asserted over the *source* rather than by importing and looking for an
+    `BulkWriteResult` is returned by ports in several modules, and homing it in
+    `bulk.py` would make each of them drag the bulk-load port into every
+    consumer. Aggregate modules may import `_results`, and may not import each
+    other. Asserted over the *source* rather than by importing and catching an
     `ImportError`, because a cycle between two modules both reachable from
     `__init__` frequently does not raise -- it resolves in whichever order
-    `__init__` happens to list them, and then stops resolving for the first
-    person who imports a submodule directly.
+    `__init__` lists them, and then stops resolving for the first person who
+    imports a submodule directly.
     """
     modules = _aggregate_modules()
     assert modules, "the port-module scan found nothing, so it proves nothing"
@@ -249,21 +221,14 @@ def test_no_aggregate_module_imports_another_aggregate_module() -> None:
 
 
 def test_every_port_and_abstract_method_in_the_package_carries_a_docstring() -> None:
-    """A docstring lost in a 3,434-line move is invisible to every other test in this repository.
+    """Every port and abstract method in the package carries a docstring.
 
-    strip the docstrings from `ports/repository.py` and `ast.unparse` leaves **619 of
-    3,434 lines**, so roughly four lines in five are the prose the ports are mostly
-    *for*.
-
-    Nothing here can prove the move preserved a docstring's wording -- `getsource` did
-    that, once, against `git show HEAD:` -- but this is what stops the next port
-    arriving without one, and what would have caught a whole class quietly dropped.
-
-    The counts are floors and the constants say what they were measured at. A
-    dataclass with no docstring of its own inherits a synthesised
-    `Thing(field: int, ...)` from `@dataclass`, which `inspect.getdoc` reports
-    as prose, so the check is against `__doc__` in the class's own `__dict__`
-    with the synthesised signature rejected by name.
+    Most of what a port is worth is its prose, and one dropped in a move is
+    invisible to every other test here. The counts are floors, so this is what
+    stops the next port arriving without a docstring. A dataclass with none of
+    its own inherits a synthesised `Thing(field: int, ...)` from `@dataclass`,
+    which `inspect.getdoc` reports as prose, so the check is against `__doc__` in
+    the class's own `__dict__` with the synthesised signature rejected by name.
     """
     ports: list[type[ABC]] = []
     supporting: list[type] = []

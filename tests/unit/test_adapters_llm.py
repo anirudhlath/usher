@@ -35,7 +35,7 @@ _SCHEMA: dict[str, Any] = {
 # omits `usage` entirely is a real shape and one case is about it.
 _REPORTED = object()
 
-# : A JSON nesting depth past the one `json.loads` refuses.
+#: A JSON nesting depth past the one `json.loads` refuses.
 _DEEP = 12_000
 
 #: Where the injected clock starts. **Deliberately not zero**, for the reason
@@ -45,29 +45,25 @@ _DEEP = 12_000
 #: the one field this client takes an injected clock in order to measure.
 _T0 = 1_000.0
 
-# : How long this file's transport takes to answer, and **why it is not the : 1,420 ms
-# the live run measured as its median.** `_T0 + 1.42` is `1001.42`, : which is not
-# representable in binary, so `int((1001.42 - 1000.0) * 1000)` is : **1419** -- an exact
-# assertion on a measured-looking constant would have : been an off-by-one nobody could
-# read as anything but a defect.
+#: How long this file's transport takes to answer. A round number on purpose: an
+#: interval whose seconds form is not representable in binary turns an exact
+#: millisecond assertion into an off-by-one nobody reads as anything but a defect.
 _SEND_SECONDS = 1.5
 
-# : **A literal, deliberately not `int(_SEND_SECONDS * 1000)`**, and that is the : same
-# finding rather than a second one: the derived spelling performs a : *different*
-# computation from the client's, which subtracts first.
+#: A literal, deliberately not `int(_SEND_SECONDS * 1000)`: the derived spelling
+#: performs a different computation from the client's, which subtracts first.
 _SEND_MS = 1_500
 
 
 class _Clock:
     """A monotonic clock that moves only when the transport does.
 
-    **A two-tick iterator cannot see this defect and that is the whole design
-    of this fixture.** `iter([_T0, _T0 + elapsed])` hands out the same two
-    numbers whether `started` is read before the send or after it, so both
-    spellings compute the identical delta -- the fixture would be measuring the
-    iterator rather than the code. Moving the clock *inside* the handler is
-    what puts the request on one side of the reading and makes "the send is in
-    the measured window" a thing an assertion can be wrong about.
+    `iter([_T0, _T0 + elapsed])` hands out the same two numbers whether `started`
+    is read before the send or after it, so both spellings compute the identical
+    delta and the fixture would be testing the iterator rather than the code.
+    Moving the clock *inside* the handler puts the request on one side of the
+    reading, which is what makes "the send is inside the window" a thing an
+    assertion can be wrong about.
     """
 
     def __init__(self) -> None:
@@ -135,9 +131,9 @@ async def _complete(client: OpenAICompatibleClient) -> tuple[dict[str, Any], Any
 async def test_the_request_asks_for_the_schema_by_name_and_strictly() -> None:
     """Kills a client that sends the schema in the prompt and hopes.
 
-    `response_format: json_schema` with `strict: true` was measured working
-    against a live endpoint and is the cheapest guarantee available; the
-    fallbacks below exist for providers that ignore it, not instead of it.
+    `response_format: json_schema` with `strict: true` is the cheapest guarantee
+    available; the fallbacks below exist for providers that ignore it, not instead
+    of it.
     """
     seen: list[dict[str, Any]] = []
 
@@ -172,10 +168,10 @@ async def test_the_credential_is_a_header_and_never_reaches_the_url() -> None:
 
 
 async def test_no_credential_configured_sends_no_authorization_header() -> None:
-    """A local vLLM or Ollama needs none.
+    """A local vLLM or Ollama needs no key, so no header is sent without one.
 
-    and sending `Bearer None` is how a client fails against the deployment this project
-    is actually for.
+    Sending `Bearer None` is how a client fails against the deployment this
+    project is actually for.
     """
     seen: list[httpx.Request] = []
 
@@ -223,12 +219,11 @@ async def test_a_plain_json_body_parses() -> None:
     ],
 )
 async def test_a_fenced_body_parses(wrapped: str) -> None:
-    """Kills `json.loads(content)`.
+    """Kills `json.loads(content)` on a fenced answer.
 
-    Measured: against a live endpoint with no `response_format`, **5 of 5**
-    responses came back inside a ` ```json ` fence. This is a fallback for a
-    provider that ignores `response_format`, so it has to work on the shape
-    that provider actually produces.
+    A provider that ignores `response_format` routinely wraps its answer in a
+    ` ```json ` fence, and this is the fallback for that, so it has to work on the
+    shape such a provider produces.
     """
     client = _client(body=_completion(wrapped))
     body, _usage = await _complete(client)
@@ -245,10 +240,10 @@ async def test_content_that_is_not_json_is_malformed_not_unavailable() -> None:
 
 
 async def test_a_json_array_is_refused_because_the_port_promises_an_object() -> None:
-    """`complete_json` is annotated `-> tuple[dict[str.
+    """A top-level JSON array is refused rather than handed back.
 
-    Any], LLMUsage]`, and a list that reached a caller would fail on `body["rows"]`
-    several frames away from the thing that was wrong.
+    `complete_json` promises a mapping, and a list that reached a caller would
+    fail on `body["rows"]` several frames away from the thing that was wrong.
     """
     with pytest.raises(PortDataMalformed):
         await _complete(_client(body=_completion('[{"ok": true}]')))
@@ -271,23 +266,16 @@ async def test_a_null_content_is_malformed() -> None:
 
 
 async def test_deeply_nested_content_is_malformed_not_a_recursion_error() -> None:
-    """Same family as the `content.
+    """Nesting past `json.loads`'s limit raises outside the port taxonomy.
 
-    null` case above, and missed for the same reason it was caught: `json.loads` raises
-    `RecursionError` past a nesting depth of 9,999, and `RecursionError` subclasses
-    `RuntimeError`, **not** `ValueError` -- so `_parse`'s `except ValueError` does not
-    see it, it is not a `UsherPortError`, and it escapes `CurationService`'s `except
-    UsherPortError` to take the worker down instead of parking one job.
-
-    The depth is measured, not guessed: 9,998 parses and 9,999 raises on
-    CPython 3.13 at the default recursion limit. `_DEEP` clears it with room
-    to spare rather than sitting on the boundary, because the boundary is an
-    interpreter property this case has no business pinning.
-
-    Reachable on the two fallback paths the module docstring names -- the
-    `json_object` arm and the fenced-prose arm -- which are unconstrained
-    generation, and this project has already measured an unsatisfiable bound
-    driving *this endpoint* into a degenerate repeating loop.
+    `json.loads` raises `RecursionError` on deep enough nesting, and
+    `RecursionError` subclasses `RuntimeError` rather than `ValueError` -- so
+    `_parse`'s `except ValueError` does not see it, it is not a `UsherPortError`,
+    and it escapes `CurationService`'s `except UsherPortError` to take the worker
+    down instead of parking one job. `_DEEP` clears the limit with room to spare
+    rather than sitting on the boundary, which is an interpreter property this
+    case has no business pinning. Reachable on the two fallback paths the module
+    docstring names, both of which are unconstrained generation.
     """
     nested = "[" * _DEEP + "]" * _DEEP
     # The premise: this really is the exception the port does not classify,
@@ -344,13 +332,11 @@ async def test_a_truncated_completion_is_refused_and_names_the_cap() -> None:
 
 
 async def test_usage_is_read_from_the_response() -> None:
-    """`latency_ms` is deliberately **not** asserted here.
+    """`latency_ms` is deliberately not asserted here.
 
-    it is the one field of `LLMUsage` that is measured rather than read, so it belongs
-    with the clock below.
-
-    The `>= 0` bound this case used to carry could not fail -- `max(0, ...)` clamps it
-    -- and was the only assertion about latency anywhere in the repository.
+    It is the one field of `LLMUsage` the client computes rather than reads, so it
+    belongs with the clock below. A `>= 0` bound here could not fail anyway,
+    because `max(0, ...)` clamps it.
     """
     _body, usage = await _complete(_client())
     assert usage.tokens_in == 1200
@@ -361,12 +347,10 @@ async def test_usage_is_read_from_the_response() -> None:
 async def test_cost_is_computed_from_the_configured_prices_in_decimal() -> None:
     """Kills float arithmetic and kills reading a cost field that does not exist.
 
-    Measured against a live endpoint: `usage` carries `prompt_tokens`,
-    `completion_tokens` and `total_tokens` and **no cost field at all**, so
-    PRD 10's "litellm reports per-call cost natively" was wrong about the
-    mechanism. 1200 in at $3/Mtok and 340 out at $15/Mtok is
-    0.0036 + 0.0051 = 0.0087 exactly, which is a number binary floating point
-    cannot represent.
+    `usage` carries `prompt_tokens`, `completion_tokens` and `total_tokens` and no
+    cost field at all, so the client computes the cost itself. 1200 in at $3/Mtok
+    and 340 out at $15/Mtok is 0.0036 + 0.0051 = 0.0087 exactly, which is a number
+    binary floating point cannot represent.
     """
     client = _client(
         price_in_per_mtok=Decimal("3.00"),
@@ -383,14 +367,11 @@ async def test_the_default_prices_are_zero_which_is_honest_for_a_local_model() -
 
 
 async def test_a_response_with_no_usage_reports_zeros_rather_than_failing() -> None:
-    """A provider that omits `usage` has still answered.
+    """A provider that omits `usage` has still answered, so zeros are recorded.
 
-    and failing the whole generation over a bookkeeping gap would trade good rows for an
-    accurate ledger.
-
-    The zeros are visible as zeros -- a real completion with a real latency and no
-    tokens is obviously wrong on the dashboard -- and this is recorded in the module
-    docstring rather than hidden.
+    Failing the whole generation over a bookkeeping gap would trade good rows for
+    an accurate ledger. The zeros stay visible as zeros: a real completion with a
+    real latency and no tokens is obviously wrong on a dashboard.
     """
     _body, usage = await _complete(_client(body=_completion(json.dumps({"ok": True}), usage=None)))
     assert usage.tokens_in == 0
@@ -399,11 +380,10 @@ async def test_a_response_with_no_usage_reports_zeros_rather_than_failing() -> N
 
 
 async def test_the_reported_model_falls_back_to_the_configured_one() -> None:
-    """`usage.model` is what PRD 10 groups spend by.
+    """`usage.model` falls back to the model that was asked for.
 
-    so an empty string collapses every model into one bar.
-
-    A provider that echoes no `model` is still serving the one that was asked for.
+    Spend is grouped by it, so an empty string collapses every model into one bar,
+    and a provider that echoes no `model` is still serving the one requested.
     """
     body = _completion(json.dumps({"ok": True}))
     del body["model"]
@@ -416,7 +396,7 @@ async def test_the_reported_model_falls_back_to_the_configured_one() -> None:
 
 
 async def test_the_latency_is_the_whole_send_and_not_what_was_left_after_it() -> None:
-    """**The success path's latency, pinned to the millisecond.**."""
+    """The success path's latency, pinned to the millisecond."""
     clock = _Clock()
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -432,16 +412,13 @@ async def test_the_latency_is_the_whole_send_and_not_what_was_left_after_it() ->
 def test_the_clock_default_is_the_monotonic_one() -> None:
     """Pinned on the signature, because the behavioural version cannot fail.
 
-    `time.monotonic` drifting to `time.time` is a genuine equivalent mutant
-    here -- both reads come from the same callable, so the delta is identical
-    -- and the two differ only across a wall-clock adjustment, which cannot be
-    induced against a builtin used as a default. Measured and recorded the same
-    way for `CurationService` and `QueryExpansionService`, which each pin their
-    own default on the signature for the same reason.
-
-    The half that *is* behavioural is the case above, and the two are not
-    interchangeable: this one says which clock ships, that one says the
-    reading is a delta across the send.
+    `time.monotonic` drifting to `time.time` is a genuine equivalent mutant here --
+    both reads come from the same callable, so the delta is identical -- and the
+    two differ only across a wall-clock adjustment, which cannot be induced
+    against a builtin used as a default. `CurationService` and
+    `QueryExpansionService` each pin their own default on the signature for the
+    same reason. The behavioural half is the case above: this one says which clock
+    ships, that one says the reading is a delta across the send.
     """
     default = inspect.signature(OpenAICompatibleClient.__init__).parameters["clock"].default
 
@@ -470,13 +447,12 @@ async def test_a_rejected_credential_is_auth_failed(status: int) -> None:
 async def test_a_permanent_4xx_is_malformed_not_unavailable(status: int) -> None:
     """Kills one `except HTTPStatusError` arm raising `PortUnavailable`.
 
-    M4 measured this against TMDb: a 400 for a request the provider will
-    never accept costs five rate-limited retries and a whole backoff schedule
-    to reach the identical answer, and then parks with "upstream unavailable"
-    rather than with what was wrong. Here the three that matter are a bad
-    schema (400), an unknown model (404) and a prompt over the context length
-    (400 or 422 depending on provider) -- and the last is permanent for *that
-    prompt*, whose fix is a smaller pool.
+    A 4xx for a request the provider will never accept costs five rate-limited
+    retries and a whole backoff schedule to reach the identical answer, then parks
+    with "upstream unavailable" rather than with what was wrong. The three that
+    matter are a bad schema (400), an unknown model (404) and a prompt over the
+    context length (400 or 422 by provider) -- the last permanent for *that*
+    prompt, whose fix is a smaller pool.
     """
     with pytest.raises(PortDataMalformed):
         await _complete(_client(status=status, body={}))
@@ -507,13 +483,11 @@ async def test_a_transport_failure_is_unavailable() -> None:
 
 
 async def test_no_failure_message_carries_the_credential_or_the_url() -> None:
-    """PRD 08: credentials are never logged, including in error paths.
+    """Credentials are never logged, error paths included.
 
-    and an httpx transport exception's own text frequently includes the request URL.
-
-    `EmbySession` interpolates one and explains why that is safe there; it is not safe
-    here, because a household may be pointed at a provider whose URL carries a token in
-    a path segment.
+    An httpx transport exception's own text frequently includes the request URL,
+    and a household may be pointed at a provider whose URL carries a token in a
+    path segment.
     """
     secret = _KEY.get_secret_value()
 
@@ -533,9 +507,9 @@ async def test_no_failure_message_carries_the_credential_or_the_url() -> None:
 
 
 async def test_a_rejected_request_does_not_echo_the_prompt() -> None:
-    """PRD 08: a rejected request never echoes the body it rejected.
+    """A rejected request never echoes the body it rejected.
 
-    and here that body is the household's watch history.
+    Here that body is the household's watch history.
     """
     client = _client(status=400, body={"error": {"message": "bad request"}})
     with pytest.raises(PortDataMalformed) as raised:

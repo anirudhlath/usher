@@ -32,28 +32,22 @@ def test_import_runs_is_keyed_by_dataset() -> None:
 
 
 def test_tmdb_ids_primary_key_is_namespaced_by_kind() -> None:
-    """Same reason titles' unique index is (ADR-0011).
-
-    TMDb movie 1 and TMDb series 1 are different works.
+    """TMDb movie 1 and TMDb series 1 are different works.
 
     A single-column key would merge them.
     """
     # DeclarativeBase.__table__ is typed as the broader FromClause in
     # SQLAlchemy's stubs -- at runtime it is always a concrete Table for a
-    # normal declarative model like this one, so the cast is safe. Same
-    # pattern as tests/unit/test_db_models.py.
+    # normal declarative model like this one, so the cast is safe.
     table = cast(Table, TmdbIdRow.__table__)
     assert [c.name for c in table.primary_key.columns] == ["tmdb_id", "kind"]
 
 
 def test_id_crosswalk_is_keyed_by_imdb_id() -> None:
-    """Imdb_id is the id the catalog already has after Phase 0.
-
-    so it is the join key Phase 2 needs.
+    """`imdb_id` is the join key Phase 2 needs — the id the catalog already has.
 
     The three provider columns carry no unique constraint of their own: the data really
-    does contain duplicates (569 TMDb ids claimed by more than one IMDb id, measured),
-    and arbitrating them is link_crosswalk's job, not this table's.
+    does contain duplicate provider ids, and arbitrating them is link_crosswalk's job.
     """
     table = cast(Table, IdCrosswalkRow.__table__)
     assert [c.name for c in table.primary_key.columns] == ["imdb_id"]
@@ -62,12 +56,11 @@ def test_id_crosswalk_is_keyed_by_imdb_id() -> None:
 
 
 def test_no_bootstrap_table_has_an_updated_at_column() -> None:
-    """Deliberate.
+    """The omission is deliberate.
 
     An updated_at column here would want the BEFORE UPDATE trigger the core schema uses,
-    which would change the exact trigger set tests/integration/test_migrations.py
-    asserts — for a column whose only writer already sets it explicitly. Delete this
-    test and that coupling stops being visible.
+    changing the trigger set tests/integration/test_migrations.py asserts — for a column
+    whose only writer already sets it explicitly.
     """
     for row in (ImportRunRow, TmdbIdRow, IdCrosswalkRow):
         assert "updated_at" not in {c.name for c in row.__table__.columns}
@@ -77,12 +70,11 @@ def test_tmdb_ids_popularity_index_is_descending_and_excludes_adult() -> None:
     """The only query this table exists to serve is "most popular non-adult ids first".
 
     A plain ascending btree cannot serve ORDER BY popularity DESC in either scan
-    direction — the same finding that shaped ix_titles_popularity.
+    direction.
     """
     table = cast(Table, TmdbIdRow.__table__)
     index = next(i for i in table.indexes if i.name == "ix_tmdb_ids_popularity")
     # `next(iter(...))`, not `list(...)[0]`: ruff's RUF015 flags the latter,
-    # and RUF is in this project's select list. Verified against the real
-    # metadata -- the expression stringifies to exactly "popularity DESC".
+    # and RUF is in this project's select list.
     assert str(next(iter(index.expressions))) == "popularity DESC"
     assert str(index.dialect_options["postgresql"]["where"]) == "NOT adult"

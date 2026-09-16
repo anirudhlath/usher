@@ -14,9 +14,9 @@ from usher.services.search import SearchService
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Get_settings() exists to be a FastAPI Depends.
+    """`get_settings()` exists to be a FastAPI `Depends`.
 
-    it must not re-read and re-parse the environment (and, once .env exists, hit disk)
+    It must not re-read and re-parse the environment (and, once `.env` exists, hit disk)
     on every call and injection site.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
@@ -75,12 +75,12 @@ def test_settings_reject_short_secret_key(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_settings_reject_placeholder_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """.env.example itself ships USHER_SECRET_KEY= blank.
+    """`.env.example` ships `USHER_SECRET_KEY=` blank, not this string.
 
-    not this string (a fresh copy fails validation for a different reason: a missing
-    required field) -- this guards the case where someone instead pastes in a
-    placeholder shown in documentation, an old README, or a setup guide, which would
-    ship a credential-encryption key published in the repo.
+    A fresh copy fails validation for a different reason -- a missing required field --
+    so this guards the case where someone pastes in a placeholder shown in
+    documentation, an old README, or a setup guide, which would ship a
+    credential-encryption key published in the repo.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "change-me-to-a-long-random-string")
@@ -103,9 +103,9 @@ def test_telemetry_enabled_when_endpoint_set(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_service_name_read_without_usher_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Service_name (and otlp_endpoint) use an explicit alias to the unprefixed OTEL_* convention.
+    """`service_name` and `otlp_endpoint` alias the unprefixed `OTEL_*` convention.
 
-    bypassing env_prefix="USHER_" entirely — the one interaction in this module a
+    Bypassing `env_prefix="USHER_"` entirely — the one interaction in this module a
     routine refactor would most easily break silently.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
@@ -115,10 +115,10 @@ def test_service_name_read_without_usher_prefix(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_blank_tmdb_api_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """USHER_TMDB_API_KEY= (present but empty.
+    """`USHER_TMDB_API_KEY=` present but empty must parse to `None`, not `''`.
 
-    as .env.example ships it) must parse to None, not '' — otherwise `is not None`
-    checks take the wrong branch.
+    That is how `.env.example` ships it, and otherwise `is not None` checks take the
+    wrong branch.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
@@ -173,9 +173,9 @@ def test_port_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_database_url_rejects_wrong_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A sync postgresql:// URL must fail fast at config load.
+    """A sync `postgresql://` URL must fail fast at config load.
 
-    not deep inside SQLAlchemy's async engine much later.
+    Not deep inside SQLAlchemy's async engine much later.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
@@ -184,10 +184,9 @@ def test_database_url_rejects_wrong_driver(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_bulk_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every one of these is read by usher.cli.
+    """Every one of these is read by `usher.cli`.
 
-    None is a field that validates and then influences nothing -- the failure mode
-    Settings.host and Settings.port had before M1's Task 13.
+    None is a field that validates and then influences nothing.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -210,7 +209,7 @@ def test_bulk_batch_size_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> No
 def test_bulk_user_agent_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:
     """WDQS's user-agent policy blocks default and empty agents.
 
-    an empty one would fail the crosswalk with an opaque 403.
+    An empty one would fail the crosswalk with an opaque 403.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -223,8 +222,7 @@ def test_ingest_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -
     """PRD 03's pipeline knobs.
 
     Constructor arguments on the repositories and services that read them -- `db/` must
-    not import `config` (ADR-0009) -- so the composition roots are what wire these
-    through.
+    not import `config` -- so the composition roots are what wire these through.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -239,25 +237,17 @@ def test_ingest_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -
 def test_the_worker_concurrency_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M9's W1, and every number here is a measurement rather than a taste.
+    """The worker concurrency and the pool defaults, pinned together.
 
-    `job_concurrency = 12` is Little's law over S3's measured tail: p95 HTTP
-    0.4267 s over 130,334 live requests, plus ~0.033 s of per-job Postgres
-    bookkeeping (S2's one-worker 10.38 rps against its own 0.0637 s mean HTTP),
-    is a p95 job of ~0.46 s -- so holding ADR-0005's ~25 rps takes ~11.5 in
-    flight. Below that the *architecture* is the ceiling again, which is the
-    defect W1 exists to remove.
-
-    The pool defaults are stated **twice** on purpose -- here and as
-    `build_engine`'s own argument defaults, because that function has callers
-    with no `Settings` (the integration fixtures, `alembic`'s `env.py`) and a
-    required argument would make each of them invent a number. This case is
-    what stops the two drifting, which is the whole reason a duplicated
-    constant is allowed to exist at all.
-
-    `KIND_CONCURRENCY` is asserted beside them because a per-kind ceiling above
-    the global would be silently clamped rather than refused, and a reader
-    editing one of those entries should meet the other list here.
+    `job_concurrency` is set so the *architecture* stops being the ceiling: below it the
+    pipeline is bounded by how much work is in flight rather than by what a source will
+    serve. The pool defaults are stated **twice** on purpose -- here and as
+    `build_engine`'s own argument defaults, because that function has callers with no
+    `Settings` (the integration fixtures, `alembic`'s `env.py`) and a required argument
+    would make each of them invent a number. This case is what stops the two drifting,
+    which is the whole reason a duplicated constant is allowed to exist at all.
+    `KIND_CONCURRENCY` is asserted beside them because a per-kind ceiling above the
+    global would be silently clamped rather than refused.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -284,7 +274,7 @@ def test_the_worker_concurrency_settings_have_the_measured_defaults(
 def test_the_four_concurrency_entries_that_are_bounds_are_pinned_by_value_and_say_which_measurement_moved_them() -> (  # noqa: E501
     None
 ):
-    """The four entries the case above leaves unpinned, each with its run."""
+    """The four entries the case above leaves unpinned."""
     assert KIND_CONCURRENCY[JobKind.MATCH] == 4
     assert KIND_CONCURRENCY[JobKind.WATCH_HISTORY] == 4
     assert KIND_CONCURRENCY[JobKind.WATCH_WRITEBACK] == 4
@@ -338,8 +328,8 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
 def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ceiling of zero parks every job on its first failure.
 
-    which takes the retry out of a retry queue -- PRD 08 asks for "after N attempts",
-    and N is at least one.
+    That takes the retry out of a retry queue -- PRD 08 asks for "after N attempts", and
+    N is at least one.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -351,7 +341,7 @@ def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) 
 def test_job_backoff_seconds_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
     """A zero base collapses the whole exponential schedule to "retry immediately".
 
-    which is the hot loop against a broken upstream that the backoff exists to prevent.
+    That is the hot loop against a broken upstream that the backoff exists to prevent.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -361,9 +351,9 @@ def test_job_backoff_seconds_must_be_positive(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_sync_max_retract_fraction_is_a_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ADR-0015's guard is a fraction of a source.
+    """The guard is a fraction of a source.
 
-    so 1.0 is "disabled" and anything above it is a typo that would silently disable the
+    So 1.0 is "disabled" and anything above it is a typo that would silently disable the
     guard rather than loosen it.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
@@ -391,7 +381,7 @@ def test_metadata_provider_settings_have_usable_defaults(monkeypatch: pytest.Mon
 def test_tmdb_requests_per_second_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Zero is not "unthrottled", it is a token bucket that never refills.
 
-    the first request would wait forever.
+    The first request would wait forever.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -417,7 +407,7 @@ def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
 ) -> None:
     """TMDb's caching term is a six-month ceiling.
 
-    so the bound is a compliance constraint expressed as a type rather than a tuning
+    So the bound is a compliance constraint expressed as a type rather than a tuning
     range -- and zero is not "always fresh", it is "refetch on every retry".
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
@@ -432,13 +422,11 @@ def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
 def test_the_sse_heartbeat_is_under_every_proxy_idle_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nginx closes an idle connection at 60 s and Cloudflare at ~100 s (ADR-0004's operational.
+    """Nginx closes an idle connection at 60 s and Cloudflare at ~100 s.
 
-    facts, which apply to a long-lived HTTP response exactly as they apply to a
-    WebSocket).
-
-    A default at or above 60 would make an idle SSE stream drop on every proxied
-    deployment, so `lt=60` is a compliance bound expressed as a type rather than a
+    Those operational facts apply to a long-lived HTTP response exactly as they apply to
+    a WebSocket, so a default at or above 60 would make an idle SSE stream drop on every
+    proxied deployment. `lt=60` is a compliance bound expressed as a type rather than a
     tuning range -- and zero is not "no heartbeat", it is a comment line per event-loop
     turn.
     """
@@ -475,15 +463,11 @@ def test_the_sse_ring_and_queue_are_bounded_both_ways(
 def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ten new fields, and the two lane switches are PRD 01's "--worker entrypoint flag ...
+    """The two lane switches are configuration rather than code.
 
-    so lanes can be moved to a separate container later by editing compose, with no code
-    change" expressed as configuration -- one image serves an all-in-one deployment and
-    a split one.
-
-    The plan called this task "eleven settings" and said eight were new;
-    both numbers are wrong. Its own field list holds ten, and with the three
-    `sse_*` fields Task 20 and 21 already landed the block is thirteen.
+    PRD 01's "--worker entrypoint flag ... so lanes can be moved to a separate container
+    later by editing compose, with no code change" -- one image serves an all-in-one
+    deployment and a split one.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -505,15 +489,11 @@ def test_the_gap_closer_defaults_to_refusing_an_uncursored_walk(
 ) -> None:
     """The one default in this block that is a *refusal*.
 
-    and the one that changed behaviour for an existing deployment (2026-08-19, issue
-    #9).
-
-    A reconnect delta reads its `since` from the newest completed item-lane
-    run; with none there is no `since`, so the walk is the whole library --
-    performed by `uvicorn` on startup, against a server the operator may not
-    own. `cursored` is the shipped answer; the vocabulary is closed, so a
-    typo is a startup failure rather than a value that silently means
-    something.
+    A reconnect delta reads its `since` from the newest completed item-lane run; with
+    none there is no `since`, so the walk is the whole library -- performed by `uvicorn`
+    on startup, against a server the operator may not own. `cursored` is the shipped
+    answer; the vocabulary is closed, so a typo is a startup failure rather than a value
+    that silently means something.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -530,17 +510,14 @@ def test_the_gap_closer_defaults_to_refusing_an_uncursored_walk(
 def test_the_staleness_window_is_bounded_below_by_something_useful(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A window shorter than the source's own message interval reconnects a healthy channel.
+    """A window shorter than the source's own message interval reconnects forever.
 
-    forever.
-
-    `gt=0` alone would permit `0.001`; the floor is a *documented* one rather than a
-    guessed one -- Emby's `Sessions` interval is the subscription's own `0,1000`, i.e.
-    one second, and 5 s leaves it real headroom.
-
-    The default must also match `usher.adapters.emby.push`'s own, because
-    the adapter's constructor default is what a caller that forgets to pass
-    one gets -- two numbers that mean the same thing and can drift apart.
+    It would drop a perfectly healthy channel. `gt=0` alone would permit `0.001`; the
+    floor is a *documented* one rather than a guessed one -- Emby's `Sessions` interval
+    is the subscription's own `0,1000`, i.e. one second, and 5 s leaves real headroom.
+    The default must also match `usher.adapters.emby.push`'s own, because the adapter's
+    constructor default is what a caller that forgets to pass one gets -- two numbers
+    that mean the same thing and can drift apart.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -553,11 +530,10 @@ def test_the_staleness_window_is_bounded_below_by_something_useful(
 
 
 def test_max_items_per_event_is_bounded_above(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cap exists because Emby emits `LibraryChanged` during a library scan and it can name.
+    """Emby emits `LibraryChanged` during a library scan and it can name thousands.
 
-    thousands, against a source measured at 1,126,789 items and 1-5 s per request.
-
-    A ceiling an operator could set to 100,000 would turn the guard off while looking
+    Against a source holding a large library and answering in seconds per request. A
+    ceiling an operator could set to 100,000 would turn the guard off while looking
     configured.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
@@ -573,15 +549,12 @@ def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
 ) -> None:
     """`job_backoff_seconds`' argument, one lane over.
 
-    a zero base collapses the whole schedule to "retry immediately", which is the hot
-    loop the backoff exists to prevent.
-
-    And `job_max_attempts`' argument for `ge=1`: a ceiling of zero disables push on the
-    first blip, before a single reconnect has been attempted.
-
-    `push_gap_min_interval_seconds` is the deliberate exception at `ge=0` --
-    zero means "close the gap on every reconnect", which is expensive but
-    correct, unlike every other zero here.
+    A zero base collapses the whole schedule to "retry immediately", which is the hot
+    loop the backoff exists to prevent. And `job_max_attempts`' argument for `ge=1`: a
+    ceiling of zero disables push on the first blip, before a single reconnect has been
+    attempted. `push_gap_min_interval_seconds` is the deliberate exception at `ge=0` --
+    zero means "close the gap on every reconnect", which is expensive but correct,
+    unlike every other zero here.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -605,8 +578,8 @@ def test_the_retention_window_and_the_chunk_cannot_be_switched_off(
 ) -> None:
     """Both `ge=1` floors on the retention pair.
 
-    and **the two zeros fail differently**, which is why the comments beside them are
-    not interchangeable.
+    The two zeros fail differently, which is why the comments beside them are not
+    interchangeable.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -624,15 +597,11 @@ def test_the_retention_window_and_the_chunk_cannot_be_switched_off(
 
 
 def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`config.py`'s own comment: "none is a field that validates and then influences nothing".
+    """A setting nothing reads is a knob an operator turns with no effect.
 
-    Asserted rather than trusted.
-
-    A setting nothing reads is a knob an operator turns with no effect --
-    the same shape M4 found three times in PRD 10's metric table (two
-    gauges that did not exist, one emitted under a different name). Scans
-    `src/` for the attribute access, excluding `config.py` itself, which is
-    where the field is *declared*.
+    `config.py`'s own comment says "none is a field that validates and then influences
+    nothing"; this asserts it rather than trusting it. Scans `src/` for the attribute
+    access, excluding `config.py` itself, which is where the field is *declared*.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -647,17 +616,13 @@ def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> 
 def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`source_requests_per_second` is a *derived* default.
+    """`source_requests_per_second` is a *derived* default, not a chosen one.
 
-    not a chosen one, so it gets pinned like a measurement (the `search_*`/`embedding_*`
-    treatment): Little's law over S1's page p95 and the Emby concurrency, `4 / 9.1713 =
-    0.436` rps, with the shipped **0.4** a courtesy margin below it (ADR-0043).
-
-    Two properties beyond the number. `ge=0`, not `ge=1`, because `0` is
-    unlimited -- the shape `push_gap_min_interval_seconds` uses and a size does
-    not -- and the derived default is genuinely below the rate it was derived
-    from, which is the whole of "courtesy margin rather than a re-statement of
-    the server's own speed".
+    It sits a courtesy margin below the rate the source will actually serve. Two
+    properties beyond the number: `ge=0`, not `ge=1`, because `0` is unlimited -- the
+    shape `push_gap_min_interval_seconds` uses and a size does not -- and the shipped
+    default is genuinely below the rate it was derived from, which is the whole of
+    "courtesy margin rather than a re-statement of the server's own speed".
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -675,9 +640,9 @@ def test_the_source_rate_default_is_the_courtesy_margin_derived_from_s1(
 def test_the_search_and_embedding_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nine fields pinned together, and most of them are *measurements* rather than choices.
+    """Nine fields pinned together, most of them derived rather than chosen.
 
-    which is why an edit to any one of them has to be visible somewhere.
+    Which is why an edit to any one of them has to be visible somewhere.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -688,19 +653,19 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
         settings.embedding_batch_size,
         settings.embedding_offline,
     ) == (False, "fastembed:BAAI/bge-large-en-v1.5", 16, True)
-    # The three `m09e` added, in the same place for the same reason. The
-    # api key is `SecretStr("")` and is compared through
-    # `get_secret_value()`, because `SecretStr("") == ""` is False and an
-    # assertion that quietly cannot fail is the thing this file is for.
+    # The three image fields, in the same place for the same reason. The api key is
+    # `SecretStr("")` and is compared through `get_secret_value()`, because
+    # `SecretStr("") == ""` is False and an assertion that quietly cannot fail is the
+    # thing this file is for.
     assert (
         settings.embedding_base_url,
         settings.embedding_api_key.get_secret_value(),
         settings.embedding_timeout_seconds,
     ) == ("http://localhost:8001/v1", "", 30.0)
-    # **The default checkpoint has to be as wide as the column**, which is the invariant
-    # `m09e` made breakable: `EMBEDDING_DIMENSIONS` is a deployment-wide `halfvec`
-    # typmod, so a default narrower than it ships a deployment whose
-    # `USHER_EMBEDDING_ENABLED=true` claims nothing but unclaimed index jobs.
+    # The default checkpoint has to be as wide as the column: `EMBEDDING_DIMENSIONS` is
+    # a deployment-wide `halfvec` typmod, so a default narrower than it ships a
+    # deployment whose `USHER_EMBEDDING_ENABLED=true` claims nothing but unclaimed
+    # index jobs.
     assert EMBEDDING_DIMENSIONS == 1024
     assert settings.embedding_model.endswith("bge-large-en-v1.5")
     assert (
@@ -715,23 +680,16 @@ def test_the_search_and_embedding_settings_have_the_measured_defaults(
 def test_the_suggest_writer_ships_on_and_the_two_defaults_for_it_agree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The keystroke writer ships **on**.
+    """The keystroke writer ships on, because the row no longer sits on the request.
 
-    because the row no longer sits on the request that produced it.
-
-    `SearchQueryBuffer` takes the row and a drain writes it, so what the
-    request pays is an append -- which is what makes this a setting an operator
-    might turn *off* rather than a knob over a feature nobody could afford to
-    turn on.
-
-    **Both defaults are asserted, and that pairing is the point.** The value
-    lives in two places -- `Settings.search_suggest_analytics`, which is what a
-    deployment gets, and `SearchService.__init__`'s `suggest_analytics`, which
-    is what a hand-built service gets. Every shipped construction passes the
-    first into the second through `composition.build_search_service`, so a
-    disagreement is invisible on every path an operator can reach and visible
-    only in a fixture. Asserted equal rather than each against a literal, so
-    one edit fails this case rather than two edits being required.
+    `SearchQueryBuffer` takes the row and a drain writes it, so what the request pays is
+    an append -- which makes this a setting an operator might turn *off* rather than a
+    knob over a feature nobody could afford to turn on. Both defaults are asserted, and
+    that pairing is the point: the value lives in `Settings.search_suggest_analytics`,
+    which is what a deployment gets, and in `SearchService.__init__`'s
+    `suggest_analytics`, which is what a hand-built service gets. Every shipped
+    construction passes the first into the second, so a disagreement is visible only in
+    a fixture. Asserted equal rather than each against a literal, so one edit fails it.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -756,16 +714,13 @@ def test_the_embedding_model_name_cannot_be_blank(monkeypatch: pytest.MonkeyPatc
 
 
 def test_the_embed_batch_is_bounded_both_ways(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Zero is not "no batching", it is a call that embeds nothing while looking configured.
+    """Zero is not "no batching", it is a call that embeds nothing while configured.
 
-    the same shape every other `ge=1` in this file refuses.
-
-    The ceiling is memory rather than throughput, which is a **deliberate
-    departure from the plan's `le=64`**: 64 is the top of the measured flat
-    region, so a value above it is slower and not dangerous, and the cost of
-    being wrong at the top end is an OOM inside a worker pass rather than a
-    slow one. Recorded here so the two numbers are not confused -- 16 is
-    measured, 512 is a guard.
+    The same shape every other `ge=1` in this file refuses. The ceiling is memory rather
+    than throughput: past the flat region a larger batch is slower and not dangerous,
+    and the cost of being wrong at the top end is an OOM inside a worker pass rather
+    than a slow one. The two numbers are not the same kind of thing -- the default is
+    derived, the ceiling is a guard.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -780,16 +735,12 @@ def test_the_embed_batch_is_bounded_both_ways(monkeypatch: pytest.MonkeyPatch) -
 def test_the_trigram_floor_stays_inside_similaritys_own_range(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`similarity()` returns [0.
+    """`similarity()` returns [0, 1], so a floor outside it is not a strict setting.
 
-    1], so a floor outside it is not a strict setting but one that silently means
-    "everything" or "nothing".
-
-    Zero admits every row in `titles` to the `levenshtein` re-rank -- the
-    exact cliff ADR-0002 says the narrow path exists to avoid, measured at
-    8,020 candidates against 1,774 at the default. 1.0 is accepted rather
-    than refused: it is `LIKE` with extra steps, which is a strange thing to
-    want and not an incoherent one.
+    It silently means "everything" or "nothing". Zero admits every row in `titles` to
+    the `levenshtein` re-rank, the exact cliff the narrow path exists to avoid. 1.0 is
+    accepted rather than refused: it is `LIKE` with extra steps, which is a strange
+    thing to want and not an incoherent one.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -806,12 +757,11 @@ def test_the_rrf_constant_and_the_ef_search_cannot_be_switched_off(
 ) -> None:
     """Both `ge=1`, and neither zero is "off".
 
-    `search_rrf_k = 0` makes `1 / (k + rank)` unbounded at rank 0 against the
-    second rank's half, which is "return whichever list ranked something
-    first" wearing fusion's name -- ADR-0002's prohibition reachable by
-    configuration. `search_hnsw_ef_search = 0` is below pgvector's own floor,
-    and the measured failure at the *default* of 40 was already 0.88 rows
-    returned of a requested 10.
+    `search_rrf_k = 0` makes `1 / (k + rank)` unbounded at rank 0 against the second
+    rank's half, which is "return whichever list ranked something first" wearing
+    fusion's name -- the prohibition on score addition, reachable by configuration.
+    `search_hnsw_ef_search = 0` is below pgvector's own floor, where the index already
+    returns fewer rows than a caller asked for.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -824,23 +774,15 @@ def test_the_rrf_constant_and_the_ef_search_cannot_be_switched_off(
 
 
 def test_the_suggest_cap_is_above_the_result_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cross-field rule.
+    """A cross-field rule, asserted as a type rather than left in a comment.
 
-    in the shape `test_the_sse_heartbeat_is_under_every_proxy_idle_timeout` established:
-    a constraint no single field can express, asserted as a type rather than left in a
-    comment.
-
-    `PostgresSuggestIndex` collects `search_suggest_candidates` trigram
-    matches, re-ranks them by edit distance, and keeps the best
-    `search_result_limit`. At or below the limit the re-rank is handed
-    exactly the rows it is meant to choose *among*, so it can reorder but
-    never discard -- and a suggest path that cannot discard is one whose
-    trigram floor is doing all the work, which is the implementation
-    `test_a_single_character_typo_still_finds_a_short_title` exists to rule
-    out, reachable by configuration rather than by code.
-
-    **Not hypothetical.** An operator reaches it by raising the limit alone,
-    which is the ordinary thing to do: both fields' ceilings allow
+    `PostgresSuggestIndex` collects `search_suggest_candidates` trigram matches,
+    re-ranks them by edit distance, and keeps the best `search_result_limit`. At or
+    below the limit the re-rank is handed exactly the rows it is meant to choose
+    *among*, so it can reorder but never discard -- and a suggest path that cannot
+    discard is one whose trigram floor is doing all the work, reachable by configuration
+    rather than by code. Not hypothetical: an operator reaches it by raising the limit
+    alone, which is the ordinary thing to do, since both fields' ceilings allow
     `search_result_limit = 200` against the cap's own default of 200.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
@@ -860,20 +802,15 @@ def test_the_suggest_cap_is_above_the_result_limit(monkeypatch: pytest.MonkeyPat
 def test_the_two_llm_spenders_have_independent_switches_and_both_default_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**Three reachable configurations, and each is a different deployment.**.
+    """Three reachable configurations, and each is a different deployment.
 
-    `USHER_LLM_ENABLED` used to gate both spenders at once, on the argument
-    that a second switch's only honest default is "follow the first". That
-    argument was sound while query expansion was believed to help. It is not
-    sound now: measured 2026-08-07 against a local `gemma-4-26b-a4b`, expansion
-    moved MRR **0.733 -> 0.373** and recall@10 **0.800 -> 0.533** over five mood
-    queries and 150 real overviews, so the two spenders have opposite expected
-    values and cannot share a switch (`docs/prd/05-search-and-similarity.md`).
-
-    Asserted as a walk through the three states rather than as three
-    independent cases, because the claim is that the second switch **moves
-    independently of the first** -- and a case that only ever reads the pair in
-    one state cannot see a `query_expansion_enabled` wired to return
+    One switch over both spenders rests on the argument that a second switch's only
+    honest default is "follow the first". That does not hold here: query expansion
+    degrades retrieval on this catalog rather than improving it, so the two spenders
+    have opposite expected values and cannot share a switch. Asserted as a walk through
+    the three states rather than as three independent cases, because the claim is that
+    the second switch moves independently of the first -- and a case that only ever
+    reads the pair in one state cannot see a `query_expansion_enabled` wired to return
     `llm_enabled`.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
@@ -898,16 +835,13 @@ def test_query_expansion_without_an_llm_is_refused_rather_than_silently_ignored(
     Expansion is one completion in front of an embed, so with no client there
     is nothing for it to be: `composition.llm_client` answers `(None, no-op)`,
     `build_pipeline` is handed nothing to build an expander from, and a
-    `USHER_QUERY_EXPANSION_ENABLED=true` left standing beside it would be a
-    knob an operator turned with no effect -- which is
-    `test_every_setting_is_read_by_something`'s whole subject arriving as a
-    *state* rather than as a missing reader, and the same shape
-    `USHER_WORKER_ENABLED` was silently ignored in for four milestones.
-
-    A cross-field rule, in the shape `_suggest_cap_leaves_room_to_choose`
-    established. **The message has to name both variables**: one naming only
-    the field that was set sends an operator to delete the line they meant,
-    rather than to the line that makes it work.
+    `USHER_QUERY_EXPANSION_ENABLED=true` left standing beside it would be a knob an
+    operator turned with no effect -- which is
+    `test_every_setting_is_read_by_something`'s whole subject arriving as a *state*
+    rather than as a missing reader. A cross-field rule, in the shape
+    `_suggest_cap_leaves_room_to_choose` established. The message has to name both
+    variables: one naming only the field that was set sends an operator to delete the
+    line they meant, rather than to the line that makes it work.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -925,9 +859,9 @@ def test_query_expansion_without_an_llm_is_refused_rather_than_silently_ignored(
 def test_the_image_proxy_settings_have_the_measured_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Four fields pinned together, and two of them are *measurements* rather than choices.
+    """Four fields pinned together, two of them derived rather than chosen.
 
-    which is why an edit to either has to be visible somewhere.
+    Which is why an edit to either has to be visible somewhere.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -941,15 +875,11 @@ def test_the_image_proxy_settings_have_the_measured_defaults(
 
 
 def test_the_image_ladder_is_not_a_setting() -> None:
-    """ADR-0032.
+    """The four widths are a tuple in `usher.ports.images`, never configuration.
 
-    the four widths are a tuple in `usher.ports.images`, because they are what bounds
-    the cache and are reviewable in `src/` rather than per deployment.
-
-    PRD 08's Configuration table listed an "image cache ladder" as a TOML-layer
-    concern until 2026-08-11, and there is no TOML layer — so this is the
-    dead-config rule applied to a knob rather than to a typo. The assertion is
-    over the whole field set rather than over one guessed name, because
+    They are what bounds the cache, so they are reviewable in `src/` rather than per
+    deployment -- the dead-config rule applied to a knob rather than to a typo. The
+    assertion is over the whole field set rather than over one guessed name, because
     `USHER_IMAGE_WIDTHS`, `USHER_IMAGE_LADDER` and `USHER_IMAGE_SIZES` are three
     spellings of the same mistake.
     """

@@ -67,7 +67,7 @@ from usher.ports.search import SearchMode
 
 # Spelled out rather than derived from `_SUSPENDABLE_INDEXES`, so a name
 # silently dropped from that dict fails these cases instead of being read
-# back as agreement. M6's two GIN indexes joined it; see bulk.py.
+# back as agreement.
 _SUSPENDED = {
     "ix_titles_sort_name",
     "ix_titles_name_lower_year",
@@ -226,15 +226,11 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
 async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batches(
     session: AsyncSession,
 ) -> None:
-    """The shared contract only exercises the empty-batch guard for upsert_titles.
+    """The shared contract only exercises the empty-batch guard for `upsert_titles`.
 
-    (test_upsert_titles_accepts_an_empty_batch) -- these three early-return the same way
-    (`if not rows: return 0`), and were otherwise unreached by any test, live or in-
-    memory.
-
-    Coverage gap found running `pytest --cov` during this task's verification pass,
-    closed here rather than in the shared contract (tests/contract/), which is not this
-    file's to extend.
+    These three early-return the same way (`if not rows: return 0`) and are otherwise
+    unreached. Covered here rather than in `tests/contract/`, which is not this file's
+    to extend.
     """
     assert await PostgresBulkCatalogRepository(session).apply_ratings([]) == 0
     assert await PostgresBulkCatalogRepository(session).upsert_tmdb_ids([]) == 0
@@ -242,11 +238,10 @@ async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batch
 
 
 async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession) -> None:
-    """**The whole of ADR-0040 in one assertion.** Before it.
+    """An IMDb import must not overwrite a TMDb figure.
 
-    this same call wrote `vote_count`/`community_rating` -- the columns TMDb enrichment
-    also writes -- so an IMDb import silently overwrote a TMDb figure and nothing
-    recorded which had won.
+    Writing `vote_count`/`community_rating` from this call touches the columns TMDb
+    enrichment also writes, with nothing recording which had won.
     """
     title_id = new_id()
     await session.execute(
@@ -283,26 +278,22 @@ async def test_apply_ratings_writes_only_the_imdb_columns(session: AsyncSession)
 async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_constraint(
     session: AsyncSession,
 ) -> None:
-    """**The measurement `parse_akas_row`'s length filter exists for.
+    """The length filter `parse_akas_row` exists for, asserted where it is enforced.
 
-    asserted where it is actually enforced.** 33 rows of the pinned `title.akas.tsv.gz`
-    exceed `SEARCH_NAME_MAX_CHARS` (longest 831), and
+    Real `title.akas.tsv.gz` rows exceed `SEARCH_NAME_MAX_CHARS`, and
     `ck_title_search_names_name_within_btree_bound` refuses them — per *statement*, so
-    one such row takes a ten-thousand-row batch with it.
+    one such row takes a ten-thousand-row batch with it. That is why the parser drops
+    them upstream, and it is a claim about *this* repository that only a real database
+    can check: the fake has no CHECK to mirror.
 
-    That is why the parser drops them upstream, and it is a claim about *this*
-    repository that only a real database can check: the fake has no CHECK to mirror and
-    `tests/unit` cannot see this at all.
-
-    Two assertions, and the second is the one `SEARCH_NAME_MAX_CHARS`' own
-    docstring argues for. **The bound is a named CHECK rather than the btree's
-    own refusal precisely so `constraint_name()` has something to report** —
-    an index-side refusal carries no constraint name, and a loader handed one
-    long alias could not tell it from any other write failure.
+    **The bound is a named CHECK rather than the btree's own refusal precisely so
+    `constraint_name()` has something to report** — an index-side refusal carries no
+    constraint name, and a loader handed one long alias could not tell it from any
+    other write failure.
 
     And the batch's earlier aliases survive, which is the half that matters
-    operationally: a refusal that had already run the DELETE would silently
-    strip a title's aliases and report a conflict about a different one.
+    operationally: a refusal that had already run the DELETE would silently strip a
+    title's aliases and report a conflict about a different one.
     """
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
@@ -339,11 +330,10 @@ async def test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_co
 async def test_the_canonical_comparison_is_the_databases_own_lower_and_not_pythons(
     session: AsyncSession,
 ) -> None:
-    """**Three case-folding functions disagree on real IMDb names.
+    """Three case-folding functions disagree on real IMDb names, and one answers here.
 
-    and only one of them is the right answer here.** Measured 2026-08-11 over the whole
-    pinned `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`): **32,223 of
-    46,202,631 retained rows (0.070%) have `str.lower()` != `str.casefold()`**, in two.
+    The canonical form is the database's own `lower()`, not Python's `str.lower()` or
+    `str.casefold()`, which part ways on Greek final sigma among others.
     """
     greek = ImdbTitle(
         imdb_id="tt99000150",
@@ -382,19 +372,17 @@ async def test_the_canonical_comparison_is_the_databases_own_lower_and_not_pytho
 async def test_the_alias_prefix_probe_uses_the_tables_own_prefix_index(
     session: AsyncSession,
 ) -> None:
-    """**The reason the rows are worth storing at all**.
+    """The reason the rows are worth storing, asserted on the plan and not an index name.
 
-    and it is asserted on the plan rather than on an index name: `m09a` builds
-    `ix_title_search_names_name_lower_prefix` as a btree over `lower(name)
-    text_pattern_ops`, and tier 1 of the two-tier suggest reads this table with
-    `lower(name) LIKE 'typed%'`.
+    `ix_title_search_names_name_lower_prefix` is a btree over
+    `lower(name) text_pattern_ops`, and tier 1 of the two-tier suggest reads this
+    table with `lower(name) LIKE 'typed%'`.
 
-    An alias that lands in a table the probe seq-scans is a row with a cost and
-    no benefit, and nothing else in this task's own files can see that. The
-    `Index Cond` is what is asserted, for the reason B2's case records: an
-    index *name* is satisfied by any index that happens to be usable, and the
-    near-miss here — a default-opclass index on the same expression — is
-    exactly the thing that cannot serve this query.
+    An alias that lands in a table the probe seq-scans is a row with a cost and no
+    benefit. The `Index Cond` is what is asserted, because an index *name* is
+    satisfied by any index that happens to be usable, and the near-miss here — a
+    default-opclass index on the same expression — is exactly the thing that cannot
+    serve this query.
     """
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
@@ -425,12 +413,11 @@ async def test_the_alias_prefix_probe_uses_the_tables_own_prefix_index(
 
 
 async def test_copy_writes_the_server_default_columns(session: AsyncSession) -> None:
-    """The reason TitleRow carries server_defaults at all.
+    """The reason `TitleRow` carries server defaults at all.
 
-    the COPY path never mentions enrichment_state, field_provenance, keywords,
-    spoken_languages, origin_countries, or created_at.
-
-    Without them this insert fails on `null value in column "genres"`.
+    The COPY path never mentions `enrichment_state`, `field_provenance`, `keywords`,
+    `spoken_languages`, `origin_countries` or `created_at`, and without them this
+    insert fails on `null value in column "genres"`.
     """
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
@@ -476,7 +463,7 @@ async def test_bulk_load_window_suspends_indexes_on_an_empty_catalog(
 async def test_bulk_load_window_declines_on_a_populated_catalog(
     session: AsyncSession,
 ) -> None:
-    """ADR-0005 promises the catalog is browsable while bootstrap runs.
+    """The catalog stays browsable while bootstrap runs.
 
     On a first bootstrap there is nothing to browse, so dropping the two ordering
     indexes is free; on a re-import a browse ordered by name would seq-scan for the
@@ -492,11 +479,9 @@ async def test_bulk_load_window_declines_on_a_populated_catalog(
 async def test_bulk_load_window_commits_the_callers_own_pending_work(
     postgres_url: str,
 ) -> None:
-    """Pins the documented, deliberate exception to "these flush and return counts.
+    """The deliberate exception to "these flush and return counts, they never commit".
 
-    they never commit" -- see BulkCatalogRepository.bulk_load_window and
-    PostgresBulkCatalogRepository's own docstrings for the full rationale and the
-    (rejected) alternatives.
+    See `BulkCatalogRepository.bulk_load_window`'s own docstring for the rationale.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
@@ -566,13 +551,10 @@ async def _indexdef(session: AsyncSession, name: str) -> str | None:
 async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
     session: AsyncSession,
 ) -> None:
-    """`_SUSPENDABLE_INDEXES` holds literal `CREATE INDEX` strings that `bulk_load_window`.
+    """`_SUSPENDABLE_INDEXES` holds `CREATE INDEX` strings run verbatim in `finally`.
 
-    executes verbatim in its `finally`.
-
-    Nothing has ever checked that those strings reproduce the index the migration
-    created, and until M6 the hazard was mild -- both entries were plain btrees whose
-    only degree of freedom is the column list.
+    Those strings have to reproduce the index the migration created, and nothing else
+    checks that they do.
     """
     from usher.db.repositories.bulk import _SUSPENDABLE_INDEXES
 
@@ -597,9 +579,9 @@ async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
         )
 
 
-# -------------------------------------------------------------------------- ADR-0044's
-# ledger, driven: a value a domain model accepts must not reach an operator as a raw
-# driver exception.
+# --------------------------------------------------------------------------
+# A value a domain model accepts must not reach an operator as a raw driver
+# exception.
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -623,8 +605,7 @@ _LEDGER_NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
 #: `2**31` is the smallest value an `integer` column cannot hold that every
 #: `Field(ge=0)` in `usher.domain` accepts -- `db-and-sql.md`'s *"the common
-#: shape here"*, and the value both of `_errors.py`'s measured shapes were
-#: found with.
+#: shape here"*, and the value both of `_errors.py`'s shapes answer to.
 _OVER_INT32 = 2**31
 
 
@@ -760,7 +741,7 @@ async def _refused_image(bed: _Bed, **changes: object) -> None:
 #: own translation, and a statement written here would exercise a second
 #: spelling of the SQL that nothing ships.
 _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
-    # -- exposed at a SQLAlchemy statement (ADR-0044's 20) -------------------
+    # -- exposed at a SQLAlchemy statement -----------------------------------
     ("genome_scores", "relevance"): lambda bed: PostgresBulkCatalogRepository(
         bed.session
     ).upsert_genome_vectors(
@@ -783,7 +764,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ("import_runs", "position"): lambda bed: _refused_import_run(bed, position=_OVER_INT32),
     ("import_runs", "rows_seen"): lambda bed: _refused_import_run(bed, rows_seen=_OVER_INT32),
     ("import_runs", "rows_written"): lambda bed: _refused_import_run(bed, rows_written=_OVER_INT32),
-    # `m10b`'s resume checkpoint, in the ledger since issue #41.
+    # The sync run's resume checkpoint.
     ("sync_runs", "error_code"): lambda bed: _refused_sync_run(bed, error_code="e" * 33),
     ("sync_runs", "position"): lambda bed: _refused_sync_run(bed, position=_OVER_INT32),
     ("sync_runs", "items_seen"): lambda bed: _refused_sync_run(bed, items_seen=_OVER_INT32),
@@ -836,10 +817,9 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
         ]
     ),
     ("titles", "tvdb_id"): lambda bed: _refused_title_update(bed, tvdb_id=_OVER_INT32),
-    # **New coverage created by `m10a`/ADR-0040, not a gap this file had.**
-    # `titles.vote_count` was one column with two writers, one of them the staged `COPY`
-    # in `apply_ratings` -- so the ledger scored it `exposed-copy` (worst case over its
-    # writers) and it was outside the two scored buckets this parametrisation covers.
+    # `titles.vote_count` has two writers, one of them the staged `COPY` in
+    # `apply_ratings`, which puts it outside the two buckets this parametrisation
+    # covers; the TMDb-only column below is inside them.
     ("titles", "tmdb_vote_count"): lambda bed: _refused_title_update(
         bed, tmdb_vote_count=_OVER_INT32
     ),
@@ -849,7 +829,7 @@ _BOUNDED_ARMS: dict[tuple[str, str], Callable[[_Bed], Awaitable[object]]] = {
     ("titles", "content_rating"): lambda bed: _refused_title_update(bed, content_rating="y" * 33),
     ("user_taste", "centroid"): lambda bed: _refused_taste(bed, centroid=(0.1, 0.2, 0.3)),
     ("user_taste", "title_count"): lambda bed: _refused_taste(bed, title_count=_OVER_INT32),
-    # -- already translated: the positive control (ADR-0044's 10) ------------
+    # -- already translated: the positive control ---------------------------
     ("curated_rows", "position"): lambda bed: PostgresCuratedRowRepository(
         bed.session
     ).replace_for_user(
@@ -908,7 +888,7 @@ _NO_CALLER_SUPPLIED_VALUE = {
     # `SearchQueryRecord.mode` is a `SearchMode`, so the longest value that can
     # reach `varchar(16)` is `'full_text'` at nine characters.
     ("search_queries", "mode"): "enum-typed on the port DTO; longest member is 9 of 16",
-    # `m10c`'s two.
+    # The search-surface pair.
     ("search_queries", "surface"): "enum-typed on the port DTO; longest member is 7 of 8",
     ("search_queries", "tier"): "enum-typed on the port DTO; longest member is 6 of 6",
 }
@@ -961,22 +941,21 @@ async def test_a_value_the_domain_model_accepts_is_refused_as_a_port_error_and_n
 
 
 # --------------------------------------------------------------------------
-# ADR-0044 scope item 2: the two staging columns with no destination at all
+# The two staging columns with no destination at all
 # --------------------------------------------------------------------------
 
 
 async def test_a_movielens_tmdb_id_above_int32_stages_and_is_reported_unmatched(
     bed: _Bed,
 ) -> None:
-    """`stg_genome.tmdb_id` is `bigint` since M10's F9, and this is the behaviour that buys.
+    """`stg_genome.tmdb_id` is `bigint`, and this is the behaviour that buys.
 
     That column is written to **nothing**: `upsert_genome_vectors`' destination
-    statement joins on `imdb_id`, and MovieLens's own `tmdb_id` is carried
-    through the staging table for a join nobody makes. Declared `integer`, a
-    value above 2**31 raised `builtins.OverflowError` inside
-    `copy_records_to_table` — no SQLSTATE, not a `DBAPIError`, nothing
-    `is_row_refusal` can inspect — and took the whole batch with it. So a
-    single malformed row in a 350 MB dump aborted ten thousand good ones over
+    statement joins on `imdb_id`, and MovieLens's own `tmdb_id` is carried through the
+    staging table for a join nobody makes. Declared `integer`, a value above 2**31
+    raises `builtins.OverflowError` inside `copy_records_to_table` — no SQLSTATE, not
+    a `DBAPIError`, nothing `is_row_refusal` can inspect — and takes the whole batch
+    with it, so one malformed row in a 350 MB dump aborts ten thousand good ones over
     a number that is never stored.
 
     The assertion is on the batch **completing**, not on an absence: the
@@ -1007,7 +986,7 @@ async def test_a_movielens_tmdb_id_above_int32_stages_and_is_reported_unmatched(
 async def test_an_imdb_akas_ordering_above_int32_stages_and_the_batch_is_written(
     bed: _Bed,
 ) -> None:
-    """`stg_akas.ordering` is `bigint` since M10's F9, for `stg_genome.tmdb_id`'s reason exactly.
+    """`stg_akas.ordering` is `bigint` for `stg_genome.tmdb_id`'s reason exactly.
 
     IMDb's own `ordering` field is read by the destination statement's
     `DISTINCT ON`/`ORDER BY` and written to no column, so bounding it to

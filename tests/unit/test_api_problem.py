@@ -169,15 +169,7 @@ def assert_is_a_problem_document(
 async def test_an_unknown_title_answers_a_problem_document_rather_than_fastapis_detail(
     client: httpx.AsyncClient,
 ) -> None:
-    """The first failing case of this task.
-
-    and the one that retires `tests/unit/test_api_titles.py::test_an_unknown_title_is_a_
-    404_in_the_shape_m3_ships`.
-
-    At HEAD this route answers `{"detail": "title not found"}` with
-    `content-type: application/json` -- FastAPI's default, which M5 shipped
-    deliberately because there was no `code` vocabulary to name.
-    """
+    """An unknown title answers the envelope, not FastAPI's bare `{"detail": ...}`."""
     title_id = uuid.uuid4()
     response = await client.get(f"/titles/{title_id}")
     assert response.status_code == 404
@@ -202,13 +194,12 @@ async def test_the_route_walk_finds_the_shipped_surface(app: FastAPI) -> None:
 async def test_every_route_answers_a_problem_document_for_a_method_it_does_not_have(
     client: httpx.AsyncClient, app: FastAPI
 ) -> None:
-    """A 405 is the one failure *every* route can be made to produce without knowing anything.
+    """A 405 is the one failure every route produces without knowing anything about it.
 
-    about it, so it is the failure the walk can assert uniformly.
-
-    Starlette raises it from the router rather than from a handler, which is why the
-    exempt routes are swept too: the exemptions in `dto/problem.py` are about what a
-    *handler* answers.
+    So it is the failure the walk can assert uniformly. Starlette raises it from
+    the router rather than from a handler, which is why the exempt routes are
+    swept too: the exemptions in `dto/problem.py` are about what a *handler*
+    answers.
     """
     swept = 0
     for path, methods in sorted(_methods_by_path(app).items()):
@@ -299,14 +290,12 @@ async def test_the_422_envelope_still_does_not_echo_the_credential_it_rejected(
 ) -> None:
     """The security control, composed.
 
-    `usher.api.errors`' module docstring holds the reproduction: FastAPI's default 422
-    answered this exact request with the plaintext password of every sibling field,
-    because a `missing` error's `input` is the whole unparsed body.
-
-    Both shapes, because they fail differently -- a *missing* field echoes
-    its siblings and a *wrong-typed* field echoes only itself -- and both
-    with the positive control the plan requires, since a body that never
-    carried the value is also what a handler that never ran produces.
+    FastAPI's default 422 answers this request with the plaintext password of
+    every sibling field, because a `missing` error's `input` is the whole
+    unparsed body. Both shapes are driven, because they fail differently -- a
+    *missing* field echoes its siblings, a *wrong-typed* field echoes only
+    itself -- and each carries a positive control, since a body that never
+    submitted the value is also what a handler that never ran produces.
     """
     missing_field = {"kind": "emby", "name": "n", "username": "u", "password": PASSWORD}
     response = await client.post("/admin/sources", json=missing_field)
@@ -333,17 +322,13 @@ async def test_the_422_envelope_still_does_not_echo_the_credential_it_rejected(
 async def test_every_error_is_stripped_and_not_only_the_first(
     client: httpx.AsyncClient,
 ) -> None:
-    """**Every rejected request in this repository produced exactly one validation error until.
-
-    this case, so "strip `input` from the first error" and "strip it from all of them"
-    were the same program.** Measured: the per-item strip narrowed to the first item
-    survived all 3,008 unit cases.
+    """A strip narrowed to the first error is invisible to any one-error request.
 
     A `missing` error's `input` is the whole unparsed body, so with three
-    fields absent the credential is in the response three times over and the
-    first strip removes one copy of it. The premise is asserted rather than
-    assumed, because a body that happens to produce one error again would
-    quietly make this the case above.
+    fields absent the credential is in the response three times over and a
+    first-item strip removes one copy of it. The premise is asserted rather
+    than assumed, because a body that produced one error again would quietly
+    make this the case above.
     """
     submitted = {"username": "u", "password": PASSWORD}
     response = await client.post("/admin/sources", json=submitted)
@@ -363,9 +348,8 @@ async def test_every_error_is_stripped_and_not_only_the_first(
 async def test_instance_is_the_path_and_never_the_query(client: httpx.AsyncClient) -> None:
     """`str(request.url)` is the same leak through a different field.
 
-    and it is about to matter more: `?q=` on M9's search route is written to
-    `search_queries`, and a rejected request's query string is as much a submitted value
-    as its body.
+    A rejected request's query string is as much a submitted value as its body
+    -- `?q=` on the search route is written to `search_queries`.
     """
     response = await client.get(f"/events?titles=not-a-uuid&probe={QUERY_SENTINEL}")
     assert response.status_code == 422
@@ -423,8 +407,8 @@ def test_the_response_status_is_read_from_the_document_rather_than_passed_beside
 def test_type_is_derived_from_code_for_every_member() -> None:
     """One derivation, never a hand-written URL per member.
 
-    so V1 growing the vocabulary cannot introduce a member whose `type` disagrees with
-    its `code`.
+    Growing the vocabulary cannot then introduce a member whose `type`
+    disagrees with its `code`.
     """
     for code in ProblemCode:
         assert problem_type(code) == f"https://usher.dev/errors/{code.value.replace('_', '-')}"
@@ -434,22 +418,12 @@ def test_type_is_derived_from_code_for_every_member() -> None:
 def test_the_vocabulary_is_the_members_the_shipped_routes_emit() -> None:
     """A literal pin on the seven members, kept beside the derived one.
 
-    **The generic-vs-per-resource question is settled**, by ADR-0030 ruling
-    1: one generic `not_found`, no `title_not_found` and no
-    `episode_not_found`. `tests/unit/test_api_problem_vocabulary.py` is where
-    that closure is *encoded* -- it parses the ADR's table and compares it to
-    this enum in both directions, and it is the case a fan-out task will fail.
-
-    This one stays because the two say different things. The derived case
-    fails when the enum and the record disagree; this one fails when they
-    agree on something nobody meant, which is what a literal list is for. It
-    is also the cheaper failure to read: `assert {..} == {..}` names the
-    member, where the derived case names it and a document to go and amend.
-
-    **Still seven after M9's E3.** `POST /admin/sources/{id}/sync` answers
-    `409 not_playable` for a source an operator has disabled -- a second
-    emitter of an existing member, not an eighth one; see ADR-0030's
-    amendment for why `not_playable` covers it and no member was minted.
+    The vocabulary is generic rather than per-resource: one `not_found`, no
+    `title_not_found` and no `episode_not_found`. A literal list is what fails
+    when the enum grows a member nobody meant, and `assert {..} == {..}` names
+    that member directly. `POST /admin/sources/{id}/sync` answering `409
+    not_playable` for a disabled source is a second emitter of an existing
+    member, not an eighth one.
     """
     assert {code.value for code in ProblemCode} == {
         "not_found",
@@ -502,11 +476,10 @@ async def test_events_still_answers_a_stream(app: FastAPI) -> None:
 
 
 def test_every_exemption_names_a_route_and_carries_a_reason(app: FastAPI) -> None:
-    """Group H's "every route that can fail declares its problem responses" scan imports this.
+    """The declares-its-problem-responses scan imports this allow-list, not a copy.
 
-    allow-list rather than re-deriving it, so an entry that names no real route would
-    silently excuse nothing -- and an entry with no reason would excuse something for no
-    recorded cause.
+    An entry that names no real route would silently excuse nothing, and an
+    entry with no reason would excuse something for no recorded cause.
     """
     assert frozenset(PROBLEM_EXEMPTIONS) == PROBLEM_EXEMPT_ROUTES
     served = set(_methods_by_path(app))
@@ -516,23 +489,21 @@ def test_every_exemption_names_a_route_and_carries_a_reason(app: FastAPI) -> Non
 
 
 def test_problem_response_is_named_so_the_credential_scan_covers_it() -> None:
-    """`tests/unit/test_api_dto.py` finds response models by `name.endswith("Response")` and.
+    """`tests/unit/test_api_dto.py` finds response models by `name.endswith("Response")`.
 
-    asserts none of them declares a credential field or a `SecretStr`.
-
-    Renaming this model to `ProblemDetail` would leave that scan silently, which is why
-    the name is pinned here as well as argued for in the model's own docstring.
+    It asserts that none of them declares a credential field or a `SecretStr`,
+    so renaming this model to `ProblemDetail` would leave that scan passing
+    over nothing.
     """
     assert ProblemResponse.__name__.endswith("Response")
     assert ProblemResponse.__module__ == "usher.api.dto.problem"
 
 
 def test_the_extension_member_is_absent_rather_than_null_when_there_is_nothing_to_say() -> None:
-    """`api/dto/`'s one empty-value convention.
+    """`api/dto/`'s one empty-value convention, the one `GET /titles/{id}` keeps.
 
-    which `GET /titles/{id}` already keeps for `credits`/`images`/`similar`/`seasons`: a
-    client cannot tell "no field errors" from "this failure has no field errors to give"
-    if the answer is `null` either way.
+    A client cannot tell "no field errors" from "this failure has no field
+    errors to give" if the answer is `null` either way.
     """
     document = ProblemResponse.of(
         status=404, code=ProblemCode.NOT_FOUND, detail="nothing here", instance="/titles/x"

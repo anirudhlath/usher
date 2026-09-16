@@ -113,19 +113,14 @@ class FakeMetadataProvider(MetadataProvider):
     def genre_vocabulary(self) -> frozenset[str]:
         """The 24 canonical concepts TMDb's 35 genre names collapse to.
 
-        **Written out rather than read off `TMDB_GENRE_NAMES`**, and that is
-        the seventh entry in this module's list of ways it is more forgiving
-        than the real provider — restating it here means `EnrichService`'s
-        cases prove the *rule* (a concept the vocabulary lacks survives) and
-        say nothing about whether TMDb's real set is this one.
-        `test_adapters_tmdb_provider.py::
-        test_the_genre_vocabulary_is_every_tmdb_name_as_a_canonical_concept`
-        is what pins that half, and the two together are what make issue #30's
-        deletion actually fixed rather than fixed against a fixture.
+        **Written out rather than read off `TMDB_GENRE_NAMES`**, so `EnrichService`'s
+        cases prove the *rule* (a concept the vocabulary lacks survives) and say
+        nothing about whether TMDb's real set is this one;
+        `test_adapters_tmdb_provider.py` pins that half.
 
-        The seven canonical concepts deliberately absent — `Adult`,
-        `Biography`, `Film-Noir`, `Game-Show`, `Musical`, `Short`, `Sport` —
-        are IMDb's vocabulary gap and the whole subject.
+        The seven canonical concepts deliberately absent — `Adult`, `Biography`,
+        `Film-Noir`, `Game-Show`, `Musical`, `Short`, `Sport` — are IMDb's vocabulary
+        gap and the whole subject.
         """
         return frozenset(
             {
@@ -176,9 +171,7 @@ class FakeMetadataProvider(MetadataProvider):
         self._failure = None
 
     def return_partial(self, ref: ProviderRef = _MOVIE_REF) -> None:
-        """Answer with a payload carrying only an id.
-
-        as TMDb does for an entity nobody has filled in.
+        """Answer with a payload carrying only an id, as TMDb does for an empty entity.
 
         The tier must not move for it.
         """
@@ -202,18 +195,16 @@ class FakeMetadataProvider(MetadataProvider):
         self.fetches += 1
         payload = self._payloads.get(ref)
         if payload is None:
-            # Unconditionally malformed rather than unavailable -- see the
-            # module docstring. The real provider decides this from a status
-            # code and the fake has none.
+            # Unconditionally malformed rather than unavailable: the real
+            # provider decides this from a status code and the fake has none.
             raise PortDataMalformed(
                 f"{self._name} has no entity for this reference", detail=ref.value
             )
         return copy.deepcopy(payload)
 
     def to_result(self, payload: dict[str, Any], title_id: uuid.UUID) -> EnrichmentResult:
-        # Both spellings, because TMDb really does use two -- but see the
-        # module docstring: agreeing with a payload this same file wrote is
-        # not evidence about TMDb.
+        # Both spellings, because TMDb really does use two -- though agreeing
+        # with a payload this same file wrote is not evidence about TMDb.
         is_series = "name" in payload or "first_air_date" in payload or "seasons" in payload
         kind = TitleKind.SERIES if is_series else TitleKind.MOVIE
         name = payload.get("name") or payload.get("title") or str(payload.get("id", "unknown"))
@@ -233,7 +224,7 @@ class FakeMetadataProvider(MetadataProvider):
             genres=tuple(one["name"] for one in payload.get("genres", [])),
             original_language=payload.get("original_language"),
             # The payload keys are TMDb's own and stay; the `Title` fields
-            # they land in now name their source. ADR-0040.
+            # they land in name their source.
             tmdb_vote_average=payload.get("vote_average"),
             tmdb_vote_count=payload.get("vote_count"),
             tmdb_popularity=payload.get("popularity"),

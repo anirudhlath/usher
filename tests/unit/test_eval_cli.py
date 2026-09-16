@@ -21,11 +21,7 @@ def test_the_surface_defaults_to_every_surface() -> None:
 
 
 def test_the_seed_defaults_to_the_gates_own() -> None:
-    """20260803 is ADR-0002's seed.
-
-    A different default would make every E1 number incomparable with the measurement E1
-    exists to reproduce.
-    """
+    """The default seed is the gate's own, so its numbers stay comparable across runs."""
     from usher.eval.goldens.suggest import GATE_SEED
 
     assert parse_args(["eval"]).seed == GATE_SEED
@@ -43,9 +39,5 @@ def test_the_seed_defaults_to_the_gates_own() -> None:
     ],
 )
 def test_only_a_failed_bar_is_a_non_zero_exit(verdict: Verdict, code: int) -> None:
-    """**`BASELINE_INVALID` exits 0 deliberately.** A catalog that moved under the baseline is.
-
-    not the diff's fault, and a red the author cannot fix is the red everyone learns to
-    ignore.
-    """
+    """`BASELINE_INVALID` exits 0: a moved catalog is not the diff's fault."""
     assert exit_code_for(verdict) == code

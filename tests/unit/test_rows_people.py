@@ -18,15 +18,12 @@ async def _watched_film(library: Library, name: str, *, at: float, **kwargs: obj
 
 
 async def test_the_people_row_is_about_the_person_with_four_titles_not_the_one_with_one() -> None:
-    """**The front matter's distractor**.
+    """The distractor is a one-credit person, seeded to sort and to mint first.
 
-    seeded so the one-credit person sorts first by name *and* is minted first, which is
-    what an implementation with no threshold orders by.
-
-    Asserts the proposed rows' person ids in order and asserts the one-credit
-    person is in none of them. Under `_MIN_TITLES = 1` the answer is two rows,
-    both populated, both about people the household has genuinely seen -- and
-    the top one is about a single appearance.
+    That is what an implementation with no threshold orders by. Asserts the proposed
+    rows' person ids in order and asserts the one-credit person is in none of them:
+    under `_MIN_TITLES = 1` the answer is two rows, both populated, both about people
+    the household has genuinely seen, and the top one is about a single appearance.
     """
     library = Library()
     passing = await library.person("A Passing Face")
@@ -45,24 +42,14 @@ async def test_the_people_row_is_about_the_person_with_four_titles_not_the_one_w
 
 
 async def test_a_person_credited_twice_on_one_film_is_not_recurring() -> None:
-    """One film, **two characters**.
+    """One film, **two characters**, which TMDb genuinely emits.
 
-    which TMDb genuinely emits -- against a genuine three-title actor.
-
-    Under `count(*)` the multiply-credited person scores 3; under distinct
-    titles they score 1.
-
-    Two seeding decisions, both measured rather than assumed. The credits
-    differ by *character* and not by *job*, because the read groups by
-    `(person_id, kind, job)` -- Group B measured that the plan's own seeding
-    (credits differing by job) lands in separate groups of one row where the
-    two counts agree exactly, and the mutation survived. And there are
-    **three** of them rather than two, because `_MIN_TITLES` is 3: at two
-    credits the wrong count is still below the floor and the row is absent
-    either way, which is a case that passes for a reason unrelated to what it
-    asserts. Measured too -- the two-credit seeding let the `count(*)`
-    mutation survive this file and left the port's own contract case as the
-    only cover.
+    Against a genuine three-title actor: under `count(*)` the multiply-credited person
+    scores 3; under distinct titles they score 1. The credits differ by *character* and
+    not by *job*, because the read groups by `(person_id, kind, job)` and credits
+    differing by job land in separate groups of one row where the two counts agree.
+    There are **three** of them rather than two because `_MIN_TITLES` is 3: at two
+    credits the wrong count is still below the floor and the row is absent either way.
     """
     library = Library()
     double = await library.person("Aaron Doubled")
@@ -109,9 +96,7 @@ async def test_a_recurring_gaffer_does_not_outrank_a_recurring_lead() -> None:
 
 
 async def test_a_recurring_director_qualifies_and_the_row_says_directed_by() -> None:
-    """`CreditKind` has to reach the sentence rather than being collapsed into a count on the.
-
-    way.
+    """`CreditKind` has to reach the sentence rather than being collapsed into a count.
 
     *"You've watched four films with Denis Villeneuve"* is wrong in a way a
     listener notices; *"directed by"* is the fix. It is also the case that
@@ -136,7 +121,7 @@ async def test_a_recurring_director_qualifies_and_the_row_says_directed_by() -> 
 async def test_a_cast_row_says_with_rather_than_directed_by() -> None:
     """The other half of the same sentence.
 
-    so a single hard-coded string fails whichever one it picked.
+    A single hard-coded string fails whichever one it picked.
     """
     library = Library()
     actor = await library.person("A Real Actor")
@@ -153,10 +138,9 @@ async def test_a_cast_row_says_with_rather_than_directed_by() -> None:
 async def test_two_people_at_equal_counts_are_ordered_by_recency_then_id() -> None:
     """Three titles each, one last watched a month ago and one in 2019.
 
-    A row about a director the household was into three years ago is the front
-    matter's opening failure with a person's name on it. The 2019 person is
-    minted **first**, so id order favours the wrong answer and the counts are
-    identical by construction.
+    A row about a director the household was into three years ago is stale relevance
+    with a person's name on it. The 2019 person is minted **first**, so id order
+    favours the wrong answer and the counts are identical by construction.
     """
     library = Library()
     old = await library.person("Aaron Nostalgia")
@@ -177,18 +161,13 @@ async def test_two_people_at_equal_counts_are_ordered_by_recency_then_id() -> No
 
 
 async def test_a_series_watched_only_through_its_episodes_credits_its_people() -> None:
-    """**Trap 7.** An episode's watch state carries `title_id IS NULL` and the credit hangs off.
+    """An episode's watch state carries `title_id IS NULL`, and the credit hangs off the series.
 
-    the *series*, so a history read keyed on `watch_states.title_id` finds no credits at
-    all for a television household -- and this row is then permanently absent on a
-    library that is 89% episodes, which renders identically to a household with thin
-    history.
-
-    Group B measured the cost exactly: a film-only `list_recurring_for_user`
-    passes 11 of 13 contract cases. The distractor here is a film actor with
-    **two** titles, below the floor, so a films-only implementation proposes
-    nothing at all rather than something wrong -- which is the failure that
-    looks like correct behaviour.
+    A history read keyed on `watch_states.title_id` finds no credits at all for a
+    television household, so this row is permanently absent on a library that is mostly
+    episodes, which renders identically to a household with thin history. The
+    distractor is a film actor with **two** titles, below the floor, so a films-only
+    implementation proposes nothing at all rather than something wrong.
     """
     library = Library()
     television = await library.person("A Television Regular")
@@ -210,17 +189,13 @@ async def test_a_series_watched_only_through_its_episodes_credits_its_people() -
 
 
 async def test_the_cards_are_owned_unwatched_titles_crediting_that_person() -> None:
-    """Two distractors.
+    """Two distractors, each varying exactly one thing.
 
-    each varying exactly one thing and each seeded as a credit of the *same* person so
-    neither can be dropped by the person filter:.
-
-    - a title they are in that the household has already watched (the three
-      that *established* the affinity -- a row made of those is circular)
-    - a title they are in that the household does not own
-
-    The survivor is asserted at `cards[0]`, and both distractors are asserted
-    absent.
+    Both are credits of the *same* person, so neither can be dropped by the person
+    filter: a title they are in that the household has already watched (the three that
+    *established* the affinity -- a row made of those is circular), and a title they
+    are in that the household does not own. The survivor is asserted at `cards[0]` and
+    both distractors are asserted absent.
     """
     library = Library()
     actor = await library.person("A Real Actor")
@@ -243,12 +218,11 @@ async def test_the_cards_are_owned_unwatched_titles_crediting_that_person() -> N
 
 
 async def test_a_person_whose_other_films_are_all_owned_and_watched_builds_empty() -> None:
-    """The row is proposed.
+    """The row is proposed -- the person really does recur -- and builds with no cards.
 
-    the person really does recur -- and builds with no cards, so `HomeService` drops it.
-
-    Fails the implementation that pads with the watched titles to avoid an empty row,
-    which is the circular shelf the case above rules out arriving as a fallback.
+    `HomeService` drops it. This fails the implementation that pads with the watched
+    titles to avoid an empty row, which is the circular shelf the case above rules out
+    arriving as a fallback.
     """
     library = Library()
     actor = await library.person("A Real Actor")
@@ -284,13 +258,11 @@ async def test_no_more_than_two_people_rows_are_proposed() -> None:
 async def test_people_costs_one_history_statement_regardless_of_history_size() -> None:
     """The N+1 available here is worse than `NextUpProvider`'s.
 
-    a per-engaged-title credit fetch is fifty queries to find two people, and it returns
-    exactly the right answer -- which is why no assertion about the row's contents can
-    see it.
-
-    Held fixed the way M4's ingest cases hold it: the same call count against
-    a household with five engaged titles and one with fifty, with the *people*
-    count held constant so the bound being measured is history size.
+    A per-engaged-title credit fetch is fifty queries to find two people, and it
+    returns exactly the right answer -- which is why no assertion about the row's
+    contents can see it. Held fixed as the same call count against a household with
+    five engaged titles and one with fifty, with the *people* count constant so the
+    bound is about history size.
     """
 
     async def household(films: int) -> int:
@@ -325,12 +297,10 @@ async def test_a_household_that_has_watched_nothing_proposes_no_people_row() -> 
 async def test_an_empty_credits_table_names_the_command_that_fixes_it() -> None:
     """`credits` is empty until `usher derive` has run.
 
-    and a provider that silently never fires is indistinguishable from a household with
+    A provider that silently never fires is indistinguishable from a household with
     thin history -- the same shape `BecauseYouWatchedProvider` and `FranchiseProvider`
-    use, for the same reason.
-
-    The household has watched plenty, so "nothing to say" here is a statement
-    about the derivation rather than about the person.
+    use, for the same reason. The household has watched plenty, so "nothing to say"
+    here is a statement about the derivation rather than about the person.
     """
     library = Library()
     for index in range(6):
@@ -350,9 +320,7 @@ async def test_an_empty_credits_table_names_the_command_that_fixes_it() -> None:
 
 
 async def test_a_larger_body_of_work_outscores_a_smaller_one_and_saturates() -> None:
-    """Six watched titles is a stronger claim than three.
-
-    and beyond six it is not a stronger want.
+    """Six watched titles is a stronger claim than three, and beyond six no stronger.
 
     Asserted as an ordering *and* a ceiling, because `_SATURATION = 1` keeps the
     ordering and destroys the scale.
@@ -376,9 +344,7 @@ async def test_a_larger_body_of_work_outscores_a_smaller_one_and_saturates() -> 
 
 
 async def test_the_underived_warning_is_said_once_per_process_not_once_per_propose() -> None:
-    """The people half of CLAUDE.md's "a per-process fact logged in a per-pass function" finding.
-
-    `test_rows_franchise.py`'s twin carries the arithmetic.
+    """A per-process fact must not be logged once per pass.
 
     Three passes on **one** provider instance, because the providers are
     module-level singletons and a single pass cannot tell "once" from "once per

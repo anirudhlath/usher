@@ -45,15 +45,10 @@ def _declared_instrument_names() -> set[str]:
 
     Harvests the first positional string literal or the `name=` keyword,
     whichever the call site used. A call that supplies neither -- a name built
-    at runtime -- would be invisible here, so the walk records `None` and the
-    caller's premise guard on the anchor is what would notice a wholesale move
-    to that spelling.
-
-    ⚠️ **The `name=` branch is dead code today**: all 41 sites pass the name
-    positionally, so 0 of 41 exercise it. It is here because `Meter`'s
-    signatures accept the keyword and one future call site spelling it that way
-    would otherwise vanish from the comparison silently -- but do not read its
-    presence as evidence that anything covers it.
+    at runtime -- is invisible here, so the caller's premise guard on the anchor
+    is what would notice a wholesale move to that spelling. The `name=` branch
+    has no call site today; it is here so that one future site spelling it that
+    way does not vanish from the comparison silently.
     """
     found: set[str] = set()
     for path in sorted(_SOURCE.rglob("*.py")):
@@ -106,9 +101,9 @@ def _catalogue_names() -> list[str]:
 
 
 def _fastapi_points(reader: InMemoryMetricReader, name: str) -> list[dict[str, str]]:
-    """The attribute maps of every point recorded under `name` by the instrumentation scope.
+    """The attribute maps of every point recorded under `name` by the FastAPI scope.
 
-    which is the scope a dashboard panel is coupled to.
+    That is the scope a dashboard panel is coupled to.
     """
     data = reader.get_metrics_data()
     return [
@@ -159,10 +154,10 @@ def _settings() -> Settings:
 
 @pytest.fixture
 def meter_reader() -> InMemoryMetricReader:
-    """`tests/conftest.py::reset_otel_meter_provider` is what makes this installable more than.
+    """Installable more than once per process only because of the conftest reset.
 
-    once per process -- `set_meter_provider` is set-once and every `usher` module holds
-    a `_ProxyMeter` from import time.
+    `set_meter_provider` is set-once and every `usher` module holds a
+    `_ProxyMeter` from import time.
     """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
@@ -175,8 +170,8 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
     """Both halves must hold, and neither is a substitute for the other.
 
     The declared half would stay green against a process that emits nothing at
-    all; the measured half would stay green against a catalogue that had
-    drifted entirely away from the code.
+    all; the emitted half would stay green against a catalogue that had drifted
+    entirely away from the code.
     """
     # -- the declared half -------------------------------------------------
     declared = _declared_instrument_names()
@@ -192,7 +187,7 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
 
     assert declared == set(catalogue) - {_INHERITED}
 
-    # -- the measured half -------------------------------------------------
+    # -- the emitted half --------------------------------------------------
     app = create_app(_settings())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/health")
@@ -220,19 +215,15 @@ async def test_every_metric_name_usher_emits_is_a_row_of_prd_10s_catalogue(
 async def test_a_path_that_matched_no_route_carries_no_http_target_at_all(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """**`http.target` is absent on an unrouted path.
+    """`http.target` is absent on an unrouted path, not empty.
 
-    not empty**, so a panel that groups by it silently drops every 404 an operator most
-    wants to see.
-
-    The mechanism is `_collect_target_attribute` in the installed
-    `opentelemetry-instrumentation-asgi` 0.65b0 (`asgi/__init__.py:528-551`):
-    it reads `route.path_format` off the ASGI scope and returns `None` when no
-    route matched, and the ASGI middleware omits a `None` attribute rather
-    than recording an empty one.
-
-    The routed control comes first, because "the key is missing" is also what a
-    build that never recorded the attribute anywhere would produce.
+    A panel that groups by it otherwise drops every 404 an operator most wants
+    to see. `_collect_target_attribute` in `opentelemetry-instrumentation-asgi`
+    reads `route.path_format` off the ASGI scope and returns `None` when no
+    route matched, and the middleware omits a `None` attribute rather than
+    recording an empty one. The routed control comes first, because "the key is
+    missing" is also what a build that never recorded the attribute anywhere
+    would produce.
     """
     app = create_app(_settings())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -251,19 +242,15 @@ async def test_a_path_that_matched_no_route_carries_no_http_target_at_all(
 
 
 def test_the_semconv_opt_in_cannot_be_set_from_a_dotenv_file(tmp_path: Path) -> None:
-    """`Settings.model_config` is `extra="forbid"` (`config.py:144-149`) and pydantic-settings'.
+    """The opt-in in `.env` is a `ValidationError`, not a silently renamed metric.
 
-    dotenv source hands an unmatched key back under its full lowercased name -- so the
-    opt-in in `.env` is a `ValidationError` out of every entry point rather than a
-    silently renamed metric.
-
-    Not a general claim that `.env` refuses `OTEL_*`: `Settings` declares
-    `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` as aliased fields
-    (`config.py:757-758`) and both are accepted. What is refused is every
-    un-declared key, and `OTEL_SEMCONV_STABILITY_OPT_IN` is one.
-
-    The control is the same file without the line, because a `Settings` that
-    refused this directory for any other reason would satisfy the first arm.
+    `Settings.model_config` is `extra="forbid"` and pydantic-settings' dotenv
+    source hands an unmatched key back under its full lowercased name. Not a
+    general claim that `.env` refuses `OTEL_*`: `Settings` declares
+    `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` as aliased fields and
+    both are accepted; what is refused is every un-declared key. The control is
+    the same file without the line, because a `Settings` that refused this
+    directory for any other reason would satisfy the first arm.
     """
     body = (
         "USHER_DATABASE_URL=postgresql+asyncpg://usher:usher@127.0.0.1:1/usher\n"

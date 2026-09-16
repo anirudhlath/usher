@@ -90,7 +90,7 @@ async def test_the_screen_is_ordered_by_score_and_not_by_registration_order(
 ) -> None:
     """Kills a composer that returns proposals in the order the registry yielded them.
 
-    which passes every membership assertion and produces a screen whose order is an
+    That passes every membership assertion and produces a screen whose order is an
     implementation detail of a tuple literal.
     """
     service = HomeService(
@@ -137,7 +137,7 @@ async def test_continue_watching_is_first_even_when_registered_last_and_scoring_
 async def test_a_provider_with_nothing_to_say_contributes_no_row_rather_than_an_empty_one(
     ctx: RowContext,
 ) -> None:
-    """PRD 06: "A provider returns nothing when it has nothing to say.".
+    """A provider returns nothing when it has nothing to say (PRD 06).
 
     An absent row and an empty row are different states, and the composer must
     not manufacture the second from the first -- a zero-card row on the screen
@@ -198,13 +198,12 @@ async def test_a_screen_never_carries_three_consecutive_similarity_rows(
 async def test_the_similarity_constraint_still_holds_after_an_empty_row_is_dropped(
     ctx: RowContext,
 ) -> None:
-    """**The case for the bug that is invisible in review.**.
+    """The bug that is invisible in review: the adjacency rule applied at selection.
 
     Select `[S, X, S, S]`, build, drop `X` because it built empty, return
-    `[S, S, S]`. A composer that applies the adjacency rule at *selection*
-    passes every other case in this file and returns a screen that violates the
-    constraint it advertises -- with nothing raised and nothing logged. The
-    rule is applied to the sequence that is returned, which is the only
+    `[S, S, S]`. That composer passes every other case in this file and returns a
+    screen violating the constraint it advertises, with nothing raised and nothing
+    logged. The rule is applied to the sequence that is returned, which is the only
     sequence anybody sees.
     """
     service = HomeService(
@@ -227,8 +226,6 @@ async def test_a_screen_of_only_similarity_rows_stops_at_two_rather_than_breakin
     ctx: RowContext,
 ) -> None:
     """The constraint takes precedence over screen length.
-
-    stated deliberately rather than discovered.
 
     With nothing to interleave, the deferred rows are never placeable and the screen is
     two rows long. A composer that "gives up" on the constraint when it cannot fill the
@@ -271,8 +268,7 @@ async def test_no_family_exceeds_its_cap_even_when_it_proposes_the_top_scores(
 ) -> None:
     """The cap is applied at selection, so it also bounds what is built.
 
-    which is the property that makes it a cost control rather than a display filter.
-
+    That is the property that makes it a cost control rather than a display filter.
     Kills a cap applied after the build.
     """
     similarity = [
@@ -323,9 +319,8 @@ async def test_a_tie_is_broken_by_the_slug_and_not_by_registration_order(
 async def test_every_provider_is_asked_exactly_once_per_screen(ctx: RowContext) -> None:
     """`propose` is the cheap phase and it runs once per provider per screen.
 
-    never once per proposal.
-
-    Kills a composer that re-proposes to find a provider's family or its score.
+    Never once per proposal. Kills a composer that re-proposes to find a provider's
+    family or its score.
     """
     providers = [_stub(f"row-{n}", score=0.9 - n / 100) for n in range(3)]
 
@@ -337,15 +332,10 @@ async def test_every_provider_is_asked_exactly_once_per_screen(ctx: RowContext) 
 async def test_the_screen_is_never_longer_than_the_row_ceiling(ctx: RowContext) -> None:
     """`_MAX_ROWS` bounds what is built as well as what is returned.
 
-    PRD 06's "builds the top N", so no over-selection and no padding.
-
-    **The build count is the half with teeth, and it was missing until M8's
-    sweep measured it.** `_order` bounds the returned sequence by the same
-    number, so a `_select` that stopped truncating still returns four rows --
-    having hydrated six -- and this case's own docstring claimed the property
-    it did not check. The ceiling is *injected* here; the case below is the one
-    that reaches the shipped default, which no input could until `RowFamily`
-    had a third member.
+    PRD 06's "builds the top N", so no over-selection and no padding. The build count
+    is the half with teeth: `_order` bounds the returned sequence by the same number,
+    so a `_select` that stopped truncating still returns four rows having hydrated
+    six. The ceiling is *injected* here; the case below reaches the shipped default.
     """
     providers = [
         *(_stub(f"row-{n:02d}", score=0.9 - n / 100, family=RowFamily.SOURCE) for n in range(3)),
@@ -363,9 +353,9 @@ async def test_the_screen_is_never_longer_than_the_row_ceiling(ctx: RowContext) 
 async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exists(
     ctx: RowContext,
 ) -> None:
-    """**The branch `RowFamily.CURATED` made reachable**.
+    """The branch `RowFamily.CURATED` made reachable.
 
-    and the reason `domain/rows.py` declined to pre-declare that member.
+    It is also the reason `domain/rows.py` declined to pre-declare that member.
     """
     pinned = _stub("continue-watching", score=1.0, pinned=True)
     capped = [
@@ -380,10 +370,10 @@ async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exis
     families = Counter(row.family for provider in capped for row in provider.rows)
     assert len(families) == 3, "the premise: three families, which is what gets past nine rows"
     # `_MAX_PER_FAMILY` rather than the literal 4: a table that repeats a value
-    # is a table that can drift from it, and this guard is about the cap.
-    # Measured -- planting `_MAX_PER_FAMILY = 3`, the literal spelling still
-    # passes here and the case fails below on `len(screen) == 10`, which is
-    # about the *ceiling*, so a premise about the cap reports the wrong one.
+    # is a table that can drift from it, and this guard is about the cap. With
+    # `_MAX_PER_FAMILY = 3` the literal spelling still passes here and the case
+    # fails below on `len(screen) == 10`, which is about the *ceiling*, so a
+    # premise about the cap would report the wrong one.
     assert max(families.values()) <= _MAX_PER_FAMILY, (
         "the premise: no family is over the cap, so it drops none"
     )
@@ -398,24 +388,16 @@ async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exis
 def test_the_registry_holds_the_ten_providers_prd_06_specifies_under_their_own_names() -> None:
     """Asserted by **name**, not by count.
 
-    `len(...) == 10` is satisfied by registering one provider twice, and a provider that
-    is not registered is dead code (boundary call 9 -- registration in code *is* the
-    enable switch, and there is no `row_providers` table).
+    `len(...) == 10` is satisfied by registering one provider twice, and a provider
+    that is not registered is dead code: registration in code *is* the enable switch,
+    and there is no `row_providers` table.
 
     The name asserted is `slug_prefix`, which is the identifier
-    `usher.row.build.duration`'s `provider` label and `usher home`'s report
-    both carry. `test_rows_invariants.py` asserts the same registry by *class*
-    name; the two are different vocabularies and this is the one a dashboard
-    sees, so renaming a class is a refactor and renaming this is a deliberate
-    change to something outside the codebase.
-
-    **This case was written to fail when M8 added `CuratedProvider`, and it
-    did.** M8 Task 15 updates it in the same commit that registers the tenth,
-    which is the whole of what "deliberately" bought: a registry assertion a
-    later milestone can grow past without touching is one that would not have
-    caught a provider left out of the tuple. `curated` is the new member, and
-    it is the label a dashboard will group the one row on this screen that
-    cost money under.
+    `usher.row.build.duration`'s `provider` label and `usher home`'s report both
+    carry. `test_rows_invariants.py` asserts the same registry by *class* name; the
+    two are different vocabularies and this is the one a dashboard sees, so renaming a
+    class is a refactor and renaming this is a deliberate change to something outside
+    the codebase.
     """
     from usher.services.rows import ROW_PROVIDERS
 
@@ -443,12 +425,12 @@ def _has_a_run_of_three(families: Sequence[RowFamily]) -> bool:
 async def test_the_report_has_a_line_for_every_registered_provider_including_silent_ones(
     ctx: RowContext,
 ) -> None:
-    """**An absent provider and a silent one are the two states this milestone exists to.
+    """An absent provider and a silent one are two different states.
 
-    distinguish.** A report assembled by iterating the *proposals* drops the silent
-    ones, which makes them identical to providers that were never registered -- and that
-    is exactly how a provider left out of `ROW_PROVIDERS` survives review, because the
-    report gets shorter and tidier rather than wrong.
+    A report assembled by iterating the *proposals* drops the silent ones, which makes
+    them identical to providers that were never registered -- and that is exactly how a
+    provider left out of `ROW_PROVIDERS` survives review, because the report gets
+    shorter and tidier rather than wrong.
     """
     service = HomeService(
         providers=[_stub("recently-added", score=0.9), _silent("seasonal"), _silent("rediscover")]
@@ -467,10 +449,7 @@ async def test_the_report_has_a_line_for_every_registered_provider_including_sil
 async def test_a_row_that_built_empty_is_reported_as_selected_but_not_built(
     ctx: RowContext,
 ) -> None:
-    """`selected 1.
-
-    built 0` is the only place in the system where PRD 06's "drops any that build empty"
-    is visible.
+    """`selected 1, built 0` is where PRD 06's "drops any that build empty" is visible.
 
     Without the pair, a provider that proposes on every request and never builds
     anything looks identical to one that never fires -- and one of those is a bug.
@@ -495,10 +474,9 @@ async def test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent(
 ) -> None:
     """The third state, and it is not the same as either of the other two.
 
-    a provider that proposed and was **not selected** is the per-family cap doing its
-    job, not a quiet household and not a dead provider.
-
-    One number for `selected` and `built` together would hide whichever happened.
+    A provider that proposed and was **not selected** is the per-family cap doing its
+    job, not a quiet household and not a dead provider. One number for `selected` and
+    `built` together would hide whichever happened.
     """
     crowd = [
         _stub(f"byw-{n}", score=0.99 - n / 1000, family=RowFamily.SIMILARITY) for n in range(8)
@@ -513,9 +491,9 @@ async def test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent(
 
 
 async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowContext) -> None:
-    """**PRD 06's ~30 s screen cache is meant to cost nothing.
+    """PRD 06's ~30 s screen cache is meant to cost nothing.
 
-    and one dependency was making it cost three statements.**.
+    A dependency read on the cached path would make it cost three statements.
     """
     reads = 0
 
@@ -544,22 +522,18 @@ async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowConte
     assert cache.get_screen(ctx.user.id) is not None
 
 
-# --------------------------------------------------------------------------- The
-# registry left-joined onto the stored overrides (M9 E2).
+# ---------------------------------------------------------------------------
+# The registry left-joined onto the stored overrides.
 
 
 def test_a_provider_no_one_has_ever_touched_renders_as_enabled() -> None:
     """The virgin-database case, and the one the wrong default gets wrong.
 
-    An empty `overrides()` is the *shipped* state of this table -- M1's `m09a`
-    creates it with no rows and PRD 09 item 9 says it is *"deliberately not
-    seeded with ten slugs"* -- so this is not an edge case, it is the state
-    every deployment starts in and most stay in forever.
-
-    The slug set is compared against `{p.slug_prefix for p in ROW_PROVIDERS}`
-    rather than against a literal, so an eleventh provider cannot be forgotten
-    here. `test_the_registry_holds_the_ten_providers_prd_06_specifies_under_
-    their_own_names` above is where the literal lives, once.
+    An empty `overrides()` is the *shipped* state of this table -- PRD 09 item 9 says
+    it is *"deliberately not seeded with ten slugs"* -- so this is not an edge case,
+    it is the state every deployment starts in and most stay in forever. The slug set
+    is compared against `{p.slug_prefix for p in ROW_PROVIDERS}` rather than against a
+    literal, so an eleventh provider cannot be forgotten here.
     """
     settings = row_provider_settings({})
 
@@ -571,7 +545,7 @@ def test_a_provider_no_one_has_ever_touched_renders_as_enabled() -> None:
 def test_a_stored_false_removes_exactly_that_provider_and_leaves_the_other_nine() -> None:
     """The toggle, and the assertion that says it is a toggle rather than a switch.
 
-    nine survive, in registry order, and the tenth is the one named.
+    Nine survive, in registry order, and the tenth is the one named.
     """
     kept = enabled_row_providers(row_provider_settings({"continue-watching": False}))
 
@@ -598,12 +572,10 @@ def test_a_stored_true_is_a_recorded_action_and_not_a_disable() -> None:
 def test_an_override_for_a_slug_the_registry_does_not_hold_renders_nothing() -> None:
     """Dead configuration is not rendered as a provider.
 
-    which is the read half of the 404 `PUT /admin/rows/providers/{slug}` answers.
-
-    An override for a provider nothing registers reads exactly like working
-    configuration -- an operator sees a row in the table and believes something
-    is off. The route refuses to write one; this says the join would not honour
-    it either, so the two defences are independent.
+    That is the read half of the 404 `PUT /admin/rows/providers/{slug}` answers. An
+    override for a provider nothing registers reads exactly like working configuration
+    -- an operator sees a row in the table and believes something is off. The route
+    refuses to write one; this says the join would not honour it either.
     """
     settings = row_provider_settings({"a-provider-nobody-wrote": False})
 
@@ -614,12 +586,10 @@ def test_an_override_for_a_slug_the_registry_does_not_hold_renders_nothing() -> 
 def test_the_join_is_applied_to_whatever_registry_it_is_handed() -> None:
     """`usher home` and the refresh lane compose over `pipeline.row_providers`.
 
-    which is `row_providers(semantic=...)` and **not** `ROW_PROVIDERS` -- a different
-    tuple of different instances.
-
-    A join that ignored its second argument and read the module constant would filter
-    the wrong list and, because the two agree by slug, would be invisible everywhere
-    else.
+    That is `row_providers(semantic=...)` and **not** `ROW_PROVIDERS` -- a different
+    tuple of different instances. A join that ignored its second argument and read the
+    module constant would filter the wrong list and, because the two agree by slug,
+    would be invisible everywhere else.
     """
     handed = (_stub("alpha", score=0.5), _stub("beta", score=0.4))
 
@@ -629,25 +599,18 @@ def test_the_join_is_applied_to_whatever_registry_it_is_handed() -> None:
 
 
 def test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it() -> None:
-    """**The structural defence, and the reason it is structural.**.
+    """The structural defence, and the reason it is structural.
 
     `overrides()` returns only the slugs somebody has written, so the whole
-    correctness of this feature is one two-argument `.get` -- and the wrong
-    spelling, `.get(slug, False)`, is one character from the right one, reads
-    perfectly, and turns a virgin database into a blank home screen. Nothing in
-    `Mapping[str, bool]` distinguishes them, and E1's reviewer flagged exactly
-    this consequence for the first caller.
+    correctness of this feature is one two-argument `.get` -- and the wrong spelling,
+    `.get(slug, False)`, is one character from the right one, reads perfectly, and
+    turns a virgin database into a blank home screen.
 
-    So the mapping is never *bound to a name* outside `services/rows/__init__
-    .py`: every call site hands `await settings.overrides()` straight into the
-    join as an argument, which means a second reader has to change this case
-    before it can spell a default of its own. That is not a proof of
-    correctness -- the join's own default is pinned by the four cases above --
-    it is a proof that there is exactly one place to get it right.
-
-    Walked over the AST rather than grepped: a substring search for
-    `.overrides()` cannot tell an argument from an assignment, which is the
-    entire distinction being asserted.
+    So the mapping is never *bound to a name* outside `services/rows/__init__.py`:
+    every call site hands `await settings.overrides()` straight into the join as an
+    argument, which means a second reader has to change this case before it can spell
+    a default of its own. Walked over the AST rather than grepped, because a substring
+    search for `.overrides()` cannot tell an argument from an assignment.
     """
     fetched: dict[str, int] = {}
     joined: dict[str, int] = {}
@@ -684,7 +647,7 @@ def test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it(
     )
 
 
-# -- the demand lane (issue #73) -------------------------------------------
+# -- the demand lane -------------------------------------------------------
 
 
 def _card_at(state: EnrichmentState) -> RowCard:
@@ -701,11 +664,10 @@ def _row_of(slug: str, *cards: RowCard, score: float) -> FakeRowProvider:
 async def test_composing_a_screen_promotes_the_skeletons_it_drew(ctx: RowContext) -> None:
     """`/home` is nine providers over one catalog.
 
-    so the promotion is once for the whole screen rather than once per shelf --
+    The promotion is once for the whole screen rather than once per shelf --
     `seen_cards` dedupes across it and pays one staged write instead of one per row.
-
-    Both tiers are on the screen, because a composer that promoted every card
-    it drew passes an all-skeleton case unchanged.
+    Both tiers are on the screen, because a composer that promoted every card it drew
+    passes an all-skeleton case unchanged.
     """
     queue = FakeJobQueue()
     skeleton, enriched = _card_at(EnrichmentState.SKELETON), _card_at(EnrichmentState.ENRICHED)
@@ -722,24 +684,16 @@ async def test_composing_a_screen_promotes_the_skeletons_it_drew(ctx: RowContext
 
 
 async def test_a_row_the_composer_dropped_is_not_promoted(ctx: RowContext) -> None:
-    """A shelf that lost the cap is never promoted.
+    """A shelf that lost the cap is never promoted, and the mechanism is `_select`.
 
-    and the mechanism is `_select` rather than `_order`.
-
-    ⚠️ **The first draft of this case named `_order` and was wrong.**
     `_select` applies `max_rows` and the family cap *before* anything is built
-    (`[*pinned, *capped][: self._max_rows]`), so a losing candidate is never
-    built at all and its cards never exist to be promoted. `_order` only
-    reorders and displaces. Measured by planting `built` for `screen` at the
-    promotion site, verifying the plant landed, and watching this case stay
-    green: the two collections are identical today, so that substitution is an
-    **equivalent mutant** rather than a defect this case misses.
-
-    What this case does pin is the property that survives either spelling: the
-    cap is upstream of the promotion, so composing far more than is served
-    costs nothing on this lane. `max_rows=1` is the cheapest way to make a row
-    lose, and the assertion is that the loser's card is absent rather than
-    merely that the winner's is present.
+    (`[*pinned, *capped][: self._max_rows]`), so a losing candidate is never built at
+    all and its cards never exist to be promoted; `_order` only reorders and
+    displaces. What this pins is the property that survives either spelling: the cap
+    is upstream of the promotion, so composing far more than is served costs nothing
+    on this lane. `max_rows=1` is the cheapest way to make a row lose, and the
+    assertion is that the loser's card is absent rather than that the winner's is
+    present.
     """
     queue = FakeJobQueue()
     drawn, dropped = _card_at(EnrichmentState.SKELETON), _card_at(EnrichmentState.SKELETON)

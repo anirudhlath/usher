@@ -40,7 +40,7 @@ def queue(session: AsyncSession) -> PostgresJobQueue:
 async def clear_backoff(session: AsyncSession) -> ClearBackoff:
     """The Postgres half of the contract's test-only hook.
 
-    see `tests/contract/job_queue_contract.py`'s docstring for why this is a fixture
+    See `tests/contract/job_queue_contract.py`'s docstring for why this is a fixture
     rather than a port method.
     """
 
@@ -103,7 +103,7 @@ class _PostgresConcurrentClaims(ConcurrentClaimHarness):
     def session(self, index: int) -> AsyncSession:
         """One claimer's own backend.
 
-        for cases that need to drive the two sides by hand rather than through `run`.
+        For cases that need to drive the two sides by hand rather than through `run`.
         """
         return self._sessions[index]
 
@@ -143,9 +143,9 @@ async def claimers(postgres_url: str) -> AsyncIterator[_PostgresConcurrentClaims
     """Named `claimers`, not `concurrent_claims`, so the class fixture below can request it.
 
     `JobQueueContract` defines `concurrent_claims` as a class-level fixture returning
-    `None`; a class-level fixture shadows a module-level one of the same name, so a
-    module fixture called `concurrent_claims` is simply never reached and the contract
-    case skips itself with `requires_concurrency = True` set. Found by running it.
+    `None`, and a class-level fixture shadows a module-level one of the same name, so
+    a module fixture of that name is never reached and the contract case skips itself
+    with `requires_concurrency = True` set.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
@@ -157,11 +157,6 @@ async def claimers(postgres_url: str) -> AsyncIterator[_PostgresConcurrentClaims
             await one.close()
         async with factory() as cleanup:
             await cleanup.execute(text("DELETE FROM jobs"))
-            # A `DROP TABLE IF EXISTS stg_jobs` stood here until M6, because
-            # `stage_records` created the staging table with DDL, Postgres DDL is
-            # transactional, and this harness's writer *commits* -- so unlike every
-            # other test in this suite the table survived and took
-            # `test_migration_matches_the_orm_metadata` down in a later file.
             await cleanup.commit()
         await engine.dispose()
 
@@ -169,7 +164,7 @@ async def claimers(postgres_url: str) -> AsyncIterator[_PostgresConcurrentClaims
 class TestPostgresJobQueue(JobQueueContract):
     """Every case in `JobQueueContract`, against real Postgres.
 
-    including the concurrency case the fake skips.
+    Including the concurrency case the fake skips.
     """
 
     requires_concurrency = True
@@ -257,23 +252,15 @@ async def test_the_claim_query_uses_the_partial_index(
 
 
 async def test_backoff_is_jittered(session: AsyncSession) -> None:
-    """A fixed backoff makes every job that failed in the same batch retry at the same instant.
+    """A fixed backoff makes every job that failed in one batch retry at the same instant.
 
-    a thundering herd against the upstream that was already struggling.
-
-    The fake's schedule is unjittered and cannot catch this; only the real one is
-    asserted on.
-
-    **`len(instants) > 1` alone is not this assertion, and it was measured
-    rather than assumed.** Twenty sequential `fail()` calls are twenty
-    separate round trips, and `clock_timestamp()` genuinely advances between
-    them even with the jitter term deleted outright -- planting that deletion
-    still produces twenty *distinct* microsecond-precision timestamps, spread
-    over single-digit milliseconds of real network and scheduling drift.
-    Jitter's own band at `backoff_seconds=60.0` is 30 s wide, so the range
-    (max - min) is the number that tells the two apart: ~8 ms of drift-only
-    spread measured against ~400 ms with the jitter term removed and ~30 s
-    with it present is nowhere close to `>= 1s`, which is the threshold below.
+    A thundering herd against the upstream that was already struggling. The fake's
+    schedule is unjittered and cannot catch this, so only the real one is asserted
+    on. `len(instants) > 1` alone is not this assertion: twenty sequential `fail()`
+    calls are twenty round trips and `clock_timestamp()` advances between them even
+    with the jitter term deleted, so the *range* is the number that tells the two
+    apart -- milliseconds of scheduling drift against a jitter band tens of seconds
+    wide.
     """
     queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=60.0)
     await queue.enqueue(
@@ -301,23 +288,13 @@ async def test_backoff_is_jittered(session: AsyncSession) -> None:
 async def test_a_retry_after_hint_still_spreads_across_a_batch(session: AsyncSession) -> None:
     """The floor and the jitter are the same expression, not competing ones.
 
-    `GREATEST(:retry_after_seconds, 0) + <the existing jittered term>` -- so twenty jobs
-    rate-limited by the same upstream in the same second, all carrying the identical
-    hint, must still not retry in the identical instant.
-
-    An implementation that used the hint *alone* (dropping the jittered term, or a
-    `CASE` arm that returns the hint outright) produces twenty identical values and
-    cannot pass this; only the spread test exercises that mutation, which is why it is
-    asserted here and not just that every value respects the floor.
-
-    **The spread has to be a magnitude, not a count, for the same reason
-    `test_backoff_is_jittered` above does.** Twenty sequential round trips
-    land on twenty distinct `clock_timestamp()` reads regardless of jitter --
-    measured at ~8 ms of spread with the jitter term deleted outright, against
-    ~400-440 ms across four runs with it present. `backoff_seconds=1.0`'s
-    jitter band is only 0.5 s wide (attempts=0), so the threshold below is
-    picked with a wide margin on both sides rather than merely "more than
-    one instant".
+    `GREATEST(:retry_after_seconds, 0) + <the existing jittered term>`, so twenty
+    jobs rate-limited by the same upstream in the same second, all carrying the
+    identical hint, must still not retry in the identical instant. An implementation
+    that used the hint *alone* -- dropping the jittered term, or a `CASE` arm
+    returning the hint outright -- produces twenty identical values, and only the
+    spread assertion exercises that mutation. The spread is a magnitude rather than a
+    count, for the reason `test_backoff_is_jittered` gives.
     """
     queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=1.0)
     await queue.enqueue(
@@ -353,15 +330,12 @@ async def test_a_retry_after_hint_still_spreads_across_a_batch(session: AsyncSes
 async def test_the_backoff_never_draws_zero(session: AsyncSession) -> None:
     """Equal jitter, not full jitter.
 
-    the delay is a uniform draw from `[base/2, base)` rather than from `[0, base)`.
-
-    Full jitter is the shape the plan proposed and the one AWS's article
-    names, and it is wrong for this queue: its minimum draw is arbitrarily
-    close to zero, so some fraction of failures against a broken upstream
-    retry *immediately* -- the hot loop the backoff exists to prevent, just
-    for fewer jobs. A guaranteed floor costs nothing (the spread is what
-    breaks the herd, not the reachability of zero) and makes "a failed job is
-    not immediately re-claimable" a property rather than a probability.
+    The delay is a uniform draw from `[base/2, base)` rather than from `[0, base)`.
+    Full jitter's minimum draw is arbitrarily close to zero, so some fraction of
+    failures against a broken upstream retry *immediately* -- the hot loop the
+    backoff exists to prevent, just for fewer jobs. A guaranteed floor costs nothing
+    and makes "a failed job is not immediately re-claimable" a property rather than a
+    probability.
     """
     queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=10.0)
     await queue.enqueue(
@@ -403,13 +377,11 @@ async def test_the_backoff_grows_with_the_attempt_count(session: AsyncSession) -
 async def test_an_empty_key_is_a_port_error_not_an_integrity_error(
     queue: PostgresJobQueue,
 ) -> None:
-    """`ck_jobs_key_not_empty` reaching the caller as a raw `IntegrityError` would make.
+    """`ck_jobs_key_not_empty` has to reach the caller as a port error.
 
-    `services/` import `sqlalchemy.exc` to handle it, which is the thing ADR-0009
-    forbids.
-
-    The staging table carries no constraints, so this fires one statement later, at the
-    `INSERT ... SELECT`, which is why catching `IntegrityError` is sufficient.
+    A raw `IntegrityError` would make `services/` import `sqlalchemy.exc` to handle
+    it. The staging table carries no constraints, so this fires one statement later,
+    at the `INSERT ... SELECT`, which is why catching `IntegrityError` is sufficient.
     """
     with pytest.raises(RepositoryConflict) as caught:
         await queue.enqueue([JobRequest(kind=JobKind.MATCH, key="", priority=JobPriority.NEW)])
@@ -417,13 +389,12 @@ async def test_an_empty_key_is_a_port_error_not_an_integrity_error(
 
 
 async def test_an_out_of_range_priority_is_a_port_error(queue: PostgresJobQueue) -> None:
-    """`JobRequest` is a plain frozen dataclass.
+    """`JobRequest` is a plain frozen dataclass, not a `DomainModel`.
 
-    not a `DomainModel`, so nothing validates `priority` before it reaches the column.
-
-    That is deliberate -- promotion is `GREATEST` in SQL over an `int` -- and it means
-    `ck_jobs_priority_range` is the only thing standing between a caller's typo and a
-    row nothing can ever claim in the right order.
+    Nothing validates `priority` before it reaches the column -- deliberately, since
+    promotion is `GREATEST` in SQL over an `int` -- so `ck_jobs_priority_range` is
+    the only thing standing between a caller's typo and a row nothing can ever claim
+    in the right order.
     """
     with pytest.raises(RepositoryConflict) as caught:
         await queue.enqueue([JobRequest(kind=JobKind.MATCH, key="m1", priority=1_000)])
@@ -433,9 +404,9 @@ async def test_an_out_of_range_priority_is_a_port_error(queue: PostgresJobQueue)
 async def test_a_caught_conflict_leaves_the_session_usable(queue: PostgresJobQueue) -> None:
     """Postgres aborts the entire transaction on any statement error until a ROLLBACK.
 
-    so without a SAVEPOINT a caught conflict poisons the session for the caller's next,
-    unrelated call -- and this queue's caller commits a batch of enqueues together with
-    the walk's own sync-run checkpoint.
+    Without a SAVEPOINT a caught conflict poisons the session for the caller's next,
+    unrelated call -- and this queue's caller commits a batch of enqueues together
+    with the walk's own sync-run checkpoint.
     """
     with pytest.raises(RepositoryConflict):
         await queue.enqueue([JobRequest(kind=JobKind.MATCH, key="", priority=JobPriority.NEW)])
@@ -443,12 +414,10 @@ async def test_a_caught_conflict_leaves_the_session_usable(queue: PostgresJobQue
 
 
 async def test_a_failed_batch_writes_none_of_itself(queue: PostgresJobQueue) -> None:
-    """The SAVEPOINT is what makes a batch atomic across its staging DDL.
+    """The SAVEPOINT is what makes a batch atomic across its staging DDL, `COPY` and upsert.
 
-    its `COPY`, and its upsert.
-
-    Half of a 1,000-job enqueue landing would leave a walk unable to tell what it still
-    owes.
+    Half of a 1,000-job enqueue landing would leave a walk unable to tell what it
+    still owes.
     """
     with pytest.raises(RepositoryConflict):
         await queue.enqueue(
@@ -480,11 +449,9 @@ async def test_the_claim_returns_the_row_as_stored(
 ) -> None:
     """`Job` and `jobs` are in exact 1:1 column correspondence.
 
-    and `extra="forbid"` means a column this port forgot to map is a `ValidationError`
-    rather than a silent drop.
-
-    Asserted through a claim because `RETURNING jobs.*` is the one place the whole row
-    round-trips.
+    `extra="forbid"` means a column this port forgot to map is a `ValidationError`
+    rather than a silent drop. Asserted through a claim because `RETURNING jobs.*` is
+    the one place the whole row round-trips.
     """
     await queue.enqueue(
         [
@@ -512,11 +479,10 @@ async def test_the_claim_returns_the_row_as_stored(
 async def test_requeue_running_spares_a_claim_younger_than_the_cutoff(
     queue: PostgresJobQueue,
 ) -> None:
-    """`older_than_seconds` exists so a future multi-worker deployment can recover a dead.
+    """`older_than_seconds` is how a dead worker's claims are recovered without stealing.
 
-    worker's claims without stealing a live worker's.
-
-    A requeue that ignored it would hand every in-flight job to whoever restarted last.
+    A future multi-worker deployment needs it, and a requeue that ignored it would
+    hand every in-flight job to whoever restarted last.
     """
     await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
     await queue.claim([JobKind.ENRICH])
@@ -608,9 +574,8 @@ async def _running_row(session: AsyncSession, key: str) -> tuple[str, int] | Non
 
 
 # (the running row's priority, the repeat's priority, rows written, the
-# priority left on the row). Measured against pgvector/pgvector:pg17 through
-# `PostgresJobQueue` on 2026-08-07 -- see the two cases below for what each
-# half means and why the second one matters more than it reads.
+# priority left on the row). See the two cases below for what each half means
+# and why the second one matters more than it reads.
 _REPEAT_WHILE_RUNNING = [
     (JobPriority.BACKFILL, JobPriority.BACKFILL, 0, JobPriority.BACKFILL),
     (JobPriority.DEMAND, JobPriority.DEMAND, 0, JobPriority.DEMAND),
@@ -665,26 +630,17 @@ async def test_a_repeat_of_a_running_job_is_written_only_when_it_promotes(
 async def test_a_promoting_repeat_of_a_running_job_reports_success_and_is_discarded_anyway(
     session: AsyncSession, queue: PostgresJobQueue
 ) -> None:
-    """**`enqueue`'s return value does not tell a caller whether its request will run**.
-
-    and this is the case where it says the wrong thing.
+    """`enqueue`'s return value does not tell a caller whether its request will run.
 
     A repeat at a *strictly higher* priority than the running row satisfies
-    `jobs.priority < excluded.priority`, so `enqueue` writes 1 and reports
-    success -- but it wrote a promotion of the row already in flight, not a
-    second job. `complete()` deletes that row by id when the in-flight run
-    finishes, and the work the caller asked for never happens. The queue is
-    empty afterwards and nothing re-enqueues it.
-
-    That matters at exactly the priority a demand endpoint uses. `POST
-    /admin/rows/regenerate` and `api/routes/titles.py`'s existing promotion
-    both enqueue at `JobPriority.DEMAND`, so a caller reading `written == 0`
-    as "coalesced into the run in flight" gets a **false negative** here: the
-    count is 1 and the request is still lost. The distinction is not
-    observable through the port at all -- an enqueue that created a job and
-    an enqueue that promoted one both return 1 -- so a caller that needs a
-    *fresh* generation after the one in flight has to arrange it above the
-    queue.
+    `jobs.priority < excluded.priority`, so `enqueue` writes 1 and reports success --
+    but it promoted the row already in flight rather than creating a second job.
+    `complete()` deletes that row by id when the in-flight run finishes, the work the
+    caller asked for never happens, and nothing re-enqueues it. That is exactly the
+    priority a demand endpoint uses, so a caller reading `written == 0` as "coalesced
+    into the run in flight" gets a **false negative**: the count is 1 and the request
+    is still lost. The distinction is not observable through the port at all, so a
+    caller that needs a fresh generation has to arrange it above the queue.
     """
     key = str(uuid.uuid4())
     await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=key, priority=JobPriority.BACKFILL)])
@@ -739,8 +695,8 @@ async def test_the_claim_ordering_survives_a_planner_that_ignores_the_index(
 ) -> None:
     """The `created_at` key in the claim's `ORDER BY` is *redundant given* `ix_jobs_claim`.
 
-    which already carries it -- so deleting it changes nothing any ordinary case can
-    observe.
+    The index already carries it, so deleting the key changes nothing any ordinary
+    case can observe.
     """
     for key in ("old", "new", "old"):
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key=key, priority=JobPriority.NEW)])
@@ -753,14 +709,12 @@ async def test_the_claim_ordering_survives_a_planner_that_ignores_the_index(
 async def test_a_claim_is_ordered_even_when_its_update_stage_hash_joins(
     session: AsyncSession, queue: PostgresJobQueue, analyze: Analyze
 ) -> None:
-    """`UPDATE ...
+    """`UPDATE ... RETURNING` makes no promise about row order.
 
-    RETURNING` makes no promise about row order, and at 2,000 rows the claim's second
-    stage really is a `Hash Join` over a `Seq Scan` of `jobs` (measured -- see
-    `test_the_claim_query_uses_the_partial_index`), so `RETURNING` hands rows back in
-    heap order rather than in the order the `claimable` CTE selected them. The outer
-    `ORDER BY` over the data-modifying CTE is what makes the port's documented ordering
-    true rather than incidental.
+    At 2,000 rows the claim's second stage really is a `Hash Join` over a `Seq Scan`
+    of `jobs`, so `RETURNING` hands rows back in heap order rather than in the order
+    the `claimable` CTE selected them. The outer `ORDER BY` over the data-modifying
+    CTE is what makes the port's documented ordering true rather than incidental.
     """
     await queue.enqueue(
         [
@@ -784,17 +738,13 @@ async def test_a_claim_is_ordered_even_when_its_update_stage_hash_joins(
 async def test_a_full_and_a_delta_sync_for_one_source_are_two_rows(
     queue: PostgresJobQueue,
 ) -> None:
-    """`usher.domain.jobs.JobKind.SYNC`'s whole argument.
+    """`usher.domain.jobs.JobKind.SYNC`'s whole argument, against real Postgres.
 
-    measured against real Postgres rather than reasoned from the statement: `(kind,
-    key)` is unique over the **composite** string, so `"{source}:full"` and
+    `(kind, key)` is unique over the **composite** string, so `"{source}:full"` and
     `"{source}:delta"` are two rows for the same source, never one collapsed into the
-    other.
-
-    A bare source id would coalesce a requested `full` walk into a pending `delta` one
-    and answer 202 for a walk that never happens -- this is the case that would fail if
-    the composite ever regressed to a bare id, because both requests would then dedup
-    onto one row and this count would read 1.
+    other. A bare source id would coalesce a requested `full` walk into a pending
+    `delta` one and answer 202 for a walk that never happens -- this is the case that
+    would fail if the composite ever regressed to a bare id.
     """
     source_id = uuid.uuid4()
     full = JobRequest(kind=JobKind.SYNC, key=f"{source_id}:full", priority=JobPriority.DEMAND)
@@ -808,9 +758,9 @@ async def test_a_full_and_a_delta_sync_for_one_source_are_two_rows(
 async def test_a_repeat_of_either_sync_lane_writes_zero(queue: PostgresJobQueue) -> None:
     """The other half of the same claim.
 
-    a repeat of a lane already at this priority is `_ENQUEUE`'s ordinary promote-never-
-    demote no-op, not a second row -- pressing the sync button twice for the same lane
-    must not double the queue.
+    A repeat of a lane already at this priority is `_ENQUEUE`'s ordinary
+    promote-never-demote no-op, not a second row -- pressing the sync button twice
+    for the same lane must not double the queue.
     """
     source_id = uuid.uuid4()
     full = JobRequest(kind=JobKind.SYNC, key=f"{source_id}:full", priority=JobPriority.DEMAND)

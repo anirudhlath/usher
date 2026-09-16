@@ -22,9 +22,8 @@ from usher.ports.errors import RepositoryConflict, UsherPortError
 class _DriverError(Exception):
     """Asyncpg's own exception, in the two fields `_errors.py` reads off it.
 
-    Both are read through `exc.orig.__cause__` -- SQLAlchemy wraps the driver's
-    exception and chains the original onto the wrapper -- so the fake has to be
-    two layers deep or it would pin an accessor that does not exist.
+    Both are read through `exc.orig.__cause__`, so the fake has to be two layers deep or
+    it would pin an accessor that does not exist.
     """
 
     def __init__(self, sqlstate: str | None, constraint_name: str | None = None) -> None:
@@ -61,10 +60,8 @@ def _integrity_error(constraint: str) -> IntegrityError:
 class _RecordingSession:
     """An `AsyncSession` in exactly the two members the helper touches.
 
-    Records the order it was driven in, because the ordering is the thing the
-    three copies agreed on and the thing a fourth caller could get wrong:
-    `no_autoflush` outside the SAVEPOINT, and the SAVEPOINT unwound before the
-    translation runs.
+    Records the order it was driven in: `no_autoflush` outside the SAVEPOINT, and the
+    SAVEPOINT unwound before the translation runs.
     """
 
     def __init__(self) -> None:
@@ -102,11 +99,11 @@ def _session() -> tuple[_RecordingSession, AsyncSession]:
 
 
 async def test_the_body_runs_in_a_savepoint_with_autoflush_suppressed() -> None:
-    """The order, which is what was copied three times.
+    """`no_autoflush` is outside the SAVEPOINT, not inside it.
 
-    `no_autoflush` is outside: a shared session can be carrying some other
-    call's unflushed, invalid row, and a flush of *that* inside this SAVEPOINT
-    would be reported to this caller as its own row being refused.
+    A shared session can be carrying some other call's unflushed, invalid row, and a
+    flush of *that* inside this SAVEPOINT would be reported to this caller as its own
+    row being refused.
     """
     recorded, session = _session()
 
@@ -123,11 +120,10 @@ async def test_the_body_runs_in_a_savepoint_with_autoflush_suppressed() -> None:
 
 
 async def test_a_refused_row_is_translated_and_carries_its_constraint() -> None:
-    """SQLSTATE class 23.
+    """SQLSTATE class 23 is the shape every constraint on these three tables produces.
 
-    the shape every constraint on these three tables produces, and the message is the
-    caller's rather than the helper's -- three tables refusing a row for three different
-    reasons say three different things to a service.
+    The message is the caller's rather than the helper's: three tables refusing a row
+    for three different reasons say three different things to a service.
     """
     recorded, session = _session()
     refusal = _refusal("23503", "fk_curated_rows_user_id_users")
@@ -151,14 +147,10 @@ async def test_a_refused_row_is_translated_and_carries_its_constraint() -> None:
 
 
 async def test_a_value_the_column_cannot_hold_is_translated_without_a_name() -> None:
-    """SQLSTATE class 22.
+    """SQLSTATE class 22 is a value too wide for its column, which `except IntegrityError` misses.
 
-    `curated_rows."position"` at `2**31` and `llm_calls.cost_usd` above
-    `$9,999.99999999` -- which is the pair that made `except IntegrityError` the wrong
-    clause for these three callers.
-
-    `constraint` is `None` and that is the honest answer: a column's declared
-    width refusing a value is not a named constraint firing.
+    `constraint` is `None` and that is the honest answer: a column's declared width
+    refusing a value is not a named constraint firing.
     """
     _, session = _session()
 
@@ -170,15 +162,10 @@ async def test_a_value_the_column_cannot_hold_is_translated_without_a_name() -> 
 
 
 async def test_a_plain_integrity_error_is_still_a_refusal() -> None:
-    """No SQLSTATE on the chain at all.
+    """A refusal with no SQLSTATE on the chain must still translate.
 
-    which is how a refusal arrives when any layer of the best-effort accessor is not
-    what was expected.
-
-    It must still translate: degrading to "propagate" would let an integrity
-    violation cross the port boundary raw, which is the one thing ADR-0009
-    forbids and the thing every sibling repository's `except IntegrityError`
-    already gets right.
+    Degrading to "propagate" would let an integrity violation cross the port boundary
+    raw, which is the one thing a port error exists to prevent.
     """
     _, session = _session()
 
@@ -190,15 +177,11 @@ async def test_a_plain_integrity_error_is_still_a_refusal() -> None:
 
 
 async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
-    """Class 42.
+    """Class 42, an undefined table, stands in for the faults that are not the row's.
 
-    an undefined table, standing in for the dropped connection and the statement timeout
-    that are not deterministic enough to write.
-
-    Captured rather than `pytest.raises(DBAPIError)`: under the mutation this
-    kills the helper raises `RepositoryConflict`, which is not a `DBAPIError`,
-    so `pytest.raises` would decline it and the case would fail before the
-    discriminating assertion ever ran.
+    Captured rather than `pytest.raises(DBAPIError)`: a helper that wrongly translated
+    would raise `RepositoryConflict`, which is not a `DBAPIError`, so `pytest.raises`
+    would fail the case before the discriminating assertion ran.
     """
     _, session = _session()
     raised: BaseException | None = None
@@ -245,8 +228,8 @@ def _dbapi_handlers() -> list[tuple[str, str, ast.ExceptHandler]]:
     return found
 
 
-# : Every `except DBAPIError` in the two packages that translate, named rather : than
-# counted.
+# Every `except DBAPIError` in the two packages that translate, named rather
+# than counted.
 WIDENED_SITES = frozenset(
     {
         ("_errors.py", "refusals_as_conflict"),
@@ -266,12 +249,11 @@ WIDENED_SITES = frozenset(
 
 
 def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
-    """A census, not a floor -- see `WIDENED_SITES`.
+    """`WIDENED_SITES` is a census, not a floor.
 
-    Widening a site is a decision (it changes what crosses a port boundary),
-    and so is narrowing one. Either without editing this set fails here, which
-    is what makes the count a decision rather than an observation -- the same
-    thing `PUBLISHED` does for the ledger one directory over.
+    Widening a site changes what crosses a port boundary, and so does narrowing one.
+    Either without editing this set fails here, which makes the list a decision rather
+    than an observation.
     """
     found = {(module, method) for module, method, _ in _dbapi_handlers()}
     assert found == set(WIDENED_SITES), (
@@ -281,10 +263,7 @@ def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
 
 
 def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
-    """The invariant `except DBAPIError` buys its width with.
-
-    checked once across every site instead of once per site.
-    """
+    """The invariant that buys `except DBAPIError` its width, checked across every site."""
     handlers = _dbapi_handlers()
     assert {(module, method) for module, method, _ in handlers} == set(WIDENED_SITES), (
         "the handler scan disagrees with WIDENED_SITES -- fix that census first, since "

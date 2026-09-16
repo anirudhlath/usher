@@ -481,7 +481,7 @@ def _refuse_partial_vocabulary(tags: Sequence[GenomeTag], revision: str) -> None
     constraint behind them at all: `ck_genome_tags_tag_id_in_vocabulary`
     cannot see a *gap*, and an empty `tags` is a legal `DELETE` followed by a
     legal zero-row `INSERT`. A fake that skipped them would let a caller-
-    assembly bug through every unit test in the milestone.
+    assembly bug through every unit test.
     """
     if not tags:
         raise ValueError("a genome vocabulary of no tags is not a vocabulary")

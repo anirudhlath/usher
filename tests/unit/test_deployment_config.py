@@ -205,8 +205,8 @@ def test_every_usher_variable_in_env_example_is_a_setting_or_compose_reserved() 
 def test_every_variable_compose_substitutes_is_a_setting_or_compose_reserved() -> None:
     """The same guard from `compose.yml`'s side, over the whole file.
 
-    `.env.example` and `compose.yml` are edited independently -- the M1
-    commit that introduced `USHER_HOST_PORT` touched both -- so checking one
+    `.env.example` and `compose.yml` are edited independently -- the commit
+    that introduced `USHER_HOST_PORT` touched both -- so checking one
     of them would leave the other free to reintroduce the failure.
     """
     known = _settings_variables()
@@ -280,7 +280,7 @@ def test_the_container_is_given_the_env_file_whole() -> None:
     time and compose substitutes each from `.env`; `env_file:` hands the file
     to the container. The first is why 24 of 30 documented settings were
     unreachable -- every one of them needed a line somebody had to remember
-    to write, and twelve of the missing were M5's own.
+    to write.
     """
     assert _compose_env_files() == [".env"]
 
@@ -311,10 +311,10 @@ def test_a_relative_path_setting_is_overridden_for_the_container() -> None:
     there, and a new one is a decision rather than a silent repeat.
 
     This is the check that did not exist when `bulk_data_dir` was added.
-    `image_cache_dir` got its override in M9 and `bulk_data_dir` did not, and
-    nothing related the two: the compose scan reads `${...}` substitutions and
-    neither is written that way, so a second relative writable path was
-    invisible for five milestones. It surfaced as `PermissionError(13)` from
+    `image_cache_dir` got its override and `bulk_data_dir` did not, and nothing
+    related the two: the compose scan reads `${...}` substitutions and neither
+    is written that way, so a second relative writable path was invisible. It
+    surfaced as `PermissionError(13)` from
     `adapters/bulk/download.py` on the first bootstrap the *container* ever
     ran -- every earlier one was a dev shell, where the path is correct.
 
@@ -355,7 +355,7 @@ def test_the_worker_switch_reaches_the_container() -> None:
     so an operator following the README leaves `worker: true` and then starts
     `usher work` in a second container: the double-worker state where
     `JobWorker.startup()` requeued everything `running` and each stole the
-    other's live claims. *(M9's W1 closed that consequence -- recovery is a
+    other's live claims. *(That consequence is closed -- recovery is a
     lease now -- and the setting still matters, because two workers spend
     `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` twice against
     limits that are per process.)*

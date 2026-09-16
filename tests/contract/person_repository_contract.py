@@ -60,9 +60,8 @@ class PersonHistorySeeder(ABC):
     async def stored(self, person_id: uuid.UUID) -> Person:
         """Read one stored person back.
 
-        A test affordance and deliberately **not** a port method: Task 6
-        settled that `PersonRepository` has no `get(person_id)`, because
-        nothing in M7 reads one person by id and `GET /people/{id}` is M9's.
+        A test affordance and deliberately **not** a port method: the port has
+        no `get(person_id)` to read one person by id.
         The suite still has to assert on a stored column -- `COALESCE` on
         `known_for_department` is unobservable otherwise, since
         `RecurringPerson` does not carry it -- so the read-back lives here,
@@ -92,15 +91,11 @@ class PersonRepositoryContract:
     async def test_two_people_who_share_a_name_are_two_people(
         self, repository: PersonRepository
     ) -> None:
-        """The wrong implementation this kills.
+        """Kills an implementation that dedupes by `name` rather than by `tmdb_id`.
 
-        dedupes by `name` rather than by `tmdb_id`, collapsing two directors who share
-        one.
-
-        ADR-0003 is the rule -- identity is Usher's own UUIDv7 and `tmdb_id`
-        is an indexed attribute, never identity -- and this is what it buys. A
-        name-keyed implementation returns one id here, every credit for both
-        directors hangs off one person, and the result renders as a plausible,
+        Identity is Usher's own UUIDv7 and `tmdb_id` is an indexed attribute, never
+        identity. A name-keyed implementation returns one id here, every credit for
+        both directors hangs off one person, and the result renders as a plausible,
         populated, wrong "more from this director" row.
         """
         await repository.upsert_many(
@@ -123,11 +118,9 @@ class PersonRepositoryContract:
         name is unfixable. `name` is `NOT NULL` and always supplied, so there
         is no null to preserve.
 
-        **That second half has to read the stored name back, and an earlier
-        version of this case did not.** It asserted the counts and the id
-        count only, both of which a COALESCEd `name` satisfies exactly --
-        measured, the mutation survived the whole suite. Counting rows cannot
-        see which value landed in them.
+        That half reads the stored name back: counting rows cannot see which
+        value landed in them, and a COALESCEd `name` satisfies a count assertion
+        exactly.
         """
         first = await repository.upsert_many([person(93_000_012, "Someone Invented")])
         again = await repository.upsert_many([person(93_000_012, "Someone Renamed")])
@@ -142,21 +135,18 @@ class PersonRepositoryContract:
     ) -> None:
         """The `COALESCE` rule, and here it is **required rather than defensive**.
 
-        which is the difference from `upsert_seasons`, where it guards against a later
+        That is the difference from `upsert_seasons`, where it guards against a later
         walk.
 
-        Measured against the recorded payloads: a `credits.cast[]` entry
-        carries `known_for_department` and a `created_by[]` entry does not. So
-        the same person arrives with it and without it *inside one derivation
-        pass over one series*, and an unconditional assignment blanks an
-        actor's department the moment they also created a show -- silently, on
-        a field `PeopleProvider` reads.
+        A `credits.cast[]` entry carries `known_for_department` and a `created_by[]`
+        entry does not. So the same person arrives with it and without it *inside one
+        derivation pass over one series*, and an unconditional assignment blanks an
+        actor's department the moment they also created a show -- silently, on a
+        field `PeopleProvider` reads.
 
-        Read back through the seeder rather than through a `get`, because
-        there is no `get`: nothing in M7 reads one person by id and
-        `GET /people/{id}` is M9's, and `RecurringPerson` does not carry this
-        column. A port method added only so a test could assert is the
-        liability `SearchIndex`' docstring already refuses.
+        Read back through the seeder rather than through a `get`, because there is no
+        `get` and `RecurringPerson` does not carry this column. A port method added
+        only so a test could assert is the liability `SearchIndex`' docstring refuses.
         """
         await repository.upsert_many(
             [person(93_000_013, "An Invented Creator", known_for_department="Directing")]
@@ -173,10 +163,7 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """The front matter's ranking failure.
-
-        seeded so the wrong answer is confident rather than empty.
-        """
+        """The ranking failure, seeded so the wrong answer is confident rather than empty."""
         await repository.upsert_many(
             [
                 person(93_000_020, "Three Parts One Film"),
@@ -215,9 +202,9 @@ class PersonRepositoryContract:
         """Twelve watched episodes of one series is one title, not twelve.
 
         The wrong implementation this kills: a count over rows joined from
-        `watch_states`, which -- on a library where 999,827 of 1,126,674 items
-        are episodes -- makes every series regular the household's most
-        "recurring" person by an order of magnitude.
+        `watch_states`, which -- on a mostly-television library -- makes every
+        series regular the household's most "recurring" person by an order of
+        magnitude.
 
         Seeded against a distractor that would otherwise be beaten: a person
         genuinely on two watched films. Under `count(*)` the series regular
@@ -292,8 +279,8 @@ class PersonRepositoryContract:
     ) -> None:
         """Seeds the *other* user with the larger history.
 
-        so an implementation ignoring `user_id` returns more rather than fewer -- the
-        failure that reads as working.
+        An implementation ignoring `user_id` therefore returns more rather than
+        fewer -- the failure that reads as working.
 
         This user has watched one film; the other has watched three, all
         credited to a person this user has never seen. An unscoped read
@@ -352,8 +339,8 @@ class PersonRepositoryContract:
     ) -> None:
         """PRD 06's word is *recurring*, and one appearance is not a recurrence.
 
-        The front matter's distractor for this provider is exactly this: "a person with
-        one credit, against one with four".
+        The distractor for this provider is exactly this: "a person with one credit,
+        against one with four".
 
         The one-film person is seeded **second**, so an implementation with
         `>= 1` in place of `>= min_titles` returns them in a position an
@@ -379,7 +366,7 @@ class PersonRepositoryContract:
     async def test_get_returns_the_person_and_none_for_an_unknown_id(
         self, repository: PersonRepository
     ) -> None:
-        """`GET /people/{id}` is the caller M7 said would come, and this is the read it needs.
+        """`GET /people/{id}` is the caller, and this is the read it needs.
 
         **Two people seeded, and the assertion is on the value rather than on
         truthiness.** The wrong implementation this kills is a `get` whose
@@ -424,7 +411,7 @@ class PersonRepositoryContract:
     ) -> None:
         """One derivation pass spans many titles and a working actor is on several of them.
 
-        so this is the common case rather than the odd one.
+        This is the common case rather than the odd one.
 
         Without `SELECT DISTINCT ON` the real implementation answers
         `CardinalityViolationError: ON CONFLICT DO UPDATE command cannot affect row a
@@ -442,7 +429,7 @@ class PersonRepositoryContract:
     ) -> None:
         """The partial index's other half, and the fake's easiest bug.
 
-        a dict keyed on `tmdb_id` collapses every `None` onto one entry.
+        A dict keyed on `tmdb_id` collapses every `None` onto one entry.
 
         In Postgres the property comes free from the index being *partial*.
         """
@@ -459,15 +446,15 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """**The front matter's opening failure with a person's name on it.**.
+        """Equal counts are broken by recency, then by id.
 
         Two actors at three titles each, one of them last watched a month ago
-        and the other in 2019. Without the recency key the answer is "whatever
+        and the other years back. Without the recency key the answer is "whatever
         the aggregate returned", and the row that renders is a beautifully
-        constructed shelf about a person the household was into three years
-        ago -- populated, correctly shaped, and about the wrong person.
+        constructed shelf about a person the household was into years ago --
+        populated, correctly shaped, and about the wrong person.
 
-        The 2019 person is seeded **first**, so insertion order and id order
+        The older person is seeded **first**, so insertion order and id order
         both favour the wrong answer; `count(DISTINCT title_id)` is identical
         by construction, so the count key cannot break the tie either.
         """
@@ -503,7 +490,7 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """The mirror of the case above, and the one that was missing."""
+        """The mirror of the case above."""
         await repository.upsert_many(
             [person(93_000_045, "Watched Often"), person(93_000_046, "Watched Lately")]
         )
@@ -530,8 +517,8 @@ class PersonRepositoryContract:
 
         assert [row.person_id for row in rows] == [often_id, lately_id]
         assert [row.watched_title_count for row in rows] == [5, 3]
-        # and the recency key really does point the other way, so this case
-        # cannot be satisfied by an implementation that dropped *it* instead.
+        # The recency key really does point the other way, so this case cannot
+        # be satisfied by an implementation that dropped *it* instead.
         assert rows[0].last_watched_at is not None
         assert rows[1].last_watched_at is not None
         assert rows[0].last_watched_at < rows[1].last_watched_at
@@ -542,10 +529,10 @@ class PersonRepositoryContract:
         seeder: PersonHistorySeeder,
         user_id: uuid.UUID,
     ) -> None:
-        """`watch_states.last_played_at` is nullable because a walk's listing cannot determine.
+        """`watch_states.last_played_at` is nullable, so `max(...)` can be genuinely NULL.
 
-        it (ADR-0014), so `max(...)` over a person's states is genuinely NULL on a
-        freshly-walked deployment.
+        A walk's listing cannot determine it, so a freshly-walked deployment holds
+        people whose states are all undatable.
 
         Postgres defaults a `DESC` sort to **NULLS FIRST**, which would put
         every such person above everyone the household demonstrably watched

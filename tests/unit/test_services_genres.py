@@ -1,4 +1,4 @@
-"""`GenreNormalisationService` — the write-time half ADR-0039 deferred."""
+"""`GenreNormalisationService` — the write-time half of genre normalisation."""
 
 import uuid
 from collections.abc import Sequence
@@ -26,13 +26,9 @@ def _title(name: str, *genres: str) -> Title:
 class _ScriptedStaleCount(FakeTitleEmbeddingRepository):
     """`count_stale` reading off a script.
 
-    so the *difference* the service reports is observably the repository's answer and
-    not its own arithmetic.
-
-    Subclassed rather than replaced: everything else the port declares still
-    has to be a real implementation, or the service could be passed something
-    that is not a `TitleEmbeddingRepository` at all and this case would ratify
-    it.
+    The *difference* the service reports is then observably the repository's
+    answer and not its own arithmetic. Subclassed rather than replaced so the
+    rest of the port stays a real implementation.
     """
 
     def __init__(self, counts: Sequence[int]) -> None:
@@ -76,10 +72,7 @@ async def _service(
 
 
 async def test_a_source_spelling_is_rewritten_to_the_concept_it_names() -> None:
-    """The whole point.
-
-    `Sci-Fi` is `Science Fiction` in the column, not only in the reader that expands it.
-    """
+    """`Sci-Fi` is `Science Fiction` in the column, not only in the reader that expands it."""
     titles = FakeTitleRepository()
     title = _title("The Quiet Vacuum", "Sci-Fi", "Drama")
     await titles.add(title)
@@ -112,12 +105,11 @@ async def test_a_fused_television_label_becomes_both_concepts_it_names() -> None
 
 
 async def test_a_second_run_over_the_normalised_catalog_rewrites_nothing() -> None:
-    """**The re-runnability property.
+    """Re-runnability, which is why this is not an Alembic migration.
 
-    and it is the reason this is not an Alembic migration.** `canonicalise_genres` is
-    idempotent, so a sweep that lands on an already-normalised row must count it
-    unchanged and write nothing — which is also what makes an interrupted run safe to
-    restart from the beginning rather than from a checkpoint nobody stored.
+    `canonicalise_genres` is idempotent, so a sweep landing on an
+    already-normalised row counts it unchanged and writes nothing, and an
+    interrupted run restarts from the beginning rather than a checkpoint.
     """
     titles = FakeTitleRepository()
     await titles.add(_title("The Quiet Vacuum", "Sci-Fi"))
@@ -135,11 +127,7 @@ async def test_a_second_run_over_the_normalised_catalog_rewrites_nothing() -> No
 
 
 async def test_a_dry_run_counts_what_it_would_rewrite_and_writes_nothing() -> None:
-    """The bare `usher genres` form.
-
-    which is the bargain `usher index` and `usher derive` already take: reading is safe
-    on a production box.
-    """
+    """The bare `usher genres` form — reading is safe on a production box."""
     titles = FakeTitleRepository()
     title = _title("The Quiet Vacuum", "Sci-Fi")
     await titles.add(title)
@@ -155,10 +143,7 @@ async def test_a_dry_run_counts_what_it_would_rewrite_and_writes_nothing() -> No
 
 
 async def test_the_batch_size_is_the_page_size_the_repository_is_asked_for() -> None:
-    """A single 1.27M-row `UPDATE` in one transaction is the shape this command exists not to be.
-
-    so the batch size has to reach the read.
-    """
+    """The batch size has to reach the read; a whole-catalog `UPDATE` is what this avoids."""
     titles = _CountingTitles()
     for index in range(5):
         await titles.add(_title(f"Title {index}", "Sci-Fi"))
@@ -176,8 +161,8 @@ async def test_the_batch_size_is_the_page_size_the_repository_is_asked_for() -> 
 async def test_the_cursor_advances_on_the_last_id_seen_rather_than_on_a_write() -> None:
     """`usher index --backfill`'s rule, imported rather than re-derived.
 
-    a sweep whose cursor advanced only when a page wrote something stops moving the
-    moment it reaches a page that is already normalised, and re-reads it forever.
+    A sweep whose cursor advanced only when a page wrote something stops the
+    moment it reaches an already-normalised page, and re-reads it forever.
     """
     titles = _CountingTitles()
     # Two rows already canonical and one that is not, so a cursor that only
@@ -197,8 +182,8 @@ async def test_the_cursor_advances_on_the_last_id_seen_rather_than_on_a_write() 
 async def test_the_limit_bounds_the_scan_and_the_report_carries_the_resume_cursor() -> None:
     """Bounded, and resumable *exactly* rather than only by idempotence.
 
-    an operator who stops after a bounded run continues with `--after` and pays for no
-    row twice.
+    An operator who stops after a bounded run continues with `--after` and pays
+    for no row twice.
     """
     titles = FakeTitleRepository()
     for index in range(6):
@@ -214,11 +199,7 @@ async def test_the_limit_bounds_the_scan_and_the_report_carries_the_resume_curso
 
 
 async def test_the_embeddings_staled_figure_is_the_repositorys_own_difference() -> None:
-    """Plumbing only — see the module docstring.
-
-    What is asserted is that the number comes from `count_stale` on both sides of the
-    writes, so the integration arm has something real to disagree with.
-    """
+    """The figure is `count_stale` either side of the writes, not the service's arithmetic."""
     titles = FakeTitleRepository()
     await titles.add(_title("The Quiet Vacuum", "Sci-Fi"))
     embeddings = _ScriptedStaleCount([7, 9])
@@ -233,8 +214,7 @@ async def test_the_embeddings_staled_figure_is_the_repositorys_own_difference() 
 async def test_a_title_with_no_genres_at_all_is_scanned_and_left_alone() -> None:
     """`canonicalise_genres(())` is `()`.
 
-    so an empty array is unchanged rather than rewritten to itself — which is what keeps
-    118,856 titles out of the rewritten count on the live catalog.
+    An empty array is counted unchanged rather than rewritten to itself.
     """
     titles = FakeTitleRepository()
     await titles.add(_title("The Quiet Vacuum"))

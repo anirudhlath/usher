@@ -128,9 +128,6 @@ async def test_a_malformed_titles_filter_is_a_422_that_does_not_echo_it(
     decided before `200 text/event-stream` is answered, so there is still a status code
     to carry a document.
 
-    (It read `== {"detail": …}` until M9 -- see the M5 plan's "Does a streaming surface
-    force the error envelope?" for the shape it used to have.)
-
     The detail still names the *rule* rather than the submitted value, and
     `instance` is the path with the query string dropped: `usher.api.errors`
     strips `input` from every validation error app-wide because a 422 must
@@ -188,7 +185,7 @@ async def test_a_heartbeat_keeps_an_idle_stream_open(client: httpx.AsyncClient) 
     ignore.
 
     **This case alone is not enough**, and it is worth knowing which half it
-    covers: it passed for the whole of M5 against a route that closed the
+    covers: it passed against a route that closed the
     connection immediately after this second heartbeat, because three lines
     is what a route that greets, heartbeats once and returns also produces.
     `test_a_stream_that_has_heartbeat_still_delivers_events` above is the

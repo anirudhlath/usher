@@ -119,7 +119,7 @@ class Library:
             genres=tuple(genres),
             keywords=tuple(keywords),
             # The builder's own keyword names are test-local vocabulary and
-            # stay; only the `Title` fields they feed moved. ADR-0040.
+            # stay; only the `Title` fields they feed are provider-scoped.
             tmdb_popularity=popularity,
             tmdb_vote_count=vote_count,
             runtime_minutes=runtime_minutes,
@@ -210,10 +210,10 @@ class Library:
         )
         await self.episodes.upsert_episodes([one])
         self.episode_series[one.id] = series_id
-        # **Trap 7's third fake.** `FakePersonRepository._title_of` reproduces
-        # `COALESCE(w.title_id, e.title_id)` and reads this map; without it an
-        # episode watch state reaches no credits at all, which is precisely the
-        # films-only answer `list_recurring_for_user` exists to refuse.
+        # `FakePersonRepository._title_of` reproduces `COALESCE(w.title_id,
+        # e.title_id)` and reads this map; without it an episode watch state
+        # reaches no credits at all, which is the films-only answer
+        # `list_recurring_for_user` exists to refuse.
         self.people.household.episode_titles[one.id] = series_id
         if owned:
             await self.copy(series_id, episode_id=one.id)
@@ -275,23 +275,19 @@ class Library:
         await self.watched(title_id, played=False, position_seconds=position_seconds, at=at)
 
     async def finished(self, title_id: uuid.UUID, *, at: datetime, play_count: int = 1) -> None:
-        """**The distractor, and it varies exactly one thing.**.
+        """The distractor, and it varies exactly one thing.
 
         `played = True` with the resume position *kept*, so it isolates the
-        `NOT played` half of `list_in_progress`' predicate. The plan's own
-        headline seeding sets `played` and `position_seconds = 0` together,
-        which isolates neither half -- Group E measured that and this is the
-        correction. `never_started` is the separate seed for the other half.
+        `NOT played` half of `list_in_progress`' predicate. Setting `played` and
+        `position_seconds = 0` together would isolate neither half;
+        `never_started` is the separate seed for the other one.
         """
         await self.watched(
             title_id, played=True, position_seconds=5400, play_count=play_count, at=at
         )
 
     async def never_started(self, title_id: uuid.UUID) -> None:
-        """`position_seconds = 0` with `played = False`.
-
-        the *other* half of the predicate, alone.
-        """
+        """`position_seconds = 0` with `played = False`: the other half, alone."""
         await self.watched(title_id, played=False, position_seconds=0, at=days_ago(0.5))
 
     # -- people, credits and collections -----------------------------------

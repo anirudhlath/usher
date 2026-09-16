@@ -1,7 +1,4 @@
-"""`BaseRow`'s artwork hook.
-
-the fourth read every shelf makes, and the one decision on a card that no client could
-"""
+"""`BaseRow`'s artwork hook: the fourth read every shelf makes."""
 
 import uuid
 from collections.abc import Sequence
@@ -60,14 +57,11 @@ class _Shelf(BaseRow):
 
 
 async def test_the_hint_decides_the_kind_and_a_poster_is_not_a_backdrop() -> None:
-    """**The headline.
+    """The hint picks the artwork kind: two shelves differing in nothing else.
 
-    and the one wrong implementation a shelf cannot show you.** One title, both kinds of
-    artwork, two shelves over it that differ in nothing but `display_hint`.
-
-    Under the swap both rows still carry an id for the card, both render, and
-    the only symptom is a 16:9 image in a 2:3 slot -- which is why the premise
-    is asserted: with `poster_id == backdrop_id` the case would pass against
+    Under a swapped mapping both rows still carry an id for the card, both
+    render, and the only symptom is a 16:9 image in a 2:3 slot. The premise is
+    asserted because with `poster_id == backdrop_id` the case would pass against
     any implementation at all, including one that answers a constant.
     """
     library = Library()
@@ -99,14 +93,11 @@ async def test_every_hint_in_the_vocabulary_takes_the_kind_it_was_given(
 ) -> None:
     """All four members, and two of them have no emitter in `services/rows/`.
 
-    `wide` and `square` are in ADR-0006's vocabulary and no provider returns
-    either today, so a mapping derived from what the providers happen to use
-    would be complete-looking and would `KeyError` on the first row that used
-    one. Parametrised over the *enum* rather than over the providers.
-
-    Each arm seeds the **other** kind as well, so an implementation ignoring
-    `kind` entirely answers the wrong id rather than `None` -- a `None` here
-    would be indistinguishable from a title with no artwork.
+    No provider returns `wide` or `square` today, so a mapping derived from what
+    the providers happen to use would look complete and would `KeyError` on the
+    first row that used one -- hence parametrised over the enum. Each arm seeds
+    the other kind as well, so an implementation ignoring `kind` answers the
+    wrong id rather than the `None` a title with no artwork would give.
     """
     library = Library()
     title_id = await library.title("A Film With Both")
@@ -124,9 +115,7 @@ async def test_every_hint_in_the_vocabulary_takes_the_kind_it_was_given(
 
 
 def test_the_hint_to_kind_mapping_is_total_over_the_vocabulary() -> None:
-    """`DisplayHint` is closed at four and `ARTWORK_FOR_HINT` has to stay in step with it.
-
-    which is a fact about two vocabularies rather than about any row.
+    """`ARTWORK_FOR_HINT` covers every member of `DisplayHint`.
 
     The behavioural case above covers today's four; this one fails the day a
     fifth hint is added without a kind, which is a `KeyError` inside `hydrate`
@@ -138,7 +127,7 @@ def test_the_hint_to_kind_mapping_is_total_over_the_vocabulary() -> None:
 
 
 async def test_a_title_with_no_artwork_carries_none_beside_cards_that_have_some() -> None:
-    """**The `None` arm, on a shelf where it is not the only answer.**.
+    """The `None` arm, on a shelf where it is not the only answer.
 
     A catalog that has never been derived has no artwork at all, so a case
     seeding nothing would pass against an implementation that never reads
@@ -159,16 +148,12 @@ async def test_a_title_with_no_artwork_carries_none_beside_cards_that_have_some(
 
 
 async def test_a_title_whose_only_artwork_is_a_logo_carries_none() -> None:
-    """ADR-0032's SVG ruling, as the state it makes unreachable.
+    """A card is never handed a logo, because the `kind` filter says so.
 
-    The proxy refuses `image/svg+xml` -- measured, the CDN ignores the ladder
-    entirely for it -- and TMDb publishes some logos as `.svg`. A card is never
-    handed one, because a card paints a poster or a backdrop and the `kind`
-    filter is what says so. So *"no logo"* and *"a logo we will not serve"* are
-    the same card, and there is no discriminator field to tell them apart.
-
-    Kills a hook that reads `list_for_title` and takes the first row, which is
-    the obvious implementation and which hands a logo to a portrait shelf.
+    The proxy refuses `image/svg+xml` and TMDb publishes some logos as `.svg`, so
+    "no logo" and "a logo we will not serve" would be the same card with no
+    discriminator to tell them apart. Kills a hook that reads `list_for_title`
+    and takes the first row, which hands a logo to a portrait shelf.
     """
     library = Library()
     title_id = await library.title("A Film With Only A Logo")
@@ -181,25 +166,16 @@ async def test_a_title_whose_only_artwork_is_a_logo_carries_none() -> None:
 
 
 async def test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none() -> None:
-    """The state the case above says a `kind` filter makes unreachable.
+    """A poster the proxy will not serve reads as no poster at all.
 
-    and which nothing in this code actually excludes.
-
-    *"A card is never handed a logo"* is true and is not the whole claim. That
-    a **poster** is never published as `.svg` is an empirical property of the
-    provider today, not a guarantee: `images_from_payload` records whatever
-    `provider_path` the payload carried, for every kind, and servability is
-    otherwise only decided at serve time from a fetched `Content-Type`. So
-    this shelf read filters on `is_servable_path` exactly as
-    `GET /titles/{id}`'s `images` key does -- **two reads of one table
-    disagreeing about what is servable is the drift that predicate exists as
-    one definition to prevent.**
-
-    The degradation is the assertion: `primary_for_titles` has already chosen,
-    so this title's *second* poster is not fallen through to and the card
-    carries `None`. Deliberate, and it is why a card must not carry a
-    discriminator instead -- "no poster" and "a poster we will not serve" are
-    the same render, and both are the one a client wants.
+    That a poster is never published as `.svg` is a property of the provider
+    today, not a guarantee: `images_from_payload` records whatever
+    `provider_path` the payload carried, for every kind. So this shelf read
+    filters on `is_servable_path` exactly as `GET /titles/{id}`'s `images` key
+    does -- two reads of one table disagreeing about what is servable is the
+    drift that predicate exists as one definition to prevent. The degradation is
+    the assertion: `primary_for_titles` has already chosen, so the title's second
+    poster is not fallen through to and the card carries `None`.
     """
     library = Library()
     title_id = await library.title("A Film With An SVG Poster")
@@ -223,16 +199,14 @@ async def test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none() -> No
 async def test_the_flagged_image_wins_over_the_one_that_was_seen_first() -> None:
     """`(is_primary DESC, id)`, and the fixture is arranged so `ORDER BY id` disagrees.
 
-    `Image.id` is a UUIDv7, so first-sighting order *is* id order, and a
-    fixture seeding the flagged image first would be satisfied by an
-    implementation that ignored the flag entirely -- the trap `CLAUDE.md` names
-    and which cost M7 five untested orderings. The unflagged image is seeded
-    first and the premise says so in terms of the ids themselves.
+    `Image.id` is a UUIDv7, so first-sighting order *is* id order, and a fixture
+    seeding the flagged image first would be satisfied by an implementation that
+    ignored the flag entirely. The unflagged image is seeded first and the
+    premise says so in terms of the ids themselves.
 
-    `m09c` carries no `sort_order` column, deliberately, so which image is
-    primary is the *only* thing a provider re-ranking its posters can move in
-    Usher's answer. That makes this the whole of the ordering contract a card
-    depends on.
+    There is no `sort_order` column, deliberately, so which image is primary is
+    the only thing a provider re-ranking its posters can move in Usher's answer.
+    That makes this the whole of the ordering contract a card depends on.
     """
     library = Library()
     title_id = await library.title("A Film With Two Posters")
@@ -248,16 +222,12 @@ async def test_the_flagged_image_wins_over_the_one_that_was_seen_first() -> None
 
 
 async def test_a_whole_shelf_costs_one_artwork_read_whatever_its_length() -> None:
-    """**Counted, not timed**.
+    """Counted, not timed: a timing assertion here would only time the fake.
 
-    a timing assertion against an in-memory dict measures the dict (`rows-and-
-    genome.md`'s four-reads finding).
-
-    Asserted **equal** at two lengths rather than `== 1` once: `== 1` is also
-    what an implementation answering the first title only produces, and two
-    lengths giving one number is the claim that the cost does not scale. The
-    premise is that the long shelf really did paint every card, so the equality
-    is not bought by a shelf that hydrated nothing.
+    Asserted equal at two shelf lengths rather than `== 1` once, because `== 1`
+    is also what an implementation answering the first title only produces, and
+    two lengths giving one number is the claim that the cost does not scale. The
+    premise is that the long shelf really did paint every card.
     """
     library = Library()
     one = [await library.title("A Film On Its Own")]
@@ -282,17 +252,13 @@ async def test_a_whole_shelf_costs_one_artwork_read_whatever_its_length() -> Non
 
 
 async def test_a_composed_screen_costs_one_artwork_read_per_shelf_and_no_more() -> None:
-    """**`+1 per shelf`, counted against fakes rather than timed**.
+    """One artwork read per shelf, counted against fakes rather than timed.
 
-    the honest unit for this task's cost, because the home path's p95 is a property of
-    the household and not of the composer (the 5,200-copy and 1,277,878-copy figures
-    differ by 30x, `rows-and-genome.md`).
-
-    Asserted **equal to the number of shelves the composer actually built**,
-    derived from the screen rather than written as a literal, so the case says
-    "one per shelf" rather than "some number I measured once". A row the
-    composer proposed and did not build costs nothing, and a row that built
-    empty costs nothing -- both of which a literal would hide.
+    The expected count is derived from the shelves the composer actually built
+    rather than written as a literal, so the case says "one per shelf" rather
+    than naming a number. A row the composer proposed and did not build costs
+    nothing, and a row that built empty costs nothing -- both of which a literal
+    would hide.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))
@@ -310,13 +276,12 @@ async def test_a_composed_screen_costs_one_artwork_read_per_shelf_and_no_more() 
 
 
 async def test_a_shelf_with_no_titles_reads_no_artwork_at_all() -> None:
-    """`hydrate` returns `()` before it asks anything, and the composer drops empty rows.
+    """`hydrate` returns `()` before it asks anything when the shelf is empty.
 
-    so a fourth port call made anyway would be one statement per *dropped* shelf, on
-    every screen, for a row nobody sees.
-
-    The premise is the second half: the same fixture with one id, and the read
-    appears. Without it `0 == 0` is also what an implementation that never
+    The composer drops empty rows, so a port call made anyway would be one
+    statement per dropped shelf, on every screen, for a row nobody sees. The
+    premise is the second half: the same fixture with one id, and the read
+    appears -- without it `0 == 0` is also what an implementation that never
     reads artwork produces.
     """
     library = Library()

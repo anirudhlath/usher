@@ -22,19 +22,13 @@ def _affinity(genre: str, *, lift: float, support: int) -> GenreAffinity:
 
 
 async def test_the_affinity_row_is_about_lift_and_not_about_volume() -> None:
-    """**Six engaged westerns at lift 4.4 against forty engaged dramas at lift 1.6**.
+    """Lift orders the rows; support does not.
 
-    handed over in Task 23's own lift order.
-
-    The wrong implementation re-ranks by `support`, which is the count of
-    titles -- volume -- and it produces a populated, hydrated, plausibly
-    labelled Drama row first. Nothing about either row's shape distinguishes
-    them; only the order does, so the assertion is on the proposed rows' slugs
-    *in sequence* and the drama row is asserted not to be first rather than
-    asserted absent (it is a real affinity and belongs on the screen).
-
-    The fixture is what makes it non-vacuous: drama has **six times** western's
-    support, so a support ranking is not a coin flip.
+    The wrong implementation re-ranks by `support` -- the count of titles -- and
+    produces a populated, hydrated, plausibly labelled Drama row first. Nothing about
+    either row's shape distinguishes them, so the assertion is on the proposed rows'
+    slugs *in sequence*, and the drama row is asserted not to be first rather than
+    absent, because it is a real affinity and belongs on the screen.
     """
     library = Library()
     for index in range(6):
@@ -56,11 +50,11 @@ async def test_the_affinity_row_is_about_lift_and_not_about_volume() -> None:
 
 
 async def test_the_reason_claims_lift_rather_than_volume() -> None:
-    """`reason` is written to be spoken (PRD 06's Alfred section).
+    """`reason` is generated from the computation and written to be spoken.
 
-    and this sentence is *generated from the computation*: it says the household watches
-    more of this genre than their library would predict, which is what lift means and
-    what a volume ranking would make false on every household at once.
+    It says the household watches more of this genre than their library would predict,
+    which is what lift means and what a volume ranking would make false on every
+    household at once.
     """
     library = Library()
     for index in range(4):
@@ -77,19 +71,13 @@ async def test_the_reason_claims_lift_rather_than_volume() -> None:
 
 
 async def test_the_cards_are_owned_and_unwatched_with_the_best_first() -> None:
-    """Two distractors.
+    """Two distractors, each varying **one** thing.
 
-    each varying **one** thing, and each seeded as the *best* match in the catalog so it
-    is `cards[0]` under the implementation that forgets it.
-
-    - An unowned horror at the highest popularity in the library. A "you love
-      horror" shelf of films nobody can play looks perfect and does nothing.
-    - An owned horror the household already finished, at the second-highest.
-      The row exists to offer something *new*; a shelf of the four westerns
-      they already watched is circular.
-
-    A membership assertion on the survivor passes with both of them sitting
-    above it.
+    Each is seeded as the *best* match in the catalog, so it is `cards[0]` under the
+    implementation that forgets it: an unowned horror at the highest popularity, a
+    shelf of films nobody can play; and an owned horror the household already
+    finished, where the row exists to offer something *new*. A membership assertion
+    on the survivor passes with both of them sitting above it.
     """
     library = Library()
     unowned = await library.title("Unowned Best", genres=("Horror",), popularity=99.0, owned=False)
@@ -109,13 +97,11 @@ async def test_the_cards_are_owned_and_unwatched_with_the_best_first() -> None:
 
 
 async def test_a_series_watched_only_through_its_episodes_is_not_offered_again() -> None:
-    """**Trap 7 in the unwatched filter.** An episode's watch state carries `title_id IS NULL`.
+    """An episode's watch state carries `title_id IS NULL`.
 
-    so a "has the household seen this" check keyed on `watch_states.title_id` answers
-    films only -- and every series the household is partway through comes back as
-    something new, in a row headed "you watch a lot more Horror".
-
-    The distractor is a *film* the household finished, so a films-only
+    A "has the household seen this" check keyed on `watch_states.title_id` answers
+    films only, so every series the household is partway through comes back as
+    something new. The distractor is a *film* the household finished, so a films-only
     implementation still drops something and still looks like it is filtering.
     """
     library = Library()
@@ -136,21 +122,12 @@ async def test_a_series_watched_only_through_its_episodes_is_not_offered_again()
 
 
 async def test_a_genre_whose_owned_titles_are_all_watched_builds_empty() -> None:
-    """The row is **proposed**.
+    """The row is **proposed** -- the affinity is real -- and then builds with no cards.
 
-    the affinity is real and the claim is true -- and builds with no cards, so
-    `HomeService` drops it (PRD 06: *"drops any that build empty"*).
-
-    Fails the implementation that pads with watched titles to avoid an empty
-    row, which is the popular-titles fallback scoped to one genre. It is also
-    why this provider's `propose` reads nothing: proposing on the affinity
-    alone and reading cards in `build` is what keeps "this row had nothing to
-    show" a different state from "this row was never proposed".
-
-    Note the plan's own table says this provider *"returns nothing when ...
-    every card would be a title already watched"*, which contradicts the case
-    it specifies two paragraphs later. The case wins; the table is recorded as
-    wrong.
+    `HomeService` drops it (PRD 06: *"drops any that build empty"*). This fails the
+    implementation that pads with watched titles to avoid an empty row, which is the
+    popular-titles fallback scoped to one genre, and it is why `propose` reads nothing:
+    "had nothing to show" stays a different state from "was never proposed".
     """
     library = Library()
     for index in range(4):
@@ -169,10 +146,10 @@ async def test_a_genre_whose_owned_titles_are_all_watched_builds_empty() -> None
 async def test_no_more_than_three_affinity_rows_are_proposed() -> None:
     """PRD 06 says 1-3 rows.
 
-    Task 23's `_MAX_AFFINITY_ROWS` bounds the affinities; this pins that the provider
-    does not then emit one row per *card set* or re-expand them -- and it is written
-    against a context carrying five, because a provider that trusted its input would be
-    correct only for as long as the other cap holds.
+    `_MAX_AFFINITY_ROWS` bounds the affinities; this pins that the provider does not
+    then emit one row per *card set* or re-expand them, and it is written against a
+    context carrying five because a provider that trusted its input would be correct
+    only for as long as the other cap holds.
     """
     library = Library()
     genres = ("Horror", "Western", "Musical", "Noir", "Documentary")
@@ -197,9 +174,7 @@ async def test_no_more_than_three_affinity_rows_are_proposed() -> None:
 
 
 async def test_a_household_with_no_affinities_proposes_nothing() -> None:
-    """No genre cleared Task 23's lift and support floors.
-
-    which is the common answer and is a real one.
+    """No genre cleared the lift and support floors, which is a common and real answer.
 
     **Never "the library's most common genres"**, which is the popular-titles fallback
     wearing a taste row's title -- so the library here is deliberately full and
@@ -244,18 +219,12 @@ async def test_a_bigger_lift_outscores_a_smaller_one_and_then_saturates() -> Non
 
 
 async def test_the_provider_returns_the_same_rows_with_and_without_a_centroid() -> None:
-    """**The reason this provider exists in this shape.** PRD 06 fires it on *"taste centroid.
+    """The row fires from `affinities`, never from a taste centroid.
 
-    concentrated in a genre"*; implemented literally it makes the most broadly-useful
-    provider the one that never fires, because the embedder is optional and off by
-    default (ADR-0022).
-
-    Task 23 corrected that, and this is the provider-level half of the same
-    assertion: the row fires from `affinities` -- counts over `titles.genres`,
-    which need no embedder -- and there is no centroid on the context for it to
-    reach. Kills an "improvement" that reaches for `TasteService.centroid()`
-    here, which would silently disable the row on most deployments and raise
-    nothing anywhere.
+    Counts over `titles.genres` need no embedder, and the embedder is optional and off
+    by default, so an "improvement" that reached for `TasteService.centroid()` would
+    silently disable the most broadly-useful row on most deployments and raise nothing
+    anywhere. There is no centroid on the context for it to reach.
     """
     library = Library()
     for index in range(4):
@@ -268,9 +237,8 @@ async def test_the_provider_returns_the_same_rows_with_and_without_a_centroid() 
     assert [row.row.slug for row in proposed] == ["genre-affinity-western"]
     assert built.cards
 
-    # **The structural half, which is now the whole of it.** This case used to compose
-    # twice -- once with a real `Centroid` on the context and once with `None` -- and
-    # assert the two agreed.
+    # The structural half: `RowContext` carries no taste centroid at all, so the
+    # provider has nothing to reach for.
     annotations = inspect.get_annotations(RowContext)
     assert annotations, "the annotation scan found nothing, so it proves nothing"
     assert "taste" not in annotations

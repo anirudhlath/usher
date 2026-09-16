@@ -45,7 +45,7 @@ async def test_every_case_gets_a_ranking_even_when_nothing_came_back() -> None:
 async def test_the_ranking_order_is_the_index_order() -> None:
     """`suggest` is not re-ranked by the service (both tiers order their own answer).
 
-    so the eval must not reorder it either -- MRR is the metric that would silently
+    So the eval must not reorder it either -- MRR is the metric that would silently
     change if it did.
     """
     case = _case("Alien", "Alein")
@@ -55,7 +55,7 @@ async def test_the_ranking_order_is_the_index_order() -> None:
 
 
 async def test_the_probe_is_what_reaches_the_index_not_the_name() -> None:
-    """The whole measurement is that a *misspelt* prefix still finds the title.
+    """A *misspelt* prefix, not the correct name, is what reaches the index.
 
     An eval that sent the correct name would score ~1.0 on any index and prove nothing.
     """
@@ -78,11 +78,9 @@ async def test_the_relevant_map_is_one_entry_per_case() -> None:
 
 
 async def test_strata_split_by_band_and_by_typo_class_and_never_average_them() -> None:
-    """ADR-0031 ships two tiers with very different profiles and ADR-0002 measured 0.0% on one.
+    """Bands and typo classes have profiles far enough apart that a mean describes neither.
 
-    typo class against 95%+ on a long band.
-
-    A mean over either dimension describes neither.
+    Each case lands in an overall stratum plus one per dimension, never a blend.
     """
     cases = (
         _case("Up", "Uq", band="2-4", klass="substitution"),

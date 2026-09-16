@@ -38,9 +38,8 @@ def _settings() -> Settings:
 
 #: A key an operator could plausibly have made with the command this project
 #: documents, chosen so that it is a **legal environment variable name**: 64
-#: lowercase hex characters beginning with a letter, which is 6/16 = 37.5% of
-#: `openssl rand -hex 32`'s output space (measured over 100,000 samples:
-#: 37.6%). It is the case a grammar check alone cannot see.
+#: lowercase hex characters beginning with a letter. It is the case a grammar
+#: check alone cannot see.
 HEX_KEY_THAT_IS_A_LEGAL_NAME = "f72e4ec32beea584456a" + "a" * 44
 
 #: A key that is *not* a legal name: `openssl rand -base64 32`'s alphabet
@@ -52,12 +51,9 @@ BASE64_KEY = "aB3/xY+9zQ7wE1rT2uI5oP8kL0jH6gF4dS2aZ1xC3v=="
 def _merged(argv: list[str]) -> tuple[object, str]:
     """Run `main` and return its exit code beside **everything an operator sees**.
 
-    stdout, stderr and the `SystemExit` string, concatenated.
-
-    The three together, because the leak this file's security cases are about
-    was found on the merged stream -- argparse writes its refusals to stderr
-    and this command writes its own to `SystemExit`, so a case reading only
-    one of them can watch a key go past on the other.
+    Stdout, stderr and the `SystemExit` string, concatenated: argparse writes its
+    refusals to stderr and this command writes its own to `SystemExit`, so a case
+    reading only one of them can watch a key go past on the other.
     """
     out, err = io.StringIO(), io.StringIO()
     code: object = 0
@@ -79,11 +75,8 @@ def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
     exiting. `--new-key-env` names the variable instead, so the value is never
     a token argparse sees.
 
-    ⚠️ **This case asserts a *shape*, and a shape assertion is exactly what the
-    2026-08-26 abbreviation defect satisfied**: `--new-key <the key>` bound to
-    `new_key_env`, so the namespace was this dict with the wrong value in the
-    right field. It is kept because the surface is worth pinning, and the cases
-    below it are the ones with teeth.
+    This case asserts a *shape*, which an abbreviation binding `--new-key <the key>`
+    to `new_key_env` would also satisfy; the cases below it are the ones with teeth.
     """
     args = parse_args(["rotate-secret", "--new-key-env", VAR])
 
@@ -99,7 +92,7 @@ def test_rotate_secret_takes_a_variable_name_and_never_a_key() -> None:
 def test_a_key_passed_as_new_key_is_refused_and_never_appears_anywhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """🔴 **The 2026-08-26 defect, and it was a silent success.**."""
+    """`--new-key` is a tripwire: it must refuse, never quietly succeed."""
     configured(monkeypatch)
     argv = ["rotate-secret", "--new-key", NEW_KEY]
     assert NEW_KEY in argv, "the premise: the key really is in this invocation"
@@ -146,9 +139,8 @@ def test_a_key_given_to_the_variable_flag_itself_is_refused_without_being_echoed
 ) -> None:
     """The half `allow_abbrev=False` does not reach.
 
-    the operator uses the **right** flag and passes the key to it.
-
-    Two premises, and the second is the whole reason this case exists.
+    The operator uses the **right** flag and passes the key to it. Two premises, and
+    the second is the whole reason this case exists.
     """
     configured(monkeypatch)
     # Premise 1: this really is a legal environment variable name, so the
@@ -211,11 +203,11 @@ def test_an_unrecognised_argument_names_its_value_on_every_command_except_this_o
 def test_prefix_matching_is_off_for_this_command_and_on_for_every_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The blast radius of `allow_abbrev=False`, pinned rather than asserted in a comment.
+    """The blast radius of `allow_abbrev=False`, pinned rather than left to a comment.
 
-    It is set on this subparser only -- measured, because a subparser does
-    **not** inherit it from the parser that created it -- so exactly three
-    option strings lose prefix matching and nineteen other commands keep it.
+    It is set on this subparser only -- a subparser does **not** inherit it from the
+    parser that created it -- so exactly three option strings lose prefix matching and
+    nineteen other commands keep it.
     """
     configured(monkeypatch)
 
@@ -271,8 +263,8 @@ def test_the_key_itself_is_absent_from_argv_and_from_the_parsed_namespace(
 def test_the_variable_name_is_required() -> None:
     """No default, because this command rewrites every stored credential in the deployment.
 
-    a bare `usher rotate-secret` must not pick up a variable left over in the shell from
-    a previous run.
+    A bare `usher rotate-secret` must not pick up a variable left over in the shell
+    from a previous run.
     """
     with pytest.raises(SystemExit) as exit_info:
         build_parser().parse_args(["rotate-secret"])
@@ -284,7 +276,7 @@ def test_rotate_secret_dispatches_to_rotate_and_not_to_the_server(
 ) -> None:
     """The argument is asserted as well as the call.
 
-    and here that is a security assertion rather than only a wiring one: what crosses
+    Here that is a security assertion rather than only a wiring one: what crosses
     `_dispatch` is the **variable name**, so a frame summary of this call site cannot
     print a key.
     """
@@ -302,7 +294,7 @@ def test_an_unset_variable_is_a_sentence_naming_it_rather_than_a_traceback(
 ) -> None:
     """The commonest way to get this wrong is to forget the `export`.
 
-    and the message has to be the fix rather than a `KeyError`.
+    The message has to be the fix rather than a `KeyError`.
     """
     monkeypatch.delenv(VAR, raising=False)
 
@@ -316,15 +308,12 @@ def test_an_unset_variable_is_a_sentence_naming_it_rather_than_a_traceback(
 
 
 def test_an_empty_variable_is_refused_the_same_way(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`export USHER_NEW_SECRET_KEY=` is set-and-empty.
+    """`export USHER_NEW_SECRET_KEY=` is set-and-empty, which `os.environ.get` reads as `""`.
 
-    which `os.environ.get` answers with `""` rather than `None`.
-
-    `Settings` has a validator for exactly this shape one namespace over
-    (*"not set" is not "set to the empty string"*), and an empty key here
-    would otherwise reach pydantic as a `min_length` failure -- a correct
-    refusal with a message about characters, for an operator whose real
-    mistake was a truncated shell variable.
+    `Settings` has a validator for exactly this shape one namespace over, and an empty
+    key here would otherwise reach pydantic as a `min_length` failure -- a correct
+    refusal with a message about characters, for an operator whose real mistake was a
+    truncated shell variable.
     """
     monkeypatch.setenv(VAR, "")
 
@@ -337,14 +326,12 @@ def test_an_empty_variable_is_refused_the_same_way(monkeypatch: pytest.MonkeyPat
 def test_a_key_shorter_than_settings_would_accept_is_refused_without_printing_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rotation to a key `Settings` would refuse is a rotation that bricks the next start.
+    """A rotation to a key `Settings` would refuse is one that bricks the next start.
 
-    so the refusal has to arrive here rather than from pydantic at the next boot with
-    every credential already re-encrypted.
-
-    The premise is that the short value really was read: a `_new_secret_key`
-    that ignored the environment would refuse this for the *absent-variable*
-    reason and pass a naive assertion on `SystemExit` alone.
+    The refusal has to arrive here rather than from pydantic at the next boot with
+    every credential already re-encrypted. The premise is that the short value really
+    was read: a `_new_secret_key` that ignored the environment would refuse this for
+    the *absent-variable* reason and pass a naive assertion on `SystemExit` alone.
     """
     short = "too-short-to-be-a-key"
     monkeypatch.setenv(VAR, short)
@@ -365,8 +352,8 @@ def test_the_documented_placeholder_is_refused_even_though_it_is_long_enough(
 ) -> None:
     """`min_length` is not the whole of `Settings.secret_key`'s rules.
 
-    and the placeholder is the half a length check cannot see: it is exactly 32
-    characters, so this case is about `_reject_placeholder_secret_key` and nothing else.
+    The placeholder is the half a length check cannot see: it is exactly 32 characters,
+    so this case is about `_reject_placeholder_secret_key` and nothing else.
     """
     monkeypatch.setenv(VAR, PLACEHOLDER)
     assert len(PLACEHOLDER) >= 32, "the premise: min_length alone would accept this"
@@ -403,7 +390,8 @@ def test_the_report_prints_three_counts_and_names_every_refused_ref(
 ) -> None:
     """No cap on the refused list, unlike `_print_restore_report`'s `_REFUSALS_NAMED`.
 
-    a restore can refuse 14,166 rows and this table holds one row per configured source.
+    A restore can refuse many thousands of rows; this table holds one row per
+    configured source.
     """
     report = RotationReport(rotated=("ref-a",), already=("ref-b", "ref-c"), refused=("ref-d",))
 
@@ -440,21 +428,11 @@ def test_a_run_that_rotated_nothing_does_not_tell_anyone_to_restart(
 
 
 def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`_sync`'s and `_restore`'s precedent.
+    """`_sync`'s and `_restore`'s precedent: refused refs on stdout, failure in the code.
 
-    the refused refs are on stdout for a human, and cron, CI and a systemd unit read the
-    exit code.
-
-    ⚠️ **The fixture rotates a row as well as refusing one, and that is
-    load-bearing since M10's K8.** It refused a single row out of a single row
-    until then, which is the *saturated* count — and `_rotation_refusal` now
-    reads that as *"the old key is wrong"* and deliberately does not say
-    "re-entered". This case is about the **exit code**, which is non-zero on
-    both arms, so it keeps its subject and its assertion by naming a report
-    only the partial arm can produce.
-    `test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_
-    credentials` asserts the exit code on the other arm, so nothing this case
-    used to cover is now uncovered.
+    Cron, CI and a systemd unit read the exit code. The fixture rotates a row as well
+    as refusing one, which is load-bearing: a run that refused *every* row gets a
+    different diagnosis, so this case names a report only the partial arm produces.
     """
     configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
@@ -476,7 +454,7 @@ def test_a_refused_row_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_run_with_nothing_refused_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """The control for the case above.
 
-    and the one that would catch a command that exits non-zero on every run.
+    It is the one that would catch a command that exits non-zero on every run.
     """
     configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
@@ -517,22 +495,15 @@ class _SessionContext:
 def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """K8's drill measured the state this message is for.
-
-    and measured that the message was wrong in it.
+    """A run that refused every row means the old key is wrong, not the credentials.
 
     With `USHER_SECRET_KEY` already changed to the new key -- the `.env`-first
     mistake, and the likeliest operator error this command has -- `cli._rotate`
-    builds `old_cipher` from that same key, both ciphers are one cipher, and
-    every row still on the previous key opens under neither. The rows are
-    **intact**; the run wrote nothing.
-
-    Today's sentence tells that operator their credentials *"must be
-    re-entered"*, and an operator who obeys it re-types every credential in the
-    deployment for a problem they do not have. So the saturated count gets its
-    own diagnosis: a counter whose saturation implies a different cause than
-    its partial values needs the saturated case named, or the message written
-    for the partial case is the one that gets acted on.
+    builds `old_cipher` from that same key, both ciphers are one cipher, and every
+    row still on the previous key opens under neither. The rows are **intact** and
+    the run wrote nothing, so a message saying credentials *"must be re-entered"*
+    would have an operator re-type every credential in the deployment for a problem
+    they do not have.
     """
     configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)
@@ -554,7 +525,7 @@ def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials
     # damage: an operator reading "refused" as "corrupt" re-types everything.
     assert "nothing was written" in message.lower()
     assert "no credential was lost" in message.lower()
-    # 🔴 And it must NOT advise the destructive recovery. This is the whole
+    # And it must NOT advise the destructive recovery. This is the whole
     # point of splitting the two diagnoses.
     assert "re-entered" not in message
     assert "re-register" not in message
@@ -564,14 +535,10 @@ def test_a_run_that_refused_every_row_blames_the_old_key_and_not_the_credentials
 def test_a_run_that_refused_only_some_rows_still_says_to_re_register_those(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control.
+    """The control, and what keeps the case above about the *saturated* count.
 
-    and it is what keeps the case above a statement about the *saturated* count rather
-    than about the message being removed.
-
-    A run that rotated some rows and refused others proves the old key was
-    right, so a row it could not open really is unreadable and really does have
-    to be re-entered. Today's sentence is correct here and is kept verbatim.
+    A run that rotated some rows and refused others proves the old key was right, so a
+    row it could not open really is unreadable and really does have to be re-entered.
     """
     configured(monkeypatch)
     monkeypatch.setenv(VAR, NEW_KEY)

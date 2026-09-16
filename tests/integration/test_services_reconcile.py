@@ -1,6 +1,6 @@
 """`ReconcileService` against real Postgres.
 
-for the one thing the fakes cannot say about a refused sweep: whether the session
+For the things the fakes cannot say: a refused sweep, and the sweep's own SQL.
 """
 
 from collections.abc import AsyncIterator, Iterator
@@ -171,14 +171,11 @@ def _fraction_points(reader: InMemoryMetricReader, *, outcome: str) -> list[tupl
     records happened: a metric published twice per walk and a metric published
     once are indistinguishable from a lookup that returns the first match.
 
-    And the **label travels with the value**, because a sweep measured 2026-08-19
-    found that nothing in the repository asserted it: planting
-    `{"source": str(run.source_id)}` in place of the source's name survived the
-    whole of `tests/unit` and every reconcile case. `_sweep` takes `source_name`
-    as a parameter for exactly one reason -- `usher.sync.run.duration` beside it
-    is labelled by name, and ADR-0043 §2 refuses a second per-source identity in
-    telemetry -- so a mutation that puts the id on the wire is the ADR violation
-    that argument exists to prevent, and it was invisible.
+    And the **label travels with the value**: planting
+    `{"source": str(run.source_id)}` in place of the source's name is invisible
+    everywhere else. `_sweep` takes `source_name` for one reason -- the run duration
+    beside it is labelled by name, and a second per-source identity in telemetry is
+    exactly what that argument exists to prevent.
     """
     data = reader.get_metrics_data()
     found: list[tuple[str, float]] = []
@@ -247,7 +244,7 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
     assert swept == [("Reconcile Source", 0.0)], (
         "a full walk that retracted nothing must still record the series, "
         "under the source's name -- otherwise silence means both 'shed "
-        "nothing' and 'never ran', and ADR-0043 §2's one identity becomes two"
+        "nothing' and 'never ran', and one source identity reads as two"
     )
 
     # Now approach the ceiling: 9 of 10 gone is 0.9 against the 0.25 default.
@@ -415,7 +412,7 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
     source: Source,
     adapter: _Adapter,
 ) -> None:
-    """M10 S6, and the reason the ceiling may not let its run complete."""
+    """The gap ceiling stops the walk, and its run may not be recorded complete."""
     service = _service(session, runs, media_items, batch_size=30)
     adapter.items["seed"] = _item("seed")
     completed = await service.reconcile(source, SyncRunKind.FULL, adapter)  # type: ignore[arg-type]
@@ -479,12 +476,11 @@ async def test_a_delta_that_hits_its_ceiling_records_failed_so_the_next_delta_do
 
 
 def test_the_service_is_constructed_from_ports_only() -> None:
-    """ADR-0009, restated where the concrete repositories are in scope.
+    """The layering rule, restated where the concrete repositories are in scope.
 
-    this file wires `ReconcileService` entirely out of `Postgres*` classes and the
-    service itself imports none of them.
-
-    `import-linter` enforces the module graph; this is the assembly actually running.
+    This file wires `ReconcileService` entirely out of `Postgres*` classes and the
+    service itself imports none of them. `import-linter` enforces the module graph; this
+    is the assembly actually running.
     """
     import usher.services.reconcile as module
 

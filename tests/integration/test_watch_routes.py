@@ -40,7 +40,7 @@ EPISODE_COUNT = 3
 class _CommitProbe(EventPublisher):
     """Records each frame *and* what a second connection can see at that moment.
 
-    The G1 harness shape, one route over: a publisher is only allowed to offer
+    The same harness shape, one route over: a publisher is only allowed to offer
     an event about committed state, and the only witness that can tell a
     committed row from an uncommitted one is a connection that is not the
     writer's.
@@ -120,12 +120,9 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
 async def seeded(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[_Seeded]:
     """A movie with one copy, and a series with one copy plus three episode copies.
 
-    which is what makes `AND episode_id IS NULL` observable at all.
-
-    Three rather than twenty thousand: the clause is the thing under test and
-    it does not care how many rows it excludes.
-    `tests/unit/test_services_watch_write.py` carries the twenty-episode case
-    that names the measured read.
+    Which is what makes `AND episode_id IS NULL` observable at all. Three
+    rather than twenty thousand: the clause is the thing under test and it does
+    not care how many rows it excludes.
     """
     await _wipe(sessions)
     fixture = _Seeded()
@@ -288,15 +285,13 @@ async def test_a_put_writes_a_row_the_next_sync_will_not_overwrite(
 async def test_the_row_is_committed_by_the_time_the_frame_is_published(
     client: AsyncClient, seeded: _Seeded, probe: _CommitProbe
 ) -> None:
-    """ADR-0033, measured the way ADR-0033 was measured.
+    """An event is a statement about committed state, read from a second connection.
 
-    A second connection reads `watch_states` from inside `publish`. Postgres
-    never shows another transaction's uncommitted row version, so "the row is
-    there" is exactly "the write committed first" -- and against a service
-    that published before committing, every entry reads `None`.
-
-    The probe's own recording is asserted non-empty first: a probe that never
-    ran records nothing, and every absence claim over it passes.
+    Postgres never shows another transaction's uncommitted row version, so "the
+    row is there" is exactly "the write committed first" -- and against a
+    service that published before committing, every entry reads `None`. The
+    probe's own recording is asserted non-empty first: a probe that never ran
+    records nothing, and every absence claim over it passes.
     """
     await client.put(
         f"/watch/titles/{seeded.movie_id}", json={"position_seconds": 1840, "played": False}
@@ -343,10 +338,7 @@ async def test_a_series_write_enqueues_one_job_and_not_one_per_episode(
 async def test_an_episode_write_enqueues_the_episodes_own_file(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`list_for_episode` is the other statement.
-
-    and it answers with exactly the row `list_for_title` excludes.
-    """
+    """`list_for_episode` answers with exactly the row `list_for_title` excludes."""
     response = await client.put(
         f"/watch/episodes/{seeded.episode_ids[1]}",
         json={"position_seconds": 61, "played": False},
@@ -361,10 +353,9 @@ async def test_the_write_back_job_is_committed_by_the_request(
 ) -> None:
     """The enqueue rides `get_session`'s commit rather than the service's.
 
-    so the row is only durable once the handler has returned.
-
-    Read on a second connection, which is the only reader that can tell a
-    committed job from one the request is still holding.
+    So the row is only durable once the handler has returned. Read on a second
+    connection, the only reader that can tell a committed job from one the
+    request is still holding.
     """
     await client.put(
         f"/watch/titles/{seeded.movie_id}", json={"position_seconds": 61, "played": False}
@@ -387,13 +378,11 @@ async def test_the_write_back_job_is_committed_by_the_request(
 async def test_marking_played_twice_does_not_advance_the_count_twice(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`GREATEST(watch_states.play_count.
+    """`GREATEST(watch_states.play_count, 1)` advances idempotently, never increments.
 
-    1)`, which is Emby's own `POST /PlayedItems` semantics measured against 4.9.5.0: it
-    advances to 1 idempotently rather than incrementing.
-
-    A local `play_count + 1` would diverge from the source on the second press, and the
-    write-back would then carry a number Usher invented.
+    That is Emby's own `POST /PlayedItems` semantics. A local `play_count + 1`
+    would diverge from the source on the second press, and the write-back would
+    then carry a number Usher invented.
     """
     await client.post(f"/watch/titles/{seeded.movie_id}/played")
     first = await _watch_state(sessions, title_id=seeded.movie_id)
@@ -408,7 +397,7 @@ async def test_marking_played_twice_does_not_advance_the_count_twice(
 async def test_unmarking_played_keeps_the_position_the_count_and_the_date(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """M3's destructive-route finding, against the real `CASE` clauses.
+    """The destructive route, against the real `CASE` clauses.
 
     Emby's `DELETE /Users/{u}/PlayedItems/{item}` resets `PlayCount`, clears
     `LastPlayedDate` **and** clears a non-zero resume position. All three
@@ -459,8 +448,8 @@ async def test_a_repeat_write_of_identical_state_publishes_nothing(
 ) -> None:
     """The changed-row guard against the real statement.
 
-    where `updated_at` really is trigger-owned and really does move on every write --
-    which is the thing that makes a guard spelled `before != after` dead.
+    `updated_at` really is trigger-owned here and really does move on every
+    write, which is what makes a guard spelled `before != after` dead.
     """
     await client.put(
         f"/watch/titles/{seeded.movie_id}", json={"position_seconds": 61, "played": False}

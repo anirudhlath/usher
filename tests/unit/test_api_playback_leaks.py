@@ -1,7 +1,4 @@
-"""D5.
-
-the leak pins ADR-0012 names and says nothing tests: an RFC 9457 `detail`, `RowCache`,
-"""
+"""The leak pins nothing else tests: an RFC 9457 `detail`, `RowCache`, the success body."""
 
 import ast
 import inspect
@@ -62,9 +59,8 @@ DIRECT_URL = f"https://e/a.mkv?api_key={TOKEN}"
 class _ScriptedAdapter(FakeSourceAdapter):
     """A `FakeSourceAdapter` whose `stream_targets` is scripted outright.
 
-    or which raises whatever it was scripted with -- the module docstring's tiny-URL
-    discipline needs a target this file wrote, not one the fake's own URL construction
-    produced.
+    It answers, or raises, whatever it was scripted with -- the tiny-URL discipline
+    needs a target this file wrote, not one the fake's own URL construction produced.
     """
 
     def __init__(
@@ -172,17 +168,13 @@ def settings() -> Settings:
 
 @pytest.fixture
 def app(household: _Household, settings: Settings) -> FastAPI:
-    """The shipped app.
+    """The shipped app, with the playback ports replaced by `household`.
 
-    with the playback ports replaced by `household` and `GET /home` wired over an
-    otherwise-empty `Library` -- the row-cache pin needs both routers live in one app so
-    `RowCache` can be observed across both.
-
-    `get_row_cache` is deliberately **not** overridden: `app.state.row_cache`
-    is the one this file reads back, which is what makes the structural sweep
-    over `app.state` mean anything -- a cache built only for the test would
-    prove nothing about what the shipped app actually shares between the two
-    routers.
+    `GET /home` is wired over an otherwise-empty `Library`, because the row-cache pin
+    needs both routers live in one app so `RowCache` can be observed across both.
+    `get_row_cache` is deliberately **not** overridden: `app.state.row_cache` is the
+    one this file reads back, and a cache built only for the test would prove nothing
+    about what the shipped app actually shares between the two routers.
     """
     built = create_app(settings)
     built.dependency_overrides[get_title_repository] = lambda: household.titles
@@ -191,14 +183,14 @@ def app(household: _Household, settings: Settings) -> FastAPI:
     built.dependency_overrides[get_credential_store] = lambda: household.credentials
     built.dependency_overrides[get_source_adapter_factory] = lambda: household.factory
     built.dependency_overrides[get_row_context] = lambda: Library().context()
-    # M9 E2: the one other request-scoped read `GET /home` makes. Faked for
+    # The one other request-scoped read `GET /home` makes. Faked for
     # the reason the context is -- this file has no database -- and
     # `get_row_cache` is still deliberately *not* overridden, because the
     # cache is the thing being swept.
     built.dependency_overrides[get_row_provider_settings_repository] = (
         FakeRowProviderSettingsRepository
     )
-    # M9 F3: the two `/play` routes attribute PRD 10's `played` to the search a client
+    # The two `/play` routes attribute PRD 10's `played` to the search a client
     # came from, so both routes now resolve a household and a `search_queries`
     # repository.
     built.dependency_overrides[get_default_user_id] = lambda: USER.id
@@ -224,17 +216,14 @@ def _direct_target(url: str = DIRECT_URL) -> StreamTarget:
 async def test_the_503_detail_never_carries_the_upstream_messages_own_token(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """ADR-0012's first named leak surface.
-
-    an RFC 9457 `detail` built from an upstream's own message.
+    """The first named leak surface: an RFC 9457 `detail` built from an upstream message.
 
     The fake raises `PortUnavailable` whose message *contains* the tiny URL,
-    deliberately -- exactly what a real transport error does when it quotes
-    the request it choked on. `PlaybackService._copy_targets` and
+    deliberately -- exactly what a real transport error does when it quotes the
+    request it choked on. `PlaybackService._copy_targets` and
     `api/routers/playback.py`'s `_answer` both document that the client-facing
-    `detail` is a fixed sentence plus the source's own name and never
-    `str(exc)`; this is the case that proves it rather than trusts the
-    docstring.
+    `detail` is a fixed sentence plus the source's own name and never `str(exc)`;
+    this is the case that proves it rather than trusts the docstring.
     """
     title_id = await household.add_title()
     source = await household.add_source()
@@ -263,13 +252,12 @@ async def test_the_503_detail_never_carries_the_upstream_messages_own_token(
 def _cache_shaped_dicts(app: FastAPI) -> list[tuple[str, dict[object, object]]]:
     """Every `dict`-valued attribute of every object `app.state` holds.
 
-    A structural sweep rather than a hard-coded `row_cache` reach-in, per
-    D5's acceptance bar: any object parked on `app.state` that keeps its own
-    entries in a plain `dict` is "cache-shaped" for this purpose, so a second
-    cache another group adds later is swept without this file naming it.
-    `State.__setattr__` (Starlette) stores every attribute in one private
-    dict, `_state` -- reading that rather than `getattr`-guessing names is
-    what makes the sweep exhaustive over whatever the app actually holds.
+    A structural sweep rather than a hard-coded `row_cache` reach-in: any object
+    parked on `app.state` that keeps its own entries in a plain `dict` is
+    "cache-shaped" for this purpose, so a second cache another group adds later is
+    swept without this file naming it. `State.__setattr__` (Starlette) stores every
+    attribute in one private dict, `_state` -- reading that rather than
+    `getattr`-guessing names is what makes the sweep exhaustive.
     """
     state: dict[str, object] = app.state.__dict__.get("_state", {})
     found: list[tuple[str, dict[object, object]]] = []
@@ -286,20 +274,16 @@ def _cache_shaped_dicts(app: FastAPI) -> list[tuple[str, dict[object, object]]]:
 async def test_the_row_cache_never_stores_a_token_or_a_ticket(
     client: httpx.AsyncClient, household: _Household, app: FastAPI
 ) -> None:
-    """ADR-0012's second named leak surface, scoped to the cache this application actually holds.
+    """The second named leak surface, scoped to the cache this application actually holds.
 
-    `RowCache` (`services/rows/cache.py:94`), a two-dict store of built rows and
-    composed screens -- not a group-A HTTP cache over `GET /titles/{id}`, which does not
-    exist (group A declines conditional GET there).
-
-    Warms the cache through `GET /home` first -- the positive control is
-    that `RowCache.size` actually grew and a screen entry exists for this
-    request's user, so the "unchanged after play" assertion below is a
-    statement about the cache rather than about a cache nothing ever wrote
-    to. Then plays and redeems, and re-reads: `RowCache.size` must not have
-    moved (nothing on the playback path writes to it), and a structural
-    sweep of every dict-shaped attribute on `app.state` -- not just
-    `row_cache`'s own two dicts -- must not carry the token or the ticket.
+    `RowCache` (`services/rows/cache.py`) is a two-dict store of built rows and
+    composed screens. Warms the cache through `GET /home` first -- the positive
+    control is that `RowCache.size` actually grew and a screen entry exists for this
+    request's user, so the "unchanged after play" assertion below is a statement
+    about the cache rather than about a cache nothing ever wrote to. Then plays and
+    redeems, and re-reads: `RowCache.size` must not have moved, and a structural
+    sweep of every dict-shaped attribute on `app.state` must not carry the token or
+    the ticket.
     """
     cache = app.state.row_cache
     assert cache.size == 0, "the premise: nothing has warmed the cache yet"
@@ -339,11 +323,11 @@ async def test_the_success_body_never_carries_the_source_url_the_ticket_replaced
 ) -> None:
     """The load-bearing fourth pin.
 
-    ADR-0012 was written when `/play`'s response *was* a serialization of `StreamTarget`
-    and the token in the body was the point -- with D3's ticket that is no longer true,
-    and "the body carries no source URL" is now a property a regression could quietly
-    reverse with nothing else noticing (an unsubstituted target still round-trips
-    through every DTO field, still 200s, still looks like a working response).
+    Now that `/play` answers with a ticket rather than a serialization of
+    `StreamTarget`, "the body carries no source URL" is a property a regression could
+    quietly reverse with nothing else noticing: an unsubstituted target still
+    round-trips through every DTO field, still 200s, and still looks like a working
+    response.
     """
     title_id = await household.add_title()
     source = await household.add_source()
@@ -399,12 +383,10 @@ def _without_docstrings(tree: ast.Module) -> ast.Module:
 
 
 def test_the_playback_dto_module_names_no_bulk_serializer() -> None:
-    """ADR-0012 measured six bulk-dump paths.
+    """Six bulk-dump paths return `StreamTarget.url` verbatim.
 
     `dataclasses.asdict`, `astuple`, `__dict__`, `vars()`, `json.dumps(asdict(...))`,
-    and pydantic's `TypeAdapter(StreamTarget).dump_json`/`dump_python` -- all returning
-    `StreamTarget.url` verbatim.
-
+    and pydantic's `TypeAdapter(StreamTarget).dump_json`/`dump_python`.
     `api/dto/playback.py`'s own module docstring argues at length that every field is
     named one at a time for exactly this reason, which is what makes a raw substring
     scan worthless here: the docstring itself names every one of these words. Scanned

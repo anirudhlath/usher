@@ -172,18 +172,12 @@ def test_the_harness_refuses_to_issue_more_requests_than_its_declared_budget() -
 
 
 def test_the_budget_counts_requests_on_the_wire_and_not_probes() -> None:
-    """🔴 The property C1 restored, and the one a 401 silently broke.
+    """A 401 anywhere in a run makes one probe cost two requests.
 
-    `EmbySession.request` retries once on a 401 and `_TokenSession
-    ._authenticate_locked` issues no request of its own, so with the budget
-    spent per `Probe` a single 401 anywhere in a run made one probe cost two
-    requests and **nothing noticed**. Measured against this exact stub before
-    the fix: `spent = 5` against a limit of 5, and **6 requests on the wire** --
-    which falsifies the one property this module says it exists to pin and the
-    declaration Group S's <= 256 ceiling is assembled out of.
-
-    Neither of the other stubs in this file can see it: both answer 200 to
-    everything, so probes and requests are equal for the wrong reason.
+    `EmbySession.request` retries once on a 401 and `_TokenSession._authenticate_locked`
+    issues no request of its own, so a budget spent per `Probe` puts more requests on
+    the wire than it allows. Neither of the other stubs in this file can see it: both
+    answer 200 to everything, so probes and requests are equal for the wrong reason.
     """
     sent: list[httpx.Request] = []
     budget = _BUDGET(5)
@@ -285,22 +279,11 @@ def test_a_dry_run_is_enforced_where_the_guard_actually_lives(
 ) -> None:
     """`--budget 0` must reach `_run`'s early return, not `run_probes`'.
 
-    By the time `run_probes` is called the four warm-ups have already gone to
-    the operator's server, so `run_probes`' own zero-guard is unreachable in
-    production and a case that drives it is a case about dead code. A review
-    planted `_run`'s return moved below the warm-ups and the suite stayed
-    green.
-
-    **That plant alone puts zero requests on the wire** -- `Budget(0)` refuses
-    the first spend, so it dies with an uncaught `BudgetExceeded` and this case
-    never reaches its `# The claim.` block. It takes `Budget.spend`'s "0 means
-    unlimited" idiom *as well* to reach four requests.
-
-    So the three assertions below die to three different plants, and none is
-    decoration: `dry == []` to the second spelling, `built == []` to the guard
-    moved below the **client construction** (the shape this harness shipped
-    before the guard was hoisted), and `code == 0` to a dry run that returns
-    non-zero. See the module docstring for all three measured.
+    By the time `run_probes` is called the four warm-ups have already gone to the
+    operator's server, so its own zero-guard is unreachable in production. The three
+    assertions below die to three different wrong implementations: `dry == []` to a
+    guard below the warm-ups, `built == []` to one below the client construction, and
+    `code == 0` to a dry run that returns non-zero.
     """
     # **The positive control fires first**, and it is a strong one: it drives the whole
     # of `_run` and pins that the four warm-ups *do* leave through this seam, first and
@@ -370,20 +353,13 @@ def test_a_mid_run_port_error_keeps_the_partials_and_reports_the_failure(
     mode: str,
     port_error: type[UsherPortError],
 ) -> None:
-    """🔴 The recovery arm C2 opened and left too narrow.
+    """The recovery arm, widened past `(BudgetExceeded, ProbeFailed)`.
 
-    `_run`'s `except` caught only `(BudgetExceeded, ProbeFailed)`, so a port
-    error of any other kind -- a 429 (`PortRateLimited`), an unreachable server
-    (`PortUnavailable`), a rejected credential -- propagated past the report and
-    past the `--timings-out` write, both of which sit after the try/finally.
-    Measured before this fix: a 429 at request 10 spent **ten real requests and
-    persisted zero rows** -- the exact "S1's entire share of the group ceiling,
-    unrecoverable, for nothing" outcome C2 exists to prevent, one arm over. A
-    429 from a household server is precisely the S4 scenario.
-
-    So the run must keep the rows it already paid for **and** surface that it
-    ended on a port error rather than completing: nine persisted rows that read
-    as a clean nine-rep run is the failure this asserts against.
+    A port error of any other kind -- a 429, an unreachable server, a rejected
+    credential -- propagates past the report and past the `--timings-out` write, both of
+    which sit after the try/finally, so a run spends real requests and persists nothing.
+    It must keep the rows it already paid for and surface that it ended on a port error:
+    nine persisted rows reading as a clean nine-rep run is the failure asserted against.
     """
     sent: list[httpx.Request] = []
     built: list[dict[str, Any]] = []
@@ -428,17 +404,13 @@ def test_a_mid_run_port_error_keeps_the_partials_and_reports_the_failure(
 def test_the_incomplete_line_is_redacted_like_every_other_line_that_prints_a_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """🔴 The last unredacted `str(exc)` in this family.
+    """The one exception this harness raises itself is the one carrying a credential.
 
-    `BudgetExceeded` names the request it refused, and the `Budget` hook builds
-    that name out of `request.url.path` -- the **real** path, which is
-    `/Users/{emby_user_id}/Items/...`. So the one exception this harness raises
-    itself is the one carrying a credential, and the `INCOMPLETE` line printed
-    it raw where the sibling arms redact their identical line.
-
-    A 401 is what reaches the refusal without an over-subscribed budget:
-    `EmbySession.request` re-authenticates and resends, so one probe costs two
-    requests and a plan whose arithmetic fits still runs out.
+    `BudgetExceeded` names the request it refused, and the `Budget` hook builds that
+    name out of `request.url.path` -- the real `/Users/{emby_user_id}/Items/...`, so the
+    `INCOMPLETE` line has to redact it. A 401 is what reaches the refusal without an
+    over-subscribed budget: the session re-authenticates and resends, so one probe costs
+    two requests and a plan whose arithmetic fits still runs out.
     """
     sent: list[httpx.Request] = []
     built: list[dict[str, Any]] = []
@@ -512,9 +484,7 @@ def test_the_four_probe_classes_are_read_only_and_spend_no_discovery_request() -
 
 
 def test_the_secrets_reader_takes_its_path_and_hard_codes_no_host(tmp_path: Path) -> None:
-    """`CLAUDE.md`.
-
-    a live run must not write a credential, a token, a user id or a host into the repo.
+    """A live run must not write a credential, a token, a user id or a host into the repo.
 
     The path is an argument, and the redaction is a function this file can point at a
     known value and check.
@@ -550,10 +520,8 @@ def test_the_secrets_reader_takes_its_path_and_hard_codes_no_host(tmp_path: Path
     ("seconds", "median", "p95", "maximum"),
     [
         # Twelve ascending values: `p95` at nearest-rank is ceil(0.95*12) = 12,
-        # i.e. the maximum. **That is why four rows of S1's published table show
-        # `p95 == max`** -- with n = 12 there is no 95th percentile short of the
-        # largest sample, and a reader who does not know that reads a
-        # copy-paste error.
+        # i.e. the maximum. With n = 12 there is no 95th percentile short of the
+        # largest sample, which is why a published table can show `p95 == max`.
         ([float(n) for n in range(1, 13)], 6.5, 12.0, 12.0),
         # Twenty values pull p95 off the maximum: ceil(0.95*20) = 19.
         ([float(n) for n in range(1, 21)], 10.5, 19.0, 20.0),
@@ -565,18 +533,12 @@ def test_the_secrets_reader_takes_its_path_and_hard_codes_no_host(tmp_path: Path
 def test_the_published_statistics_are_the_ones_the_table_claims(
     seconds: list[float], median: float, p95: float, maximum: float
 ) -> None:
-    """`summarise` and `_quantile`, neither of which had any test anywhere.
+    """`summarise` and `_quantile`, neither of which had a test anywhere.
 
-    Measured: `summarise` returning the **median** in the `p95` field passed all
-    4,076 unit cases, and `_quantile` off by one passed all 4,076. `_quantile`
-    is correct -- nearest-rank, matching its docstring -- but S1's table is the
-    first artefact in this repository to publish a p95 out of it, and a number
-    in a durable record with no test under it is the thing this whole task is
-    about.
-
-    Rows one and two differ only in `n`, which is what makes the `p95 == max`
-    coincidence in row one visibly a property of twelve samples rather than a
-    property of the function.
+    `_quantile` is nearest-rank, matching its docstring, and the published table is the
+    first artefact in this repository to print a p95 out of it. Rows one and two differ
+    only in `n`, which is what makes the `p95 == max` coincidence in row one visibly a
+    property of twelve samples rather than a property of the function.
     """
     timings = [
         _MODULE.Timing(
@@ -601,16 +563,11 @@ def test_the_published_statistics_are_the_ones_the_table_claims(
 
 
 def test_redaction_survives_a_value_that_contains_another_and_a_bare_host() -> None:
-    """Both of `redact`'s stated invariants, neither of which was reachable.
+    """Both of `redact`'s stated invariants, neither of which the old fixture reached.
 
-    Measured against the previous fixture -- four values, all scheme-carrying,
-    none a substring of another: **deleting the scheme-stripped `bare` branch
-    left the suite green, and sorting shortest-first instead of longest-first
-    left the suite green.** The docstring states both properties explicitly and
-    the fixture could not exercise either. This is the parameter-table failure
-    mode recorded twice already in `.claude/rules/testing-discipline.md`,
-    landing in the one function whose whole job is keeping four credentials out
-    of a log.
+    Four values that all carry a scheme and none of which is a substring of another
+    exercise neither the scheme-stripped `bare` branch nor the longest-first ordering --
+    in the one function whose whole job is keeping four credentials out of a log.
     """
     redact: Callable[[str, Mapping[str, str]], str] = _MODULE.redact
     secrets = {
@@ -646,16 +603,11 @@ def test_main_redacts_the_failure_it_prints(
 ) -> None:
     """`main`'s `except` is the only path that can print a credential.
 
-    Measured: replacing that line with an unredacted
-    `print(f"FAILED: {type(exc).__name__}: {exc}")` left the whole unit suite
-    green -- 4,076 passed. Nothing drove `main`; the existing case pinned
-    `redact` as a pure function and stopped there.
-
-    The path is reachable with a real value, not a hypothetical one:
+    Pinning `redact` as a pure function says nothing about whether anything calls it, so
+    this drives `main` itself. The path is reachable with a real value:
     `EmbySession._send` translates any transport failure into
-    `PortUnavailable(f"{method} {path} failed: {exc}")` and `path` is
-    `/Users/{emby_user_id}/Items/{id}`, so the user id is *in the exception
-    message* by construction. Every secret below is a fixture value.
+    `PortUnavailable(f"{method} {path} failed: {exc}")`, and `path` carries the user id
+    by construction. Every secret below is a fixture value.
     """
     bar = tmp_path / "BAR.md"
     bar.write_text("a pre-registered bar", encoding="utf-8")
@@ -697,15 +649,13 @@ def test_main_redacts_the_failure_it_prints(
 
 
 def test_a_run_the_budget_cannot_finish_is_refused_before_the_first_request() -> None:
-    """🔴 C2's precondition, and the worst outcome this harness could produce.
+    """The precondition, and the worst outcome this harness could produce.
 
-    Measured before it existed: `--reps 15 --budget 60` spent **all sixty live
-    requests** against the operator's real server, raised `BudgetExceeded` on
-    the last one, and produced no table, no timings file and no flush. Sixty
-    requests -- S1's entire share of the group ceiling -- unrecoverable, for
-    nothing. And `--reps 0` spent four and then died on an `IndexError`.
-
-    Arithmetic knowable before the first packet belongs before the first packet.
+    Without it, `--reps 15 --budget 60` spends every one of sixty live requests against
+    the operator's real server, raises `BudgetExceeded` on the last and produces no
+    table, no timings file and no flush -- unrecoverable, for nothing; and `--reps 0`
+    spends four and dies on an `IndexError`. Arithmetic knowable before the first packet
+    belongs before the first packet.
     """
     check: Callable[..., None] = _MODULE.check_budget_is_sufficient
     with pytest.raises(SystemExit) as refused:
@@ -716,7 +666,7 @@ def test_a_run_the_budget_cannot_finish_is_refused_before_the_first_request() ->
     )
     with pytest.raises(SystemExit):
         check(budget=60, reps=0)
-    # The premise: the run S1 actually made is *not* refused, or this guard
+    # The premise: a run whose arithmetic fits is *not* refused, or this guard
     # would simply forbid everything.
     check(budget=60, reps=12)
 
@@ -724,12 +674,11 @@ def test_a_run_the_budget_cannot_finish_is_refused_before_the_first_request() ->
 def test_the_budget_precondition_is_reached_before_any_request_leaves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The precondition **at its call site**, which the case above cannot see.
+    """The precondition at its call site, which the case above cannot see.
 
-    Pinning `check_budget_is_sufficient` as a function is satisfied by a `_run`
-    that never calls it -- measured: deleting the call left the case above
-    green. What this asserts is the property the operator's server cares about:
-    an over-subscribed run puts **nothing** on the wire.
+    Pinning `check_budget_is_sufficient` as a function is satisfied by a `_run` that
+    never calls it. What this asserts is the property the operator's server cares about:
+    an over-subscribed run puts nothing on the wire.
     """
     sent: list[httpx.Request] = []
     built: list[dict[str, Any]] = []

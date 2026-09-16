@@ -32,11 +32,10 @@ from usher.services.similar import (
 
 _EMBEDDING_MODEL = "fake:test-embedding"
 
-# M7's four-signal blend, and the digest `title_neighbors.blend_fingerprint`
-# carries on every row any deployment holds today. Kept here rather than in
-# `src/` because the superseded weights are exactly what S7 removes -- and
-# licensed by a case below rather than trusted, so it cannot drift into a
-# number nothing ever stamped.
+# The superseded four-signal blend, and the digest `title_neighbors.blend_fingerprint`
+# carries on every row a deployment already holds. Kept here rather than in `src/`, and
+# licensed by a case below rather than trusted, so it cannot drift into a number nothing
+# ever stamped.
 _M7_FOUR_SIGNAL_WEIGHTS = {"cosine": 0.45, "tags": 0.25, "keywords": 0.20, "genres": 0.10}
 _M7_FOUR_SIGNAL_FINGERPRINT = "78900b2bd89a649774d7fd3efe082621"
 
@@ -56,8 +55,8 @@ _GENRE_TWIN = uuid.UUID(int=0x19)
 _KEYWORD_TWIN = uuid.UUID(int=0x1A)
 # `_GENOME_TWIN < _NO_GENOME < _HALF_GENOME`, so every genome case below is
 # seeded such that the tiebreak resolves a cosine-only blend to the *wrong*
-# order rather than coin-flipping it. Group C/D's class-B finding, one file
-# over: a case decided by creation order is a case that ratifies the bug.
+# order rather than coin-flipping it: a case decided by creation order is a
+# case that ratifies the bug.
 _GENOME_TWIN = uuid.UUID(int=0x1B)
 _NO_GENOME = uuid.UUID(int=0x1C)
 _HALF_GENOME = uuid.UUID(int=0x1D)
@@ -134,33 +133,24 @@ def _candidate(
 def test_jaccard_is_none_when_either_side_has_nothing_to_say(
     left: tuple[str, ...], right: tuple[str, ...], expected: float | None
 ) -> None:
-    """**The 0/0 case, decided.** Two wrong implementations, and the second is worse.
+    """The 0/0 case: two empty sets are `None`, neither a raise nor `0.0`.
 
-    `len(a & b) / len(a | b)` raises `ZeroDivisionError` on two empty sets --
-    inside a batch job, which is the worst place for one: it aborts mid-rebuild
-    and leaves a table half old and half new.
-
-    Returning `0.0` is *silent*, which is worse: it gives the same answer for
-    "these two share no genres" (evidence of dissimilarity, the third row here)
-    as for "we do not know either one's genres" (no evidence at all). The
-    second is a fact about enrichment, not about the films, and scoring it
-    pushes every thin title to the bottom of every neighbour list while every
-    gauge reads healthy.
-
-    The fifth row is the asymmetric case and it is `None` too: one side being
-    empty tells us nothing about whether they overlap.
+    `len(a & b) / len(a | b)` raises `ZeroDivisionError` inside a batch job, which
+    aborts mid-rebuild and leaves a table half old and half new. Returning `0.0` is
+    worse because it is silent: it gives the same answer for "these two share no genres"
+    as for "we do not know either one's genres", and the second is a fact about
+    enrichment rather than about the films. The asymmetric case is `None` for the same
+    reason.
     """
     assert _jaccard(left, right) == expected
 
 
 async def test_a_higher_jaccard_wins_at_equal_cosine() -> None:
-    """**Half of "a single-signal implementation must not pass".**.
+    """Half of "a single-signal implementation must not pass".
 
-    Both candidates sit at exactly the same planted cosine to the seed, so the
-    cosine term cancels and the only thing left is tag overlap. Fails a blend
-    that is cosine and nothing else -- which is the implementation you get by
-    writing the vector half first and never coming back, and which is
-    indistinguishable from a working one on any pair whose signals agree.
+    Both candidates sit at exactly the same planted cosine to the seed, so the cosine
+    term cancels and only tag overlap is left. Fails a blend that is cosine and nothing
+    else, which is indistinguishable from a working one on any pair whose signals agree.
     """
     seed, at_theta = planted_pair(math.pi / 4)
     service, embeddings, _ = _service()
@@ -175,14 +165,11 @@ async def test_a_higher_jaccard_wins_at_equal_cosine() -> None:
 
 
 async def test_a_higher_cosine_wins_at_equal_jaccard() -> None:
-    """The mirror, and without it a Jaccard-only implementation passes the case above.
+    """The mirror: without it a Jaccard-only implementation passes the case above.
 
-    Identical genre and keyword sets on both candidates, planted cosines of cos(0) = 1.0
-    and cos(pi/3) = 0.5.
-
-    Both cases together are what "the blend uses every term" means: neither
-    alone rules out a single-signal scorer, and a case whose two signals agree
-    rules out nothing at all.
+    Identical genre and keyword sets on both candidates, planted cosines of 1.0 and 0.5.
+    Neither case alone rules out a single-signal scorer, and a case whose two signals
+    agree rules out nothing at all.
     """
     seed, far = planted_pair(math.pi / 3)
     service, embeddings, _ = _service()
@@ -194,21 +181,13 @@ async def test_a_higher_cosine_wins_at_equal_jaccard() -> None:
 
 
 async def test_genres_and_keywords_are_two_terms_rather_than_one_set() -> None:
-    """**Boundary call 8's shape.
+    """Genres and keywords are two terms, not one Jaccard over the union.
 
-    and the mutation that is a silent re-weighting rather than an error.**.
-
-    One Jaccard over `genres + keywords` does not raise, does not change a
-    count, and cannot be seen from any pair whose two tag signals agree. Here
-    they disagree on purpose: `_GENRE_TWIN` shares both genres and no keywords,
-    `_KEYWORD_TWIN` shares no genre and eight of twenty keywords. At the
-    declared weights the genre twin wins (0.15 against 0.10); merged into one
-    forty-element set the five genre elements vanish and the keyword twin wins
-    (0.139 against 0.035).
-
-    **The assertion is about which terms exist, not about which film is more
-    similar** -- the weights decide that and they are chosen with an argument
-    rather than measured, which this task's prose says out loud.
+    One Jaccard over `genres + keywords` does not raise, changes no count, and cannot be
+    seen from any pair whose two tag signals agree. Here they disagree on purpose: at
+    the declared weights the genre twin wins, and merged into one set the five genre
+    elements vanish and the keyword twin wins. The assertion is about which terms exist,
+    not about which film is the more similar.
     """
     seed, twin = planted_pair(0.0)
     vocabulary = tuple(f"keyword-{index:02d}" for index in range(20))
@@ -226,14 +205,10 @@ async def test_genres_and_keywords_are_two_terms_rather_than_one_set() -> None:
 async def test_a_pair_with_no_tags_is_scored_on_its_vector_alone() -> None:
     """Absence leaves the denominator as well as the numerator.
 
-    so the pair is scored on what is known rather than penalised for what is not.
-
-    Fails: a blend that divides by `sum(_WEIGHTS.values())` unconditionally.
-    That version scores an untagged pair at 0.60x its true cosine agreement,
-    which puts every skeleton-shaped enriched title below every richly-tagged
-    one *regardless of how close the vectors are* -- and boundary call 4's
-    whole point is that the embedded population is the tier where the text is
-    the good signal.
+    The pair is scored on what is known rather than penalised for what is not. A blend
+    dividing by `sum(_WEIGHTS.values())` unconditionally scores an untagged pair at
+    0.60x its true cosine agreement, putting every thinly-tagged title below every
+    richly-tagged one regardless of how close the vectors are.
     """
     seed, near = planted_pair(0.0)
     service, embeddings, _ = _service()
@@ -246,11 +221,9 @@ async def test_a_pair_with_no_tags_is_scored_on_its_vector_alone() -> None:
 def test_a_negative_cosine_cannot_produce_a_negative_score() -> None:
     """`title_neighbors.score` carries `CHECK (score >= 0 AND score <= 1)`.
 
-    so an unclamped cosine is a `RepositoryConflict` mid-rebuild rather than a bad
-    ordering -- and clamping it in the *service* is what makes that true for every
-    implementation of the port rather than for the one that remembered.
-
-    A negative cosine is not a near neighbour at all, so 0.0 loses nothing.
+    An unclamped cosine is a `RepositoryConflict` mid-rebuild rather than a bad
+    ordering, and clamping in the *service* makes that true for every implementation of
+    the port. A negative cosine is not a near neighbour at all, so 0.0 loses nothing.
     """
     rows = _neighbors_for(
         NeighborSeed(title_id=_SEED, genres=(), keywords=(), has_genome=False),
@@ -263,13 +236,11 @@ def test_a_negative_cosine_cannot_produce_a_negative_score() -> None:
 
 
 async def test_a_title_is_never_its_own_neighbour() -> None:
-    """Cosine of a vector with itself is 1.0.
+    """Cosine of a vector with itself is 1.0, so the exclusion has to be explicit.
 
-    so without an explicit exclusion every title's top hit is itself -- and every "more
-    like this" row's first item is the film the user is already looking at.
-
-    Fails an implementation that filters the *rendered* list instead of the stored one,
-    too: the stored row would then cost every consumer one wasted slot out of 25.
+    Without it every "more like this" row's first item is the film the user is already
+    looking at. An implementation that filtered the *rendered* list instead of the
+    stored one fails too: the stored row costs every consumer one wasted slot out of 25.
     """
     seed, other = planted_pair(math.pi / 4)
     service, embeddings, neighbors = _service()
@@ -281,17 +252,12 @@ async def test_a_title_is_never_its_own_neighbour() -> None:
 
 
 async def test_a_null_embedding_title_is_neither_a_seed_nor_a_candidate() -> None:
-    """**The degenerate-cluster trap.
+    """A refused title carries a NULL embedding and must not reach this computation.
 
-    the front matter names it as the one that either crashes or, worse, forms a
-    cluster.** A refused title is written as a row with a NULL embedding so it stops
-    matching the backfill, and those rows must not reach this computation.
-
-    As a candidate the distance is NULL, which sorts last -- so it leaks in only when
-    the population is smaller than the top-N, arriving as a `TypeError` or, with a
-    careless `coalesce`, a distance of 0 that pins every refused title to the top of
-    every list. Both directions asserted: no neighbours of its own, and in nobody
-    else's.
+    As a candidate its distance is NULL, which sorts last, so it leaks in only when the
+    population is smaller than the top-N -- arriving as a `TypeError` or, with a careless
+    `coalesce`, as a distance of 0 that pins every refused title to the top of every
+    list. Both directions are asserted: no neighbours of its own, and in nobody else's.
     """
     seed, other = planted_pair(math.pi / 4)
     service, embeddings, neighbors = _service()
@@ -311,18 +277,13 @@ async def test_a_null_embedding_title_is_neither_a_seed_nor_a_candidate() -> Non
 
 
 async def test_the_top_n_is_capped_and_ordered_best_first() -> None:
-    """Thirty candidates at thirty distinct planted angles, twenty-five stored, nearest first.
+    """Thirty planted angles, twenty-five stored, nearest first.
 
-    Three wrong implementations, and the second and third are why the
-    twenty-seventh candidate carries the seed's own tags:
-
-    - storing everything (250,000 rows becomes 10,000,000);
-    - storing the first N the *candidate query* returned rather than the N best
-      after the blend, which is the whole point of blending in application
-      code -- the tagged candidate is 27th on cosine alone and must appear;
-    - `_CANDIDATE_POOL = _NEIGHBORS_PER_TITLE`, which never offers the service
-      a 27th candidate at all and makes both tag terms decoration on a pure
-      cosine ranking.
+    Three wrong implementations, and the last two are why the twenty-seventh candidate
+    carries the seed's own tags: storing everything; storing the first N the *candidate
+    query* returned rather than the N best after the blend; and
+    `_CANDIDATE_POOL = _NEIGHBORS_PER_TITLE`, which never offers a 27th candidate at all
+    and makes both tag terms decoration on a pure cosine ranking.
     """
     genres = ("drama", "noir")
     keywords = ("ledger",)
@@ -355,21 +316,13 @@ async def test_the_top_n_is_capped_and_ordered_best_first() -> None:
 
 
 def test_equal_scores_are_broken_by_id_so_two_rebuilds_agree() -> None:
-    """Determinism, which here is a *pagination and diff* property.
+    """Determinism, which here is a pagination and diff property.
 
-    M7 reads this table repeatedly and a row that reorders between two identical
-    rebuilds makes every "more like this" row shuffle for no reason.
-
-    Two candidates at an identical cosine and identical tag sets -- genuinely common,
-    one shared genre and no keywords -- presented high-id first, which is what "whatever
-    the candidate query returned" looks like when the executor's order and id order
-    disagree.
-
-    Driven straight through `_neighbors_for` rather than through the fake, and
-    deliberately: the fake's `nearest_for` mirrors the real `ORDER BY distance,
-    title_id`, so a tie reaches the service already in id order there and the
-    service's own tiebreak would be unobservable. `list.sort` is stable, so the
-    mutation keeps whatever order it was handed.
+    A row that reorders between two identical rebuilds makes every "more like this" row
+    shuffle for no reason. Two candidates at an identical cosine and identical tag sets
+    are presented high-id first, and this is driven straight through `_neighbors_for`:
+    the fake's `nearest_for` mirrors `ORDER BY distance, title_id`, so a tie would reach
+    the service already in id order and its own tiebreak would be unobservable.
     """
     seed = NeighborSeed(title_id=_SEED, genres=("drama",), keywords=(), has_genome=False)
     rows = _neighbors_for(
@@ -388,11 +341,10 @@ async def test_a_rebuild_is_idempotent() -> None:
     This is the property that makes a batch acceptable in place of a job at all: an
     interrupted rebuild is resumed by running it again.
 
-    The fake caps how many pages it will hand out and raises a plain
-    `AssertionError` past the ceiling -- never a `UsherPortError`, so nothing
-    can catch it. A rebuild that re-read a predicate instead of advancing its
-    keyset cursor would otherwise *hang* rather than fail, and a hung case in a
-    sweep log reads like a mutation nothing observed.
+    The fake caps how many pages it will hand out and raises a plain `AssertionError`
+    past the ceiling -- never a `UsherPortError`, so nothing can catch it. A rebuild
+    that re-read a predicate instead of advancing its keyset cursor would otherwise hang
+    rather than fail.
     """
     seed, other = planted_pair(math.pi / 4)
     service, embeddings, neighbors = _service()
@@ -408,16 +360,12 @@ async def test_a_rebuild_is_idempotent() -> None:
 
 
 async def test_a_seed_that_lost_every_neighbour_has_its_old_rows_removed() -> None:
-    """**The one row shape a rebuild cannot repair if the delete is scoped wrongly**.
+    """The one row shape a rebuild cannot repair if the delete is scoped wrongly.
 
-    which is why the seed list is passed to `replace` separately from the rows rather
-    than derived from them.
-
-    A seed whose neighbours all disappeared -- the other enriched titles were
-    deleted, or every candidate became degenerate -- contributes *no rows* to
-    the write. An implementation deriving the delete's scope from the rows
-    therefore deletes nothing for it and leaves stale neighbours in place
-    forever, through every future rebuild.
+    A seed whose neighbours all disappeared contributes no rows to the write, so an
+    implementation deriving the delete's scope from the rows deletes nothing for it and
+    leaves stale neighbours in place through every future rebuild. Hence the seed list
+    is passed to `replace` separately from the rows.
     """
     seed, other = planted_pair(math.pi / 4)
     service, embeddings, neighbors = _service()
@@ -454,12 +402,9 @@ async def test_computed_at_distinguishes_never_computed_from_no_neighbours() -> 
 async def test_computed_at_reports_the_oldest_page() -> None:
     """Oldest rather than newest.
 
-    the newest would report a whole-table rebuild as fresh the moment the first page
-    committed, which is this milestone's own failure mode ("looks healthy while
-    describing yesterday") wearing an accessor.
-
-    Two pages, one seed each, on a clock that genuinely advances -- which is
-    what real per-transaction `now()` values do.
+    The newest would report a whole-table rebuild as fresh the moment the first page
+    committed -- healthy-looking while describing yesterday. Two pages, one seed each,
+    on a clock that genuinely advances, as real per-transaction `now()` values do.
     """
     clock = _stepping_clock()
     seed, other = planted_pair(math.pi / 4)
@@ -476,11 +421,9 @@ async def test_computed_at_reports_the_oldest_page() -> None:
 async def test_a_neighbour_deleted_since_the_rebuild_is_dropped_rather_than_raising() -> None:
     """A stale artefact is expected here by construction.
 
-    nothing in M6 re-runs the rebuild -- so a title deleted since it ran must not make
-    every row it appears in raise.
-
-    Fails `rows[row.neighbor_title_id]`, a `KeyError` reached through a lookup whose
-    whole promise is that it is instant.
+    Nothing re-runs the rebuild, so a title deleted since it ran must not make every row
+    it appears in raise. Fails `rows[row.neighbor_title_id]`, a `KeyError` reached
+    through a lookup whose whole promise is that it is instant.
     """
     seed, other = planted_pair(math.pi / 4)
     service, embeddings, catalog = _service()
@@ -512,25 +455,16 @@ async def test_the_rebuild_walks_every_page_of_the_population() -> None:
         assert len(await neighbors.list_for(title_id, limit=100)) == len(ids) - 1
 
 
-# --- the genome, the fourth signal ----------------------------------------- Group F
-# measured the genome's off-diagonal spread against a bar written before any vector
-# existed and **no clause fired**: mean 0.6101, sd 0.0913, min 0.2556, p1 0.4075, p99
-# 0.8165, top-10 gap 0.2456, over all 268,157,000 ordered off-diagonal pairs.
+# --- the genome, the fourth signal -----------------------------------------
 
 
 def test_a_genome_bearing_candidate_gets_no_score_a_pair_without_one_would_not() -> None:
-    """The M7 case this replaces asserted the opposite.
+    """A genome-bearing candidate scores exactly what a candidate without one scores.
 
-    and the fixture is the same one so the two are legible against each other.
-
-    A candidate carrying a genome at 0.90 and one carrying none, at the
-    *identical* cosine and with nothing else to separate them, must now score
-    identically -- so the tiebreak, and only the tiebreak, decides. Until S7
-    the genomed one scored `0.75 x 0.80 + 0.25 x 0.90 = 0.825` and won by 0.025.
-
-    Asserted on the **scores** rather than only on the order, because at equal
-    scores the order is decided by an id comparison that would also be
-    satisfied by two wrong-but-differently-wrong numbers.
+    At an identical cosine and with nothing else to separate them, the tiebreak and only
+    the tiebreak decides. Asserted on the scores rather than only on the order, because
+    at equal scores the order is decided by an id comparison that two
+    wrong-but-differently-wrong numbers would also satisfy.
     """
     rows = _neighbors_for(
         NeighborSeed(title_id=_SEED, genres=(), keywords=(), has_genome=True),
@@ -547,25 +481,14 @@ def test_a_genome_bearing_candidate_gets_no_score_a_pair_without_one_would_not()
 
 
 def test_every_pair_is_scored_within_m6s_reweighting_bound() -> None:
-    """What S7 did to the catalog an operator already has.
+    """What the reweighting did to the catalog an operator already has, as a bound.
 
-    as an arithmetic bound rather than as a claim that nothing moved.
-
-    M6's weights are recomputed inline here rather than imported, precisely so
-    this case still means something after `_WEIGHTS` moves again: it is a claim
-    about the *catalog*, not a restatement of the constant.
-
-    The three surviving weights are M7's and still sum to 0.75, so the
-    renormalised cosine share is exactly `0.45 / 0.75 = 0.600` -- M6's number,
-    unchanged to three decimal places -- while keywords and genres sit
-    +0.0167 and -0.0167 off M6's. A pair's score therefore differs from M6's by
-    `0.0167 x (keywords - genres)`, bounded by +/-0.0167, and two of them can
-    only swap if they were already within 0.033 of each other.
-
-    **This case covered "the 98% of pairs with no genome" until S7 and now
-    covers all of them**, which is the whole shape of the change: the pairs
-    that used to be scored differently were the 2.4746% carrying a genome on
-    both sides, and they are now scored on this same denominator.
+    The older weights are recomputed inline rather than imported, so this stays a claim
+    about the catalog after `_WEIGHTS` moves again. The three surviving weights still
+    sum to 0.75, so the renormalised cosine share is exactly `0.45 / 0.75 = 0.600` while
+    keywords and genres sit +/-0.0167 off the older ones: a pair's score differs by
+    `0.0167 x (keywords - genres)`, and two of them can only swap if they were already
+    within 0.033 of each other.
     """
     m6_weights = {"cosine": 0.60, "keywords": 0.25, "genres": 0.15}
     # A pair where the two Jaccards are maximally far apart, which is where the
@@ -584,22 +507,14 @@ def test_every_pair_is_scored_within_m6s_reweighting_bound() -> None:
 
 
 def test_a_genome_cosine_a_port_put_outside_the_unit_interval_cannot_reach_a_score() -> None:
-    """The clamp `_clamped` used to apply is gone with the term, and this is what replaces it.
+    """A genome cosine a port put outside `[0, 1]` cannot reach a score.
 
-    the same hostile input, asserted against the CHECK.
-
-    `title_neighbors.score` is `CHECK (score >= 0 AND score <= 1)`, so an
-    unclamped term is a `RepositoryConflict` mid-rebuild -- a table left half
-    old and half new -- rather than a bad ordering. Real data cannot produce
-    either planted value (a genome vector is non-negative, so the true cosine
-    is in `[0, 1]`); a **port implementation** can, which is why M7 clamped in
-    the service rather than in SQL.
-
-    With the term removed the defence is structural instead of arithmetic: the
-    value never reaches `_blend` at all, so no port can push a score out of
-    range through it. The parameters are the two that used to land the
-    *unclamped* blend strictly outside the CHECK, kept precisely so this case
-    fails if anybody re-passes `candidate.tags` without also restoring a clamp.
+    `title_neighbors.score` is `CHECK (score >= 0 AND score <= 1)`, so an unclamped term
+    is a `RepositoryConflict` mid-rebuild -- a table left half old and half new -- rather
+    than a bad ordering. Real data cannot produce either planted value; a port
+    implementation can. With the term no longer blended the defence is structural: the
+    value never reaches `_blend`, so this case fails if anybody re-passes
+    `candidate.tags` without also restoring a clamp.
     """
     for planted in (-0.4, 1.4):
         rows = _neighbors_for(
@@ -610,15 +525,12 @@ def test_a_genome_cosine_a_port_put_outside_the_unit_interval_cannot_reach_a_sco
 
 
 async def test_the_rebuild_reports_how_many_seeds_carried_a_genome() -> None:
-    """Kills `has_genome` filled but never counted.
+    """`has_genome` filled and never counted is the implementation this rules out.
 
-    The coverage figure PRD 05 has promised since before an importer existed
-    has never had a denominator, and this is the counter that produces it --
-    from the code path that consumes the vectors, rather than from a second
-    query somebody has to think to run.
-
-    Five seeds, two genomed. A rebuild reporting `seeds` alone cannot tell a
-    1.8%-covered catalog from a fully covered one.
+    The coverage figure PRD 05 promises has never had a denominator, and this counter
+    produces it from the code path that consumes the vectors rather than from a second
+    query somebody has to think to run. Five seeds, two genomed: a rebuild reporting
+    `seeds` alone cannot tell a thinly covered catalog from a fully covered one.
     """
     service, embeddings, _ = _service()
     ids = [uuid.UUID(int=0x300 + index) for index in range(5)]
@@ -635,24 +547,17 @@ async def test_the_rebuild_reports_how_many_seeds_carried_a_genome() -> None:
     assert report.seeds_with_genome == 2
 
 
-# --- the genome is measured and no longer blended (M9 S7) ------------------ S5 walked
-# the whole embedded population once, read-only, over the pool `nearest_for` draws:
-# **130,647 seeds, 13,064,700 candidate pairs, 323,297 of them carrying a genome vector
-# on both sides -- 2.4746%.** That is a *second* measurement rather than a delta against
-# M7's 1.81%, which S1 settled came from 5,020 owned, name-selected, pre-TMDb seeds in a
+# --- the genome is counted and no longer blended ---------------------------
 
 
 def test_the_tag_genome_cosine_no_longer_reorders_a_pool() -> None:
-    """The whole of S7's behaviour change, and the inverse of the M7 case it replaces.
+    """The tag-genome cosine no longer reorders a pool.
 
-    The genome-bearing candidate carries a **lower** embedding cosine and a
-    near-perfect genome cosine, and its id sorts *first*, so the assertion can
-    only hold if the cosine decided: a four-signal blend scores it
-    `0.75 x 0.79 + 0.25 x 0.95 = 0.83` against the other's 0.80 and answers in
-    the opposite order, and a tie answers in the opposite order too.
-
-    The second arm is the one a residual weight cannot satisfy: with no other
-    signal present the score **is** the clamped cosine, exactly.
+    The genome-bearing candidate carries a lower embedding cosine, a near-perfect genome
+    cosine and an id that sorts first, so the assertion can only hold if the cosine
+    decided -- a four-signal blend, and a tie, both answer in the opposite order. The
+    second arm is the one a residual weight cannot satisfy: with no other signal present
+    the score *is* the clamped cosine, exactly.
     """
     assert _GENOME_TWIN < _NO_GENOME, "the premise: a tie would answer the other way round"
     rows = _neighbors_for(
@@ -669,10 +574,9 @@ def test_the_tag_genome_cosine_no_longer_reorders_a_pool() -> None:
 def test_the_four_signal_fingerprint_this_file_pins_is_the_one_m7_and_m8_stamped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Licenses the literal below.
+    """Licenses the literal above, so the staleness case is about tables that exist.
 
-    so the staleness case is about the tables an operator really has rather than about
-    an invented string.
+    A digest nothing ever stamped would make that case about an invented string.
     """
     monkeypatch.setattr("usher.services.similar._WEIGHTS", _M7_FOUR_SIGNAL_WEIGHTS)
     historical_payload = json.dumps(
@@ -689,24 +593,19 @@ def test_the_four_signal_fingerprint_this_file_pins_is_the_one_m7_and_m8_stamped
         == _M7_FOUR_SIGNAL_FINGERPRINT
     )
     # The half that makes this a licence rather than a restatement: today's
-    # function, handed M7's own weights, does *not* answer it. A reader finding
-    # the literal must not conclude the running code can still mint it.
+    # function, handed the four-signal weights, does *not* answer it. A reader
+    # finding the literal must not conclude the running code can still mint it.
     assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != _M7_FOUR_SIGNAL_FINGERPRINT
 
 
 async def test_every_row_written_under_the_four_signal_blend_reads_as_stale() -> None:
-    """The rebuild obligation as a **query** rather than as an inference.
+    """The rebuild obligation as a query rather than as an inference.
 
-    ADR-0020's whole argument, and what makes S7's operational cost legible.
-
-    Every `title_neighbors` row any deployment holds was written under M7's
-    four-signal blend. After S7 they mean something the running blend does not,
-    and `usher similar --rebuild` is the only thing that repairs them -- so the
-    count has to be reachable without anybody knowing which blend wrote what.
-
-    The premise is asserted first and is the assertion that was red before the
-    change: while the running blend *is* the four-signal one, a re-stamped row
-    is not stale and this case cannot say anything.
+    Every `title_neighbors` row a deployment holds was written under the four-signal
+    blend; they now mean something the running blend does not, and
+    `usher similar --rebuild` is the only thing that repairs them -- so the count has to
+    be reachable without anybody knowing which blend wrote what. The premise is asserted
+    first, because under the four-signal blend a re-stamped row is not stale at all.
     """
     assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != _M7_FOUR_SIGNAL_FINGERPRINT, (
         "the premise: the running blend is no longer the four-signal one"
@@ -724,26 +623,13 @@ async def test_every_row_written_under_the_four_signal_blend_reads_as_stale() ->
 
 
 def test_the_surviving_weights_are_m7s_and_not_a_revert_to_m6s() -> None:
-    """The second half of S7's decision, and nothing else in this file can see it.
+    """The surviving weights stay where they are rather than returning to the older set.
 
-    every number here is a **literal**.
-
-    Removing the genome licenses nothing about keywords against genres, so
-    `cosine`/`keywords`/`genres` stay at M7's 0.45 / 0.20 / 0.10 rather than
-    returning to M6's 0.60 / 0.25 / 0.15. `_blend` renormalises, so keeping M7's
-    means a pair that carried no genome is scored under **exactly** the
-    denominator it already was and its stored score does not move -- confining
-    the change to the 2.4746% of pairs the measurement is about. M6's numbers
-    would move every row for a reason nothing measured.
-
-    **`test_every_pair_is_scored_within_m6s_reweighting_bound` cannot pin
-    this.** Its assertions are derived from `_WEIGHTS` -- `abs(new - old) <=
-    0.0167` is 0.0 under M6's own weights and
-    `_WEIGHTS["cosine"] / sum(_WEIGHTS.values())` is 0.600 under both tables --
-    so it pins that the weights are *in force* and not what they *are*. Those
-    are two claims and they need two cases, which is D4's `TICKET_TTL_SECONDS`
-    finding and B9's `CAST_LIMIT` arriving at a third constant. The tell, as in
-    both of those, is the constant appearing on both sides of the assertion.
+    Removing the genome licenses nothing about keywords against genres, and `_blend`
+    renormalises, so keeping these means a pair that carried no genome is scored under
+    exactly the denominator it already was and its stored score does not move. Every
+    number here is a literal, because the bound case above derives its assertions from
+    `_WEIGHTS` and so pins that the weights are in force rather than what they are.
     """
     assert _WEIGHTS == {"cosine": 0.45, "keywords": 0.20, "genres": 0.10}
 
@@ -761,19 +647,12 @@ def test_a_zero_weight_signal_is_arithmetically_identical_to_an_absent_one(
 ) -> None:
     """Why the revert removes the key instead of zeroing it.
 
-    stated where the next reader will look for it.
-
-    `_blend` adds `_WEIGHTS[name] * value` to `total` **and** `_WEIGHTS[name]`
-    to `applied`, so a 0.0-weighted signal moves neither: it is arithmetically
-    the same program as an absent one, to full precision, at every value the
-    signal can take. Asserted with `==` rather than `approx`, because
-    "indistinguishable" is the claim.
-
-    And the second half is what makes zeroing strictly *worse* than removing:
-    `blend_fingerprint()` reads `_WEIGHTS`, so the zeroed spelling mints a new
-    digest, declares every stored row stale, and buys an 85-minute rebuild for
-    a table whose every score is unchanged. A weight of 0.0 is a term that
-    costs a read, a fingerprint entry and a rebuild, and contributes nothing.
+    `_blend` adds `_WEIGHTS[name] * value` to `total` and `_WEIGHTS[name]` to `applied`,
+    so a 0.0-weighted signal moves neither: arithmetically the same program as an absent
+    one, at every value the signal can take, which is why this asserts `==` rather than
+    `approx`. Zeroing is strictly worse than removing -- `blend_fingerprint()` reads
+    `_WEIGHTS`, so the zeroed spelling mints a new digest, declares every stored row
+    stale and buys a full rebuild for a table whose every score is unchanged.
     """
     zeroed = {**_M7_FOUR_SIGNAL_WEIGHTS, "tags": 0.0}
     monkeypatch.setattr("usher.services.similar._WEIGHTS", zeroed)
@@ -787,21 +666,14 @@ def test_a_zero_weight_signal_is_arithmetically_identical_to_an_absent_one(
 
 
 def test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero() -> None:
-    """The two careless spellings of S7's revert.
+    """The two careless spellings of the revert, refused structurally.
 
-    refused structurally, because neither is visible in a score.
-
-    **The key removed and the argument left** is a `KeyError` on the first pair
-    of the first page of a rebuild -- loud, but only at run time, in a batch.
-    **The argument removed and the key left** is silent: a weight nothing is
-    ever handed, still in the fingerprint, still declaring a dependency the
-    scorer does not have. Asserting the two sets are *equal* refuses both with
-    one claim.
-
-    **And no weight is 0.0**, for the reason the arithmetic case above
-    measures: a zero-weighted term is indistinguishable from an absent one in
-    every score it touches, so nothing behavioural can tell the two apart and
-    only this can.
+    The key removed and the argument left is a `KeyError` on the first pair of the first
+    page of a rebuild: loud, but only at run time, in a batch. The argument removed and
+    the key left is silent -- a weight nothing is ever handed, still in the fingerprint,
+    still declaring a dependency the scorer does not have. Asserting the two sets are
+    equal refuses both, and no weight is 0.0 because nothing behavioural could tell a
+    zero-weighted term from an absent one.
     """
     calls = [
         node
@@ -817,19 +689,12 @@ def test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero() -
 
 
 async def test_a_half_covered_pair_is_not_counted_as_a_genome_pair() -> None:
-    """ADR-0014's fourth site after S7.
+    """A pair carrying a genome on one side only is not a covered pair.
 
-    it moved from the blend to the measurement, and it is the reason the read stays.
-
-    Nothing blends `NeighborCandidate.tags` any more, so the only consumer of
-    "`None` rather than 0.0" is `pairs_with_tags` -- the counter that produced
-    2.4746% and that will produce the number a later milestone re-opens this
-    decision on. A port answering 0.0 for a half-covered pair would report a
-    catalog as fully covered, which is exactly the wrong direction: it makes a
-    dead signal look live.
-
-    Three embedded titles, two genomed. Every title is a seed, so the pool
-    holds six ordered pairs and exactly two of them are covered on both sides.
+    Nothing blends `NeighborCandidate.tags` any more, so the only consumer of "`None`
+    rather than 0.0" is `pairs_with_tags`. A port answering 0.0 for a half-covered pair
+    would report a catalog as fully covered, which makes a dead signal look live. Three
+    embedded titles, two genomed: six ordered pairs, exactly two covered on both sides.
     """
     service, embeddings, _ = _service()
     seed, near = planted_pair((math.pi / 2) / 5)
@@ -860,17 +725,11 @@ def test_the_blend_fingerprint_moves_when_any_of_the_three_constants_moves(
 ) -> None:
     """Kills a fingerprint over `_WEIGHTS` alone.
 
-    All three constants decide what a stored score *means*, and the two that
-    are not weights are the ones a reader is most likely to think are
-    incidental. `_NEIGHBORS_PER_TITLE` changes no score at all -- it changes
-    which pairs are **stored**, so a table rebuilt at 10 and read as though it
-    were 25 is missing rows nobody can see are missing. `_CANDIDATE_POOL`
-    decides which pairs were ever **considered**, so shrinking it can silently
-    drop a title's true nearest neighbour while every stored row stays
-    perfectly valid.
-
-    A fingerprint blind to either reports a table as current across exactly
-    the changes that make it wrong without making it look wrong.
+    All three constants decide what a stored score *means*. `_NEIGHBORS_PER_TITLE`
+    changes no score at all -- it changes which pairs are stored, so a table rebuilt at
+    10 and read as though it were 25 is missing rows nobody can see are missing.
+    `_CANDIDATE_POOL` decides which pairs were ever considered, so shrinking it can
+    silently drop a title's true nearest neighbour while every stored row stays valid.
     """
     before = blend_fingerprint(embedding_model=_EMBEDDING_MODEL)
     monkeypatch.setattr(f"usher.services.similar.{attribute}", value)
@@ -882,23 +741,12 @@ def test_reordering_the_weights_without_changing_one_leaves_the_fingerprint(
 ) -> None:
     """Kills a fingerprint over `repr(_WEIGHTS)` or an unsorted `json.dumps`.
 
-    `_WEIGHTS` is a `dict` and Python preserves insertion order, so the
-    obvious spellings mint a new digest for a purely cosmetic edit -- which
-    declares every row in the table stale, and instructs an operator to spend
-    a full rebuild on a no-op. The failure is not that it is wrong; it is that
-    it cries wolf, and the next genuine change is the one nobody rebuilds for.
-
-    At 130,647 embedded titles that rebuild is **85 minutes** (S5's measured
-    walk), which is what makes "cries wolf" an operational cost rather than a
-    tidiness argument.
-
-    **The reordering is derived from `_WEIGHTS` rather than transcribed from
-    it, and that is a repair.** Until 2026-08-12 the monkeypatched value was a
-    hand-written copy of the shipped table, so this case failed on *any* change
-    to a weight -- it was a change-detector wearing an ordering case's name, and
-    S7's sweep watched it report a kill for three separate plants that had
-    nothing to do with insertion order. Reversed from the real mapping it can
-    only ever fail on the property it is named for.
+    `_WEIGHTS` is a `dict` and Python preserves insertion order, so the obvious
+    spellings mint a new digest for a cosmetic edit -- declaring every row in the table
+    stale and instructing an operator to spend a whole rebuild on a no-op. The failure
+    is not that it is wrong; it is that it cries wolf, and the next genuine change is
+    the one nobody rebuilds for. The reordering is derived from `_WEIGHTS` rather than
+    transcribed from it, so it can only fail on the property it is named for.
     """
     reordered = dict(reversed(list(_WEIGHTS.items())))
     assert list(reordered) != list(_WEIGHTS), "the premise: the order really moved"
@@ -921,17 +769,12 @@ async def test_a_rebuild_stamps_the_running_fingerprint_so_nothing_reads_stale()
 
 
 async def test_rows_written_under_a_previous_blend_read_as_stale() -> None:
-    """The state M7 created and M6 could not have detected.
+    """Rows written under a previous blend are in range and carry a plausible `rank`.
 
-    Every row stored before this milestone came from a three-signal blend at
-    different weights. Both halves of such a table are in `[0, 1]`, both carry
-    a plausible `rank`, and **nothing distinguished them** -- so an operator
-    reading `computed_at()` sees one recent timestamp and concludes the
-    artefact is current, which it is, for the wrong definition of current.
-
-    Scoped to one seed as well as whole-table, because that is what
-    `usher similar <title id>` reports and the two must not be able to
-    disagree about what "different blend" means.
+    Nothing else distinguishes them, so an operator reading `computed_at()` sees one
+    recent timestamp and concludes the artefact is current -- which it is, for the wrong
+    definition of current. Scoped to one seed as well as whole-table, because that is
+    what `usher similar <title id>` reports and the two must not disagree.
     """
     service, embeddings, neighbors = _service()
     for index, title_id in enumerate((_SEED, _OTHER)):
@@ -946,7 +789,7 @@ async def test_rows_written_under_a_previous_blend_read_as_stale() -> None:
 
 
 def test_swapping_the_embedding_model_makes_every_stored_neighbour_stale() -> None:
-    """The gap this fingerprint had for three milestones, as a case."""
+    """Swapping the embedding model makes every stored neighbour stale."""
     small = blend_fingerprint(embedding_model="fastembed:BAAI/bge-small-en-v1.5")
     m3 = blend_fingerprint(embedding_model="openai:BAAI/bge-m3")
 
@@ -964,15 +807,10 @@ def test_swapping_the_embedding_model_makes_every_stored_neighbour_stale() -> No
 def test_the_runtime_prefix_is_part_of_the_fingerprint_not_just_the_checkpoint() -> None:
     """`fastembed:X` and `openai:X` are different vectors and must be different digests.
 
-    `Embedder.model_name` records the runtime *and* the checkpoint because the
-    same weights served two ways do not agree: the measured max pairwise
-    similarity delta between `fastembed` and `sentence-transformers` on one
-    checkpoint is **1.41e-03**, which is 6x the halfvec quantisation error. A
-    fingerprint that hashed only the checkpoint would call those two the same
-    and leave the rows from one reading as current under the other.
-
-    This is the whole reason the argument is the full `model_name` string
-    rather than `checkpoint_of(...)` of it.
+    `Embedder.model_name` records the runtime as well as the checkpoint, because the
+    same weights served two ways do not agree -- by more than the halfvec quantisation
+    error. A fingerprint hashing only the checkpoint would leave rows from one reading
+    as current under the other, which is why the argument is the full `model_name`.
     """
     assert blend_fingerprint(embedding_model="fastembed:BAAI/bge-m3") != blend_fingerprint(
         embedding_model="openai:BAAI/bge-m3"

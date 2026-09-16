@@ -36,25 +36,20 @@ class SourceHarness(ABC):
 
     @abstractmethod
     async def recorded_watch_state(self, external_id: str) -> tuple[int, bool] | None:
-        """`(position_seconds.
+        """`(position_seconds, played)` as the source now holds it, or `None`.
 
-        played)` as the source now holds it after a `push_watch_state`, or `None` if
-        nothing was ever written.
-
-        Read back from the source's own state, never from a log of calls the
-        adapter made -- a harness that recorded "push_watch_state was
-        called" would pass against an adapter that called the wrong upstream
-        endpoint and got a 200 from something that ignored it.
+        Read back from the source's own state, never from a log of calls the adapter
+        made -- a harness that recorded "push_watch_state was called" would pass against
+        an adapter that called the wrong upstream endpoint and got a 200 from something
+        that ignored it.
         """
 
     @abstractmethod
     async def go_offline(self) -> None:
         """Make every subsequent request fail at the transport layer.
 
-        the way an unplugged server or a dead DNS entry does.
-
-        Not a 5xx: a transport failure is the case an adapter is most likely to
-        translate wrongly.
+        The way an unplugged server or a dead DNS entry does -- not a 5xx, because a
+        transport failure is the case an adapter is most likely to translate wrongly.
         """
 
     @abstractmethod
@@ -82,19 +77,14 @@ class SourceHarness(ABC):
     async def expire_credentials(self) -> None:
         """Invalidate the adapter's *session*, leaving the stored credentials correct.
 
-        the exact failure that motivated this project, where a token in a Home Assistant
-        dashboard silently began returning 401 with no way to renew it.
-
-        A source with no expiring session may implement this as a no-op; the
-        contract's assertions still hold (the operation succeeds, and no
-        storm of authentications follows).
+        A source with no expiring session may implement this as a no-op; the contract's
+        assertions still hold -- the operation succeeds, and no storm of
+        authentications follows.
         """
 
     @abstractmethod
     def authentications(self) -> int:
-        """How many times the source has been asked to authenticate since the harness was.
-
-        created.
+        """How many times the source has been asked to authenticate since construction.
 
         `0` for a source with no authentication step.
         """
@@ -102,10 +92,8 @@ class SourceHarness(ABC):
     def observed_overlap(self) -> int | None:
         """The greatest number of upstream requests this harness saw in flight at once.
 
-        or `None` if it cannot tell.
-
-        Optional: the default is `None`, and a harness with no transport to instrument
-        leaves it there.
+        `None` if it cannot tell -- the default, which a harness with no transport to
+        instrument leaves in place.
         """
         return None
 
@@ -119,18 +107,13 @@ class SourceHarness(ABC):
     async def push_silence(self) -> None:
         """Deliver nothing from here on, without closing the channel.
 
-        The failure this milestone is built around: the connection is open,
-        the subscription was accepted, and nothing arrives. ADR-0004 measured
-        exactly this against a nonexistent path. An implementation that
-        closed the connection instead would be arranging a *different*
-        failure -- one every WebSocket library already detects.
+        The connection is open, the subscription was accepted, and nothing arrives. An
+        implementation that closed the connection instead would be arranging a
+        *different* failure -- one every WebSocket library already detects.
 
-        **Whatever is already queued must also stop arriving.** Otherwise
-        this is a no-op in the only case that reads it -- nothing is in
-        flight on a channel a case has not pushed to -- and a harness could
-        implement it as `pass` with the suite still green.
-        `test_a_stalled_channel_raises_rather_than_hanging` pushes an event
-        *first* for exactly that reason.
+        **Whatever is already queued must also stop arriving.** Otherwise this is a
+        no-op in the only case that reads it, and a harness could implement it as `pass`
+        with the suite still green.
         """
 
     @abstractmethod
@@ -164,12 +147,9 @@ class SourceHarness(ABC):
     def push_stale_after(self) -> float:
         """The adapter's staleness window.
 
-        so a case can step past it without hard-coding a constant that belongs to the
-        implementation.
-
-        Only ever called by a case that has already checked
-        `can_advance_push_clock`, which is why this may raise rather than
-        returning a number a harness would have to invent.
+        A case steps past it without hard-coding a constant that belongs to the
+        implementation. Only ever called after `can_advance_push_clock`, which is why
+        this may raise rather than return a number a harness would have to invent.
         """
         raise NotImplementedError
 

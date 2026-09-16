@@ -87,12 +87,10 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
 def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """A `Settings` that validates.
 
-    so a case about the *command* failing is not accidentally a case about the settings
-    failing.
-
-    Its own values rather than `tests.unit.commands.configured`'s: the host
-    and the key are what this file's rendering cases scan a failure message
-    for, so they have to be distinguishable from every other file's.
+    So a case about the *command* failing is not accidentally a case about the settings
+    failing. Its own values rather than `tests.unit.commands.configured`'s: the host and
+    the key are what this file's rendering cases scan a failure message for, so they
+    have to be distinguishable from every other file's.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
@@ -108,12 +106,9 @@ def _raising(exc: BaseException) -> Callable[..., Coroutine[Any, Any, None]]:
 def _every_command_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
     """Make every dispatch target fail identically.
 
-    Reached by walking the module rather than by listing the dispatch
-    coroutines, for the same reason the argv table is checked against the
-    parser: a hand-written list agrees with itself and with nothing else.
-    **Count-free deliberately** -- this docstring said "the fourteen
-    coroutines" until M8 added a fifteenth command, which is a number nobody
-    re-derives and the walk never needed.
+    Reached by walking the module rather than by listing the dispatch coroutines, for
+    the same reason the argv table is checked against the parser: a hand-written list
+    agrees with itself and with nothing else, and a count is a number nobody re-derives.
     """
     for name, value in vars(usher_cli).items():
         if name.startswith("_") and inspect.iscoroutinefunction(value):
@@ -130,7 +125,7 @@ def _every_command_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -
 
 
 def _refused() -> ConnectionRefusedError:
-    """The exact exception the M7 smoke test hit, shape and all.
+    """The exact exception an unreachable database produces, shape and all.
 
     asyncpg lets the raw `OSError` out rather than wrapping it, which is why the
     boundary cannot key on a SQLAlchemy type alone.
@@ -162,10 +157,9 @@ def test_an_unreachable_database_is_a_message_rather_than_a_traceback(
 
 
 def test_the_message_names_the_command_that_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator runs `usher bootstrap` overnight and finds the output in a log the next.
+    """An operator runs `usher bootstrap` overnight and reads the log the next morning.
 
-    morning; a bare `[Errno 111]` with no subject is the same problem as the traceback,
-    shorter.
+    A bare `[Errno 111]` with no subject is the same problem as the traceback, shorter.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(usher_cli, "_sync_status", _raising(_refused()))
@@ -179,7 +173,7 @@ def test_the_message_names_the_command_that_failed(monkeypatch: pytest.MonkeyPat
 def test_the_message_names_the_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stack still exists and the message has to say so.
 
-    or the boundary has removed the only tool for the failure it is most likely to hide.
+    Or the boundary has removed the only tool for the failure it is most likely to hide.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(usher_cli, "_status", _raising(_refused()))
@@ -207,14 +201,11 @@ def test_the_traceback_flag_lets_the_original_exception_through(
 
 
 def test_a_programming_error_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The boundary's hardest requirement.
+    """The boundary's hardest requirement, and why it enumerates families.
 
-    and the reason it enumerates families instead of catching `Exception`.
-
-    `AttributeError` here stands for every bug: nothing the operator sets or
-    starts makes it go away, so collapsing it to one line moves the cost
-    from a wart to a lost bug report. This case is what a later
-    `except Exception:` would break.
+    `AttributeError` here stands for every bug: nothing the operator sets or starts
+    makes it go away, so collapsing it to one line moves the cost from a wart to a lost
+    bug report. This case is what a later `except Exception:` would break.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(
@@ -230,7 +221,7 @@ def test_an_http_source_that_is_down_is_operator_facing_too(
 ) -> None:
     """TMDb, Emby and every bulk download fail through httpx, not through the driver.
 
-    an unreachable Emby is the same class of operator problem as an unreachable database
+    An unreachable Emby is the same class of operator problem as an unreachable database
     and reads the same way.
     """
     _configured(monkeypatch)
@@ -250,7 +241,7 @@ def test_a_database_error_the_driver_does_wrap_is_operator_facing(
 ) -> None:
     """The other half of the database story.
 
-    a connect failure arrives as a bare `OSError`, but `relation "titles" does not
+    A connect failure arrives as a bare `OSError`, but `relation "titles" does not
     exist` -- an operator who skipped `alembic upgrade head` -- arrives wrapped as a
     `SQLAlchemyError`.
     """
@@ -268,24 +259,18 @@ def test_a_database_error_the_driver_does_wrap_is_operator_facing(
 
 
 def test_a_missing_greenlet_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The case issue #8 is about.
+    """`test_a_programming_error_keeps_its_traceback`, in the family that hit this for real.
 
-    and it is `test_a_programming_error_keeps_its_traceback` in the one family that
-    reached this boundary for real.
-
-    `MissingGreenlet` is `InvalidRequestError` is `SQLAlchemyError`, so a
-    boundary that names `SQLAlchemyError` catches it -- and M9's S3 run
-    recorded exactly that: one of three `usher work` daemons died at
-    23:26:57Z on 2026-08-11 and the whole of what it left behind was
+    `MissingGreenlet` is `InvalidRequestError` is `SQLAlchemyError`, so a boundary that
+    names `SQLAlchemyError` catches it and a dead `usher work` daemon leaves behind
 
         usher work: MissingGreenlet: greenlet_spawn has not been called; ...
         (the stack is one flag away: `usher --traceback work`)
 
-    Nothing an operator sets or starts makes IO-outside-a-greenlet go away;
-    it is a bug in this project, and the stack is the bug report. The
-    boundary's own comment already says what it means to admit -- *"everything
-    the driver does wrap"* -- and that is `DBAPIError`, not every error
-    SQLAlchemy can raise.
+    Nothing an operator sets or starts makes IO-outside-a-greenlet go away; it is a bug
+    in this project, and the stack is the bug report. What the boundary means to admit
+    is *everything the driver does wrap* -- `DBAPIError`, not every error SQLAlchemy can
+    raise.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(
@@ -303,13 +288,11 @@ def test_the_operator_database_family_is_what_the_driver_wraps(
 ) -> None:
     """The membership assertion behind the case above.
 
-    so the repair cannot be undone by widening the tuple back without noticing.
-
-    `DBAPIError` is the driver's half -- a missing table, a dead pool, a
-    permission the role does not have. `InvalidRequestError` is this
-    project's half: a session used wrong, a statement built wrong, IO in a
-    place there is no greenlet to run it in. The tuple may hold the first and
-    must not hold anything that catches the second.
+    So the tuple cannot be widened back without noticing. `DBAPIError` is the driver's
+    half -- a missing table, a dead pool, a permission the role does not have.
+    `InvalidRequestError` is this project's half: a session used wrong, a statement built
+    wrong, IO in a place there is no greenlet to run it in. The tuple may hold the first
+    and must not hold anything that catches the second.
     """
     assert DBAPIError in usher_cli.OPERATOR_ERRORS
     assert not any(issubclass(MissingGreenlet, member) for member in usher_cli.OPERATOR_ERRORS)
@@ -318,9 +301,9 @@ def test_the_operator_database_family_is_what_the_driver_wraps(
 def test_a_rejected_setting_is_reported_without_the_value_it_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The security case, and it is a live regression rather than a hypothetical.
+    """The security case: a rejected setting must not print the value it rejected.
 
-    `USHER_DATABASE_URL` with the wrong driver made `usher bootstrap-status` print.
+    `USHER_DATABASE_URL` with the wrong driver made `usher bootstrap-status` print
 
         ... [type=value_error, input_value='mysql://admin:<the password>@db:5432/usher', ...]
 
@@ -405,18 +388,15 @@ def test_ctrl_c_during_a_long_import_is_not_a_crash(
 
 
 def test_a_deliberate_exit_message_is_not_re_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The CLI already raised `SystemExit` with a written message in three places before this.
+    """The CLI raises `SystemExit` with a written message in three places of its own.
 
-    boundary existed -- `_as_uuid`, the semantic-search guard, `similar`'s cross-
-    argument rule.
+    `_as_uuid`, the semantic-search guard, `similar`'s cross-argument rule. Those
+    messages were chosen for the failure they describe, and the boundary must pass them
+    through untouched rather than prefix them with a second explanation.
 
-    Those messages were chosen for the failure they describe, and the boundary must pass
-    them through untouched rather than prefix them with a second explanation.
-
-    Free structurally, because `SystemExit` is a `BaseException` and the
-    boundary names only `Exception` subclasses -- pinned anyway, because
-    "free structurally" stops being true the moment somebody widens the
-    tuple.
+    Free structurally, because `SystemExit` is a `BaseException` and the boundary names
+    only `Exception` subclasses -- pinned anyway, because "free structurally" stops being
+    true the moment somebody widens the tuple.
     """
     _configured(monkeypatch)
     written = "semantic search is unavailable -- try --mode fused, or run `usher index`"
@@ -447,7 +427,7 @@ def test_the_parsers_own_exits_are_untouched(monkeypatch: pytest.MonkeyPatch) ->
 def test_the_argv_table_covers_every_subcommand() -> None:
     """The parametrised case below is only "CLI-wide" if this passes.
 
-    a new subcommand with no row is a command nobody has checked is inside the boundary.
+    A new subcommand with no row is a command nobody has checked is inside the boundary.
     """
     subparsers = next(
         action
@@ -461,10 +441,7 @@ def test_the_argv_table_covers_every_subcommand() -> None:
 def test_every_command_reports_a_dead_database_the_same_way(
     command: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The finding named two commands.
-
-    the fix is one boundary, so the case is every command rather than those two.
-    """
+    """One boundary, so the case is every command rather than the two that found it."""
     _configured(monkeypatch)
     _every_command_raises(monkeypatch, _refused())
 
@@ -488,12 +465,10 @@ def _function_def(name: str) -> ast.FunctionDef:
 def test_the_boundary_is_one_try_around_the_whole_dispatch() -> None:
     """One case about this implementation, one about the next.
 
-    The behavioural cases above pass just as well against one `try`/`except`
-    pair per arm -- which is the shape that rots, because the *next* command
-    is written by copying an arm and not the handler, and M8's `usher curate`
-    is the one that arrived and proved it. This asserts the shape instead:
-    `main` has exactly one `try`,
-    and everything that can fail -- reading the settings, configuring
+    The behavioural cases above pass just as well against one `try`/`except` pair per
+    arm -- which is the shape that rots, because the *next* command is written by
+    copying an arm and not the handler. This asserts the shape instead: `main` has
+    exactly one `try`, and everything that can fail -- reading the settings, configuring
     telemetry, dispatching -- is inside it.
     """
     main_def = _function_def("main")
@@ -518,12 +493,11 @@ def test_the_boundary_is_one_try_around_the_whole_dispatch() -> None:
 
 
 def test_the_boundary_catches_families_and_not_exception() -> None:
-    """`except Exception` is the change that passes every behavioural case in this module except.
+    """`except Exception` passes every behavioural case in this module but one.
 
-    `test_a_programming_error_keeps_its_traceback`, and it is what somebody reaches for
-    when a new failure escapes.
-
-    The tuple is named so the intent is legible at the handler.
+    It is what somebody reaches for when a new failure escapes, and
+    `test_a_programming_error_keeps_its_traceback` is the case that refuses it. The
+    tuple is named so the intent is legible at the handler.
     """
     assert Exception not in usher_cli.OPERATOR_ERRORS
     assert BaseException not in usher_cli.OPERATOR_ERRORS
@@ -531,28 +505,25 @@ def test_the_boundary_catches_families_and_not_exception() -> None:
 
 
 def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> None:
-    """**The shape of ADR-0026's 2026-08-07 amendment.
+    """The split port taxonomy, asserted rather than described.
 
-    asserted rather than described**, and the assertion that fails on the one-line
-    version of it.
+    This is the assertion that fails on the one-line version of it.
     """
     reaching = {PortUnavailable, PortAuthFailed, PortRateLimited}
     everything_else = set(UsherPortError.__subclasses__()) - reaching
     # The six that stay out, named so the count is checkable: three that are about what
     # came back or what we tried to write and carry deliberate bug tripwires, and three
-    # that no measured path reaches this boundary with -- `ReconcileService` and
-    # `PushService` absorb two of them, and `_TRANSLATORS` covers every `SearchFilters`
-    # field, so the third fires only for a field a later milestone forgets.
+    # nothing reaches this boundary with -- `ReconcileService` and `PushService` absorb
+    # two of them, and `_TRANSLATORS` covers every `SearchFilters` field, so the third
+    # fires only for a field a later change forgets.
     exclusion = (
-        "RepositoryConflict stays out: 22 raise sites across 14 modules "
-        "(re-derived 2026-08-20, M10 F4), of which exactly ONE is reachable "
-        "from a CLI argument -- `usher unmatched --title` naming no title, "
-        "fixed by a lookup in `cli._unmatched` rather than by muting the other "
-        "21. Several of those are deliberate tripwires for bugs in this "
-        "project's own code (`title_neighbors`' bounds, the credits delete's "
-        "scope, a curated batch this project assembled wrong), and ADR-0026's "
-        "bar is that a family belongs here when an operator can act on it. "
-        "1-of-22 is not a family. See ADR-0026's Consequences."
+        "RepositoryConflict stays out: of its raise sites exactly ONE is reachable "
+        "from a CLI argument -- `usher unmatched --title` naming no title, fixed by "
+        "a lookup in `cli._unmatched` rather than by muting the rest. Several of "
+        "those are deliberate tripwires for bugs in this project's own code "
+        "(`title_neighbors`' bounds, the credits delete's scope, a curated batch "
+        "this project assembled wrong). A family belongs here when an operator can "
+        "act on it, and one reachable site out of twenty-two is not a family."
     )
     assert everything_else == {
         RepositoryConflict,
@@ -574,23 +545,17 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
 def test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**ADR-0026's own motivating defect, in the family the ADR did not name.**.
+    """The motivating defect, in the family the taxonomy did not name.
 
-    `OpenAICompatibleClient` translates every transport failure into a port
-    error *before* it crosses the boundary -- which is what the taxonomy is
-    for -- so `httpx.HTTPError` can never fire for it and
-    `usher curate` against a `USHER_LLM_BASE_URL` with nothing listening used
-    to print a stack ending in `PortUnavailable: POST /chat/completions
-    failed: ConnectError`. Measured 2026-08-07 by driving
-    `OpenAICompatibleClient.complete_json` at a loopback port with nothing
-    bound: that is exactly the exception and exactly the message, and
-    `isinstance(exc, cli.OPERATOR_ERRORS)` was `False`.
+    `OpenAICompatibleClient` translates every transport failure into a port error
+    *before* it crosses the boundary -- which is what the taxonomy is for -- so
+    `httpx.HTTPError` can never fire for it, and `usher curate` against a
+    `USHER_LLM_BASE_URL` with nothing listening used to print a stack ending in
+    `PortUnavailable: POST /chat/completions failed: ConnectError`.
 
-    It is the *most likely* runtime failure of a cron'd `usher curate`, and
-    the operator has already been billed for it by the time they read it:
-    `CurationService.generate` writes and commits the `llm_calls` row on its
-    way out. Being handed a stack on top of that is the wart ADR-0026 was
-    written about.
+    It is the *most likely* runtime failure of a cron'd `usher curate`, and the operator
+    has already been billed for it by the time they read it: `CurationService.generate`
+    writes and commits the `llm_calls` row on its way out.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(
@@ -638,17 +603,14 @@ def test_a_rejected_credential_and_a_rate_limit_read_the_same_way(
 
 
 def test_a_repository_conflict_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """**The half of the amendment that is a refusal**.
+    """The half of the taxonomy that is a refusal.
 
-    and the case that fails if somebody later widens the tuple to `UsherPortError`.
-
-    `PostgresTitleNeighborRepository.replace` raises this for a score outside
-    `[0, 1]`, a self-neighbour, a negative rank or a title id naming no row --
-    all four CHECKs or foreign keys, and all four *a bug in the blend* rather
-    than something an operator can start, fix or wait for.
-    `usher similar --rebuild` is where it surfaces, and the stack is the bug
-    report. Same argument `test_a_programming_error_keeps_its_traceback`
-    makes for `AttributeError`, one taxonomy over.
+    This is the case that fails if somebody later widens the tuple to `UsherPortError`.
+    `PostgresTitleNeighborRepository.replace` raises this for a score outside `[0, 1]`, a
+    self-neighbour, a negative rank or a title id naming no row -- all four CHECKs or
+    foreign keys, and all four *a bug in the blend* rather than something an operator can
+    start, fix or wait for. `usher similar --rebuild` is where it surfaces, and the stack
+    is the bug report.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(
@@ -664,18 +626,16 @@ def test_a_repository_conflict_keeps_its_traceback(monkeypatch: pytest.MonkeyPat
 def test_a_malformed_upstream_payload_keeps_its_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`FastEmbedEmbedder` raises this when it hands back a different number of vectors than it.
+    """`FastEmbedEmbedder` raises this when it returns a different number of vectors.
 
-    was given texts -- title *n*'s vector landing on title *m*, which its own adapter
-    calls the most damaging bug available in that milestone and which no operator action
-    reaches.
+    Title *n*'s vector lands on title *m*, which its own adapter calls the most damaging
+    bug available to it and which no operator action reaches. `usher search --mode
+    semantic` is where it surfaces.
 
-    `usher search --mode semantic` is where it surfaces.
-
-    The commands that *can* answer a `PortDataMalformed` sensibly do it
-    themselves, in the arm that knows what the message means:
-    `_vocabulary_line` prints it as a status line, `_curate` turns it into a
-    sentence about last night's screen. Neither is the boundary's to guess.
+    The commands that *can* answer a `PortDataMalformed` sensibly do it themselves, in
+    the arm that knows what the message means: `_vocabulary_line` prints it as a status
+    line, `_curate` turns it into a sentence about last night's screen. Neither is the
+    boundary's to guess.
     """
     _configured(monkeypatch)
     monkeypatch.setattr(
@@ -688,9 +648,9 @@ def test_a_malformed_upstream_payload_keeps_its_traceback(
         usher_cli.main(["search", "dune"])
 
 
-# -- a failed sync run is a non-zero exit ------------------------------------- The
-# stand-ins below drive `_sync`'s real body -- every other case in this module patches
-# the dispatch coroutine, which is what makes them tests of the *boundary*.
+# -- a failed sync run is a non-zero exit -------------------------------------
+# The stand-ins below drive `_sync`'s real body -- every other case in this module
+# patches the dispatch coroutine, which is what makes them tests of the *boundary*.
 
 
 def _run(
@@ -727,16 +687,13 @@ def _sync_against(
 ) -> list[_StubAdapter]:
     """Wire `_sync` to given run rows and nothing else.
 
-    Deliberately not a fake pipeline with behaviour: the property under test is
-    what the command does with `run.status`, and a stub that could itself fail
-    would make a red ambiguous.
+    Deliberately not a fake pipeline with behaviour: the property under test is what the
+    command does with `run.status`, and a stub that could itself fail would make a red
+    ambiguous.
 
-    ⚠️ **`second` is not a convenience.** With one source, *"collect the
-    failures and exit after the loop"* and *"exit on the first failing source"*
-    are the same program -- measured, in S9's own sweep, where moving the
-    `raise` inside the loop survived every case in this module. One source
-    cannot see the difference and `_sync`'s docstring calls it load-bearing, so
-    a second one is what makes the claim checkable.
+    **`second` is not a convenience.** With one source, *"collect the failures and exit
+    after the loop"* and *"exit on the first failing source"* are the same program, so a
+    second source is what makes `_sync`'s load-bearing claim checkable.
     """
     _configured(monkeypatch)
     sources = [
@@ -836,11 +793,10 @@ def test_the_escape_hatch_is_offered_on_the_column_rather_than_on_the_message(
 ) -> None:
     """The refusal's kind is `error_code`, so a reworded sentence cannot hide it.
 
-    The wrong implementation this kills is the one that shipped: `in
-    (one.error or "")`. `ports/ingest.py` builds that sentence from three
-    numbers and PRD 08 lets it be reworded in any release, so a match on it
-    silently stops offering `--allow-full-retraction` on the one failure that
-    has one. The message here deliberately carries no token at all.
+    The wrong implementation this kills is `in (one.error or "")`: `ports/ingest.py`
+    builds that sentence from three numbers and PRD 08 lets it be reworded in any
+    release, so a match on it silently stops offering `--allow-full-retraction` on the
+    one failure that has one. The message here deliberately carries no token at all.
     """
     _sync_against(
         monkeypatch,
@@ -873,10 +829,8 @@ def test_a_transport_failure_is_not_offered_the_escape_hatch(
 ) -> None:
     """The control for the case above.
 
-    an escape hatch offered for every failure is one people learn to paste without
-    reading.
-
-    `error_code` is null for a read timeout, and a message that happens to
+    An escape hatch offered for every failure is one people learn to paste without
+    reading. `error_code` is null for a read timeout, and a message that happens to
     mention a ceiling must not be enough to earn the flag.
     """
     _sync_against(
@@ -928,22 +882,18 @@ def test_a_source_that_failed_does_not_stop_the_next_source_being_walked(
 ) -> None:
     """The exit is collected after the loop, and one source cannot end the run.
 
-    🔴 **Nothing pinned this until S9's own sweep said so.** Moving the `raise`
-    inside the loop -- the obvious spelling, and the one somebody reaches for
-    when adding the exit -- survived every case in this module, because each
-    wired exactly **one** source and the two programs are then identical. The
-    claim was load-bearing and lived only in `_sync`'s docstring, which is the
-    shape `.claude/rules/testing-discipline.md` calls a deleted guard.
+    Moving the `raise` inside the loop -- the obvious spelling, and the one somebody
+    reaches for when adding the exit -- passes every other case in this module, because
+    each wires exactly **one** source and the two programs are then identical.
 
-    It matters because it is the same property `ReconcileService.reconcile`
-    swallows the exception for in the first place: a household with a laptop
-    that is asleep and a NAS that is up must still get the NAS walked. Exiting
-    on the first failure would put that back one layer up, having removed it
-    one layer down.
+    It matters because it is the same property `ReconcileService.reconcile` swallows the
+    exception for in the first place: a household with a laptop that is asleep and a NAS
+    that is up must still get the NAS walked. Exiting on the first failure would put
+    that back one layer up, having removed it one layer down.
 
-    The premise is asserted before the conclusion: **both** adapters must have
-    been opened and closed, or "the second source was walked" is a claim about
-    a loop that never reached it.
+    The premise is asserted before the conclusion: **both** adapters must have been
+    opened and closed, or "the second source was walked" is a claim about a loop that
+    never reached it.
     """
     adapters = _sync_against(
         monkeypatch,
@@ -973,15 +923,13 @@ def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
 ) -> None:
     """The lane that has actually been failing here, and the hint's negative arm.
 
-    Ten of this deployment's thirteen `watch_state` runs have recorded `FAILED`
-    and none has ever completed, every one of them at exit 0 -- so the change is
-    about a failed run rather than about a refused sweep, and the `full` arm
-    above would pass against a command that special-cased retraction alone.
+    A `watch_state` run that recorded `FAILED` used to exit 0, so this is about a failed
+    run rather than about a refused sweep, and the `full` arm above would pass against a
+    command that special-cased retraction alone.
 
-    And the flag is **absent** here, which is the half that keeps the hint
-    honest: `--allow-full-retraction` does nothing for a read timeout, and an
-    escape hatch offered for every failure is one an operator learns to paste
-    without reading.
+    And the flag is **absent** here, which is the half that keeps the hint honest:
+    `--allow-full-retraction` does nothing for a read timeout, and an escape hatch
+    offered for every failure is one an operator learns to paste without reading.
     """
     _sync_against(
         monkeypatch,
@@ -1004,7 +952,7 @@ def test_a_failed_watch_lane_is_a_non_zero_exit_without_the_retraction_hint(
     )
 
 
-# -- issue #5: `--title` naming a title the catalog does not hold -------------
+# -- `--title` naming a title the catalog does not hold -----------------------
 
 
 class _AbsentTitle:
@@ -1023,17 +971,12 @@ class _RefusesTheForeignKey:
     """`PostgresMediaItemRepository.attach_title` against a real Postgres.
 
     The raise is not invented: `media_items.title_id` carries
-    `fk_media_items_title_id_titles`, the `UPDATE` matches the row, asyncpg
-    raises `ForeignKeyViolationError`, and the repository translates every
-    `IntegrityError` on that statement into this. Reproduced 2026-08-18
-    against `pgvector/pgvector:pg17` at `alembic head` by seeding one source
-    and one unmatched item and calling `_unmatched` with a well-formed title
-    id naming no row -- the traceback ended in exactly this type carrying
-    exactly this message.
+    `fk_media_items_title_id_titles`, the `UPDATE` matches the row, asyncpg raises
+    `ForeignKeyViolationError`, and the repository translates every `IntegrityError` on
+    that statement into this.
 
-    **The message names the media item and the media item is the id that was
-    fine**, which is the second half of what made the shipped behaviour
-    useless at a terminal.
+    **The message names the media item and the media item is the id that was fine**,
+    which is the second half of what made the shipped behaviour useless at a terminal.
     """
 
     def __init__(self) -> None:
@@ -1054,21 +997,19 @@ async def test_resolving_to_a_title_the_catalog_does_not_hold_is_a_sentence(
 ) -> None:
     """An operator typo in `--title` used to be a stack.
 
-    and this module's rule 2 does not cover it: the id is well-formed, so `_as_uuid`
+    The programming-error rule does not cover it: the id is well-formed, so `_as_uuid`
     passes it, and the row it names is the operator's mistake rather than a bug in this
     project's code.
 
-    The write is what raised, so the guard has to run **before** it -- the
-    order `POST /admin/unmatched/{id}/resolve` already keeps, and for the
-    same reason it documents: `attach_title` writes what it is given, so a
-    refusal that arrived after the write would be a refusal that had already
-    happened. `attempted` is what asserts the order rather than the outcome;
-    a lookup added after the call would print the same line.
+    The write is what raised, so the guard has to run **before** it -- the order `POST
+    /admin/unmatched/{id}/resolve` already keeps, and for the same reason: `attach_title`
+    writes what it is given, so a refusal that arrived after the write would be a refusal
+    that had already happened. `attempted` is what asserts the order rather than the
+    outcome; a lookup added after the call would print the same line.
 
-    Reads like `no such media item`, the other arm of this one branch, rather
-    than like `_as_uuid`'s `SystemExit`: two ways to name something that does
-    not exist, in one command, would be two exit codes for one operator
-    mistake.
+    Reads like `no such media item`, the other arm of this one branch, rather than like
+    `_as_uuid`'s `SystemExit`: two ways to name something that does not exist, in one
+    command, would be two exit codes for one operator mistake.
     """
     media_items = _RefusesTheForeignKey()
     absent = uuid.UUID("0198c6b1-0000-7000-8000-00000000dead")

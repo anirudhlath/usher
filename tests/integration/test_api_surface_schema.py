@@ -99,11 +99,11 @@ def _image(**overrides: object) -> dict[str, object]:
         "person_id": None,
         "kind": "poster",
         "provider": "tmdb",
-        # A provider *path*, not a URL -- `m09c` renamed the column, because
-        # ADR-0032's ladder is `{base}{rung}{path}` and a stored URL turns rung
-        # selection into string surgery. Each caller of `_image` that needs two
-        # distinct rows overrides it, since `uq_images_owner_provider_path` now
-        # refuses a second row with the same owner, provider and path.
+        # A provider *path*, not a URL: the image ladder is `{base}{rung}{path}`
+        # and a stored URL turns rung selection into string surgery. Each caller
+        # of `_image` that needs two distinct rows overrides it, since
+        # `uq_images_owner_provider_path` refuses a second row with the same
+        # owner, provider and path.
         "provider_path": "/an-invented-path.jpg",
         "width": 500,
         "height": 750,
@@ -149,16 +149,15 @@ async def test_search_queries_carries_prd_tens_columns_and_no_others(
 ) -> None:
     """`requested_mode` is wire-only.
 
-    PRD 10 assigns this table to M9 *whole* because a half-populated analytics table is
-    worse than an empty metric -- a dashboard reading it cannot tell a real zero from a
-    column nobody filled -- and the other half of "whole" is that nothing is added to it
+    PRD 10 assigns this table *whole* because a half-populated analytics table is worse
+    than an empty metric -- a dashboard reading it cannot tell a real zero from a column
+    nobody filled -- and the other half of "whole" is that nothing is added to it
     speculatively either.
 
-    **Nine until `m10c`, eleven now**, and the list stays closed rather than
-    becoming a floor: `m10c` takes PRD 10's amendment 2 -- `surface` and
-    `tier`, both named in that document -- and nothing else. No
-    `keystroke_index`, no `session_id`, no `debounced` flag; a twelfth column
-    is a red here exactly as a tenth was.
+    The eleven stay closed rather than becoming a floor: `m10c` takes PRD 10's amendment
+    2 -- `surface` and `tier`, both named in that document -- and nothing else. No
+    `keystroke_index`, no `session_id`, no `debounced` flag; a twelfth column is a red
+    here.
     """
     result = await session.execute(
         text(
@@ -184,12 +183,11 @@ async def test_search_queries_carries_prd_tens_columns_and_no_others(
 async def test_search_queries_ships_one_index_beyond_its_primary_key(
     session: AsyncSession,
 ) -> None:
-    """`genome_tags`' precedent held until `m10c` and the exception is the thing that makes it a.
+    """One index beyond the primary key, and its reader exists today.
 
-    rule: an index whose reader is a later milestone is `ix_titles_popularity` again,
-    and `ix_search_queries_at`'s reader is written out verbatim in PRD 10 today --
-    `DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an operator's
-    own SQL.
+    An index whose reader is a later milestone is `ix_titles_popularity` again;
+    `ix_search_queries_at`'s reader is written out verbatim in PRD 10 -- `DELETE FROM
+    search_queries WHERE at < now() - interval '90 days'`, an operator's own SQL.
 
     That the statement plans onto it is asserted in
     `tests/integration/test_m10_schema.py`; that no *second* index appeared alongside it
@@ -210,9 +208,8 @@ async def test_the_three_image_foreign_keys_carry_the_delete_rule_they_were_give
 ) -> None:
     """All three CASCADE, and the reason is not "artwork is cheap".
 
-    it is that `ck_images_exactly_one_owner` makes SET NULL *unavailable*.
-
-    Nulling the one non-null owner column leaves `num_nonnulls(...) = 0`, which the
+    It is that `ck_images_exactly_one_owner` makes SET NULL *unavailable*. Nulling the
+    one non-null owner column leaves `num_nonnulls(...) = 0`, which the
     CHECK refuses, so the parent delete would fail with a constraint violation naming a
     table the operator never touched. RESTRICT would make deleting a title fail because
     somebody cached a poster for it.
@@ -243,7 +240,7 @@ async def test_the_search_queries_foreign_keys_carry_two_different_delete_rules(
     `clicked_title_id` is SET NULL (`n`) -- a deleted title must not delete the row
     recording what somebody searched for, because the search happened and the
     attribution is a separate fact. `user_id` is RESTRICT (`r`) -- a household's search
-    history is user state, which is the side of ADR-0010's asymmetry
+    history is user state, the same side of that asymmetry
     `fk_watch_states_episode_id_episodes` already sits on.
     """
     result = await session.execute(
@@ -280,7 +277,7 @@ async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
 ) -> None:
     """Postgres implements ON DELETE CASCADE by finding referencing rows *by that column*.
 
-    so a CASCADE without a lookup index sequentially scans the child table on every
+    So a CASCADE without a lookup index sequentially scans the child table on every
     parent delete.
     """
     probes = [
@@ -316,9 +313,7 @@ async def test_an_image_with_no_owner_is_refused_by_a_named_constraint(
 async def test_an_image_with_two_owners_is_refused_by_the_same_constraint(
     session: AsyncSession,
 ) -> None:
-    """The other half of `= 1`.
-
-    and the half a `num_nonnulls(...) >= 1` spelling would let through.
+    """The other half of `= 1`, and what a `num_nonnulls(...) >= 1` spelling lets past.
 
     An image belonging to both a title and a person is not a poster with two homes, it
     is a row two readers will disagree about.
@@ -336,10 +331,10 @@ async def test_an_image_with_two_owners_is_refused_by_the_same_constraint(
 async def test_an_image_round_trips_through_each_owner_column(
     session: AsyncSession, owner: str
 ) -> None:
-    """Parametrised over all three.
+    """Parametrised over all three owner columns.
 
-    because a CHECK naming `num_nonnulls(title_id, episode_id, person_id)` is satisfied
-    by exactly one of them and a migration that misspelled one column name would still
+    A CHECK naming `num_nonnulls(title_id, episode_id, person_id)` is satisfied by
+    exactly one of them, and a migration that misspelled one column name would still
     pass a case that only ever exercises `title_id`.
     """
     if owner == "person_id":
@@ -373,21 +368,16 @@ async def test_deleting_a_title_cascades_into_its_images(session: AsyncSession) 
 async def test_a_search_name_longer_than_the_btree_bound_is_refused_by_a_constraint(
     session: AsyncSession,
 ) -> None:
-    """The ordering-of-two-refusals argument.
+    """The constraint has to refuse before the index does.
 
-    `test_the_genome_tag_id_column_is_wide_enough_that_a_constraint_refuses_it_first`
-    already makes for `genome_tags.tag_id`, arriving at a text column.
+    Postgres refuses a btree entry over 2,704 bytes on an 8 kB page, and a long alias
+    out of IMDb's `title.akas` must be refused by a *named* constraint with a
+    classifiable `IntegrityError` rather than by the index at insert time -- an
+    index-side refusal carries no constraint name for `constraint_name()` to report, so
+    a loader cannot tell it from any other write failure.
 
-    Postgres refuses a btree entry over 2,704 bytes on an 8 kB page, and a
-    long alias out of IMDb's `title.akas` must be refused by a *named*
-    constraint with a classifiable `IntegrityError` rather than by the index
-    at insert time -- an index-side refusal carries no constraint name for
-    `constraint_name()` to report, so a loader cannot tell it from any other
-    write failure.
-
-    The arithmetic is in the migration docstring; this case pins that one
-    character over the bound is refused, which is where the two spellings
-    (`<=` and `<`) differ.
+    The arithmetic is in the migration docstring; this case pins that one character over
+    the bound is refused, which is where the two spellings (`<=` and `<`) differ.
     """
     title_id = await _seed_title(session)
     with pytest.raises(IntegrityError) as caught:
@@ -404,12 +394,11 @@ async def test_a_search_name_longer_than_the_btree_bound_is_refused_by_a_constra
 async def test_a_search_name_at_exactly_the_bound_is_stored_and_indexed(
     session: AsyncSession,
 ) -> None:
-    """The premise of the case above: the bound is a bound and not an off-by-one, and.
+    """The premise of the case above: the bound is a bound and not an off-by-one.
 
-    the half that matters -- a name of exactly that length goes into the
-    `text_pattern_ops` index without Postgres refusing the entry.
-
-    A CHECK that let the index refuse first would fail here rather than there.
+    A name of exactly that length goes into the `text_pattern_ops` index without
+    Postgres refusing the entry, and a CHECK that let the index refuse first would fail
+    here rather than there.
     """
     title_id = await _seed_title(session)
     row_id = new_id()
@@ -430,12 +419,10 @@ async def test_a_search_name_at_exactly_the_bound_is_stored_and_indexed(
 async def test_row_provider_settings_is_created_empty(session: AsyncSession) -> None:
     """**Not seeded with ten slugs.** An absent row means enabled.
 
-    which is what "providers are enabled by registration in code" already means.
-
-    A migration hard-coding the registry would be a second copy of
-    `services/rows/__init__.py` with nothing anywhere to detect drift -- the exact shape
-    `_SUSPENDABLE_INDEXES`' literal strings needed a dedicated round-trip case to stop.
-    Reconciliation belongs to the admin task.
+    Which is what "providers are enabled by registration in code" already means. A
+    migration hard-coding the registry would be a second copy of
+    `services/rows/__init__.py` with nothing anywhere to detect drift. Reconciliation
+    belongs to the admin task.
     """
     result = await session.execute(text("SELECT count(*) FROM row_provider_settings"))
     assert result.scalar_one() == 0
@@ -446,11 +433,9 @@ async def test_a_row_provider_setting_round_trips_on_its_natural_key(
 ) -> None:
     """`RowProvider.slug_prefix` is the natural key.
 
-    "declared rather than derived" and "bounded at ten", which its own port docstring
-    says.
-
-    A surrogate id would permit two rows for one provider, a state no admin route could
-    interpret.
+    "Declared rather than derived" and "bounded at ten", which its own port docstring
+    says. A surrogate id would permit two rows for one provider, a state no admin route
+    could interpret.
     """
     await session.execute(
         text(
@@ -480,18 +465,14 @@ async def test_a_row_provider_setting_round_trips_on_its_natural_key(
 async def test_both_tier_one_indexes_carry_text_pattern_ops(
     session: AsyncSession, index_name: str, table: str
 ) -> None:
-    """Asserted off `pg_indexes.indexdef`.
+    """Asserted off `pg_indexes.indexdef`, which is what Postgres actually built.
 
-    what Postgres actually built -- rather than off `Base.metadata`, because an opclass
-    is exactly the kind of thing `compare_metadata` does not diff on an expression
-    index.
+    Rather than off `Base.metadata`, because an opclass is exactly the kind of thing
+    `compare_metadata` does not diff on an expression index.
 
-    Measured on a real 1,271,138-title catalog: p50 0.6 ms, p95 1.0 ms, max
-    10 ms, 44 MB, building in 0.559 s
-    (`.claude/rules/search-and-embeddings.md`). One index goes on `titles`,
-    which is what answers canonical-name prefixes on day one; one goes on
-    `title_search_names`, which is free on an empty table and is what the
-    alias and people halves will read.
+    One index goes on `titles`, which is what answers canonical-name prefixes on day
+    one; one goes on `title_search_names`, which is free on an empty table and is what
+    the alias and people halves will read.
     """
     result = await session.execute(
         text("SELECT indexdef FROM pg_indexes WHERE indexname = :name AND tablename = :table"),
@@ -508,7 +489,7 @@ async def test_the_existing_lower_name_index_has_the_default_opclass(
 ) -> None:
     """The premise of the case below, stated as its own assertion rather than left implicit.
 
-    `ix_titles_name_lower_year` has been on `titles` since M1 and is
+    `ix_titles_name_lower_year` is on `titles` and is
     `Index("ix_titles_name_lower_year", text("lower(name)"), "year")` -- a btree over
     `lower(name)` with no opclass named, which under this database's collation is
     `text_ops`. So "there is already a btree on `lower(name)`" is true and is not the
@@ -526,23 +507,17 @@ async def test_the_existing_lower_name_index_has_the_default_opclass(
 async def test_the_tier_one_index_serves_a_prefix_the_existing_index_cannot(
     session: AsyncSession,
 ) -> None:
-    """The case with teeth.
+    """The case with teeth, and the one that makes "two indexes, not one" a fact.
 
-    and the one that makes "two indexes, not one" a measurement instead of a claim.
+    An index-exists assertion is a membership assertion, and a membership assertion is
+    not a relevance test. `enable_seqscan = off` forces the planner to reveal whether a
+    usable index exists at all.
 
-    An index-exists assertion is a membership assertion, and a membership
-    assertion is not a relevance test. `enable_seqscan = off` forces the
-    planner to reveal whether a usable index exists at all -- the same
-    discipline
-    `test_both_new_foreign_keys_have_an_index_the_referential_check_can_use`
-    applies to a referential lookup.
-
-    **Run against the pre-migration schema first, with `m09a.upgrade()` still
-    a `pass`:** the plan for this exact predicate was `Seq Scan on titles`
-    even with seq scans disabled, so `ix_titles_name_lower_year` is not merely
-    not-chosen for a `LIKE 'pre%'`, it is not choosable. That is what the
-    default opclass costs under a non-`C` collation, and it is why
-    `ix_titles_name_lower_prefix` is a second index rather than a rename.
+    Without `ix_titles_name_lower_prefix`, the plan for this predicate is `Seq Scan on
+    titles` even with seq scans disabled: `ix_titles_name_lower_year` is not merely
+    not-chosen for a `LIKE 'pre%'`, it is not choosable. That is what the default
+    opclass costs under a non-`C` collation, and it is why this is a second index rather
+    than a rename.
     """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     result = await session.execute(

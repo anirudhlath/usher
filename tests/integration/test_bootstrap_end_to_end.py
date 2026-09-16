@@ -70,10 +70,7 @@ def cache(tmp_path: Path) -> Path:
 
 
 def _local(cache: Path) -> httpx.MockTransport:
-    """Serves from the already-staged cache, so ensure_local short-circuits on the revision stamp.
-
-    see the same helper in tests/unit/test_adapters_bulk_imdb.py.
-    """
+    """Serves from the staged cache, so `ensure_local` short-circuits on the revision stamp."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         name = str(request.url).rsplit("/", 1)[-1]
@@ -88,7 +85,7 @@ def _local(cache: Path) -> httpx.MockTransport:
 # `bulk_load_window` rebuilds the two suspendable btrees, and `CREATE INDEX`
 # writes the heap's `reltuples` in place just as `ANALYZE` does -- so this
 # leaves `titles` described as holding rows the rollback takes away. The
-# guard in `session` puts it back; this names it so it is not a red (#79).
+# guard in `session` puts it back; this marks the leak as expected.
 @pytest.mark.leaks_statistics("titles")
 async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     session: AsyncSession, cache: Path
@@ -141,8 +138,8 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     linked = await catalog.link_crosswalk()
     assert linked.linked == 2
 
-    # `imdb_average_rating` beside `tmdb_vote_average`, and the NULL is the assertion
-    # ADR-0040 bought.
+    # `imdb_average_rating` beside `tmdb_vote_average`: the IMDb writer fills the
+    # first and leaves the second NULL, which is what the NULL here asserts.
     result = await session.execute(
         text(
             "SELECT imdb_id, tmdb_id, tvdb_id, tmdb_popularity, imdb_average_rating, "
@@ -154,11 +151,9 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, None, "skeleton")
     assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, None, "skeleton")
 
-    # **The enrichment tier is non-empty on a bootstrap-only catalog, which is issue #42
-    # and the reason this assertion exists at all.** After ADR-0040 redirected the IMDb
-    # writer, `scripts/enqueue_tier_enrichment.py`'s tier still read `tmdb_vote_count`
-    # -- a column `upsert_titles` omits, `link_crosswalk` never touches and only TMDb
-    # enrichment fills.
+    # The enrichment tier has to be non-empty on a bootstrap-only catalog. A tier that
+    # reads `tmdb_vote_count` selects nothing there: `upsert_titles` omits that column,
+    # `link_crosswalk` never touches it, and only TMDb enrichment fills it.
     tier_page = await session.execute(
         text(_enqueue_tier_module()._PAGE),
         {"min_votes": _enqueue_tier_module().TIER_MIN_VOTES, "after": None, "size": 100},
@@ -170,20 +165,12 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
 
 
 async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, cache: Path) -> None:
-    """ADR-0005 and the spec both promise the catalog is usable during bootstrap.
+    """The catalog is readable during bootstrap, because the loop commits per batch.
 
-    With batch_size=2 the first commit lands two titles, and a reader sees them before
-    the import finishes -- this asserts the loop really does commit per batch rather
-    than once at the end.
-
-    `commits` (not just `seen`) is what actually pins that: `upsert_titles`
-    writes via `COPY` straight to the connection, so `seen` alone stays
-    `[2, 4, 5]` even with the per-batch `self._commit()` call deleted
-    entirely -- confirmed directly by deleting it and re-running this test,
-    which still passed. `commits` counts calls to the *injected* commit
-    callable itself, independent of COPY's own within-session visibility,
-    so it is the assertion that actually distinguishes committing per batch
-    from merely writing per batch and committing once at the end.
+    `commits`, not `seen`, is what pins that: `upsert_titles` writes via `COPY` straight
+    to the connection, so `seen` reads the same with the per-batch commit deleted
+    entirely. `commits` counts calls to the injected commit callable, independent of
+    COPY's within-session visibility.
     """
     catalog = PostgresBulkCatalogRepository(session)
     commits = 0
@@ -219,9 +206,9 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
 async def test_a_restart_resumes_from_the_stored_checkpoint(
     session: AsyncSession, cache: Path
 ) -> None:
-    """Simulates a crash by importing with a service whose write fails on the third batch.
+    """A write that fails on the third batch stands in for a crash.
 
-    then re-running -- the second run must pick up the cursor the first one committed.
+    The second run must pick up the cursor the first one committed.
     """
     catalog = PostgresBulkCatalogRepository(session)
     runs = PostgresImportRunRepository(session)
@@ -248,10 +235,9 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
         assert checkpoint is not None
         assert checkpoint.rows_seen == 4
 
-        # Every write below is an upsert, so `count_titles() == 5` at the end would hold
-        # even if resumption were silently broken and the second run restarted from line
-        # 0 -- confirmed directly, by disabling resume_from in BootstrapService._drain
-        # and watching this test's final assertions still pass.
+        # Every write below is an upsert, so `count_titles() == 5` at the end holds
+        # even if resumption is broken and the second run restarts from line 0. The
+        # ids and batch count below are what distinguish the two.
         seen_ids: list[str] = []
         batches_seen = 0
 
@@ -271,10 +257,10 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
 
 
 class _Stop(Exception):
-    """Not a UsherPortError, deliberately.
+    """Deliberately not a `UsherPortError`.
 
-    BootstrapService records port errors and swallows them, so a port error here would
-    give a COMPLETED- shaped path rather than the abrupt stop this test needs.
+    `BootstrapService` records port errors and swallows them, so a port error would give
+    a COMPLETED-shaped path rather than the abrupt stop this test needs.
     """
 
 
@@ -289,23 +275,14 @@ async def _written(catalog: PostgresBulkCatalogRepository, rows: Sequence[ImdbTi
 async def test_a_titles_aliases_survive_a_batch_boundary_against_real_postgres(
     session: AsyncSession, cache: Path
 ) -> None:
-    """The alias phase's dataset and its writer.
+    """The alias phase's dataset and writer composed, against the real DELETE.
 
-    composed, against the statement that actually does the deleting.
-
-    `replace_aliases` is `DELETE ... WHERE title_id = ANY(:ids) AND kind =
-    'alias'` followed by an insert, so a title split across two batches has
-    its first half deleted by its second half's call -- and **nothing
-    raises**, because the port's `ValueError` guard is about a row outside the
-    scope and both halves are inside their own. `batch_size=1` over a slice
-    whose every title carries two aliases is the shape that does it.
-
-    **This case is here as well as in `tests/unit/test_cli.py` because only
-    this arm runs the DELETE.** `FakeBulkCatalogRepository` models the scope
-    with a list comprehension; a defect in the statement's `= ANY(...)` or in
-    its `kind` predicate is invisible from the fake, and a defect in the
-    dataset's batching is visible from both. Two arms, two different things
-    each can see.
+    `replace_aliases` deletes by `title_id = ANY(:ids) AND kind = 'alias'` and then
+    inserts, so a title split across two batches has its first half deleted by its
+    second half's call — and nothing raises, because both halves are inside their own
+    scope. `batch_size=1` over a slice whose every title carries two aliases is the
+    shape that does it, and only this arm runs the statement: the fake models the scope
+    with a list comprehension.
     """
     for source, name in (("title.akas.slice.tsv", "title.akas.tsv.gz"),):
         (cache / name).write_bytes(gzip.compress((_FIXTURES / source).read_bytes()))
@@ -370,10 +347,9 @@ _ML_LINKS = "\n".join(
         "90000502,99000998,90000602",  # in links, in the genome, in no title
     ]
 )
-# **The real 1,128, not a convenient two.** `genome_scores.relevance` is declared
-# `halfvec(1128)` and the cast in the staged upsert refuses anything else -- measured,
-# `asyncpg.exceptions.DataError: expected 1128 dimensions, not 2` -- so a narrow fixture
-# here would exercise everything except the one width production runs at.
+# The real width, not a convenient two: `genome_scores.relevance` is declared
+# `halfvec(1128)` and the cast in the staged upsert refuses anything else, so a
+# narrow fixture would exercise everything except the width production runs at.
 _ML_TAGS = "\n".join(
     ["tagId,tag"] + [f"{tag},synthetic tag {tag}" for tag in range(1, GENOME_TAG_COUNT + 1)]
 )
@@ -426,17 +402,11 @@ async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
 ) -> None:
     """The whole `movielens` phase against real Postgres.
 
-    archive -> adapter -> staged `real[]` -> `halfvec(1128)` -> a row keyed on the
-    resolved `titles.id`.
-
-    **This is the only place the `halfvec`-over-`COPY` path runs end to end.**
-    A `halfvec` had never crossed asyncpg's binary `COPY` in this repository
-    before M7; the staging column is `real[]` and the cast is in the
-    `INSERT ... SELECT`, and if either half were wrong this case is what
-    says so rather than a production bootstrap.
-
-    `position` is a *movie run index*, not a line number: two movies, two
-    completed runs, one of which joins to nothing.
+    Archive -> adapter -> staged `real[]` -> `halfvec(1128)` -> a row keyed on the
+    resolved `titles.id`, and the only place that path runs end to end: the staging
+    column is `real[]` and the cast is in the `INSERT ... SELECT`, so a defect in either
+    half surfaces here rather than in a production bootstrap. `position` is a movie run
+    index, not a line number.
     """
     catalog = await _seed_catalog(session, _genome_cache(cache))
     service = BootstrapService(
@@ -478,19 +448,13 @@ async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
 async def test_the_tag_vocabulary_crosses_the_whole_phase_at_the_production_width(
     session: AsyncSession, cache: Path
 ) -> None:
-    """`genome-tags.csv` -> adapter -> `replace_genome_tags` -> 1,128 rows of `genome_tags` ->.
+    """`genome-tags.csv` through the adapter and `replace_genome_tags` into the vocabulary.
 
-    `GenomeRepository.vocabulary`, at the width production runs at.
-
-    **1,128 rather than a convenient three**, for the reason the fixture
-    comment above gives about vectors and one more that belongs to this table:
-    `ck_genome_tags_tag_id_in_vocabulary` bounds `tag_id` at exactly
-    `GENOME_TAG_COUNT`, so a narrow fixture exercises the column's range check
-    nowhere near its edge. The last lane is asserted by name for that reason.
-
-    The two halves are asserted together, which is the property the third
-    column exists for: the vocabulary reads back **only** when asked for the
-    revision the vectors carry.
+    A full-width vocabulary rather than a convenient three, because
+    `ck_genome_tags_tag_id_in_vocabulary` bounds `tag_id` at exactly `GENOME_TAG_COUNT`
+    and a narrow fixture exercises that check nowhere near its edge — hence the last
+    lane asserted by name. The two halves are asserted together because the vocabulary
+    reads back only when asked for the revision the vectors carry.
     """
     catalog = await _seed_catalog(session, _genome_cache(cache))
     async with httpx.AsyncClient(transport=_local(cache)) as client:
@@ -514,17 +478,13 @@ async def test_the_tag_vocabulary_crosses_the_whole_phase_at_the_production_widt
 async def test_a_vocabulary_one_lane_wider_than_the_schema_is_refused_by_the_column(
     session: AsyncSession, cache: Path
 ) -> None:
-    """`ck_genome_tags_tag_id_in_vocabulary` is the ceiling on `tag_id`.
-
-    and this is the case that proves it is a *constraint* rather than an encoder
-    refusal.
+    """The ceiling on `tag_id` is a constraint, not an encoder refusal.
 
     A vocabulary of `GENOME_TAG_COUNT + 1` tags is contiguous `1…n`, so
-    `_refuse_partial_vocabulary` passes it, and it is the smallest input that
-    reaches the column's own bound. Measured here rather than argued: the
-    refusal arrives as a `RepositoryConflict` **naming the constraint**, which
-    is what `integer` buys over `smallint` -- under `smallint` the same shape
-    at 32,768 lanes is asyncpg's unnamed encoder `DataError` instead.
+    `_refuse_partial_vocabulary` passes it, and it is the smallest input that reaches
+    the column's own bound. The refusal arrives as a `RepositoryConflict` naming the
+    constraint, which is what `integer` buys over `smallint`: under `smallint` the same
+    shape is asyncpg's unnamed encoder `DataError` instead.
     """
     catalog = PostgresBulkCatalogRepository(session)
     too_wide = tuple(
@@ -543,19 +503,13 @@ async def test_a_vocabulary_one_lane_wider_than_the_schema_is_refused_by_the_col
 async def test_a_failure_that_is_not_the_rows_propagates_untranslated(
     session: AsyncSession,
 ) -> None:
-    """`if not is_row_refusal(exc): raise`.
+    """A fault that is not the row's is re-raised rather than translated.
 
-    the half of the `except` that every sibling repository has and that no case had
-    exercised here.
-
-    A missing table is SQLSTATE `42P01`, which is neither class `22` nor class
-    `23`: it is the deployment being wrong, not the vocabulary, and a caller
-    that cannot tell it from a refused row retries the one thing a retry
-    cannot fix. Kills `raise RepositoryConflict(...)` unconditionally, which
-    is the shape an `except DBAPIError` invites.
-
-    The `DROP` is inside the test's own rolled-back transaction, so nothing
-    outlives it.
+    A missing table is SQLSTATE `42P01`, neither class `22` nor class `23`: the
+    deployment is wrong, not the vocabulary, and a caller that cannot tell it from a
+    refused row retries the one thing a retry cannot fix. Rules out an unconditional
+    `raise RepositoryConflict(...)`, which is the shape `except DBAPIError` invites. The
+    `DROP` is inside the test's own rolled-back transaction, so nothing outlives it.
     """
     catalog = PostgresBulkCatalogRepository(session)
     await session.execute(text("DROP TABLE genome_tags"))
@@ -572,9 +526,7 @@ async def test_a_failure_that_is_not_the_rows_propagates_untranslated(
 async def test_a_replayed_genome_phase_reports_updates_and_the_same_coverage(
     session: AsyncSession, cache: Path
 ) -> None:
-    """Trap 3 through the whole phase rather than through one statement.
-
-    and the coverage report alongside it.
+    """Inserts and updates are counted apart, through the whole phase.
 
     Rowcount reports the sum, so without `xmax = 0` the second run of an operator's
     `--phase movielens` would be indistinguishable from the first.

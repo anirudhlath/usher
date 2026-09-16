@@ -1,6 +1,6 @@
-"""A dashboard panel with no series behind it is indistinguishable from one nobody has written.
+"""A dashboard panel with no series behind it reads like one nobody has written yet.
 
-yet — which is [PRD 10](../../docs/prd/10-telemetry-and-dashboards.md)'s own first
+PRD 10 says which panels are backed, and this file grades the document against the tree.
 """
 
 import json
@@ -99,17 +99,11 @@ def section_body(number: int, text: str | None = None) -> str:
 def compliance_panel_sql(text: str | None = None) -> list[str]:
     """Dashboard 5's cache-age panel, as three statements PRD 10 spells out.
 
-    **Three targets and not one statement**, which is a measurement rather than
-    a preference: folding the oldest entry and the two counts into a single
-    aggregate costs `ix_raw_payloads_fetched_at` its work, because `count(*)`
-    over the whole table has to read every row and the planner then seq-scans
-    the lot. Measured on the live catalog 2026-09-07 at 133,501 payloads —
-    separately the three plan at 0.48, 4.46 and 4,813; combined, one
-    `Parallel Seq Scan` and the index unused. `test_raw_payload_cache_age.py`
-    is what keeps that true.
-
-    The split is on `;`, which is safe only because no statement in the block
-    contains one; the count guard below is what notices if that changes.
+    Three targets and not one: folding the oldest entry and the two counts into a single
+    aggregate costs `ix_raw_payloads_fetched_at` its work, because `count(*)` over the
+    whole table reads every row and the planner then seq-scans the lot. The split is on
+    `;`, which is safe only because no statement in the block contains one; the count
+    guard below is what notices if that changes.
     """
     fence = _SQL_FENCE.search(section_body(5, text))
     assert fence is not None, (
@@ -159,22 +153,13 @@ def test_every_dashboard_section_carries_a_backing_statement() -> None:
 
 
 def test_the_dashboards_preamble_names_a_path_that_exists_and_how_it_is_provisioned() -> None:
-    """M10's D6 lands the first dashboard.
+    """The preamble's promise is checkable rather than merely written.
 
-    and this is the arm that keeps the preamble's promise checkable rather than merely
-    written.
-
-    **The path is resolved on disk, which is the whole point.** The sentence
-    this file's neighbour corrected in 2026-08-19 was wrong in exactly one way —
-    it described JSON that did not exist — and a check that only asserted the
-    *words* `dashboards/` would have passed on it the moment somebody typed
-    them. Every path the preamble names in backticks and ending in `.json`,
-    `.yml` or `/` has to be a real file or directory.
-
-    The count is asserted too, because "six" and "one of them built" are two
-    claims and the second is the one that ages: D7 through D10 each make it
-    false and each has to come here and say so, which is the same currency
-    discipline the section-count assertion above applies.
+    The path is resolved on disk, which is the whole point: a check that asserted only
+    the words `dashboards/` would pass on a sentence describing JSON that does not
+    exist, so every path the preamble names in backticks and ending in `.json`, `.yml`
+    or `/` has to be a real file or directory. The count is asserted too, because "six"
+    and "one of them built" are two claims and the second is the one that ages.
     """
     preamble = normalised(_dashboards_preamble())
 
@@ -218,11 +203,9 @@ def test_the_dashboards_preamble_names_a_path_that_exists_and_how_it_is_provisio
 
 
 def test_the_preamble_scan_stops_above_the_first_dashboard_heading() -> None:
-    """`_dashboards_preamble` truncating at the wrong place would let any of the six.
+    """A preamble truncated too late lets a per-dashboard section answer a claim about the set.
 
-    per-dashboard sections answer a claim about the set.
-
-    Proved on a synthetic document, where the bait sits *below* the first heading.
+    Proved on a synthetic document, where the bait sits below the first heading.
     """
     document = (
         "## Dashboards\n\nSix, one built at `dashboards/x.json`.\n\n"
@@ -242,7 +225,7 @@ def test_the_preamble_scan_stops_above_the_first_dashboard_heading() -> None:
 def test_the_scan_names_a_section_whose_backing_statement_is_missing() -> None:
     """The negative arm, proved on a synthetic document rather than by editing the real one.
 
-    so this file's teeth do not depend on a plant being restored.
+    This file's teeth then do not depend on a plant being restored.
     """
     document = (
         "## Dashboards\n\nSix.\n\n"
@@ -260,17 +243,13 @@ def test_the_scan_names_a_section_whose_backing_statement_is_missing() -> None:
 
 
 def test_a_section_body_stops_at_the_next_heading() -> None:
-    """Truncating each body at the following heading is what makes the check per-*section*.
+    """Truncating each body at the following heading is what makes the check per-section.
 
-    and the case above cannot see it: its bare section is the last one, so a `_sections`
-    that ran every body to the end of the document would leave that section's body
-    unchanged and the case green.
-
-    Measured 2026-09-07 — replacing the `end` expression with `len(body)` survives the
-    other three cases *and* the whole 4,000-case unit suite, because sections 1..5 of
-    the real file would each then contain section 6's `✅ **Backed by real data as of
-    E1**` and the scan would report `[]` with five annotations deleted. The bare section
-    goes **first** here, which is the only arrangement that can fail.
+    The case above cannot see it: its bare section is the last one, so a `_sections`
+    that ran every body to the end of the document would leave that body unchanged and
+    the case green. A body running to the end of the document instead lets every section
+    inherit the last one's annotation. The bare section goes first here, which is the
+    only arrangement that can fail.
     """
     document = (
         "## Dashboards\n\nTwo.\n\n"
@@ -291,9 +270,7 @@ def test_a_section_body_stops_at_the_next_heading() -> None:
 
 
 def test_the_scan_refuses_an_unbolded_mention_of_backing() -> None:
-    """Section 5's first paragraph is this shape and must not satisfy the check on its own.
-
-    its second, bolded one is what does.
+    """Section 5's first paragraph must not satisfy the check; its bolded second one does.
 
     A check a paragraph of prose can answer is answered by the prose that explains why
     it is red.
@@ -306,10 +283,10 @@ def test_the_scan_refuses_an_unbolded_mention_of_backing() -> None:
 
 
 def test_a_bold_opening_that_makes_no_backing_claim_is_not_one() -> None:
-    """`**quality ladder**` opens no paragraph today.
+    """A bolded run alone is not a backing claim.
 
-    but a panel list that began with a bolded panel name would satisfy a check that only
-    looked for bold — so the claim's words are asserted, not its formatting.
+    A panel list beginning with a bolded panel name would satisfy a check that looked
+    only for bold, so the claim's words are asserted rather than its formatting.
     """
     bold_but_silent = "\n**Quality ladder** (4K/HDR/codec share broken down by decade).\n"
 
@@ -322,7 +299,7 @@ def test_a_bold_opening_that_makes_no_backing_claim_is_not_one() -> None:
 _PROGRESS = _ROOT / "docs" / "plans" / "progress.md"
 
 # The same anchor `test_docs_currency.py` uses, for the same reason: the
-# document holds four status tables plus a `| M7 gets | From |` table 1,400
+# document holds four status tables plus a `| M<n> gets | From |` table 1,400
 # lines further down, and an unanchored scan for `| M<n> |` reads all of them.
 _MILESTONE_TABLE = "## Milestones (from"
 
@@ -333,7 +310,7 @@ _MILESTONE_TABLE = "## Milestones (from"
 # owed by no milestone and have nothing to compare.
 _OWED_MARKER = re.compile(r"⏳\s*(?P<milestone>M\d+)")
 
-# Cells are split on **unescaped** pipes only. M10's status cell is one 6 kB
+# Cells are split on **unescaped** pipes only. One status cell is a 6 kB
 # paragraph carrying a Loki query — `{service_name="usher"} \|= "2fa839a2…"` —
 # and `str.split("|")` turns that single row into seven cells, which silently
 # moves the status into the wrong position rather than failing.
@@ -341,7 +318,7 @@ _UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
 
 def _milestone_status(progress: str) -> dict[str, str]:
-    """`{"M9": "✅ complete on …", …}` from progress.md's milestone table."""
+    """`{"M<n>": "✅ complete on …", …}` from progress.md's milestone table."""
     start = progress.find(_MILESTONE_TABLE)
     assert start != -1, f"docs/plans/progress.md has no '{_MILESTONE_TABLE}…' heading"
     rest = progress[start + len(_MILESTONE_TABLE) :]
@@ -373,26 +350,15 @@ def _owed_markers(text: str) -> list[tuple[int, str]]:
 
 
 def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> None:
-    """⏳ means *owed by a named milestone*.
+    """A ⏳ against a milestone that has shipped is a panel whose blocker is gone.
 
-    so a ⏳ against a milestone that has shipped is a panel whose blocker is gone and
-    whose document does not know it — the failure this file's neighbour checks for in
-    the other direction.
-
-    **Both parses can return nothing, and both are controlled.** An empty
-    shipped set makes every marker read as legitimately owed, and an
-    `_OWED_MARKER` that stopped matching makes a document full of stale markers
-    read as clean. The status parse is controlled here on the real table, in
-    both polarities — M9 shipped, M10 has not — and the marker parse is
-    controlled on a synthetic document in the case below, because after this
-    task the real file has no `⏳ M<n>` left to find. **That is why the
-    positive control this task's own text specified — `assert milestones_seen`
-    against the real document — is not written here: it would go red at exactly
-    the moment the task succeeded.**
-
-    The scan is over the whole document rather than over the dashboard sections
-    alone. `⏳ M<n>` means the same thing wherever PRD 10 writes it, and a scan
-    scoped to `## Dashboards` would inherit `_dashboards()`'s dependency on a
+    Both parses can return nothing, and both are controlled: an empty shipped set makes
+    every marker read as legitimately owed, and an `_OWED_MARKER` that stopped matching
+    makes a document full of stale markers read as clean. The status parse is controlled
+    here on the real table in both polarities; the marker parse is controlled on a
+    synthetic document below, because the real file has no `⏳ M<n>` left to find. The
+    scan is over the whole document, since `⏳ M<n>` means the same thing wherever PRD
+    10 writes it.
     """
     status = _milestone_status(_PROGRESS.read_text(encoding="utf-8"))
 
@@ -426,12 +392,10 @@ def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> 
 def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None:
     """The marker parse's own control, on a synthetic document.
 
-    the real one carries no `⏳ M<n>` once this task lands, so the case above cannot
-    prove its scan still matches anything.
-
-    Three lines, three distinct claims: a marker naming a shipped milestone is
-    a finding, a marker naming an unshipped one is not, and the bare `⏳` PRD 10
-    uses in prose to name the vocabulary is neither.
+    The real one carries no `⏳ M<n>`, so the case above cannot prove its scan still
+    matches anything. Three lines, three distinct claims: a marker naming a shipped
+    milestone is a finding, a marker naming an unshipped one is not, and the bare `⏳`
+    PRD 10 uses in prose to name the vocabulary is neither.
     """
     planted = (
         "Cost per play attributed to an LLM row stays ⏳ M9: it needs a client.\n"
@@ -450,20 +414,16 @@ def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None
 
 
 def test_the_milestone_status_parse_survives_an_escaped_pipe_in_the_status_cell() -> None:
-    r"""M10's real row carries one `\|`, inside a Loki query.
+    r"""One real row carries an escaped `\|`, inside a Loki query.
 
     It is the only escaped pipe in the table, and splitting on every pipe
     truncates that one cell rather than shifting it.
 
-    **So the assertion is on the whole cell and not on its marker**, which is
-    the correction this case needed: `\|` sits *after* the `🚧`, so a prefix
-    check reads the truncated cell as correct and the naive split survives it.
-    Measured 2026-09-07 — with `_UNESCAPED_PIPE` replaced by `r"\|"` the
-    prefix form passed all eight cases in this module. The defect is
-    unobservable in today's *conclusions* for exactly that reason; it stops
-    being unobservable the first time a status cell puts an escaped pipe before
-    its marker, and that row would then read as unshipped and forgive every ⏳
-    against it.
+    **So the assertion is on the whole cell and not on its marker.** `\|` sits
+    *after* the `🚧`, so a prefix check reads the truncated cell as correct and
+    a naive split survives today's conclusions. It stops surviving the first
+    time a status cell puts an escaped pipe before its marker: that row would
+    then read as unshipped and forgive every ⏳ against it.
     """
     table = (
         "## Milestones (from docs/specs/x.md)\n"
@@ -494,7 +454,7 @@ def test_dashboard_5_names_the_compliance_series_and_the_column_it_is_not() -> N
     body = normalised(section_body(5))
 
     assert "`raw_payloads.fetched_at`" in body, (
-        "dashboard 5 does not name the column ADR-0016 made the compliance answer"
+        "dashboard 5 does not name the column that answers the compliance question"
     )
     assert "`titles.enriched_at`" in body, (
         "the distinction from titles.enriched_at is not stated, so nothing here stops it "
@@ -507,13 +467,11 @@ def test_dashboard_5_names_the_compliance_series_and_the_column_it_is_not() -> N
 
 
 def test_the_panel_sql_is_three_statements_over_raw_payloads() -> None:
-    """The premise every other check on this block depends on.
+    """The premise every other check on this block depends on, and the one executed.
 
-    and the one the integration suite executes.
-
-    Three, because folding them into one statement is what costs the index — so a block
-    that has been "simplified" back to a single aggregate fails here rather than
-    silently in the plan.
+    Three statements, because folding them into one costs the index — so a block that
+    has been "simplified" back to a single aggregate fails here rather than silently in
+    the plan.
     """
     statements = compliance_panel_sql()
 
@@ -528,13 +486,11 @@ def test_the_panel_sql_is_three_statements_over_raw_payloads() -> None:
 
 
 def test_the_panel_sql_carries_all_three_numbers_and_the_threshold() -> None:
-    """`min(fetched_at)` alone is satisfied by a cache holding one ancient row and says nothing.
+    """`min(fetched_at)` alone is satisfied by a cache holding one ancient row.
 
-    about how much of the cache is out of term, which is the question a licence breach
-    is measured in.
-
-    The numbers are asserted on the SQL rather than on the prose because the SQL is what
-    D10 copies.
+    It says nothing about how much of the cache is out of term, which is the question a
+    licence breach turns on. The numbers are asserted on the SQL rather than on the
+    prose, because the SQL is what gets copied into the dashboard.
     """
     joined = "\n".join(compliance_panel_sql())
 
@@ -553,13 +509,10 @@ def test_the_panel_sql_carries_all_three_numbers_and_the_threshold() -> None:
 
 
 def test_the_panel_sql_never_names_the_column_or_the_table_adr_0016_refused() -> None:
-    """`titles.enriched_at` and `provider_cache_meta` are both live spellings.
+    """`titles.enriched_at` and `provider_cache_meta` are both live spellings elsewhere.
 
-    the first shipped in this document until 2026-08-14, the second is still in M10's
-    spec.
-
-    The prose above has to *mention* both to correct them, so this arm is on the SQL,
-    where a mention is a defect rather than an explanation.
+    The prose above has to mention both in order to correct them, so this arm is on the
+    SQL, where a mention is a defect rather than an explanation.
     """
     joined = "\n".join(compliance_panel_sql())
 
@@ -599,10 +552,7 @@ _INTERVAL = re.compile(r"interval\s+'(?P<term>[^']+)'")
 
 
 def test_the_committed_compliance_panels_read_the_term_the_prd_states() -> None:
-    """🔴 The retention half of TMDb's licence has exactly one enforcement in this repository.
-
-    and it is the committed JSON rather than the PRD.
-    """
+    """The retention half of TMDb's licence is enforced by the committed JSON, not the PRD."""
     statements = committed_compliance_sql()
 
     assert len(statements) == 3, (
@@ -640,13 +590,11 @@ def test_the_committed_compliance_panels_read_the_term_the_prd_states() -> None:
 
 
 def test_the_committed_compliance_scan_is_falsifiable() -> None:
-    """The scan above is a substring selection over JSON.
+    """The scan above is a substring selection over JSON, and could match nothing.
 
-    and a selection that matched nothing would make every assertion in it pass on an
-    empty set -- except the count, which is why the count is asserted first.
-
-    This is the other half: the term extractor answers what a widened ceiling looks
-    like, proved on a statement rather than on the committed file.
+    Every assertion in it would then pass on an empty set, except the count, which is
+    why the count is asserted first. This is the other half: the term extractor answers
+    what a widened ceiling looks like, proved on a statement rather than the file.
     """
     widened = "SELECT count(*) FROM raw_payloads WHERE fetched_at < now() - interval '12 months'"
 
@@ -657,9 +605,8 @@ def test_the_committed_compliance_scan_is_falsifiable() -> None:
 def test_the_single_number_version_is_recorded_as_a_rejected_design() -> None:
     """Stated in the panel's own description rather than in a plan.
 
-    because a plan is not read by whoever trims a dashboard for time.
-
-    Three numbers cost more than one and the reason has to travel with them.
+    A plan is not read by whoever trims a dashboard for time, and three numbers cost
+    more than one, so the reason has to travel with them.
     """
     body = normalised(section_body(5))
 
@@ -672,8 +619,8 @@ def test_the_single_number_version_is_recorded_as_a_rejected_design() -> None:
 def test_prd_10_mentions_provider_cache_meta_only_where_it_denies_it_exists() -> None:
     """The whole document, not just dashboard 5.
 
-    A table refused by name in ADR-0016 may appear here only as a refusal — anywhere
-    else it reads as schema, which is what M10's spec still does.
+    A table this project refused by name may appear here only as a refusal; anywhere
+    else it reads as schema.
     """
     text = _PRD.read_text(encoding="utf-8")
     denials = ("does not exist", "refused it by name", "is not created")
@@ -698,8 +645,8 @@ def test_prd_10_mentions_provider_cache_meta_only_where_it_denies_it_exists() ->
 def test_the_section_accessor_refuses_a_number_that_is_not_there() -> None:
     """Proved on a synthetic document.
 
-    a `section_body` that returned `""` for a heading that moved would make every check
-    above pass on an empty string.
+    A `section_body` returning `""` for a heading that moved would make every check above
+    pass on an empty string.
     """
     document = (
         "## Dashboards\n\nOne.\n\n"
@@ -715,7 +662,7 @@ def test_the_section_accessor_refuses_a_number_that_is_not_there() -> None:
 def test_the_sql_extractor_refuses_a_section_carrying_no_fence() -> None:
     """The other half of the same hazard.
 
-    an extractor returning `[]` would let every `in joined` assertion above pass
+    An extractor returning `[]` would let every `in joined` assertion above pass
     vacuously on the empty string, and `len(statements) == 3` is the only one that would
     notice.
     """

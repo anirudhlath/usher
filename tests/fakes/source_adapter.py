@@ -60,7 +60,7 @@ class FakeSourceAdapter(SourceAdapter):
         #: second spelling of `_closed`**, because `aclose` is idempotent on
         #: both implementations, so a flag cannot tell one release from twenty
         #: -- and "the supervisor closes this adapter on every refresh tick
-        #: forever" is precisely the defect it would hide. M10's S10.
+        #: forever" is precisely the defect it would hide.
         self._closes = 0
         self._fail_after: int | None = None
         # The session model. `_server_token` is what the source currently
@@ -199,9 +199,7 @@ class FakeSourceAdapter(SourceAdapter):
         `None`. What makes them different is a *reopen*: `_events` clears
         the instant and keeps the count, exactly as `PushHealth.record_open`
         does, so the second open of a channel that has delivered before
-        reads `False` on the third clause and not on the second. Same
-        equivalent-mutant shape M4 recorded for `jobs.py`'s `GREATEST`
-        alongside its `WHERE`, and kept for the same reason: one is the
+        reads `False` on the third clause and not on the second: one is the
         lane's history, the other is this connection's.
         """
         return (
@@ -326,10 +324,9 @@ class FakeSourceAdapter(SourceAdapter):
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
         """Authoritative, which for a fake means "the same thing the walk returns".
 
-        see the module docstring.
-
-        `None` for an unknown id, matching `get_item`, and `_ready()` first so a closed
-        or offline adapter raises `PortUnavailable` rather than answering.
+        See the module docstring. `None` for an unknown id, matching `get_item`, and
+        `_ready()` first so a closed or offline adapter raises `PortUnavailable` rather
+        than answering.
         """
         await self._ready()
         if external_id not in self._items:
@@ -340,10 +337,10 @@ class FakeSourceAdapter(SourceAdapter):
 
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
         await self._ready()
-        # Preserve whatever history is already recorded rather than rebuilding the state
-        # from scratch: a real source's write-back does not reset `PlayCount` (verified
-        # on Emby -- marking played advances it to 1 idempotently, and a position write
-        # leaves it alone), so a fake that zeroed it would make
+        # Preserve whatever history is already recorded rather than rebuilding the
+        # state from scratch: a real source's write-back does not reset `PlayCount`
+        # -- marking played advances it to 1 idempotently, and a position write leaves
+        # it alone -- so a fake that zeroed it would make
         # `test_get_watch_state_is_authoritative_about_play_history` order-dependent.
         existing = self._states.get(external_id)
         self._states[external_id] = SourceWatchState(
@@ -373,7 +370,7 @@ class FakeSourceAdapter(SourceAdapter):
         # lane's history across reconnects, the instant is evidence about a
         # socket that is now closed. Carrying the instant over would let a
         # fresh connection that delivers nothing inherit its predecessor's
-        # freshness -- the exact state this milestone refuses.
+        # freshness.
         self._push_last_message_at = None
         try:
             yield self._drain()
@@ -410,12 +407,11 @@ class FakeSourceAdapter(SourceAdapter):
             yield event
 
     def _silent_for(self) -> float:
-        """Seconds since anything arrived, measured from the open when nothing has.
+        """Seconds since anything arrived, counted from the open when nothing has.
 
-        `PushHealth.silent_for`'s rule, re-derived.
-
-        That fallback is what makes a channel that has *never* delivered become stale,
-        which is the one failure the watchdog exists for.
+        `PushHealth.silent_for`'s rule, re-derived. That fallback is what makes a
+        channel that has *never* delivered become stale, which is the one failure the
+        watchdog exists for.
         """
         since = self._push_last_message_at
         if since is None:

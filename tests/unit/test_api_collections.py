@@ -80,15 +80,11 @@ async def _link(
     available: bool = True,
     as_episode: bool = False,
 ) -> None:
-    """The `titles.collection_id` link and any `media_items` row.
-
-    what `CollectionRepository.get` reads.
+    """Write the `titles.collection_id` link and any `media_items` row that `get` reads.
 
     **Separate from `_film` so a case can make the two stores disagree about
-    order**, which is the only way to tell "rendered `collection.title_ids`"
-    from "rendered whatever `list_by_ids` returned". Measured: with the two
-    seeded together they agree, and the mutation that renders `list_by_ids`'
-    order survived this whole file.
+    order**, which is the only way to tell "rendered `collection.title_ids`" from
+    "rendered whatever `list_by_ids` returned".
     """
     collections.catalog.kinds[title.id] = TitleKind.MOVIE
     collections.catalog.order.append(title.id)
@@ -138,13 +134,12 @@ async def test_a_franchise_reports_what_the_household_owns_and_what_it_does_not(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """PRD 06's franchise signal, on the wire: *"you own 2 of 4"*.
+    """Every member is rendered, owned or not, so the signal can say *"you own 2 of 4"*.
 
-    **Every member is rendered, owned or not**, and the wrong implementation
-    this kills is a member list filtered to the owned subset -- under which the
-    response reads "2 of 2", a completeness signal that always reads complete
-    and therefore says nothing. `OwnedCollection` carries two lists for exactly
-    this reason and the counts here are their `len()`.
+    The wrong implementation this kills is a member list filtered to the owned
+    subset -- under which the response reads "2 of 2", a completeness signal that
+    always reads complete and therefore says nothing. `OwnedCollection` carries two
+    lists for exactly this reason and the counts here are their `len()`.
     """
     collection_id = await _seed_collection(collections, name="An Invented Franchise")
     first = await _member(collections, titles, collection_id, name="One", year=1999, owned=True)
@@ -172,9 +167,7 @@ async def test_a_member_card_carries_what_a_franchise_page_renders(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """Hydrated from `TitleRepository.list_by_ids`.
-
-    so the card is the catalog's answer about the film.
+    """A member card is hydrated from `TitleRepository.list_by_ids`, not from the link.
 
     `enrichment_state` rides along because a franchise is exactly where a skeleton
     member shows up -- the household owns two of seven and the other five were never
@@ -228,19 +221,13 @@ async def test_an_unavailable_copy_and_an_episode_level_one_are_not_owned(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """`owned` is B6's predicate unchanged.
+    """`owned` on the wire is the repository's predicate: `episode_id IS NULL` and `available`.
 
-    `episode_id IS NULL` **and** `available` -- and this is that agreement asserted on
-    the wire rather than only in the repository contract.
-
-    Both wrong implementations overstate, which is the direction nobody checks:
-    a retracted copy on an unmounted drive and an episode-level row both read
-    as owned, and the page says "you own 3 of 3" to a household that can play
-    one. B6's documented consequence -- a library reporting a series' episodes
-    but not the series' own item reads as not-owned -- cannot arise here at
-    all, because a collection holds only movies; the clause is written down
-    anyway, in both statements, precisely so its absence is distinguishable
-    from having forgotten it.
+    Both wrong implementations overstate, which is the direction nobody checks: a
+    retracted copy on an unmounted drive and an episode-level row both read as owned,
+    and the page says "you own 3 of 3" to a household that can play one. The clause is
+    written down in both statements precisely so its absence is distinguishable from
+    having forgotten it.
     """
     collection_id = await _seed_collection(collections, name="Three Kinds Of Owned")
     genuine = await _member(collections, titles, collection_id, name="Genuinely Owned", owned=True)
@@ -256,11 +243,10 @@ async def test_an_unavailable_copy_and_an_episode_level_one_are_not_owned(
 
 
 async def test_an_unknown_collection_is_a_404_in_the_envelope(client: httpx.AsyncClient) -> None:
-    """V1's generic `not_found`, never a `collection_not_found`.
+    """An unknown id answers the generic `not_found`, never a `collection_not_found`.
 
-    RFC 9457's `instance` already carries the path.
-
-    Kept thin -- the envelope itself is asserted in `tests/unit/test_api_problem.py`.
+    RFC 9457's `instance` already carries the path, and the envelope itself is
+    asserted in `tests/unit/test_api_problem.py`.
     """
     collection_id = uuid.uuid4()
     response = await client.get(f"/collections/{collection_id}")
@@ -277,22 +263,15 @@ async def test_the_members_keep_the_repositorys_order_rather_than_the_owned_ones
 ) -> None:
     """`OwnedCollection.title_ids` is release order and the response is that order unchanged.
 
-    Two wrong implementations, and the fixture has to be built for the second
-    or it cannot see it.
-
-    The first is rendering the owned subset first -- a plausible "show me what
-    I can play" instinct that turns a franchise timeline into two piles, and
-    which every membership assertion accepts. The fixture owns the *last* two
-    members in franchise order, so a hydration that iterated `owned_title_ids`
-    and then the rest would answer a different sequence.
-
-    The second is rendering whatever `list_by_ids` returned, which the port
-    promises nothing about at all -- the real one is a bare `IN (...)`, so that
-    is physical order. **Seeding both stores together cannot see it**: this
-    fake's `list_by_ids` returns its own insertion order, so with `_member`
-    writing the two in step the two orders agree and the mutation survived the
-    whole file. So the films are created here in the **reverse** of their
-    franchise order, and the premise is asserted rather than assumed.
+    Two wrong implementations, and the fixture has to be built for the second or it
+    cannot see it. The first renders the owned subset first -- a plausible "show me
+    what I can play" instinct that turns a franchise timeline into two piles, and
+    which every membership assertion accepts; the fixture owns the *last* two members
+    in franchise order, so a hydration that iterated `owned_title_ids` and then the
+    rest would answer a different sequence. The second renders whatever `list_by_ids`
+    returned, which the port promises nothing about at all, so the films are created
+    here in the **reverse** of their franchise order and the premise is asserted
+    rather than assumed.
     """
     collection_id = await _seed_collection(collections)
     ordered = [await _film(titles, name=f"Member {index}") for index in range(4)]
@@ -315,21 +294,15 @@ async def test_a_member_the_catalog_no_longer_holds_leaves_both_counts_agreeing(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """`list_by_ids` returns fewer rows than it was asked for.
+    """`list_by_ids` may return fewer rows than it was asked for, as the port allows.
 
-    the port says so -- and the counts are `len()` over what is **rendered**, so the
-    client can count the list and get the same numbers.
-
-    The wrong implementations this kills are a `KeyError` on the missing row
-    (a 500 where the honest answer is a shorter list) and counts taken from
-    `OwnedCollection`'s lists rather than from the rendered ones, which puts a
-    `total_count` of 3 above a list of 2 -- the same disagreement
-    `OwnedCollection` carries two lists instead of two counts to prevent,
-    reintroduced one layer up.
-
-    **The plant is asserted present before the claim is read out of it**: a
-    member that was never hydratable and one whose deletion did not land look
-    identical from here.
+    The counts are `len()` over what is **rendered**, so the client can count the list
+    and get the same numbers. The wrong implementations this kills are a `KeyError` on
+    the missing row (a 500 where the honest answer is a shorter list) and counts taken
+    from `OwnedCollection`'s lists rather than from the rendered ones, which puts a
+    `total_count` of 3 above a list of 2. **The plant is asserted present before the
+    claim is read out of it**: a member that was never hydratable and one whose
+    deletion did not land look identical from here.
     """
     collection_id = await _seed_collection(collections)
     kept = await _member(collections, titles, collection_id, name="Still Here", owned=True)
@@ -350,12 +323,12 @@ async def test_the_counts_are_the_length_of_the_lists_they_count(
     collections: FakeCollectionRepository,
     titles: FakeTitleRepository,
 ) -> None:
-    """The invariant stated as an invariant rather than as two numbers.
+    """The counts are asserted as a relationship rather than as two literals.
 
     Every other case here asserts literals, which pins the arithmetic for that
-    fixture; this one asserts the relationship, which is what stops a second
-    source for either number from being introduced later. PRD 06's *"you own 2
-    of 4"* is unreadable the moment the two can disagree.
+    fixture; this one asserts the relationship, which is what stops a second source
+    for either number from being introduced later. *"You own 2 of 4"* is unreadable
+    the moment the two can disagree.
     """
     collection_id = await _seed_collection(collections)
     for index in range(5):
@@ -368,10 +341,7 @@ async def test_the_counts_are_the_length_of_the_lists_they_count(
 
 
 async def test_the_route_is_in_the_schema_under_its_own_tag(app: FastAPI) -> None:
-    """A route that answers correctly and is absent from `/openapi.json` is a route no generated.
-
-    client can call.
-    """
+    """A route absent from `/openapi.json` is a route no generated client can call."""
     paths = app.openapi()["paths"]
     assert "/collections/{collection_id}" in paths
     assert paths["/collections/{collection_id}"]["get"]["tags"] == ["collections"]

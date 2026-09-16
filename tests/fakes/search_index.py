@@ -22,9 +22,8 @@ from usher.ports.search import (
 _RRF_K = 60
 
 # Weight classes, mirroring PRD 05's ordering: names, then credits (class B,
-# reserved and empty in M6 -- boundary call 2), then genres and keywords,
-# then the long prose. Constants rather than `setweight`, which is the
-# second divergence in this module's docstring.
+# reserved and empty), then genres and keywords, then the long prose.
+# Constants rather than `setweight`, which is a divergence from Postgres.
 _NAME_WEIGHT = 1.0
 _CREDIT_WEIGHT = 0.4
 _TAG_WEIGHT = 0.2
@@ -55,7 +54,7 @@ class FakeSearchIndex(SearchIndex):
             # The lexical lane is the only one with a typed string to compare a
             # name against, which is `PostgresSearchIndex`'s own split: the
             # vector lane matches an embedding and is handed no query text at
-            # all (issue #25).
+            # all.
             query=request.query,
         )
         vectors = _rank(
@@ -71,7 +70,7 @@ class FakeSearchIndex(SearchIndex):
         hits: list[SearchHit]
         match request.mode:
             case SearchMode.FULL_TEXT:
-                # 0.0 rather than the measured fraction: no semantic lane
+                # 0.0 rather than the real fraction: no semantic lane
                 # ran, and reporting coverage for a lane that did not run
                 # invites a caller to read it as a fact about the catalog.
                 hits, coverage = lexical, 0.0
@@ -129,17 +128,13 @@ class FakeSuggestIndex(SuggestIndex):
         """Test-only writer, deliberately absent from the port.
 
         `SuggestIndex` has no write method and `PostgresSuggestIndex` writes
-        nothing at all -- it reads `titles`. Adding `index`/`remove` to the
-        port so this class could implement them is exactly the change
-        ADR-0021 exists to make visible, so the seam stays here, in
+        nothing at all -- it reads `titles` -- so the seam stays here, in
         `tests/`, where nothing in `src/` can reach it.
 
-        **`title_id` is optional so two tiers can be seeded over one
-        catalog.** A case that asks *which tier answered* has to hand the same
-        row to both doubles and to the `TitleRepository` the hydration reads
-        through; minting an id here would make the three disagree and the
-        hydration would drop every hit, which is a green empty box for the
-        wrong reason.
+        `title_id` is optional so two tiers can be seeded over one catalog: a case
+        that asks *which tier answered* has to hand the same row to both doubles and
+        to the `TitleRepository` the hydration reads through, and minting an id here
+        would make the three disagree and drop every hit.
         """
         title_id = new_id() if title_id is None else title_id
         self._names[title_id] = (name, popularity)
@@ -167,20 +162,16 @@ class FakeSuggestIndex(SuggestIndex):
 class FakePrefixSuggestIndex(SuggestIndex):
     """Tier 1's matching rule and nothing else: the name starts with the typed prefix.
 
-    **Subclasses no contract, deliberately**, for the reason this module's
-    docstring gives: checked against `SuggestIndexContract` it would be
-    `str.startswith` asserting against `str.startswith`, and the real tier's
-    cases are about which index Postgres takes. What it is for is a case that
-    has to tell **which tier answered** -- it finds no typo where
-    `FakeSuggestIndex` finds one, and that disagreement is the only thing a
-    tier selector can be held to.
+    **Subclasses no contract, deliberately**: checked against `SuggestIndexContract`
+    it would be `str.startswith` asserting against `str.startswith`, while the real
+    tier's cases are about which index Postgres takes. What it is for is a case that
+    has to tell **which tier answered** -- it finds no typo where `FakeSuggestIndex`
+    finds one.
 
-    Two further divergences from `PostgresPrefixSuggestIndex`, both in the
-    forgiving direction and neither reachable by anything above the port.
-    There is no `LIKE` escaping here, so nothing says what a typed `%` costs;
-    and the ordering is `popularity DESC, id` where the real statement is
-    `popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id ASC`, because
-    a `SuggestIndex` hands back ids and a `vote_count` is not one of them.
+    Two divergences from `PostgresPrefixSuggestIndex`, both forgiving and neither
+    reachable above the port: no `LIKE` escaping, so nothing says what a typed `%`
+    costs; and the ordering is `popularity DESC, id` where the real statement adds
+    `vote_count DESC NULLS LAST`, because a `SuggestIndex` hands back ids only.
     """
 
     def __init__(self) -> None:
@@ -268,11 +259,8 @@ def _rank(
 def _is_exact_name(document: SearchDocument, query: str | None) -> bool:
     """Python's `casefold()` where the statement spells `lower(t.name) = lower(btrim(...))`.
 
-    the divergence this module's docstring already records for `FakeSuggestIndex`, in a
-    second place.
-
-    The two agree on ASCII and no case in this repository names a title in anything
-    else.
+    A divergence from Postgres, as in `FakeSuggestIndex`. The two agree on ASCII and
+    no case in this repository names a title in anything else.
     """
     return query is not None and document.name.casefold() == query.strip().casefold()
 
@@ -282,15 +270,15 @@ def _fuse(*lanes: Sequence[SearchHit]) -> list[SearchHit]:
 
     Never a sum of the lanes' own scores: a cosine and a `ts_rank` are not
     on the same scale, and adding them makes whichever lane happens to emit
-    larger numbers the only lane that matters. ADR-0002 says so; the
-    contract's `test_fusion_does_not_add_scores_from_different_scales` is
-    what would catch this function being "simplified" into addition.
+    larger numbers the only lane that matters. The contract's
+    `test_fusion_does_not_add_scores_from_different_scales` is what would catch
+    this function being "simplified" into addition.
     """
     scores: dict[uuid.UUID, float] = {}
     # Carried from whichever lane knew, which is the lexical one. A fused
     # answer that dropped it would leave `_dense_ranks` with nothing to
     # separate an exact name match from the rows tied to it, on the one mode
-    # where both lanes ran (issue #25).
+    # where both lanes ran.
     exact: set[uuid.UUID] = set()
     for lane in lanes:
         for rank, hit in enumerate(lane):

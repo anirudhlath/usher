@@ -1,4 +1,4 @@
-"""`usher.cache.hits`/`.misses` -- PRD 10, M9."""
+"""`usher.cache.hits`/`.misses` -- PRD 10."""
 
 import datetime as dt
 import uuid
@@ -208,8 +208,8 @@ def test_an_entry_exactly_at_its_expiry_records_a_miss(
 ) -> None:
     """Stepped *onto* the boundary, not past it.
 
-    the habit M5's surviving `stale_after` `<=` -> `<` mutation exists to teach: every
-    case that steps past the boundary leaves both spellings agreeing on every input
+    A surviving `stale_after` `<=` -> `<` mutation teaches the habit: every case
+    that steps past the boundary leaves both spellings agreeing on every input
     offered.
 
     An entry at its expiry is a rebuild, so it must count as a miss.

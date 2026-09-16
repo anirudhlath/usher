@@ -57,21 +57,14 @@ def lane_settings(postgres_url: str) -> Settings:
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     """Undo what a committing test wrote.
 
-    Two `DROP TABLE IF EXISTS stg_*` statements used to be part of this, and
-    the reason is worth keeping even though the lines are gone:
-    `usher.db.staging` created `stg_*` with DDL, Postgres DDL is
-    transactional, so a *committing* test was the only kind that could leak
-    one -- and it surfaced as schema drift in
-    `test_migrations.py::test_migration_matches_the_orm_metadata`, a
-    different file that then failed only in combination. Reproduced here
-    exactly as CLAUDE.md predicted at the time. M6 made the staging tables
-    `CREATE TEMP TABLE ... ON COMMIT DROP`, so the commit is what removes
-    them.
+    The staging tables are `CREATE TEMP TABLE ... ON COMMIT DROP`, so the commit is what
+    removes them and nothing here has to. A leaked one surfaces as schema drift in
+    `test_migrations.py`, a different file that then fails only in combination.
     """
     async with sessions() as session:
         for statement in (
             "DELETE FROM jobs",
-            # M8's cost ledger, which cascades from nothing: it has no
+            # The cost ledger, which cascades from nothing: it has no
             # `user_id` at all (`generation_id` is its only correlation key,
             # which is what makes PRD 10's dashboard 5 a join rather than a
             # lookup), so a committing curate case has to clean it up itself.
@@ -99,7 +92,7 @@ async def _queue_depth(sessions: async_sessionmaker[AsyncSession]) -> int:
 async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
     lane_settings: Settings, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The milestone's central claim, proved rather than asserted.**.
+    """The central claim of this file, proved rather than asserted.
 
     A real `match` job goes into a real `jobs` table, an app is started with
     nothing but `LifespanManager`, and the row is gone before the app stops.
@@ -142,10 +135,9 @@ async def test_the_worker_lane_is_off_when_the_setting_is(
 ) -> None:
     """PRD 01's `--worker` flag, as configuration.
 
-    the same image with the switch off leaves the queue for another container.
-
-    The mirror of the case above and the reason it is evidence -- without
-    this, "the job disappeared" could be anything in the process.
+    The same image with the switch off leaves the queue for another container. The
+    mirror of the case above and the reason it is evidence -- without this, "the job
+    disappeared" could be anything in the process.
     """
     async with sessions() as session:
         pipeline = build_pipeline(
@@ -182,12 +174,10 @@ async def _curate_status(sessions: async_sessionmaker[AsyncSession], key: str) -
 async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to_curate(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The wiring `create_app` has that no unit test can see**.
+    """The wiring `create_app` has that no unit test can see.
 
-    and it is the shape a `RowContext.curated = None` took when `mypy` was the only
-    thing holding it: `tests/unit/test_api_lanes.py` proves a `LaneSupervisor` *given*
-    an `LLMClient` claims curate work, and says nothing about whether the lifespan ever
-    builds one.
+    `tests/unit/test_api_lanes.py` proves a `LaneSupervisor` *given* an `LLMClient`
+    claims curate work, and says nothing about whether the lifespan ever builds one.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -225,7 +215,7 @@ async def test_a_curate_job_waits_for_a_process_that_has_a_model(
 ) -> None:
     """The mirror, and the reason the case above is evidence.
 
-    without it, "the job parked" could be anything in the process.
+    Without it, "the job parked" could be anything in the process.
 
     `USHER_LLM_ENABLED=false` is the shipped default, so this is what nearly
     every deployment does with a curate job -- it leaves it `pending` for a
@@ -259,10 +249,9 @@ async def test_a_curate_job_waits_for_a_process_that_has_a_model(
 class _Closes:
     """Counts what a composition root actually released.
 
-    A `(thing, close it)` pair whose `close it` is never called is the one
-    defect neither a fake nor `mypy` can see: the object is built, the
-    process works, and the transport leaks. `FakeLLMClient` carries a
-    `closed` counter for the same reason and nothing had ever read it.
+    A `(thing, close it)` pair whose `close it` is never called is the one defect
+    neither a fake nor `mypy` can see: the object is built, the process works, and the
+    transport leaks.
     """
 
     def __init__(self) -> None:
@@ -281,7 +270,7 @@ class _Closes:
 async def test_the_lifespan_releases_every_process_resource_it_built(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch, clean: None
 ) -> None:
-    """**`create_app`'s `finally` is asserted rather than read.**."""
+    """`create_app`'s `finally` is asserted rather than read."""
     closes = _Closes()
     monkeypatch.setattr("usher.api.app.metadata_provider", closes.factory("provider"))
     monkeypatch.setattr("usher.api.app.embedder", closes.factory("embedder"))
@@ -334,15 +323,12 @@ def _with_fake_adapters(
 async def test_a_push_lane_starts_for_a_real_source_row(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """The lane's source list.
+    """The lane's source list, credential decryption and adapter build.
 
-    credential decryption and adapter build, all through the real repositories against
-    real rows.
-
-    A fake `SourceRepository` cannot express the one thing that has ever
-    gone wrong here -- an encrypted credential that does not decrypt under
-    the configured `USHER_SECRET_KEY` -- and `PostgresCredentialStore` is
-    the only implementation that can.
+    All through the real repositories against real rows. A fake `SourceRepository`
+    cannot express the one thing that has ever gone wrong here -- an encrypted
+    credential that does not decrypt under the configured `USHER_SECRET_KEY` -- and
+    `PostgresCredentialStore` is the only implementation that can.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -395,23 +381,20 @@ async def test_writing_the_push_availability_it_already_has_writes_nothing(
 ) -> None:
     """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`.
 
-    so a lane that wrote unconditionally would move a column an operator reads to see
+    So a lane that wrote unconditionally would move a column an operator reads to see
     when a source last changed, once per reconnect of a flapping socket.
 
-    **And the guard is not what prevents that, measured.** Deleting
-    `_write_push_available`'s equality check leaves this case green:
-    `PostgresSourceRepository.update` sets attributes on a *loaded ORM row*
-    and SQLAlchemy's unit of work emits no `UPDATE` when no attribute
-    actually changed, so the trigger never fires either way. Recorded as an
-    equivalent mutant against today's repository rather than as a kill --
-    the same treatment M4 gave `_ENQUEUE`'s `GREATEST` -- and the guard is
-    kept, because the day that repository issues a bare `UPDATE ... SET`
-    the property stops being free.
+    **The guard is not what prevents that today.** Deleting `_write_push_available`'s
+    equality check leaves this case green: `PostgresSourceRepository.update` sets
+    attributes on a *loaded ORM row* and SQLAlchemy's unit of work emits no `UPDATE`
+    when no attribute actually changed, so the trigger never fires either way. The guard
+    is kept, because the day that repository issues a bare `UPDATE ... SET` the property
+    stops being free.
 
-    What this case does pin is the other half, which is not free: a real
-    change still writes, and it writes the value the lane asked for. Two
-    separate transactions throughout, because `now()` is
-    `transaction_timestamp()` and is frozen for the life of one.
+    What this case does pin is the other half, which is not free: a real change still
+    writes, and it writes the value the lane asked for. Two separate transactions
+    throughout, because `now()` is `transaction_timestamp()` and is frozen for the life
+    of one.
     """
     settings = Settings(
         database_url=postgres_url,

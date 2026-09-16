@@ -131,7 +131,7 @@ class SourceAdapterContract:
     async def test_list_items_streams_rather_than_materialising(
         self, harness: SourceHarness
     ) -> None:
-        """94,395 movies across 17 libraries on the deployment this was built for.
+        """A real library is too large to materialise, so the walk has to stream.
 
         An adapter that collected the walk into a list before yielding would raise here
         before producing anything, because the failure is arranged to land partway
@@ -203,7 +203,7 @@ class SourceAdapterContract:
         assert item.hdr_format is HdrFormat.DOLBY_VISION
 
     async def test_provider_ids_use_canonical_lowercase_keys(self, harness: SourceHarness) -> None:
-        """M4's matcher reads `provider_ids["tmdb"]`.
+        """The matcher reads `provider_ids["tmdb"]`.
 
         It must not have to know that Emby spells it `Tmdb`.
         """
@@ -215,13 +215,10 @@ class SourceAdapterContract:
         assert all(key == key.lower() for key in item.provider_ids)
 
     async def test_added_at_is_timezone_aware(self, harness: SourceHarness) -> None:
-        """`SourceItem` is a plain dataclass.
+        """`SourceItem` is a plain dataclass, so a naive datetime is built silently.
 
-        so a naive datetime is constructed without complaint and only fails much later,
-        at a `TIMESTAMPTZ` column.
-
-        Verified while planning: Python 3.13's `fromisoformat` returns a naive datetime
-        for any timestamp with no offset, which several sources emit.
+        It fails only much later, at a `TIMESTAMPTZ` column. `fromisoformat` returns a
+        naive datetime for any timestamp with no offset, which several sources emit.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         item = await harness.adapter.get_item("movie-1")
@@ -231,12 +228,10 @@ class SourceAdapterContract:
         assert item.added_at.utcoffset() is not None
 
     async def test_an_episode_carries_its_place_in_the_series(self, harness: SourceHarness) -> None:
-        """TV is in scope throughout (PRD 09).
+        """TV is in scope throughout, and `SourceItem` already has the three fields.
 
-        and `SourceItem` already has the three fields for it.
-
-        Persisting them is M4's -- there is no `episodes` table -- but an adapter that
-        flattened episodes into movies would make that milestone impossible.
+        Persisting them is not this port's job, but an adapter that flattened episodes
+        into movies would make it impossible downstream.
         """
         await harness.given_item(SERIES, changed_at=T0)
         await harness.given_item(EPISODE, changed_at=T0)
@@ -295,10 +290,9 @@ class SourceAdapterContract:
     async def test_operations_recover_from_an_expired_credential(
         self, harness: SourceHarness
     ) -> None:
-        """The failure that motivated this whole project, and its fix.
+        """A session that silently dies is re-minted from stored credentials.
 
-        a session that silently dies is re-minted from stored credentials with no human
-        pasting a token.
+        With no human pasting a token, which is the failure that motivated this project.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         assert await harness.adapter.get_item("movie-1") is not None
@@ -357,14 +351,10 @@ class SourceAdapterContract:
     async def test_stream_targets_include_a_deep_link_with_its_scheme(
         self, harness: SourceHarness
     ) -> None:
-        """PRD 07.
+        """Deep-link construction moves here, where it is testable.
 
-        "the deep-link construction currently done by hand in the Home Assistant card
-        moves here, where it is testable." If an adapter produces no deep link, it has
-        not moved.
-
-        Any source with a direct HTTP URL can produce one, because the Infuse scheme
-        wraps an arbitrary URL.
+        If an adapter produces no deep link, it has not moved. Any source with a direct
+        HTTP URL can produce one, because the Infuse scheme wraps an arbitrary URL.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         targets = await harness.adapter.stream_targets("movie-1")
@@ -414,25 +404,18 @@ class SourceAdapterContract:
     async def test_a_walk_never_reports_play_history_it_cannot_know(
         self, harness: SourceHarness
     ) -> None:
-        """The measured failure, expressed so it cannot be passed by lying.
+        """The failure, expressed so it cannot be passed by lying.
 
-        Emby's listing route reports `PlayCount: 0` and omits
-        `LastPlayedDate` for an item whose single-item route reports
-        `PlayCount: 2` and a real date (verified 2026-07-31 against 4.9.5.0).
-        An adapter that passed the listing's zeros through would report `0`
-        here and the merge downstream would write it over real history.
-
-        So the assertion is not "the walk reports 7" (which would force an
-        honest-but-lossy source to fabricate) and not "the walk reports
-        None" (which would forbid a source whose listing is complete). It is
-        **either the truth or an explicit absence, never a third number** --
-        which is exactly the guarantee `SourceWatchState`'s docstring makes
-        and the only one a caller can build a `COALESCE` on.
-
-        `FakeSourceAdapter` passes this on the `== 7` branch (it stores what
-        the harness seeded); `EmbyAdapter` passes it on the `is None`
-        branch. Both branches being live across the two runs is what makes
-        this a contract rather than a restatement of one implementation.
+        Emby's listing route reports `PlayCount: 0` and omits `LastPlayedDate` for an
+        item whose single-item route reports a real count and a real date. An adapter
+        passing the listing's zeros through would report `0` here and the merge
+        downstream would write it over real history. So the assertion is not "the walk
+        reports 7", which would force an honest-but-lossy source to fabricate, and not
+        "the walk reports None", which would forbid a source whose listing is complete:
+        it is either the truth or an explicit absence, never a third number, which is
+        the only guarantee a caller can build a `COALESCE` on. `FakeSourceAdapter`
+        passes on the `== 7` branch and `EmbyAdapter` on the `is None` branch, which is
+        what makes this a contract rather than a restatement of one implementation.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         last_played = datetime(2026, 7, 20, 21, 4, 0, tzinfo=UTC)
@@ -468,7 +451,7 @@ class SourceAdapterContract:
     ) -> None:
         """Filtering empty states looks like an obvious saving and is a correctness bug.
 
-        un-marking something played *is* an all-zero state, so an adapter that skipped
+        Un-marking something played *is* an all-zero state, so an adapter that skipped
         them could never propagate a reset -- the delta walk would find the changed item
         and then discard exactly the record describing the change.
         """
@@ -487,10 +470,9 @@ class SourceAdapterContract:
     async def test_watch_state_start_index_offsets_the_filtered_stream(
         self, harness: SourceHarness
     ) -> None:
-        """**`start_index` counts what this walk *yields*.
+        """`start_index` counts what this walk yields, never rows of the unfiltered set.
 
-        never rows of the source's unfiltered set** -- the port's own words, and until
-        this case existed nothing in the suite said so.
+        The port's own words, and nothing else in the suite says so.
         """
         await harness.given_item(_filler(0), changed_at=T0)
         await harness.given_item(_filler(1), changed_at=T0)
@@ -551,12 +533,11 @@ class SourceAdapterContract:
     async def test_get_watch_state_returns_none_for_an_item_the_source_does_not_have(
         self, harness: SourceHarness
     ) -> None:
-        """An adapter that fabricates an all-zero state for an unknown id hands the merge a.
+        """An all-zero state for an unknown id is a positive claim about nothing.
 
-        positive claim of "never played" about something it knows nothing about.
-
-        `None` is the only honest answer, and it is the same answer `get_item` gives, so
-        a caller never learns to tell the two apart.
+        It hands the merge "never played" about something the adapter knows nothing
+        about. `None` is the only honest answer, and it is the same answer `get_item`
+        gives, so a caller never learns to tell the two apart.
         """
         assert await harness.adapter.get_watch_state("never-existed") is None
 
@@ -579,7 +560,7 @@ class SourceAdapterContract:
     async def test_push_watch_state_is_visible_to_the_source(self, harness: SourceHarness) -> None:
         """Read back from the source's own state, not from a record of the call.
 
-        a `pass` body, or a call to an endpoint that answers 200 and ignores the
+        A `pass` body, or a call to an endpoint that answers 200 and ignores the
         payload, both fail this and neither would fail an "it didn't raise" assertion.
         """
         await harness.given_item(MOVIE, changed_at=T0)
@@ -610,26 +591,22 @@ class SourceAdapterContract:
                 "movie-1", WatchStateUpdate(position_seconds=600, played=False)
             )
 
-    # --- push ---------------------------------------------------------- **The
-    # asymmetry these six are written around.** `supports_push` is a *health* signal and
-    # `SourceNotSupported` is a *capability* one, and the implication between them runs
-    # one way only: an adapter with a perfectly good channel reports `False` from the
-    # moment it opens until the first message arrives on it.
+    # --- push ----------------------------------------------------------
+    # The asymmetry these six are written around: `supports_push` is a *health* signal
+    # and `SourceNotSupported` is a *capability* one, and the implication runs one way
+    # only -- an adapter with a perfectly good channel reports `False` from the moment
+    # it opens until the first message arrives on it.
 
     async def test_events_yields_what_the_source_pushed(self, harness: SourceHarness) -> None:
         """PRD 03's fast path, at its narrowest.
 
-        something changed on the source and the channel said so, naming the item.
-
-        The play-history assertion is deliberately the same three-valued
-        shape `test_a_walk_never_reports_play_history_it_cannot_know` uses,
-        and for the same reason: a push message is a *third* payload shape
-        (a listing is one, a single-item route is another), so an adapter
-        may carry the numbers or decline them -- and may not invent a
-        `0`, which `merge_from_source` would write over real history
-        permanently (ADR-0014). `EmbyAdapter` passes on the absence branch
-        and `FakeSourceAdapter` on the true-value branch, which is what
-        makes it a contract rather than a restatement of one of them.
+        Something changed on the source and the channel said so, naming the item. The
+        play-history assertion is deliberately the same three-valued shape the walk case
+        uses, and for the same reason: a push message is a *third* payload shape, so an
+        adapter may carry the numbers or decline them -- and may not invent a `0`, which
+        `merge_from_source` would write over real history permanently. `EmbyAdapter`
+        passes on the absence branch and `FakeSourceAdapter` on the true-value branch,
+        which is what makes it a contract rather than a restatement of one of them.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         last_played = datetime(2026, 7, 20, 21, 4, 0, tzinfo=UTC)
@@ -665,13 +642,11 @@ class SourceAdapterContract:
     async def test_supports_push_is_false_until_a_message_arrives(
         self, harness: SourceHarness
     ) -> None:
-        """**The rule this milestone exists for**.
+        """The rule this port exists for, where every future adapter must satisfy it.
 
-        stated where every future adapter has to satisfy it.
-
-        ADR-0004: a WebSocket handshake against a *nonexistent path* also upgrades and
-        also receives `Sessions`, so an open connection is not evidence of anything --
-        and PRD 03's reconciler skips a source whose adapter says `True` here.
+        A WebSocket handshake against a *nonexistent path* also upgrades and also
+        receives `Sessions`, so an open connection is not evidence of anything -- and
+        PRD 03's reconciler skips a source whose adapter says `True` here.
         """
         assert harness.adapter.supports_push is False
         async with harness.adapter.events() as events:
@@ -774,7 +749,7 @@ class SourceAdapterContract:
     async def test_verify_reports_bad_credentials_without_raising(
         self, harness: SourceHarness
     ) -> None:
-        """The 🔶 this settles.
+        """Three states rather than a bool, because a route renders them.
 
         `GET /admin/sources/{id}/status` renders these states; it does not handle them,
         so `verify` returns rather than raising -- and reachable-but-unauthenticated is
@@ -795,13 +770,11 @@ class SourceAdapterContract:
     async def test_verify_does_not_claim_push_without_evidence(
         self, harness: SourceHarness
     ) -> None:
-        """ADR-0004.
+        """An upgrade is not evidence; only received messages are.
 
-        a WebSocket handshake against a *nonexistent* path also upgrades and also
-        receives `Sessions`, so an upgrade is not evidence.
-
-        Only received messages are. Until a probe asserts on messages, `push_available`
-        must be `None`, not `True`.
+        A WebSocket handshake against a *nonexistent* path also upgrades and also
+        receives `Sessions`. Until a probe asserts on messages, `push_available` must be
+        `None`, not `True`.
         """
         status = await harness.adapter.verify()
         assert status.push_available is not True
@@ -809,26 +782,16 @@ class SourceAdapterContract:
     async def test_supports_push_never_claims_a_channel_events_would_refuse(
         self, harness: SourceHarness
     ) -> None:
-        """An adapter that advertises push it does not have makes the reconciler skip the only.
+        """An adapter advertising push it does not have makes the reconciler skip it.
 
-        source it is cover for.
-
-        **The implication is one-way, and this case used to assert it both
-        ways.** It read `assert offered is harness.adapter.supports_push`,
-        which is right for M3's world -- where every adapter either had a
-        channel and said so, or had none -- and is *wrong* once an adapter
-        grounds its answer in messages: one with a perfectly good channel
-        reports `supports_push =
-        False` from the moment it opens until the first message arrives on
-        it, because a socket that upgraded and delivers nothing is the
-        failure this milestone is built around. The old assertion forbids
-        exactly the honest implementation, and `EmbyAdapter` fails it the
-        day `events()` starts working.
-
-        So: `supports_push` may not be `True` for a channel `events()`
-        refuses, and an adapter with no channel may not report `True`.
-        Whether a *silent* channel reads `False` is a stronger claim and
-        belongs to the health cases rather than here.
+        The implication is one-way. An adapter that grounds its answer in messages
+        reports `supports_push = False` from the moment its channel opens until the
+        first message arrives, because a socket that upgraded and delivers nothing is
+        the failure this port is built around -- so asserting the equivalence both ways
+        would forbid exactly the honest implementation. What holds: `supports_push` may
+        not be `True` for a channel `events()` refuses, and an adapter with no channel
+        may not report `True`. Whether a *silent* channel reads `False` is a stronger
+        claim and belongs to the health cases.
         """
         offered: bool
         try:
@@ -852,12 +815,11 @@ class SourceAdapterContract:
     async def test_operations_after_aclose_raise_port_unavailable(
         self, harness: SourceHarness
     ) -> None:
-        """Verified while planning.
+        """A closed `httpx.AsyncClient` raises a bare `RuntimeError`.
 
-        a closed `httpx.AsyncClient` raises a bare `RuntimeError`, which is *not* an
-        `httpx.HTTPError` -- so an adapter that translates only `httpx.HTTPError` lets a
-        raw stdlib exception cross the port boundary, where no caller written against
-        `usher.ports.errors` can catch it.
+        That is *not* an `httpx.HTTPError`, so an adapter translating only
+        `httpx.HTTPError` lets a raw stdlib exception cross the port boundary, where no
+        caller written against `usher.ports.errors` can catch it.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         await harness.adapter.aclose()

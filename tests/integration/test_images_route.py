@@ -22,8 +22,8 @@ from usher.domain.image import Image
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 PROVIDER = "tmdb"
 PROVIDER_PATH = "/zq7.jpg"
-# Tiny, for `tests/unit/test_api_images.py`'s reason: ADR-0012 measured that
-# loguru truncates a rendered value at ~128 characters.
+# Tiny, for `tests/unit/test_api_images.py`'s reason: loguru truncates a
+# rendered value at ~128 characters.
 CDN_BASE = "http://x.test"
 # Distinctive per rung, so "the bytes are the rung's" is an assertion rather
 # than an inference from which URL was requested.
@@ -54,12 +54,9 @@ def settings(postgres_url: str, cache_dir: Path) -> Settings:
 def cdn() -> httpx.MockTransport:
     """The CDN's fifteen-rung allowlist, in miniature.
 
-    a body per rung of the ladder and an **HTTP 400** for anything else.
-
-    The 400 is the half that matters. ADR-0032 measured that the real CDN's
-    allowlist is closed and answers 400 off it -- `w0`, `w100`, `w600`,
-    `wibble` and `W500` all -- so a handler that answered any width would let
-    an unclamped route pass this file.
+    A body per rung of the ladder and an **HTTP 400** for anything else. The 400 is the
+    half that matters: the real CDN's allowlist is closed and answers 400 off it, so a
+    handler that answered any width would let an unclamped route pass this file.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -80,8 +77,8 @@ def title_id() -> uuid.UUID:
 def an_image(title_id: uuid.UUID) -> Image:
     """A fresh UUIDv7 every call.
 
-    exactly what `usher derive` mints per sighting, which is what makes the re-
-    derivation case a real test of the natural key rather than of a constant.
+    Exactly what `usher derive` mints per sighting, which is what makes the
+    re-derivation case a real test of the natural key rather than of a constant.
     """
     return Image(
         title_id=title_id,
@@ -201,7 +198,7 @@ async def test_the_same_id_still_serves_the_same_bytes_after_a_real_re_derivatio
     title_id: uuid.UUID,
     cache_dir: Path,
 ) -> None:
-    """C2's `uq_images_owner_provider_path` arriving on the wire, over real SQL.
+    """`uq_images_owner_provider_path` arriving on the wire, over real SQL.
 
     This is the case the header rests on, and the fake cannot make it: a Python
     tuple key is `NULLS NOT DISTINCT` for free, so the id survives there
@@ -261,11 +258,10 @@ async def test_a_width_the_cdn_refuses_never_reaches_it(
 ) -> None:
     """`?w=513` is a width the provider answers HTTP 400 to, and this route never asks it.
 
-    The `MockTransport` mirrors the measured allowlist, so if the clamp were
-    removed the CDN's 400 would arrive here as `PortDataMalformed` and the
-    response would be a 503 -- which is what the assertion below rules out.
-    ADR-0032's finding stated as a test: the clamp is what makes the proxy work
-    rather than what makes it cheap.
+    The `MockTransport` mirrors the real allowlist, so if the clamp were removed the
+    CDN's 400 would arrive here as `PortDataMalformed` and the response would be a 503
+    -- which is what the assertion below rules out. The clamp is what makes the proxy
+    work rather than what makes it cheap.
     """
     response = await client.get(f"/images/{seeded}", params={"w": 513})
 

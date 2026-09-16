@@ -14,17 +14,10 @@ AUDIT_SCRIPT = _ROOT / "scripts" / "audit_bounded_columns.py"
 def audit_module() -> ModuleType:
     """`scripts/audit_bounded_columns.py`, imported once per process.
 
-    Cached because building a ledger walks the SQLAlchemy metadata, the
-    `usher` package's AST and every migration revision.
-
-    ⚠️ **Do not memoise `build_ledger` on `(reading, at)` to make this
-    faster.** The degradation cases in
-    `tests/unit/test_bounded_column_ledger.py` monkeypatch a scan and then
-    call it expecting the mutation to be seen; against a memo they would read
-    a ledger built before the patch and assert nothing at all. What the script
-    does instead is hoist the source scans into a value its own multi-ledger
-    callers pass in -- optional, and off by default for this reason. Only the
-    *module import* is cached here, which no case mutates.
+    Only the *module import* is cached. Building a ledger walks the SQLAlchemy
+    metadata, the `usher` package's AST and every migration revision, but the
+    degradation cases monkeypatch those scans and then expect the mutation to be
+    seen, so memoising `build_ledger` would serve them a pre-patch ledger.
     """
     specification = importlib.util.spec_from_file_location(
         "usher_audit_bounded_columns", AUDIT_SCRIPT
@@ -38,27 +31,21 @@ def audit_module() -> ModuleType:
 
 
 def drift() -> list[str]:
-    """`--check`'s own answer, empty when the ledger agrees with what ADR-0044 publishes.
+    """`--check`'s own answer, empty when the ledger agrees with what is published.
 
-    Deliberately `_drift()` rather than a bucket assertion of the test's own.
-    An earlier draft of ADR-0044 specified F9's guard as *"assert the
-    `exposed-sqlalchemy` bucket is empty"*, and review demonstrated that a
-    totally dead scan satisfies it perfectly -- stubbing `write_sites()` to
-    `[]` empties every bucket and exits 0. `_drift()` compares the whole
-    census against `PUBLISHED` and `PUBLISHED_AT_M08B`, at both heads, under
-    all three readings, plus the metadata/migration column set, so a guard
-    spelled as one call to it inherits every degeneracy check that file has
-    **and every one it gains later**.
+    Deliberately `_drift()` rather than a bucket-is-empty assertion of the
+    test's own, which a dead scan satisfies: it compares the whole census
+    against `PUBLISHED` and `PUBLISHED_AT_M08B`, at both heads, under all three
+    readings, plus the metadata/migration column set, so a guard spelled as one
+    call to it inherits every degeneracy check that file has and every one it
+    gains later.
     """
     module = audit_module()
     return cast(list[str], module._drift(module.DEFAULT_READING))
 
 
 def ledger_columns(*buckets: str) -> frozenset[tuple[str, str]]:
-    """`(table.
-
-    column)` for every bounded column in the named buckets, under the reading ADR-0044
-    adopts.
+    """`(table, column)` for every bounded column in the named buckets.
 
     Raises on an unknown bucket name rather than answering the empty set: a
     parametrisation that collected nothing reads exactly like one that

@@ -12,8 +12,7 @@ from usher.ports.search import SearchDocument
 
 class TestFakeSearchIndex(SearchIndexContract):
     # It does dot products over `SearchDocument.vector`, so it expresses the
-    # four semantic and fusion cases -- which are the most delicate logic in
-    # this milestone, and would otherwise run only under Docker.
+    # four semantic and fusion cases, which would otherwise run only under Docker.
     supports_semantic = True
     # A dict of documents holds no `media_items` and no `enrichment_state`,
     # so `owned_only` and `min_enrichment` are genuinely inexpressible here.

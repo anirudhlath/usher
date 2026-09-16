@@ -69,11 +69,10 @@ def _read(path: Path) -> list[dict[str, object]]:
 
 
 async def test_the_header_is_the_first_line_and_carries_both_stamps(tmp_path: Path) -> None:
-    """`schema_revision` is the one K4 refuses on; the rest is provenance.
+    """`schema_revision` is the one a restore refuses on; the rest is provenance.
 
-    The read is `gzip` + `json` rather than anything in `src/`, so this
-    observes the bytes an operator would `zcat` and not this module's own
-    idea of what it wrote.
+    The read is `gzip` + `json` rather than anything in `src/`, so this observes the
+    bytes an operator would `zcat`.
     """
     service = _service({"users": [{"name": "the household"}]})
     report = await service.write(tmp_path / "x.jsonl.gz")
@@ -92,17 +91,11 @@ async def test_the_header_is_the_first_line_and_carries_both_stamps(tmp_path: Pa
 def _installed_version() -> str:
     """`usher.__version__`, imported the way `src/` imports it.
 
-    **Read rather than pinned to a literal**, and that is a decision this
-    case has to explain because the obvious spelling is `== "0.1.0"`.
-    `__version__` is `importlib.metadata.version("usher")`, which answers
-    whatever the *installed distribution* says -- `0.1.0` from
-    `pyproject.toml` in a normal checkout and `0.0.0+unknown` from the
-    fallback in a tree that was never installed. A literal here would fail
-    on the second, which is a fact about the environment rather than about
-    the artifact. What the case is really asserting is that the header
-    carries the same string the rest of `src/` sends to a real Emby as
-    `app_version` and serves on the console's version payload -- so it reads
-    it from the same place they do.
+    Read rather than pinned to a literal: `__version__` answers whatever the installed
+    distribution says, and a tree that was never installed reports the fallback, which
+    is a fact about the environment rather than about the artifact. The claim is that
+    the header carries the same string `src/` sends as `app_version`, so it reads it
+    from the same place.
     """
     from usher import __version__
 
@@ -110,13 +103,11 @@ def _installed_version() -> str:
 
 
 async def test_the_counts_in_the_header_are_what_was_written(tmp_path: Path) -> None:
-    """The counts are a truncation check for K4.
+    """The counts are a truncation check, so they are `len()` of the body.
 
-    so they have to be `len()` of the body rather than a number taken beside it.
-
-    Both halves are asserted: the header's map, and the body counted back
-    out. A case asserting only the first passes against a service that
-    writes the counts and then drops every row.
+    Both halves are asserted: the header's map, and the body counted back out. A case
+    asserting only the first passes against a service that writes the counts and then
+    drops every row.
     """
     service = _service(
         {
@@ -148,12 +139,10 @@ async def test_a_reference_is_spelled_as_a_nested_object_with_every_rung(
 ) -> None:
     """The four keys including the nulls, and the raw id among them.
 
-    `keys_tried` omits a rung it cannot offer because its consumer is a
-    sentence; here the consumer is K4's parser, and a key that is sometimes
-    absent and sometimes null is two shapes for one fact. The `id` rung is
-    present on every reference -- it is `RESOLUTION_ORDER`'s third entry, a
-    check on the target rather than a key -- and it is the only place a
-    title UUID may appear in the artifact at all.
+    The consumer here is a parser, and a key that is sometimes absent and sometimes
+    null is two shapes for one fact. The `id` rung is present on every reference -- a
+    check on the target rather than a key -- and is the only place a title UUID may
+    appear in the artifact at all.
     """
     series_id = new_id()
     movie_id = new_id()
@@ -214,21 +203,14 @@ async def test_a_reference_is_spelled_as_a_nested_object_with_every_rung(
 async def test_money_and_ciphertext_survive_the_encoding(tmp_path: Path) -> None:
     """A `Decimal` positionally as text, and `bytes` as base64.
 
-    `llm_calls.cost_usd` is `NUMERIC(12, 8)`: `json.dumps` refuses a
-    `Decimal` outright, so the failure mode here is not a silent float --
-    but the *repair* somebody reaches for is `float(value)`, which is how a
+    `json.dumps` refuses a `Decimal` outright, so the failure mode is not a silent
+    float -- but the repair somebody reaches for is `float(value)`, which is how a
     spend ledger stops adding up.
 
-    **The value is chosen at the boundary rather than for looking small.**
-    `Decimal.__str__` switches to scientific notation once the adjusted
-    exponent drops below -6, so `0.00870000` stringifies positionally and
-    `0.00000002` -- the same column, a reachable per-token price on a cheap
-    model -- comes out as `2E-8`. Both are asserted, because a case carrying
-    only the first passes against `str()` and this one failed on it.
-
-    `source_credentials.ciphertext` is `bytea` and this service holds no
-    key: it is carried opaque, which is what `CREDENTIAL_KEY_WARNING` is
-    about.
+    The values sit either side of the boundary where `Decimal.__str__` switches to
+    scientific notation, because a case carrying only the positional one passes
+    against `str()`. `ciphertext` is `bytea` and this service holds no key, so it is
+    carried opaque.
     """
     service = _service(
         {
@@ -248,13 +230,11 @@ async def test_money_and_ciphertext_survive_the_encoding(tmp_path: Path) -> None
 
 
 async def test_a_boolean_stays_a_boolean(tmp_path: Path) -> None:
-    """`isinstance(True.
+    """`isinstance(True, int)` is true, so `bool` has to be matched before `int`.
 
-    int)` is true, so a narrower `int` arm ahead of `bool` would write every `played`,
-    `enabled` and `ok` as `1`.
-
-    Asserted with `is` rather than `==`, because `1 == True` in Python and
-    an `==` assertion cannot see the defect it is written for.
+    A narrower `int` arm ahead of it would write every `played`, `enabled` and `ok` as
+    `1`. Asserted with `is` rather than `==`, because `1 == True` and an `==` assertion
+    cannot see the defect it is written for.
     """
     service = _service({"watch_states": [{"played": True, "play_count": 1}]})
     report = await service.write(tmp_path / "x.jsonl.gz")
@@ -271,12 +251,9 @@ async def test_a_type_the_encoder_does_not_know_raises_rather_than_being_stringi
 ) -> None:
     """Better a refused backup than one carrying `<object object at 0x…>`.
 
-    An artifact is only ever read on the day the database is gone, so a
-    value silently rendered as its `repr` is a loss discovered at the worst
-    possible moment. The type named here is deliberately one no column
-    produces: this asserts the *default*, and the column types that do
-    reach it are asserted by the integration file round-tripping all eight
-    carried tables.
+    An artifact is only ever read on the day the database is gone, so a value silently
+    rendered as its `repr` is a loss discovered at the worst possible moment. The type
+    named here is deliberately one no column produces, so this asserts the default arm.
     """
     service = _service({"users": [{"what": object()}]})
 
@@ -330,22 +307,15 @@ def test_the_default_name_is_utc_whatever_the_clock_s_offset_is() -> None:
 async def test_a_directory_that_does_not_exist_is_an_oserror_before_the_read(
     tmp_path: Path,
 ) -> None:
-    """The family `cli.OPERATOR_ERRORS` already carries.
+    """An unusable path is an `OSError`, raised before the carried set is read.
 
-    and it fires before the carried set is read.
+    `OSError` is already in `cli.OPERATOR_ERRORS`, so `usher backup` gets one line and
+    exit 1 from the boundary that exists and needs no handler of its own.
 
-    ADR-0026 predicted that a milestone adding a filesystem writer would add
-    a family to that tuple. It does not: `OSError` has been in it since M7,
-    put there because asyncpg lets a refused TCP connection out unwrapped,
-    and it covers this for free. So `usher backup` gets one line and exit 1
-    from the boundary that already exists, and no handler of its own.
-
-    **The ordering is the second assertion and it is the one with teeth.**
-    `pytest.raises(OSError)` alone is satisfied by the check running *after*
-    the read -- which is what `gzip.open` would give for free -- so the case
-    also asserts the repository was never asked for a table. Without it,
-    an operator with a typo'd `--output` waits out the whole read before
-    being told.
+    The ordering is the assertion with teeth: `pytest.raises(OSError)` alone is
+    satisfied by the check running *after* the read, so the case also asserts the
+    repository was never asked for a table. Otherwise an operator with a typo'd
+    `--output` waits out the whole read before being told.
     """
     repository = FakeBackupRepository({"users": [{"name": "one"}]})
     service = BackupService(repository=repository, now=lambda: AT)
@@ -364,14 +334,10 @@ async def test_a_directory_that_does_not_exist_is_an_oserror_before_the_read(
 async def test_a_read_that_fails_leaves_no_file_at_all(tmp_path: Path) -> None:
     """Everything is read before anything is opened.
 
-    so a database that goes away mid-read leaves no artifact rather than a short one.
-
-    That ordering is the reason: gzip decompresses a truncated stream
-    happily up to the point it stops, so a half-written artifact is a file
-    that *looks* readable and is missing rows nothing counts. The premise
-    guard is the second assertion -- the same service, the same path, asked
-    without the failure, must produce a file -- because "no file exists" is
-    also what a service that never writes produces.
+    A database that goes away mid-read then leaves no artifact rather than a short one:
+    gzip decompresses a truncated stream happily, so a half-written artifact looks
+    readable and is missing rows nothing counts. The premise guard is the second
+    assertion, because "no file exists" is also what a service that never writes does.
     """
 
     class _Failing(FakeBackupRepository):
@@ -405,14 +371,11 @@ _FAILS_MID_WRITE: Mapping[str, Sequence[Mapping[str, object]]] = {
 
 
 async def test_the_compression_does_not_run_on_the_event_loop(tmp_path: Path) -> None:
-    """Gzip over the carried set is seconds of CPU.
+    """Gzip over the carried set is seconds of CPU, so it does not run on the loop.
 
-    and a service that spends them on the loop stalls every other coroutine in the
-    process -- which is the difference between a CLI command and the route a later
-    milestone makes this.
-
-    Asserted on the thread the encoding actually runs in, because *"`to_thread` was
-    called"* is satisfied by a call that awaits nothing.
+    A service that spent them there would stall every other coroutine in the process.
+    Asserted on the thread the encoding actually runs in, because "`to_thread` was
+    called" is satisfied by a call that awaits nothing.
     """
     encoded_on: list[int] = []
 
@@ -438,22 +401,16 @@ async def test_the_compression_does_not_run_on_the_event_loop(tmp_path: Path) ->
 async def test_a_failure_part_way_through_the_write_leaves_no_artifact_behind(
     tmp_path: Path,
 ) -> None:
-    """🔴 **The write phase had the failure the read phase was defended against**.
+    """A failure mid-write must leave no artifact, not a cleanly-decompressing short one.
 
-    and `write`'s own docstring claimed otherwise until a review measured it.
+    `gzip.open(path, "wt")` truncates the destination at open and writes a valid gzip
+    trailer on the way out of an exception, so a run that died part-way leaves a file
+    `zcat` reads cleanly whose header claims more rows than the body holds -- the worst
+    shape an artifact can have, because nothing but a count comparison notices.
 
-    `gzip.open(path, "wt")` truncates the destination at open and the `with`
-    block writes a valid gzip trailer on the way out of an exception, so a
-    run that died on row 4 of table 2 left a 211-byte file that `zcat`
-    decompresses **cleanly**, with a header claiming four `watch_states` rows
-    over a body holding three. That is the worst shape an artifact can have:
-    it is not detectably broken, and the only thing that would ever notice is
-    K4 comparing the header's counts against what it read.
-
-    The repair is a scratch sibling plus `os.replace`. Both halves are
-    asserted -- no artifact at the destination, and no scratch left in the
-    directory -- because a repair that merely renamed the truncated file
-    would satisfy the first.
+    Writing to a scratch sibling and `os.replace`-ing it is what avoids that. Both
+    halves are asserted -- no artifact at the destination, and no scratch left behind
+    -- because merely renaming the truncated file would satisfy the first.
     """
     path = tmp_path / "x.jsonl.gz"
 
@@ -473,20 +430,14 @@ async def test_a_failure_part_way_through_the_write_leaves_no_artifact_behind(
 
 
 async def test_a_failed_run_does_not_destroy_the_previous_artifact(tmp_path: Path) -> None:
-    """**The half that matters for a cron entry**.
+    """A failed run leaves the previous artifact exactly as it was.
 
-    and the reason the repair is `os.replace` rather than an `unlink` in a `finally`.
+    A nightly `usher backup --output nightly.jsonl.gz` writes to one path forever, so a
+    truncating spelling would let the first failing run replace the last good artifact
+    with a short one that still decompresses.
 
-    A nightly `usher backup --output nightly.jsonl.gz` writes to one path
-    forever. Under the truncating spelling, the *first failing run* replaced
-    the last good artifact with a short one -- so a household could lose its
-    watch history and its money ledger to a transient failure, on the run
-    that was supposed to protect it, with a file still sitting there that
-    decompresses.
-
-    Asserted on the **bytes**, not on the file's existence: a repair that
-    left an empty or zero-length file at the destination passes an
-    `exists()` check and is the same loss.
+    Asserted on the bytes rather than on the file's existence: a scheme that left an
+    empty file at the destination passes an `exists()` check and is the same loss.
     """
     path = tmp_path / "nightly.jsonl.gz"
     await _service({"users": [{"name": "last night"}]}).write(path)
@@ -502,28 +453,23 @@ async def test_a_failed_run_does_not_destroy_the_previous_artifact(tmp_path: Pat
 
 
 def test_the_credential_warning_names_the_setting_and_the_consequence() -> None:
-    """One string, so K5's runbook quotes it rather than paraphrasing it.
+    """One string, so the runbook quotes it rather than paraphrasing it.
 
-    Asserted on the two facts an operator has to act on rather than on the
-    whole sentence: the sentence is a standing candidate for copy-editing
-    and an `==` on it would be a change-detector, while the setting's name
-    and the word for what goes wrong are the claim.
+    Asserted on the two facts an operator has to act on rather than on the whole
+    sentence, which is a standing candidate for copy-editing.
     """
     assert "USHER_SECRET_KEY" in CREDENTIAL_KEY_WARNING
     assert "ciphertext" in CREDENTIAL_KEY_WARNING
 
 
 def test_the_projection_built_reference_is_the_one_backup_identity_builds() -> None:
-    """The one duplication K3 accepts, pinned across the two files that hold it.
+    """One reference, built two ways, pinned across the two files that hold it.
 
-    `PostgresBackupRepository._titles` builds a `TitleReference` from a
-    four-column projection rather than calling
-    `backup_identity.title_reference`, because that function takes a 33-
-    column `Title` and this path would materialise one per distinct
-    referenced title. This asserts the two constructions agree field for
-    field, so a rung added to `title_reference` -- a normalisation, a fifth
-    key -- fails here rather than silently producing artifacts whose
-    references are built two different ways.
+    `PostgresBackupRepository._titles` builds a `TitleReference` from a narrow
+    projection rather than calling `backup_identity.title_reference`, which would
+    materialise a whole `Title` per referenced title. This asserts the two agree field
+    for field, so a rung added to one fails here rather than silently producing
+    artifacts whose references disagree.
     """
     identifier = new_id()
     title = Title(

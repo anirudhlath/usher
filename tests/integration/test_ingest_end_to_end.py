@@ -47,13 +47,13 @@ from usher.services.watch_sync import WatchStateSyncService
 CHANGED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 PAGE_SIZE = 3
 
-# The catalog already holds this one (M2's bootstrap put 291,737 tmdb ids
-# there), so it matches on tier 1 and no stub is created.
+# The catalog already holds this one, so it matches on tier 1 and no stub is
+# created.
 KNOWN_TMDB_ID = 90000550
-# It does not hold this one. 291,737 of 1,271,138 titles carry a `tmdb_id`,
-# so "a trusted provider id the catalog has never seen" is the common case
-# rather than the exception -- which is what makes stub-on-sight load-bearing
-# rather than dead code.
+# It does not hold this one. Most titles carry no `tmdb_id`, so "a trusted
+# provider id the catalog has never seen" is the common case rather than the
+# exception -- which is what makes stub-on-sight load-bearing rather than dead
+# code.
 UNKNOWN_TMDB_ID = 999_331
 
 _MOVIE_KNOWN = SourceItem(
@@ -120,7 +120,7 @@ async def source(session: AsyncSession) -> Source:
 
 @pytest_asyncio.fixture
 async def catalog(session: AsyncSession) -> uuid.UUID:
-    """One title M2's bootstrap would have left behind, so tier 1 has something to find."""
+    """One title the bootstrap would have left behind, so tier 1 has something to find."""
     title = Title(
         kind=TitleKind.MOVIE,
         name="Fight Club",
@@ -276,11 +276,9 @@ def statement_counter() -> Iterator[list[str]]:
 async def _explain(session: AsyncSession, statement: str, parameters: Sequence[object]) -> str:
     """`EXPLAIN` the statement **as the driver received it**, with the parameters it received.
 
-    Not a hand-copied lookalike: two earlier tasks in this project asserted
-    on the plan of a transcribed query and both were replaced, because the
-    copy drifts from the repository and then reads like coverage. What
-    `before_cursor_execute` hands over is already compiled to asyncpg's
-    `$1` placeholders, so it has to go back to asyncpg rather than through
+    Not a hand-copied lookalike, which drifts from the repository and then reads like
+    coverage. What `before_cursor_execute` hands over is already compiled to
+    asyncpg's `$1` placeholders, so it has to go back to asyncpg rather than through
     `text()` -- SQLAlchemy would find no binds in it and pass none.
     """
     driver = await raw_connection(session)
@@ -291,10 +289,9 @@ async def _explain(session: AsyncSession, statement: str, parameters: Sequence[o
 def _capture(
     predicate: Callable[[str], bool],
 ) -> tuple[list[tuple[str, Sequence[object]]], Callable[[], None]]:
-    """Record (statement.
+    """Record `(statement, parameters)` for every statement matching `predicate`.
 
-    parameters) for every statement matching `predicate`, and the callable that stops
-    recording.
+    Hands back the callable that stops recording.
     """
     seen: list[tuple[str, Sequence[object]]] = []
 
@@ -334,7 +331,7 @@ async def test_a_library_becomes_a_catalog(
 ) -> None:
     """Registered source in, canonical catalog out.
 
-    one movie the catalog already holds, one it does not (stub-on-sight), one with no
+    One movie the catalog already holds, one it does not (stub-on-sight), one with no
     ids at all (review queue), a series, and two of its episodes hung off it.
     """
     _seed(emby, LIBRARY)
@@ -378,11 +375,11 @@ async def test_no_episode_ever_mints_a_title(
 ) -> None:
     """The catastrophe this pipeline is shaped around, end to end.
 
-    Each seeded episode carries its *own* `Imdb` id -- a live Emby episode really does
-    -- and no episode's IMDb id is in the catalog at all (`tvEpisode` is excluded from
-    M2's bootstrap by design), so an episode that walked the ladder would fall through
-    to stub-on-sight and mint one junk title apiece: 999,827 of them at the one measured
-    deployment, a catalog of rubbish roughly the size of the real one.
+    Each seeded episode carries its *own* `Imdb` id -- a live Emby episode really
+    does -- and no episode's IMDb id is in the catalog at all (`tvEpisode` is
+    excluded from the bootstrap by design), so an episode that walked the ladder
+    would fall through to stub-on-sight and mint one junk title apiece: a catalog of
+    rubbish roughly the size of the real one.
     """
     _seed(emby, LIBRARY)
     before = (await session.execute(text("SELECT count(*) FROM titles"))).scalar_one()
@@ -448,9 +445,7 @@ async def test_a_deleted_item_is_retracted_and_its_watch_state_survives(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """PRD 08's backup asymmetry as behaviour.
-
-    the catalog is rebuildable, watch state is precious.
+    """PRD 08's backup asymmetry as behaviour: the catalog is rebuildable, watch state is not.
 
     A retracted item keeps its row, its title link, and everything attached to that
     title.
@@ -497,11 +492,9 @@ async def test_a_walk_that_dies_mid_run_leaves_a_resumable_catalog(
 ) -> None:
     """A crash costs the batch in flight, not the walk.
 
-    and nothing is retracted in between, because the sweep is on the success path and
-    nowhere else.
-
-    The second run upserts everything again, which is free because every write is an
-    upsert.
+    Nothing is retracted in between, because the sweep is on the success path and
+    nowhere else. The second run upserts everything again, which is free because
+    every write is an upsert.
     """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
@@ -534,24 +527,17 @@ async def test_watch_state_survives_a_walk_that_cannot_report_history(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """**The whole milestone, end to end.**.
+    """A backfilled play count survives a later walk that cannot report history.
 
-    A backfill records `play_count = 7`. A full nightly watch-state walk
-    then runs over the same item, through the real `EmbyAdapter` against a
-    `FakeEmbyServer` whose *listing* omits play history exactly as Emby
-    4.9.5.0 does -- and the count is still 7 afterwards.
-
-    Six layers can each break this on their own: the adapter's mapper, the
-    port DTO's `int | None`, `WatchStateSyncService._merge_for`, the
-    `WatchStateMerge` DTO, the `UPDATE ... FROM` merge, and the
-    `INSERT ... ON CONFLICT DO NOTHING` behind it. Each has its own test.
-    This is the one that fails when two of them regress at once.
-
-    The row is staged with `clock_timestamp()` through a raw `INSERT`
-    because `now()` is frozen for a transaction and each test *is* one
-    transaction, so a merge carrying `datetime.now(UTC)` would otherwise
-    lose the "latest `updated_at` wins" comparison against a row written
-    microseconds earlier in the same frozen instant.
+    A backfill records `play_count = 7`; a full nightly watch-state walk then runs
+    over the same item, through the real `EmbyAdapter` against a `FakeEmbyServer`
+    whose *listing* omits play history exactly as Emby does, and the count is still 7
+    afterwards. Six layers can each break this on their own -- the adapter's mapper,
+    the port DTO's `int | None`, `WatchStateSyncService._merge_for`, the
+    `WatchStateMerge` DTO, the `UPDATE ... FROM` merge and the `INSERT ... ON
+    CONFLICT DO NOTHING` behind it -- and each has its own case; this is the one that
+    fails when two regress at once. The row is staged with `clock_timestamp()`
+    because `now()` is frozen for a transaction and each test *is* one transaction.
     """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
@@ -608,13 +594,13 @@ async def test_the_backfill_recovers_the_history_the_walk_could_not_see(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """The other half of ADR-0014, through the real single-item route.
+    """The other half, through the real single-item route.
 
-    The walk merges `play_count = NULL` (the listing genuinely cannot say),
-    which leaves the row matching `played AND play_count = 0` -- an
-    observable "history unknown" state bounded by the household's watched
-    items rather than by the source's 1,126,674. `backfill_one` then asks
-    `GET /Users/{u}/Items/{item}`, which can.
+    The walk merges `play_count = NULL` (the listing genuinely cannot say), which
+    leaves the row matching `played AND play_count = 0` -- an observable "history
+    unknown" state bounded by the household's watched items rather than by the
+    source's whole library. `backfill_one` then asks `GET /Users/{u}/Items/{item}`,
+    which can.
     """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
@@ -654,15 +640,13 @@ async def test_an_episodes_watch_state_lands_on_the_episode_not_the_series(
     catalog: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
-    """89% of this library is episodes.
+    """Most of this library is episodes.
 
-    and an episode's `MediaItem` carries its series' `title_id` *and* its own
-    `episode_id` while `watch_states` permits exactly one (`num_nonnulls(title_id,
-    episode_id) = 1`).
-
-    Collapsing to the *title* would merge every episode of a show onto one row, quietly;
-    passing both through raises `PortDataMalformed` and aborts a batch of five thousand
-    states.
+    An episode's `MediaItem` carries its series' `title_id` *and* its own
+    `episode_id`, while `watch_states` permits exactly one (`num_nonnulls(title_id,
+    episode_id) = 1`). Collapsing to the *title* would merge every episode of a show
+    onto one row, quietly; passing both through raises `PortDataMalformed` and aborts
+    a batch of five thousand states.
     """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
@@ -701,11 +685,11 @@ async def test_a_delta_walk_never_retracts(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """ADR-0015's second rule, end to end.
+    """A delta walk's second rule, end to end.
 
-    A delta returns only what changed, so by construction nearly everything is "unseen"
-    -- a sweep after one would retract the library. The real adapter's `since` filter is
-    what makes this a real delta rather than a relabelled full walk.
+    A delta returns only what changed, so by construction nearly everything is
+    "unseen" -- a sweep after one would retract the library. The real adapter's
+    `since` filter is what makes this a real delta rather than a relabelled full walk.
     """
     _seed(emby, LIBRARY)
     await reconcile.reconcile(source, SyncRunKind.FULL, adapter)
@@ -735,18 +719,14 @@ async def test_a_delta_walk_never_retracts(
 
 
 def _mixed(*, series: int, episodes: int, movies: int, offset: int) -> list[SourceItem]:
-    """A slice of the measured library's shape.
+    """A slice of the library's shape: mostly episodes, many series, movies alongside.
 
-    mostly episodes, spread over many series, with movies alongside.
-
-    **Many series, not one**, and many movies, and that is what makes the
-    flatness assertion below bite. `IngestService._series_titles` resolves
-    the series this page's episodes hang off, and
-    `_titles_needing_enrichment` reads the enrichment state of every title
-    the page touched -- both take a *list*. With a single series and a
-    single title, a per-item spelling of either issues exactly one statement
-    and is indistinguishable from the batched one. Measured: both mutations
-    survived a version of this case built on one series.
+    **Many series, not one**, and many movies, and that is what makes the flatness
+    assertion below bite. `IngestService._series_titles` resolves the series this
+    page's episodes hang off, and `_titles_needing_enrichment` reads the enrichment
+    state of every title the page touched -- both take a *list*. With a single series
+    and a single title, a per-item spelling of either issues exactly one statement
+    and is indistinguishable from the batched one.
     """
     items = [
         SourceItem(
@@ -796,7 +776,7 @@ async def test_statements_do_not_grow_with_the_page(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """**The measurement, at the library's own shape.**."""
+    """A flat statement count, at the library's own shape."""
 
     def _walker(batch_size: int) -> ReconcileService:
         matching = PostgresTitleMatchRepository(session)
@@ -843,19 +823,15 @@ async def test_the_only_per_item_write_is_one_insert_per_new_title(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """The one place the pipeline is *not* set-based, measured rather than asserted about.
+    """The one place the pipeline is *not* set-based.
 
-    `MatchService._create_stub` calls `TitleRepository.add` per item, so a
-    first walk over items the catalog has never seen costs one `INSERT INTO
-    titles` apiece. That is bounded by **new titles**, not by items: at the
-    one measured deployment that is at most 94,438 movies + 32,409 series,
-    because an episode never walks the ladder at all and the other 999,827
-    items therefore cost nothing here. A second walk over the same items
-    costs zero, because they match.
-
-    Pinned so the bound cannot silently become per-item-of-the-library: if
-    an episode ever started stubbing, the case above goes from flat to
-    linear and this one's arithmetic stops holding.
+    `MatchService._create_stub` calls `TitleRepository.add` per item, so a first walk
+    over items the catalog has never seen costs one `INSERT INTO titles` apiece. That
+    is bounded by **new titles**, not by items -- an episode never walks the ladder
+    at all, so the bulk of a library costs nothing here -- and a second walk over the
+    same items costs zero, because they match. Pinned so the bound cannot silently
+    become per-item-of-the-library: if an episode ever started stubbing, the case
+    above goes from flat to linear and this one's arithmetic stops holding.
     """
     fresh = [
         SourceItem(
@@ -888,13 +864,12 @@ async def test_the_only_per_item_write_is_one_insert_per_new_title(
 async def test_a_re_seen_job_is_not_rewritten_every_night(
     queue: PostgresJobQueue, session: AsyncSession
 ) -> None:
-    """`_ENQUEUE`'s `ON CONFLICT DO UPDATE` used to stamp `updated_at` for every re-seen job.
+    """`_ENQUEUE`'s `ON CONFLICT DO UPDATE` must not stamp `updated_at` for a re-seen job.
 
-    so a nightly walk rewrote a row per job for no state change -- 1.1M dead-weight row
-    versions and the vacuum to match, every night, on a table whose whole purpose is to
-    be small.
-
-    The promotion path still writes, because that is a real state change.
+    A nightly walk would otherwise rewrite a row per job for no state change --
+    millions of dead-weight row versions and the vacuum to match, every night, on a
+    table whose whole purpose is to be small. The promotion path still writes,
+    because that is a real state change.
     """
     from usher.domain.jobs import JobPriority
     from usher.ports.jobs import JobRequest
@@ -920,19 +895,17 @@ async def test_a_re_seen_job_is_not_rewritten_every_night(
 _SWEPT_SOURCE = 2_000
 """Rows on the source the sweep runs against.
 
-Not a round number chosen for comfort: fifty is what this case seeded until
-2026-08-31, and fifty rows with no statistics is a table the planner sizes off
-an empty `pg_class`, where `ix_media_items_sweep` and
-`uq_media_items_source_external` both cost `0.14..8.16` -- the same to four
-significant figures. The assertion below was reading a tie-break, and it lost
-**10 runs of 10** in isolation. See issue #79.
+Not a round number chosen for comfort: a few dozen rows with no statistics is a
+table the planner sizes off an empty `pg_class`, where `ix_media_items_sweep` and
+`uq_media_items_source_external` cost the same to four significant figures, so
+the assertion below would be reading a tie-break rather than a property.
 """
 
 _STALE_ON_IT = 50
-"""And the shape matters as much as the size. The measured nightly run is
-1,126,674 rows with 200 stale, so `available AND last_seen_at < :seen_since`
-selects a fraction of a per-source range -- which is the only shape in which a
-three-column index beats a scan. Seeding a source where *every* row is stale
+"""And the shape matters as much as the size. A nightly run is a large table
+with a small stale tail, so `available AND last_seen_at < :seen_since` selects a
+fraction of a per-source range -- the only shape in which a three-column index
+beats a scan. Seeding a source where *every* row is stale
 describes a library that vanished overnight, and any plan is right for that."""
 
 
@@ -1009,23 +982,16 @@ async def test_resolving_a_target_uses_the_unique_index(
 ) -> None:
     """`resolve_targets` runs once per watch-state batch against `external_id = ANY(...)`.
 
-    and it is the only lookup on the hot path keyed by a source's own id.
-
-    A plan that reached the rows through `source_id` alone and then *filtered* on
-    `external_id` is a full pass over the source per batch -- 1,126,674 rows per
-    thousand states -- and is exactly what an empty fixture cannot tell apart from a
-    real lookup, because every `source_id`-leading index looks the same when there is
-    nothing to scan.
-
-    So this seeds two thousand rows and `ANALYZE`s before asking. The rows
-    are *matched* on purpose: seeded unmatched, `title_id IS NOT NULL OR
-    episode_id IS NOT NULL` selects nothing and the planner reasonably picks
-    a `BitmapOr` over the two nullable-id indexes -- a plan that is right for
-    that fixture and wrong for a library where nearly every item is matched.
-    Measuring the fixture instead of the query is the failure mode this
-    whole file exists to avoid, so the fixture has to have the production
-    shape. The assertion is on the *`Index Cond`*: `external_id` has to be
-    in it, which only `uq_media_items_source_external` can offer.
+    It is the only lookup on the hot path keyed by a source's own id, and a plan that
+    reached the rows through `source_id` alone and then *filtered* on `external_id`
+    is a full pass over the source per batch -- exactly what an empty fixture cannot
+    tell apart from a real lookup, because every `source_id`-leading index looks the
+    same when there is nothing to scan. So this seeds two thousand rows and
+    `ANALYZE`s before asking, and the rows are *matched* on purpose: seeded
+    unmatched, `title_id IS NOT NULL OR episode_id IS NOT NULL` selects nothing and
+    the planner reasonably picks a `BitmapOr`, right for that fixture and wrong for a
+    real library. The assertion is on the *`Index Cond`*: `external_id` has to be in
+    it, which only `uq_media_items_source_external` can offer.
     """
     await media_items.upsert_many(
         [

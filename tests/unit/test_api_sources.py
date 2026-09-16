@@ -1,4 +1,4 @@
-"""`POST /admin/sources/{id}/sync` -- the M4 boundary call, as an enqueue."""
+"""`POST /admin/sources/{id}/sync` -- the boundary call, as an enqueue."""
 
 import ast
 import inspect
@@ -74,20 +74,14 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 async def test_a_sync_request_enqueues_one_job_at_demand_and_reconciles_nothing_in_the_request(
     client: httpx.AsyncClient, queue: FakeJobQueue, source_repository: FakeSourceRepository
 ) -> None:
-    """The whole route.
+    """One `(sync, "<source id>:delta")` job at `DEMAND`, and a body carrying the pair.
 
-    one `(sync, "<source id>:delta")` job at `DEMAND`, and a body carrying the pair --
-    the queue's own identity, exactly as `POST /admin/rows/regenerate` returns for
-    `curate`.
+    `delta` because nothing on the request names a lane: the default is the cheaper of
+    the two, and `?kind=full` is the escape hatch this case's sibling below exercises.
 
-    `delta` because nothing on the request names a lane: the default is the
-    cheaper of the two an operator reaching for this button is most often
-    asking for, and `?kind=full` is the escape hatch this case's sibling
-    below exercises.
-
-    The priority is asserted as the literal `100`, not as `JobPriority.
-    DEMAND`, so renumbering the scale is a failure here rather than a silent
-    agreement between the enum and itself.
+    The priority is asserted as the literal `100`, not as `JobPriority.DEMAND`, so
+    renumbering the scale is a failure here rather than a silent agreement between the
+    enum and itself.
     """
     source = _source()
     await source_repository.add(source)
@@ -106,7 +100,7 @@ async def test_nothing_but_the_sync_job_is_enqueued(
 ) -> None:
     """`depth()` promises a key per kind, so this reads every one of them.
 
-    a route that also enqueued a `match` or `watch_history` sweep would be spending an
+    A route that also enqueued a `match` or `watch_history` sweep would be spending an
     operator's press on more than they asked for.
     """
     source = _source()
@@ -134,7 +128,7 @@ async def test_a_full_and_a_delta_request_are_two_distinct_jobs(
 ) -> None:
     """The composite key at work.
 
-    two lanes for one source are two rows, not one coalesced into the other.
+    Two lanes for one source are two rows, not one coalesced into the other.
     """
     source = _source()
     await source_repository.add(source)
@@ -152,7 +146,7 @@ async def test_an_invalid_kind_is_the_generic_422_and_enqueues_nothing(
 ) -> None:
     """Not a third route-specific refusal.
 
-    FastAPI's own request validation already answers `422 validation_failed` for a
+    FastAPI's own request validation answers `422 validation_failed` for a
     `kind` outside `{full, delta}`, the same member every malformed query parameter in
     this API answers with.
     """
@@ -182,14 +176,13 @@ async def test_a_disabled_source_is_409_and_enqueues_nothing(
 ) -> None:
     """`enabled` is how an operator parks a source being rebuilt.
 
-    and a 202 here would promise a walk the worker will decline
+    A 202 here would promise a walk the worker will decline
     (`composition.selected_sources` skips a disabled source even when named explicitly).
 
-    `not_playable`, not a minted `source_disabled` -- V1's vocabulary is
-    closed at seven (ADR-0030) and a reused member is the fix, per the ADR's
-    amendment: both this and a title with no playable copy are RFC 9110
-    §15.5.10's "conflict with the current state of the target resource, stop
-    asking", and a client cannot act on the two differently.
+    `not_playable`, not a minted `source_disabled`: the error vocabulary is closed, and
+    both this and a title with no playable copy are RFC 9110 §15.5.10's "conflict with
+    the current state of the target resource, stop asking" -- a client cannot act on the
+    two differently.
     """
     source = _source(enabled=False)
     await source_repository.add(source)
@@ -218,17 +211,14 @@ async def test_a_lookup_for_an_unknown_source_never_reaches_the_queue(
 def test_the_sync_route_holds_no_reconcile_service_and_no_source_adapter() -> None:
     """PRD 08's "never fails a request local state can answer" as a *structural* property.
 
-    the same shape
-    `tests/unit/test_api_home.py::test_the_home_service_and_every_provider_
-    hold_no_source_adapter` uses: with no `ReconcileService` and no `SourceAdapter`
-    reachable from this module, there is no walk for the route to run inline, whatever a
-    behavioural case might fail to notice.
+    With no `ReconcileService` and no `SourceAdapter` reachable from this module, there
+    is no walk for the route to run inline, whatever a behavioural case might fail to
+    notice.
 
-    Two misses that shape's own docstring already found and this scan
-    inherits: a signature check spelled `annotation in (SourceAdapter, ...)`
-    does not see a **string** annotation, and an `ast.ImportFrom`-only scan
-    does not see `import usher.ports.source`. Read the annotation as text
-    and walk both node types.
+    Annotations are read as text and both import node types are walked, because a
+    signature check spelled `annotation in (SourceAdapter, ...)` does not see a
+    **string** annotation and an `ast.ImportFrom`-only scan does not see
+    `import usher.ports.source`.
     """
     source = pathlib.Path(inspect.getfile(sources)).read_text()
     tree = ast.parse(source)

@@ -24,10 +24,9 @@ from usher.services.search import compose_document
 async def _no_commit() -> None:
     """`IndexService` commits after its upsert.
 
-    this suite's session is a transaction the fixture rolls back, so committing here
-    would make one case durable against a session-scoped container and take three
-    unrelated files down with it -- the failure
-    `tests/integration/test_pipeline_spans.py` already recorded.
+    This suite's session is a transaction the fixture rolls back, so committing here
+    would make one case durable against a session-scoped container and take
+    unrelated files down with it.
     """
     return None
 
@@ -73,7 +72,7 @@ def _cross_check_title(**columns: object) -> Title:
 async def _insert(session: AsyncSession, title: Title) -> None:
     """Through the real repository, so the row is written the way production writes it.
 
-    including the generated column the fingerprint sits beside.
+    Including the generated column the fingerprint sits beside.
     """
     await PostgresTitleRepository(session).add(title)
 
@@ -81,9 +80,8 @@ async def _insert(session: AsyncSession, title: Title) -> None:
 async def _sql_fingerprint(session: AsyncSession, title_id: uuid.UUID) -> str:
     """The repository's own assembly, evaluated by Postgres for one title.
 
-    Reads `_FINGERPRINT_SQL` out of the module rather than transcribing it:
-    a hand-copied lookalike drifts and then reads like coverage, which is the
-    failure this project has already recorded twice.
+    Reads `_FINGERPRINT_SQL` out of the module rather than transcribing it: a
+    hand-copied lookalike drifts and then reads like coverage.
     """
     result = await session.execute(
         # `_FINGERPRINT_SQL` is a module constant; nothing a caller supplies
@@ -139,15 +137,11 @@ async def test_a_title_with_no_embedding_row_is_stale(session: AsyncSession) -> 
 async def test_a_skeleton_title_is_never_stale(session: AsyncSession) -> None:
     """Boundary call 4, asserted at the layer that enforces it.
 
-    A skeleton title is a name and a year; embedding it produces a vector of the name,
-    which full-text already does better and cheaper, and it is the difference between a
-    coffee break and an overnight job (1.27M titles at ~83 texts/s is 4-6 hours; the
-    enriched tier is ~25 s to 2 min).
-
-    The wrong implementation this fails: a cursor over all of `titles`. That
-    one *works*, drains, and produces correct-looking vectors -- it just
-    costs four hours and fills an HNSW graph whose 1.39 GiB exceeds
-    maintenance_work_mem.
+    A skeleton title is a name and a year; embedding it produces a vector of the
+    name, which full-text already does better and cheaper. The wrong implementation
+    this fails is a cursor over all of `titles` -- that one *works*, drains and
+    produces correct-looking vectors, and costs hours while filling an HNSW graph
+    larger than `maintenance_work_mem`.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     await session.execute(
@@ -162,11 +156,9 @@ async def test_a_skeleton_title_is_never_stale(session: AsyncSession) -> None:
 async def test_a_model_change_makes_every_row_stale_again(session: AsyncSession) -> None:
     """`model_name` records the runtime as well as the checkpoint.
 
-    so swapping fastembed for sentence-transformers -- whose vectors differ by 6x the
-    halfvec quantisation error for the same weights -- invalidates every row through
-    this predicate rather than through a migration.
-
-    That is the fingerprint scheme doing its job.
+    Swapping fastembed for sentence-transformers -- whose vectors differ for the same
+    weights -- invalidates every row through this predicate rather than through a
+    migration. That is the fingerprint scheme doing its job.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     title_id = await _enriched(session, "Harbour Nine")
@@ -192,12 +184,9 @@ async def test_editing_a_title_makes_it_stale_without_anything_being_told(
 
     Nothing enqueues, nothing publishes, nothing sets a flag -- the text changes, the
     fingerprint the predicate computes changes with it, and the row is claimed again.
-
-    The wrong implementation this fails: trusting the enqueue and dropping
-    the fingerprint. `EnrichService._apply` is one line; every path that
-    writes a title without going through it -- a migration backfill, a repair
-    script, a future source of catalog updates -- produces a silently stale
-    vector with nothing to detect it.
+    The wrong implementation this fails trusts the enqueue and drops the fingerprint,
+    so every path that writes a title without going through `EnrichService._apply` --
+    a migration backfill, a repair script -- produces a silently stale vector.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     title_id = await _enriched(session, "Winter Signal")
@@ -224,21 +213,15 @@ async def test_editing_a_title_makes_it_stale_without_anything_being_told(
 async def test_a_refused_title_is_counted_as_refused_and_not_as_stale(
     session: AsyncSession,
 ) -> None:
-    """The second trap in the degenerate-document argument.
+    """The second trap in the degenerate-document argument, and the worse one.
 
-    and the one that is worse than the first.
-
-    A refused title -- one whose composed document is degenerate -- gets a
-    row with a NULL embedding, the current model, and the fingerprint of the
-    degenerate text. It must then match *neither* the stale predicate (or the
-    backfill re-claims it every pass forever and the gauge never reaches
-    zero) *nor* be invisible (or nobody can tell a permanently-refused
-    catalog from a drained one).
-
-    The wrong implementation this fails: `count_refused` spelled as a bare
-    `embedding IS NULL`. That version double-counts a row refused under an
-    *old* model -- it is stale *and* refused -- so the two counters sum above
-    the population and "drained" stops being observable.
+    A refused title -- one whose composed document is degenerate -- gets a row with a
+    NULL embedding, the current model, and the fingerprint of the degenerate text. It
+    must match *neither* the stale predicate (or the backfill re-claims it every pass
+    forever and the gauge never reaches zero) nor be invisible (or nobody can tell a
+    permanently-refused catalog from a drained one). The wrong implementation spells
+    `count_refused` as a bare `embedding IS NULL`, which double-counts a row refused
+    under an *old* model, so the two counters sum above the population.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     title_id = await _enriched(session, "Station Zero")
@@ -268,10 +251,10 @@ async def test_the_cursor_drains_and_never_repeats_a_title(
 ) -> None:
     """Keyset, not OFFSET.
 
-    `list_unmatched`'s OFFSET pagination is measured at 43.7 ms at offset 0 and **388.9
-    ms at offset 1,126,574** -- linear per page, quadratic to drain -- which is fine for
-    an operator reading the first few pages and wrong for anything that walks a
-    population to exhaustion. A backfill does exactly that.
+    `list_unmatched`'s OFFSET pagination costs linear time per page and quadratic
+    time to drain, which is fine for an operator reading the first few pages and
+    wrong for anything that walks a population to exhaustion. A backfill does exactly
+    that.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     expected = {await _enriched(session, f"Relay {i}") for i in range(7)}
@@ -301,15 +284,11 @@ async def test_the_cursor_does_not_fetch_the_search_document(
 ) -> None:
     """`titles` carries a `tsvector` roughly the size of the document it indexes.
 
-    and the backfill has no use for it.
-
-    Two failure modes, opposite directions: a plain `select(TitleRow)` ships it per row
-    for nothing, and a deferral without `raiseload` turns `_to_domain`'s column walk
-    into one extra query per title -- an N+1 that is invisible because it answers
-    correctly.
-
-    Asserted on the compiled statement and on the statement count, not on
-    wall clock.
+    The backfill has no use for it. Two failure modes, opposite directions: a plain
+    `select(TitleRow)` ships it per row for nothing, and a deferral without
+    `raiseload` turns `_to_domain`'s column walk into one extra query per title -- an
+    N+1 that is invisible because it answers correctly. Asserted on the compiled
+    statement and on the statement count, not on wall clock.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     for index in range(5):
@@ -327,18 +306,13 @@ async def test_the_cursor_does_not_fetch_the_search_document(
 async def test_a_vector_survives_the_halfvec_round_trip(session: AsyncSession) -> None:
     """The one thing no in-memory fake can express.
 
-    Measured round-trip error over 1,000 real vectors: max cosine error 1.21e-04, mean
-    3.03e-05 -- three orders of magnitude below the useful signal.
-
-    The wrong implementation this fails: staging the vector as `text` and
-    forgetting the cast, which stores the literal string in a text column
-    somewhere or fails at the insert; and any formatting that loses the
-    vector's order, which is the most damaging possible bug in this milestone
-    and completely invisible to a per-vector assertion.
-
-    The distance is measured against a vector whose components *differ*, for
-    exactly that reason -- a constant vector is rotationally symmetric, so a
-    reversed or shuffled one would come back at distance 0 and pass.
+    The wrong implementations this fails: staging the vector as `text` and forgetting
+    the cast, which stores the literal string in a text column or fails at the
+    insert; and any formatting that loses the vector's order, which is the most
+    damaging possible bug here and completely invisible to a per-vector assertion.
+    The distance is taken against a vector whose components *differ*, for exactly
+    that reason -- a constant vector is rotationally symmetric, so a reversed or
+    shuffled one would come back at distance 0 and pass.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     title_id = await _enriched(session, "The Slow Aperture")
@@ -370,22 +344,14 @@ async def test_a_vector_survives_the_halfvec_round_trip(session: AsyncSession) -
 async def test_a_vector_read_scoped_to_a_model_leaves_the_other_checkpoints_rows_behind(
     session: AsyncSession,
 ) -> None:
-    """`list_for_titles`' keyword-only `model_name`.
+    """`list_for_titles`' keyword-only `model_name`, against a table that holds two.
 
-    against the table that can actually hold two checkpoints at once.
-
-    A cosine across two checkpoints is the ST-vs-fastembed divergence — max
-    pairwise-similarity delta **1.41e-03, 6x the halfvec quantisation error** —
-    arriving as a confident number rather than as an error, so a caller that
-    holds a model name (a stored `user_taste` row carries one) must be able to
-    ask for only that model's rows.
-
-    **Both arms, because either alone is satisfied by the wrong thing.** A
-    scoped read must drop the other checkpoint's row *and keep its own*, so
-    "the predicate is `model_name <> :model_name`" and "the predicate matches
-    nothing" both fail; and the default must still answer both, so a scope that
-    leaked into the unscoped call — the widening's own failure mode, and the
-    one that would silently narrow `TasteService.centroid` — fails too.
+    A cosine across two checkpoints arrives as a confident number rather than as an
+    error, so a caller that holds a model name -- a stored `user_taste` row carries
+    one -- must be able to ask for only that model's rows. **Both arms, because
+    either alone is satisfied by the wrong thing.** A scoped read must drop the other
+    checkpoint's row *and keep its own*, and the default must still answer both, so a
+    scope that leaked into the unscoped call fails too.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     ours = await _enriched(session, "The Current Checkpoint")
@@ -419,16 +385,13 @@ async def test_a_vector_read_scoped_to_a_model_leaves_the_other_checkpoints_rows
 async def test_a_scoped_vector_read_still_excludes_a_written_refusal(
     session: AsyncSession,
 ) -> None:
-    """The model scope is an **additional** predicate.
+    """The model scope is an **additional** predicate, never a replacement for the NULL one.
 
-    never a replacement for the NULL-vector one.
-
-    A refused title is written with the current `model_name` and a NULL
-    embedding precisely so it stops matching the stale predicate — so it is the
-    one row that satisfies a `model_name` filter and must still be absent.
-    Spelled as `WHERE model_name = :m` alone, this read hands the caller a
-    `None` where its type says `tuple[float, ...]`, which is a `TypeError`
-    inside a ranking function rather than a wrong order.
+    A refused title is written with the current `model_name` and a NULL embedding
+    precisely so it stops matching the stale predicate, so it is the one row that
+    satisfies a `model_name` filter and must still be absent. Spelled as `WHERE
+    model_name = :m` alone, this read hands the caller a `None` where its type says
+    `tuple[float, ...]`, which is a `TypeError` inside a ranking function.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     refused = await _enriched(session, "A Title With No Words")
@@ -517,10 +480,10 @@ async def test_a_vector_for_a_title_that_does_not_exist_is_a_repository_conflict
 ) -> None:
     """The foreign key, translated.
 
-    Nothing above `db/` imports `sqlalchemy.exc`, and the SAVEPOINT is what leaves the
-    session usable for the caller's other pending work afterwards -- the same reasoning
-    `PostgresMediaItemRepository.upsert_many` documents, and the same reason the staging
-    DDL sits inside it.
+    Nothing above `db/` imports `sqlalchemy.exc`, and the SAVEPOINT is what leaves
+    the session usable for the caller's other pending work afterwards -- the same
+    reasoning `PostgresMediaItemRepository.upsert_many` documents, and the same
+    reason the staging DDL sits inside it.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     with pytest.raises(RepositoryConflict):
@@ -538,7 +501,7 @@ async def test_a_vector_for_a_title_that_does_not_exist_is_a_repository_conflict
     assert await repository.count_stale(_MODEL) == 0
 
 
-# --- The cross-check, and the reason this file's docstring names it.
+# --- The cross-check between the Python composer and the SQL fingerprint.
 
 _CROSS_CHECK_TITLES: list[tuple[str, dict[str, object]]] = [
     ("every column populated", {}),
@@ -568,7 +531,7 @@ _CROSS_CHECK_TITLES: list[tuple[str, dict[str, object]]] = [
 async def test_the_composer_and_the_sql_fingerprint_agree(
     session: AsyncSession, columns: dict[str, object]
 ) -> None:
-    """**The case the whole fingerprint scheme rests on.**."""
+    """The case the whole fingerprint scheme rests on."""
     title = _cross_check_title(**columns)
     await _insert(session, title)
 
@@ -611,9 +574,9 @@ async def test_the_composer_refuses_exactly_the_titles_the_refused_predicate_fin
 
 
 async def test_the_second_page_still_applies_the_predicate(session: AsyncSession) -> None:
-    """**A page after the first must still be filtered.
+    """A page after the first must still be filtered.
 
-    and the obvious spelling of the keyset clause silently stops filtering.**.
+    The obvious spelling of the keyset clause silently stops filtering.
     """
     repository = PostgresTitleEmbeddingRepository(session)
     # Ids are UUIDv7 minted at construction, so constructing in this order is
@@ -647,17 +610,11 @@ async def test_the_composer_and_the_sql_fingerprint_agree_for_a_title_with_credi
 ) -> None:
     """The cross-check above extended to the population that can disagree.
 
-    **The existing case cannot see any of weight class B**, and that is worth
-    being explicit about rather than trusting: it calls `compose_document`
-    with the default `credits=()` over a title whose `credit_names` is `{}`,
-    so both sides emit an empty segment and the strings match under *every*
-    wrong implementation this change can produce. Move only the SQL and it
-    passes; move only the Python and it passes; move both and forget
-    `IndexService` and it is not in the picture at all.
-
-    This one seeds a populated `credit_names` and passes the same names to the
-    composer, so sites one and two moving apart -- in either direction -- is a
-    mismatch of two hashes.
+    The existing case calls `compose_document` with the default `credits=()` over a
+    title whose `credit_names` is `{}`, so both sides emit an empty segment and the
+    strings match under *every* wrong implementation. This one seeds a populated
+    `credit_names` and passes the same names to the composer, so the Python site and
+    the SQL site moving apart -- in either direction -- is a mismatch of two hashes.
     """
     title = _cross_check_title()
     await _insert(session, title)
@@ -675,18 +632,13 @@ async def test_the_composer_and_the_sql_fingerprint_agree_for_a_title_with_credi
 async def test_an_uncredited_title_still_agrees_after_class_b_lands(
     session: AsyncSession,
 ) -> None:
-    """The other half, and it is what makes the unconditional segment observable.
+    """The other half, and what makes the unconditional segment observable.
 
-    The M6 shim appended the credits section only `if credits:`, which is the
-    conditional-append shape `services/search.py`'s own module docstring
-    refuses as unreproducible in SQL. Restored, it produces a *six*-segment
-    string in Python against `_FINGERPRINT_SQL`'s seven, for every uncredited
-    title -- which is most of the catalog. If every case seeding this
+    A credits section appended only `if credits:` is the conditional-append shape
+    `services/search.py`'s own module docstring refuses as unreproducible in SQL: it
+    produces a *six*-segment string in Python against `_FINGERPRINT_SQL`'s seven, for
+    every uncredited title, which is most of the catalog. If every case seeding this
     comparison had credits, that mutation would survive.
-
-    Measured on pg17.10: `usher_array_text(ARRAY[]::text[])` is `''` and
-    `md5(usher_array_text(ARRAY[]::text[])) = md5('')`, so the empty segment
-    really is empty on both sides.
     """
     title = _cross_check_title(name="Iron Harbour")
     await _insert(session, title)
@@ -697,10 +649,9 @@ async def test_an_uncredited_title_still_agrees_after_class_b_lands(
 async def test_an_indexed_title_with_credits_stops_matching_the_stale_predicate(
     session: AsyncSession,
 ) -> None:
-    """**Trap 2.
+    """Trap 2, as a closure property rather than as an equality of two strings.
 
-    as a closure property rather than as an equality of two strings, and the only case
-    that sees site three.**.
+    The only case that sees site three.
     """
     embeddings = PostgresTitleEmbeddingRepository(session)
     title = _cross_check_title(name="The Quiet Vacuum")

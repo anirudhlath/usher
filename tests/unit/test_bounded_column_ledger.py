@@ -1,4 +1,4 @@
-"""F9's guard: the bounded-column ledger is checked by a test, not by a person."""
+"""The bounded-column ledger is checked by a test, not by a person."""
 
 import ast
 
@@ -10,7 +10,7 @@ from tests.bounded_ledger import audit_module, drift, ledger_columns
 def test_the_published_census_still_describes_the_repository() -> None:
     complaints = drift()
     assert complaints == [], (
-        "the bounded-column ledger has moved away from what ADR-0044 publishes. "
+        "the bounded-column ledger has moved away from what `PUBLISHED` records. "
         "Regenerate with `uv run python scripts/audit_bounded_columns.py --summary`, "
         "then update PUBLISHED / PUBLISHED_AT_M08B *and* the record, in the same "
         "commit as the change that moved them:\n  " + "\n  ".join(complaints)
@@ -39,11 +39,11 @@ def test_the_guard_goes_red_when_the_census_moves(monkeypatch: pytest.MonkeyPatc
 def test_a_dead_write_site_scan_is_a_failure_and_not_an_empty_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The degeneracy review found, pinned where F9 consumes it.
+    """A dead write-site scan must raise, not answer an empty ledger.
 
-    `write_sites() -> []` is the exact stub that satisfied the record's first
-    specification of this guard. It must raise out of `build_ledger`, which is
-    the function both `_drift()` and the integration parametrisation go
+    `write_sites() -> []` empties every bucket, so it satisfies any guard
+    phrased as "this bucket is empty". It must raise out of `build_ledger`,
+    which is the function both `_drift()` and the integration parametrisation go
     through, rather than answer a ledger in which nothing is exposed.
     """
     module = audit_module()
@@ -56,14 +56,14 @@ def test_a_dead_write_site_scan_is_a_failure_and_not_an_empty_ledger(
 def test_an_unknown_bucket_name_raises_rather_than_answering_nothing() -> None:
     """`ledger_columns` is what the integration arms are collected from.
 
-    and a typo in a bucket name must not read as "no columns in that bucket".
+    A typo in a bucket name must not read as "no columns in that bucket".
     """
     with pytest.raises(ValueError, match="unknown ledger bucket"):
         ledger_columns("exposed-sqlalchmey")
 
 
 # --------------------------------------------------------------------------
-# The two scans F9's review found blind, pinned on source the tests own
+# Both scans, pinned on source the tests own rather than on the real tree
 # --------------------------------------------------------------------------
 
 #: A module in the shape `bulk.py` actually has, written here rather than
@@ -162,9 +162,9 @@ class Repository:
     [
         # The helper itself: one statement, wrapped.
         ("_run", "refusals_as_conflict"),
-        # **The edge the scan used to refuse to follow.** `_executing_functions`
-        # already traverses it to answer "does this write?"; this is the same
-        # edge answering "does this translate?".
+        # The delegated edge. `_executing_functions` already traverses it to
+        # answer "does this write?"; this is the same edge answering "does this
+        # translate?".
         ("delegating", "refusals_as_conflict"),
         # **The reason the closure cannot simply be "callee translates =>
         # caller translates".** This method delegates one statement and runs
@@ -180,32 +180,28 @@ class Repository:
         # query -- assembled entirely from module constants -- outside its own
         # translation and must not be penalised for it.
         ("reading_outside", "refusals_as_conflict"),
-        # 🔴 **And the counter-case that made the old rule false.** *"A `SELECT` changes
-        # no row, so it cannot be refused for one"* is wrong: one carrying a bind raises
-        # class 22 routinely (`22P02` on a cast, `22012` on a division, `22003` on an
-        # overflow) and an unwrapped one crosses the port boundary as raw as an
-        # `INSERT`'s would.
+        # A `SELECT` changing no row can still be refused for one: carrying a bind
+        # it raises class 22 routinely (`22P02` on a cast, `22012` on a division,
+        # `22003` on an overflow), and an unwrapped one crosses the port boundary
+        # as raw as an `INSERT`'s would.
         ("bound_read_outside", "none"),
-        # 🔴 **A live defect the narrowed predicate found.** `mapping.get(...)` is a
-        # `dict.get` on a caller's argument, and matching bare attribute names against
-        # the module's function names read it as a delegated call into this module's own
-        # `get` -- which is an untranslated read, so its `none` was carried across an
-        # edge that does not exist.
+        # `mapping.get(...)` is a `dict.get` on a caller's argument. Matching bare
+        # attribute names against the module's function names reads it as a
+        # delegated call into this module's own `get` -- an untranslated read --
+        # and carries its `none` across an edge that does not exist.
         ("calling_a_foreign_get", "refusals_as_conflict"),
-        # The ORM branch, which was pinned only against the real tree.
+        # The ORM branch.
         ("orm_writing", "except DBAPIError"),
         ("orm_unwrapped", "none"),
-        # `_SESSION_RECEIVERS` exists for exactly this and was pinned by
-        # nothing: `add` is in `_ORM_WRITE_CALLS`, and a bare attribute match
-        # would read `seen.add(...)` on a `set` as an untranslated ORM write.
+        # `_SESSION_RECEIVERS` exists for exactly this: `add` is in
+        # `_ORM_WRITE_CALLS`, and a bare attribute match would read
+        # `seen.add(...)` on a `set` as an untranslated ORM write.
         ("a_set_add_is_not_an_orm_write", "refusals_as_conflict"),
         # A handler's own statements are not covered by the handler they are
-        # in, and neither is a `finally`. `import_run.py:save` is cited by name
-        # in `_refusal_points` for the first shape and had no case.
+        # in, and neither is a `finally`.
         ("statement_in_the_handler", "none"),
         ("statement_in_the_finally", "none"),
-        # Lexical, not "the name appears somewhere in the body", which is what
-        # the predecessor of this function asked.
+        # Lexical, not "the name appears somewhere in the body".
         ("wrapping_one_of_two", "none"),
         ("narrowly_caught", "except IntegrityError"),
     ],
@@ -219,19 +215,15 @@ def test_the_translation_closure_follows_calls_but_stays_narrower_than_execution
 
 
 def test_a_writer_the_scan_cannot_place_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The degeneracy class ADR-0044's own testing missed.
+    """A writer the scan cannot resolve to a table must fail loudly.
 
-    Its degradation suite covered dead scans (`write_sites() -> []`) and empty
-    maps (`staged_into() -> {}`) — both of which move a column *toward*
-    `exposed`. A writer the scan cannot resolve to a table moves the other way:
-    it drops out of `write_sites()` entirely, and since a bucket is worst-case
-    over the writers the scan can see, its table reads **optimistically**
-    translated. `PostgresTitleRepository.add` was exactly that for the whole of
-    F9's first commit — it writes `self._session.add(_to_row(title))`, so
-    `TitleRow` never appears in the method and it resolved to nothing.
-
-    Neutering the construction closure is what puts it back in that state, and
-    the scan must now refuse rather than answer.
+    A dead scan or an empty staging map moves a column *toward* `exposed`; an
+    unresolvable writer moves the other way, dropping out of `write_sites()`
+    entirely, and since a bucket is worst-case over the writers the scan can
+    see, its table then reads optimistically translated. Neutering the
+    construction closure puts `PostgresTitleRepository.add` into that state --
+    it writes `self._session.add(_to_row(title))`, so `TitleRow` never appears
+    in the method -- and the scan must refuse rather than answer.
     """
     module = audit_module()
     monkeypatch.setattr(module, "_constructed_rows", lambda tree: {})
@@ -243,8 +235,8 @@ def test_a_writer_the_scan_cannot_place_fails_loudly(monkeypatch: pytest.MonkeyP
 def test_every_orm_writer_in_the_package_resolves_to_a_table() -> None:
     """The live half of the case above.
 
-    the eight methods that flush the session are all placed, so the guard is protecting
-    a property that holds rather than one that is aspirational.
+    Every method that flushes the session is placed, so the guard protects a
+    property that holds rather than one that is aspirational.
     """
     module = audit_module()
     placed = {(site.module, site.qualname) for site in module.write_sites()}
@@ -254,18 +246,14 @@ def test_every_orm_writer_in_the_package_resolves_to_a_table() -> None:
 def test_a_write_site_with_no_refusal_point_is_a_failure_not_a_translated_site(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`min([])` has no answer, and the code used to return the top of the lattice.
+    """A site with no refusal point is a failure, not a translated site.
 
-    so a site the translation scan found nothing in read `refusals_as_conflict` on **no
-    evidence**.
-
-    The mirror of `test_a_writer_the_scan_cannot_place_fails_loudly`, on the
-    other axis. It is reachable rather than theoretical:
-    `_executing_functions` and `_refusal_points` use different predicates, so a
-    method whose only database access is a COPY is *executing* with zero
-    refusal points, and `bulk.py:_stage` is that shape today — saved from being
-    a counter-example only by resolving no destination table, which is a
-    coincidence and not a defence.
+    `min([])` has no answer, so answering the top of the lattice reads
+    `refusals_as_conflict` on no evidence. The mirror of
+    `test_a_writer_the_scan_cannot_place_fails_loudly`, on the other axis, and
+    reachable rather than theoretical: `_executing_functions` and
+    `_refusal_points` use different predicates, so a method whose only database
+    access is a COPY is *executing* with zero refusal points.
     """
     module = audit_module()
     real = module._points_of
@@ -287,16 +275,13 @@ def test_a_bind_carrying_read_that_would_change_a_verdict_refuses_to_be_scored(
     """The one question this instrument deliberately does not answer.
 
     A `SELECT` carrying a caller's bind can be refused on class 22 and leaks if
-    it is unwrapped — but wrapping it would report a *statement* fault as a
-    refused row, which ADR-0044 question (3) forbids. Rather than invent a
-    verdict, `write_sites` scores the ledger with and without those statements
-    and **raises where the two disagree**.
-
-    Forcing every readable `SELECT` to look bind-carrying is what puts a site
-    into that state: `bulk.py:link_crosswalk` runs its classification query —
-    genuinely bind-free, which is what makes exempting it correct — outside its
-    own translation, so under the forced predicate it reads `none` where it
-    otherwise reads `refusals_as_conflict`.
+    it is unwrapped, but wrapping it would report a *statement* fault as a
+    refused row. Rather than invent a verdict, `write_sites` scores the ledger
+    with and without those statements and raises where the two disagree. Forcing
+    every readable `SELECT` to look bind-carrying puts a site into that state:
+    `bulk.py:link_crosswalk` runs its genuinely bind-free classification query
+    outside its own translation, so under the forced predicate it reads `none`
+    where it otherwise reads `refusals_as_conflict`.
     """
     module = audit_module()
     monkeypatch.setattr(module, "_carries_binds", lambda node, statement: True)

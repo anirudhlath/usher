@@ -8,21 +8,18 @@ from usher.db.migrations.status import code_head_revision
 
 
 def test_code_head_revision_matches_the_head_migration_on_disk() -> None:
-    """No Docker needed.
+    """The head on disk, read without Docker.
 
-    reads usher/db/migrations/versions/*.py directly off disk, the same files `alembic
-    upgrade head` itself would use -- doesn't touch a database at all.
-
-    Pinned to the literal revision id (not just "is not None") so a migration ever added
-    without updating this test fails loudly here instead of silently changing what "the"
-    expected head means.
+    Reads `usher/db/migrations/versions/*.py` directly, the same files `alembic
+    upgrade head` would use. Pinned to the literal revision id, not just "is not
+    None", so a migration added without updating this test fails loudly instead
+    of silently changing what "the" expected head means.
     """
     assert code_head_revision() == "m10f"
 
 
-# : The chain three documents spell out, in the order they spell it: every : revision
-# from `ffa` -- the landing that created : `test_migrations.py`'s `-1` block -- to head
-# inclusive.
+#: Every revision from `ffa` -- the landing that created `test_migrations.py`'s
+#: `-1` block -- to head inclusive.
 _REPOINTING_CHAIN = (
     "ffa",
     "ffb",
@@ -42,9 +39,8 @@ _REPOINTING_CHAIN = (
     "m10f",
 )
 
-#: The English cardinal `.claude/rules/db-and-sql.md` and
-#: `tests/integration/test_migrations.py` both write out. Keyed by count so
-#: the next landing changes one literal and the word follows it.
+#: The English cardinal `.claude/rules/db-and-sql.md` writes out. Keyed by
+#: count so the next landing changes one literal and the word follows it.
 _CARDINALS = {
     12: "twelve",
     13: "thirteen",
@@ -54,15 +50,9 @@ _CARDINALS = {
     17: "seventeen",
 }
 
-#: The two documents that state the count in prose. Neither is checked by
-#: anything else: `db-and-sql.md` is a rules file and the other is a
-#: docstring, so both are exactly the shape that went **five landings stale**
-#: between `m09a` and `m10b` -- which `db-and-sql.md` records, in the entry
-#: whose own subject is a count going stale.
-_COUNT_SITES = (
-    Path(".claude/rules/db-and-sql.md"),
-    Path("tests/integration/test_migrations.py"),
-)
+#: The document that states the count in prose. A rules file is read by people
+#: and by nothing else, so it is the shape that goes stale unnoticed.
+_COUNT_SITES = (Path(".claude/rules/db-and-sql.md"),)
 
 
 def _chain_to_head() -> tuple[str, ...]:
@@ -83,41 +73,25 @@ def _chain_to_head() -> tuple[str, ...]:
 
 
 def test_the_repointing_chain_on_disk_is_the_one_three_documents_spell_out() -> None:
-    """**A counted fact restated in three places goes stale in the two nobody re-reads**.
+    """The chain is compared against a scan of `versions/` rather than restated.
 
-    and this repository has the receipt: `.claude/rules/db-and-sql.md` records the count
-    standing at *six* from `m09a` (2026-08-10) until issue #41 brought it current on
-    2026-08-25 -- five landings that each re-pointed `test_migrations.py`'s `-1` block
-    and none of which wrote it down.
-
-    So the chain is compared against a **scan** rather than restated a fourth
-    time. `ffa` is the lower bound because that is the landing that created
-    the block; every revision above it broke the block and re-pointed it, so
-    the count of landings and the length of this chain are one number, and a
-    revision that lands without re-pointing fails
-    `test_a_full_down_and_up_cycle_restores_every_index` rather than passing
-    here quietly.
-
-    Both premises are asserted inside the walk, for the reason `m10c`'s own
-    red carried: an empty versions directory makes `get_current_head()`
-    answer `None` and a slice of an empty list is `()`, which would satisfy
-    an equality against nothing at all.
+    `ffa` is the lower bound because that is the landing that created
+    `test_migrations.py`'s `-1` block; every revision above it re-pointed the
+    block, so the count of landings and the length of this chain are one number.
+    Both premises are asserted inside the walk: an empty versions directory makes
+    `get_current_head()` answer `None`, and a slice of an empty list is `()`,
+    which would satisfy an equality against nothing at all.
     """
     assert _chain_to_head() == _REPOINTING_CHAIN
 
 
 def test_the_landing_count_the_prose_states_is_the_one_on_disk() -> None:
-    """The half a chain comparison cannot see.
+    """The half a chain comparison cannot see: the count written out in words.
 
-    two documents write the count out **in words**, and a landing that re-points the
-    block without touching them leaves the repository asserting one number and
-    explaining another.
-
-    Only the phrase *"<cardinal> landings"* is matched, not every occurrence
-    of the word -- `thirteen` appears in over thirty unrelated places in this
-    tree (`RowContext`'s fields, the candidate cap, a TMDb run's non-200s),
-    so a bare substring search would be a change-detector on prose that has
-    nothing to do with migrations.
+    A landing that re-points the block without editing the rules file leaves the
+    repository asserting one number and explaining another. Only the phrase
+    *"<cardinal> landings"* is matched, not every occurrence of the word, which
+    appears in many places that have nothing to do with migrations.
     """
     expected = _CARDINALS[len(_REPOINTING_CHAIN)]
     stale = {word for count, word in _CARDINALS.items() if count != len(_REPOINTING_CHAIN)}

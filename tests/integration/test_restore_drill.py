@@ -1,4 +1,4 @@
-"""K5's arm 1, compressed into one case: back it up, lose it, rebuild, restore."""
+"""The restore drill in one case: back it up, lose it, rebuild, restore."""
 
 import uuid
 from collections.abc import Mapping
@@ -24,10 +24,9 @@ from usher.services.restore import RestoreReport, RestoreService
 MOVIE_IMDB_ID = "tt99000700"
 MOVIE_TMDB_ID = 99000700
 SERIES_IMDB_ID = "tt99000701"
-#: The title carrying **neither** provider id, so its only rung is K2's third
-#: one -- the raw UUID, accepted if and only if the target already holds a
-#: title with that exact id. A rebuild never mints it again, which is the
-#: whole reason this row is in the fixture.
+#: The title carrying **neither** provider id, so its only rung is the raw
+#: UUID -- accepted if and only if the target already holds a title with that
+#: exact id. A rebuild never mints it again, which is why this row is here.
 UNKEYED_NAME = "Drill Case: No Provider Id At All"
 
 HOUSEHOLD_NAME = "drill-case household"
@@ -49,7 +48,7 @@ STAMP = datetime(2026, 8, 25, 14, 30, tzinfo=UTC)
 async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """🔴 **Every title id moves and every precious row comes back.**."""
+    """Every title id moves and every precious row comes back."""
     await _truncate_the_precious_tables(session)
     catalog = await _seed_the_catalog(session)
     await _seed_the_precious_rows(session, catalog)
@@ -77,9 +76,8 @@ async def test_a_backup_of_a_seeded_household_restores_into_a_rebuilt_catalog(
 
     assert report.refused == (), report.refused
     assert report.committed
-    # The floor the plan names, and it is a floor rather than an equality on
-    # purpose: what matters is that the run was not a no-op, and the exact
-    # tally is asserted table by table below.
+    # A floor rather than an equality on purpose: what matters here is that the
+    # run was not a no-op, and the exact tally is asserted table by table below.
     assert report.total_written >= 4, report.written
     assert report.written == _tally(
         users=1,
@@ -167,12 +165,11 @@ async def _truncate_the_precious_tables(session: AsyncSession) -> None:
 
 
 async def _seed_the_catalog(session: AsyncSession) -> dict[str, uuid.UUID]:
-    """A dozen titles is what the plan asks for and four is what it needs.
+    """Four titles, one per way a reference can resolve.
 
-    A movie with both provider ids, a series with only an `imdb_id` plus a
-    season and an episode under it, and one title with **neither** -- which is
-    the population K2's three rungs are each exercised by. Padding it to twelve
-    would add rows nothing resolves against.
+    A movie with both provider ids, a series with only an `imdb_id` plus a season and an
+    episode under it, and one title with neither. More titles would add rows nothing
+    resolves against.
     """
     ids = {
         "movie": new_id(),
@@ -390,21 +387,12 @@ async def _remint_the_catalog(
 ) -> dict[str, uuid.UUID]:
     """The bootstrap boundary: the dump's rows are dropped and re-imported.
 
-    A **delete and re-import** rather than an `UPDATE` of the ids, and the
-    difference is not stylistic. `fk_seasons_title_id_titles` is not
-    deferrable, so re-stamping a title id in place is refused by Postgres while
-    its season still points at it -- and more to the point, re-importing is
-    what a bootstrap *does*: `db/repositories/bulk.py` mints `new_id()` per row
-    per import and reconciles on `imdb_id`, so the rows come back new and the
-    keys come back the same.
-
-    The unkeyed title is deliberately **not** re-imported, because no importer
-    produces it: it carries neither provider id, so it is in no dump. It sits
-    here as the same-database rung -- K2's third one, a *check* that the target
-    holds that exact id rather than a key -- and it resolves for exactly that
-    reason. A deployment whose catalog was rebuilt *and* re-walked would mint
-    that stub afresh and the reference would refuse; K5's arm 2 is where that
-    is measured against the real artifact.
+    A delete and re-import rather than an `UPDATE` of the ids. `fk_seasons_title_id_titles`
+    is not deferrable, so re-stamping a title id in place is refused while its season
+    still points at it, and re-importing is what a bootstrap does: ids come back new and
+    natural keys come back the same. The unkeyed title is deliberately not re-imported,
+    because it carries neither provider id and so appears in no dump; it resolves on the
+    same-database rung, a check that the target holds that exact id.
     """
     reminted = {
         "movie": new_id(),
@@ -467,13 +455,10 @@ async def _media_item_links(session: AsyncSession) -> set[tuple[str, uuid.UUID, 
 
 
 async def _counts(session: AsyncSession) -> dict[str, int]:
-    """One count per precious table.
-
-    so *"every carried row is back"* is a statement about all seven rather than about
-    the two a case felt like naming.
+    """One count per precious table, so "every carried row is back" covers all of them.
 
     `media_items` is excluded because it is `PARTIAL`: its rows are the walk's and only
-    their links are the artifact's.
+    its links are the artifact's.
     """
     counted: dict[str, int] = {}
     for table in carried_tables():

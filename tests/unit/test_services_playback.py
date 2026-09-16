@@ -140,14 +140,11 @@ class _ScriptedAdapter(FakeSourceAdapter):
 
 
 class _UndecryptableStore(FakeCredentialStore):
-    """A store whose rows are present and unreadable.
+    """A store whose rows are present and unreadable, as a rotated key leaves them.
 
-    what a rotated `USHER_SECRET_KEY` leaves behind.
-
-    The same shape `tests/unit/test_services_sources.py` uses, and deliberately not a
-    mode on `FakeCredentialStore` itself: the contract suite runs against that fake, and
-    a store that can be told to fail its own contract is a fake with a mode nothing in
-    `src/` can produce.
+    Deliberately not a mode on `FakeCredentialStore` itself: the contract suite runs
+    against that fake, and a store that can be told to fail its own contract is a fake
+    with a mode nothing in `src/` can produce.
     """
 
     async def get(self, ref: str) -> SourceCredentials | None:
@@ -160,10 +157,9 @@ class _UndecryptableStore(FakeCredentialStore):
 
 
 class _Household:
-    """Two repositories.
+    """Two repositories, a credential store, a recording factory and a recording mint.
 
-    a credential store, a recording factory and a recording mint, wired the way the
-    composition root will wire them.
+    Wired the way the composition root wires them.
     """
 
     def __init__(self, credentials: FakeCredentialStore | None = None) -> None:
@@ -219,9 +215,7 @@ class _Household:
         )
 
     async def retract(self, source: Source) -> None:
-        """Soft-delete this source's copies.
-
-        the only way a row becomes `available = false` (PRD 02, ADR-0015).
+        """Soft-delete this source's copies, the only way a row becomes unavailable.
 
         `upsert_many` cannot seed one: appearing in a walk *is* the evidence of
         availability.
@@ -266,11 +260,10 @@ def _emby_shaped_targets(url: str) -> list[StreamTarget]:
 def _rendered(resolution: PlaybackResolution) -> str:
     """Every field of every returned target, as a string.
 
-    `dataclasses.asdict` deliberately: ADR-0012 measured that it, `astuple`,
-    `vars()`, `json.dumps(asdict(...))` and pydantic's `dump_json` all return
-    `StreamTarget.url` in full -- the field-access paths `__repr__`'s
-    redaction cannot close. A leak assertion written over `repr()` would be
-    satisfied by the redaction rather than by the substitution.
+    `dataclasses.asdict` deliberately: it, `astuple`, `vars()` and pydantic's
+    `dump_json` all return `StreamTarget.url` in full, which `__repr__`'s redaction
+    cannot close. A leak assertion written over `repr()` would be satisfied by the
+    redaction rather than by the substitution.
     """
     return json.dumps([asdict(entry) for entry in resolution.targets], default=str)
 
@@ -279,18 +272,13 @@ def _rendered(resolution: PlaybackResolution) -> str:
 
 
 async def test_a_deep_link_carries_the_ticket_and_never_the_source_url() -> None:
-    """The headline: both targets carry the ticket, neither carries the URL.
+    """Both targets carry the ticket, and neither carries the URL.
 
-    Three assertions, and the first is a positive control -- an
-    implementation that returned nothing at all would also have no token in
-    its output, so "the direct target's url *is* the ticket" is what makes
-    the two absence assertions evidence rather than decoration.
-
-    The deep-link half asserts containment of the ticket itself. D1 measured
-    that `quote(ticket, safe="")` is *not* a no-op in general (it re-encodes
-    `=`, and only 32% of plaintext lengths mint an unpadded token), so a
-    case written as if the encoding proved something would be asserting a
-    fact about this fixture's alphabet rather than about the service.
+    The first assertion is a positive control: an implementation returning nothing at
+    all would also have no token in its output, so "the direct target's url *is* the
+    ticket" is what makes the two absence assertions evidence. The deep-link half
+    asserts containment of the ticket itself, since `quote(ticket, safe="")` is not a
+    no-op in general and an encoding assertion would be about the fixture's alphabet.
     """
     household = _Household()
     source = await household.add_source("Living Room Emby")
@@ -362,13 +350,8 @@ async def test_one_ticket_is_minted_per_distinct_source_url() -> None:
 async def test_a_deep_link_is_paired_by_containment_and_not_by_position() -> None:
     """The pairing is keyed, and the adapter's order is scrambled to say so.
 
-    This repository has recorded the positional failure twice --
-    `SourceEvent.watch_states` is "keyed by `external_id` rather than
-    aligned by position", and M5's `zip` of a matched subset against a whole
-    batch published item A's position under item B's id
-    (`services/push.py:203-219`). The deep link here arrives *first* and
-    wraps the *second* direct URL, so any implementation that pairs by index
-    hands it the wrong ticket.
+    The deep link arrives first and wraps the second direct URL, so any implementation
+    that pairs by index hands it the wrong ticket.
     """
     household = _Household()
     source = await household.add_source("Living Room Emby")
@@ -569,10 +552,9 @@ async def test_a_source_answering_with_no_targets_is_not_playable() -> None:
 
 
 async def test_a_household_holding_no_copy_at_all_is_not_playable() -> None:
-    """The catalog holds 1,271,138 titles and the one measured source holds 1,126,789 items.
+    """Being on no source is the ordinary answer rather than an error.
 
-    so "on no source" is the ordinary answer rather than an error -- and nothing is
-    built, because there is nothing to ask.
+    Nothing is built either, because there is nothing to ask.
     """
     household = _Household()
     await household.add_source("Living Room Emby")
@@ -584,12 +566,11 @@ async def test_a_household_holding_no_copy_at_all_is_not_playable() -> None:
 
 
 async def test_a_failure_beside_an_empty_answer_is_unavailable() -> None:
-    """The case the plan leaves open, decided here so the route inherits it.
+    """One source answering `[]` and another down is retryable, not "not playable".
 
-    One source answers `[]` and another is down. "Not playable" is a claim
-    about the household's whole holding and can only be made from a complete
-    answer; a source that raised is a source that did not answer, so the
-    claim is unsupported and the honest reply is the retryable one.
+    "Not playable" is a claim about the household's whole holding and can only be made
+    from a complete answer; a source that raised is a source that did not answer, so the
+    claim is unsupported.
     """
     household = _Household()
     empty = await household.add_source("Attic Emby")
@@ -629,13 +610,11 @@ async def test_a_malformed_payload_from_one_copy_does_not_abort_the_others() -> 
 
 
 async def test_a_source_with_no_stored_credentials_is_unavailable() -> None:
-    """A misconfigured source cannot serve.
-
-    and cannot answer "you do not own this" on the household's behalf either.
+    """A misconfigured source cannot serve, and cannot answer for the household either.
 
     Answered without building an adapter, exactly as `SourceService.status` does: there
-    is nothing to authenticate with, so a probe could only spend a 1-5 s upstream round
-    trip to learn what local state already knows.
+    is nothing to authenticate with, so a probe would spend an upstream round trip to
+    learn what local state already knows.
     """
     household = _Household()
     source = await household.add_source("Living Room Emby", with_credentials=False)
@@ -648,10 +627,10 @@ async def test_a_source_with_no_stored_credentials_is_unavailable() -> None:
 
 
 async def test_a_credential_that_no_longer_decrypts_is_unavailable() -> None:
-    """A rotated `USHER_SECRET_KEY`, or a row restored from a backup taken under a different one.
+    """An unreadable credential row degrades rather than escaping as a 500.
 
-    `CredentialStore.get` raises `PortDataMalformed` for this rather than answering
-    `None`, and the raise must not escape as a 500.
+    `CredentialStore.get` raises `PortDataMalformed` for a rotated key rather than
+    answering `None`.
     """
     household = _Household(credentials=_UndecryptableStore())
     source = await household.add_source("Living Room Emby")
@@ -664,10 +643,7 @@ async def test_a_credential_that_no_longer_decrypts_is_unavailable() -> None:
 
 
 async def test_a_copy_whose_source_row_has_gone_is_skipped_not_failed() -> None:
-    """`media_items.source_id` is `ON DELETE CASCADE`.
-
-    so a source deleted between the two reads leaves a copy naming a row that is already
-    gone.
+    """A source deleted between the two reads leaves a copy naming a row already gone.
 
     `TitleReadService` renders that as "Unknown source"; here there is nothing to build
     an adapter from, and calling it a failure would report a 503 for a row that is on
@@ -716,10 +692,9 @@ async def test_the_unavailable_detail_names_the_source_and_not_the_exception() -
 
 
 async def test_the_detail_names_every_source_that_failed_once_each() -> None:
-    """Two copies on one source that is down must not name it twice.
+    """Two copies on one failing source name it once, and a second failing source too.
 
-    and a second failing source must not be silently dropped from the sentence an
-    operator reads.
+    Neither may be dropped from the sentence an operator reads.
     """
     household = _Household()
     first = await household.add_source("Attic Emby")
@@ -741,16 +716,11 @@ async def test_the_detail_names_every_source_that_failed_once_each() -> None:
 
 
 async def test_an_available_copy_is_offered_before_an_unavailable_one() -> None:
-    """PRD 02's soft delete means a retracted copy may still play.
+    """A retracted copy may still play, so it is a fallback rather than an exclusion.
 
-    so an unavailable one is a fallback rather than an exclusion -- and the fixture is
-    built so that neither `ORDER BY id` nor `ORDER BY last_seen_at` could produce the
-    right answer by accident.
-
-    The retracted copy is seeded *first*, so it holds the lower UUIDv7, and
-    it is given the *newer* `last_seen_at`. Only `available DESC` puts the
-    available copy in front. That is the shape M7 was missing when five
-    orderings went untested.
+    The retracted copy is seeded first, so it holds the lower UUIDv7, and is given the
+    newer `last_seen_at`. Only `available DESC` puts the available copy in front, so
+    neither `ORDER BY id` nor `ORDER BY last_seen_at` can be right by accident.
     """
     household = _Household()
     retracted = await household.add_source("Attic Emby")
@@ -782,10 +752,10 @@ async def test_an_available_copy_is_offered_before_an_unavailable_one() -> None:
 
 
 async def test_a_household_holding_only_unavailable_copies_still_gets_targets() -> None:
-    """A sweep that over-retracted must not be able to tell a household it owns nothing.
+    """A sweep that over-retracted must not tell a household it owns nothing.
 
-    `mark_unseen_unavailable` sets `available = false` and deletes nothing (ADR-0015),
-    and the file is very often still there.
+    `mark_unseen_unavailable` sets `available = false` and deletes nothing, and the file
+    is very often still there.
     """
     household = _Household()
     source = await household.add_source("Living Room Emby")
@@ -805,8 +775,8 @@ async def test_a_household_holding_only_unavailable_copies_still_gets_targets() 
 async def test_the_freshest_of_two_available_copies_is_offered_first() -> None:
     """The second ordering key, with its own premise.
 
-    the stale copy is seeded first and therefore holds the lower id, so `ORDER BY id`
-    and `ORDER BY last_seen_at DESC` disagree and only the second is right.
+    The stale copy is seeded first and so holds the lower id, making `ORDER BY id` and
+    `ORDER BY last_seen_at DESC` disagree, with only the second right.
     """
     household = _Household()
     stale = await household.add_source("Attic Emby")
@@ -856,10 +826,10 @@ async def test_exactly_one_adapter_is_built_per_copy_and_every_one_is_closed() -
 
 
 async def test_an_adapter_whose_source_raised_is_closed_too() -> None:
-    """The `finally`, and the mutation it exists for.
+    """The `aclose()` is in a `finally`.
 
-    Moving `aclose()` out of it leaks exactly one connection pool per unreachable
-    source, on the route a client retries.
+    Moving it out leaks exactly one connection pool per unreachable source, on the route
+    a client retries.
     """
     household = _Household()
     down = await household.add_source("Attic Emby")
@@ -881,11 +851,9 @@ async def test_an_adapter_whose_source_raised_is_closed_too() -> None:
 async def test_an_episode_is_resolved_through_its_own_copies() -> None:
     """`list_for_episode`, not `list_for_title`.
 
-    `list_for_title` carries `AND episode_id IS NULL`, which is exactly what
-    makes it useless here -- an episode's row is precisely one of the rows
-    that clause excludes. A service that reached for the title read would
-    answer "not playable" for every episode in the catalog, and 999,927 of
-    the one measured library's 1,126,789 items are episodes.
+    `list_for_title` carries `AND episode_id IS NULL`, and an episode's row is precisely
+    one of the rows that clause excludes — so a service reaching for the title read
+    would answer "not playable" for every episode in the catalog.
     """
     household = _Household()
     source = await household.add_source("Living Room Emby")
@@ -919,9 +887,7 @@ async def test_an_episode_with_no_copy_is_not_playable() -> None:
 def test_targets_and_status_cannot_disagree() -> None:
     """`PlaybackResolution` refuses the two states a route could not render.
 
-    a playable answer with nothing to play, and a failed one carrying targets.
-
-    The same shape `SourceStatus.__post_init__` uses, and for the same reason -- the
+    A playable answer with nothing to play, and a failed one carrying targets. The
     invariant belongs on the DTO rather than in every caller that branches on it.
     """
     one = PlaybackTarget(

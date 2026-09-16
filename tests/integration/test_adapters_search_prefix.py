@@ -1,7 +1,4 @@
-"""`PostgresPrefixSuggestIndex` against real Postgres.
-
-tier 1 of the two-tier suggest, the btree `lower(name) text_pattern_ops` prefix probe.
-"""
+"""`PostgresPrefixSuggestIndex` -- tier 1 of the suggest, a btree prefix probe."""
 
 import ast
 import inspect
@@ -32,11 +29,9 @@ _TIER_TWO_INDEX = "ix_titles_name_trgm"
 _ENOUGH_TO_PLAN_AGAINST = 2_000
 """Filler rows behind the tier-1 plan assertion.
 
-One row is what it had until 2026-08-31, and one row is a table the planner
-sizes off an empty `pg_class` where every candidate index costs the same --
-see `_plan_tree` and issue #79. Two thousand is the same order the other plan
-assertions in this suite seed (`test_title_match_repository.py`,
-`test_job_queue.py`), and it is enough for the measured margin below.
+One row is a table the planner sizes off an empty `pg_class`, where every
+candidate index costs the same -- see `_plan_tree`. Two thousand is the same
+order the other plan assertions in this suite seed.
 """
 
 
@@ -59,11 +54,10 @@ async def _given_title(
     title_id = new_id()
     await session.execute(
         text(
-            # **The bind names are not the column names and only the columns moved.**
-            # ADR-0040 renamed `popularity`/`vote_count` to
-            # `tmdb_popularity`/`tmdb_vote_count`; `:popularity` and `:vote_count` stay
-            # because they are this helper's own keyword arguments, which are test-local
-            # vocabulary.
+            # The bind names are not the column names: `:popularity` and
+            # `:vote_count` are this helper's own keyword arguments, which are
+            # test-local vocabulary, while the columns are
+            # `tmdb_popularity`/`tmdb_vote_count`.
             "INSERT INTO titles (id, kind, name, sort_name, tmdb_popularity, "
             "tmdb_vote_count, enrichment_state) VALUES (CAST(:id AS uuid), :kind, :name, "
             ":sort_name, :popularity, :vote_count, :state)"
@@ -117,12 +111,11 @@ def _index_names(node: dict[str, Any]) -> list[str]:
 def _index_conditions(node: dict[str, Any]) -> list[str]:
     """Every `Index Cond` in a plan tree, the same walk as `_index_names`.
 
-    **Naming the index is the weaker half of the claim.** An index scan that
-    walks the whole index and puts the predicate in a `Filter` reaches the
-    index by name while doing none of the work the index exists for -- which is
-    what a plan reaching `titles` through `pk_titles` is, and is exactly the
-    shape of the CI failure on 2026-08-25 (issue #79). `Index Cond` is
-    Postgres saying it used the predicate to *position* the scan.
+    Naming the index is the weaker half of the claim: an index scan that walks
+    the whole index and puts the predicate in a `Filter` reaches the index by
+    name while doing none of the work the index exists for, which is what a
+    plan reaching `titles` through `pk_titles` is. `Index Cond` is Postgres
+    saying it used the predicate to *position* the scan.
     """
     found = [node["Index Cond"]] if "Index Cond" in node else []
     for child in node.get("Plans", ()):
@@ -174,23 +167,16 @@ async def _given_a_catalog_to_plan_against(session: AsyncSession, rows: int) -> 
 
 @pytest.mark.integration
 async def test_the_prefix_tier_answers_a_prefix_and_finds_no_typo(session: AsyncSession) -> None:
-    """**The tier's whole shape in one case, positive control first.**.
+    """The tier's whole shape in one case, positive control first.
 
     The positive arm runs before the absence arm on purpose: an assertion that
     a misspelt prefix returns nothing is satisfied by an implementation that
     returns nothing for *everything* -- a wrong table name, a pattern that can
-    never match, a session that was never given a row. Proving the path
-    answers a real prefix first is what makes the second assertion evidence
-    about typo tolerance instead of evidence that nothing ran.
-
-    The distractor is 900x more popular and shares no prefix, so an
-    implementation whose predicate silently matches everything puts it first
-    and fails the positive arm rather than passing it by luck.
-
-    **The absence is the tier's design, not its defect.** Measured over 2,993
-    single-edit typo cases at 1,271,138 names, this configuration scores
-    **1.9%** -- and 0.6 ms p50 against the trigram path's 33.3 ms. Tier 2 is
-    what carries the tolerance; tier 1 is what a keystroke can afford.
+    never match, a session that was never given a row. The distractor is far
+    more popular and shares no prefix, so an implementation whose predicate
+    matches everything puts it first and fails the positive arm. The absence is
+    the tier's design, not its defect: tier 2 carries the typo tolerance, and
+    tier 1 is what a keystroke can afford.
     """
     await _given_title(session, name="Harbour Lights", popularity=900.0)
     wanted = await _given_title(session, name="Vane", popularity=1.0)
@@ -221,12 +207,11 @@ class TestPostgresPrefixSuggestIndex(SuggestIndexContract):
         self._session = session
 
     async def given_title(self, index: SuggestIndex, *, name: str, popularity: float) -> uuid.UUID:
-        """The port has no write method (ADR-0021) and this implementation writes nothing either.
+        """The port has no write method, and this implementation writes nothing.
 
-        it reads two tables somebody else owns.
-
-        So the arrangement is an insert, which is the honest shape of a read-only port
-        and the reason this is a hook rather than a convenience.
+        It reads two tables somebody else owns, so the arrangement is an
+        insert -- the honest shape of a read-only port, and the reason this is
+        a hook rather than a convenience.
         """
         return await _given_title(self._session, name=name, popularity=popularity)
 
@@ -331,12 +316,10 @@ async def test_the_cap_is_ordered_so_the_top_of_the_list_is_not_arbitrary(
 
 @pytest.mark.integration
 async def test_a_wildcard_typed_into_the_box_is_not_a_wildcard(session: AsyncSession) -> None:
-    """`LIKE`'s own metacharacters reaching the pattern.
+    """`LIKE`'s own metacharacters reaching the pattern, and the ways escaping fails.
 
-    and the three ways the escaping can be wrong.
-
-    **Four arms, because each kills a different spelling and no one of them kills the
-    others.**
+    Four arms, because each kills a different spelling and no one of them kills
+    the others.
     """
     await _given_title(session, name="Vane Alpha", popularity=1.0)
     await _given_title(session, name="Harbour Lights", popularity=900.0)
@@ -416,22 +399,14 @@ async def test_the_tier_one_statement_plans_to_the_prefix_index_and_not_the_near
 async def test_the_trigram_index_is_still_gin_and_tier_two_still_plans_to_it(
     session: AsyncSession,
 ) -> None:
-    """A GiST trigram index added beside the GIN one.
+    """A GiST trigram index added beside the GIN one is what this refuses.
 
-    "add GiST for KNN and keep GIN for `%`", which is measured and is not available.
-
-    With both present the planner takes GiST for `%` and the identical shipped
-    configuration goes **33.3 ms -> 141.5 ms p50 (4.3x) for byte-identical
-    recall**. Tier 1 adds a *btree*, which no `%` plan can take, so this case
-    is what says so rather than assumes it.
-
-    **Three assertions, and the first two are not redundant with the third.**
-    `pg_indexes` says the index exists and says `USING gin`; a plan assertion
-    cannot say either, because **no plan shape distinguishes GIN from GiST for
-    `%`** -- GiST serves that operator too, which is exactly why the
-    regression this guards against would be invisible to a green suite. The
-    third asserts the index the planner actually **takes** for the tier-2
-    statement, which is the only half a future GiST index would move.
+    With both present the planner takes GiST for `%`, and the shipped
+    configuration gets several times slower for byte-identical recall. Tier 1
+    adds a *btree*, which no `%` plan can take. Three assertions, and the first
+    two are not redundant with the third: `pg_indexes` says the index exists
+    and says `USING gin`, which no plan shape can say, because GiST serves `%`
+    too; the third asserts the index the planner actually **takes**.
     """
     for number in range(20):
         await _given_title(session, name=f"Vane {number:04d}", popularity=1.0)
@@ -463,26 +438,17 @@ async def test_the_trigram_index_is_still_gin_and_tier_two_still_plans_to_it(
 
 @pytest.mark.integration
 async def test_the_two_tiers_order_their_answers_the_same_way(session: AsyncSession) -> None:
-    """Tier 1 ordering on something tier 2 does not.
-
-    so the box reshuffles when the debounced tier arrives behind it.
+    """Tier 1 ordering on something tier 2 does not means the box reshuffles.
 
     Both statements sort `popularity DESC NULLS LAST, vote_count DESC NULLS
     LAST, id ASC`; tier 2 puts edit distance above all three and tier 1 has no
-    distance to put there, so on rows both tiers return the orders agree. A
-    client that renders tier 1 and then replaces it with tier 2 shows the same
-    list in the same order rather than a list that jumps under the cursor.
-
-    The fixture is what makes this a statement about **all three** keys, and
-    the seeding order is the load-bearing part of it. Three titles that are
-    exact prefix matches for the same query, so distance cannot decide
-    anything; popularity present on one and absent on the two below it, so
-    `NULLS LAST` decides which end they go to; and the low-vote row **inserted
-    before** the high-vote one, so id order and vote-count order disagree.
-    Seeded the other way round, an implementation carrying only the popularity
-    key answers correctly by accident -- a UUIDv7 primary key makes
-    `ORDER BY id` and `ORDER BY vote_count DESC` the same list whenever the
-    fixture happens to seed them in agreement.
+    distance to put there, so on rows both tiers return the orders agree. The
+    fixture is what makes this a statement about **all three** keys: three
+    exact prefix matches, so distance cannot decide anything; popularity on one
+    and absent on the two below it, so `NULLS LAST` decides; and the low-vote
+    row **inserted before** the high-vote one, so id order and vote-count order
+    disagree -- seeded the other way round a UUIDv7 key makes `ORDER BY id` and
+    `ORDER BY vote_count DESC` the same list.
     """
     popular = await _given_title(session, name="Vane Alpha", popularity=5.0, vote_count=1)
     quiet = await _given_title(session, name="Vane Cedar", popularity=None, vote_count=1)

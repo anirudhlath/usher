@@ -1,4 +1,4 @@
-"""Every M4 provider in `api/deps.py`, resolved through FastAPI itself."""
+"""Every provider in `api/deps.py`, resolved through FastAPI itself."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -65,28 +65,24 @@ _PROVIDERS = {
     "ingest_service": get_ingest_service,
     "reconcile_service": get_reconcile_service,
     "watch_sync_service": get_watch_state_sync_service,
-    # M5's read-through surface. The one provider here that a shipped
+    # The read-through surface. The one provider here that a shipped
     # route actually resolves -- `GET /titles/{id}` -- and therefore the
     # one whose graph a 500 at request time would be a real outage.
     "sources_repository": get_source_repository,
     "title_read_service": get_title_read_service,
-    # M7's composed home screen.
+    # The composed home screen.
     "neighbors": get_title_neighbor_repository,
     "embeddings": get_title_embedding_repository,
     "people": get_person_repository,
     "credits": get_credit_repository,
     "collections": get_collection_repository,
-    # M8's, and it is here for this file's own reason rather than for symmetry:
-    # `get_row_context` grew a **tenth** `Depends` when `CuratedProvider` was registered
-    # -- measured at the time, when `inspect.signature` had 11 parameters and `curated`
-    # was the 10th; M9's `images` has since made it 12 and 11 (re-derive with
-    # `len(inspect.signature(get_row_context).parameters)`) -- and a dependency
+    # Another `Depends` on `get_row_context`, here for this file's own reason
+    # rather than for symmetry: a dependency annotated without `Depends` raises
+    # `FastAPIError` at route registration, which no unit test overriding
+    # `get_row_context` can see.
     "curated_rows": get_curated_row_repository,
-    # M9's, and the eleventh `Depends` on `get_row_context` -- `RowCard.artwork`
-    # is read through it by `BaseRow.hydrate` rather than by any one provider.
-    # Here for the same reason `curated_rows` is: a dependency annotated
-    # without `Depends` raises `FastAPIError` at route registration, which no
-    # unit test overriding `get_row_context` can see.
+    # The same reason again -- `RowCard.artwork` is read through
+    # `get_row_context` by `BaseRow.hydrate` rather than by any one provider.
     "images": get_image_repository,
     "taste_repository": get_taste_repository,
     "default_user": get_default_user,
@@ -94,13 +90,13 @@ _PROVIDERS = {
     "row_context": get_row_context,
     "row_cache": get_row_cache,
     "home_service": get_home_service,
-    # M9's `GET /titles/{id}/similar`, over finished M6 wiring. Resolved
-    # through FastAPI's own graph for the reason every provider above is:
-    # `get_similarity_service` takes `session.commit` as a bound method, which
-    # only exists once `SessionDep` has resolved a real session, and a plain
-    # call cannot reach that failure mode.
+    # `GET /titles/{id}/similar`, resolved through FastAPI's own graph for the
+    # reason every provider above is: `get_similarity_service` takes
+    # `session.commit` as a bound method, which only exists once `SessionDep`
+    # has resolved a real session, and a plain call cannot reach that failure
+    # mode.
     "similarity_service": get_similarity_service,
-    # M9's `GET /search`, and the first provider here that reaches its collaborators
+    # `GET /search`, and the first provider here that reaches its collaborators
     # through `usher.composition` rather than naming them: the import-linter contract
     # that keeps `PostgresSearchIndex` inside its package lists `usher.api` whole, so
     # `api/deps.py` cannot construct one.
@@ -167,11 +163,10 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
 async def test_the_providers_answer_with_a_live_session(probe: AsyncClient) -> None:
     """The repositories are built against `get_session`.
 
-    which is the request's commit/rollback boundary -- so a provider that had reached
-    for `app.state` or built its own engine would still return an object and would
-    silently be outside the request's transaction.
-
-    Resolving through the real graph is what makes that observable at all.
+    That is the request's commit/rollback boundary, so a provider that reached
+    for `app.state` or built its own engine would still return an object and
+    would silently sit outside the request's transaction. Resolving through the
+    real graph is what makes that observable at all.
     """
     response = await probe.get("/_probe/media_items")
     assert response.json()["built"] == "PostgresMediaItemRepository"
@@ -180,17 +175,15 @@ async def test_the_providers_answer_with_a_live_session(probe: AsyncClient) -> N
 async def test_the_row_context_carries_the_stored_user_and_not_a_fresh_one(
     postgres_url: str,
 ) -> None:
-    """**A constructor default is one keystroke from an empty home screen.**.
+    """A constructor default is one keystroke from an empty home screen.
 
     `User.id` is `default_factory=new_id`, so `User(name="default",
     is_default=True)` built in `get_row_context` would validate, type-check and
     compose a screen for a household that has never existed -- every read
     returns nothing, and the response renders as a household that has watched
-    nothing rather than as a bug. That is this milestone's headline failure
-    arriving through a default value, and nothing in the unit file can see it:
-    those cases construct the context themselves.
-
-    So the assertion is that the id on the context is the id in `users`.
+    nothing rather than as a bug. Nothing in the unit file can see it, because
+    those cases construct the context themselves, so the assertion here is that
+    the id on the context is the id in `users`.
     """
     app = create_app(
         Settings(
@@ -224,10 +217,7 @@ async def test_the_row_context_carries_the_stored_user_and_not_a_fresh_one(
 async def test_a_request_resolves_the_default_user_and_writes_the_row(
     postgres_url: str,
 ) -> None:
-    """The singleton `users` row exists on the *server* path.
-
-    not only after `usher work` has run.
-    """
+    """The singleton `users` row exists on the *server* path, not only after `usher work`."""
     app = create_app(
         Settings(
             database_url=postgres_url,
@@ -276,12 +266,10 @@ async def test_a_request_resolves_the_default_user_and_writes_the_row(
 async def test_the_reconcile_service_carries_this_deployments_tuning(
     postgres_url: str,
 ) -> None:
-    """`sync_batch_size`/`sync_max_retract_fraction` reach the service from `app.state.settings`.
+    """The tuning reaches the service from `app.state.settings`, never `get_settings()`.
 
-    never from `get_settings()`.
-
-    M3 found the difference the hard way -- a `Depends(get_settings)` re-reads
-    `os.environ`, which `tests/conftest.py` strips, and failed 13 of 15 tests.
+    A `Depends(get_settings)` re-reads `os.environ`, which `tests/conftest.py`
+    strips.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -310,10 +298,7 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
 async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
     postgres_url: str,
 ) -> None:
-    """**A `Depends` graph that resolves is not a graph that wired the right objects.
-
-    and the two suggest tiers are the case where those come apart.**.
-    """
+    """A `Depends` graph that resolves is not one that wired the right objects."""
     app = create_app(
         Settings(
             database_url=postgres_url,
@@ -344,7 +329,7 @@ async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
 async def test_the_search_service_the_graph_resolves_writes_search_queries_over_this_session(
     postgres_url: str,
 ) -> None:
-    """**PRD 10's analytics row, on the root that would lose it silently.**."""
+    """PRD 10's analytics row, on the root that would lose it silently."""
     app = create_app(
         Settings(
             database_url=postgres_url,

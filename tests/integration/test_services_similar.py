@@ -153,22 +153,15 @@ async def test_the_candidate_query_is_an_exact_scan_and_not_the_hnsw_index(
 ) -> None:
     """Asserted on the plan, not the clock.
 
-    Recall loss in a live query is per-query; recall loss in a cached artefact is
-    permanent, and this table is read until the next rebuild. PRD 05 says brute-force
-    exact cosine is the right call at this scale (10k x 384 halfvec is 7.7 MB).
-
-    **This milestone has not measured HNSW recall**, and borrowing the halfvec
-    quantisation figures to justify an approximate index would be laundering
-    one measurement into a claim about another.
-
-    **The statement *sequence* is the load-bearing assertion and the plan is
-    the corroboration, not the other way round.** At three rows the planner
-    would not choose an HNSW scan under any setting, so a plan assertion alone
-    would pass against a repository that never issued the GUC at all -- the
-    vacuous pass this milestone's trap section is about. What cannot pass
-    vacuously is "the candidate query ran between `enable_indexscan = off` and
-    `enable_indexscan = on`", captured off `before_cursor_execute` and never
-    transcribed.
+    Recall loss in a live query is per-query; recall loss in a cached artefact
+    is permanent, and this table is read until the next rebuild. PRD 05 says
+    brute-force exact cosine is the right call at this scale. The statement
+    *sequence* is the load-bearing assertion and the plan is the corroboration:
+    at three rows the planner would not choose an HNSW scan under any setting,
+    so a plan assertion alone would pass against a repository that never issued
+    the GUC. What cannot pass vacuously is "the candidate query ran between
+    `enable_indexscan = off` and `enable_indexscan = on`", captured off
+    `before_cursor_execute` and never transcribed.
     """
     first, second = planted_pair(math.pi / 4)
     seed_id = await _seed(session, vector=first)
@@ -237,21 +230,19 @@ async def test_the_repository_restores_the_index_gucs_after_its_own_statement(
 
 @pytest.mark.integration
 async def test_the_top_five_survive_the_halfvec_round_trip(session: AsyncSession) -> None:
-    """The measured safe band, exercised rather than cited.
+    """The safe band for `halfvec`, exercised rather than cited.
 
-    max cosine error 1.21e-04, mean 3.03e-05, top-1 and top-5 ordering identical in
-    42/42 queries.
-
-    Planted angles far enough apart that a 1.21e-04 error cannot reorder them, so this
-    fails a *storage* mistake -- a `vector` column silently narrowed, or a float32
-    written through a lossy cast -- rather than re-measuring quantisation.
+    The planted angles are far enough apart that the round-trip error cannot
+    reorder them, so this fails a *storage* mistake -- a `vector` column
+    silently narrowed, or a float32 written through a lossy cast -- rather than
+    re-deriving the quantisation error.
     """
     base, _ = planted_pair(0.0)
     seed_id = await _seed(session, vector=base)
     expected: list[uuid.UUID] = []
     for index in range(5):
-        # 0.15 rad apart: the cosine gap between neighbours is ~0.02, which is
-        # more than 150x the measured worst-case round-trip error.
+        # 0.15 rad apart: the cosine gap between neighbours is ~0.02, two
+        # orders of magnitude above the worst-case round-trip error.
         _, vector = planted_pair(0.15 * (index + 1))
         expected.append(await _seed(session, vector=vector))
     await session.flush()
@@ -276,7 +267,7 @@ async def test_a_page_costs_one_candidate_statement_not_one_per_seed(
     `SearchIndex` for -- at 10,000 instead of 1.3M, which is smaller and is still no
     reason to reintroduce it when a `CROSS JOIN LATERAL` expresses it in one statement.
 
-    Held fixed the way M4's ingest cases hold it: same statement shape,
+    Held fixed the way the ingest cases hold it: same statement shape,
     different page size.
     """
     ids = []
@@ -304,8 +295,8 @@ async def test_a_page_costs_one_candidate_statement_not_one_per_seed(
 async def test_a_rebuild_writes_the_same_rows_the_second_time(session: AsyncSession) -> None:
     """Idempotence against the real table.
 
-    where `replace` is a real DELETE and INSERT rather than a dict assignment -- the
-    fake cannot distinguish "replaced" from "merged".
+    `replace` is a real DELETE and INSERT rather than a dict assignment, and
+    the fake cannot distinguish "replaced" from "merged".
 
     A merge would double the row count on the second run and violate
     `pk_title_neighbors` on the third; either way the property that makes a
@@ -401,21 +392,16 @@ async def test_the_stored_rank_is_what_a_read_orders_by(session: AsyncSession) -
 async def test_a_read_orders_by_rank_and_not_by_the_neighbours_own_id(
     session: AsyncSession,
 ) -> None:
-    """`ORDER BY rank, neighbor_id`.
-
-    and deleting `rank` from it **survived the whole suite** until this case existed.
+    """`ORDER BY rank, neighbor_id`, with `rank` the key that carries the claim.
 
     The case above separates `rank` from `score` and not `rank` from `id`: it
     mints the rank-0 neighbour first, so the monotonic UUIDv7 puts it first
     under either ordering. Here the arrangement is inverted -- the rank-1
     neighbour carries the *lower* id -- so an implementation that dropped the
-    `rank` key returns the catalog's oldest row as "most similar".
-
-    The distractor is `far_id`: a genuinely less similar title whose only
-    claim on the top of the shelf is that it was inserted first. Nothing
-    downstream recovers this -- `BaseRow.hydrate` turns ids into cards *in the
-    order given*, and `BecauseYouWatchedProvider` truncates to `_MAX_CARDS`
-    off the top, so a wrong order is also a wrong *selection*.
+    `rank` key returns the catalog's oldest row as "most similar". Nothing
+    downstream recovers it: `BaseRow.hydrate` turns ids into cards *in the
+    order given* and `BecauseYouWatchedProvider` truncates off the top, so a
+    wrong order is also a wrong *selection*.
     """
     neighbors = PostgresTitleNeighborRepository(session)
     first, second = planted_pair(math.pi / 4)
@@ -472,9 +458,7 @@ async def test_count_stale_counts_rows_from_another_blend_and_not_rows_from_this
 
 @pytest.mark.integration
 async def test_two_equidistant_candidates_come_back_in_id_order(session: AsyncSession) -> None:
-    """*Which* candidates enter the pool.
-
-    and in what order, is decided rather than left to the executor.
+    """*Which* candidates enter the pool, and in what order, is decided here.
 
     Two candidates planted at the identical angle to the seed have an identical
     `<=>` distance, so `ORDER BY e.embedding <=> seed.embedding` alone leaves
@@ -554,9 +538,8 @@ async def test_a_score_outside_the_stored_range_is_a_translated_conflict(
 ) -> None:
     """`title_neighbors` carries `CHECK (score >= 0 AND score <= 1)`.
 
-    and the service clamps a negative cosine to keep the blend a convex combination.
-
-    This is the other side of that: if the clamp ever goes, the failure is a
+    The service clamps a negative cosine to keep the blend a convex
+    combination; this is the other side. If the clamp ever goes, the failure is a
     `RepositoryConflict` naming a constraint rather than a raw
     `sqlalchemy.exc.IntegrityError` escaping the port -- and the session is still usable
     afterwards, which is what the SAVEPOINT buys.
@@ -587,10 +570,10 @@ async def _give_genome(session: AsyncSession, title_id: uuid.UUID, lane: int) ->
 
     The vector is one-hot at `lane` -- so two titles sharing a lane are cosine
     1.0 and two on different lanes are 0.0. Real genome vectors are dense and
-    measure mean 0.6101 (Group F, over 268,157,000 pairs); the point of a
-    one-hot here is that these cases are about **whether the statement joins
-    both sides at all**, and a planted value nobody has to trust is what makes
-    a wrong join visible as a wrong number rather than as a plausible one.
+    measure mean 0.6101; the point of a one-hot here is that these cases are
+    about **whether the statement joins both sides at all**, and a planted
+    value nobody has to trust is what makes a wrong join visible as a wrong
+    number rather than as a plausible one.
 
     `halfvec(1128)` rejects any other length outright, which is the constraint
     `GenomeRepositoryContract` already records.
@@ -631,10 +614,7 @@ async def test_the_seed_page_reports_which_titles_carry_a_genome(
 async def test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one(
     session: AsyncSession,
 ) -> None:
-    """The `None`-not-zero rule.
-
-    asserted against the real join rather than against the fake's dict.
-    """
+    """The `None`-not-zero rule, against the real join rather than the fake's dict."""
     seed_vector, near = planted_pair(math.pi / 3)
     seed_id = await _seed(session, vector=seed_vector, name="Harbour Nine")
     same_lane = await _seed(session, vector=near, name="Autumn Iron")
@@ -655,33 +635,25 @@ async def test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one(
 async def test_the_genome_join_does_not_run_inside_the_no_index_bracket(
     session: AsyncSession,
 ) -> None:
-    """**The plan says to put the genome join inside `_NEAREST`.
-
-    measured, that is the more expensive spelling, and this is the structural pin.**.
+    """The genome join stays outside the no-index bracket, and that is structural.
 
     `_NEAREST` executes with `enable_indexscan = off` and
     `enable_bitmapscan = off`, which is the stated reason `titles` is read by a
     second statement rather than joined there. A `genome_scores` join inside
-    that bracket degrades to a sequential scan of the whole genome table
-    **once per seed** -- `Seq Scan on genome_scores ... loops=200` in the
-    measured plan -- where outside it the same work is one hash build shared by
-    the page. Measured on a real 15,565-row table: 165.7 ms -> 246.6 ms at 50
-    seeds (+49%), 619.9 ms -> 958.1 ms at 200 (+55%), against +20.3 ms flat for
-    the separate statement.
-
-    A timing assertion would be flaky, so this asserts the *shape* that makes
-    the cost true: the constant carries no reference to the genome table at
-    all. Fails the moment someone follows the plan's text.
+    that bracket degrades to a sequential scan of the whole genome table **once
+    per seed**, where outside it the same work is one hash build shared by the
+    page. A timing assertion would be flaky, so this asserts the *shape* that
+    makes the cost true: the constant carries no reference to the genome table.
     """
     assert "genome_scores" not in _NEAREST
 
 
-# -- the resume cursor and the model guard (M10 J6) -------------------------
+# -- the resume cursor and the model guard ---------------------------------
 
-# ⚠️ **The guard's case runs before the cursor's, and the order is load
-# bearing.** A deployment mid-model-swap has a mixed `title_embeddings`, so the
-# refusal fires and the cursor is never read -- correct, and also why a green
-# cursor case placed first could be green because nothing ran at all.
+# The guard's case runs before the cursor's, and the order is load bearing: a
+# deployment mid-model-swap has a mixed `title_embeddings`, so the refusal
+# fires and the cursor is never read -- which is also why a green cursor case
+# placed first could be green because nothing ran at all.
 
 
 @pytest.fixture
@@ -696,7 +668,7 @@ def lines() -> Iterator[list[str]]:
 async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
     session: AsyncSession, lines: list[str]
 ) -> None:
-    """🔴 **The registration refuses a mixed table, and refusing means writing nothing.**."""
+    """The registration refuses a mixed table, and refusing means writing nothing."""
     ids = []
     for index in range(3):
         _, vector = planted_pair(0.3 * (index + 1))
@@ -820,11 +792,7 @@ async def _written_rows(session: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUI
 async def test_a_rebuild_with_no_argument_walks_exactly_as_a_resumed_one_over_a_stale_table(
     session: AsyncSession,
 ) -> None:
-    """`rebuild()` is unchanged.
-
-    and `resume=True` over a fully-stale table is the same walk rather than a different
-    one.
-    """
+    """`resume=True` over a fully-stale table is the same walk, not a different one."""
     ids = []
     for index in range(4):
         _, vector = planted_pair(0.2 * (index + 1))
@@ -872,9 +840,8 @@ async def test_a_refusal_written_under_another_model_does_not_block_the_rebuild(
 ) -> None:
     """The guard's population is the rows that **have a vector**.
 
-    which is the population `list_embedded` walks.
-
-    A title whose document was degenerate is stored as a `title_embeddings` row
+    That is the population `list_embedded` walks. A title whose document was
+    degenerate is stored as a `title_embeddings` row
     with a NULL embedding and whatever model name the deployment carried when
     it was refused. It is never a seed and it names no vector a pool can be
     drawn from, so a guard scoped to the whole table would refuse a rebuild

@@ -19,7 +19,7 @@ from usher.domain.ids import new_id
 from usher.services.backup import MANIFEST_VERSION, BackupService
 
 # The three rebuildable tables this fixture seeds, chosen because each one
-# would be a *different* mistake to carry: `titles` is the 1,050 MB relation
+# would be a *different* mistake to carry: `titles` is the largest relation
 # every reference in the artifact points at, `jobs` is a queue whose rows are
 # actively harmful in a restored database, and `raw_payloads` is third-party
 # TMDb payloads verbatim.
@@ -33,8 +33,7 @@ SERIES_IMDB_ID = "tt99000551"
 
 # **Deliberately unequal**, so a transposition of the two is a different
 # artifact rather than the same one. Every series has an S01E01, so a fixture
-# using 1 and 1 would make the swap invisible -- and 32,409 series make that a
-# certainty rather than a risk.
+# using 1 and 1 would make the swap invisible.
 SEASON_NUMBER = 1
 EPISODE_NUMBER = 4
 
@@ -57,14 +56,11 @@ def artifact(tmp_path: Path) -> Path:
 
 @pytest_asyncio.fixture
 async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
-    """One row in each of the seven precious tables.
+    """One row in each precious table, the `media_items` links, and the rebuildable three.
 
-    the `media_items` links, and one row in each of the three rebuildable tables above.
-
-    Raw `INSERT`s rather than repositories, which is this directory's habit
-    (`test_watch_state_repository.py` seeds `users` the same way): the
-    subject is what a reader of the *schema* carries, so going through nine
-    repositories would seed the tables a repository happens to touch.
+    Raw `INSERT`s rather than repositories: the subject is what a reader of the *schema*
+    carries, so going through nine repositories would seed the tables a repository
+    happens to touch.
     """
     ids = {
         "user": new_id(),
@@ -75,8 +71,7 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
         "episode": new_id(),
         # **Not `new_id()`, and the whole of the ordering case rests on it.** `new_id()`
         # is UUIDv7 and monotonic, so a fixture that mints ids in insertion order makes
-        # heap order and `ORDER BY id` identical and the `ORDER BY` unobservable -- the
-        # trap `testing-discipline.md` records costing M7 five untested orderings.
+        # heap order and `ORDER BY id` identical and the `ORDER BY` unobservable.
         "watch_movie": uuid.UUID("00000000-0000-7000-8000-0000000000b2"),
         "watch_episode": uuid.UUID("00000000-0000-7000-8000-0000000000a1"),
         "llm_call": new_id(),
@@ -172,9 +167,8 @@ async def seeded(session: AsyncSession) -> Mapping[str, uuid.UUID]:
     )
     # `ck_watch_states_exactly_one_target` is `num_nonnulls(title_id,
     # episode_id) = 1`, so an episode's watch state names the *episode* and
-    # nothing else -- which is exactly the row K2's ladder is hardest on,
-    # since resolving it needs the series' natural key that the row does not
-    # carry.
+    # nothing else -- the row the resolution ladder is hardest on, since
+    # resolving it needs the series' natural key the row does not carry.
     await session.execute(
         text(
             "INSERT INTO watch_states "
@@ -286,9 +280,10 @@ def _carried(rows: Sequence[Mapping[str, Any]], table: str) -> list[Mapping[str,
 async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """🔴 **The case this file shipped without.
+    """Every carried reference holds the natural-key values of the row it names.
 
-    and the reason the command exists rather than `pg_dump`.**.
+    A reference that names the wrong row is the failure a natural-key artifact has and
+    `pg_dump` does not.
     """
     # The premises, and they are the case. An equality is only a statement
     # about the field it names if a wrong field would give a different answer.
@@ -334,7 +329,7 @@ async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
 
     # `search_queries` is the third reference column and the one whose
     # unresolved rule is `NULL` rather than `REFUSE`, so it travels a
-    # different path in K4 and the same one here.
+    # different path in restore and the same one here.
     (query,) = _carried(rows, "search_queries")
     assert query["clicked_title"] == movie_reference
     assert query["user"] == HOUSEHOLD_NAME
@@ -354,9 +349,10 @@ async def test_every_carried_reference_holds_the_values_of_the_row_it_names(
 async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_code_expects(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """🔴 **`schema_revision` is the stamp K4 refuses on.
+    """`schema_revision` is the revision the database holds, not the code's own head.
 
-    and nothing could tell it from the code's own head.**.
+    Restore refuses on this stamp, and nothing else in the header could tell the two
+    apart.
     """
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
@@ -382,10 +378,10 @@ async def test_the_stamp_is_the_revision_the_database_holds_and_not_the_one_the_
 async def test_every_carried_table_is_ordered_by_its_key_rather_than_by_the_heap(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """The port promises a stable order *"because a diff between two nights' artifacts is a.
+    """The port promises a stable order, so two nights' artifacts can be diffed.
 
-    thing an operator will do"*, and deleting the whole `ORDER BY` clause passed all
-    5,891 cases: the one place order was observable was a `set` comparison.
+    Deleting the `ORDER BY` clause is otherwise invisible: everywhere else the order
+    reaches, it reaches a `set` comparison.
     """
     _, rows = await _write(session, artifact)
 
@@ -447,14 +443,11 @@ async def test_the_artifact_carries_every_precious_table_and_no_rebuildable_one(
 async def test_the_header_stamps_the_revision_the_code_expects_and_counts_what_it_wrote(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """K4 refuses a `schema_revision` mismatch.
+    """A `schema_revision` mismatch is refused, as `_check_migrations` already refuses it.
 
-    which is the refusal `api/routers/health.py::_check_migrations` already makes -- so
-    the stamp is read through `database_revision` and compared here against
-    `code_head_revision()` rather than against a literal.
-
-    The plan for this task spelled `m09f`; `m10a` landed since, and a case naming either
-    would need editing at `m10b`.
+    The stamp is read through `database_revision` and compared against
+    `code_head_revision()` rather than against a literal, which would have to be edited
+    at every new revision.
     """
     header, rows = await _write(session, artifact)
 
@@ -473,13 +466,11 @@ async def test_the_header_stamps_the_revision_the_code_expects_and_counts_what_i
 
 
 def _uuids(value: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], uuid.UUID]]:
-    """Every value anywhere in an emitted object that parses as a UUID.
+    """Every value in an emitted object that parses as a UUID, with its key path.
 
-    with the key path it was found at.
-
-    Grammar-based rather than key-name based on purpose: a scan looking for
-    keys called `*_id` cannot see an id that arrived under a new name, which
-    is exactly the failure this case exists for.
+    Grammar-based rather than key-name based on purpose: a scan looking for keys called
+    `*_id` cannot see an id that arrived under a new name, which is exactly the failure
+    this case exists for.
     """
     if isinstance(value, dict):
         for key, child in value.items():
@@ -498,25 +489,17 @@ def _uuids(value: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, 
 async def test_no_carried_row_holds_a_title_id_that_is_not_a_declared_raw_id_fallback(
     session: AsyncSession, seeded: Mapping[str, uuid.UUID], artifact: Path
 ) -> None:
-    """No title UUID survives a bootstrap boundary.
+    """No title UUID survives a bootstrap boundary, except at the declared fallback.
 
-    so the only place one may appear is K2's third rung.
+    `RESOLUTION_ORDER` is `("imdb_id", "kind+tmdb_id", "id")` and the third entry is a
+    *check on the target* rather than a key: restore accepts it if and only if the
+    target already holds a title with that exact id. `TitleReference` therefore carries
+    `id` on every reference, and the declared fallback position is the `id` key of an
+    object that also carries `kind` -- which is what this case allows and nothing else.
 
-    `RESOLUTION_ORDER` is `("imdb_id", "kind+tmdb_id", "id")` and the third
-    entry is a *check on the target* rather than a key: restore accepts it if
-    and only if the target already holds a title with that exact id.
-    `TitleReference` therefore carries `id` on every reference, and the
-    declared fallback position is the `id` key of an object that also carries
-    `kind` -- which is what this case allows and nothing else.
-
-    **The rung is reachable rather than defensive**, which is why the case is
-    written to accommodate it rather than to forbid it. Measured on the live
-    catalog 2026-08-21, 6 real titles carry neither an `imdb_id` nor a
-    `(kind, tmdb_id)` -- and counted inside a real artifact on 2026-08-25,
-    those 6 account for **602 of 16,819 carried title references, 3.6%**,
-    because an unkeyed title tends to be one a household actually owns and
-    watched. From the catalog's side the rung looks like 6 rows in 1.27 M;
-    from the artifact's side it is one carried reference in 28.
+    **The rung is reachable rather than defensive**, which is why the case is written to
+    accommodate it rather than to forbid it: a title carrying neither an `imdb_id` nor a
+    `(kind, tmdb_id)` tends to be one a household actually owns and watched.
     """
     _, rows = await _write(session, artifact)
 
@@ -567,20 +550,9 @@ async def test_the_media_item_rows_carry_their_natural_key_and_only_the_two_link
 ) -> None:
     """`media_items` is the manifest's one `PARTIAL` entry.
 
-    every other column is rebuilt by the next source walk, and carrying them would take
-    the artifact from kilobytes to the whole table.
-
-    The columns carried are read off the manifest entry, so this cannot drift from K1.
-
-    **Two counts of this table are in circulation and they are about two
-    populations**, which is worth one sentence because this file stated the
-    larger one as current fact until a review caught it: `media_items` on
-    **this** deployment is **13,539 rows** (read 2026-08-25), and the
-    **1,126,789** that `backup_manifest`, PRD 08 and a dozen contract
-    docstrings carry is *"the household this project measures"* -- a
-    different, fully-walked library, 999,827 of whose items are episodes.
-    Neither is wrong; naming which is what stops them being read as a
-    contradiction.
+    Every other column is rebuilt by the next source walk, and carrying them would take
+    the artifact from kilobytes to the whole table. The columns carried are read off the
+    manifest entry, so this cannot drift from it.
     """
     _, rows = await _write(session, artifact)
     carried = [row["row"] for row in rows if row["table"] == "media_items"]

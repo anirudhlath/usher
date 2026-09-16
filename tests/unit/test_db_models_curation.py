@@ -1,7 +1,4 @@
-"""The 1:1 correspondence rule for M8's two tables.
-
-and the five schema decisions their column lists do not show.
-"""
+"""The 1:1 correspondence rule for the two curation tables."""
 
 from typing import cast
 
@@ -28,12 +25,11 @@ def test_curated_row_and_curated_row_row_have_matching_field_sets() -> None:
 
 
 def test_llm_call_and_llm_call_row_have_matching_field_sets() -> None:
-    """Same rule.
+    """The same 1:1 rule, for the LLM call ledger.
 
-    The two tempting divergences are both additions: a `user_id` (which PRD 10's column
-    list deliberately omits — spend is attributed to an outcome by joining
-    `curated_rows` on `generation_id`), and a `created_at` beside `at` (which would be
-    the same instant twice).
+    The two tempting divergences are both additions: a `user_id` (spend is
+    attributed to an outcome by joining `curated_rows` on `generation_id`), and a
+    `created_at` beside `at`, which would be the same instant twice.
     """
     assert {c.name for c in LLMCallRow.__table__.columns} == set(LLMCall.model_fields)
 
@@ -57,7 +53,7 @@ def test_neither_table_carries_a_created_at_or_an_updated_at() -> None:
 
 
 def test_generated_at_and_at_have_no_server_default() -> None:
-    """Unlike every other timestamp in this schema, and the reason is the read.
+    """Neither timestamp takes a server default, unlike every other one here.
 
     `generated_at` is *one instant per generation*, minted once by
     `CurationService` and written identically onto every row of that
@@ -73,15 +69,11 @@ def test_generated_at_and_at_have_no_server_default() -> None:
 
 
 def test_card_title_ids_is_an_ordered_uuid_array_and_not_text() -> None:
-    """`ARRAY(Text)` is the only array prior art in this schema (`titles.genres` and friends).
+    """`card_title_ids` is an array of UUID, not the `ARRAY(Text)` prior art.
 
-    so the tempting spelling is to copy it.
-
-    It would store a UUID as its 36-character rendering, cost 36 bytes an id
-    instead of 16, and — the part that matters — silently accept any string
-    at all, which is precisely the class of value
-    [ADR-0028](../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
-    validator exists to keep out of this table.
+    `titles.genres` and friends make `ARRAY(Text)` the tempting spelling. It
+    would store a UUID as its 36-character rendering, cost 36 bytes an id instead
+    of 16, and -- the part that matters -- silently accept any string at all.
     """
     column_type = CuratedRowRow.__table__.c.card_title_ids.type
     assert isinstance(column_type, ARRAY)
@@ -98,25 +90,14 @@ def test_cost_usd_is_numeric_with_a_scale_that_cannot_round_a_cheap_call_away() 
 
 
 def test_purpose_is_an_enum_column_wide_enough_for_its_longest_member() -> None:
-    """`enum_column` compiles to `VARCHAR(length)`.
+    """`enum_column` compiles to `VARCHAR(length)`, so the width is a real bound.
 
-    so the length is a real bound rather than documentation.
-
-    **The lower bound is not this case's to defend, and asserting it here was
-    a check that could not fail.** SQLAlchemy's `Enum.__init__` refuses a
-    length below its longest member at import time — verified on 2.0.51,
-    `enum_column(LLMPurpose, length=8)` raises `ValueError: When provided,
-    length must be larger or equal than the length of the longest enum value.
-    8 < 15` before any test runs. So `length >= max(len(member.value) …)` is
-    guaranteed by the constructor, and next to a line pinning the length at 32
-    it was doubly unfalsifiable. The constructor owns the floor; this case
-    owns the specific width.
-
-    32 rather than 16, which is the only wrong length that is *reachable*: it
-    fits both current members, so nothing raises, and it merely disagrees with
-    the migration — caught by `test_migration_matches_the_orm_metadata` as a
-    type diff. The enum-ness itself is pinned alongside every other enum
-    column in `test_db_models.py`.
+    32 rather than 16 is the only wrong length that is *reachable*: it fits both
+    current members, so nothing raises, and it merely disagrees with the
+    migration -- caught by `test_migration_matches_the_orm_metadata` as a type
+    diff. SQLAlchemy's `Enum.__init__` refuses a length below its longest member
+    at import time, so the floor needs no assertion here. The enum-ness itself is
+    pinned alongside every other enum column in `test_db_models.py`.
     """
     column_type = LLMCallRow.__table__.c.purpose.type
     # `.type` is stubbed as the generic `TypeEngine`, which declares no
@@ -129,20 +110,13 @@ def test_purpose_is_an_enum_column_wide_enough_for_its_longest_member() -> None:
 def test_curated_rows_check_constraint_names() -> None:
     """The Pydantic bounds on `CuratedRow`, mirrored as CHECKs.
 
-    this schema's standing convention, because nothing stops a hand-written `INSERT`
-    from bypassing the model.
-
-    `cards_not_empty` is the load-bearing one and it is
-    `CuratedRow.card_title_ids`'s `min_length=1` in SQL: an empty curated row
-    is a validator that ran and kept nothing, and persisting one puts a
-    heading with no shelf under it on the screen.
-
-    `cards_have_no_nulls` has no counterpart in any other table because no
-    other table has an array of ids. It is the one liability the array shape
-    introduces that a child table's `NOT NULL` column would have closed for
-    free: `uuid[]` admits a NULL element, and one would read back as a card
-    that denotes nothing. `array_position` is `IMMUTABLE` (verified against
-    PostgreSQL 17) and finds a NULL element, so the CHECK is expressible.
+    Nothing stops a hand-written `INSERT` from bypassing the model.
+    `cards_not_empty` is `CuratedRow.card_title_ids`'s `min_length=1` in SQL: an
+    empty curated row is a validator that ran and kept nothing, and persisting
+    one puts a heading with no shelf under it on the screen. `cards_have_no_nulls`
+    closes the one liability the array shape introduces that a child table's
+    `NOT NULL` would have closed for free -- `uuid[]` admits a NULL element, and
+    one would read back as a card that denotes nothing.
     """
     table = cast(Table, CuratedRowRow.__table__)
     names = {c.name for c in table.constraints if c.name is not None}
@@ -181,16 +155,12 @@ def test_llm_calls_check_constraint_names() -> None:
 def test_the_curated_read_index_leads_with_user_id_and_descends_generated_at() -> None:
     """`ix_curated_rows_user_newest` is the whole of this table's index set.
 
-    and its two columns serve three readers: `list_for_user`'s `WHERE user_id =
-    :user_id`, `replace_for_user`'s `DELETE` by the same column, and the `ON DELETE
-    CASCADE` from `users`, which Postgres performs as a lookup *by the referencing
-    column*.
-
-    The direction is asserted here off `Base.metadata` and again off
+    Its two columns serve three readers: `list_for_user`'s `WHERE user_id`,
+    `replace_for_user`'s `DELETE` by the same column, and the `ON DELETE CASCADE`
+    from `users`, which Postgres performs as a lookup by the referencing column.
+    The descending direction is asserted here off `Base.metadata` and again off
     `pg_indexes.indexdef` in `tests/integration/test_migrations.py`, because
-    `compare_metadata` diffs neither — measured, and recorded in the
-    migration: at this table's population either direction produces the same
-    plan, so the declaration is the only thing that can carry the intent.
+    `compare_metadata` diffs neither.
     """
     table = cast(Table, CuratedRowRow.__table__)
     assert {index.name for index in table.indexes} == {"ix_curated_rows_user_newest"}
@@ -206,7 +176,7 @@ def test_the_curated_read_index_leads_with_user_id_and_descends_generated_at() -
 
 
 def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None:
-    """A refusal discharged, asserted so it stays a decision."""
+    """The ledger carries these two indexes and no others."""
     assert {index.name for index in cast(Table, LLMCallRow.__table__).indexes} == {
         "ix_llm_calls_at",
         "ix_llm_calls_generation_id",
@@ -214,16 +184,13 @@ def test_llm_calls_ships_the_two_indexes_m08a_wrote_down_and_no_others() -> None
 
 
 def test_the_user_foreign_key_cascades_and_llm_calls_has_none() -> None:
-    """A curated row protects no user state and is fully re-derivable by running the generation.
+    """A curated row protects no user state, so its `user_id` CASCADEs.
 
-    again, which is `user_taste`'s case rather than `watch_states`' — ADR-0010 makes
-    `watch_states.user_id` RESTRICT because a watch record *is* the thing worth keeping.
-
-    `llm_calls` has no foreign key at all, in either direction, and that is
-    the second half of the same decision: it has no `user_id` to cascade, and
-    `generation_id` deliberately references nothing — see the module
-    docstring, where the alternative is refused with the consequence that
-    would follow from taking it.
+    It is fully re-derivable by running the generation again, which is
+    `user_taste`'s case rather than `watch_states`' -- a watch record is itself
+    the thing worth keeping, so that column RESTRICTs. `llm_calls` has no foreign
+    key at all, in either direction: no `user_id` to cascade, and
+    `generation_id` deliberately references nothing.
     """
     user_fk = next(iter(CuratedRowRow.__table__.c.user_id.foreign_keys))
     assert user_fk.ondelete == "CASCADE"

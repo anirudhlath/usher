@@ -54,15 +54,13 @@ def _report(
 
 
 def test_restore_takes_a_required_artifact_and_two_flags() -> None:
-    """**The artifact is positional and required**.
-
-    which is the asymmetry with `backup --output` and is a decision rather than a style.
+    """The artifact is positional and required, unlike `backup --output`.
 
     A backup with no destination has an obvious default -- a timestamped name
     in the working directory. A restore with no source has none: picking the
-    newest `.jsonl.gz` nearby is exactly the guess a command that writes over
-    a household's history must not make, and argparse refusing it is cheaper
-    than a sentence in a runbook.
+    newest `.jsonl.gz` nearby is exactly the guess a command that writes over a
+    household's history must not make, and argparse refusing it is cheaper than
+    a sentence in a runbook.
     """
     args = parse_args(["restore", str(ARTIFACT)])
     assert vars(args) == {
@@ -77,8 +75,8 @@ def test_restore_takes_a_required_artifact_and_two_flags() -> None:
 def test_the_artifact_argument_arrives_as_a_path() -> None:
     """`type=Path` at the parser rather than a `Path(...)` in `_dispatch`.
 
-    so there is no spelling of this argument that is a `str` on one side and a `Path` on
-    the other.
+    So there is no spelling of this argument that is a `str` on one side and a
+    `Path` on the other.
     """
     assert parse_args(["restore", "x.jsonl.gz"]).artifact == Path("x.jsonl.gz")
 
@@ -86,7 +84,7 @@ def test_the_artifact_argument_arrives_as_a_path() -> None:
 def test_an_artifact_is_required() -> None:
     """Argparse's own exit 2, not this command's exit 1.
 
-    a missing positional is an argument failure and reads as usage, which is the same
+    A missing positional is an argument failure and reads as usage, the same
     answer `usher search` with no query gives.
     """
     with pytest.raises(SystemExit) as exit_info:
@@ -95,21 +93,17 @@ def test_an_artifact_is_required() -> None:
 
 
 def test_restore_is_advertised_by_the_parser() -> None:
-    """A subcommand `build_parser` does not declare is a command `test_cli_errors.py`'s boundary.
-
-    sweep never runs.
-    """
+    """A subcommand `build_parser` does not declare is one the boundary sweep never runs."""
     assert build_parser().parse_args(["restore", "x.jsonl.gz"]).command == "restore"
 
 
 def test_restore_dispatches_to_restore_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured for `usher curate` in M8.
+    """The dispatch arm, asserted on the arguments it forwards.
 
-    deleting its arm left the whole boundary selection green.
-
-    `dispatched` carries the arguments.
+    Deleting a subcommand's arm leaves the boundary selection green, so
+    `dispatched` records what was passed rather than only that it was called.
     """
     configured(monkeypatch)
 
@@ -125,17 +119,13 @@ def test_restore_dispatches_to_restore_and_not_to_the_server(
 def test_a_missing_artifact_is_one_line_and_exit_one(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Through `OSError` in `OPERATOR_ERRORS`, and not through a handler of this command's own.
+    """Through `OSError` in `OPERATOR_ERRORS`, not a handler of this command's own.
 
-    ⚠️ **`FileNotFoundError` is named in the assertion and that is the whole
-    difficulty of this case**, exactly as it is for `usher backup`.
-    `USHER_DATABASE_URL` here points at a port nothing listens on, so a
-    refused connection is *also* an `OSError` and also renders as one line --
-    an assertion on the family, or on the shape of the message, passes
-    identically against a run that never reached the filesystem. The artifact
-    is read before the database is touched for the same reason
-    `BackupService` checks its destination first, and naming the type is what
-    makes this a statement about the path.
+    `FileNotFoundError` is named in the assertion, and that is the whole
+    difficulty: `USHER_DATABASE_URL` here points at a port nothing listens on,
+    so a refused connection is *also* an `OSError` rendering as one line, and
+    an assertion on the family would pass identically against a run that never
+    reached the filesystem.
     """
     configured(monkeypatch)
     missing = tmp_path / "no-such-artifact.jsonl.gz"
@@ -156,14 +146,11 @@ def test_a_damaged_artifact_is_one_line_and_never_a_stack(
 ) -> None:
     """`RestoreRefused` reaches a terminal as a sentence.
 
-    through `_restore`'s own `except` rather than through a tenth member of
-    `OPERATOR_ERRORS`.
-
-    ADR-0026 rejects a per-command error *boundary* and permits a command that
-    knows what a failure means to render it -- `_curate` does exactly this for
-    the two conditions it can name. The file here is real bytes that are not
-    gzip, so the refusal is provoked rather than substituted, and the database
-    is never reached: a run that got as far as the connection would say
+    Through `_restore`'s own `except` rather than a tenth member of
+    `OPERATOR_ERRORS`: a command that knows what a failure means renders it,
+    as `_curate` does. The file here is real bytes that are not gzip, so the
+    refusal is provoked rather than substituted, and the database is never
+    reached -- a run that got as far as the connection would say
     `ConnectionRefusedError` instead.
     """
     configured(monkeypatch)
@@ -199,14 +186,10 @@ def test_the_traceback_flag_does_not_reopen_a_refusal(
 ) -> None:
     """A refused artifact stays a sentence under `--traceback`.
 
-    and that is the same call `_settings_problem` makes.
-
-    `RestoreRefused` is raised by this project *about* a file, so its stack is
-    four frames of `usher.services.restore` and diagnoses nothing an operator
-    can act on. The flag reopens `OPERATOR_ERRORS`, which this is deliberately
-    not a member of -- so the exit stays a `SystemExit` carrying the sentence,
-    and the case that would fail if somebody added it to the tuple is this
-    one.
+    The same call `_settings_problem` makes: `RestoreRefused` is raised by this
+    project *about* a file, so its stack diagnoses nothing an operator can act
+    on. The flag reopens `OPERATOR_ERRORS`, which this is deliberately not a
+    member of, and this is the case that would fail if somebody added it.
     """
     configured(monkeypatch)
     damaged = tmp_path / "damaged.jsonl.gz"
@@ -243,22 +226,16 @@ def test_the_report_prints_five_counts_per_table(capsys: pytest.CaptureFixture[s
 def test_the_report_tells_already_present_from_nothing_to_write_onto(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """🔴 **K5's drill printed `10,515 already present` against a table holding zero rows.**.
+    """*Already present* and *nothing to write onto* are different states.
 
     `media_items`' merge is an `UPDATE` over a row the *source walk* creates,
-    and `RETURNING` cannot tell *"the target already holds this link"* from
-    *"there is no row here at all"* -- both return nothing. One number rendered
-    as *"already present"* therefore said the restore had been unnecessary when
-    what had actually happened is that it was too early, which is the opposite
-    instruction: the second wants `usher sync` and another run.
-
-    That second state is not a corner. It is **universal** on the recovery path
-    this command exists for, because `media_items` rows come from a walk and
-    the walk needs the `sources` row the artifact carries -- so the first
-    restore of a rebuilt deployment lands every link in it.
-
-    The two are asserted as different strings over one report, because a
-    renderer that printed the same word for both is exactly what shipped.
+    and `RETURNING` cannot tell "the target already holds this link" from
+    "there is no row here at all" -- both return nothing. Rendering one number
+    as "already present" says the restore was unnecessary when what happened is
+    that it was too early, which is the opposite instruction: the second wants
+    `usher sync` and another run. That state is universal on the recovery path
+    this command exists for, so the two are asserted as different strings over
+    one report.
     """
     _print_restore_report(
         _report(
@@ -302,16 +279,13 @@ def test_rows_skipped_as_unresolvable_are_counted_apart_from_everything_else(
 def test_the_report_names_every_refused_key_rather_than_counting_them(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A restore that stopped at the first missing title tells an operator to enrich one title.
+    """Every refused key is named, because a count and a list say different things.
 
-    a restore that names all of them tells them the catalog is not finished, which is a
-    different instruction.
-
-    The keys printed are `keys_tried`'s own rendering, so what an operator
-    reads is what was looked for rather than a paraphrase of it -- and a
-    reference that could not offer a rung has that rung omitted rather than
-    printed as `None`, which would send them looking for a title nobody asked
-    about.
+    A restore that stopped at the first missing title tells an operator to
+    enrich one title; one that names all of them tells them the catalog is not
+    finished. The keys printed are `keys_tried`'s own rendering, so what an
+    operator reads is what was looked for -- and a reference that could not
+    offer a rung has it omitted rather than printed as `None`.
     """
     _print_restore_report(
         _report(
@@ -341,13 +315,11 @@ def test_the_report_names_every_refused_key_rather_than_counting_them(
 def test_a_dry_run_says_so_rather_than_reading_as_a_committed_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A refused run and a `--dry-run` both leave the database untouched and they are not the.
+    """A refused run and a `--dry-run` both leave the database untouched.
 
-    same event.
-
-    An operator who reads *"3,348 rows written"* off a dry run and walks away
-    has lost their restore, so the flag is in the line rather than only in the
-    command they typed a scrollback ago.
+    They are not the same event: an operator who reads "3,348 rows written" off
+    a dry run and walks away has lost their restore, so the flag is in the line
+    rather than only in the command they typed a scrollback ago.
     """
     _print_restore_report(_report(dry_run=True, committed=False))
 
@@ -398,19 +370,14 @@ class _StubService:
 def test_a_run_that_refused_a_row_exits_non_zero(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """🔴 **The exit code, which nothing measured for one commit.**.
+    """The exit code, which no other case in this file reads.
 
-    `_restore`'s own docstring makes an operational claim about it -- *"cron,
-    CI and a systemd unit read the exit code"* -- and PRD 08 repeats it, and
-    replacing `if report.refused:` with `if False:` left all 5,946 cases and
-    every gate step green. That is `_sync`'s failed-run defect exactly
-    (2026-08-19: ten consecutive `watch_state` failures, every one of them
-    exit 0, a human reading the terminal saw it and cron did not), arriving in
-    the next command written after it.
-
-    The refusals are already on stdout for a human; this is the half a
-    scheduler reads, so both are asserted -- the message, and that the exit is
-    a `SystemExit` carrying a string, which is what exits 1.
+    `_restore`'s own docstring makes an operational claim about it -- cron, CI
+    and a systemd unit read the exit code -- and replacing `if report.refused:`
+    with `if False:` leaves every other case green. The refusals are already on
+    stdout for a human; this is the half a scheduler reads, so both are
+    asserted: the message, and that the exit is a `SystemExit` carrying a
+    string, which is what exits 1.
     """
     configured(monkeypatch)
     monkeypatch.setattr(
@@ -454,14 +421,12 @@ def test_a_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_a_dry_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator asking what would happen and being told got the answer they asked for.
+    """`--dry-run` on a clean artifact is not a failure.
 
-    so `--dry-run` on a clean artifact is not a failure.
-
-    Stated as a case because the obvious implementation of *"a run that
-    changed nothing exits non-zero"* would break exactly this, and the
-    distinction between *refused* and *not committed* is the whole reason
-    `RestoreReport` carries both.
+    An operator asking what would happen got the answer they asked for. Stated
+    as a case because the obvious implementation of "a run that changed nothing
+    exits non-zero" would break exactly this, and the distinction between
+    *refused* and *not committed* is why `RestoreReport` carries both.
     """
     configured(monkeypatch)
     monkeypatch.setattr(
@@ -474,7 +439,7 @@ def test_a_dry_run_that_refused_nothing_exits_zero(monkeypatch: pytest.MonkeyPat
 def test_the_refusal_list_is_capped_and_the_per_table_counts_stay_exact(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """🔴 **K5's drill printed a 14,176-line report.**."""
+    """An uncapped report is thousands of lines no operator reads."""
     refusals = tuple(
         RestoreRefusal(
             table="watch_states",
@@ -505,23 +470,15 @@ def test_the_refusal_list_is_capped_and_the_per_table_counts_stay_exact(
 def test_a_rung_three_refusal_names_the_flag_rather_than_an_impossible_errand(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """🔴 **`enrich or import what the lines above name` is false for the one rung a correctly.
+    """An enrich-or-import errand is impossible for the raw-id rung.
 
-    rebuilt catalog fails on.**.
-
-    K2's ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id, and the
+    The ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id, and the
     third is a *check on the target* rather than a key. A title reaches it only
-    by carrying neither provider id -- on the deployment this project measures,
-    an unmatched **stub** the ingest ladder created, which is in no IMDb dump,
-    has no TMDb id to enrich by, and gets a fresh UUID from any rebuild. The
-    old sentence sent an operator to run an importer that cannot help.
-    Measured 2026-08-25: 6 such titles of 1,272,891, accounting for 304
-    `media_items` rows, which refused a file carrying 3,347 resolved watch
-    states.
-
-    The two arms are asserted over **one** report carrying both kinds, because
-    a message that named the flag for every refusal would be the mirror defect
-    -- telling an operator to skip rows an importer really would fix.
+    by carrying neither provider id -- an unmatched stub the ingest ladder
+    created, which is in no IMDb dump, has no TMDb id to enrich by, and gets a
+    fresh UUID from any rebuild -- so no importer can help. The two arms are
+    asserted over **one** report carrying both kinds, because a message naming
+    the flag for every refusal would be the mirror defect.
     """
     configured(monkeypatch)
     monkeypatch.setattr(
@@ -596,15 +553,12 @@ def test_a_refusal_that_names_a_provider_id_does_not_advertise_the_flag(
 
 
 def test_skip_unresolvable_is_off_unless_it_is_asked_for() -> None:
-    """The default is the guarantee.
+    """The default is the guarantee, so it is pinned as a parsed value.
 
-    so it is pinned as a parsed value rather than left to the arm that reads it.
-
-    *"Refuses rather than half-applies"* is this command's headline promise;
-    the flag is an operator saying they accept the loss. A default that
-    flipped -- by a `default=True`, by a `store_false`, by anything -- would
-    turn every refusal in this file into a silent skip, and no other case here
-    asserts the parsed value.
+    "Refuses rather than half-applies" is this command's headline promise; the
+    flag is an operator saying they accept the loss. A default that flipped --
+    by a `default=True`, by a `store_false`, by anything -- would turn every
+    refusal in this file into a silent skip, and no other case asserts it.
     """
     assert parse_args(["restore", str(ARTIFACT)]).skip_unresolvable is False
     assert parse_args(["restore", str(ARTIFACT), "--skip-unresolvable"]).skip_unresolvable is True

@@ -26,8 +26,8 @@ _PEOPLE = {
     "other_person": 93_000_073,
 }
 
-# **`ORDER BY id`, because `m09a` gives this table no rank column and that is
-# deliberate** -- an alias is a set, not a ranking.
+# `ORDER BY id`: this table has no rank column, deliberately -- an alias is a
+# set, not a ranking.
 _READ_SEARCH_NAMES = """
 SELECT name FROM title_search_names
 WHERE title_id = CAST(:title_id AS uuid) AND kind = :kind
@@ -149,9 +149,9 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
     ) -> None:
         """Postgres-only: the fake is a dict and has nothing to violate.
 
-        `fk_credits_title_id_titles`. A raw `IntegrityError` escaping here is
-        the one thing ADR-0009 says must never happen -- the only way a caller
-        could handle it is to import sqlalchemy itself.
+        `fk_credits_title_id_titles`. A raw `IntegrityError` escaping here is the
+        one thing that must never happen -- the only way a caller could handle it
+        is to import sqlalchemy itself.
         """
         orphan = new_id()
         with pytest.raises(RepositoryConflict):
@@ -200,11 +200,11 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
     async def test_a_negative_billing_order_is_a_port_error(
         self, repository: PostgresCreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:
-        """`ck_credits_billing_order_non_negative`, which fires at the `INSERT ...
+        """`ck_credits_billing_order_non_negative` fires where SQLAlchemy can translate it.
 
-        SELECT` rather than during the `COPY` -- the staging table carries no
-        constraints, deliberately, so the violation surfaces one statement later where
-        SQLAlchemy can translate it.
+        The violation surfaces at the `INSERT ... SELECT` rather than during the
+        `COPY` -- the staging table carries no constraints, deliberately, so it lands
+        one statement later.
 
         Constructed by bypassing the model, because `Credit`'s own `ge=0`
         refuses it first -- which is exactly why the CHECK exists: the bulk
@@ -248,15 +248,13 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
 
         A credited person's name has no locale -- the same person is credited
         under the same string in every region -- so `region` and `language` are
-        NULL on every row this writer produces, and the port docstring says so.
-        They exist for group T's `title.akas` half, where without them a French
-        and a Brazilian alias for one film are indistinguishable rows.
+        NULL on every row this writer produces. They exist for the `title.akas`
+        half, where without them a French and a Brazilian alias for one film are
+        indistinguishable rows.
 
-        The wrong implementation this kills is a writer that fills them with
-        something plausible-looking -- `'en'` from the enrichment locale, say.
-        A NULL means *"not specific to a region"*, which is a different fact
-        from any code, and once written a code cannot be told from one IMDb
-        supplied.
+        Kills a writer that fills them with something plausible-looking -- `'en'`
+        from the enrichment locale, say. A NULL means *"not specific to a region"*,
+        which is a different fact from any code.
         """
         await repository.replace_for_titles(
             [title_id],
@@ -284,9 +282,7 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         title_id: uuid.UUID,
         lead_person: uuid.UUID,
     ) -> None:
-        """`ck_title_search_names_name_within_btree_bound`.
-
-        which is a **named** CHECK precisely so this refusal is classifiable.
+        """`ck_title_search_names_name_within_btree_bound` is named so it is classifiable.
 
         `titles.credit_names` is a `text[]` and holds any string at all, so the
         bound is the one place the two spellings of this fact can disagree --

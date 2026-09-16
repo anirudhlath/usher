@@ -38,11 +38,10 @@ class TitleMatchRepositoryContract:
     async def test_provider_id_lookup_is_namespaced_by_kind(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """ADR-0011 in batch form.
+        """A TMDb id is only unique within its kind, and this is that in batch form.
 
-        26,968 TMDb ids are live in both spaces (measured), so an implementation keyed
-        on the bare number returns one of the two arbitrarily -- and it is a coin flip
-        which.
+        The same number is live in the movie and the series space, so an implementation
+        keyed on the bare number returns one of the two arbitrarily.
         """
         movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
         series = await catalog.given_title(
@@ -57,9 +56,7 @@ class TitleMatchRepositoryContract:
     async def test_a_tmdb_ref_without_a_kind_resolves_to_nothing(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """The other half of ADR-0011.
-
-        and the one an implementation is likely to get wrong by being helpful.
+        """The other half, and the one an implementation gets wrong by being helpful.
 
         "Which title has tmdb_id 90000550" has no answer; returning the movie because it
         happened to be indexed first attaches a series' watch history to a film.
@@ -79,13 +76,11 @@ class TitleMatchRepositoryContract:
     async def test_an_imdb_ref_that_carries_a_kind_is_still_answered(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """`tt` ids are one global namespace.
-
-        so a kind on an IMDb ref is redundant rather than wrong.
+        """`tt` ids are one global namespace, so a kind on an IMDb ref is redundant.
 
         An implementation that filtered on it would drop every match whose catalog kind
         disagrees with what a source guessed -- and a source that reports an episode's
-        `tt` id under `kind=movie` is exactly the shape M4 has to survive.
+        `tt` id under `kind=movie` is a shape ingest has to survive.
         """
         title = await catalog.given_title(
             kind=TitleKind.SERIES, imdb_id="tt99000030", name="A Synthetic Series"
@@ -96,10 +91,7 @@ class TitleMatchRepositoryContract:
     async def test_a_tvdb_ref_resolves(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """50,793 titles carry one after M2's crosswalk.
-
-        and a source that reports only a TVDB id is a real shape.
-        """
+        """A source that reports only a TVDB id is a real shape."""
         title = await catalog.given_title(
             kind=TitleKind.SERIES, tvdb_id=91000030, name="A Synthetic Series"
         )
@@ -109,10 +101,11 @@ class TitleMatchRepositoryContract:
     async def test_a_batch_lookup_answers_every_probe_it_was_given(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """An implementation that silently drops refs it found nothing for leaves the caller.
+        """Every probe gets an answer, including a negative one.
 
-        unable to tell "no match" from "not asked", and the review queue then fills with
-        items that were matched.
+        An implementation that silently drops refs it found nothing for leaves the
+        caller unable to tell "no match" from "not asked", and the review queue then
+        fills with items that were matched.
         """
         await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
         known = tmdb("90000550", TitleKind.MOVIE)
@@ -127,18 +120,14 @@ class TitleMatchRepositoryContract:
         """A source is free to report `ProviderIds.Tmdb: "unknown"`.
 
         That is a matching failure, not a pipeline failure, and an implementation that
-        cast it straight into an integer column aborts a whole batch of 5,000 items over
-        one bad string.
+        cast it straight into an integer column aborts a whole page over one bad string.
         """
         assert await repository.match_by_provider_ids([tmdb("unknown", TitleKind.MOVIE)]) == {}
 
     async def test_a_bad_ref_does_not_take_its_batch_down_with_it(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """The point of the case above, stated as the consequence that matters.
-
-        the other 4,999 items in the page still match.
-        """
+        """The consequence that matters: every other item in the page still matches."""
         title = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
         good = tmdb("90000550", TitleKind.MOVIE)
         resolved = await repository.match_by_provider_ids(
@@ -151,9 +140,8 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """Emby reports whatever `ProviderIds` a library's scrapers wrote.
 
-        including ones this catalog has no column for.
-
-        "None that I can tell" is the honest answer; raising would fail the batch.
+        Including ones this catalog has no column for: "none that I can tell" is the
+        honest answer, and raising would fail the batch.
         """
         ref = ProviderRef(provider="zap2it", value="EP001", kind=None)
         assert await repository.match_by_provider_ids([ref]) == {}
@@ -163,7 +151,7 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """`list_items`' contract permits the same item twice in one walk.
 
-        so a page really does carry the same ref twice.
+        A page really does carry the same ref twice.
         """
         title = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
         ref = tmdb("90000550", TitleKind.MOVIE)
@@ -239,9 +227,8 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """The +/-1 window is what *creates* most ambiguity.
 
-        a 1963 and a 1964 release of the same name are one probe's two candidates.
-
-        An implementation that counted exact-year matches and then widened the window to
+        A 1963 and a 1964 release of the same name are one probe's two candidates, and
+        an implementation that counted exact-year matches and then widened the window to
         pick a winner is confidently wrong.
         """
         await catalog.given_title(kind=TitleKind.MOVIE, name="The Killers", year=1964)
@@ -255,9 +242,8 @@ class TitleMatchRepositoryContract:
         """The ordinary shape of a real page, and the third leg of the ambiguity partition.
 
         A batch is mostly films of the same kind from overlapping years, so `PARTITION
-        BY` without `name` merges the whole page into a handful of partitions and
-        reports every item ambiguous -- 1,126,674 items straight to the review queue,
-        with each individual match perfectly confident.
+        BY` without `name` merges the whole page into a handful of partitions and sends
+        every item to the review queue with each individual match perfectly confident.
         """
         first = await catalog.given_title(kind=TitleKind.MOVIE, name="Arrival", year=2016)
         second = await catalog.given_title(kind=TitleKind.MOVIE, name="Moonlight", year=2016)
@@ -274,15 +260,12 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """The ambiguity partition has to carry `kind`, and only a *batch* can show it.
 
-        The join already filters `t.kind = p.kind`, so within one probe's own
-        candidates the kind is constant and dropping it from the
-        `PARTITION BY` changes nothing -- which is exactly why the
-        single-probe case above passes either way (measured: that mutation
-        survived the whole suite). It bites when one batch carries two probes
-        that differ only in kind, which every real walk does: 94,438 movies
-        and 32,409 series come off the same listing. Their rows then merge
-        into one partition of two and both perfectly confident matches are
-        reported ambiguous.
+        The join already filters `t.kind = p.kind`, so within one probe's own candidates
+        the kind is constant and dropping it from the `PARTITION BY` changes nothing --
+        which is why the single-probe case above passes either way. It bites when one
+        batch carries two probes that differ only in kind, which every real walk does:
+        their rows merge into one partition of two and both perfectly confident matches
+        are reported ambiguous.
         """
         movie = await catalog.given_title(kind=TitleKind.MOVIE, name="Fargo", year=1996)
         series = await catalog.given_title(kind=TitleKind.SERIES, name="Fargo", year=1996)
@@ -326,7 +309,7 @@ class TitleMatchRepositoryContract:
     async def test_a_probe_with_no_year_resolves_to_nothing(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """A bare name is not an identity claim at 1,271,138 titles."""
+        """A bare name is not an identity claim at catalog scale."""
         await catalog.given_title(kind=TitleKind.MOVIE, name="Solaris", year=1972)
         probe = NameYearProbe(name="Solaris", year=None, kind=TitleKind.MOVIE)
         assert probe not in await repository.match_by_name_year([probe])
@@ -334,10 +317,7 @@ class TitleMatchRepositoryContract:
     async def test_a_title_with_no_year_is_never_matched_by_name_alone(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """The mirror image.
-
-        and the one a `COALESCE` or an `IS NOT DISTINCT FROM` in the join condition
-        would break.
+        """The mirror image, and what a `COALESCE` in the join condition would break.
 
         `titles.year` is nullable and plenty of IMDb skeletons carry no year; a probe
         carrying 2016 must not match one of them just because the name agrees.
@@ -394,7 +374,7 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """A page carrying a film and its two alternate cuts names one title three times.
 
-        and `list_items`' contract permits the same item twice on top of that.
+        `list_items`' contract permits the same item twice on top of that.
         """
         known = await catalog.given_title(kind=TitleKind.MOVIE, name="Known")
         assert await repository.enrichment_states([known, known, known]) == {

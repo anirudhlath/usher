@@ -38,7 +38,7 @@ async def test_a_second_run_row_for_one_dataset_is_a_port_error(
 async def test_the_session_survives_a_conflict_for_the_callers_next_statement(
     postgres_url: str,
 ) -> None:
-    """Pins the bug Group F found live against a real two-process race.
+    """Pins the bug against a real two-process race.
 
     `save()` translated the `uq_import_runs_dataset` IntegrityError to
     `RepositoryConflict` correctly (see the test above), but never rolled back -- so
@@ -50,7 +50,7 @@ async def test_the_session_survives_a_conflict_for_the_callers_next_statement(
     try:
         async with factory() as winner, factory() as loser:
             # "winner" claims the dataset first and really commits -- the
-            # process that won the race in Group F's live repro.
+            # process that won the race.
             winner_run = await PostgresImportRunRepository(winner).start("race.dataset", "etag-1")
             await winner.commit()
 

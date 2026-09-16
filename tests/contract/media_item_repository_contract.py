@@ -66,8 +66,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """Rowcount alone reports their sum.
 
-        so a nightly re-sync would be indistinguishable from a first one and PRD 10's
-        "library growth per week" panel would be a straight line.
+        So a nightly re-sync would be indistinguishable from a first one, and
+        PRD 10's "library growth per week" panel would be a straight line.
         """
         first = await repository.upsert_many([item(source_id, "movie-1")])
         assert (first.inserted, first.updated) == (1, 0)
@@ -77,10 +77,10 @@ class MediaItemRepositoryContract:
     async def test_upsert_many_of_nothing_is_a_no_op(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """A delta walk that found nothing new is the common case.
+        """A delta walk that found nothing new is the common case, not an edge one.
 
-        not an edge one, and a `COPY` of zero records followed by an upsert over an
-        empty staging table is pure round-trip cost per empty batch.
+        A `COPY` of zero records followed by an upsert over an empty staging
+        table is pure round-trip cost per empty batch.
         """
         result = await repository.upsert_many([])
         assert (result.inserted, result.updated) == (0, 0)
@@ -89,12 +89,11 @@ class MediaItemRepositoryContract:
     async def test_upsert_many_tolerates_a_duplicate_within_one_batch(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """`SourceAdapter.list_items` explicitly permits the same item twice in one walk.
+        """`SourceAdapter.list_items` permits the same item twice in one walk.
 
-        (overlapping upstream pages).
-
-        An implementation without `SELECT DISTINCT ON` raises
-        `CardinalityViolationError` against real Postgres -- measured, not defensive.
+        Overlapping upstream pages do it. An implementation without
+        `SELECT DISTINCT ON` raises `CardinalityViolationError` against real
+        Postgres.
         """
         result = await repository.upsert_many(
             [item(source_id, "movie-1"), item(source_id, "movie-1")]
@@ -107,11 +106,9 @@ class MediaItemRepositoryContract:
     ) -> None:
         """Deduplication has to pick a *deterministic* winner.
 
-        not whichever row the planner reached first: a resumed walk re-reads a page it
-        already sent, so the later copy is the fresher read.
-
-        Without an explicit `ORDER BY` in the `DISTINCT ON` this passes or fails by
-        luck.
+        Not whichever row the planner reached first: a resumed walk re-reads a
+        page it already sent, so the later copy is the fresher read. Without an
+        explicit `ORDER BY` in the `DISTINCT ON` this passes or fails by luck.
         """
         await repository.upsert_many(
             [
@@ -128,11 +125,10 @@ class MediaItemRepositoryContract:
     ) -> None:
         """The nightly walk runs before the match pass has resolved everything.
 
-        so it upserts with `title_id=None` for items a human resolved yesterday.
-
-        An implementation whose `DO UPDATE SET title_id = excluded.title_id` fires
-        unconditionally erases every manual resolution, the same night it was made, with
-        nothing reporting it.
+        So it upserts with `title_id=None` for items a human resolved yesterday,
+        and an implementation whose `DO UPDATE SET title_id = excluded.title_id`
+        fires unconditionally erases every manual resolution the same night it
+        was made, with nothing reporting it.
         """
         await repository.upsert_many([item(source_id, "movie-1", title_id=title_id)])
         await repository.upsert_many([item(source_id, "movie-1", title_id=None)])
@@ -153,12 +149,11 @@ class MediaItemRepositoryContract:
     async def test_upsert_many_does_not_blank_a_stored_added_at(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """`added_at` is optional on the way in and a source that stops reporting it.
+        """`added_at` is optional on the way in, and absence must not erase it.
 
-        or a delta walk whose payload omits it -- must not erase when a file arrived.
-
-        Same `COALESCE` as `title_id`, and the one other column on this row that is a
-        fact rather than an observation.
+        A source that stops reporting it, or a delta walk whose payload omits
+        it, must not erase when a file arrived. Same `COALESCE` as `title_id`,
+        the one other column here that is a fact rather than an observation.
         """
         await repository.upsert_many([item(source_id, "movie-1")])
         await repository.upsert_many([item(source_id, "movie-1", added_at=None)])
@@ -189,8 +184,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """A household with two Embys syncs them independently.
 
-        and a sweep keyed on `last_seen_at` alone retracts the other one's whole library
-        every night.
+        A sweep keyed on `last_seen_at` alone retracts the other one's whole
+        library every night.
         """
         await repository.upsert_many([item(other_source_id, "theirs", last_seen_at=EARLIER)])
         await repository.mark_unseen_unavailable(
@@ -219,12 +214,11 @@ class MediaItemRepositoryContract:
     async def test_marking_unseen_unavailable_refuses_to_retract_a_whole_library(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """A walk that *completes* and returns almost nothing.
+        """A walk that *completes* and returns almost nothing is not a deletion.
 
-        an unmounted drive, a library removed by accident.
-
-        The adapter cannot tell that from a mass deletion and Usher cannot undo one, so
-        the sweep declines and changes nothing. ADR-0015.
+        An unmounted drive, or a library removed by accident, looks the same to
+        the adapter as a mass deletion, and Usher cannot undo one -- so the
+        sweep declines and changes nothing.
         """
         await repository.upsert_many(
             [item(source_id, f"movie-{index}", last_seen_at=EARLIER) for index in range(10)]
@@ -258,11 +252,9 @@ class MediaItemRepositoryContract:
     async def test_marking_unseen_unavailable_is_a_no_op_when_nothing_is_stale(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """A guard expressed as `would_retract / total > ceiling` divides by zero on an empty.
+        """A ratio guard divides by zero on an empty source; a count comparison does not.
 
-        source; one expressed as a count comparison does not.
-
-        This case is here because the first spelling is the obvious one.
+        This case is here because the ratio is the obvious spelling.
         """
         result = await repository.mark_unseen_unavailable(
             source_id, seen_since=RUN_AT, max_retract_fraction=0.25
@@ -272,10 +264,11 @@ class MediaItemRepositoryContract:
     async def test_a_second_sweep_does_not_re_retract(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """`retracted` counts rows this call changed, not rows that are currently unavailable.
+        """`retracted` counts rows this call changed, not rows already unavailable.
 
-        otherwise every nightly run after a real deletion reports the same retraction
-        again, and the guard trips on history rather than on what just happened.
+        Otherwise every nightly run after a real deletion reports the same
+        retraction again, and the guard trips on history rather than on what
+        just happened.
         """
         await repository.upsert_many(
             [item(source_id, f"movie-{index}", last_seen_at=EARLIER) for index in range(4)]
@@ -294,9 +287,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """The guard counts what *this* run would change.
 
-        not how much of the source is already unavailable.
-
-        An operator who has looked at a refusal and re-run with the ceiling
+        Not how much of the source is already unavailable. An operator who has
+        looked at a refusal and re-run with the ceiling
         raised has accepted the retraction; every nightly run after that must
         go back to succeeding. An implementation whose count omits
         `available` keeps measuring yesterday's retraction against today's
@@ -351,9 +343,9 @@ class MediaItemRepositoryContract:
     async def test_unmatched_items_sort_dated_before_undated(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """`ORDER BY added_at DESC` puts NULLs *first* in Postgres unless `NULLS LAST` is.
+        """`ORDER BY added_at DESC` puts NULLs *first* unless `NULLS LAST` is spelled out.
 
-        spelled out, so an item the source could not date would head the review queue
+        An item the source could not date would otherwise head the review queue
         ahead of everything it could.
         """
         await repository.upsert_many(
@@ -370,7 +362,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """An operator resolving a backlog walks it a page at a time.
 
-        and an unstable order silently shows the same item twice while hiding another.
+        An unstable order silently shows the same item twice while hiding
+        another.
         """
         await repository.upsert_many(
             [
@@ -388,15 +381,12 @@ class MediaItemRepositoryContract:
     async def test_the_review_queue_breaks_ties_on_id(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """A source that imported a thousand files in one second gives them all the same.
+        """A thousand files imported in one second share one `added_at`.
 
-        `added_at`, at which point the tiebreak is the *only* thing making paging
-        stable.
-
-        Asserted as an ordering property rather than by paging a big enough set to catch
-        Postgres reordering, which would be a flaky test by construction: Python's own
-        `sort` is stable, so a missing tiebreak is invisible to the fake, and Postgres's
-        is not.
+        The tiebreak is then the *only* thing making paging stable. Asserted as
+        an ordering property rather than by paging a set big enough to catch
+        Postgres reordering, which would be flaky by construction: Python's own
+        `sort` is stable, so a missing tiebreak is invisible to the fake.
         """
         same_instant = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
         await repository.upsert_many(
@@ -412,7 +402,7 @@ class MediaItemRepositoryContract:
     ) -> None:
         """`GET /admin/unmatched` has no source in its path (PRD 07).
 
-        so the default has to be every source rather than none.
+        So the default has to be every source rather than none.
         """
         await repository.upsert_many([item(source_id, "a"), item(other_source_id, "b")])
         assert len(await repository.list_unmatched()) == 2
@@ -420,16 +410,12 @@ class MediaItemRepositoryContract:
     async def test_the_keyset_page_and_the_offset_page_are_one_order(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """`GET /admin/unmatched` pages by cursor and `usher unmatched` pages by offset.
+        """The cursor form and the offset form page the same queue in one order.
 
-        over the same queue.
-
-        Two reads with two `ORDER BY`s is how an operator resolving from the CLI and an
-        operator resolving from the API stop seeing the same backlog -- so the orders
-        are one definition, and this is the case that says so from the outside.
-
-        Seeded with both dated and undated items, because `NULLS LAST` is the
-        half of the order the two forms could most plausibly disagree about.
+        Two reads with two `ORDER BY`s is how an operator resolving from the CLI
+        and one resolving from the API stop seeing the same backlog. Seeded with
+        both dated and undated items, because `NULLS LAST` is the half of the
+        order the two forms could most plausibly disagree about.
         """
         await repository.upsert_many(
             [
@@ -450,7 +436,7 @@ class MediaItemRepositoryContract:
     async def test_a_page_boundary_inside_the_undated_group_does_not_drop_the_rest_of_it(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
-        """ADR-0034's third arm, and the one the refuted spelling loses silently.
+        """The third arm of the cursor, and the one a wrong spelling loses silently.
 
         Two dated items and three undated ones at `limit=3` puts the first
         page's boundary on an **undated** row. Resuming from there, the row
@@ -490,9 +476,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """The `added_at IS NULL` disjunct of the *dated* arm.
 
-        which is a separate clause from the undated branch above and fails separately.
-
-        Undated items sort last, so every one of them follows every dated one
+        A separate clause from the undated branch above, and it fails
+        separately. Undated items sort last, so every one of them follows every dated one
         -- and a predicate that compared only `added_at < :boundary` would
         answer nothing for them, because a NULL is not less than anything.
         This is the review queue's most damaging shape: an item a source could
@@ -553,10 +538,9 @@ class MediaItemRepositoryContract:
         other_source_id: uuid.UUID,
         title_id: uuid.UUID,
     ) -> None:
-        """The two predicates `list_unmatched` already carries.
+        """The two predicates `list_unmatched` already carries, on the keyset form.
 
-        asserted on the keyset form as well: they are a second statement, not a second
-        clause on the first one.
+        They are a second statement, not a second clause on the first one.
 
         Unscoped it spans every source, which is what `GET /admin/unmatched` -- no
         source in its path -- asks for.
@@ -590,7 +574,7 @@ class MediaItemRepositoryContract:
     async def test_series_titles_are_resolved_in_one_batch(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """999,827 episodes means this cannot be one lookup per episode."""
+        """A library of episodes means this cannot be one lookup per episode."""
         await repository.upsert_many([item(source_id, "series-1", title_id=title_id)])
         resolved = await repository.resolve_series_titles(source_id, ["series-1", "series-2"])
         assert resolved == {"series-1": title_id}
@@ -617,10 +601,10 @@ class MediaItemRepositoryContract:
     async def test_targets_are_resolved_in_one_batch(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """The read a watch-state walk makes once per batch rather than once per state.
+        """The read a watch-state walk makes once per batch, not once per state.
 
-        `watch_state()` yields one record per item and this deployment has 1,126,674 of
-        them.
+        `watch_state()` yields one record per item, and a library has as many
+        items as it has files.
         """
         await repository.upsert_many([item(source_id, "movie-1", title_id=title_id)])
         resolved = await repository.resolve_targets(source_id, ["movie-1", "movie-2"])
@@ -633,11 +617,10 @@ class MediaItemRepositoryContract:
         title_id: uuid.UUID,
         episode_id: uuid.UUID,
     ) -> None:
-        """An episode's row holds its series' title *and* its episode, and this must report both.
+        """An episode's row holds its series' title *and* its episode; both are reported.
 
-        A resolver that answered with the title alone would merge every episode of a
-        show into one watch state on the series -- 999,827 episodes collapsing onto
-        32,409 rows.
+        A resolver that answered with the title alone would merge every episode
+        of a show into one watch state on the series.
         """
         await repository.upsert_many(
             [item(source_id, "episode-1", title_id=title_id, episode_id=episode_id)]
@@ -665,7 +648,7 @@ class MediaItemRepositoryContract:
     ) -> None:
         """Two Emby servers can address different films by the same `external_id`.
 
-        and merging one household's watch state against the other's film is
+        Merging one household's watch state against the other's film is
         unrecoverable.
         """
         await repository.upsert_many([item(other_source_id, "movie-1", title_id=title_id)])
@@ -679,9 +662,7 @@ class MediaItemRepositoryContract:
     async def test_a_target_resolves_back_to_the_id_its_source_uses(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """`list_needing_history` answers in canonical ids and `get_watch_state` asks in the.
-
-        source's own.
+        """`list_needing_history` answers in canonical ids, `get_watch_state` asks in the source's.
 
         Without this the backfill has no way across.
         """
@@ -698,9 +679,9 @@ class MediaItemRepositoryContract:
     ) -> None:
         """An episode's row carries its series' `title_id`.
 
-        so a reverse lookup that matched on that column alone would answer a series' own
-        watch state with an episode's file -- and then backfill the series' history from
-        one episode's play count.
+        So a reverse lookup matching on that column alone would answer a series'
+        own watch state with an episode's file, and then backfill the series'
+        history from one episode's play count.
         """
         await repository.upsert_many(
             [
@@ -736,21 +717,14 @@ class MediaItemRepositoryContract:
     ) -> None:
         """One walk stamps every row it sees with the *run's* start instant.
 
-        so two copies of one film tie on `last_seen_at` in the common case rather than
-        the rare one.
-
-        Without a final tiebreak the winner is insertion order here and the planner
-        there.
-
-        **Two `upsert_many` calls, in this order, and that is what gives the
-        case teeth.** Inside one batch the staged upsert reads
-        `DISTINCT ON (source_id, external_id)`, which orders by
-        `external_id` on the way in -- so a single batch stores `copy-a`
-        first whatever order the list is in, a tie-broken read and an
-        arbitrary one agree, and dropping the tiebreak survives. Measured:
-        it did. Storing `copy-b` first puts heap order and `external_id`
-        order in genuine disagreement, which is what a real library does
-        anyway (two files added on different nights).
+        So two copies of one film tie on `last_seen_at` in the common case
+        rather than the rare one, and without a final tiebreak the winner is
+        insertion order here and the planner there. Two `upsert_many` calls in
+        this order is what gives the case teeth: inside one batch the staged
+        upsert reads `DISTINCT ON (source_id, external_id)` and stores `copy-a`
+        first whatever order the list is in, so a tie-broken read and an
+        arbitrary one agree. Storing `copy-b` first puts heap order and
+        `external_id` order in genuine disagreement.
         """
         await repository.upsert_many([item(source_id, "copy-b", title_id=title_id)])
         await repository.upsert_many([item(source_id, "copy-a", title_id=title_id)])
@@ -764,23 +738,18 @@ class MediaItemRepositoryContract:
         title_id: uuid.UUID,
         episode_id: uuid.UUID,
     ) -> None:
-        """The same rule on the branch that carries 89% of this library.
+        """The same rule on the branch that carries most of this library.
 
         Episodes are re-encoded and re-added exactly as films are, and the
-        episode branch is a *separate statement* with its own `ORDER BY` --
-        so ordering added to the title branch alone leaves the majority case
-        arbitrary. Measured: deleting the episode branch's entire `ORDER BY`
-        survived every other case in this file.
-
-        Three copies and three separate upserts, because both halves of the
-        order have to be observable at once and because a single batch
-        stores its rows in `external_id` order (its own `DISTINCT ON` key),
-        which is exactly the order under test and hides a missing one.
+        episode branch is a *separate statement* with its own `ORDER BY` -- so
+        ordering added to the title branch alone leaves the majority case
+        arbitrary. Three copies and three separate upserts, because both halves
+        of the order have to be observable at once and because a single batch
+        stores its rows in `external_id` order, which is the order under test.
         """
         # `aa-stale` sorts *first* deliberately: with a plausible name the
         # `external_id` key alone would pick the right row for the wrong
         # reason and `last_seen_at DESC` could be deleted unnoticed.
-        # Measured -- it was.
         for external_id, seen in (("aa-stale", EARLIER), ("copy-b", RUN_AT), ("copy-a", RUN_AT)):
             await repository.upsert_many(
                 [
@@ -799,10 +768,7 @@ class MediaItemRepositoryContract:
     async def test_a_target_this_source_does_not_have_is_absent(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """The normal state of a household with two sources.
-
-        a title one server holds and the other does not.
-        """
+        """The normal state of a household with two sources: one holds it, one does not."""
         assert (
             await repository.resolve_external_ids(
                 source_id, [MediaItemTarget(title_id=title_id, episode_id=None)]
@@ -851,10 +817,10 @@ class MediaItemRepositoryContract:
     async def test_list_for_title_puts_a_retracted_copy_last(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """An unordered read makes a detail screen shuffle its badges between refreshes for no.
+        """An unordered read shuffles a detail screen's badges between refreshes.
 
-        reason a user can see, and a bare `SELECT` promises nothing about row order --
-        M4 measured exactly that against real Postgres at three queue depths.
+        A bare `SELECT` promises nothing about row order, and real Postgres
+        does reorder.
         """
         await repository.upsert_many(
             [item(source_id, "stale", title_id=title_id, last_seen_at=RUN_AT)]
@@ -881,10 +847,8 @@ class MediaItemRepositoryContract:
 
         Two *available* copies is the ordinary shape -- a 4K and an HD file of
         one film -- and the case above cannot see `last_seen_at DESC` at all,
-        because its two rows already differ on `available`. Measured:
-        deleting the freshness key survived the whole file until this case
-        existed. Stored oldest-first, so insertion order and the answer
-        disagree.
+        because its two rows already differ on `available`. Stored oldest-first,
+        so insertion order and the answer disagree.
         """
         await repository.upsert_many(
             [item(source_id, "old", title_id=title_id, last_seen_at=EARLIER)]
@@ -898,9 +862,9 @@ class MediaItemRepositoryContract:
     ) -> None:
         """One walk stamps every row it sees with the run's own start instant.
 
-        so two copies of one film tie on `last_seen_at` in the common case rather than
-        the rare one, and the tiebreak is then the only thing making the answer stable
-        between two refreshes of one screen.
+        So two copies of one film tie on `last_seen_at` in the common case, and
+        the tiebreak is then the only thing making the answer stable between two
+        refreshes of one screen.
         """
         await repository.upsert_many(
             [item(source_id, "copy-a", title_id=title_id, last_seen_at=EARLIER)]
@@ -919,18 +883,14 @@ class MediaItemRepositoryContract:
         title_id: uuid.UUID,
         episode_id: uuid.UUID,
     ) -> None:
-        """**This is what bounds the read**.
-
-        and it is a correctness rule before it is a scale one.
+        """What bounds the read, and a correctness rule before it is a scale one.
 
         An episode's row carries its series' `title_id` as well as its own
         `episode_id` (`IngestService` writes both, deliberately: a client
-        browsing a season wants each). So a read on `title_id` alone answers
-        a *series* with one row per episode file -- 999,827 of the one
-        measured source's 1,126,789 items are episodes -- and PRD 07's
-        `availability` array would carry a badge per episode instead of one
-        per source. Same asymmetry `resolve_external_ids`' title branch
-        already documents, one method over.
+        browsing a season wants each). So a read on `title_id` alone answers a
+        *series* with one row per episode file, and PRD 07's `availability`
+        array would carry a badge per episode instead of one per source. Same
+        asymmetry `resolve_external_ids`' title branch already documents.
         """
         await repository.upsert_many(
             [
@@ -944,10 +904,7 @@ class MediaItemRepositoryContract:
     async def test_list_for_title_answers_empty_for_a_title_on_no_source(
         self, repository: MediaItemRepository
     ) -> None:
-        """The catalog holds 1,271,138 titles and the one measured source holds 1,126,789 items.
-
-        most of them episodes -- so the great majority of titles are on no source at
-        all.
+        """The great majority of catalog titles are on no source at all.
 
         A normal answer, not a missing row.
         """
@@ -965,8 +922,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """`list_for_title`'s counterpart, for `POST /episodes/{id}/play`.
 
-        `list_for_title` carries `AND episode_id IS NULL`, which is exactly what makes
-        it useless for an episode's own copies.
+        `list_for_title` carries `AND episode_id IS NULL`, which is exactly what
+        makes it useless for an episode's own copies.
         """
         await repository.upsert_many(
             [
@@ -986,13 +943,10 @@ class MediaItemRepositoryContract:
         title_id: uuid.UUID,
         episode_id: uuid.UUID,
     ) -> None:
-        """Same ordering property `list_for_title` pins.
+        """Same ordering property `list_for_title` pins, on the episode statement.
 
-        on the statement that answers an episode's own copies -- an unordered read makes
-        an episode's detail screen shuffle its badges between refreshes for no reason a
-        user can see.
-
-        The retracted copy (`stale`) is the *fresher* of the two, so
+        An unordered read makes an episode's detail screen shuffle its badges
+        between refreshes. The retracted copy (`stale`) is the *fresher* of the two, so
         `available DESC` is the only key that can put the available one
         first -- with `last_seen_at DESC` alone the answer reverses. Both
         rows are swept (their `last_seen_at`s both predate the cutoff), then
@@ -1083,9 +1037,8 @@ class MediaItemRepositoryContract:
     ) -> None:
         """Same non-HOT-update mechanism as `list_for_title`'s sibling case.
 
-        see that case's docstring for the full reasoning.
-
-        `copy-a` is re-upserted last and its `last_seen_at` has to *change* (dropped
+        See that case for the full reasoning. `copy-a` is re-upserted last and
+        its `last_seen_at` has to *change* (dropped
         here, so it defaults back to `RUN_AT` off `EARLIER`), which moves it in
         `ix_media_items_sweep`'s key and forces a new index entry; without that,
         Postgres keeps the original one and the read stays in insertion order, where a
@@ -1126,7 +1079,7 @@ class MediaItemRepositoryContract:
     ) -> None:
         """The ordinary answer for an episode with no copy on any configured source.
 
-        not a missing row -- `list_for_title`'s sibling case, one method over.
+        Not a missing row -- `list_for_title`'s sibling case, one method over.
         """
         assert await repository.list_for_episode(new_id()) == []
 
@@ -1137,19 +1090,14 @@ WINDOW_START = RUN_AT - timedelta(days=30)
 
 
 class MediaItemRepositoryRecentlyAddedContract:
-    """`list_recently_added`.
+    """`list_recently_added`, and the wrong implementations that look plausible.
 
-    and the wrong implementations that each return a populated, plausible row.
-
-    The distractor the front matter names for this provider is **an item with
-    the newest `last_seen_at` and the oldest `added_at`** -- which is every
-    item in the library on the morning after a walk, so an implementation
-    that reached for the wrong timestamp is green against any fixture that
-    does not seed one deliberately.
-
-    Subclasses provide `repository`, `source_id`, `title_id`,
-    `other_title_id`, `series_title_id` and `episode_ids`, where every id in
-    `episode_ids` belongs to `series_title_id`.
+    The distractor is an item with the newest `last_seen_at` and the oldest
+    `added_at` -- which is every item in the library on the morning after a
+    walk, so an implementation that reached for the wrong timestamp is green
+    against any fixture that does not seed one deliberately. Subclasses provide
+    `repository`, `source_id`, `title_id`, `other_title_id`, `series_title_id`
+    and `episode_ids`, where every id in the last belongs to `series_title_id`.
     """
 
     async def test_recently_added_orders_by_added_at_and_not_by_last_seen_at(
@@ -1159,11 +1107,9 @@ class MediaItemRepositoryRecentlyAddedContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """The named distractor, seeded.
+        """The distractor, seeded: added two years ago and seen one minute ago.
 
-        an item added two years ago and seen one minute ago, against an item added
-        yesterday and seen a day ago.
-
+        Against an item added yesterday and seen a day ago.
         `last_seen_at` is "when the walk last observed this file" and is
         `NOT NULL` with a `now()` default, so on any real deployment it is
         approximately the same recent instant for the entire library.
@@ -1204,9 +1150,7 @@ class MediaItemRepositoryRecentlyAddedContract:
     ) -> None:
         """An episode's MediaItem carries its series' `title_id`.
 
-        so a series added last night is one row per episode file -- 20,000 for the
-        measured pathological series, one card.
-
+        So a series added last night is one row per episode file, and one card.
         The wrong implementation this kills is no dedup at all, which returns
         a Recently Added row that is twenty thousand copies of one show and
         nothing else. `LIMIT` hides it: a limit of 12 returns 12 identical
@@ -1246,9 +1190,8 @@ class MediaItemRepositoryRecentlyAddedContract:
     ) -> None:
         """The dedup has to pick a *deterministic* winner.
 
-        and which one it picks is a product decision rather than a detail.
-
-        A season that landed last night on a show whose pilot has been on
+        Which one it picks is a product decision rather than a detail. A season
+        that landed last night on a show whose pilot has been on
         disk for two years is a *new arrival*, so the row reports the newest
         contributing file and sorts on it. Picking the oldest would bury
         every long-running series the household is actively collecting, at
@@ -1356,9 +1299,7 @@ class MediaItemRepositoryRecentlyAddedContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """`added_at` is nullable.
-
-        and a file a source cannot date is not evidence that it arrived this week.
+        """`added_at` is nullable, and an undated file is no evidence of arrival.
 
         `added_at >= :since` is NULL -- and therefore not true -- for such a
         row, so the exclusion is free. Asserted anyway, because the free
@@ -1416,22 +1357,16 @@ class MediaItemRepositoryRecentlyAddedContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """The outer sort is `added_at DESC`.
+        """The outer sort is `added_at DESC`, and `title_id DESC` alone satisfies the rest.
 
-        and every other case in this class is satisfied by `title_id DESC` alone.
-
-        Found by mutation: deleting `added_at DESC` from `_RECENTLY_ADDED`'s
-        outer `ORDER BY` **survived the whole suite**. Every multi-row case
-        here mints its ids in ascending order and its arrivals in ascending
-        recency, so id-descending order and recency order are exact reverses
-        and the two keys are indistinguishable. `new_id()` is a UUIDv7 and is
-        monotonic, so that coincidence is the default rather than bad luck.
-
-        This case arranges them to **agree**: the newest arrival is minted
-        first and therefore carries the *lower* id. The distractor is
-        `other_title_id` -- a two-year-old file whose only claim on the top of
-        the shelf is a larger UUID. An implementation ordering by id returns
-        it first, which is a Recently Added row led by the oldest thing in it.
+        Every other multi-row case here mints its ids in ascending order and its
+        arrivals in ascending recency, so id-descending order and recency order
+        are exact reverses and the two keys are indistinguishable; `new_id()` is
+        a monotonic UUIDv7, so that coincidence is the default rather than bad
+        luck. This case arranges them to **agree**: the newest arrival is minted
+        first and therefore carries the *lower* id, and the distractor is a
+        two-year-old file whose only claim on the top of the shelf is a larger
+        UUID.
         """
         await repository.upsert_many(
             [
@@ -1469,12 +1404,11 @@ class MediaItemRepositoryRecentlyAddedContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """No `user_id` and no `source_id`.
+        """No `user_id` and no `source_id`, because availability is household-wide.
 
-        availability is household-wide, so this is the one provider whose output is
-        identical for every member of the household and for every source it owns.
-
-        Worth an assertion rather than a comment, because the natural place
+        This is the one provider whose output is identical for every member of
+        the household and for every source it owns. Worth an assertion rather
+        than a comment, because the natural place
         to reach for a scope is the very next method along on this port --
         every other statement here is per-source.
         """

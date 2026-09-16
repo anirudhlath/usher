@@ -51,7 +51,7 @@ def test_a_search_document_reserves_credits_and_ships_them_empty() -> None:
     There is no `Person`, `Credit` or `Collection` table anywhere in `src/`; the only
     place credits physically exist is `raw_payloads.payload`, and assembling a search
     document out of a *provider's* JSON shape would put a TMDb-shaped concept in
-    `services/`. Reserved rather than repurposed, so the day M7 lands `Credit` filling
+    `services/`. Reserved rather than repurposed, so the day `Credit` lands, filling
     it is a migration rather than a port change.
     """
     document = SearchDocument(
@@ -119,7 +119,7 @@ def test_a_semantic_request_with_no_vector_is_refused_at_construction() -> None:
 
 
 def test_an_outcome_reports_semantic_coverage_beside_its_hits() -> None:
-    """Point 3 of "the one thing this milestone must not get wrong".
+    """Point 3 of "the one thing search must not get wrong".
 
     A title with no embedding is *absent from the semantic candidate list*, and RRF
     cannot tell "ranked last" from "never a candidate" -- so the fraction that had a

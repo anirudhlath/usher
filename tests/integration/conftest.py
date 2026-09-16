@@ -24,26 +24,14 @@ _ALEMBIC_INI = _THIS_DIR.parent.parent / "alembic.ini"
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Every test collected under tests/integration/ needs Docker (this directory's whole reason.
+    """Mark every test collected under tests/integration/, so none needs it by hand.
 
-    to exist -- see the module docstring).
+    `-m integration` / `-m "not integration"` then work as a marker-based equivalent
+    of the directory split, for tooling that would rather filter by `-m` than by path.
 
-    Marking it here, once, means Task 10's own literal test functions below don't each
-    need a hand-applied `@pytest.mark.integration`, and neither will any test a future
-    task adds to this directory. `pytest -m integration` / `pytest -m "not integration"`
-    then work as a marker-based equivalent of the tests/unit vs tests/integration
-    directory split, for tooling (Group F/G's CI) that would rather filter by `-m` than
-    by path.
-
-    `pytest_collection_modifyitems` is *not* directory-scoped the way a
-    fixture would be -- pytest calls every conftest.py's implementation of
-    this hook with the *entire* session's `items`, not just the ones
-    collected from this hook's own directory (verified directly: an
-    earlier, unguarded `for item in items: item.add_marker(...)` here
-    marked all ~194 tests "integration", including every test under
-    tests/unit/ -- `-m integration` selected the whole suite and
-    `-m "not integration"` selected nothing). The explicit path check below
-    is what actually scopes this to tests/integration/.
+    This hook is *not* directory-scoped the way a fixture is: pytest calls every
+    conftest's implementation with the entire session's `items`, so without the path
+    check below this would mark the unit tests as integration too.
     """
     for item in items:
         if item.path.is_relative_to(_THIS_DIR):
@@ -51,19 +39,14 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 def _upgrade_head(database_url: str) -> None:
-    """Runs the real migration chain against a freshly-started container.
+    """Run the real migration chain against a freshly-started container.
 
-    see the module docstring.
-
-    `env.py` (deliberately -- see its own docstring) reads the URL from
-    `usher.config.get_settings()`, never from `alembic.ini`, so driving it here means
-    setting the env vars a real `alembic upgrade head` invocation would have had,
-    exactly as far as `Settings` needs: `USHER_DATABASE_URL` and `USHER_SECRET_KEY`
-    (both required, neither has a default). Every `USHER_*`/`OTEL_*` variable is saved
-    and restored around the call -- the same isolation `tests/conftest.py`'s
-    `clean_environment` gives every test, which doesn't help here since this fixture
-    (session scope) runs before that one (function scope) ever does for the first test
-    that needs it.
+    `env.py` reads the URL from `usher.config.get_settings()` rather than from
+    `alembic.ini`, so driving it here means setting the env vars a real
+    `alembic upgrade head` would have had: `USHER_DATABASE_URL` and
+    `USHER_SECRET_KEY`. Every `USHER_*`/`OTEL_*` variable is saved and restored
+    around the call, because this session-scoped fixture runs before the
+    function-scoped `clean_environment` ever does.
     """
     saved = {key: value for key, value in os.environ.items() if key.startswith(("USHER_", "OTEL_"))}
     for key in saved:
@@ -88,16 +71,10 @@ def run_alembic(database_url: str, target: str, *, direction: str | None = None)
     directions against a throwaway database, which the session-scoped schema
     cannot survive.
 
-    **Pass `direction` whenever the target is a bare revision id.** Left to
-    infer, this reads `"base"` and `"-N"` as downgrades and *everything else*
-    as an upgrade -- so `run_alembic(url, "fe1d40c8b7a3")` against a database
-    already past that revision runs `upgrade`, which is a **silent no-op**,
-    and the caller then asserts against the schema it meant to leave. That is
-    not hypothetical: it is how
-    `test_a_full_down_and_up_cycle_restores_every_index` failed on the first
-    run after `ffa` landed, and the failure looked like a broken migration
-    rather than a broken harness. Same family as the `-q`/`-qq` and
-    `/tmp`-rootdir traps -- the command ran and measured nothing.
+    **Pass `direction` whenever the target is a bare revision id.** Left to infer,
+    this reads `"base"` and `"-N"` as downgrades and everything else as an upgrade,
+    so a bare revision id against a database already past it runs `upgrade` and is a
+    silent no-op -- the caller then asserts against the schema it meant to leave.
     """
     saved = {key: value for key, value in os.environ.items() if key.startswith(("USHER_", "OTEL_"))}
     for key in saved:
@@ -173,15 +150,11 @@ async def _restore_the_statistics(conn: AsyncConnection, tables: frozenset[str])
 async def _tables_pg_class_is_wrong_about(
     conn: AsyncConnection, forgiven: frozenset[str]
 ) -> dict[str, tuple[int, int]]:
-    """Each public table whose `reltuples` disagrees with its `count(*)`.
+    """Each public table whose `reltuples` disagrees with what it really holds.
 
-    against what it really holds.
-
-    Cheap on purpose: one query, and it returns nothing at all unless
-    something already looks wrong, so the `count(*)`s below are paid for only
-    when there is something to attribute. Tables never analyzed read
-    `reltuples = -1`, which is Postgres for "measure the file", and are not a
-    lie about anything.
+    Cheap on purpose: one query, returning nothing unless something already looks
+    wrong, so the `count(*)`s below are paid for only when there is something to
+    attribute. Tables never analyzed read `reltuples = -1` and are not a lie.
     """
     described = await conn.execute(
         text(
@@ -251,22 +224,16 @@ class Analyze(Protocol):
 
 @pytest.fixture
 def analyze(session: AsyncSession, _analyzed_tables: set[str]) -> Analyze:
-    """`ANALYZE`.
+    """`ANALYZE` for a test whose subject is a plan, plus the cleanup rollback misses.
 
-    for a test whose subject is a *plan*, with the cleanup the rollback does not do.
+    A test that asserts a plan establishes its own statistics. Without them the
+    planner sizes the relation off an empty `pg_class`, every candidate index costs
+    the same to four significant figures, and which one the assertion names is
+    decided by nothing the test controls.
 
-    **A test that asserts a plan establishes its own statistics.** Without
-    them the planner sizes the relation off an empty `pg_class`, every
-    candidate index costs the same to four significant figures, and which one
-    the assertion names is decided by nothing the test controls -- that is
-    both of #79's CI failures, and `test_the_availability_sweeps_update_uses_
-    its_index` failed **10 runs of 10** in isolation for exactly this reason
-    before it seeded a population and called this.
-
-    Use this rather than executing `ANALYZE` yourself: it registers the table
-    for the `VACUUM (ANALYZE)` that `session` runs after its rollback, which
-    is what keeps the statistics from becoming every later test's problem.
-    The guard in `session`'s teardown is what makes that non-optional.
+    Use this rather than executing `ANALYZE` yourself: it registers the table for the
+    `VACUUM (ANALYZE)` that `session` runs after its rollback, which keeps the
+    statistics from becoming every later test's problem.
     """
 
     async def run(*tables: str) -> None:
@@ -278,20 +245,11 @@ def analyze(session: AsyncSession, _analyzed_tables: set[str]) -> Analyze:
 
 
 A_DECISIVE_MARGIN = 2.0
-"""How much cheaper the asserted plan has to be than the best one without its
-index, before "the planner chose it" is a claim about the schema.
+"""How much cheaper the asserted plan has to be than the best one without its index.
 
-Two, because the measured margins are far above it and the number that matters
-is the one that separates *decided* from *tied*, not a percentile. On
-`pgvector/pgvector:pg17`, 2026-08-31: the availability sweep at 2,000 rows with
-50 stale costs **31.72** through `ix_media_items_sweep` and **129.09** through
-`uq_media_items_source_external` with the sweep index suspended -- **4.07x**.
-The same case at its old fixture size of fifty rows and no `ANALYZE` costs
-`0.14..8.16` **both** ways -- measured by suspending each candidate in turn, so
-that is a reading rather than an inference from the winner's cost -- which is
-the tie this constant exists to fail on. That reading also reproduces the CI
-failure byte for byte: `Index Scan using uq_media_items_source_external ...
-(cost=0.14..8.16 rows=1 width=7)`, `Index Cond` on `source_id` alone.
+Two, because the number that matters separates *decided* from *tied* rather than
+marking a percentile: at fixture scale and without statistics the candidates cost the
+same to four significant figures, and the assertion then reports a tie-break.
 """
 
 _A_ROOT_COST = re.compile(r"\(cost=[0-9.]+\.\.([0-9.]+) ")
@@ -311,26 +269,15 @@ def total_cost(plan: str) -> float:
 
 @asynccontextmanager
 async def index_suspended(session: AsyncSession, index: str) -> AsyncIterator[None]:
-    """Hide one index from the planner.
+    """Hide one index from the planner, so a plan assertion can price the alternative.
 
-    so a plan assertion can measure what the *alternative* costs.
+    "The planner chose the index I meant" is not a property of the schema unless the
+    runner-up is materially worse, and at fixture scale it routinely is not; asserting
+    the margin is what stops a later, smaller fixture from restoring the tie.
 
-    **"The planner chose the index I meant" is not a property of the schema
-    unless the runner-up is materially worse**, and at fixture scale it
-    routinely is not: #79's two CI failures are both plans where the chosen
-    and the asserted index cost the same to four significant figures, so the
-    assertion was reporting a tie-break. Asserting the *margin* is what stops
-    a future fixture -- trimmed from two thousand rows to fifty because the
-    suite got slow -- from silently restoring the tie under a green test.
-
-    `indisvalid = false` is how Postgres itself marks an index the planner
-    must ignore (it is the state a failed `CREATE INDEX CONCURRENTLY` leaves),
-    and a plain `UPDATE` on the catalog is transactional: the `SAVEPOINT` here
-    takes it back, and the enclosing `session` fixture's rollback would take
-    it back again. Verified directly on `pgvector/pgvector:pg17` -- the row
-    reads `indisvalid = t` again after the block, on this connection and on a
-    fresh one. Nothing writes to the table inside the block, so the index
-    being nominally invalid for its duration costs nothing.
+    `indisvalid = false` is how Postgres itself marks an index the planner must
+    ignore, and a plain `UPDATE` on the catalog is transactional: the `SAVEPOINT`
+    here takes it back, and `session`'s rollback would take it back again.
     """
     savepoint = await session.begin_nested()
     try:

@@ -1,4 +1,4 @@
-"""ADR-0030's `code` vocabulary, encoded rather than written down."""
+"""The `code` vocabulary, encoded rather than written down."""
 
 import ast
 import pathlib
@@ -19,9 +19,8 @@ from usher.config import Settings
 _REPO = pathlib.Path(__file__).parents[2]
 _API = _REPO / "src" / "usher" / "api"
 
-# The one member D4 landed against a real unreachable source, and the one
-# ADR-0030 says it may not rename: PRD 07's worked example of this envelope
-# is this code, spelled this way. Every scan in this file uses it as the
+# The one member the vocabulary may not rename: PRD 07's worked example of this
+# envelope is this code, spelled this way. Every scan in this file uses it as the
 # control, because a scan that finds it cannot be a scan that found nothing.
 _ANCHOR = "source_unavailable"
 
@@ -67,7 +66,7 @@ def _member_value(attr: str) -> str:
     """A `ProblemCode.<ATTR>` reference as the string it puts on the wire.
 
     An attribute the enum does not have is reported as its lower-cased name
-    rather than raising, so a router naming a member ADR-0030 never declared
+    rather than raising, so a router naming a member the vocabulary never declared
     fails the closure comparison **by name** -- `emitted but not declared:
     ['title_not_found']` -- instead of dying with a `KeyError` three frames
     away from anything a reader can act on.
@@ -186,22 +185,11 @@ async def readiness_client() -> AsyncIterator[httpx.AsyncClient]:
 def test_the_codes_the_api_emits_are_exactly_the_members_of_the_vocabulary() -> None:
     """The closure, in both directions, and it is the whole mechanism.
 
-    A code `src/usher/api/` emits that `ProblemCode` does not hold is a code
-    no client was told about; a member nothing emits is a contract with no
-    behaviour behind it. Both are equalities now.
-
-    **The second was a containment for the length of the fan-out and H2
-    closed it, without deleting anything.** The vocabulary was completed
-    before the read routes landed, so a member was allowed to sit with no
-    emitter for a while; `invalid_cursor` was named as the case and the only
-    one. B7's `GET /browse`, E4's `GET /admin/unmatched` and B12's
-    `GET /seasons/{id}/episodes` all call `decode_cursor` now, so the member
-    has three emitting routes and H2's deletion obligation is discharged by
-    measurement rather than by edit.
-    `tests/unit/test_api_openapi.py::test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it`
-    is the stronger half of the same claim: this case reads the whole of
-    `src/usher/api/`, which cannot tell a code a *route* can reach from one
-    only a helper names, and that one walks each route's own call graph.
+    A code `src/usher/api/` emits that `ProblemCode` does not hold is a code no client
+    was told about; a member nothing emits is a contract with no behaviour behind it.
+    `tests/unit/test_api_openapi.py` holds the stronger half of the same claim: this
+    case reads the whole of `src/usher/api/`, which cannot tell a code a *route* can
+    reach from one only a helper names, and that one walks each route's own call graph.
     """
     emitted = _emitted_codes()
     assert _ANCHOR in emitted, (
@@ -221,34 +209,26 @@ def test_the_codes_the_api_emits_are_exactly_the_members_of_the_vocabulary() -> 
 
 
 def test_a_members_name_and_its_wire_string_are_one_thing() -> None:
-    """`SOURCE_UNAVAILABLE = "source_unavailable"`.
+    """`SOURCE_UNAVAILABLE = "source_unavailable"`, never two halves that drift apart.
 
-    never a member whose Python name and wire string can be changed apart.
-
-    Cheap, and it is what lets every scan in this file report a code the
-    enum lacks by its wire spelling: `_member_value` falls back to
-    lower-casing the attribute, which is only a faithful reconstruction
-    because this holds.
+    Cheap, and it is what lets every scan in this file report a code the enum lacks by
+    its wire spelling: `_member_value` falls back to lower-casing the attribute, which
+    is only a faithful reconstruction because this holds.
     """
     for code in ProblemCode:
         assert code.name.lower() == code.value, f"{code.name} puts {code.value!r} on the wire"
 
 
 def test_no_404_is_spelled_per_resource() -> None:
-    """The careless spelling of the convention ADR-0030 refused.
+    """The careless spelling of the convention this vocabulary refuses.
 
-    One generic `not_found`, because RFC 9457's `instance` already carries
-    the path -- PRD 07's own worked example is
-    `"instance": "/titles/01936f2a-.../play"` -- so a per-resource member is
-    a second spelling of what the document already says, it grows the
-    vocabulary linearly with the resource count, and every one of those
-    members is handled identically by a client. The one candidate for an
-    exception is a title that exists with no playable copy, and D4 separates
-    that by **status** (`409 not_playable`) rather than by code, which
-    leaves no path in M9 producing two client-distinguishable 404s.
-
-    `ticket_invalid` is a 404 and is not an exception to this: it is not a
-    statement about a resource at all. See the case below.
+    One generic `not_found`, because RFC 9457's `instance` already carries the path, so
+    a per-resource member is a second spelling of what the document already says, it
+    grows the vocabulary linearly with the resource count, and every one of those
+    members is handled identically by a client. The one candidate for an exception is a
+    title that exists with no playable copy, and that is separated by **status**
+    (`409 not_playable`) rather than by code. `ticket_invalid` is a 404 and is not an
+    exception: it is not a statement about a resource at all.
     """
     offenders = [
         code.value
@@ -256,28 +236,22 @@ def test_no_404_is_spelled_per_resource() -> None:
         if "not_found" in code.value and code.value != "not_found"
     ]
     assert offenders == [], (
-        f"per-resource 404 codes: {offenders}. ADR-0030 rules for one generic `not_found`; "
+        f"per-resource 404 codes: {offenders}. The vocabulary carries one generic `not_found`; "
         "if a single path really does produce two 404s a client would act on differently, "
-        "amend the ADR's table and this case together."
+        "widen the vocabulary and this case together."
     )
 
 
 def test_no_404_code_names_a_collection_the_route_table_already_names() -> None:
-    """The careful spelling of the same defect.
+    """The careful spelling of the same defect, which is why it sits beside the one above.
 
-    and the reason this case exists beside the one above.
-
-    A linter catches the careless spelling only -- `title_not_found` dies on
-    a `_not_found$` regex and `no_such_title`, `title_missing` and
-    `unknown_episode` all sail past it while being exactly the same
-    contract. What they have in common is not the suffix; it is that they
-    name a collection the URL space already names, which is what makes them
-    a second spelling of `instance`.
-
-    Scoped to 404 deliberately. `source_unavailable` names a source and is a
-    503: it says which *dependency* is down, which is not a re-spelling of
-    the resource the client addressed. `not_playable` names no collection at
-    all.
+    A linter catches the careless spelling only -- `title_not_found` dies on a
+    `_not_found$` regex while `no_such_title`, `title_missing` and `unknown_episode`
+    all sail past it being exactly the same contract. What they have in common is that
+    they name a collection the URL space already names, which is what makes them a
+    second spelling of `instance`. Scoped to 404 deliberately: `source_unavailable`
+    names a source and is a 503, saying which *dependency* is down, and `not_playable`
+    names no collection at all.
     """
     app = create_app(_settings())
     nouns = _resource_nouns(app)
@@ -336,29 +310,20 @@ def test_every_code_carries_one_status_everywhere_it_is_raised() -> None:
 
 
 def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itself() -> None:
-    """D4 left open whether 503 and 409 belong in `_CODE_FOR_STATUS`.
+    """The table covers only statuses raised before any Usher handler runs.
 
-    ADR-0030 says they do not, and this is that answer encoded.
-
-    The table exists for statuses raised by machinery Usher does not
-    control: Starlette's router raises 404 for an unrouted path and 405 for
-    a method a route does not have, and FastAPI raises 422 for a rejected
-    request. Every status Usher's own code raises names its code at the
-    raise site through `ProblemException` -- so an entry for 409 or 503
-    would be a member of a lookup nothing looks up, and worse, it would be a
-    guess about intent: a later 503 that is not "the source is down" would
-    silently answer `source_unavailable`.
-
-    The cost of leaving them out is real and is named rather than hidden: a
-    route raising a bare `HTTPException(503)` is handed to FastAPI's default
-    handler and silently opts out of the envelope. Group H's "every route
-    that can fail declares its problem responses" scan is what closes that,
-    and `test_a_status_with_no_code_in_the_vocabulary_is_left_alone` in
-    `tests/unit/test_api_errors.py` is what keeps the delegation deliberate.
+    Starlette's router raises 404 for an unrouted path and 405 for a method a route
+    does not have, and FastAPI raises 422 for a rejected request. Every status Usher's
+    own code raises names its code at the raise site through `ProblemException`, so an
+    entry for 409 or 503 would be a member of a lookup nothing looks up -- and a guess
+    about intent, since a later 503 that is not "the source is down" would silently
+    answer `source_unavailable`. The cost is real and named rather than hidden: a route
+    raising a bare `HTTPException(503)` is handed to FastAPI's default handler and
+    silently opts out of the envelope.
     """
     assert set(_CODE_FOR_STATUS) == {404, 405, 422}, (
-        f"_CODE_FOR_STATUS covers {sorted(_CODE_FOR_STATUS)}; ADR-0030 scopes it to the "
-        "statuses Starlette and FastAPI raise before any Usher handler runs"
+        f"_CODE_FOR_STATUS covers {sorted(_CODE_FOR_STATUS)}; it is scoped to the statuses "
+        "Starlette and FastAPI raise before any Usher handler runs"
     )
 
 
@@ -367,16 +332,13 @@ async def test_the_readiness_probe_stays_exempt_and_answers_its_own_shape(
 ) -> None:
     """`/health/ready`'s 503 is not a problem document.
 
-    and the mechanism exempts it **by accident** today -- the route mutates
-    `response.status_code` and raises nothing, so no exception handler can see it.
-
-    "Held by convention" is the class of safety property `api/errors.py` was written to
-    stop relying on, so it is asserted.
-
-    **The degraded assertions come first and they are the point.** "No
-    `code` key in the body" is also what a 404, a route that never ran, or
-    an app built without the health router produces, so the absence claim is
-    worth nothing until the degraded path is proved to have run.
+    The mechanism exempts it **by accident** today -- the route mutates
+    `response.status_code` and raises nothing, so no exception handler can see it, and
+    "held by convention" is the class of safety property `api/errors.py` exists to stop
+    relying on. The degraded assertions come first and they are the point: "no `code`
+    key in the body" is also what a 404, a route that never ran, or an app built
+    without the health router produces, so the absence claim is worth nothing until the
+    degraded path is proved to have run.
     """
     response = await readiness_client.get("/health/ready")
     assert response.status_code == 503
@@ -397,11 +359,9 @@ def test_the_exemption_set_is_closed_over_every_route_the_app_serves() -> None:
     `create_app()`'s own route table, so a route added later that quietly
     joins the exemption fails rather than passing silently.
 
-    Two rather than one: `/health/ready`'s consumers gate on the status code
-    and never parse the body, and `GET /events` has no status code left once
-    it has answered `200 text/event-stream`. The second is one of PRD 07's
-    four deferrals that ADR-0030 **preserves** as a standing rule rather
-    than discharging.
+    Two rather than one: `/health/ready`'s consumers gate on the status code and never
+    parse the body, and `GET /events` has no status code left once it has answered
+    `200 text/event-stream`.
     """
     app = create_app(_settings())
     served = {route.path for route in _api_routes(app)}

@@ -38,24 +38,13 @@ INSIDE_A_WINDOW = datetime(2026, 10, 13, 20, 0, tzinfo=UTC)
 
 
 def test_the_registry_holds_every_provider_this_milestone_ships() -> None:
-    """**A provider that is not registered is dead code**.
+    """A provider that is not registered is dead code.
 
-    and dead code that looks exactly like a provider with nothing to say, which is the
-    one failure this milestone cannot see from the outside.
-
-    **Ten, which is PRD 06's table whole**, and this list is no longer
-    annotated: M7 held nine and named the missing one (boundary call 2 gave
-    `curated_rows`, `LLMRow`, `CuratedProvider` and
-    `POST /admin/rows/regenerate` to M8 as one family), and M8 Task 15 is the
-    task that registers it. Updating this case is the deliberate half of that
-    registration -- a registry assertion a later milestone can grow past
-    without touching is one that would not have caught a provider left out of
-    the tuple.
-
-    Asserted by name rather than by count, because a count passes against a
-    registry holding the same provider twice. The count is asserted *as well*,
-    because a set assertion passes against a registry holding the same provider
-    twice too.
+    And dead code that looks exactly like a provider with nothing to say, which is
+    the one failure nothing else can see from the outside. Ten, which is PRD 06's
+    table whole. Asserted by name rather than by count, because a count passes
+    against a registry holding the same provider twice; the count is asserted *as
+    well*, because a set assertion passes against that registry too.
     """
     assert {_named(provider) for provider in ROW_PROVIDERS} == {
         "ContinueWatchingProvider",
@@ -74,17 +63,17 @@ def test_the_registry_holds_every_provider_this_milestone_ships() -> None:
 
 
 def test_every_registered_provider_has_a_distinct_slug_prefix() -> None:
-    """**The key `RowProviderSettingsRepository` rests on** (E1).
+    """The key `RowProviderSettingsRepository` rests on.
 
-    pinned where the registry lives rather than assumed from the outside.
+    Pinned where the registry lives rather than assumed from the outside.
     """
     assert len({p.slug_prefix for p in ROW_PROVIDERS}) == len(ROW_PROVIDERS)
 
 
 async def test_every_proposed_row_carries_its_providers_slug_prefix() -> None:
-    """**The property that makes `usher.row.build.duration`'s label provably about the rows it.
+    """What makes `usher.row.build.duration`'s label provably about the rows it measures.
 
-    measures**, rather than merely alongside them.
+    Rather than merely alongside them.
     """
     library = await _populated()
     watched = await library.title("Something Watched", genres=("Horror",))
@@ -104,9 +93,9 @@ async def test_every_proposed_row_carries_its_providers_slug_prefix() -> None:
 
 
 async def test_every_row_family_is_emitted_by_a_registered_provider() -> None:
-    """**A family with no emitter is a branch nothing can reach.
+    """A family with no emitter is a branch nothing can reach.
 
-    and this is the only place that can see one.**.
+    This is the only place that can see one.
     """
     library = await _every_family_fires()
 
@@ -120,9 +109,9 @@ async def test_every_row_family_is_emitted_by_a_registered_provider() -> None:
 
 
 async def test_continue_watching_is_the_only_provider_that_pins_and_it_pins_one_row() -> None:
-    """**The unstated premise under `_MAX_ROWS`' arithmetic**.
+    """The unstated premise under `_MAX_ROWS`' arithmetic.
 
-    which four places now restate as the argument for a coverage decision.
+    Four places restate it as the argument for a coverage decision.
     """
     library = await _every_family_fires()
 
@@ -152,15 +141,12 @@ async def test_continue_watching_is_the_only_provider_that_pins_and_it_pins_one_
 
 
 def test_the_registry_is_the_same_set_however_the_deployment_is_wired() -> None:
-    """`row_providers` takes one deployment fact.
+    """`row_providers` takes one deployment fact: whether an embedder is installed.
 
-    whether an embedder is installed -- and it must change what a provider *says*, never
-    which providers exist.
-
-    A factory that dropped one on the shipped default would be a home screen that is
-    quietly smaller with no embedder, which is exactly the failure ADR-0022's "fewer
-    rows, not worse rows" is about, and it would be invisible to every per-provider
-    case.
+    It must change what a provider *says*, never which providers exist. A factory
+    that dropped one on the shipped default would be a home screen that is quietly
+    smaller with no embedder -- fewer rows is the rule, not worse rows -- and it
+    would be invisible to every per-provider case.
     """
     assert {_named(one) for one in row_providers(semantic=True)} == {
         _named(one) for one in row_providers(semantic=False)
@@ -168,7 +154,7 @@ def test_the_registry_is_the_same_set_however_the_deployment_is_wired() -> None:
 
 
 def test_no_provider_but_continue_watching_can_reach_the_top_score() -> None:
-    """**Task 24's design, enforced across the whole registry.**."""
+    """Only the pinned provider may reach the top score, across the whole registry."""
     ceilings = {name: score for name, score in BASE_SCORES.items()}
     top = ceilings.pop("ContinueWatchingProvider")
 
@@ -179,26 +165,13 @@ def test_no_provider_but_continue_watching_can_reach_the_top_score() -> None:
 
 
 def test_every_registered_score_is_on_one_comparable_scale() -> None:
-    """**The measurement `ports/rows.py` declines to make and hands here**.
+    """`ports/rows.py` permits a provider to modulate its base score per proposal.
 
-    it permits a provider to modulate its base score per proposal, and names the risk --
-    one incomparable scale per registered provider, which makes the composer's sort
-    meaningless while looking exactly like a sort.
-
-    That sentence is stated there and deliberately not restated here, because this
-    docstring, `ports/rows.py` and `services/rows/__init__.py` each carried their own
-    count of it and two of the three went stale the day the tenth provider registered.
-
-    Measured rather than designed: every ceiling is in (0, 1], and the range is
-    asserted as a range rather than pinned per provider, so a provider added
-    with a score of 12.0 -- or of 0.0006 -- fails here rather than silently
-    taking or ceding the whole screen.
-
-    **The count moves to ten with Task 15 and the range does not move at all.**
-    Only the count is updated here, deliberately: a tenth entry is what makes
-    the sweep cover the tenth provider, and a range widened to admit a new
-    score would be this case ratifying whatever arrived instead of measuring
-    it. `CURATED_SCORE` is 0.85 and sits inside the range as written.
+    The risk it names is one incomparable scale per registered provider, which makes
+    the composer's sort meaningless while looking exactly like a sort. Every ceiling
+    is in (0, 1], and the range is asserted as a range rather than pinned per
+    provider, so a provider added with a score of 12.0 -- or of 0.0006 -- fails here
+    rather than silently taking or ceding the whole screen.
     """
     assert len(BASE_SCORES) == 10
     for name, ceiling in BASE_SCORES.items():
@@ -207,7 +180,7 @@ def test_every_registered_score_is_on_one_comparable_scale() -> None:
 
 
 def test_a_curated_shelf_outranks_every_discovery_row_and_neither_row_about_intent() -> None:
-    """**The argument for `CURATED_SCORE`, as two comparisons rather than a literal.**."""
+    """The argument for `CURATED_SCORE`, as two comparisons rather than a literal."""
     intent = {"ContinueWatchingProvider", "NextUpProvider", "CuratedProvider"}
     discovery = {name: score for name, score in BASE_SCORES.items() if name not in intent}
 
@@ -223,22 +196,14 @@ def test_a_curated_shelf_outranks_every_discovery_row_and_neither_row_about_inte
 async def test_every_provider_returns_nothing_against_an_empty_database(
     provider: RowProvider,
 ) -> None:
-    """PRD 08's operator rule.
+    """PRD 08's operator rule, applied one layer below the CLI.
 
-    *"every one of them has to work against an empty database"* -- applied one layer
-    below the CLI.
-
-    No titles, no media items, no watch states, no credits, no collections, no
-    neighbours, no embedder, no affinities. Every one returns `[]`; none
-    raises, none divides by zero, and none returns a row at all.
-
-    A route is a poor place to find out that composition divides by zero on a
-    household that has watched nothing (boundary call 1), and Task 23's own
-    `library.tagged_titles == 0` guard exists because the naive spelling of
-    the lift divides by the owned total.
-
-    Run **inside a seasonal window**, so `SeasonalProvider` is not passing for
-    the wrong reason.
+    *"Every one of them has to work against an empty database"*: no titles, no media
+    items, no watch states, no credits, no collections, no neighbours, no embedder,
+    no affinities. Every one returns `[]`; none raises, none divides by zero, and
+    none returns a row at all -- a route is a poor place to find out that composition
+    divides by zero on a household that has watched nothing. Run **inside a seasonal
+    window**, so `SeasonalProvider` is not passing for the wrong reason.
     """
     library = Library()
 
@@ -249,10 +214,11 @@ async def test_every_provider_returns_nothing_against_an_empty_database(
 async def test_no_provider_falls_back_to_popular_titles_on_a_household_that_has_watched_nothing(
     provider: RowProvider,
 ) -> None:
-    """**The front matter's rule 2, as a sweep.** A fully populated catalog and library.
+    """The front matter's rule 2, as a sweep.
 
-    owned copies, genres, keywords, collections, credits, neighbours, recent arrivals --
-    and a household with no watch states at all.
+    A fully populated catalog and library -- owned copies, genres, keywords,
+    collections, credits, neighbours, recent arrivals -- and a household with no
+    watch states at all.
     """
     library = await _populated()
 
@@ -272,20 +238,16 @@ async def test_no_provider_falls_back_to_popular_titles_on_a_household_that_has_
 
 @_REGISTERED
 async def test_every_provider_composes_without_an_embedder(provider: RowProvider) -> None:
-    """The shipped default (ADR-0022).
+    """The shipped default: no embedder, `title_neighbors` holding metadata-only scores.
 
-    No embedder, `title_neighbors` holding metadata-only scores, and no provider raises.
-
-    One of the ten changes what it *says*: `BecauseYouWatchedProvider` softens
-    its sentence, which is a constructor argument and is covered in its own
-    file. Nothing changes what it *does*, and `GenreAffinityProvider` in
-    particular returns the same rows either way -- Task 23's whole argument,
-    asserted here where all ten are visible at once. **`CuratedProvider` is the
-    sharpest member of this sweep and the least obvious**: a curated generation
-    is built from a candidate pool that *does* re-rank on a centroid when one
-    exists, so "no embedder" changes what a previous night wrote and changes
-    nothing about reading it -- which is the whole point of hydrating stored
-    output in the request path.
+    No provider raises. One of the ten changes what it *says*:
+    `BecauseYouWatchedProvider` softens its sentence, which is a constructor argument
+    covered in its own file. Nothing changes what it *does*, and
+    `GenreAffinityProvider` in particular returns the same rows either way.
+    **`CuratedProvider` is the sharpest member of this sweep and the least
+    obvious**: a curated generation is built from a candidate pool that *does*
+    re-rank on a centroid when one exists, so "no embedder" changes what a previous
+    night wrote and changes nothing about reading it.
     """
     library = await _populated()
     await library.finished(await library.title("Something Watched"), at=NOW)
@@ -303,19 +265,12 @@ async def test_no_provider_reaches_a_port_the_context_does_not_carry(
 ) -> None:
     """A provider lives in `services/rows/` and may import only `domain/` and `ports/`.
 
-    no `usher.db`, no `sqlalchemy`, no `AsyncSession`, no `select(`.
-
-    `lint-imports` does not cover the second half: the `db is driven, not
-    driving` contract forbids `usher.services -> usher.db`, but no contract in
-    `pyproject.toml` constrains `usher.services -> sqlalchemy` at all, because
-    every contract enumerates `usher.*` modules only. Group G verified this by
-    grep, once; this is the same check as a case, over the registry, so the
-    tenth provider is covered by construction.
-
-    Walks `ast.Import` as well as `ast.ImportFrom`, because
-    `import sqlalchemy.ext.asyncio` is invisible to an ImportFrom-only scan --
-    the mutation `test_reading_a_title_never_touches_a_source` measured
-    surviving the obvious spelling.
+    No `usher.db`, no `sqlalchemy`, no `AsyncSession`, no `select(`. `lint-imports`
+    does not cover the second half: the `db is driven, not driving` contract forbids
+    `usher.services -> usher.db`, but no contract in `pyproject.toml` constrains
+    `usher.services -> sqlalchemy` at all, because every contract enumerates
+    `usher.*` modules only. Walks `ast.Import` as well as `ast.ImportFrom`, because
+    `import sqlalchemy.ext.asyncio` is invisible to an ImportFrom-only scan.
     """
     import ast
     import inspect

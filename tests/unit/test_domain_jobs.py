@@ -21,7 +21,7 @@ def test_a_job_is_pending_with_no_attempts_by_default() -> None:
 def test_there_is_no_done_status() -> None:
     """A completed job's row is deleted, not marked.
 
-    Keeping 1.1M terminal rows makes PRD 10's queue-depth panel a scan over a table that
+    Keeping terminal rows makes PRD 10's queue-depth panel a scan over a table that
     only grows, and it is the reason `complete()` on the port returns nothing to
     inspect.
     """
@@ -43,14 +43,12 @@ def test_priorities_match_the_prd_table_and_higher_is_more_urgent() -> None:
 
 
 def test_priority_ordering_is_arithmetic_not_lexicographic() -> None:
-    """The trap `ENRICHMENT_RANK` exists for (ADR-0008).
+    """The trap `ENRICHMENT_RANK` exists for, avoided here by the type.
 
-    avoided here by the type rather than by a side table: `StrEnum` members compare as
-    strings, so a string-valued scale would order "100" < "20" < "50" < "80" and put
-    DEMAND last.
-
-    `IntEnum` is what makes `GREATEST(priority, excluded. priority)` and `ORDER BY
-    priority DESC` mean what they read as.
+    `StrEnum` members compare as strings, so a string-valued scale would order
+    "100" < "20" < "50" < "80" and put DEMAND last. `IntEnum` is what makes
+    `GREATEST(priority, excluded.priority)` and `ORDER BY priority DESC` mean what they
+    read as.
     """
     assert [p.value for p in sorted(JobPriority)] == [20, 50, 80, 100]
     assert sorted(str(p.value) for p in JobPriority) == ["100", "20", "50", "80"]
@@ -74,8 +72,7 @@ def test_a_negative_attempt_count_is_rejected() -> None:
 def test_an_empty_key_is_rejected() -> None:
     """`(kind, key)` is the dedup target.
 
-    An empty key would collapse every job of a kind onto one row -- 1.1M match jobs
-    becoming one.
+    An empty key would collapse every job of a kind onto one row.
     """
     with pytest.raises(ValidationError):
         Job(kind=JobKind.MATCH, key="")
@@ -147,10 +144,8 @@ def test_a_job_is_frozen() -> None:
 def test_evolve_revalidates_a_promoted_priority() -> None:
     """The promotion clause is `SET priority = GREATEST(...)`.
 
-    and the domain-side equivalent is an `.evolve()`.
-
-    `model_copy(update=...)` would accept 500 without complaint; `.evolve()` re-runs the
-    bound.
+    The domain-side equivalent is an `.evolve()`: `model_copy(update=...)` would accept
+    500 without complaint, and `.evolve()` re-runs the bound.
     """
     job = Job(kind=JobKind.MATCH, key="k")
     assert job.evolve(priority=JobPriority.DEMAND).priority == 100

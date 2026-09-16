@@ -28,7 +28,7 @@ FORBIDDEN_TYPE_NAMES: frozenset[str] = frozenset({*CODEC_NAMES, Page.__name__})
 UPSTREAM_CURSORS: Mapping[str, str] = MappingProxyType(
     {
         "MetadataProvider.changed_since": (
-            "ADR-0017's cursor travels the other way. It is TMDb's own page token -- minted "
+            "The provider's cursor travels the other way. It is TMDb's own page token -- minted "
             "by the provider, handed back to the provider, never rendered to an Usher client "
             "and never decoded by anything here. `usher.api.cursor`'s cursor is minted by "
             "Usher for an Usher client; the two share a noun and no direction."

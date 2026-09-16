@@ -113,7 +113,7 @@ async def _given(
 ) -> dict[str, MediaItem]:
     """Seed in the order given.
 
-    which is what lets a case make the minted UUIDv7s disagree with `added_at` on
+    That is what lets a case make the minted UUIDv7s disagree with `added_at` on
     purpose.
     """
     await media_items.upsert_many(rows)
@@ -206,13 +206,9 @@ async def test_a_queue_entry_carries_the_source_id_the_operator_needs_to_find_th
 ) -> None:
     """The one place a source's own item id is on the wire.
 
-    and the reason is that an operator resolves an unmatched file by finding it on their
-    own server.
-
-    `usher unmatched` has printed it since M4.
-
-    Also the shape assertion: every declared field is rendered, derived from
-    the model rather than from a list this case keeps in step by hand.
+    An operator resolves an unmatched file by finding it on their own server. Also the
+    shape assertion: every declared field is rendered, derived from the model rather
+    than from a list this case keeps in step by hand.
     """
     await _given(media_items, [_upsert("emby-item-4471", added_at=NEWER)])
 
@@ -251,14 +247,12 @@ async def test_a_page_that_exactly_exhausts_the_queue_carries_no_next_cursor(
 async def test_walking_the_cursor_serves_every_item_exactly_once_over_more_than_one_page(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """Seven items at `limit=3`.
+    """Seven items at `limit=3`, the partition case.
 
-    the partition case, whose `7 % 3 != 0` is why it cannot see the off-by-one above.
-
-    Both dated and undated, so the walk crosses the boundary between the two groups.
-
-    `pages > 1` is asserted because a route that ignored `limit` and served
-    everything at once satisfies the set assertion perfectly.
+    `7 % 3 != 0` is why it cannot see the off-by-one above. Both dated and undated, so
+    the walk crosses the boundary between the two groups. `pages > 1` is asserted
+    because a route that ignored `limit` and served everything at once satisfies the
+    set assertion perfectly.
     """
     seeded = await _given(
         media_items,
@@ -280,7 +274,7 @@ async def test_the_source_filter_narrows_the_queue_and_the_cursor_remembers_whic
 ) -> None:
     """`?source_id=` is a filter and rides in the cursor's digest.
 
-    so a cursor minted over one source and replayed against another is a `400
+    A cursor minted over one source and replayed against another is a `400
     invalid_cursor` rather than a plausible, wrong, silent page of the other source's
     backlog starting after *this* source's second item.
     """
@@ -311,9 +305,7 @@ async def test_the_source_filter_narrows_the_queue_and_the_cursor_remembers_whic
 async def test_dropping_the_source_filter_mid_walk_is_refused_rather_than_silently_widened(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """The other direction of the same digest, and the one a client reaches by accident.
-
-    a cursor minted with a filter, replayed with none.
+    """The other direction of the same digest: minted with a filter, replayed with none.
 
     An unfiltered read resuming from a filtered position is a page of a different
     population whose every row still looks right.
@@ -342,7 +334,7 @@ async def test_dropping_the_source_filter_mid_walk_is_refused_rather_than_silent
 async def test_a_tampered_cursor_is_refused_in_the_envelope_and_never_echoed(
     client: httpx.AsyncClient, media_items: FakeMediaItemRepository
 ) -> None:
-    """A3's refusal, at a real route for the first time on this path.
+    """The refusal, at a real route.
 
     The `detail` names the rule and never the submitted value -- which is
     `api/errors.py`'s whole reason for existing, and is why the codec raises a
@@ -390,12 +382,10 @@ async def test_a_foreign_cursor_carrying_the_wrong_key_type_is_refused(
 async def test_a_page_size_past_the_ceiling_is_refused_rather_than_clamped(
     client: httpx.AsyncClient,
 ) -> None:
-    """`MAX_LIMIT` is what stops a client asking for the whole of a library that has never run a.
+    """`MAX_LIMIT` stops a client asking for the whole backlog of a library in one page.
 
-    match pass -- 1,126,789 items on the one measured source.
-
-    Refused rather than silently clamped, so a client that asked for more learns that it
-    did.
+    Refused rather than silently clamped, so a client that asked for more learns that
+    it did.
     """
     assert (await client.get("/admin/unmatched", params={"limit": "0"})).status_code == 422
     over = await client.get(
@@ -432,11 +422,10 @@ async def test_resolving_to_an_episode_writes_both_ids_which_is_what_the_cli_cou
     titles: FakeTitleRepository,
     episodes: FakeEpisodeRepository,
 ) -> None:
-    """The argument `usher.cli._unmatched` said this route would grow.
+    """An episode resolution lands both ids on the row.
 
-    Both ids land on the row, which is the shape `ports/ingest.py`'s `MediaItemTarget`
-    documents for an episode's `media_items` row: its series' `title_id` **and** its own
-    `episode_id`.
+    That is the shape `ports/ingest.py`'s `MediaItemTarget` documents for an episode's
+    `media_items` row: its series' `title_id` **and** its own `episode_id`.
     """
     stored = await _given(media_items, [_upsert("orphan", added_at=NEWER)])
     series = await _given_title(titles, "A Resolved Series")
@@ -459,11 +448,10 @@ async def test_an_unknown_media_item_is_a_404_that_names_no_resource_in_its_code
 ) -> None:
     """`attach_title`'s boolean is what answers this.
 
-    the port returns whether a row changed precisely so a caller can say 404 rather than
-    claim to have resolved something that does not exist.
-
-    The code is the generic `not_found`: RFC 9457's `instance` carries the path, which
-    names the missing item more precisely than a code could.
+    The port returns whether a row changed precisely so a caller can say 404 rather
+    than claim to have resolved something that does not exist. The code is the generic
+    `not_found`: RFC 9457's `instance` carries the path, which names the missing item
+    more precisely than a code could.
     """
     title = await _given_title(titles, "A Real Title")
     missing = new_id()
@@ -556,7 +544,7 @@ async def test_no_refusal_echoes_an_id_the_client_submitted(
     titles: FakeTitleRepository,
     episodes: FakeEpisodeRepository,
 ) -> None:
-    """A2's control, applied to the two refusals this route raises itself.
+    """The two refusals this route raises itself must not echo the body.
 
     `instance` carries the request *path*, so the media item's id is on the
     wire by design and is not what this is about -- what must not appear is a
@@ -591,17 +579,14 @@ async def test_no_refusal_echoes_an_id_the_client_submitted(
 
 
 def test_the_router_enqueues_nothing_and_invalidates_nothing() -> None:
-    """The module docstring's claim, held structurally rather than by review.
+    """The router enqueues nothing and invalidates nothing, held structurally.
 
-    Resolving writes `media_items.title_id` and nothing reads that column to
-    build a job, a neighbour list or a cached screen -- so a re-derive or a
-    cache clear here would be work with no consumer, and `usher unmatched
-    --resolve` does neither. Asserted on the module's identifiers because
-    "the response looked the same" is also what a route that enqueued and
-    discarded the result produces.
-
-    Over a docstring-stripped `ast.unparse`, so the prose above -- which names
-    every one of these on purpose -- cannot satisfy or trip the scan.
+    Resolving writes `media_items.title_id` and nothing reads that column to build a
+    job, a neighbour list or a cached screen, so a re-derive or a cache clear here
+    would be work with no consumer. Asserted on the module's identifiers because "the
+    response looked the same" is also what a route that enqueued and discarded the
+    result produces, over a docstring-stripped `ast.unparse` so this prose cannot
+    satisfy or trip the scan.
     """
     tree = ast.parse(inspect.getsource(unmatched_module))
     for node in ast.walk(tree):

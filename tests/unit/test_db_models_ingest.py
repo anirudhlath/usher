@@ -1,4 +1,4 @@
-"""M4's tables, checked against their domain models field-for-field."""
+"""The ingest tables, checked against their domain models field-for-field."""
 
 from typing import cast
 
@@ -50,7 +50,7 @@ def test_every_row_matches_its_domain_model_field_for_field() -> None:
 
 
 def test_media_items_episode_id_finally_has_a_target() -> None:
-    """A dangling `PGUUID` since M1.
+    """The column is a real foreign key, not a dangling `PGUUID`.
 
     Adding the FK before any episode rows exist is the only cheap moment -- afterwards
     it needs a cleanup pass.
@@ -61,9 +61,9 @@ def test_media_items_episode_id_finally_has_a_target() -> None:
 
 
 def test_watch_states_episode_id_restricts_deletion() -> None:
-    """The same asymmetry ADR-0010 pins for `title_id`.
+    """The same asymmetry `title_id` has.
 
-    an unmatched MediaItem is worth keeping and loses its link, a WatchState *is* the
+    An unmatched MediaItem is worth keeping and loses its link; a WatchState *is* the
     thing worth keeping and must not be silently destroyed by a merge that forgot to
     repoint it.
     """
@@ -79,14 +79,9 @@ def test_both_new_episode_foreign_keys_are_indexed_on_the_referencing_side() -> 
     referencing column* -- SET NULL to clear them, RESTRICT to refuse -- and neither
     existing index can serve that lookup: `uq_media_items_source_external` leads with
     `source_id` and `uq_watch_states_user_episode` leads with `user_id`. Without these
-    two, every episode deletion is a sequential scan of `media_items` (999,827 episode
-    rows at this deployment's scale) and of `watch_states`.
-
-    This is not hypothetical: `episodes.title_id` is `ON DELETE CASCADE`, so
-    deleting one series Title fires that check once per episode of the
-    series. It is the identical argument the M1 schema already made when it
-    added `ix_watch_states_title_id` for the RESTRICT on `title_id`, and
-    neither index was in the plan.
+    two, every episode deletion is a sequential scan of `media_items` and of
+    `watch_states` -- and `episodes.title_id` is `ON DELETE CASCADE`, so deleting one
+    series Title fires that check once per episode of the series.
     """
     assert "ix_media_items_episode_id" in {i.name for i in _table(MediaItemRow).indexes}
     assert "ix_watch_states_episode_id" in {i.name for i in _table(WatchStateRow).indexes}
@@ -95,17 +90,13 @@ def test_both_new_episode_foreign_keys_are_indexed_on_the_referencing_side() -> 
 def test_the_episode_tree_cascades_from_the_title_it_hangs_off() -> None:
     """CASCADE, unlike `watch_states`.
 
-    a season or episode with no series is not a record worth keeping -- it carries no
+    A season or episode with no series is not a record worth keeping -- it carries no
     user state and is re-derivable from the provider payload in one call.
 
-    ADR-0010's reasoning is about what a row *protects*, and these protect nothing.
-
-    The two rules compose rather than fight: deleting a Title cascades into
-    `episodes`, and each of those deletes is then refused by
-    `watch_states.episode_id`'s RESTRICT if any history points at it. So a
-    merge that forgot to repoint history fails at the DELETE, two levels
-    down. `tests/integration/test_migrations.py` proves that against real
-    Postgres.
+    The two rules compose rather than fight: deleting a Title cascades into `episodes`,
+    and each of those deletes is then refused by `watch_states.episode_id`'s RESTRICT if
+    any history points at it, so a merge that forgot to repoint history fails at the
+    DELETE two levels down.
     """
     assert {fk.ondelete for fk in SeasonRow.__table__.c.title_id.foreign_keys} == {"CASCADE"}
     assert {fk.ondelete for fk in EpisodeRow.__table__.c.title_id.foreign_keys} == {"CASCADE"}
@@ -116,7 +107,8 @@ def test_the_episode_tree_cascades_from_the_title_it_hangs_off() -> None:
 def test_a_job_is_unique_on_kind_and_key() -> None:
     """The dedup target.
 
-    Without it a nightly walk enqueues 1.1M match jobs on top of yesterday's 1.1M.
+    Without it a nightly walk re-enqueues a match job for every title on top of
+    yesterday's.
     """
     assert "uq_jobs_kind_key" in _constraint_names(JobRow, "UniqueConstraint")
 
@@ -141,18 +133,14 @@ def test_an_episode_is_unique_within_its_series_and_season() -> None:
 
 
 def test_an_episodes_imdb_id_index_is_not_unique() -> None:
-    """Deliberately unlike `ix_titles_imdb_id`.
+    """Deliberately not unique, unlike `ix_titles_imdb_id`.
 
-    and the one place this schema departs from that shape.
-
-    Nothing in M4 looks an episode up by IMDb id -- ingest looks episodes up by
-    `(title_id, season_number, episode_number)` -- while `watch.py`'s own FK comment
-    says M4's matcher produces "two episode trees" for a series ingested twice. Two
-    trees enriched from two TMDb series entries for the same show carry the same episode
-    IMDb ids, and a unique index turns that into an `IntegrityError` that aborts the
-    entire staged `COPY` batch, because the upsert's `ON CONFLICT` target is the
-    season/episode key and cannot absorb a violation of a different constraint. A non-
-    unique index keeps the lookup path and costs nothing.
+    Nothing looks an episode up by IMDb id -- ingest looks episodes up by
+    `(title_id, season_number, episode_number)` -- and a series ingested twice produces
+    two episode trees carrying the same episode IMDb ids. A unique index turns that into
+    an `IntegrityError` that aborts the entire staged `COPY` batch, because the upsert's
+    `ON CONFLICT` target is the season/episode key and cannot absorb a violation of a
+    different constraint. A non-unique index keeps the lookup path and costs nothing.
     """
     index = next(i for i in _table(EpisodeRow).indexes if i.name == "ix_episodes_imdb_id")
     assert index.unique is False
@@ -162,8 +150,7 @@ def test_an_episodes_imdb_id_index_is_not_unique() -> None:
 def test_raw_payloads_is_keyed_by_provider_and_reference() -> None:
     """One row per (provider, kind, reference), holding the response and when it was fetched.
 
-    PRD 02 listed a second `provider_cache_meta` table for the fetch timestamp;
-    `fetched_at` here answers the same question once. See ADR-0016.
+    `fetched_at` answers the staleness question here rather than in a second table.
     """
     assert sa_inspect(RawPayloadRow).primary_key[0].name == "id"
     assert "uq_raw_payloads_provider_kind_reference" in _constraint_names(
@@ -195,10 +182,10 @@ def test_every_new_enum_column_stores_values_not_names() -> None:
 
 
 def test_every_not_null_column_a_raw_insert_may_omit_has_a_server_default() -> None:
-    """Python-side `default=` never runs on the `COPY`-into-staging + `INSERT ...
+    """A NOT NULL column whose only default is Python-side breaks the bulk path.
 
-    SELECT` path M2 built and M4 reuses, so a NOT NULL column whose only default is
-    Python-side is a `NotNullViolation` waiting for the first bulk write.
+    Python-side `default=` never runs on the `COPY`-into-staging + `INSERT ... SELECT`
+    path, so such a column is a `NotNullViolation` waiting for the first bulk write.
     """
     for column in (
         JobRow.__table__.c.priority,
@@ -228,10 +215,9 @@ def test_every_not_null_column_a_raw_insert_may_omit_has_a_server_default() -> N
 def test_every_pydantic_bound_is_mirrored_by_a_named_check_constraint() -> None:
     """The schema mirrors each domain model's field constraints.
 
-    so a write that bypasses Pydantic -- which every bulk path does by construction --
-    still cannot store a negative episode number.
-
-    Names are asserted because a migration alters a constraint by name.
+    A write that bypasses Pydantic -- which every bulk path does by construction --
+    still cannot store a negative episode number. Names are asserted because a
+    migration alters a constraint by name.
     """
     assert _constraint_names(SeasonRow, "CheckConstraint") == {
         "ck_seasons_season_number_non_negative",
@@ -253,7 +239,7 @@ def test_every_pydantic_bound_is_mirrored_by_a_named_check_constraint() -> None:
         "ck_sync_runs_items_matched_non_negative",
         "ck_sync_runs_items_unmatched_non_negative",
         "ck_sync_runs_items_retracted_non_negative",
-        # `SyncRun.position`'s `ge=0`, ADR-0042.
+        # `SyncRun.position`'s `ge=0`.
         "ck_sync_runs_position_non_negative",
     }
     assert _constraint_names(RawPayloadRow, "CheckConstraint") == {
@@ -265,11 +251,8 @@ def test_every_pydantic_bound_is_mirrored_by_a_named_check_constraint() -> None:
 def test_the_naming_convention_still_leaves_check_names_alone() -> None:
     """`NAMING_CONVENTION` has no "ck" key on purpose.
 
-    with one, an already-fully-formed `CheckConstraint(name="ck_jobs_priority_range")`
+    With one, an already-fully-formed `CheckConstraint(name="ck_jobs_priority_range")`
     gets double-prefixed into `ck_jobs_ck_jobs_priority_range`.
-
-    Five new tables' worth of CHECK constraints is five more chances for that regression
-    to land unnoticed.
     """
     for row_type, prefix in (
         (SeasonRow, "ck_seasons_ck_"),

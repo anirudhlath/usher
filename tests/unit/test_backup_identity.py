@@ -1,4 +1,4 @@
-"""The identity layer K4's restore resolves its references through."""
+"""The identity layer restore resolves its references through."""
 
 import pytest
 
@@ -52,22 +52,17 @@ def _title(**changes: object) -> Title:
 async def test_a_reference_whose_natural_key_finds_nothing_is_refused_rather_than_written_null() -> (  # noqa: E501
     None
 ):
-    """The headline of the whole group.
+    """An unresolved reference is a named refusal, never a `None`.
 
-    an unresolved reference is a named refusal, never a `None` a caller can mistake for
-    "this column is nullable".
-
-    `watch_states.title_id` is `ON DELETE RESTRICT` (ADR-0010), so a `None`
-    written there is an insert Postgres refuses with a foreign-key error --
-    an operator reading a driver exception instead of "this watch state's
-    title is not in the target". `search_queries.clicked_title_id` is
-    `SET NULL`, which is exactly why the two tables cannot share one answer:
-    `UNRESOLVED_RULE` decides per table and this resolver decides nothing.
-
-    **Two premises before the absence claim**, because an absence assertion
-    over a resolver that answers `Unresolved` for everything is worthless:
-    the catalog really holds two titles, and a sibling reference in the same
-    call really resolves.
+    A `None` would be mistaken for "this column is nullable".
+    `watch_states.title_id` is `ON DELETE RESTRICT`, so a `None` written there
+    is an insert Postgres refuses with a foreign-key error -- an operator
+    reading a driver exception instead of "this watch state's title is not in
+    the target". `search_queries.clicked_title_id` is `SET NULL`, which is why
+    the two tables cannot share one answer: `UNRESOLVED_RULE` decides per table
+    and this resolver decides nothing. Two premises come first, because an
+    absence assertion over a resolver that answers `Unresolved` for everything
+    is worthless.
     """
     repository = FakeTitleRepository()
     held = _title(imdb_id="tt99000011", name="Shawshank", sort_name="Shawshank")
@@ -91,22 +86,17 @@ async def test_a_reference_whose_natural_key_finds_nothing_is_refused_rather_tha
 
 
 async def test_two_catalogs_built_from_one_dump_share_no_title_id() -> None:
-    """The fact this whole task is built on, recorded rather than changed.
+    """Two catalogs built from one dump share no title id.
 
-    `db/repositories/bulk.py:611` mints `new_id()` for every row of every
-    batch on the way into the staging table, and `:670` resolves the
-    collision with `ON CONFLICT (imdb_id) WHERE imdb_id IS NOT NULL DO
-    UPDATE`. So *within* one database a re-import is idempotent and a title
-    keeps the id it was first given; *across* two databases built from the
-    same `title.basics.tsv.gz`, every title gets a different id, because the
-    `new_id()` calls are independent. There is no seed and no derivation
-    from `imdb_id`, and ADR-0003 is what makes it so on purpose.
-
-    So this case is red at HEAD only in the sense that `backup_identity`
-    does not exist. Its first assertion is a statement about `new_id()` that
-    K2 does not change; its second is the consequence -- the natural key is
-    the only thing the two catalogs agree on, which is why a backup carries
-    that and not the id (ADR-0045).
+    `db/repositories/bulk.py` mints `new_id()` for every row on the way into the
+    staging table and resolves the collision with
+    `ON CONFLICT (imdb_id) WHERE imdb_id IS NOT NULL DO UPDATE`. So *within* one
+    database a re-import is idempotent and a title keeps the id it was first
+    given; *across* two databases built from the same `title.basics.tsv.gz`
+    every title gets a different id, because the `new_id()` calls are
+    independent -- there is no seed and no derivation from `imdb_id`. The
+    natural key is the only thing the two catalogs agree on, which is why a
+    backup carries that and not the id.
     """
     one, two = FakeBulkCatalogRepository(), FakeBulkCatalogRepository()
     await one.upsert_titles(_DUMP)
@@ -160,17 +150,15 @@ async def test_the_resolver_is_case_and_whitespace_exact(spelling: str) -> None:
 
 
 async def test_a_tmdb_id_without_a_kind_is_refused_by_the_type() -> None:
-    """ADR-0011.
+    """A `tmdb_id` without a kind is refused by the type.
 
-    TMDb's movie and series id spaces overlap on 26,968 ids (measured against Wikidata,
-    2026-07-30 -- 47.3% of every series id it knows), so `tmdb_id` alone is not an
-    identity and `ix_titles_tmdb_id_kind` is composite for that reason.
-
-    A default would be the defect: `kind=MOVIE` for a reference whose title
-    is a series resolves to whichever film shares the integer, and every
-    watch state carried against it lands on the wrong show. `TitleReference`
-    makes `kind` a required field, so the mistake is a `TypeError` at
-    construction rather than a wrong row at restore.
+    TMDb's movie and series id spaces overlap, so `tmdb_id` alone is not an
+    identity and `ix_titles_tmdb_id_kind` is composite for that reason. A
+    default would be the defect: `kind=MOVIE` for a reference whose title is a
+    series resolves to whichever film shares the integer, and every watch state
+    carried against it lands on the wrong show. `TitleReference` makes `kind`
+    required, so the mistake is a `TypeError` at construction rather than a
+    wrong row at restore.
     """
     with pytest.raises(TypeError):
         TitleReference(id=new_id(), tmdb_id=99000550)  # type: ignore[call-arg]
@@ -179,7 +167,7 @@ async def test_a_tmdb_id_without_a_kind_is_refused_by_the_type() -> None:
 async def test_two_titles_sharing_a_tmdb_id_across_kinds_resolve_to_their_own() -> None:
     """The behavioural half of the case above.
 
-    the fallback rung is `(kind, tmdb_id)` and not `tmdb_id`.
+    The fallback rung is `(kind, tmdb_id)` and not `tmdb_id`.
     """
     repository = FakeTitleRepository()
     film = _title(kind=TitleKind.MOVIE, tmdb_id=99000550, name="Film", sort_name="Film")
@@ -198,21 +186,15 @@ async def test_two_titles_sharing_a_tmdb_id_across_kinds_resolve_to_their_own() 
 async def test_a_title_with_neither_provider_id_is_carried_by_raw_id_and_only_accepted_when_the_target_already_holds_it() -> (  # noqa: E501
     None
 ):
-    """ADR-0003 makes a title with no provider id a first-class citizen on purpose.
+    """A raw id is accepted only where the target already holds it.
 
-    and the live catalog now holds six of them (2026-08-21, against zero when this was
-    designed on 2026-08-13).
-
-    So the raw-id rung is exercised by real rows rather than being defensive.
-
-    It is a **check** rather than a trust: the artifact carries the UUID and
-    restore accepts it if and only if the target already holds a title with
-    that exact id. That is the same-database case -- disaster recovery into
-    the database the backup came from -- expressed as a lookup rather than
-    as a mode, which is what lets there be one code path.
-
-    Both arms in one case, because "accepted" alone is satisfied by a
-    resolver that trusts every id it is handed.
+    A title with neither provider id is a first-class citizen, so the raw-id
+    rung is exercised by real rows rather than being defensive. It is a *check*
+    rather than a trust: the artifact carries the UUID and restore accepts it if
+    and only if the target already holds a title with that exact id, which is
+    the same-database case expressed as a lookup rather than as a mode. Both
+    arms in one case, because "accepted" alone is satisfied by a resolver that
+    trusts every id it is handed.
     """
     orphan = _title(name="Home Movie", sort_name="Home Movie")
     assert orphan.imdb_id is None and orphan.tmdb_id is None, (
@@ -237,18 +219,17 @@ async def test_a_title_with_neither_provider_id_is_carried_by_raw_id_and_only_ac
 async def test_an_empty_batch_asks_the_repository_nothing() -> None:
     """`resolve_natural_keys([])` is a round trip to learn nothing.
 
-    the same guard `list_by_ids` and `resolve_tmdb_ids` carry.
+    The same guard `list_by_ids` and `resolve_tmdb_ids` carry.
     """
     assert await resolve_titles(FakeTitleRepository(), []) == {}
 
 
 async def test_every_reference_gets_an_answer_even_when_it_repeats() -> None:
-    """K4 iterates the mapping it is handed.
+    """Restore iterates the mapping it is handed.
 
-    so a reference absent from it is a row silently written with no target.
-
-    A repeated reference -- two watch states for one title, which is the ordinary shape
-    of a household -- is one probe and two answers.
+    A reference absent from it is a row silently written with no target, and a
+    repeated reference -- two watch states for one title, the ordinary shape of
+    a household -- is one probe and two answers.
     """
     repository = FakeTitleRepository()
     held = _title(imdb_id="tt99000011")
@@ -264,15 +245,13 @@ async def test_every_reference_gets_an_answer_even_when_it_repeats() -> None:
 
 
 def test_the_reference_a_title_is_carried_as_names_every_key_the_row_has() -> None:
-    """The builder is what decides what an artifact writes down.
+    """The builder decides what an artifact writes down.
 
-    so it is asserted directly rather than only through a resolve: a builder that
-    dropped `tmdb_id` would still pass every case above, because every one of them
-    resolves on the rung before it.
-
-    `uuid.UUID` for the id, `TitleKind` for the kind -- both carried whatever
-    the provider ids say, because the kind is half of the tmdb rung's key
-    (ADR-0011) and the id is the last rung.
+    Asserted directly rather than only through a resolve: a builder that dropped
+    `tmdb_id` would still pass every case above, because every one of them
+    resolves on the rung before it. `uuid.UUID` for the id and `TitleKind` for
+    the kind are carried whatever the provider ids say, because the kind is half
+    of the tmdb rung's key and the id is the last rung.
     """
     title = _title(kind=TitleKind.SERIES, imdb_id="tt99000011", tmdb_id=99000550)
     reference = title_reference(title)
@@ -287,14 +266,12 @@ def test_the_reference_a_title_is_carried_as_names_every_key_the_row_has() -> No
 def test_the_unresolved_rules_are_the_ones_this_group_argued_for() -> None:
     """Stored per table rather than derived.
 
-    because the answer is a function of the table and of nothing K1 already records.
-
-    They differ on purpose. A `watch_states` row whose title is missing is a
-    real loss and the operator must see it, and it is recoverable: enrich the
-    title, restore again. `search_queries.clicked_title_id` is already
-    `ON DELETE SET NULL`, so `NULL` is a state the column and every reader
-    handle, and the analytic value is the query text and the outcome rather
-    than the id.
+    The answer is a function of the table and of nothing else recorded, and the
+    two differ on purpose. A `watch_states` row whose title is missing is a real
+    loss the operator must see, and it is recoverable: enrich the title, restore
+    again. `search_queries.clicked_title_id` is already `ON DELETE SET NULL`, so
+    `NULL` is a state the column and every reader handle, and the analytic value
+    is the query text and the outcome rather than the id.
     """
     from usher.db.backup_identity import UNRESOLVED_RULE, UnresolvedRule
 
@@ -306,21 +283,14 @@ def test_the_unresolved_rules_are_the_ones_this_group_argued_for() -> None:
 async def test_an_episode_whose_series_resolves_but_whose_numbers_do_not_is_refused_by_name() -> (
     None
 ):
-    """**The episode half of the headline claim, which nothing exercised.**.
+    """The episode half of "a named refusal, never `None`".
 
-    Measured with `coverage` over the whole unit suite on 2026-08-21: four
-    statements of `backup_identity` were unreached, and all four were this
-    half -- `episode_reference`'s body, `resolve_episodes`' body, and both
-    of `keys_tried`'s remaining branches. So *"a named refusal, never
-    `None`"* was pinned for titles and merely asserted for episodes, on a
-    library where 999,827 of 1,126,674 items are episodes.
-
-    The series resolving while the numbers do not is the failure that
-    matters: a resolver that answered the *series'* id here would write a
-    watch state against the wrong row, and both a `None` and a wrong id are
-    silent. The premise below is what separates this from an episode whose
-    series is missing too -- that case is refused for a different reason and
-    would pass this assertion without the numbers ever being consulted.
+    The series resolving while the numbers do not is the failure that matters: a
+    resolver that answered the *series'* id here would write a watch state
+    against the wrong row, and both a `None` and a wrong id are silent. The
+    premise below separates this from an episode whose series is missing too --
+    that case is refused for a different reason and would pass this assertion
+    without the numbers ever being consulted.
     """
     repository = FakeEpisodeRepository()
     series = _title(kind=TitleKind.SERIES, imdb_id="tt99000011")
@@ -359,21 +329,12 @@ async def test_an_episode_whose_series_resolves_but_whose_numbers_do_not_is_refu
 
 
 def test_the_rendered_rungs_name_the_kind_beside_the_tmdb_id() -> None:
-    """`keys_tried`'s tmdb rung was unreached by any test.
-
-    so the operator report K4 prints from it was unchecked at exactly the rung ADR-0011
-    exists for.
+    """The rendered tmdb rung names the kind beside the id.
 
     A rung rendered `tmdb_id=99000550` rather than `series+tmdb_id=99000550`
-    reads, in a report about a failed restore, as though one number were
-    looked up -- which is the namespacing mistake this layer refuses to
-    make, restated in the one place a human sees it.
-
-    ⚠️ The first draft of this docstring illustrated the rung with TMDb's
-    **real** id 550, which `test_no_identifier_this_repository_once_committed_
-    has_come_back` refused -- correctly, and in a docstring rather than in a
-    fixture, which is the half worth recording. The synthetic id below is
-    the one every case in this file uses.
+    reads, in a report about a failed restore, as though one number were looked
+    up -- the namespacing mistake this layer refuses to make, restated in the
+    one place a human sees it.
     """
     reference = title_reference(_title(kind=TitleKind.SERIES, tmdb_id=99000550))
     rendered = keys_tried(reference)
@@ -386,20 +347,13 @@ def test_the_rendered_rungs_name_the_kind_beside_the_tmdb_id() -> None:
 
 
 async def test_resolution_order_names_the_ladder_both_arms_actually_walk() -> None:
-    """`RESOLUTION_ORDER` is exported and documented as *"the ladder both arms spell"*.
+    """`RESOLUTION_ORDER` is bound to behaviour, not to a second copy of itself.
 
-    a claim two implementations have to honour, and until this case nothing checked it.
-
-    **Measured 2026-08-21:** rewriting the constant to `("id", "imdb_id")` survived all
-    4,527 unit cases, because its only other occurrences are its own `__all__` entry and
-    two prose mentions.
-
-    This binds it to observed behaviour rather than to a second copy of
-    itself. Each rung is exercised by a reference that can resolve *only*
-    through it, so a constant that renames or reorders a rung disagrees with
-    what the resolver does. The same shape as M9's `AKAS_NAME_MAX_CHARS`
-    binding, and for the same reason: a documented constant nothing reads is
-    documentation, not a contract.
+    Each rung is exercised by a reference that can resolve *only* through it, so
+    a constant that renames or reorders a rung disagrees with what the resolver
+    does. Its only other occurrences are its `__all__` entry and prose, so
+    without this a rewritten constant would survive the whole suite: a
+    documented constant nothing reads is documentation, not a contract.
     """
     assert RESOLUTION_ORDER == ("imdb_id", "kind+tmdb_id", "id")
 

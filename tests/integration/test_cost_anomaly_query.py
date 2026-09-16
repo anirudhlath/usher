@@ -12,8 +12,8 @@ from tests.integration.conftest import A_DECISIVE_MARGIN, Analyze, index_suspend
 from tests.unit.test_alerts import cost_anomaly_sql
 from usher.db.models.curation import COST_PRECISION, COST_SCALE
 
-# : What one ordinary night costs this deployment, and **the fixture's unit is : a
-# measurement rather than a round number**.
+#: What one ordinary night costs this deployment; a real figure rather than a
+#: round number.
 _A_NIGHT = Decimal("0.01658700")
 
 #: The floor, **read out of the committed statement** rather than retyped, so a
@@ -22,12 +22,12 @@ _A_NIGHT = Decimal("0.01658700")
 #: `test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one`.
 _THE_FLOOR = Decimal(re.findall(r">= (\d+\.\d+)\b", cost_anomaly_sql())[0])
 
-# : Rows land at this hour UTC on every day but today, which is far enough from : both
-# midnights that no arm is reading a boundary it did not mean to.
+#: Rows land at this hour UTC on every day but today, far enough from both
+#: midnights that no arm is reading a boundary it did not mean to.
 _A_MIDDAY = 12
 
-# : How many ledger rows the plan assertion seeds, and the number is the : assertion's
-# premise.
+#: How many ledger rows the plan assertion seeds; the number is the assertion's
+#: premise.
 _SEEDED_LEDGER_ROWS = 4000
 
 _SEED_AT_HOUR = text(
@@ -108,9 +108,7 @@ async def _evaluate(session: AsyncSession, sql: str | None = None) -> RowMapping
 
 
 def _planted(replacements: Mapping[str, str]) -> str:
-    """The committed statement with one decision mutated.
-
-    having checked that the mutation landed.
+    """The committed statement with one decision mutated, having checked that it landed.
 
     `testing-discipline.md`: *"a plant that did not land looks exactly like a
     check that passed"*. Here it would look like something else and worse -- a
@@ -134,7 +132,7 @@ def _planted(replacements: Mapping[str, str]) -> str:
 async def test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one(
     session: AsyncSession, multiple: Decimal, fires: bool
 ) -> None:
-    """🔴 The headline, and **the multiples are literal on purpose**."""
+    """The headline, and **the multiples are literal on purpose**."""
     await _seed(
         session,
         [(day, _A_NIGHT) for day in range(1, 8)] + [(None, _A_NIGHT * multiple)],
@@ -177,9 +175,9 @@ async def test_the_anomaly_query_fires_on_a_tripled_day_and_not_on_a_doubled_one
 async def test_a_zero_trailing_median_is_held_by_the_floor_and_not_by_the_comparison(
     session: AsyncSession, nights: int, fires: bool
 ) -> None:
-    """🔴 The state every unpriced deployment is in.
+    """The state every unpriced deployment is in.
 
-    and the one the comparison alone gets catastrophically wrong.
+    The comparison alone gets it catastrophically wrong.
     """
     await _seed(session, [(None, _A_NIGHT * nights)])
 
@@ -241,7 +239,7 @@ async def test_deleting_the_floor_pages_every_unpriced_deployment_on_its_first_p
 async def test_the_trailing_statistic_is_a_median_and_a_mean_would_miss_this_night(
     session: AsyncSession,
 ) -> None:
-    """🔴 PRD 10 says median, and **a flat trailing week ratifies the mean**."""
+    """PRD 10 says median, and **a flat trailing week ratifies the mean**."""
     week = [
         (7, Decimal(0)),
         (6, Decimal(0)),
@@ -284,7 +282,7 @@ async def test_the_trailing_statistic_is_a_median_and_a_mean_would_miss_this_nig
 async def test_the_window_is_seven_complete_trailing_days_and_reaches_no_further(
     session: AsyncSession,
 ) -> None:
-    """🔴 Eight calendar days: seven complete ones judged, plus the partial one being judged.
+    """Eight calendar days: seven complete ones judged, plus the partial one being judged.
 
     Both ends are asserted, and by the same fixture.
     """
@@ -338,7 +336,7 @@ async def test_the_window_is_seven_complete_trailing_days_and_reaches_no_further
 async def test_the_comparison_stays_in_numeric_and_float8_pages_on_an_exact_tie(
     session: AsyncSession,
 ) -> None:
-    """🔴 `cost_usd` is `NUMERIC(12, 8)` and the ratio has to stay there."""
+    """`cost_usd` is `NUMERIC(12, 8)` and the ratio has to stay there."""
     exactly_three = Decimal("0.14500000")
     await _seed(
         session,
@@ -394,10 +392,9 @@ async def test_the_comparison_stays_in_numeric_and_float8_pages_on_an_exact_tie(
 async def test_the_day_boundary_does_not_move_with_the_sessions_time_zone(
     session: AsyncSession, elsewhere: str
 ) -> None:
-    """`date_trunc('day'.
+    """`date_trunc('day', <timestamptz>)` truncates in the **session's** time zone.
 
-    <timestamptz>)` truncates in the **session's** time zone, so the unqualified
-    spelling makes "today" a property of who is asking.
+    The unqualified spelling makes "today" a property of who is asking.
     """
     await _seed(session, [(day, _A_NIGHT) for day in range(1, 8)])
     for hour, cost in ((5, Decimal("0.02000000")), (20, Decimal("0.03000000"))):
@@ -431,10 +428,7 @@ async def test_the_day_boundary_does_not_move_with_the_sessions_time_zone(
 async def test_the_windows_lower_bound_is_served_by_the_time_index(
     session: AsyncSession, analyze: Analyze
 ) -> None:
-    """**`ix_llm_calls_at` earns its keep on this statement too**.
-
-    which is the other half of the sentence `m08a` deferred it with.
-    """
+    """**`ix_llm_calls_at` earns its keep on this statement too**."""
     await session.execute(_SEED_LADDER, {"rows": _SEEDED_LEDGER_ROWS})
     # Without statistics the planner sizes `llm_calls` off an empty `pg_class`,
     # every candidate costs the same to four significant figures, and which one
@@ -466,7 +460,7 @@ async def test_the_windows_lower_bound_is_served_by_the_time_index(
         f"next best {total_cost(runner_up)}:\n{runner_up}"
     )
 
-    # **And the statement is executed afterwards.** A plan measured against a
+    # **And the statement is executed afterwards.** A plan checked against a
     # query nobody runs is a plan for a query that may not answer correctly --
     # `test_the_windowed_read_is_served_by_the_time_index` takes the same care
     # one module over, for the same reason.
@@ -479,9 +473,9 @@ async def test_the_windows_lower_bound_is_served_by_the_time_index(
 async def test_the_statement_returns_one_row_and_one_numeric_column(
     session: AsyncSession,
 ) -> None:
-    """🔴 Grafana's SQL-to-alerting conversion reads a table frame as *one series per numeric.
+    """Grafana reads a table frame as *one series per numeric column*.
 
-    column, labelled by every string column*, and the condition on this rule is a `> 0`
+    Labelled by every string column, and the condition on this rule is a `> 0`
     threshold.
     """
     await session.execute(text(f"CREATE TEMP VIEW cost_anomaly AS {cost_anomaly_sql()}"))
@@ -528,7 +522,7 @@ async def test_the_statement_returns_one_row_and_one_numeric_column(
 async def _explain(session: AsyncSession) -> str:
     """`EXPLAIN` in text format.
 
-    because `total_cost` reads the root node's `(cost=start..total ` off the first line.
+    `total_cost` reads the root node's `(cost=start..total ` off the first line.
 
     `EXPLAIN` without `ANALYZE`: what is asserted is the plan the planner
     *chose*, and executing it would add runtime to a comparison whose whole

@@ -230,7 +230,7 @@ async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() 
     """**The correction PRD 08 needs.** A readiness check that failed because Emby is down would.
 
     take Usher out of a load balancer for a reason restarting Usher cannot fix -- which
-    is the exact argument M1's liveness/readiness split is built on, and PRD 08's own
+    is the exact argument the liveness/readiness split is built on, and PRD 08's own
     failure table says an unreachable source leaves the catalog "fully browsable".
 
     Driven against a *reachable* database so the only thing that could

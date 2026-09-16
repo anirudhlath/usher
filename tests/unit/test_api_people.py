@@ -493,8 +493,6 @@ async def test_a_person_with_no_credits_is_a_200_with_no_groups_at_all(
 ) -> None:
     """Absent, never `[]`.
 
-    group B's convention, stated once for the whole group and applied here.
-
     A client cannot tell `"groups": []` from "this person's credits have not
     been derived yet", and on a catalog whose enriched tier is single-digit
     thousands of titles the second is the common case. The rest of the
@@ -514,7 +512,7 @@ async def test_a_person_with_no_credits_is_a_200_with_no_groups_at_all(
 
 
 async def test_an_unknown_person_is_a_404_in_the_envelope(client: httpx.AsyncClient) -> None:
-    """V1's generic `not_found`, never a `person_not_found`.
+    """The generic `not_found`, never a `person_not_found`.
 
     RFC 9457's `instance` already carries the path, so a per-resource member is a second
     spelling of what the document says.

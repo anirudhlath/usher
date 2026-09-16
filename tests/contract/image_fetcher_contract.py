@@ -24,7 +24,7 @@ class ImageFetcherContract(ABC):
     async def test_a_fetch_yields_a_media_type_the_cache_can_name(self) -> None:
         """`DiskImageBlobStore` names an entry from its media type.
 
-        so an implementation that answered `application/octet-stream` would produce a
+        An implementation that answered `application/octet-stream` would produce a
         `PortDataMalformed` at the *store*, one layer past where it is diagnosable.
         """
         async with self.fetcher().fetch(self.path(), IMAGE_LADDER[0]) as fetched:
@@ -43,11 +43,10 @@ class ImageFetcherContract(ABC):
         assert b"".join(chunks) != b""
 
     async def test_every_rung_of_the_ladder_is_fetchable(self) -> None:
-        """All four, because ADR-0032's ladder rests on a measurement.
+        """All four ladder widths, not just one.
 
-        every rung served 10/10 in all three kinds M9 emits — and an implementation that
-        only worked at one would make the clamp's other three widths a runtime
-        discovery.
+        An implementation that served only one would make the clamp's other three
+        widths a runtime discovery.
         """
         fetcher = self.fetcher()
         for rung in IMAGE_LADDER:
@@ -60,14 +59,10 @@ class ImageFetcherContract(ABC):
     ) -> None:
         """`ValueError`, not a `UsherPortError`.
 
-        an off-ladder width is a defect in the caller rather than an upstream saying no.
-
-        The values are the measurement. `w500` and `w1920` are widths the real
-        CDN **serves** and this proxy still refuses, because a rung resting on
-        a size the provider publishes for no kind is one it can withdraw
-        without changing its own contract; `w343` and `w1281` are the two
-        just-off-ladder cases a clamp mistake produces; `w0` and `w92` are
-        HTTP 400 upstream.
+        An off-ladder width is a defect in the caller rather than an upstream
+        saying no. `w500` and `w1920` are widths the real CDN serves and this
+        proxy still refuses; `w343` and `w1281` are the just-off-ladder cases a
+        clamp mistake produces; `w0` and `w92` are HTTP 400 upstream.
         """
         with pytest.raises(ValueError, match="ladder"):
             async with self.fetcher().fetch(self.path(), width):

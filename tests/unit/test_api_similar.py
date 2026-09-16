@@ -271,7 +271,7 @@ def test_the_route_holds_no_embedder_and_no_source_adapter() -> None:
     **The name scan runs over the module with its docstrings removed**, the
     way `tests/unit/test_rows_curated.py::test_the_curated_module_holds_no_
     llm_client_and_cannot_complete_anything` does it -- this module's own
-    docstring (M5's) argues at length about the `SourceAdapter` it must not
+    docstring argues at length about the `SourceAdapter` it must not
     hold, so a raw `"SourceAdapter" not in source` fails on the *explanation*
     rather than on an import. `ast.unparse` of a docstring-stripped tree keeps
     every identifier and every string annotation and drops only the prose --

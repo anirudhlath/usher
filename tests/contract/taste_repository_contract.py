@@ -15,8 +15,7 @@ MODEL = "fake:test-embedding"
 
 # 384 lanes, because that is what `halfvec(384)` accepts and a shorter vector
 # would have to be padded by one arm's seeder and not the other's -- the
-# padding would then be the suite's behaviour rather than the port's. Group F
-# hit the identical constraint on `halfvec(1128)`.
+# padding would then be the suite's behaviour rather than the port's.
 _DIMENSION = EMBEDDING_DIMENSIONS
 
 

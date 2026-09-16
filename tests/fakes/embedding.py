@@ -7,9 +7,7 @@ from collections.abc import Sequence
 from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.ports.embedding import Embedder
 
-# : **Tracks the column rather than restating it, since `m09e`.** This was a : literal
-# `384` while the storage width was also a literal 384, and the two : agreed for as long
-# as neither moved.
+# Tracks the storage column rather than restating its width as a second literal.
 _DIMENSION = EMBEDDING_DIMENSIONS
 _DIGEST_BYTES = 64
 _WORDS_PER_DIGEST = _DIGEST_BYTES // 8
@@ -46,16 +44,10 @@ class FakeEmbedder(Embedder):
 def _uniforms(text: str, count: int) -> list[float]:
     """`count` values in (0, 1], from blake2b over `text` and a counter.
 
-    **`hashlib`, never `hash()`, and this comment is the reason.** The
-    obvious spelling -- seeding a PRNG with `abs(hash(text))` -- passes
-    *every* case in `EmbedderContract`: unit norms, correct width, batch
-    order, same-text determinism, empty batch. It fails only **across
-    processes**, because `str.__hash__` is salted by `PYTHONHASHSEED`, and
-    nothing inside a single pytest run can observe that. What it would break
-    is the thing this milestone is built on: `source_fingerprint` makes
-    staleness a SQL predicate, and a double whose vectors differ between the
-    worker process and the test process ratifies a scheme that does not
-    work. Pinned by `test_the_fake_is_deterministic_across_processes`.
+    Blake2b rather than a PRNG seeded from `hash(text)`: `str.__hash__` is
+    salted by `PYTHONHASHSEED`, so the seeded form passes every in-process
+    case and still yields different vectors in a worker process than in the
+    test process, which would make `source_fingerprint` staleness meaningless.
     """
     values: list[float] = []
     counter = 0
@@ -82,11 +74,9 @@ def _vector(text: str, dimension: int) -> list[float]:
         gaussians.append(radius * math.cos(angle))
         gaussians.append(radius * math.sin(angle))
     gaussians = gaussians[:dimension]
-    # A gaussian vector normalised is uniform on the sphere, which is what
-    # makes the measured off-diagonal sd match 1/sqrt(384) to three decimal
-    # places. The norm is zero only with probability ~2**-64 per component;
-    # not defended, and named here so nobody mistakes its absence for an
-    # oversight.
+    # A gaussian vector normalised is uniform on the sphere. The norm is zero
+    # only with probability ~2**-64 per component; not defended, and named
+    # here so nobody mistakes its absence for an oversight.
     norm = math.sqrt(sum(value * value for value in gaussians))
     return [value / norm for value in gaussians]
 
@@ -95,13 +85,9 @@ def planted_pair(theta: float, *, dimension: int = _DIMENSION) -> tuple[list[flo
     """Two unit vectors at exactly `theta` radians, for tests that need a *known* similarity.
 
     `v = cos(theta)*a + sin(theta)*b` with `a` and `b` orthonormal, so
-    `dot(a, v) == cos(theta)` exactly -- verified to 2.22e-16, i.e. one ulp.
-
-    **This exists so that no similarity test has to hope.** The alternative
-    is picking a threshold and trusting a hash to land on the right side of
-    it, which produces a case that goes red on an unrelated change and gets
-    loosened -- once, permanently, and then it asserts nothing. A test that
-    needs "these two are 0.9 similar" states 0.9 and gets 0.9.
+    `dot(a, v) == cos(theta)` exactly. A test that needs "these two are 0.9
+    similar" states 0.9 and gets it, rather than hoping a hash lands on the
+    right side of a threshold.
     """
     first = [0.0] * dimension
     first[0] = 1.0

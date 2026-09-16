@@ -24,17 +24,12 @@ def test_every_entry_carries_a_class_from_the_enum() -> None:
 
 
 def test_the_class_counts_are_the_ones_this_task_argued_for() -> None:
-    """Asserted as counts.
+    """Asserted as counts, not merely as coverage.
 
-    not merely as coverage, so moving a table between columns is a diff a reviewer sees
-    rather than a silent reclassification of the household's watch state as something an
-    importer can rebuild.
-
-    There is deliberately no `len(MANIFEST) == 29` beside this: the four
-    counts pin the total by arithmetic, so such a line could not fail. The
-    one thing it might have been read as covering -- a table name written
-    twice in the literal, which a dict silently accepts -- is caught by
-    `ruff`'s `F601` at gate step 1, verified against a probe file.
+    Moving a table between columns is then a diff a reviewer sees rather than a
+    silent reclassification of the household's watch state as something an importer
+    can rebuild. The four counts pin the total by arithmetic, so a `len(MANIFEST)`
+    line beside them could not fail and is deliberately absent.
     """
     assert Counter(entry.kind for entry in MANIFEST.values()) == {
         BackupClass.REBUILDABLE: 20,
@@ -48,8 +43,7 @@ def test_the_manifest_is_the_orm_metadata_plus_alembics_own_table() -> None:
     """`"alembic_version"` is spelled out rather than written as the constant.
 
     Naming `ALEMBIC_VERSION_TABLE` on both sides of this equality -- the manifest keys
-    it too -- made the constant cancel: it was measured green with the constant set to
-    `"alembic_versionZZZ"`.
+    it too -- would make the constant cancel, leaving a wrong constant green.
     """
     assert set(MANIFEST) == set(Base.metadata.tables) | {"alembic_version"}
 
@@ -66,9 +60,8 @@ def test_the_alembic_constant_names_the_table_alembic_really_creates() -> None:
 def test_media_items_names_both_link_columns_and_they_exist_on_the_model() -> None:
     """The pair by name, not `<=` the model's columns.
 
-    As a subset test this was measured green with `episode_id` deleted -- which would
-    silently halve what K4's MERGE carries, and an episode link is exactly the operator
-    judgement the match ladder is worst at.
+    A subset test stays green with `episode_id` deleted, which would silently halve
+    what the restore's MERGE carries.
     """
     entry = MANIFEST["media_items"]
     assert entry.kind is BackupClass.PARTIAL
@@ -80,14 +73,10 @@ def test_media_items_names_both_link_columns_and_they_exist_on_the_model() -> No
 def test_every_rebuild_step_is_a_command_the_cli_really_accepts() -> None:
     """Parsed, not token-matched, and counted.
 
-    Two defects were measured green against the token-matching version.
-    Making `rebuild_commands` return `()` unconditionally skipped the loop
-    body for all 29 entries -- hence `checked`. And matching only the first
-    token accepted `bootstrap --phase there-is-no-such-phase` and
-    `derive --restore-catalog --from-artifact`, because `--phase` is a closed
-    `choices=` vocabulary and an unknown flag is an error argparse already
-    knows how to raise. `parse_args` catches all three families at once and
-    needs no reach into `argparse._SubParsersAction`.
+    Matching only the first token accepts `bootstrap --phase there-is-no-such-phase`
+    and `derive --restore-catalog --from-artifact`, and a `rebuild_commands` that
+    returned `()` would skip the loop body entirely -- hence `checked`. `parse_args`
+    catches all three at once and needs no reach into `argparse._SubParsersAction`.
     """
     parser = build_parser()
     checked = 0
@@ -116,15 +105,9 @@ def test_import_runs_is_never_restored_and_the_manifest_says_so_rather_than_k4()
 def test_tables_of_answers_one_class_in_manifest_order() -> None:
     """Membership, then order.
 
-    and the order is asserted as *"a subsequence of `MANIFEST`'s own keys"* rather than
-    by naming which precious table comes first.
-
-    Naming one would make the literal's ordering load-bearing, and it
-    deliberately is not: the sweep's equivalent-mutant control swaps two
-    `PRECIOUS` entries in the mapping and must stay green. The first
-    spelling of this case asserted `precious[0] == "users"` and turned that
-    control red, which is a test inventing a contract rather than pinning
-    one.
+    The order is asserted as *"a subsequence of `MANIFEST`'s own keys"* rather than by
+    naming which precious table comes first; naming one would make the literal's
+    ordering load-bearing, and it deliberately is not.
     """
     assert tables_of(BackupClass.PARTIAL) == ("media_items",)
     assert tables_of(BackupClass.SCHEMA) == ("alembic_version",)
@@ -144,7 +127,7 @@ def test_tables_of_answers_one_class_in_manifest_order() -> None:
 def test_a_valid_entry_constructs() -> None:
     """The positive control for the three refusals below.
 
-    without it, "the constructor raises" is also what a constructor that raises on
+    Without it, "the constructor raises" is also what a constructor that raises on
     everything produces.
     """
     entry = BackupEntry(kind=BackupClass.PRECIOUS, reason="a reason")
@@ -166,10 +149,10 @@ def test_an_entry_with_no_reason_is_refused() -> None:
     ],
 )
 def test_the_restore_rule_follows_from_the_class(kind: BackupClass, rule: RestoreRule) -> None:
-    """Every class.
+    """Every class, not three of four.
 
-    because a derived property that is right for three of four is a mapping with a hole
-    in it rather than a rule.
+    A derived property that is right for three of four is a mapping with a hole in it
+    rather than a rule.
     """
     entry = BackupEntry(
         kind=kind,

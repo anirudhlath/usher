@@ -1,7 +1,4 @@
-"""An alert can be green.
-
-valid, loaded, and unable to fire, and this module is the checks that close the ways it
-"""
+"""An alert can be valid, loaded, and still unable to fire."""
 
 import ast
 import pathlib
@@ -40,16 +37,13 @@ _ALERTS_SECTION = re.compile(r"^## Alerts$(?P<body>.*?)(?=^## |\Z)", re.M | re.S
 # filter is readable where a negative lookahead is not.
 _TABLE_ROW = re.compile(r"^\|(?P<alert>[^|]+)\|(?P<condition>[^|]+)\|\s*$", re.M)
 
-# 🔴 **The ledger, and it is empty because D13 was the last.** This map named which task
-# owed which alert, and the `xfail(strict=True)` that used to sit on the bidirectional
-# check below read its entries out in the failure message.
+# Alerts PRD 10 names that no rule file ships yet. Empty: every one has landed.
 _OWED: dict[str, str] = {}
 
-# 🔴 **The one series in this file that Usher does not emit, and the only exemption from
-# the two catalogue checks below.** *Disk projection* is the single alert in PRD 10's
-# table whose subject Usher has no instrument for and cannot have one: `telemetry.py`'s
-# own register records why an observable callback cannot query Postgres, and a `du` over
-# `image_cache_dir` would be disk I/O on a lane for one consumer.
+# The one series Usher does not emit, and the only exemption from the two catalogue
+# checks below. *Disk projection*'s subject is a filesystem, which Usher has no
+# instrument for and cannot have: an observable callback cannot query Postgres, and
+# a `du` over `image_cache_dir` would be disk I/O on a lane for one consumer.
 _MEASURED_STACK_SERIES = frozenset({"system_filesystem_usage_bytes"})
 
 # `### Resource envelope` in PRD 08 -- scoped to the heading, and with the same
@@ -149,10 +143,10 @@ def _grafana_rule(title: str) -> dict[str, Any]:
 def cost_anomaly_sql() -> str:
     """The statement *Cost anomaly* fires on, read out of the committed rule.
 
-    Exported because `tests/integration/test_cost_anomaly_query.py` executes
-    **this** string against a real `pgvector/pgvector:pg17` rather than a
-    transcription of it. A statement measured in one file and shipped from
-    another is a statement whose copy is what stops tracking the original.
+    Exported because `tests/integration/test_cost_anomaly_query.py` executes *this*
+    string against a real Postgres rather than a transcription of it: a statement
+    copied into one file and shipped from another is a copy that stops tracking the
+    original.
     """
     rule = _grafana_rule("Cost anomaly")
     queries = [query for query in rule["data"] if query["refId"] == rule["condition"]]
@@ -183,21 +177,15 @@ def _committed_names() -> list[str]:
 def _instrument_declarations() -> list[tuple[str, str, str]]:
     """`(name, factory, unit)` for every instrument `src/usher/` declares.
 
-    **An AST walk over a docstring-stripped tree, not a text scan**, and the
-    difference is measurable rather than stylistic: `telemetry.py`'s
-    `register_queue_gauges` docstring and the comment above `_queue_reader`
-    both spell `create_observable_gauge("usher.jobs.queued", callbacks=[other])`
-    while arguing about the SDK discarding a *second* registration. A `find()`
-    over the source text reports 43 declarations against the real 41, two of
-    them prose -- one of which supplies a name and no unit, i.e. it would grade
-    `usher.jobs.queued` as a unitless gauge and quietly accept
-    `usher_jobs_queued` as its stored spelling. That is the exact defect
-    invariant 2 exists to catch, arriving through the check itself.
-    `.claude/rules/testing-discipline.md` names the shape: *"prose that answers
-    it"*.
-
-    Comments are invisible to `ast` for free; docstrings are not, so they are
-    removed before the walk.
+    An AST walk over a docstring-stripped tree, not a text scan: `telemetry.py`'s
+    `register_queue_gauges` docstring and the comment above `_queue_reader` both
+    spell `create_observable_gauge("usher.jobs.queued", callbacks=[other])` while
+    arguing about the SDK discarding a *second* registration. A `find()` over the
+    source text counts both as declarations, and one of them supplies a name and no
+    unit -- so it would grade `usher.jobs.queued` as a unitless gauge and accept
+    `usher_jobs_queued` as its stored spelling, which is the exact defect invariant 2
+    exists to catch arriving through the check itself. Comments are invisible to
+    `ast` for free; docstrings are not, so they are removed before the walk.
     """
     found: list[tuple[str, str, str]] = []
     for path in sorted((_ROOT / "src" / "usher").rglob("*.py")):
@@ -261,22 +249,16 @@ def stored_spellings() -> dict[str, set[str]]:
 def _gauge_stored_names() -> set[str]:
     """The stored spellings of every instrument declared as an observable gauge.
 
-    Derived from the declarations rather than listed, for
-    `stored_spellings()`'s reason: a name typed into a set here is a name that
-    stops being checked the day it is renamed. A gauge is the shape whose
-    `increase()` decays out of its own window -- see
-    `test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it`.
+    Derived from the declarations rather than listed, for `stored_spellings()`'s
+    reason: a name typed into a set here is a name that stops being checked the day
+    it is renamed. A gauge is the shape whose `increase()` decays out of its own
+    window -- see `test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it`.
 
-    ⚠️ **`_MEASURED_STACK_SERIES` is added by name, because the derivation
-    cannot reach it.** `system_filesystem_usage_bytes` is produced by the
-    collector's `hostmetrics` receiver and not by any `create_*` call in
-    `src/usher/`, so a set built from the declarations alone would put D13's
-    rule on the *exempt* side of the split -- and that case's own docstring says
-    in as many words that disk free belongs on the graded side. It is a level by
-    the only test this split cares about, and that was watched rather than
-    assumed: on 2026-09-11 `/` dropped 4,033 MB in one minute and was then flat
-    to within a few MB, which is a step that leaves its own range vector exactly
-    `[W]` later. A counter would have been re-fed the whole time.
+    ⚠️ `_MEASURED_STACK_SERIES` is added by name because the derivation cannot
+    reach it: `system_filesystem_usage_bytes` comes from the collector's
+    `hostmetrics` receiver and not from any `create_*` call in `src/usher/`, so a set
+    built from the declarations alone would put the disk rule on the *exempt* side of
+    the split.
     """
     spellings = stored_spellings()
     return {
@@ -300,17 +282,13 @@ _EQUALITY_MATCHER = re.compile(r'(\w+)\s*=\s*"')
 def _absence_subject_labels(expr: str) -> set[str] | None:
     """The labels an `absent()` rule can render, or `None` if it is not one.
 
-    🔴 **An `absent()` alert has no per-instance subject, and interpolating one
-    renders empty.** Prometheus builds the result's label set from the
-    selector's equality matchers alone -- there is no series to take labels
-    from, which is the condition. So `{{ $labels.mountpoint }}` on such a rule
-    produces a page reading *"  is projected to fill"*, which is the same defect
-    `sum by (le)` causes on an aggregating rule and is invisible to the same
-    check.
-
-    The recogniser is structural -- the *whole* expression must be one
-    `absent()` call -- so `absent(x) or y > 0` is graded as an ordinary rule and
-    still has to name a subject.
+    An `absent()` alert has no per-instance subject, and interpolating one renders
+    empty: Prometheus builds the result's label set from the selector's equality
+    matchers alone, because there is no series to take labels from. So
+    `{{ $labels.mountpoint }}` on such a rule produces a page reading *"  is
+    projected to fill"*. The recogniser is structural -- the *whole* expression must
+    be one `absent()` call -- so `absent(x) or y > 0` is graded as an ordinary rule
+    and still has to name a subject.
     """
     stripped = " ".join(expr.split())
     opening = len("absent(") - 1
@@ -324,14 +302,12 @@ def _absence_subject_labels(expr: str) -> set[str] | None:
 def resource_table_figures(text: str | None = None) -> set[int]:
     """Every byte figure in PRD 08's `### Resource envelope` table, in bytes.
 
-    🔴 **Parsed rather than retyped, and that is the whole point of the case
-    that uses it.** A retyped list is a list somebody has to keep in step with a
-    document nobody reads; the prohibition it defends -- *no threshold in either
-    rule file is derived from that table* -- is about numbers that move, and
-    M9's Track 2 withdrew a design over one of them (ADR-0036).
-
-    Both the decimal and the binary reading of every ambiguous unit are
-    returned, so `~5 GB` forbids 5,000,000,000 **and** 5,368,709,120.
+    Parsed rather than retyped, which is the whole point of the case that uses it: a
+    retyped list is one somebody has to keep in step with a document nobody reads,
+    and the prohibition it defends -- no threshold in either rule file is derived
+    from that table -- is about numbers that move. Both the decimal and the binary
+    reading of every ambiguous unit are returned, so `~5 GB` forbids 5,000,000,000
+    *and* 5,368,709,120.
     """
     source = text if text is not None else _PRD_08.read_text(encoding="utf-8")
     section = _RESOURCE_SECTION.search(source)
@@ -349,10 +325,10 @@ def resource_table_figures(text: str | None = None) -> set[int]:
 def _byte_thresholds(expressions: list[tuple[str, str]], figures: set[int]) -> list[str]:
     """Every integer literal in an expression that is one of `figures`.
 
-    The *expressions* and never the annotations: both disk rules **quote** PRD
-    08's measured baseline as what the database was on a date, which is the
-    honest use of that table, and a scan that could not tell the two apart
-    would forbid saying the number at all.
+    The *expressions* and never the annotations: both disk rules quote PRD 08's
+    baseline as what the database was on a date, which is the honest use of that
+    table, and a scan that could not tell the two apart would forbid saying the
+    number at all.
     """
     return [
         f"{name}: {literal}"
@@ -413,12 +389,10 @@ def test_every_alert_prd_10_names_exists_and_every_rule_names_a_series_the_catal
 def test_every_committed_rule_names_a_series_the_catalogue_holds() -> None:
     """The catalogue arm of the case above, over the rules that exist today.
 
-    The named case carries both halves because the task text says it does, and
-    an `xfail` swallows every assertion in the body -- including that one. So
-    the half that *is* falsifiable at this HEAD runs here as well, where it has
-    teeth now rather than in three tasks' time. This is not duplication for its
-    own sake: it is the difference between D12 finding a typo when it writes its
-    rule and D14 finding it.
+    The named case carries both halves, and an `xfail` there would swallow every
+    assertion in its body including this one. So the half that *is* falsifiable
+    against the rules that exist runs here as well, where it has teeth now rather
+    than whenever the other half stops being expected to fail.
     """
     rules = committed_rules()
     assert len(rules) == 7, (
@@ -446,18 +420,14 @@ def test_every_committed_rule_names_a_series_the_catalogue_holds() -> None:
 
 
 def test_every_rule_is_written_in_the_spelling_prometheus_stores() -> None:
-    """🔴 The check the catalogue check cannot be.
+    """The check the catalogue check cannot be.
 
-    `usher_jobs_queued` normalises to `usher_jobs_queued`, which is in PRD 10's
-    table, so the case above passes it. It also selects **nothing**, because the
-    collector stores that gauge as `usher_jobs_queued_ratio` -- and an alert
-    expression that selects nothing does not fail and does not empty a panel; it
-    evaluates to no alerts, which is what "healthy" looks like. D8 found the
-    same spelling gap on Dashboard 3's panels, where the cost was a blank
-    rectangle somebody would eventually notice.
-
-    The stored spellings are **derived from the declarations**, so a new
-    instrument is covered the day it is declared, and the derivation itself is
+    `usher_jobs_queued` normalises to a name PRD 10's table holds, so the case above
+    passes it. It also selects nothing, because the collector stores that gauge as
+    `usher_jobs_queued_ratio` -- and an alert expression that selects nothing does
+    not fail and does not empty a panel, it evaluates to no alerts, which is what
+    "healthy" looks like. The stored spellings are derived from the declarations, so
+    a new instrument is covered the day it is declared, and the derivation itself is
     pinned in `test_the_stored_spelling_derivation_matches_this_hosts_prometheus`.
     """
     spellings = stored_spellings()
@@ -489,16 +459,13 @@ def _otel_name(token: str, spellings: dict[str, set[str]]) -> str:
 def test_the_stored_spelling_derivation_matches_this_hosts_prometheus() -> None:
     """The control for the case above, and it is the whole of its credibility.
 
-    A derivation that is wrong in the same direction as the rule file grades
-    every rule green. These are names read off this host's Prometheus on
-    2026-09-11 under `/api/v1/label/__name__/values`, one per instrument shape
-    the derivation has to get right, and each is paired with the PRD 10 name it
-    has to come out of.
-
-    The three rows that carry the whole argument are the `unit="1"` ones:
-    it becomes `_ratio` on a gauge, is **dropped** for `_total` on a counter,
-    and is dropped entirely on a histogram. No instrument name says which of the
-    three it is.
+    A derivation that is wrong in the same direction as the rule file grades every
+    rule green. These are names read off a real Prometheus under
+    `/api/v1/label/__name__/values`, one per instrument shape the derivation has to
+    get right, each paired with the PRD 10 name it has to come out of. The three rows
+    that carry the whole argument are the `unit="1"` ones: it becomes `_ratio` on a
+    gauge, is dropped for `_total` on a counter, and is dropped entirely on a
+    histogram. No instrument name says which of the three it is.
     """
     spellings = stored_spellings()
     measured = {
@@ -533,12 +500,9 @@ def test_the_stored_spelling_derivation_matches_this_hosts_prometheus() -> None:
 
 
 def test_the_ingest_stalled_rule_reaches_a_lane_that_has_never_settled_a_job() -> None:
-    """🔴 The headline.
+    """The rule must fire on a zero completions count and on an absent one.
 
-    the rule must fire on a *zero* completions count and on an *absent* one, and `and
-    ...
-
-    == 0` only does the first.
+    An `and ... == 0` arm only does the first.
     """
     expr = str(_rule("Ingest stalled")["expr"])
     assert "usher_jobs_queued_ratio" in expr and "usher_jobs_duration_seconds_count" in expr, (
@@ -578,7 +542,7 @@ def _seconds(duration: str) -> int:
 
 
 def test_no_decaying_window_is_as_long_as_the_for_that_waits_on_it() -> None:
-    """🔴 Two windows of thirty minutes is sixty, and the rule fires on neither."""
+    """Two windows of thirty minutes is sixty, and the rule fires on neither."""
     graded = 0
     exempt = 0
     for rule in committed_rules():
@@ -629,10 +593,10 @@ def test_the_push_down_rule_fires_on_a_zero_and_not_on_an_absence() -> None:
     those sources by construction, and an `absent()` arm would page somebody for
     having parked a server that is being rebuilt.
 
-    A reported **zero** is the incident, and it is a narrower claim than "the
-    socket is shut": `PushSnapshot.delivering` is `PushHealth.is_delivering`, so
-    a channel that upgraded, is held open and delivers nothing reads 0 -- which
-    is the failure ADR-0004 measured and the one this alert exists for.
+    A reported zero is the incident, and it is a narrower claim than "the socket is
+    shut": `PushSnapshot.delivering` is `PushHealth.is_delivering`, so a channel that
+    upgraded, is held open and delivers nothing reads 0 -- which is the failure this
+    alert exists for.
     """
     rule = _rule("Push down")
     expr = str(rule["expr"])
@@ -647,7 +611,7 @@ def test_the_push_down_rule_fires_on_a_zero_and_not_on_an_absence() -> None:
 
 
 def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table() -> None:
-    """🔴 D13's headline, and it is two prohibitions that fail in opposite directions."""
+    """Two prohibitions that fail in opposite directions."""
     figures = resource_table_figures()
     assert figures, "no figures parsed out of the resource table"
     assert len(figures) >= 40, (
@@ -660,8 +624,8 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
         "a measurement into a threshold"
     )
     assert 2_147_483_648 in figures and 2_000_000_000 in figures, (
-        "the parse no longer reads M9's withdrawn 2.0 GB ceiling in either reading, which "
-        "is the exact number ADR-0036 records a design being refused against"
+        "the parse no longer reads the withdrawn 2.0 GB ceiling in either reading, which is "
+        "the exact number a threshold must not be allowed to harden into"
     )
 
     disk = [rule for rule in committed_rules() if str(rule["alert"]) == "Disk projection"]
@@ -700,7 +664,7 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
     ]
     assert len(_byte_thresholds(planted_threshold, figures)) == 2, (
         "the threshold scan cannot see a literal lifted out of the resource table in both "
-        "languages, so the prohibition ADR-0036 was written for is decorative: "
+        "languages, so the prohibition on hard-coding one is decorative: "
         f"{_byte_thresholds(planted_threshold, figures)}"
     )
     expressions = _every_expression()
@@ -723,13 +687,9 @@ def test_the_stack_series_exemption_is_one_measured_name_and_not_a_blanket() -> 
     metric catalogue and against the spelling derived from `src/usher/`'s own
     `create_*` calls. *Disk projection*'s two Prometheus rules can be graded by
     neither, because their subject is a filesystem and Usher declares no
-    instrument for one. An exemption is the only way they land, and **an
-    exemption nobody counts is how every later rule escapes the check** -- D10
-    hit the same shape with the `pg_class` panel and asserted its exemption by
-    name and by count rather than merely granting it.
-
-    So: one name, spelled exactly as it was observed arriving, and used by
-    exactly the rules that own it.
+    instrument for one. An exemption is the only way they land, and an exemption
+    nobody counts is how every later rule escapes the check. So: one name, spelled
+    exactly as it arrives, and used by exactly the rules that own it.
     """
     assert set(_MEASURED_STACK_SERIES) == {"system_filesystem_usage_bytes"}, (
         "the exemption has grown past the one series this file measured. Any addition is "
@@ -762,8 +722,8 @@ def test_the_resource_table_parse_is_scoped_and_falsifiable() -> None:
     Three separate failures, and only the first is loud. A heading regex that
     matches nothing hands back an empty set, which the case above catches with
     `assert figures`. A scope that **leaks past** the section quietly widens the
-    prohibition to every number in PRD 08 -- and then a rule is red for carrying
-    a figure from a table this task was told not to read *and did not*. And a
+    prohibition to every number in PRD 08 -- and then a rule fails for carrying a
+    figure from a table nothing here reads. And a
     figure pattern that accepted unanchored numbers would forbid `1,272,367`, a
     title count, as a byte threshold.
     """
@@ -814,9 +774,9 @@ _AN_OUTPUT_ALIAS = re.compile(r"\bAS\s+(\w+),?\s*$", re.M)
 def disk_growth_sql() -> str:
     """The statement *Disk projection*'s database-growth half fires on.
 
-    Read out of the committed rule for `cost_anomaly_sql()`'s reason: a
-    statement measured in one place and shipped from another is a statement
-    whose copy is what stops tracking the original.
+    Read out of the committed rule for `cost_anomaly_sql()`'s reason: a statement
+    exercised in one place and shipped from another is a copy that stops tracking the
+    original.
     """
     rule = _grafana_rule("Disk projection")
     queries = [query for query in rule["data"] if query["model"].get("rawSql")]
@@ -828,9 +788,9 @@ def disk_growth_sql() -> str:
 
 
 def test_the_postgres_rule_is_not_in_the_directory_prometheus_globs() -> None:
-    """🔴 A Grafana provisioning file beside `usher.yml` disarms the other five rules.
+    """A Grafana provisioning file beside `usher.yml` disarms the other five rules.
 
-    and the directory layout is the whole of the defence.
+    The directory layout is the whole of the defence.
     """
     prometheus_directory = _ALERTS.parent
     globbed = sorted(path.name for path in prometheus_directory.glob("*.yml"))
@@ -863,9 +823,8 @@ def test_the_postgres_rule_names_only_tables_and_columns_this_schema_holds() -> 
     what carries that to a human. The failure this case is really for is the
     one in between: a column that exists on a *different* table, or a table
     renamed by a migration while the rule keeps the old name. Both are only
-    visible against `Base.metadata`, which is where D6's invariant 3 already
-    looks, so this reuses `_sql_pairs` rather than teaching a second scanner
-    the same lesson.
+    visible against `Base.metadata`, which is where invariant 3 already looks, so
+    this reuses `_sql_pairs` rather than teaching a second scanner the same lesson.
 
     ⚠️ The same coverage limit applies as there, and it is why the statement
     writes `llm_calls.at` rather than aliasing the table: an alias is not a
@@ -891,10 +850,7 @@ def test_the_postgres_rule_names_only_tables_and_columns_this_schema_holds() -> 
 
 
 def test_the_cost_anomaly_statement_carries_its_floor_its_window_and_stays_in_numeric() -> None:
-    """🔴 The four decisions the task text calls "properties of that query".
-
-    each spelled so that deleting it is red here.
-    """
+    """The four properties of that query, each spelled so deleting it fails here."""
     sql = cost_anomaly_sql()
 
     assert sql.count("interval '7 days'") == 2, (
@@ -929,24 +885,16 @@ def test_the_cost_anomaly_statement_carries_its_floor_its_window_and_stays_in_nu
 
 
 def test_the_cost_anomaly_rule_hands_grafana_exactly_one_numeric_column() -> None:
-    """🔴 The Postgres-side twin of "a metric nobody stores reads healthy forever".
+    """The Postgres twin of "a metric nobody stores reads healthy forever".
 
-    and it fails in the opposite, louder direction.
-
-    Grafana's SQL-to-alerting conversion turns every **numeric** column of a
-    table frame into a series the condition is evaluated over and every
-    **string** column into a label on it. The threshold below is `> 0`. So a
-    second numeric column -- `days_in_window`, which is 8 by construction --
-    would be judged by that same threshold and this alert would fire on every
-    evaluation, forever, with a page naming no anomaly. That is why every
-    diagnostic column carries `::text`: the casts are the rule's wiring, not
-    its formatting.
-
-    The types themselves are read out of a real PostgreSQL in
-    `tests/integration/test_cost_anomaly_query.py`, through
-    `information_schema`; what is checkable here is the shape that produces
-    them, and that the summary interpolates only labels this statement
-    actually returns.
+    Grafana's SQL-to-alerting conversion turns every numeric column of a table frame
+    into a series the condition is evaluated over and every string column into a
+    label on it. The threshold below is `> 0`, so a second numeric column --
+    `days_in_window`, which is 8 by construction -- would be judged by that same
+    threshold and this alert would fire on every evaluation, forever, with a page
+    naming no anomaly. That is why every diagnostic column carries `::text`: the casts
+    are the rule's wiring, not its formatting. The types themselves are read out of a
+    real PostgreSQL in `tests/integration/test_cost_anomaly_query.py`.
     """
     rule = _grafana_rule("Cost anomaly")
     outputs = _cost_anomaly_outputs(cost_anomaly_sql())
@@ -985,26 +933,16 @@ def test_the_cost_anomaly_rule_hands_grafana_exactly_one_numeric_column() -> Non
 
 
 def test_the_cost_anomaly_summary_survives_an_undefined_ratio() -> None:
-    """🔴 The one label on this rule that is sometimes a **sentence**.
-
-    and the page has to stay a sentence when it is.
+    """The one label on this rule that is sometimes a sentence.
 
     `spend_ratio` is `round(today / nullif(median, 0), 4)` with a
-    `coalesce(..., 'undefined (zero trailing median)')` behind it, because a
-    ratio against a zero median has no value and rendering it as `0.0000` or
-    `Infinity` would put a number in front of an operator meaning neither "no
-    anomaly" nor "an enormous one". That path is **reachable and is a real
-    page**: a zero trailing median with today above the floor fires, which is
-    the second arm of
-    `test_a_zero_trailing_median_is_held_by_the_floor_and_not_by_the_comparison`.
-
-    The summary's first spelling was `{{ $labels.spend_ratio }}x the trailing
-    7-day median`, which renders *"LLM spend today is undefined (zero trailing
-    median)x the trailing 7-day median"*. Measured against
-    `grafana/grafana:13.1.3` on 2026-09-11 -- by reading the rendered
-    annotation off a real alert instance, which is the only place a template
-    becomes a sentence. So the guard is on the adjacency rather than on the
-    whole line: a label that can be prose must not be glued to a unit.
+    `coalesce(..., 'undefined (zero trailing median)')` behind it, because a ratio
+    against a zero median has no value and rendering it as `0.0000` or `Infinity`
+    would put a number in front of an operator meaning neither "no anomaly" nor "an
+    enormous one". That path is reachable and is a real page. Glued to a unit the
+    summary renders *"LLM spend today is undefined (zero trailing median)x the
+    trailing 7-day median"*, so the guard is on the adjacency: a label that can be
+    prose must not be glued to a unit.
     """
     rule = _grafana_rule("Cost anomaly")
     summary = " ".join(str(rule["annotations"]["summary"]).split())
@@ -1026,10 +964,7 @@ def test_the_cost_anomaly_summary_survives_an_undefined_ratio() -> None:
 def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and_its_panel() -> (
     None
 ):
-    """A page has to land somewhere.
-
-    and this one has two things to explain that the Prometheus three do not.
-    """
+    """A page has to land somewhere, and this one has two things to explain."""
     rule = _grafana_rule("Cost anomaly")
     description = " ".join(str(rule["annotations"]["description"]).split())
 
@@ -1051,11 +986,10 @@ def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and
             f"the description does not name {setting}, whose default of 0 is what makes "
             "an unpriced deployment silent"
         )
-    # **Qualified, and the `or column in description` fallback was deleted after
-    # a plant survived it.** `llm_calls.at`'s column name is `at`, which is a
-    # substring of "that", "later" and a dozen other words this paragraph
-    # contains -- so the unqualified arm graded the description green with the
-    # column removed. The qualified form is also what an operator can paste.
+    # Qualified, with no `or column in description` fallback: `llm_calls.at`'s
+    # column name is `at`, a substring of "that", "later" and a dozen other words,
+    # so an unqualified arm grades the description green with the column removed.
+    # The qualified form is also what an operator can paste.
     for table, column in _sql_pairs(cost_anomaly_sql()):
         assert f"{table}.{column}" in description, (
             f"the description does not name {table}.{column}, which the rule fires on"
@@ -1117,17 +1051,14 @@ def test_the_disk_growth_statement_names_only_tables_and_columns_this_schema_hol
 
 
 def test_the_disk_growth_rule_hands_grafana_exactly_one_numeric_column() -> None:
-    """🔴 D14's finding, applied to the rule that arrived after it.
+    """The same column-type finding, applied to the rule that arrived after it.
 
-    Grafana turns every **numeric** column of a table frame into a series the
-    condition is evaluated over and every **string** column into a label on it.
-    The threshold is `> 0`. So a second numeric column -- `added_bytes_7d`,
-    which is a large positive number on any deployment that has ingested
-    anything -- would be judged by that same threshold and this alert would fire
-    on every evaluation forever, with a page naming no growth. The `::text`
-    casts are the rule's wiring, not its formatting, and they were confirmed
-    rather than assumed: run against the live catalog on 2026-09-11 the
-    statement's output types are `integer` once and `text` five times.
+    Grafana turns every numeric column of a table frame into a series the condition
+    is evaluated over and every string column into a label on it. The threshold is
+    `> 0`, so a second numeric column -- `added_bytes_7d`, a large positive number on
+    any deployment that has ingested anything -- would be judged by that same
+    threshold and this alert would fire on every evaluation forever, with a page
+    naming no growth. The `::text` casts are the rule's wiring, not its formatting.
     """
     rule = _grafana_rule("Disk projection")
     outputs = disk_growth_sql().rsplit("\nSELECT\n", 1)[1]
@@ -1166,15 +1097,12 @@ def test_the_disk_growth_rule_hands_grafana_exactly_one_numeric_column() -> None
 
 
 def test_no_grafana_rule_carries_a_zero_width_relative_time_range() -> None:
-    """D14 measured that Grafana rejects `from.
+    """Grafana rejects `from: 0, to: 0`, and then provisions no rules at all.
 
-    0, to: 0`, and that a rejected file provisions **no** rules at all rather than one
-    bad one.
-
-    So the failure is not "this rule is missing" -- it is *every* rule in the
-    file, including the one that was there first. That makes it worth a check
-    over the whole file rather than a note on the rule that would have caused
-    it: the cost of the mistake falls on somebody else's alert.
+    So the failure is not "this rule is missing" -- it is *every* rule in the file,
+    including the one that was there first. That makes it worth a check over the
+    whole file rather than a note on the rule that would have caused it: the cost of
+    the mistake falls on somebody else's alert.
     """
     ranges = [
         (str(rule["title"]), query["refId"], query["relativeTimeRange"])
@@ -1194,7 +1122,7 @@ def test_no_grafana_rule_carries_a_zero_width_relative_time_range() -> None:
 
 
 def test_no_rule_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults() -> None:
-    """D9's panel guard, turned on the rule file, and it is here for D12."""
+    """The panel guard, turned on the rule file."""
     declared = _declared_histograms()
     seconds = {name for name, body in declared.items() if 'unit="s"' in body}
     with_advisory = {
@@ -1380,20 +1308,14 @@ def test_the_prd_alert_table_parse_is_falsifiable() -> None:
 
 
 def test_the_declaration_walk_does_not_read_the_prose_that_answers_it() -> None:
-    """`telemetry.py` argues about `create_observable_gauge` in a comment and in a docstring.
+    """`telemetry.py` argues about `create_observable_gauge` in prose, twice.
 
-    and a text scan reads both as declarations.
-
-    Measured 2026-09-11: `source.find("create_observable_gauge(")` over
-    `src/usher/` reports two more gauges than exist, and one of the two supplies
-    the name `usher.jobs.queued` with **no `unit=`** -- which would derive its
-    stored spelling as `usher_jobs_queued`, the one name that never fires. The
-    check meant to catch that spelling would have been the thing that accepted
-    it.
-
-    So the walk is over an AST with docstrings removed. This case is that claim,
-    made falsifiable: the prose is real, it is quoted here, and a walk that
-    reads it produces a unitless duplicate.
+    A text scan reads both the comment and the docstring as declarations, reporting
+    two gauges that do not exist -- one of which supplies the name
+    `usher.jobs.queued` with no `unit=`, which would derive its stored spelling as
+    `usher_jobs_queued`, the one name that never fires. So the walk is over an AST
+    with docstrings removed. This case is that claim made falsifiable: the prose is
+    real, it is quoted here, and a walk that reads it produces a unitless duplicate.
     """
     prose = '''
 class Meter:
@@ -1452,7 +1374,7 @@ def _matchers(block: str | None) -> dict[str, tuple[str, str]]:
 
 
 def test_every_quantile_rule_collapses_the_labels_it_is_not_a_quantile_of() -> None:
-    """🔴 A `histogram_quantile` without `by (le)` is a quantile *per label set*."""
+    """A `histogram_quantile` without `by (le)` is a quantile *per label set*."""
     quantile_rules = [
         rule for rule in committed_rules() if "histogram_quantile" in str(rule["expr"])
     ]
@@ -1522,7 +1444,7 @@ def test_every_quantile_rule_collapses_the_labels_it_is_not_a_quantile_of() -> N
 
 
 def test_the_provider_degraded_ratio_counts_transport_failures_on_both_sides() -> None:
-    """🔴 `error` in the denominator only makes the ratio *fall* during an outage.
+    """`error` in the denominator only makes the ratio *fall* during an outage.
 
     PRD 10 states one half of this and not the other: *"a denominator that
     omitted the failures would read low exactly during an outage."* The

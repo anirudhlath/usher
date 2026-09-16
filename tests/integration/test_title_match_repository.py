@@ -19,11 +19,9 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.ingest import NameYearProbe, ProviderRef
 
-# What it took for the planner to reliably choose `ix_titles_name_lower_year`
-# over a seq scan here. Measured on `pgvector/pgvector:pg17`: at 200 rows (the
-# plan's suggestion) it still chose a seq scan, at 2,000 it chose the index
-# every run. A flaky plan assertion is worse than none, so this is the
-# comfortable number rather than the smallest one that ever worked.
+# Enough rows that the planner reliably chooses `ix_titles_name_lower_year`
+# over a seq scan. A flaky plan assertion is worse than none, so this is a
+# comfortable number rather than the smallest one that works.
 _PLAN_ROWS = 2_000
 
 
@@ -73,17 +71,14 @@ class TestPostgresTitleMatchRepository(TitleMatchRepositoryContract):
 async def test_a_batch_mixing_providers_does_not_cast_an_imdb_id_to_an_integer(
     repository: PostgresTitleMatchRepository, catalog: TitleCatalog
 ) -> None:
-    """The plan's own single-join spelling, refuted.
+    """A mixed batch never casts an IMDb reference to an integer.
 
     One `unnest` joined against `titles` with an `OR` over the three providers has to
-    write `p.value::integer` for the TMDb and TVDB arms, and Postgres does not guarantee
-    to evaluate the provider test first -- so a batch carrying `('imdb', 'tt99000020')`
-    alongside any TMDb ref answers `invalid input syntax for type integer: "tt99000020"`
-    and the whole page of 5,000 items fails.
-
-    A fake cannot reach this at all: Python never casts a value it did not
-    ask to cast. Splitting by provider is what makes the mixed batch below
-    ordinary rather than fatal.
+    write `p.value::integer` for the TMDb and TVDB arms, and Postgres does not
+    guarantee to evaluate the provider test first, so an IMDb reference alongside any
+    TMDb one fails the whole page. A fake cannot reach this: Python never casts a
+    value it did not ask to cast. Splitting by provider is what makes the mixed batch
+    below ordinary rather than fatal.
     """
     movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
     film = await catalog.given_title(
@@ -133,11 +128,10 @@ async def test_a_batch_costs_a_bounded_number_of_statements(
     session: AsyncSession,
     statement_counter: list[str],
 ) -> None:
-    """The whole reason this port exists.
+    """A batch costs a bounded number of statements, which is the reason this port exists.
 
-    `TitleRepository.get_by_tmdb_id` answers one question and a walk asks 1,126,674 of
-    them; at ~0.1 ms per indexed point lookup that is minutes of pure round trips per
-    sync -- and the name+year tier extrapolates to ~600 ms per item unindexed.
+    `TitleRepository.get_by_tmdb_id` answers one question; a catalog walk asks
+    millions, and per-item round trips turn one sync into minutes of pure latency.
     """
     for index in range(200):
         await catalog.given_title(
@@ -169,12 +163,11 @@ async def test_name_year_matching_uses_the_expression_index(
     catalog: TitleCatalog,
     analyze: Analyze,
 ) -> None:
-    """A query that lowercases the *probe* instead of the column cannot use an expression index.
+    """Name+year matching goes through the `lower(name)` expression index.
 
-    on `lower(name)` at all, and the fake -- which matches on `name.lower()` in Python
-    -- agrees with either spelling.
-
-    Only the plan tells them apart.
+    A query that lowercases the *probe* instead of the column cannot use that index at
+    all, and the fake -- which matches on `name.lower()` in Python -- agrees with
+    either spelling. Only the plan tells them apart.
     """
     for index in range(_PLAN_ROWS):
         await catalog.given_title(
@@ -201,12 +194,12 @@ async def test_provider_id_matching_uses_the_namespaced_index(
     catalog: TitleCatalog,
     analyze: Analyze,
 ) -> None:
-    """`ix_titles_tmdb_id_kind` is unique and partial (`WHERE tmdb_id IS NOT NULL`).
+    """Provider-id matching reaches the partial unique index rather than a seq scan.
 
-    and `t.tmdb_id = p.value` is what lets Postgres prove the predicate and use it.
-
-    A `COALESCE` or an `IS NOT DISTINCT FROM` in that join condition would return the
-    same rows off a seq scan of 1,271,138.
+    `ix_titles_tmdb_id_kind` is partial (`WHERE tmdb_id IS NOT NULL`), and a plain
+    `t.tmdb_id = p.value` is what lets Postgres prove the predicate and use it. A
+    `COALESCE` or an `IS NOT DISTINCT FROM` in that join condition returns the same
+    rows off a seq scan.
     """
     for index in range(_PLAN_ROWS):
         await catalog.given_title(

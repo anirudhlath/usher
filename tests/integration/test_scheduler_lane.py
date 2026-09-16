@@ -1,4 +1,4 @@
-"""The scheduled-work lane, running inside a real `create_app()` (ADR-0046)."""
+"""The scheduled-work lane, running inside a real `create_app()`."""
 
 import asyncio
 import time
@@ -90,16 +90,13 @@ def _with_job(monkeypatch: pytest.MonkeyPatch, job: ScheduledJob) -> None:
 async def test_the_scheduler_lane_runs_a_due_job_inside_the_server_process(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**A job running, not an assertion about wiring.**.
+    """A job running, not an assertion about wiring.
 
-    An app is started with nothing but `LifespanManager`, and a job that has
-    never been built runs before the app stops. Nothing in this test creates a
-    task, calls `tick()`, or runs `usher schedule` -- the only thing between
-    the registration and the run is `create_app`'s lifespan.
-
-    The premise is asserted before the wait, because *"the job never ran"* and
-    *"the lane was never started"* are different failures and the deadline
-    below cannot tell them apart.
+    Nothing here creates a task, calls `tick()`, or runs `usher schedule` -- the
+    only thing between the registration and the run is `create_app`'s lifespan.
+    The premise is asserted before the wait, because "the job never ran" and
+    "the lane was never started" are different failures the deadline below
+    cannot tell apart.
     """
     job = _OneShot()
     _with_job(monkeypatch, job)
@@ -125,12 +122,11 @@ async def test_the_scheduler_lane_runs_a_due_job_inside_the_server_process(
 async def test_the_scheduler_lane_is_off_when_the_setting_is(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The mirror of the case above and the reason it is evidence.
+    """A job stays unrun when the setting is off.
 
-    `USHER_SCHEDULER_ENABLED=false` is the **shipped default**, so this is what
-    every deployment does until an operator decides otherwise -- and it is what
-    keeps a fresh install from starting a multi-hour rebuild over an empty
-    table (ADR-0046, decision 3).
+    `USHER_SCHEDULER_ENABLED=false` is the shipped default, so this is what
+    every deployment does until an operator decides otherwise -- and it keeps a
+    fresh install from starting a multi-hour rebuild over an empty table.
     """
     settings = _settings(postgres_url, scheduler=False)
     assert settings.scheduler_enabled is False, "the premise: off is the shipped default"
