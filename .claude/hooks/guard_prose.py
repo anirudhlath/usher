@@ -50,14 +50,23 @@ def _comment_blocks(source: str) -> list[tuple[str, int]]:
     return blocks
 
 
+TRIPLE = re.compile(r"^[A-Za-z]{0,2}('''|\"\"\")")
+
+
 def _prose(source: str) -> list[str]:
-    """Every comment and docstring body, as raw text."""
+    """Every comment and triple-quoted string in the file, as raw text.
+
+    Matching the token rather than its line is what makes a raw docstring
+    visible; comparing `line.lstrip()[:3]` left every one of them unguarded.
+    Every triple-quoted string counts, not only docstrings, because a SQL
+    statement's own `--` comments are prose and carried the register too.
+    """
     out: list[str] = []
     try:
         for token in tokenize.generate_tokens(io.StringIO(source).readline):
             if token.type == tokenize.COMMENT:
                 out.append(token.string)
-            elif token.type == tokenize.STRING and token.line.lstrip()[:3] in ('"""', "'''"):
+            elif token.type == tokenize.STRING and TRIPLE.match(token.string):
                 out.append(token.string)
     except (tokenize.TokenError, IndentationError, SyntaxError):
         pass
