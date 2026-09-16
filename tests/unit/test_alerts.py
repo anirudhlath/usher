@@ -624,8 +624,8 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
         "a measurement into a threshold"
     )
     assert 2_147_483_648 in figures and 2_000_000_000 in figures, (
-        "the parse no longer reads M9's withdrawn 2.0 GB ceiling in either reading, which "
-        "is the exact number ADR-0036 records a design being refused against"
+        "the parse no longer reads the withdrawn 2.0 GB ceiling in either reading, which is "
+        "the exact number a threshold must not be allowed to harden into"
     )
 
     disk = [rule for rule in committed_rules() if str(rule["alert"]) == "Disk projection"]
@@ -664,7 +664,7 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
     ]
     assert len(_byte_thresholds(planted_threshold, figures)) == 2, (
         "the threshold scan cannot see a literal lifted out of the resource table in both "
-        "languages, so the prohibition ADR-0036 was written for is decorative: "
+        "languages, so the prohibition on hard-coding one is decorative: "
         f"{_byte_thresholds(planted_threshold, figures)}"
     )
     expressions = _every_expression()

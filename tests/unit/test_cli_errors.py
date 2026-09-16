@@ -517,15 +517,13 @@ def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> 
     # two of them, and `_TRANSLATORS` covers every `SearchFilters` field, so the third
     # fires only for a field a later change forgets.
     exclusion = (
-        "RepositoryConflict stays out: 22 raise sites across 14 modules "
-        "(re-derived 2026-08-20, M10 F4), of which exactly ONE is reachable "
-        "from a CLI argument -- `usher unmatched --title` naming no title, "
-        "fixed by a lookup in `cli._unmatched` rather than by muting the other "
-        "21. Several of those are deliberate tripwires for bugs in this "
-        "project's own code (`title_neighbors`' bounds, the credits delete's "
-        "scope, a curated batch this project assembled wrong), and ADR-0026's "
-        "bar is that a family belongs here when an operator can act on it. "
-        "1-of-22 is not a family. See ADR-0026's Consequences."
+        "RepositoryConflict stays out: of its raise sites exactly ONE is reachable "
+        "from a CLI argument -- `usher unmatched --title` naming no title, fixed by "
+        "a lookup in `cli._unmatched` rather than by muting the rest. Several of "
+        "those are deliberate tripwires for bugs in this project's own code "
+        "(`title_neighbors`' bounds, the credits delete's scope, a curated batch "
+        "this project assembled wrong). A family belongs here when an operator can "
+        "act on it, and one reachable site out of twenty-two is not a family."
     )
     assert everything_else == {
         RepositoryConflict,

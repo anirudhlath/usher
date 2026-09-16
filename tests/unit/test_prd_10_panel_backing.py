@@ -454,7 +454,7 @@ def test_dashboard_5_names_the_compliance_series_and_the_column_it_is_not() -> N
     body = normalised(section_body(5))
 
     assert "`raw_payloads.fetched_at`" in body, (
-        "dashboard 5 does not name the column ADR-0016 made the compliance answer"
+        "dashboard 5 does not name the column that answers the compliance question"
     )
     assert "`titles.enriched_at`" in body, (
         "the distinction from titles.enriched_at is not stated, so nothing here stops it "

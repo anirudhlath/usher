@@ -105,7 +105,7 @@ _SOURCE = _Decision(
     limiter=(
         "the per-source `_MinInterval` gate, taken in `EmbySession._send` immediately "
         "above `build_request`. Owned by `SourceGateRegistry` at the composition root "
-        "and keyed by `source.id`, so one source has one gate per process (ADR-0043)"
+        "and keyed by `source.id`, so one source has one gate per process"
     ),
     recorded_in="src/usher/adapters/emby/session.py",
     paced=True,
@@ -113,8 +113,7 @@ _SOURCE = _Decision(
 _TMDB = _Decision(
     upstream="api.themoviedb.org",
     limiter=(
-        "`_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` (30, under TMDb's ~40 rps "
-        "ceiling -- ADR-0005, measured over 130,334 live requests)"
+        "`_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` (30, under TMDb's ~40 rps ceiling)"
     ),
     recorded_in="src/usher/adapters/tmdb/client.py",
     paced=True,
@@ -146,13 +145,12 @@ _DECISIONS: dict[tuple[str, str], _Decision] = {
     ),
     # -- five of the six declines; `emby/push.py`'s is `_PUSH` below ----------
     ("usher.adapters.images.provider", "self._client.stream"): _Decision(
-        upstream="image.tmdb.org (the provider's image CDN, unauthenticated -- ADR-0032)",
+        upstream="image.tmdb.org (the provider's image CDN, unauthenticated)",
         limiter=(
-            "none, deliberately and already recorded before S3: the CDN publishes no "
-            "rate limit and is not the API ADR-0005's ~40 rps is about, so a limiter "
-            "here would be invented against a number nobody has measured. The real "
-            "bound is the cache -- after the first request per (image, rung) there is "
-            "no outbound traffic at all. S3 confirms this rather than reversing it"
+            "none, deliberately: the CDN publishes no rate limit and is not the API "
+            "the ~40 rps ceiling is about, so a limiter here would be invented against "
+            "a number that does not exist. The real bound is the cache -- after the "
+            "first request per (image, rung) there is no outbound traffic at all"
         ),
         recorded_in="src/usher/composition.py",
         paced=False,
@@ -423,8 +421,8 @@ def test_the_module_census_is_the_one_the_records_quote() -> None:
     paced = {module for (module, _), record in _DECISIONS.items() if record.paced}
 
     assert len(modules) == 9, (
-        "the module census moved, so `docs/prd/01-architecture.md`'s table, this file's "
-        f"docstring and ADR-0043 are all now quoting a different tree: {sorted(modules)}"
+        "the module census moved, so `docs/prd/01-architecture.md`'s table and this file's "
+        f"docstring are both now quoting a different tree: {sorted(modules)}"
     )
     assert len(_call_sites()) == 16, (
         "the httpx call-site count moved -- PRD 01 prints it, so it is corrected there "

@@ -2117,8 +2117,8 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
                 "status probe and a reconnect gap-closer spend two budgets"
             )
             assert _gate_of(through_the_worker_lane) is server_gate, (
-                "the worker lane paces independently of the push lane -- the >=2 gates "
-                "per source ADR-0043 §4 measured before S3"
+                "the worker lane paces independently of the push lane, so a source is "
+                "paced by two budgets rather than one"
             )
             assert server_gate is gates.gate(_GATED.id, _GATED.name)
             assert server_gate._rate == 0.4, (
@@ -2239,7 +2239,7 @@ def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
             f"`cli.{root}` calls `{builder}` inside a nested definition, so the registry is "
             f"built once per invocation of that closure rather than once for the process -- "
             f"{nested} of {own + nested} calls. That is a fresh outbound gate per scope, "
-            "which is the defect ADR-0043 §4 exists to remove"
+            "which is what one shared registry per process exists to prevent"
         )
 
     walk, _ = _calls_of(_cli_function(module, "_sync"), "_open_adapter")

@@ -140,14 +140,20 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
     A Protocol is satisfied structurally, so a fake that drifts from the port keeps
     passing and the contract suite silently stops being a contract.
     """
-    assert ABC in port.__mro__, f"{port.__name__} is not an ABC (ADR-0001)"
+    assert ABC in port.__mro__, (
+        f"{port.__name__} is not an ABC; a port must subclass `abc.ABC` so a fake that "
+        "drifts from it fails loudly instead of satisfying it structurally"
+    )
     # Widened to `object` deliberately: `typing.Protocol` is a typing special
     # form rather than a `type`, so the direct `Protocol not in port.__mro__`
     # is a mypy `comparison-overlap` error against a `tuple[type, ...]` --
     # and silencing that with an ignore would leave the check itself
     # unverified by the type checker.
     protocol: object = Protocol
-    assert protocol not in port.__mro__, f"{port.__name__} is a Protocol (ADR-0001)"
+    assert protocol not in port.__mro__, (
+        f"{port.__name__} is a Protocol; ports are `abc.ABC` so that a fake drifting from "
+        "one stops satisfying it"
+    )
 
 
 @pytest.mark.parametrize(

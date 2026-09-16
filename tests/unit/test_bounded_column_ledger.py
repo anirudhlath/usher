@@ -10,7 +10,7 @@ from tests.bounded_ledger import audit_module, drift, ledger_columns
 def test_the_published_census_still_describes_the_repository() -> None:
     complaints = drift()
     assert complaints == [], (
-        "the bounded-column ledger has moved away from what ADR-0044 publishes. "
+        "the bounded-column ledger has moved away from what `PUBLISHED` records. "
         "Regenerate with `uv run python scripts/audit_bounded_columns.py --summary`, "
         "then update PUBLISHED / PUBLISHED_AT_M08B *and* the record, in the same "
         "commit as the change that moved them:\n  " + "\n  ".join(complaints)

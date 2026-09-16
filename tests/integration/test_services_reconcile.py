@@ -244,7 +244,7 @@ async def test_a_refused_sweep_reports_both_numbers_where_an_operator_can_see_th
     assert swept == [("Reconcile Source", 0.0)], (
         "a full walk that retracted nothing must still record the series, "
         "under the source's name -- otherwise silence means both 'shed "
-        "nothing' and 'never ran', and ADR-0043 §2's one identity becomes two"
+        "nothing' and 'never ran', and one source identity reads as two"
     )
 
     # Now approach the ceiling: 9 of 10 gone is 0.9 against the 0.25 default.

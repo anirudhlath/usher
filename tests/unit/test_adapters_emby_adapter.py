@@ -1310,8 +1310,8 @@ async def test_events_yields_what_arrives_and_flips_supports_push() -> None:
     try:
         async with adapter.events() as events:
             assert adapter.supports_push is False, (
-                "the socket is open and nothing has arrived; ADR-0004's control "
-                "handshake against a nonexistent path produced exactly this state"
+                "the socket is open and nothing has arrived, which is the state a "
+                "control handshake against a nonexistent path leaves behind"
             )
             assert connection.sent == [SUBSCRIBE_FRAME]
             event = await asyncio.wait_for(anext(aiter(events)), timeout=BOUND)

@@ -79,7 +79,7 @@ _NOT_A_PROBLEM_DOCUMENT: Final[tuple[tuple[str, str, str | None, str], ...]] = (
         "ReadinessResponse",
         "A readiness probe's real consumers -- Kubernetes, Docker healthcheck, load balancers "
         "-- gate on the status code and never parse the body, so its 503 reports which check "
-        "failed rather than naming a code. A2's exemption, ADR-0030's ruling.",
+        "failed rather than naming a code.",
     ),
     (
         "/stream/{ticket}",
@@ -678,14 +678,14 @@ def test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it(app: FastAP
     cursor_routes = sorted(by_route.get("invalid_cursor", set()))
     assert len(cursor_routes) >= 3, (
         "`invalid_cursor` has fewer emitting routes than the three that call `decode_cursor`, "
-        f"so ADR-0030's deletion question is open again: {cursor_routes}"
+        f"so one of them has stopped raising it: {cursor_routes}"
     )
 
     machinery = {code.value for code in _CODE_FOR_STATUS.values()}
     unemitted = {code.value for code in ProblemCode} - set(by_route) - machinery
     assert unemitted == set(), (
-        f"vocabulary members no route and no handler can emit: {sorted(unemitted)}. ADR-0030's "
-        "Consequences oblige this milestone to delete them."
+        f"vocabulary members no route and no handler can emit: {sorted(unemitted)}. A code "
+        "nothing can raise is dead vocabulary -- delete it."
     )
 
 

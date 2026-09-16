@@ -236,9 +236,9 @@ def test_no_404_is_spelled_per_resource() -> None:
         if "not_found" in code.value and code.value != "not_found"
     ]
     assert offenders == [], (
-        f"per-resource 404 codes: {offenders}. ADR-0030 rules for one generic `not_found`; "
+        f"per-resource 404 codes: {offenders}. The vocabulary carries one generic `not_found`; "
         "if a single path really does produce two 404s a client would act on differently, "
-        "amend the ADR's table and this case together."
+        "widen the vocabulary and this case together."
     )
 
 
@@ -322,8 +322,8 @@ def test_the_status_translation_table_covers_only_what_usher_does_not_raise_itse
     silently opts out of the envelope.
     """
     assert set(_CODE_FOR_STATUS) == {404, 405, 422}, (
-        f"_CODE_FOR_STATUS covers {sorted(_CODE_FOR_STATUS)}; ADR-0030 scopes it to the "
-        "statuses Starlette and FastAPI raise before any Usher handler runs"
+        f"_CODE_FOR_STATUS covers {sorted(_CODE_FOR_STATUS)}; it is scoped to the statuses "
+        "Starlette and FastAPI raise before any Usher handler runs"
     )
 
 
