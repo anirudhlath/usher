@@ -144,7 +144,7 @@ async def owned(
     finally:
         async with sessions() as session:
             for title_id in planted:
-                # `GET /home` promotes every skeleton it draws (issue #73) and
+                # `GET /home` promotes every skeleton it draws, and
                 # `get_session` commits at the end of a successful request, so
                 # each `/home` below leaves an `enrich` row per planted title.
                 # **Before the title** -- the job's `key` is the title's id as

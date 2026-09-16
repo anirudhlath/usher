@@ -267,7 +267,7 @@ async def test_a_page_costs_one_candidate_statement_not_one_per_seed(
     `SearchIndex` for -- at 10,000 instead of 1.3M, which is smaller and is still no
     reason to reintroduce it when a `CROSS JOIN LATERAL` expresses it in one statement.
 
-    Held fixed the way M4's ingest cases hold it: same statement shape,
+    Held fixed the way the ingest cases hold it: same statement shape,
     different page size.
     """
     ids = []
@@ -570,10 +570,10 @@ async def _give_genome(session: AsyncSession, title_id: uuid.UUID, lane: int) ->
 
     The vector is one-hot at `lane` -- so two titles sharing a lane are cosine
     1.0 and two on different lanes are 0.0. Real genome vectors are dense and
-    measure mean 0.6101 (Group F, over 268,157,000 pairs); the point of a
-    one-hot here is that these cases are about **whether the statement joins
-    both sides at all**, and a planted value nobody has to trust is what makes
-    a wrong join visible as a wrong number rather than as a plausible one.
+    measure mean 0.6101; the point of a one-hot here is that these cases are
+    about **whether the statement joins both sides at all**, and a planted
+    value nobody has to trust is what makes a wrong join visible as a wrong
+    number rather than as a plausible one.
 
     `halfvec(1128)` rejects any other length outright, which is the constraint
     `GenomeRepositoryContract` already records.
@@ -648,7 +648,7 @@ async def test_the_genome_join_does_not_run_inside_the_no_index_bracket(
     assert "genome_scores" not in _NEAREST
 
 
-# -- the resume cursor and the model guard (M10 J6) -------------------------
+# -- the resume cursor and the model guard ---------------------------------
 
 # The guard's case runs before the cursor's, and the order is load bearing: a
 # deployment mid-model-swap has a mixed `title_embeddings`, so the refusal

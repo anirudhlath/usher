@@ -27,9 +27,7 @@ def test_both_implementations_run_the_same_assertions() -> None:
 
     **The count has to move in the same commit as the cases**, or the suite
     stays red -- which is the design of this guard rather than friction with
-    it. M3 shipped `== 39`, M4 took it to 43, M5's six push cases took it to
-    49, and issue #41's `start_index`-offsets-the-filtered-stream case takes
-    it to 50.
+    it.
 
     Exactly one of the 50 skips on this subclass:
     `test_events_raises_source_not_supported_when_push_is_unavailable`,

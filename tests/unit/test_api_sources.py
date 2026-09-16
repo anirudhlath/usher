@@ -1,4 +1,4 @@
-"""`POST /admin/sources/{id}/sync` -- the M4 boundary call, as an enqueue."""
+"""`POST /admin/sources/{id}/sync` -- the boundary call, as an enqueue."""
 
 import ast
 import inspect
@@ -179,7 +179,7 @@ async def test_a_disabled_source_is_409_and_enqueues_nothing(
     A 202 here would promise a walk the worker will decline
     (`composition.selected_sources` skips a disabled source even when named explicitly).
 
-    `not_playable`, not a minted `source_disabled`: V1's error vocabulary is closed, and
+    `not_playable`, not a minted `source_disabled`: the error vocabulary is closed, and
     both this and a title with no playable copy are RFC 9110 §15.5.10's "conflict with
     the current state of the target resource, stop asking" -- a client cannot act on the
     two differently.

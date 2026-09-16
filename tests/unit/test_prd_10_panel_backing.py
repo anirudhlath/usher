@@ -299,7 +299,7 @@ def test_a_bold_opening_that_makes_no_backing_claim_is_not_one() -> None:
 _PROGRESS = _ROOT / "docs" / "plans" / "progress.md"
 
 # The same anchor `test_docs_currency.py` uses, for the same reason: the
-# document holds four status tables plus a `| M7 gets | From |` table 1,400
+# document holds four status tables plus a `| M<n> gets | From |` table 1,400
 # lines further down, and an unanchored scan for `| M<n> |` reads all of them.
 _MILESTONE_TABLE = "## Milestones (from"
 
@@ -310,7 +310,7 @@ _MILESTONE_TABLE = "## Milestones (from"
 # owed by no milestone and have nothing to compare.
 _OWED_MARKER = re.compile(r"⏳\s*(?P<milestone>M\d+)")
 
-# Cells are split on **unescaped** pipes only. M10's status cell is one 6 kB
+# Cells are split on **unescaped** pipes only. One status cell is a 6 kB
 # paragraph carrying a Loki query — `{service_name="usher"} \|= "2fa839a2…"` —
 # and `str.split("|")` turns that single row into seven cells, which silently
 # moves the status into the wrong position rather than failing.
@@ -318,7 +318,7 @@ _UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
 
 def _milestone_status(progress: str) -> dict[str, str]:
-    """`{"M9": "✅ complete on …", …}` from progress.md's milestone table."""
+    """`{"M<n>": "✅ complete on …", …}` from progress.md's milestone table."""
     start = progress.find(_MILESTONE_TABLE)
     assert start != -1, f"docs/plans/progress.md has no '{_MILESTONE_TABLE}…' heading"
     rest = progress[start + len(_MILESTONE_TABLE) :]
@@ -414,20 +414,16 @@ def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None
 
 
 def test_the_milestone_status_parse_survives_an_escaped_pipe_in_the_status_cell() -> None:
-    r"""M10's real row carries one `\|`, inside a Loki query.
+    r"""One real row carries an escaped `\|`, inside a Loki query.
 
     It is the only escaped pipe in the table, and splitting on every pipe
     truncates that one cell rather than shifting it.
 
-    **So the assertion is on the whole cell and not on its marker**, which is
-    the correction this case needed: `\|` sits *after* the `🚧`, so a prefix
-    check reads the truncated cell as correct and the naive split survives it.
-    Measured 2026-09-07 — with `_UNESCAPED_PIPE` replaced by `r"\|"` the
-    prefix form passed all eight cases in this module. The defect is
-    unobservable in today's *conclusions* for exactly that reason; it stops
-    being unobservable the first time a status cell puts an escaped pipe before
-    its marker, and that row would then read as unshipped and forgive every ⏳
-    against it.
+    **So the assertion is on the whole cell and not on its marker.** `\|` sits
+    *after* the `🚧`, so a prefix check reads the truncated cell as correct and
+    a naive split survives today's conclusions. It stops surviving the first
+    time a status cell puts an escaped pipe before its marker: that row would
+    then read as unshipped and forgive every ⏳ against it.
     """
     table = (
         "## Milestones (from docs/specs/x.md)\n"

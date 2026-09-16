@@ -284,9 +284,9 @@ async def test_the_provider_label_is_the_provider_and_never_the_row_slug(
 async def test_no_cache_metric_is_recorded_here(
     ctx: RowContext, meter_reader: InMemoryMetricReader
 ) -> None:
-    """`usher.cache.hits`/`.misses` is M9's (PRD 10).
+    """`usher.cache.hits`/`.misses` is PRD 10's.
 
-    A metric recorded a milestone before the dashboard that reads it is the
+    A metric recorded long before the dashboard that reads it is the
     `search_queries` failure in miniature -- a shape fixed before anything has tried to
     use it.
     """

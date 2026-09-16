@@ -1095,10 +1095,9 @@ async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
     await index.index_many([shared, vector_leader])
 
     # **The two lane rankings the paragraph above does arithmetic on, read back rather
-    # than assumed.** Issue #26: "1/62 + 1/62 against 1/61" is a claim about where each
-    # row sits in each lane, and nothing here used to check it -- so a lane that came
-    # back short or reordered failed the *fusion* assertion instead, under a message
-    # blaming a missing COALESCE.
+    # than assumed.** "1/62 + 1/62 against 1/61" is a claim about where each row sits in
+    # each lane; unchecked, a lane that came back short or reordered fails the *fusion*
+    # assertion instead, under a message blaming a missing COALESCE.
     lexical = await index.search(SearchRequest(query="vacuum", limit=10))
     assert [hit.title_id for hit in lexical.hits] == [lexical_leader.title_id, shared.title_id], (
         "the lexical lane is not the one the RRF arithmetic below assumes"
@@ -1150,9 +1149,9 @@ async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession
     await index.index_many(vectors)
 
     # **"No overlap at all" is the premise, and it is a claim about the two lanes rather
-    # than about the fixture.** Issue #26: this case was seen failing on the fused set,
-    # one row short, under a message saying fusion was an INNER JOIN -- when what had
-    # happened was that the vector lane returned one of its two rows.
+    # than about the fixture.** Unasserted, a vector lane that returned one of its two
+    # rows fails the fused set one row short, under a message saying fusion was an
+    # INNER JOIN.
     lexical_hits = await index.search(SearchRequest(query="vacuum", limit=10))
     semantic_hits = await index.search(
         SearchRequest(

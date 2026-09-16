@@ -250,8 +250,8 @@ async def test_the_underived_warning_is_said_once_per_process_not_once_per_propo
     is ~2,880 screens a day per household, and with three providers each
     saying this it was ~8,640 warnings a day on a fresh install -- which trains
     an operator to ignore warnings, the exact failure a log level exists to
-    prevent. M5 hit this at `build_worker`'s 5 s poll and fixed it by moving
-    the line to where the *decision* is made rather than where the loop is.
+    prevent. `build_worker`'s 5 s poll hit this and was fixed by moving the
+    line to where the *decision* is made rather than where the loop is.
 
     **Three passes, not one.** A single pass cannot tell "once" from "once per
     pass": both spellings emit exactly one warning. That is the same reason

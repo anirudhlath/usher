@@ -54,7 +54,7 @@ class FakeSearchIndex(SearchIndex):
             # The lexical lane is the only one with a typed string to compare a
             # name against, which is `PostgresSearchIndex`'s own split: the
             # vector lane matches an embedding and is handed no query text at
-            # all (issue #25).
+            # all.
             query=request.query,
         )
         vectors = _rank(
@@ -278,7 +278,7 @@ def _fuse(*lanes: Sequence[SearchHit]) -> list[SearchHit]:
     # Carried from whichever lane knew, which is the lexical one. A fused
     # answer that dropped it would leave `_dense_ranks` with nothing to
     # separate an exact name match from the rows tied to it, on the one mode
-    # where both lanes ran (issue #25).
+    # where both lanes ran.
     exact: set[uuid.UUID] = set()
     for lane in lanes:
         for rank, hit in enumerate(lane):

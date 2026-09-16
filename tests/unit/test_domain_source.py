@@ -128,8 +128,8 @@ def test_media_item_last_seen_at_defaults_to_aware_now_when_omitted() -> None:
 
     "seen, but we don't know when" isn't a reachable state.
 
-    Required, matching the nullable=False column Task 8 declares (unlike added_at, which
-    stays optional on both sides).
+    Required, matching the nullable=False column the table declares (unlike
+    added_at, which stays optional on both sides).
     """
     item = MediaItem(source_id=new_id(), external_id="12345")
     assert item.last_seen_at.tzinfo is not None
@@ -186,7 +186,7 @@ def test_source_rejects_unknown_kind() -> None:
         _source(kind="jellyfin")
 
 
-# --- serialization round-trip (the wire contract from M4 onward) ---------
+# --- serialization round-trip (the wire contract) ----------------------
 
 
 def test_source_serialization_round_trips() -> None:

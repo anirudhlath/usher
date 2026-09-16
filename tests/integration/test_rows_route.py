@@ -327,7 +327,7 @@ async def screen(
                 await session.execute(
                     text("DELETE FROM watch_states WHERE title_id = :id"), {"id": title_id}
                 )
-                # `GET /home` promotes every skeleton it draws (issue #73) and
+                # `GET /home` promotes every skeleton it draws and
                 # `get_session` commits at the end of a successful request, so
                 # the `_slugs` reads above leave an `enrich` row per title.
                 # **Before the title** -- the job's `key` is the title's id as

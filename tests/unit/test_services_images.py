@@ -187,7 +187,7 @@ async def test_a_fetch_that_fails_stores_nothing_and_the_next_request_retries(
     The rung is asked for twice: the first attempt fails, the second succeeds,
     and the bytes that come back are the second attempt's — a store that had
     written an empty entry on the failure would serve nothing forever under
-    C5's long `max-age`.
+    the long `max-age`.
     """
     images = FakeImageRepository()
     stored = await _seed(images, _image())

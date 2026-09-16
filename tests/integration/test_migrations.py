@@ -42,17 +42,16 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
         "trg_sources_set_updated_at",
         "trg_titles_set_updated_at",
         "trg_watch_states_set_updated_at",
-        # M4. Both tables are written by `INSERT ... ON CONFLICT DO UPDATE`
-        # from a staging table, so `onupdate=` never fires for them. The
+        # Both tables are written by `INSERT ... ON CONFLICT DO UPDATE` from
+        # a staging table, so `onupdate=` never fires for them. The
         # other three new tables get none: `jobs`' one writer sets
         # `updated_at` explicitly on every statement, and `sync_runs` and
         # `raw_payloads` have no `updated_at` column at all.
         "trg_seasons_set_updated_at",
         "trg_episodes_set_updated_at",
-        # M7.
         "trg_people_set_updated_at",
         "trg_collections_set_updated_at",
-        # M8 adds `curated_rows` and `llm_calls` and this set does not move.
+        # `curated_rows` and `llm_calls` add none.
     }
 
 
@@ -137,7 +136,7 @@ async def test_every_check_constraint_in_the_models_exists_in_the_database(
     assert actual == expected
 
 
-# --- M4's two new foreign keys --------------------------------------------
+# --- The two new foreign keys ---------------------------------------------
 
 
 async def test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_given(

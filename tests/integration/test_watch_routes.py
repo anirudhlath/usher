@@ -40,7 +40,7 @@ EPISODE_COUNT = 3
 class _CommitProbe(EventPublisher):
     """Records each frame *and* what a second connection can see at that moment.
 
-    The G1 harness shape, one route over: a publisher is only allowed to offer
+    The same harness shape, one route over: a publisher is only allowed to offer
     an event about committed state, and the only witness that can tell a
     committed row from an uncommitted one is a connection that is not the
     writer's.
@@ -397,7 +397,7 @@ async def test_marking_played_twice_does_not_advance_the_count_twice(
 async def test_unmarking_played_keeps_the_position_the_count_and_the_date(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """M3's destructive-route finding, against the real `CASE` clauses.
+    """The destructive route, against the real `CASE` clauses.
 
     Emby's `DELETE /Users/{u}/PlayedItems/{item}` resets `PlayCount`, clears
     `LastPlayedDate` **and** clears a non-zero resume position. All three

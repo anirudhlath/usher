@@ -76,10 +76,10 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
         # `TRUNCATE sources CASCADE` takes `media_items` with it, which is what
         # leaves this file's titles with no referents.
         await session.execute(text("TRUNCATE sources CASCADE"))
-        # PRD 10's analytics rows, since M9's F2: every `GET /search` through this file
+        # PRD 10's analytics rows: every `GET /search` through this file
         # writes one and commits it.
         await session.execute(text("DELETE FROM search_queries"))
-        # PRD 03's demand lane, since issue #73: `GET /search` and `GET /search/suggest`
+        # PRD 03's demand lane: `GET /search` and `GET /search/suggest`
         # promote the skeletons they answered with, and `get_session` commits at the end
         # of a successful request -- so a read route in this file writes `jobs` rows.
         await session.execute(
@@ -372,7 +372,7 @@ async def test_the_two_tiers_are_two_indexes_in_the_composed_graph(
     objects either way -- what distinguishes them is *which statement runs
     against which index in the real schema*. `PostgresPrefixSuggestIndex`
     reads `ix_titles_name_lower_prefix`, which exists only because `m09a`
-    shipped it; `PostgresSuggestIndex` reads the GIN trigram index M6 shipped.
+    shipped it; `PostgresSuggestIndex` reads the GIN trigram index.
 
     Three arms, and all three are needed. Tier 1 on a true prefix proves the
     btree path answers at all. Tier 1 on a typo proves it is **not** the
@@ -483,9 +483,9 @@ async def test_one_answered_request_writes_exactly_one_search_queries_row(
         (TERM, "full_text", 2),
         (TERM, "full_text", 2),
     ]
-    # The outcome half is F3's, and it is written as literals rather than left
-    # to a column default -- so a dashboard reads a real `false` rather than a
-    # column nobody filled.
+    # The outcome half is written as literals rather than left to a column
+    # default -- so a dashboard reads a real `false` rather than a column
+    # nobody filled.
     assert [(one.clicked_title_id, one.played) for one in rows] == [(None, False), (None, False)]
     # Not an invented id: `DefaultUserIdDep` resolves PRD 01's singleton, which
     # is the only household this deployment has.
@@ -499,9 +499,9 @@ async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
     sessions: async_sessionmaker[AsyncSession],
     catalog: _Catalog,
 ) -> None:
-    """`GET /search/suggest` records one row per **answered** request since M10's J2.
+    """`GET /search/suggest` records one row per **answered** request.
 
-    and none for the two arms that never reach the service.
+    None for the two arms that never reach the service.
     """
     answered = ({"q": TYPED_PREFIX}, {"q": TYPED_TYPO, "tier": "fuzzy"})
     unanswered = ({"q": TYPED_PREFIX[:3]}, {"q": "   "})

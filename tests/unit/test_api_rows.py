@@ -442,7 +442,7 @@ async def test_re_enabling_writes_the_row_rather_than_deleting_it(
 async def test_a_slug_the_registry_does_not_hold_is_refused_and_writes_no_row(
     toggler: httpx.AsyncClient, provider_settings: FakeRowProviderSettingsRepository
 ) -> None:
-    """**404 in V1's envelope**, and the table is read back to prove it.
+    """**404 in the envelope**, and the table is read back to prove it.
 
     *"It answered 404"* is also what a route that wrote the row and then failed a lookup
     produces, so the assertion that matters is `overrides() == {}`. An override for a

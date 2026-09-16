@@ -234,11 +234,11 @@ def test_a_candidate_name_cannot_forge_a_candidate_line(raw: str) -> None:
     *about*.
 
     **Six arms, and the whole rendered line, because `replace("\n", " ")`
-    passes a weaker version of this case.** Measured: with only a `\n` arm and
-    "no line starts with 999." to assert, the narrower collapse survives -- and
-    it survives the `\r\n` arm too, because `str.splitlines()` splits on a
-    bare `\r` as well, so the forged line begins with the space the `\n`
-    became and no longer *starts with* `999.`. The assertion with teeth is the
+    passes a weaker version of this case.** With only a `\n` arm and "no line
+    starts with 999." to assert, the narrower collapse survives -- and it
+    survives the `\r\n` arm too, because `str.splitlines()` splits on a bare
+    `\r` as well, so the forged line begins with the space the `\n` became and
+    no longer *starts with* `999.`. The assertion with teeth is the
     line itself: `" ".join(value.split())` collapses every kind of whitespace
     Python recognises, including `\r`, `\t` and `U+2028`, and every arm
     renders the identical single line.

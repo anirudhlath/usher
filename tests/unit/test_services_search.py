@@ -778,8 +778,8 @@ async def test_a_blank_query_buys_no_completion() -> None:
     """The blank-query refusal is *before* the model and therefore before this.
 
     A search box sends one between every keystroke, so an expansion above that guard is
-    a completion per keypress -- the exact inverse of this milestone's cost argument,
-    arriving on its most frequent path.
+    a completion per keypress -- the exact inverse of the cost argument, arriving on its
+    most frequent path.
     """
     expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
     service = await _service(

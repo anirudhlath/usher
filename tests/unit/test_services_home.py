@@ -647,7 +647,7 @@ def test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it(
     )
 
 
-# -- the demand lane (issue #73) -------------------------------------------
+# -- the demand lane -------------------------------------------------------
 
 
 def _card_at(state: EnrichmentState) -> RowCard:

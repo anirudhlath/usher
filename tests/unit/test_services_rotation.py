@@ -107,7 +107,7 @@ async def test_a_row_already_written_under_the_new_key_is_skipped_rather_than_do
 
 
 async def test_every_rotated_row_is_committed_before_the_next_one_is_read() -> None:
-    """Per-row commit, which is the opposite of K4's one-transaction restore and is deliberate.
+    """Per-row commit, the opposite of a one-transaction restore, and deliberate.
 
     One transaction over N rows means an interrupted rotation leaves *every*
     row on the old key while the operator has already put the new one in their

@@ -68,7 +68,7 @@ async def test_a_matching_title_the_household_does_not_own_is_absent() -> None:
     catalog rather than the owned library: 1.27M titles, of which the household
     can play none, in a correctly-shaped and beautifully-themed row. PRD 06's
     *"things to seek out"* is the LLM candidate pool's property and belongs to
-    M8's `CuratedProvider`; a source-family row on the home screen is playable
+    the `CuratedProvider`; a source-family row on the home screen is playable
     or it is not there.
     """
     library = await _horror_library()

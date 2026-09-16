@@ -267,12 +267,9 @@ def test_a_provider_that_still_implements_the_old_shape_is_incomplete() -> None:
 
 
 def test_there_are_no_remaining_provisional_markers() -> None:
-    """A 🔶 that says "settle in M4" and survives M4 is worse than one that names a later.
+    """A 🔶 that outlives what it promised to settle is worse than none at all.
 
-    milestone -- it reads as settled to anyone who checks the roadmap rather than the
-    source.
-
-    All three of this module's markers named M4; none of them may survive it.
+    It reads as settled to anyone who checks the roadmap rather than the source.
     """
     import usher.ports.metadata as module
 

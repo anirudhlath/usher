@@ -14,7 +14,7 @@ async def test_bootstrap_tables_added_no_new_triggers(postgres_url: str) -> None
     Scoped to the three bootstrap tables by name, which is what this test
     claims to be about. It used to assert the *whole database's* trigger set
     instead -- a second copy of `test_migrations.py`'s assertion, in a file
-    whose own docstring says that one already covers drift -- so M4's two
+    whose own docstring says that one already covers drift -- so the two
     new triggers on unrelated tables broke it for no reason anyone reading
     the title would predict.
     """

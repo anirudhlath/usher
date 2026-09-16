@@ -90,7 +90,7 @@ async def _wipe(session: AsyncSession) -> None:
         text("DELETE FROM titles WHERE tmdb_id = :tmdb_id OR sort_name = :mark"),
         {"tmdb_id": _TMDB_ID, "mark": _MARK},
     )
-    # `DROP TABLE IF EXISTS stg_jobs` stood here until M6's staging tables
+    # `DROP TABLE IF EXISTS stg_jobs` stood here until the staging tables
     # became `CREATE TEMP TABLE ... ON COMMIT DROP`; the commit below is now
     # what removes it rather than what persists it.
     await session.commit()

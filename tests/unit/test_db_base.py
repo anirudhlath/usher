@@ -32,7 +32,7 @@ def test_session_factory_produces_async_sessions() -> None:
 
 
 def test_session_factory_does_not_expire_on_commit() -> None:
-    """Group E's repositories read attributes off a row after add()/update() flush.
+    """Repositories read attributes off a row after add()/update() flush.
 
     expire_on_commit=False is what keeps that valid without an extra round trip.
 

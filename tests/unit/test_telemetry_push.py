@@ -202,7 +202,7 @@ def test_the_module_owning_those_instruments_is_imported() -> None:
     assert "usher.services.push" in sys.modules
 
 
-# -- the two series PRD 10 reserved for M5 ----------------------------------
+# -- the two series PRD 10 reserved -----------------------------------------
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list[tuple[float, str]]:

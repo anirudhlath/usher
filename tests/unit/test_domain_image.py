@@ -38,9 +38,9 @@ def test_image_and_image_row_have_matching_field_sets() -> None:
     because the difference is otherwise indistinguishable from a forgotten
     filter.
 
-    `episode_id` and `person_id` are carried rather than dropped. Nothing in
-    M9 writes either (the group's own boundary call: episode stills and person
-    headshots are not built), and the honest shape for a column the model
+    `episode_id` and `person_id` are carried rather than dropped. Nothing
+    writes either yet (episode stills and person headshots are not built), and
+    the honest shape for a column the model
     cannot fill yet is to model it and say so, which is `api/dto/title.py`'s
     call one layer up -- not to quietly drop it so this assertion passes.
     """

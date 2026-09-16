@@ -37,8 +37,8 @@ class RowProviderSettingsRepositoryContract:
         False}` for every slug it has ever been asked about, rather than only the ones
         actually stored, satisfies a bare membership check and fails this one: after
         touching exactly one slug, the map holds exactly one entry, and every one of the
-        other nine providers this milestone ships -- untouched -- is absent rather than
-        reading as disabled.
+        other nine providers -- untouched -- is absent rather than reading as
+        disabled.
 
         And re-enabling that one slug is not a delete. The table holds
         *overrides*, not a list of disabled providers, so setting it back to

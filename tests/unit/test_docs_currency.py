@@ -29,7 +29,7 @@ _PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-(?![a-z0-9-]*-design\.md)[a-z0-9-
 def _section(document: str, heading: str) -> list[str]:
     """The lines under a level-2 heading, up to the next level-2 heading.
 
-    The heading line itself is excluded, because the milestone table's heading
+    The heading line itself is excluded, because the Milestones heading
     carries a `docs/specs/…` path and a section that included it would be
     harvesting its own title.
     """
@@ -94,13 +94,13 @@ def test_a_plan_named_only_in_prose_does_not_satisfy_the_table() -> None:
     """The scoping above, asserted rather than described.
 
     A check that reads a whole document is satisfied by the prose explaining its own
-    repair. The document below carries both spellings of the same plan file: a table row
-    for M1, and a prose heading plus a sentence for M9. A whole-document scan
-    answers `{M1, M9}` and reports the table as complete; the scoped extraction
-    answers `{M1}` and reports M9 missing, which is the truth.
+    repair. The document below names one plan in a table row and another only in a
+    prose heading and a sentence. A whole-document scan answers both and reports the
+    table as complete; the scoped extraction answers one and reports the other
+    missing, which is the truth.
 
     The second assertion is the premise. Without it the first is satisfied by a
-    regex that cannot see the M9 filename at all -- for the same reason every
+    regex that cannot see the prose filename at all -- for the same reason every
     scan in this repository carries a non-emptiness control.
     """
     document = (

@@ -95,7 +95,7 @@ async def test_derive_reports_zeroes_against_an_empty_database(fakes: _Fakes) ->
     the report prints two counts and no percentage --
     `titles_with_credits / cached_payloads` is `0/0` on exactly the deployment
     that rule exists for, and a `ZeroDivisionError` on a diagnostic is the
-    empty install's first experience of this milestone.
+    empty install's first experience of the command.
 
     Asserted through the ports the command reads rather than through its
     stdout, so a formatting change cannot silently satisfy it.
@@ -302,10 +302,10 @@ async def test_the_backfill_report_prints_every_count_the_walk_produced(
 async def test_a_derivation_that_found_no_artwork_still_prints_the_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**Zero is the number this line exists to print.** `images` joined `*_APPEND_TO_RESPONSE`.
+    """**Zero is the number this line exists to print.**.
 
-    in M4, so most of a real cache predates it, and an operator's first `usher derive
-    --backfill` will report far fewer images than titles.
+    `images` joined `*_APPEND_TO_RESPONSE` after most of a real cache was written, so an
+    operator's first `usher derive --backfill` will report far fewer images than titles.
 
     A report that suppressed the line when it was zero would make "the cache is old" and
     "the write is broken" look identical -- and the second is what an operator would

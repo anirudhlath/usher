@@ -1,4 +1,4 @@
-"""The machinery `conftest.py` added for issue #79, against a real Postgres."""
+"""The machinery `conftest.py` adds, against a real Postgres."""
 
 import pytest
 from sqlalchemy import text
@@ -116,7 +116,7 @@ async def test_a_suspended_index_leaves_the_plan_and_comes_back(session: AsyncSe
     Both halves are asserted, because a context manager whose `UPDATE` silently
     matched nothing would leave every margin assertion in this suite comparing
     a plan against itself — passing while measuring nothing, which is the
-    failure mode #79 exists to remove rather than to introduce somewhere new.
+    failure mode this guard exists to remove rather than to introduce anew.
     """
     reads_valid = text("SELECT indisvalid FROM pg_index WHERE indexrelid = CAST(:name AS regclass)")
     probe = text("EXPLAIN SELECT id FROM titles ORDER BY sort_name LIMIT 5")

@@ -34,7 +34,7 @@ def test_the_contributing_gate_is_the_gate_claude_md_states() -> None:
 
     # Six, not five: the block leads with `uv sync --extra eval`, without which
     # five eval modules abort at collection and `pytest` exits having run
-    # nothing. M10's R3 plan text says five; it predates that line.
+    # nothing.
     assert len(claude) == 6, (
         f"the fence parser found {len(claude)} commands in CLAUDE.md, so the "
         f"comparison below would be vacuous: {claude}"

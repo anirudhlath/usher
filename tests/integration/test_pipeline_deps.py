@@ -1,4 +1,4 @@
-"""Every M4 provider in `api/deps.py`, resolved through FastAPI itself."""
+"""Every provider in `api/deps.py`, resolved through FastAPI itself."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -65,12 +65,12 @@ _PROVIDERS = {
     "ingest_service": get_ingest_service,
     "reconcile_service": get_reconcile_service,
     "watch_sync_service": get_watch_state_sync_service,
-    # M5's read-through surface. The one provider here that a shipped
+    # The read-through surface. The one provider here that a shipped
     # route actually resolves -- `GET /titles/{id}` -- and therefore the
     # one whose graph a 500 at request time would be a real outage.
     "sources_repository": get_source_repository,
     "title_read_service": get_title_read_service,
-    # M7's composed home screen.
+    # The composed home screen.
     "neighbors": get_title_neighbor_repository,
     "embeddings": get_title_embedding_repository,
     "people": get_person_repository,
@@ -90,13 +90,13 @@ _PROVIDERS = {
     "row_context": get_row_context,
     "row_cache": get_row_cache,
     "home_service": get_home_service,
-    # M9's `GET /titles/{id}/similar`, over finished M6 wiring. Resolved
-    # through FastAPI's own graph for the reason every provider above is:
-    # `get_similarity_service` takes `session.commit` as a bound method, which
-    # only exists once `SessionDep` has resolved a real session, and a plain
-    # call cannot reach that failure mode.
+    # `GET /titles/{id}/similar`, resolved through FastAPI's own graph for the
+    # reason every provider above is: `get_similarity_service` takes
+    # `session.commit` as a bound method, which only exists once `SessionDep`
+    # has resolved a real session, and a plain call cannot reach that failure
+    # mode.
     "similarity_service": get_similarity_service,
-    # M9's `GET /search`, and the first provider here that reaches its collaborators
+    # `GET /search`, and the first provider here that reaches its collaborators
     # through `usher.composition` rather than naming them: the import-linter contract
     # that keeps `PostgresSearchIndex` inside its package lists `usher.api` whole, so
     # `api/deps.py` cannot construct one.

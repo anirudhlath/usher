@@ -593,8 +593,8 @@ def test_the_four_signal_fingerprint_this_file_pins_is_the_one_m7_and_m8_stamped
         == _M7_FOUR_SIGNAL_FINGERPRINT
     )
     # The half that makes this a licence rather than a restatement: today's
-    # function, handed M7's own weights, does *not* answer it. A reader finding
-    # the literal must not conclude the running code can still mint it.
+    # function, handed the four-signal weights, does *not* answer it. A reader
+    # finding the literal must not conclude the running code can still mint it.
     assert blend_fingerprint(embedding_model=_EMBEDDING_MODEL) != _M7_FOUR_SIGNAL_FINGERPRINT
 
 

@@ -146,7 +146,7 @@ async def test_ids_are_resolved_before_they_are_judged() -> None:
     """`GET /search` never holds a `Title`.
 
     `SearchResult` carries `title_id`, `kind`, `name`, `year`, `popularity`,
-    `owned` and `score` and **no `enrichment_state`** (issue #52), so the one
+    `owned` and `score` and **no `enrichment_state`**, so the one
     surface that most obviously knows what a client is looking for cannot
     answer "is this a skeleton" from what it already has. `seen_ids` resolves
     them; `seen` stays the entry point for a caller that has hydrated titles

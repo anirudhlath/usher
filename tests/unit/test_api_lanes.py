@@ -1082,7 +1082,7 @@ async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
 async def test_a_lane_that_reached_the_failure_ceiling_releases_its_adapter_and_is_named_as_stopped(
     fakes: _Fakes,
 ) -> None:
-    """The leak M10's S10 closed, and its positive control in the same case."""
+    """The adapter leak, and its positive control in the same case."""
     await _seed(fakes, _source("A"))
     await _seed(fakes, _source("B"))
     fakes.adapters.crash("A")
@@ -1550,9 +1550,9 @@ async def test_start_creates_tasks_and_never_awaits_a_unit_of_work(fakes: _Fakes
     `StopIteration` for a coroutine that never awaited and hands back a
     future for one that parked. No scheduler, no clock, no timeout, and it
     cannot be satisfied by a slow-but-eventually-fine implementation --
-    which is the technique group E established for the bus's own
-    never-blocks claim. The plan's own draft of `start()` did `await
-    self.refresh()`, which fails this on its first line.
+    the same technique as the bus's own never-blocks claim. The plan's
+    own draft of `start()` did `await self.refresh()`, which fails this
+    on its first line.
     """
     await _seed(fakes, _source("A"))
     supervisor = _supervisor(fakes)

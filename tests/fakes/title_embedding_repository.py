@@ -264,9 +264,9 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
 
         **Mirrors the `None` rule and is not strengthened past it.** The real
         statement gets this from a join that simply misses, and the standing
-        rule from M3's live run -- 40 contract assertions green against a
-        write-back that had never once worked -- is that a double which models
-        more of the predicate than the port promises stops being a stand-in.
+        rule -- 40 contract assertions green against a write-back that had
+        never once worked -- is that a double which models more of the
+        predicate than the port promises stops being a stand-in.
         So this is a join miss expressed in Python, and nothing more.
 
         Unlike the embedding vectors, genome vectors are **not** unit, so this

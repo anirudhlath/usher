@@ -39,7 +39,7 @@ def settings(postgres_url: str) -> Settings:
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
-        # `GET /browse` promotes every skeleton it draws (issue #73) and
+        # `GET /browse` promotes every skeleton it draws and
         # `get_session` commits at the end of a successful request, so this
         # file's reads write `enrich` rows. **Before the titles**: the job's
         # `key` is the title's id as text, so once the title row is gone there

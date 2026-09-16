@@ -345,7 +345,7 @@ class SearchQueryRepositoryContract:
     ) -> None:
         """**The funnel `record_outcome` exists to serve.
 
-        and the one a shared `clicked_title_id IS NULL` guard silently drops.** F3's two
+        and the one a shared `clicked_title_id IS NULL` guard silently drops.** Two
         writers fire at two different times on the *same* row: viewing a result from a
         search (`GET /titles/{id}?search_id=…`) attributes the click, and playing it
         (`POST /titles/{id}/play`) is a later, separate call that names **no** title and
@@ -468,7 +468,7 @@ class SearchQueryRepositoryContract:
         The wrong implementation this kills: writing `played` from the call's own value
         unconditionally (`SET played = :played`), which would let a later call that has
         not itself observed a play erase the evidence that one already happened -- there
-        is no route in F3's design that means "actually, undo the play", so a call
+        is no route in the design that means "actually, undo the play", so a call
         carrying `played=False` after `played=True` is stale information, not a
         correction.
         """
@@ -509,7 +509,7 @@ class SearchQueryRepositoryContract:
         assert await ledger.get(unknown) is None
         assert await ledger.count() == 0
 
-    # -- oldest() and prune(), M10's J5 -------------------------------------
+    # -- oldest() and prune() -----------------------------------------------
 
     async def test_the_oldest_row_is_what_min_at_answers_and_an_empty_table_is_none(
         self, repository: SearchQueryRepository, user_id: uuid.UUID

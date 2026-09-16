@@ -257,7 +257,7 @@ def test_enrichment_error_defaults_to_none() -> None:
     assert title.enrichment_error is None
 
 
-# --- serialization round-trip (the wire contract from M4 onward) -----------
+# --- serialization round-trip (the wire contract) --------------------------
 
 
 def test_title_serialization_round_trips() -> None:

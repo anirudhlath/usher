@@ -646,7 +646,7 @@ async def test_the_composition_root_composes_the_registry_minus_what_is_disabled
 def _visibility() -> VisibilityService:
     """A promoter over fakes.
 
-    `/home` promotes the skeletons it drew (#73), so the composition root takes one;
+    `/home` promotes the skeletons it drew, so the composition root takes one;
     what it *promotes* is asserted in `tests/unit/test_services_home.py`.
     """
     return VisibilityService(FakeJobQueue(), FakeTitleRepository())

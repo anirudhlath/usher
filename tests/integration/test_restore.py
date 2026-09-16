@@ -163,7 +163,7 @@ def _title(*, kind: str, imdb_id: str | None, tmdb_id: int | None = None) -> dic
 
     `id` is a fresh UUID rather than one of the target's: an artifact written
     on another deployment carries ids that name nothing here, which is the
-    ordinary case and the one K2's third rung is a *check* rather than a key
+    ordinary case and the one the third rung is a *check* rather than a key
     for. A case that wants the raw-id rung passes the target's id in.
     """
     return {"kind": kind, "id": str(new_id()), "imdb_id": imdb_id, "tmdb_id": tmdb_id}
@@ -312,9 +312,9 @@ def _write_artifact(
 
     **Every row's key set is checked against the real `restored_columns`
     before it is written**, which is what stops these hand-built files from
-    being a second definition of the artifact's shape. A column added to a
-    precious table in a later milestone fails the builders above rather than
-    quietly producing files this project's own restore would refuse.
+    being a second definition of the artifact's shape. A column added later to
+    a precious table fails the builders above rather than quietly producing
+    files this project's own restore would refuse.
     """
     if check_columns:
         for table, row in rows:
@@ -641,7 +641,7 @@ async def test_the_same_artifact_restored_twice_is_a_no_op_on_the_second_run(
 async def _table_counts(sessions: async_sessionmaker[AsyncSession]) -> dict[str, int]:
     """One count per carried table, scoped to this file's own rows.
 
-    Derived from `carried_tables()` so a table added to K1's precious set is
+    Derived from `carried_tables()` so a table added to the precious set is
     counted here without an edit, with the per-table predicate spelled below
     because the container is shared and a bare `count(*)` would be a count of
     every other committing file's rows too.
@@ -766,7 +766,7 @@ async def test_a_media_item_link_lands_on_a_null_and_never_over_one_the_target_h
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """K1's asymmetry argument, and both halves of it in one run.
+    """The asymmetry argument, and both halves of it in one run.
 
     `media_items` carries no provenance column, so an artifact cannot carry
     only the operator's manual resolutions -- it carries every link, and
@@ -1051,11 +1051,11 @@ async def test_every_table_the_manifest_says_restore_writes_has_a_merge_rule(
 ) -> None:
     """The exhaustiveness `_merge`'s `match` cannot get from `mypy`.
 
-    `restored_tables()` is derived from K1's manifest and the dispatch below
-    it is a `match` on table names, so a table promoted to `PRECIOUS` in a
-    later milestone would be carried by `usher backup` and reach a `case` that
-    does not exist -- which is a `KeyError` on the day somebody restores,
-    rather than at the moment the manifest changed.
+    `restored_tables()` is derived from the manifest and the dispatch below it
+    is a `match` on table names, so a table promoted to `PRECIOUS` later would
+    be carried by `usher backup` and reach a `case` that does not exist --
+    which is a `KeyError` on the day somebody restores, rather than at the
+    moment the manifest changed.
 
     Driving each table with an empty batch is enough: the dispatch runs, no
     statement is issued, and a missing arm raises. This one uses the suite's

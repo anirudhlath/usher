@@ -70,13 +70,10 @@ def test_an_akas_row_with_the_wrong_column_count_is_malformed() -> None:
 
 
 def test_an_akas_row_preserves_an_embedded_double_quote() -> None:
-    r"""The finding that rules out the csv module, re-confirmed on this file.
+    r"""A title that opens and closes with a literal `"` keeps both.
 
-    IMDb's TSVs have no quoting mechanism, so a `title` may open *and* close
-    with a literal `"` -- and `csv.reader`'s default QUOTE_MINIMAL then strips
-    both, silently. Measured over the whole pinned `title.akas.tsv.gz`:
-    **39,880 rows carry a `"` in `title` and 6,344 of them open with one**, so
-    a csv-based parser would silently rewrite 6,344 alias names. Swap
+    IMDb's TSVs have no quoting mechanism, so `csv.reader`'s default
+    QUOTE_MINIMAL strips the pair silently and rewrites the alias name. Swap
     `line.split("\t")` for `csv.reader` and this fails.
     """
     row = parse_akas_row(_akas_lines()[3])
@@ -232,9 +229,8 @@ def test_the_ordering_carried_is_imdbs_own_one_based_value_unconverted() -> None
 def test_a_multi_valued_types_field_is_not_a_column_boundary() -> None:
     r"""`types` is multi-valued and its separator is `\x02`, not a tab.
 
-    Measured: 429 of the 58,906,368 rows carry more than one value, e.g.
-    `imdbDisplay\x02dvd` (207). A parser that expected a tab there would see
-    nine columns and call a perfectly ordinary row malformed.
+    A row carrying `imdbDisplay\x02dvd` is ordinary; a parser that expected a
+    tab there would see nine columns and call it malformed.
     """
     row = parse_akas_row(_akas_lines()[9])
     assert row is not None

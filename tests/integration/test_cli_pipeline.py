@@ -1364,8 +1364,8 @@ async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
     - **nothing was attempted**, so `complete_json` was never called. A
       generation for a household with nothing to recommend is a charge with a
       guaranteed empty answer;
-    - **nothing was billed.** This is the one path in the milestone that
-      writes no `llm_calls` row at all, and the rule the service implements is
+    - **nothing was billed.** This is the one path that writes no `llm_calls`
+      row at all, and the rule the service implements is
       `record()` on every path that *attempted* a call -- a row here would be
       spend an operator has to explain away.
     """

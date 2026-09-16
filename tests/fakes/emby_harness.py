@@ -36,7 +36,7 @@ class EmbyHarness(SourceHarness):
         )
         self._transport = SlowTransport(self._server.handle)
         self._client = httpx.AsyncClient(transport=self._transport, base_url=self._source.base_url)
-        # A fake connector, because from M5 `events()` really opens something.
+        # A fake connector, because `events()` really opens something.
         self._push = FakePushConnection()
         self._push_connector = FakePushConnector([self._push])
         # Frozen at zero and moved only by `advance_push_clock`. This is the

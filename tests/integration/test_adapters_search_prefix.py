@@ -30,8 +30,8 @@ _ENOUGH_TO_PLAN_AGAINST = 2_000
 """Filler rows behind the tier-1 plan assertion.
 
 One row is a table the planner sizes off an empty `pg_class`, where every
-candidate index costs the same -- see `_plan_tree` and issue #79. Two thousand
-is the same order the other plan assertions in this suite seed.
+candidate index costs the same -- see `_plan_tree`. Two thousand is the same
+order the other plan assertions in this suite seed.
 """
 
 
@@ -114,8 +114,8 @@ def _index_conditions(node: dict[str, Any]) -> list[str]:
     Naming the index is the weaker half of the claim: an index scan that walks
     the whole index and puts the predicate in a `Filter` reaches the index by
     name while doing none of the work the index exists for, which is what a
-    plan reaching `titles` through `pk_titles` is (issue #79). `Index Cond` is
-    Postgres saying it used the predicate to *position* the scan.
+    plan reaching `titles` through `pk_titles` is. `Index Cond` is Postgres
+    saying it used the predicate to *position* the scan.
     """
     found = [node["Index Cond"]] if "Index Cond" in node else []
     for child in node.get("Plans", ()):
