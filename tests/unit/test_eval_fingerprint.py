@@ -524,7 +524,7 @@ def test_an_input_present_on_one_side_only_is_named_rather_than_merely_unequal(
 def test_two_input_mappings_only_the_serialisation_can_tell_apart_are_still_refused() -> None:
     """The branch a key-by-key diff cannot report on, and it is reachable rather than paranoid.
 
-    `2993.0 == 2993` in Python and `2993.0 != 2993` in JSON, so this mapping compares
+    A float and an int compare equal in Python and not in JSON, so this mapping compares
     equal to the gate's key by key and digests differently -- a `case_count` that
     reached the fingerprint through a division, or through a driver returning
     `NUMERIC`, is exactly that. A refusal that listed what moved would list nothing,
