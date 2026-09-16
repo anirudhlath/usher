@@ -168,29 +168,28 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
         ),
         # --- partial: rebuildable but for named columns ---------------------
         "media_items": _partial(
-            "180 rows here, 1,126,789 on the household this project measures. Every "
-            "column is rebuilt by the next source walk except the two links -- which "
-            "is what PRD 08's 'manual unmatched resolutions' actually names, since "
-            "there is no such table. No provenance column exists, so all links are "
-            "carried and K4 writes only where the target's is NULL",
+            "One row per item the source holds, so on a real deployment this is large. "
+            "Every column is rebuilt by the next source walk except the two links -- "
+            "which is what PRD 08's 'manual unmatched resolutions' actually names, "
+            "since there is no such table. No provenance column exists, so all links "
+            "are carried and K4 writes only where the target's is NULL",
             ("title_id", "episode_id"),
         ),
         # --- rebuildable ----------------------------------------------------
         "titles": _rebuildable(
-            "1,272,401 rows, 1050 MB. **Four writers, which is why the command is "
-            "`--phase all` rather than a subset**: `imdb` brings the skeleton and, since "
-            "it runs basics then ratings, ADR-0040's `imdb_average_rating` and "
-            "`imdb_num_votes` (`--phase ratings` is an alias for that second half -- a "
-            "refresh, not a rebuild); `credit-names` brings `credit_names`; `crosswalk` "
-            "brings `tmdb_id`, `tvdb_id` and `tmdb_popularity`, which is ADR-0040's "
-            "refutation 3 -- popularity has a second writer in `link_crosswalk` that "
-            "touches neither rating column; and enrichment brings the rest of the TMDb "
-            "columns. The phases have ordering constraints between them (`credit-names` "
-            "before anything that enriches; `tmdb-ids` before `crosswalk`), so naming a "
-            "subset would be a second copy of `FULL_SEQUENCE`. ⚠️ Enriching past what a "
-            "walk matches -- M9's 130,647-title priority tier -- is "
-            "`scripts/enqueue_tier_enrichment.py`, not a command, so this string does not "
-            "claim it",
+            "The catalog. **Four writers, which is why the command is `--phase all` "
+            "rather than a subset**: `imdb` brings the skeleton and, because it runs "
+            "basics then ratings, `imdb_average_rating` and `imdb_num_votes` too "
+            "(`--phase ratings` is an alias for that second half -- a refresh, not a "
+            "rebuild); `credit-names` brings `credit_names`; `crosswalk` brings "
+            "`tmdb_id`, `tvdb_id` and `tmdb_popularity`, so popularity has a second "
+            "writer that touches neither rating column; and enrichment brings the rest "
+            "of the TMDb columns. The phases have ordering constraints between them "
+            "(`credit-names` before anything that enriches; `tmdb-ids` before "
+            "`crosswalk`), so naming a subset would be a second copy of "
+            "`FULL_SEQUENCE`. Enriching past what a walk matches is "
+            "`scripts/enqueue_tier_enrichment.py`, not a command, so this string does "
+            "not claim it",
             "bootstrap --phase all then sync then work",
         ),
         "seasons": _rebuildable(
@@ -220,22 +219,14 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "derive --backfill",
         ),
         "title_embeddings": _rebuildable(
-            "130,723 rows, 707 MB (of which 340 MB is the HNSW index). The backfill of "
-            "130,720 titles measured 105.9 min on 2026-08-13",
+            "Vectors plus an HNSW index, which is half the relation's size. The "
+            "backfill is an hour or two of GPU-free CPU work",
             "index --backfill then work",
         ),
         "title_neighbors": _rebuildable(
-            "3,256,676 rows, 1140 MB -- the largest relation in this database, and still "
-            "rebuildable. The most recent completed walk, 2026-08-19: 132,442 seeds, "
-            "3,311,050 rows, 12,884 s at **97.3 ms/seed = 3.58 h** -- budget against this "
-            "one. It supersedes 2026-08-13's 130,720 seeds / 11,981 s / 91.7 ms/seed = "
-            "3.33 h, which is a real run over a 1.3% smaller population and is what "
-            "established the shape. ⚠️ Neither is 594.7 ms/seed and neither is 21.6 h: "
-            "those are `m09e`'s figures and `m09f` repaired them by moving every "
-            "`halfvec` column to PLAIN storage. At the true cost this is 1.9x the "
-            "embedding backfill above it, not the two orders of magnitude a draft of this "
-            "manifest claimed -- an overnight job, which is the conclusion that survived "
-            "the number",
+            "The largest relation in this database, and still rebuildable. Budget an "
+            "overnight run: roughly twice the embedding backfill above it, and it needs "
+            "that backfill to have finished first",
             "similar --rebuild",
         ),
         "title_search_names": _rebuildable(
@@ -251,13 +242,11 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "bootstrap --phase crosswalk",
         ),
         "raw_payloads": _rebuildable(
-            "⚠️ 130,749 rows, 995 MB -- the third-largest relation here, after "
-            "`title_neighbors` and `titles`, and the closest call in this manifest. "
-            "Rebuildable only from TMDb: M9's S3 measured 130,334 requests over 1.98 h to "
-            "fill it. Not carried, because it would take the artifact from the kilobytes "
-            "the precious set weighs on this deployment to a gigabyte an operator will not "
-            "keep, and because it is third-party payloads verbatim. See the module "
-            "docstring",
+            "⚠️ The third-largest relation here, and the closest call in this "
+            "manifest. Rebuildable only by re-fetching every title from TMDb, which is "
+            "hours of live requests. Not carried, because it would take the artifact "
+            "from kilobytes to a gigabyte an operator will not keep, and because it is "
+            "third-party payloads verbatim. See the module docstring",
             "sync then work",
         ),
         "genome_scores": _rebuildable(
