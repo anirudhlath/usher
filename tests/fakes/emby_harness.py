@@ -40,10 +40,9 @@ class EmbyHarness(SourceHarness):
         self._push = FakePushConnection()
         self._push_connector = FakePushConnector([self._push])
         # Frozen at zero and moved only by `advance_push_clock`. This is the
-        # adapter's *push* clock and nothing else reads it: `PushHealth`'s
-        # three instants are the only consumers, so freezing it costs the
-        # rest of the contract nothing and buys a ninety-second staleness
-        # window in under a millisecond, twice per run.
+        # adapter's *push* clock and nothing else reads it: `PushHealth`'s three
+        # instants are the only consumers, so freezing it costs the rest of the
+        # contract nothing and makes a staleness window instant to open.
         self._push_now = 0.0
         self._adapter = EmbyAdapter(
             self._source,
@@ -136,14 +135,6 @@ class EmbyHarness(SourceHarness):
         against the first object would silently stop affecting the channel
         the moment anything reconnected -- a `push_drop` that dropped
         nothing, which reads as a passing case.
-
-        **A known equivalent mutant against the contract suite as it stands,
-        and kept anyway**, the way `jobs.py` keeps its `GREATEST` alongside
-        its `WHERE`. Measured: collapsing this to `return self._push` leaves
-        all 49 cases green on both subclasses, because no case opens
-        `events()` twice, so the queued connection *is* the one handed out.
-        What it buys is the first reconnect case (`services/push.py`) not
-        having to discover this, and it costs one indexing expression.
         """
         return (
             self._push_connector.handed_out[-1] if self._push_connector.handed_out else self._push
@@ -152,7 +143,7 @@ class EmbyHarness(SourceHarness):
     async def push_event(self, event: SourceEvent) -> None:
         """Render a `SourceEvent` into the message Emby would have sent.
 
-        The translation ADR-0013 exists for: the contract speaks
+        The translation the harness seam exists for: the contract speaks
         `SourceEvent` and this turns it into a wire frame, so the same
         assertions run against a second source by writing a second harness
         rather than a second suite.

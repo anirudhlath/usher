@@ -13,8 +13,8 @@ class FakePushConnection(PushConnection):
         self.closed = False
         self.recv_calls = 0
         # The timeouts this connection was *asked* for, in order. It honours
-        # none of them -- see the module docstring -- so recording them is
-        # the only thing that can observe a caller passing the wrong one.
+        # none of them, so recording them is the only thing that can observe
+        # a caller passing the wrong one.
         self.recv_timeouts: list[float] = []
         self._frames: asyncio.Queue[str] = asyncio.Queue()
         self._failure: PortUnavailable | None = None
@@ -33,17 +33,12 @@ class FakePushConnection(PushConnection):
         """Deliver nothing from here on, whatever is already queued.
 
         `recv` then times out on every call, which is the *only* thing an
-        upgraded-but-silent socket does differently from a healthy one -- and
-        is exactly the state ADR-0004's control handshake against a
-        nonexistent path produced.
+        upgraded-but-silent socket does differently from a healthy one.
         """
         self._stalled = True
 
     def drop(self, message: str = "connection closed by peer") -> None:
-        """Fail every later `recv` with a `PortUnavailable`.
-
-        as a real `ConnectionClosedError` translates to.
-        """
+        """Fail every later `recv` with the `PortUnavailable` a closed socket becomes."""
         self._failure = PortUnavailable(message)
 
     # -- PushConnection --------------------------------------------------

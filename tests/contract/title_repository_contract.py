@@ -1,6 +1,6 @@
 """Shared behavioural contract every `TitleRepository` implementation must satisfy.
 
-the technique PRD 08 calls out for `SourceAdapter` ("One parametrised test class every
+The technique PRD 08 calls out for `SourceAdapter`: one parametrised test class.
 """
 
 import uuid
@@ -29,24 +29,20 @@ class TitleRepositoryContract:
     def collection_id(self) -> uuid.UUID:
         """A collection id `test_add_then_get_round_trips` may store.
 
-        Overridable, and M7 is why: `titles.collection_id` gained a real
-        foreign key to `collections` in `fd7c3a5b9e12`, so the bare
-        `new_id()` this case used to inline is a `ForeignKeyViolationError`
-        against the real repository and passes silently against a fake that
-        is a dict. Same shape `EpisodeRepositoryContract` already has for
-        `title_id`: the fake takes the default, and the Postgres subclass
-        overrides it with the id of a row it seeded.
+        Overridable, because `titles.collection_id` has a real foreign key to
+        `collections`: a bare `new_id()` is a `ForeignKeyViolationError` against the
+        real repository and passes silently against a fake that is a dict. Same shape
+        `EpisodeRepositoryContract` has for `title_id` -- the fake takes the default,
+        the Postgres subclass overrides it with the id of a row it seeded.
         """
         return new_id()
 
     async def test_add_then_get_round_trips(
         self, repo: TitleRepository, collection_id: uuid.UUID
     ) -> None:
-        # Not `assert fetched == title`: an earlier version of this test (in
-        # tests/unit/test_ports.py, before the contract suite existed) did exactly that,
-        # and it only worked by accident, against the fake alone -- the fake used to
-        # preserve created_at/updated_at verbatim, so a freshly-constructed Title round-
-        # tripped byte-for-byte.
+        # Not `assert fetched == title`: that passes only against a fake that
+        # preserves created_at/updated_at verbatim, so a freshly-constructed
+        # Title round-trips byte-for-byte and the real repository does not.
         title = Title(
             kind=TitleKind.SERIES,
             tmdb_id=90001399,
@@ -91,10 +87,6 @@ class TitleRepositoryContract:
         server_default assigns it, never whatever the caller's Title happened to carry
         -- a stale retry, a deliberately backdated import, or (as here) a plain
         constructor call that hardcodes one.
-
-        Measured divergence this pins: the fake used to honour the caller's value
-        verbatim (`created_at_is_callers: fake=True`), while the real, Postgres-backed
-        repository never did (`real=False`).
         """
         backdated = datetime(2020, 1, 1, tzinfo=UTC)
         title = Title(
@@ -110,15 +102,13 @@ class TitleRepositoryContract:
         assert fetched.created_at != backdated
 
     async def test_created_at_is_stable_across_updates(self, repo: TitleRepository) -> None:
-        """M4 builds re-enrichment scheduling on updated_at.
+        """Re-enrichment scheduling is built on updated_at.
 
-        which only means anything if created_at never moves once a title exists.
-
+        Which only means anything if created_at never moves once a title exists.
         Deliberately tampers with created_at on the incoming Title (not just leaves it
-        untouched via evolve(), which would pass this assertion even without the fix,
-        since evolve() alone never changes a field it isn't told to): update() must
-        ignore it regardless, the same way the real repository's update() never even
-        looks at created_at on the incoming row (see title.py's update()).
+        untouched via evolve(), which would pass even without the fix, since evolve()
+        never changes a field it isn't told to): update() must ignore it regardless,
+        the same way the real repository's update() never looks at it.
         """
         title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
         await repo.add(title)
@@ -145,17 +135,15 @@ class TitleRepositoryContract:
     async def test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind(
         self, repo: TitleRepository
     ) -> None:
-        """Tmdb_id is unique *per kind* (ADR-0011).
+        """tmdb_id is unique *per kind*.
 
-        so two movies claiming one TMDb movie id is still a conflict — and the
-        constraint that fires is now the composite index.
+        Two movies claiming one TMDb movie id is still a conflict, and the constraint
+        that fires is the composite index.
 
-        The final assertion pins a measured bug, not a style preference:
-        the message used to read "title {second.id} already exists"
-        unconditionally, which is false here -- `second`'s own id was
-        never the problem, its tmdb_id collided with a *different* row.
-        The message may still name `second.id` to say which add() call
-        failed; claiming that id already exists is what was wrong.
+        The final assertion is about the message: "title {second.id} already exists" is
+        false here -- `second`'s own id was never the problem, its tmdb_id collided with
+        a *different* row. The message may still name `second.id` to say which add()
+        call failed; claiming that id already exists is what is wrong.
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000100)
         second = Title(
@@ -168,13 +156,11 @@ class TitleRepositoryContract:
         assert "already exists" not in str(exc_info.value)
 
     async def test_a_movie_and_a_series_may_share_a_tmdb_id(self, repo: TitleRepository) -> None:
-        """The measurement ADR-0011 rests on.
+        """TMDb ids are live in both namespaces at once.
 
-        26,968 TMDb ids are live in both namespaces at once.
-
-        Under M1's single-column index this call raised RepositoryConflict and 47.3% of
-        TV lost its tmdb_id during Phase 2. Delete the `kind` column from the index and
-        this fails.
+        Under a single-column unique index this call raises RepositoryConflict and
+        television loses its tmdb_id wholesale. Delete the `kind` column from the index
+        and this fails.
         """
         movie = Title(kind=TitleKind.MOVIE, name="Pride", sort_name="Pride", tmdb_id=1)
         series = Title(kind=TitleKind.SERIES, name="Pride", sort_name="Pride", tmdb_id=1)
@@ -184,11 +170,11 @@ class TitleRepositoryContract:
         assert (await repo.get(series.id)) is not None
 
     async def test_add_rejects_a_duplicate_imdb_id(self, repo: TitleRepository) -> None:
-        """Same property as test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind.
+        """Same property as the duplicate-tmdb_id case, for the imdb_id branch.
 
-        for the imdb_id branch -- exercised separately, not folded into a single
-        parametrized case, so a typo swapping which field `_provider_id_conflict` (the
-        fake) or Postgres (the real repository) actually checks can't pass by accident.
+        Exercised separately rather than folded into a single parametrized case, so a
+        typo swapping which field `_provider_id_conflict` (the fake) or Postgres (the
+        real repository) actually checks can't pass by accident.
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         second = Title(
@@ -201,10 +187,7 @@ class TitleRepositoryContract:
         assert "already exists" not in str(exc_info.value)
 
     async def test_add_rejects_a_duplicate_tvdb_id(self, repo: TitleRepository) -> None:
-        """Same property, for the tvdb_id branch.
-
-        see test_add_rejects_a_duplicate_imdb_id's docstring.
-        """
+        """Same property, for the tvdb_id branch."""
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tvdb_id=91000030)
         second = Title(
             kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tvdb_id=91000030
@@ -219,9 +202,9 @@ class TitleRepositoryContract:
         assert await repo.get(new_id()) is None
 
     async def test_get_by_tmdb_id_disambiguates_by_kind(self, repo: TitleRepository) -> None:
-        """Without the `kind` argument this method has no correct answer when both namespaces.
+        """Without the `kind` argument this method has no correct answer.
 
-        hold the id — the Postgres implementation raised a raw
+        When both namespaces hold the id, the Postgres implementation raised a raw
         sqlalchemy.exc.MultipleResultsFound straight out of the port, which `db is
         driven, not driving` exists to prevent.
         """
@@ -251,17 +234,14 @@ class TitleRepositoryContract:
         assert found.id == title.id
 
     async def test_get_by_tmdb_id_of_none_finds_nothing(self, repo: TitleRepository) -> None:
-        """Tmdb_id's own type is `int`, not `int | None`.
+        """tmdb_id's own type is `int`, not `int | None`.
 
-        but a caller holding a genuinely optional value (e.g.
-
-        `Title.tmdb_id` itself) can still reach this with `None` if it ever bypasses
-        mypy at the call site (a stray `# type: ignore`, `cast`, ...). Both
-        implementations compile "tmdb_id == None" straight through -- Postgres as `IS
-        NULL`, the fake as a plain `==` -- which matches whichever null-provider-id
+        But a caller holding a genuinely optional value can still reach this with `None`
+        if it bypasses mypy at the call site (a stray `# type: ignore`, `cast`, ...).
+        Both implementations compile "tmdb_id == None" straight through -- Postgres as
+        `IS NULL`, the fake as a plain `==` -- which matches whichever null-provider-id
         title happens to come first, not "the title with this id": the opposite of what
-        this method promises. Measured without the guard: this returned an arbitrary
-        null-tmdb_id title instead of None, in both implementations.
+        this method promises.
         """
         await repo.add(Title(kind=TitleKind.MOVIE, name="Home Video", sort_name="Home Video"))
         assert await repo.get_by_tmdb_id(None, TitleKind.MOVIE) is None  # type: ignore[arg-type]
@@ -302,10 +282,10 @@ class TitleRepositoryContract:
         assert exc_info.value.constraint == "ix_titles_tmdb_id_kind"
 
     async def test_update_rejects_a_conflicting_imdb_id(self, repo: TitleRepository) -> None:
-        """Same property as test_update_rejects_a_conflicting_tmdb_id_of_the_same_kind.
+        """Same property as the conflicting-tmdb_id case, for the imdb_id branch.
 
-        for the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's docstring
-        for why this is a separate case, not a parametrized one.
+        A separate case rather than a parametrized one, for the reason
+        test_add_rejects_a_duplicate_imdb_id gives.
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         second = Title(
@@ -330,10 +310,10 @@ class TitleRepositoryContract:
     async def test_update_clearing_provider_ids_to_none_is_allowed(
         self, repo: TitleRepository
     ) -> None:
-        """Update() clearing a field to None/() was untested.
+        """update() may clear a field to None/().
 
-        worth pinning separately from test_update_mutates_an_existing_title, since a
-        naive fix for the conflict-detection tests above could plausibly treat None as
+        Worth pinning separately from test_update_mutates_an_existing_title, since a
+        naive fix for the conflict-detection cases above could plausibly treat None as
         just another value to compare, rejecting a clear as a false conflict between two
         titles that both have tmdb_id=None.
         """
@@ -364,18 +344,15 @@ class TitleRepositoryContract:
     async def test_resolve_tmdb_ids_keeps_the_two_id_spaces_apart(
         self, repo: TitleRepository
     ) -> None:
-        """ADR-0011 arriving at the *reverse* lookup.
+        """The kind-scoping rule arriving at the *reverse* lookup.
 
-        which is the direction a derivation gets wrong.
-
-        `get_by_tmdb_id` already takes a kind and the case above pins it. What
-        is new here is a walk that starts from a **payload** and has to find
-        its title: `raw_payloads` has no `title_id`, the join back is
-        `(provider, kind, reference)`, and the payload's own `id` field is the
-        bare integer sitting right there. 26,968 measured TMDb ids are live in
-        both spaces, so a resolver keyed on the integer alone attaches a
-        series' cast to a film -- with the right counts, the right people, and
-        nothing to say so.
+        Which is the direction a derivation gets wrong. `get_by_tmdb_id` already takes a
+        kind and the case above pins it. What is new here is a walk that starts from a
+        **payload** and has to find its title: `raw_payloads` has no `title_id`, the
+        join back is `(provider, kind, reference)`, and the payload's own `id` field is
+        the bare integer sitting right there. TMDb ids are live in both spaces, so a
+        resolver keyed on the integer alone attaches a series' cast to a film -- with
+        the right counts, the right people, and nothing to say so.
 
         The wrong implementation this kills is one that drops `kind` from its
         predicate. It is seeded with both spaces holding the same integer,
@@ -405,7 +382,7 @@ class TitleRepositoryContract:
     ) -> None:
         """A batch rather than one, for `PersonRepository.resolve_tmdb_ids`' reason.
 
-        a derivation page is 500 payloads and a lookup per payload is the round-trip-
+        A derivation page is 500 payloads and a lookup per payload is the round-trip-
         per-item shape batching exists to remove.
 
         **An id naming no title is absent from the answer, never `None` and
@@ -474,7 +451,7 @@ class TitleRepositoryOwnedContract:
             genres=genres,
             keywords=keywords,
             # The builder's own keyword names are test-local vocabulary and
-            # stay; only the `Title` fields they feed moved. ADR-0040.
+            # stay; only the `Title` fields they feed moved.
             tmdb_popularity=popularity,
             tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
@@ -485,13 +462,11 @@ class TitleRepositoryOwnedContract:
     ) -> None:
         """**The distractor `SeasonalProvider`'s own case seeds**, one layer down.
 
-        the *best* match in the catalog, highest popularity, exact genre, and no copy.
-
-        The wrong implementation matches the predicate against the whole
-        catalog -- 1.27M titles, of which the household can play none, in a
-        correctly-shaped and beautifully-themed row. It is `[0]` under that
-        implementation and absent under this one, so the assertion is
-        positional and cannot be satisfied by membership.
+        The *best* match in the catalog: highest popularity, exact genre, and no copy.
+        The wrong implementation matches the predicate against the whole catalog, of
+        which the household can play none, in a correctly-shaped and beautifully-themed
+        row. It is `[0]` under that implementation and absent under this one, so the
+        assertion is positional and cannot be satisfied by membership.
         """
         best = self._tagged("An Unowned Masterpiece", genres=("Horror",), popularity=99.0)
         owned = self._tagged("An Owned Horror", genres=("Horror",), popularity=1.0)
@@ -506,12 +481,10 @@ class TitleRepositoryOwnedContract:
     async def test_the_answer_is_ordered_by_popularity_rather_than_by_insertion(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """Insertion order is id order.
+        """Insertion order is id order, because every id here is a UUIDv7.
 
-        every id here is a UUIDv7 -- so a fixture seeded best-first is satisfied by
-        `ORDER BY id` and by no ordering at all.
-
-        These are seeded worst-first.
+        So a fixture seeded best-first is satisfied by `ORDER BY id` and by no ordering
+        at all. These are seeded worst-first.
         """
         worst = self._tagged("Least", genres=("Horror",), popularity=1.0)
         middle = self._tagged("Middling", genres=("Horror",), popularity=5.0)
@@ -527,12 +500,10 @@ class TitleRepositoryOwnedContract:
     async def test_vote_count_orders_titles_whose_popularity_is_unknown(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """`titles.tmdb_popularity` was measured NULL on all 1,271,138 rows of a bootstrap-only.
+        """`titles.tmdb_popularity` is NULL on every row of a bootstrap-only catalog.
 
-        catalog, so an ordering with only that key is an ordering by `id` on the
-        deployment most likely to exist.
-
-        Seeded worst-first again, and with the *popular* title third so a
+        So an ordering with only that key is an ordering by `id` on the deployment most
+        likely to exist. Seeded worst-first again, and with the *popular* title third so a
         `NULLS FIRST` default -- Postgres's, under `DESC` -- puts the two
         unknowns above it and fails.
         """
@@ -571,7 +542,7 @@ class TitleRepositoryOwnedContract:
     ) -> None:
         """The natural wrong spelling is `OR`.
 
-        which on a window carrying both a genre and a keyword returns the union -- a
+        On a window carrying both a genre and a keyword that returns the union -- a
         strictly larger, less relevant row that still looks correct.
         """
         both = self._tagged("Both", genres=("Horror",), keywords=("slasher",))
@@ -588,9 +559,7 @@ class TitleRepositoryOwnedContract:
     async def test_a_request_with_no_predicate_answers_with_nothing(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """An unpredicated call is "the library ordered by popularity".
-
-        which is the popular-titles fallback wearing a query's clothes.
+        """An unpredicated call would be the popular-titles fallback in a query's clothes.
 
         The library is deliberately populated and owned, so the empty answer is the port
         declining rather than the fixture being empty.
@@ -607,7 +576,7 @@ class TitleRepositoryOwnedContract:
     ) -> None:
         """A limit applied before the ordering keeps whichever rows the scan reached first.
 
-        which is the same failure `list_recent`'s own limit case is about.
+        The same failure `list_recent`'s own limit case is about.
         """
         seeded = []
         for index in range(5):
@@ -623,15 +592,15 @@ class TitleRepositoryOwnedContract:
     async def test_a_series_owned_only_through_its_episodes_is_owned(
         self, repo: TitleRepository, own: object
     ) -> None:
-        """**The divergence from `owned_title_ids`.
+        """The divergence from `owned_title_ids`, asserted rather than commented.
 
-        asserted rather than commented.** A series' copies are its episode files, so a
-        semi-join carrying `episode_id IS NULL` -- which that method does carry, for its
-        own good reason -- reports every series in the library as unowned, and every row
-        built on this read becomes films-only on a library that is 89% episodes.
+        A series' copies are its episode files, so a semi-join carrying `episode_id IS
+        NULL` -- which that method does carry, for its own good reason -- reports every
+        series in the library as unowned, and every row built on this read becomes
+        films-only on a library that is mostly episodes.
 
-        The distractor is a series with **no** copy at all, so this cannot
-        pass by an implementation that dropped the ownership join entirely.
+        The distractor is a series with **no** copy at all, so this cannot pass by an
+        implementation that dropped the ownership join entirely.
         """
         watched = self._tagged("An Owned Series", genres=("Horror",), kind=TitleKind.SERIES)
         absent = self._tagged("An Unowned Series", genres=("Horror",), kind=TitleKind.SERIES)
@@ -708,7 +677,7 @@ class TitleRepositoryCandidateContract:
             sort_name=name.lower(),
             genres=genres,
             # The builder's own keyword names are test-local vocabulary and
-            # stay; only the `Title` fields they feed moved. ADR-0040.
+            # stay; only the `Title` fields they feed moved.
             tmdb_vote_count=vote_count,
             enrichment_state=enrichment_state,
         )
@@ -716,14 +685,11 @@ class TitleRepositoryCandidateContract:
     async def test_a_title_the_household_finished_is_not_a_candidate(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own, watch: Watch
     ) -> None:
-        """**The distractor is the best row in the catalog**.
+        """**The distractor is the best row in the catalog**: owned, most voted, seen.
 
-        owned, the most voted title present, and already seen.
-
-        Under a dropped or inverted exclusion it is `[0]` -- the pool's most
-        prominent member is the film the household finished last week, and
-        the model writes a reason for it. Positional, so membership cannot
-        satisfy it.
+        Under a dropped or inverted exclusion it is `[0]` -- the pool's most prominent
+        member is the film the household finished last week, and the model writes a
+        reason for it. Positional, so membership cannot satisfy it.
         """
         seen = self._candidate("Already Finished", vote_count=900_000)
         fresh = self._candidate("Never Opened", vote_count=10)
@@ -744,16 +710,15 @@ class TitleRepositoryCandidateContract:
         watch: Watch,
         episode_of: EpisodeOf,
     ) -> None:
-        """Trap 7, on the read whose whole job is to subtract.
+        """The episode/title split, on the read whose whole job is to subtract.
 
-        A watched *episode*'s `watch_states` row carries `episode_id` and a
-        NULL `title_id`, so an exclusion spelled `ws.title_id = titles.id`
-        never matches one -- and 999,827 of the one measured source's
-        1,126,674 items are episodes. The wrong implementation puts every
-        series the household is midway through into the pool, forever.
+        A watched *episode*'s `watch_states` row carries `episode_id` and a NULL
+        `title_id`, so an exclusion spelled `ws.title_id = titles.id` never matches one
+        -- and most of a television-heavy source is episodes. The wrong implementation
+        puts every series the household is midway through into the pool, forever.
 
-        The distractor is a second series with no state at all, so the case
-        cannot pass by an implementation that excluded every series.
+        The distractor is a second series with no state at all, so the case cannot pass
+        by an implementation that excluded every series.
         """
         midway = self._candidate("A Series In Progress", kind=TitleKind.SERIES, vote_count=900_000)
         untouched = self._candidate("A Series Never Opened", kind=TitleKind.SERIES, vote_count=10)
@@ -771,14 +736,12 @@ class TitleRepositoryCandidateContract:
     ) -> None:
         """`played`, never "has a watch state".
 
-        `played_title_ids`' rule, arriving at the read that has to agree with it.
-
-        A sync writes a row per item it observed, so "has a state" is the
-        owned library: under that spelling the pool holds only titles the
-        household does **not** own, which is a plausible-looking pool of
-        things to seek out and nothing to play. The abandoned title is seeded
-        as the *most* voted so it is `[0]` when it is correctly kept and
-        absent when it is not.
+        `played_title_ids`' rule, arriving at the read that has to agree with it. A sync
+        writes a row per item it observed, so "has a state" is the owned library: under
+        that spelling the pool holds only titles the household does **not** own, which
+        is a plausible-looking pool of things to seek out and nothing to play. The
+        abandoned title is seeded as the *most* voted so it is `[0]` when it is
+        correctly kept and absent when it is not.
         """
         abandoned = self._candidate("Twelve Minutes In", vote_count=900_000)
         untouched = self._candidate("Never Opened", vote_count=10)
@@ -799,9 +762,7 @@ class TitleRepositoryCandidateContract:
         own: Own,
         watch: Watch,
     ) -> None:
-        """The `user_id` predicate, which on a single-household deployment -- i.e.
-
-        every deployment during development -- is invisible.
+        """The `user_id` predicate, invisible on a single-household deployment.
 
         Without it one member's history empties another's pool, and the
         household with the most watching decides what everyone else is
@@ -846,7 +807,7 @@ class TitleRepositoryCandidateContract:
     ) -> None:
         """`list_owned_by_tag`'s divergence from `owned_title_ids`.
 
-        asserted again here because this read makes its own ownership decision.
+        Asserted again here because this read makes its own ownership decision.
 
         A series' copies are its episode files, so a semi-join carrying
         `episode_id IS NULL` ranks every series in the library alongside the
@@ -878,10 +839,8 @@ class TitleRepositoryCandidateContract:
         Positional, with a genuinely owned distractor of *lower* vote count so
         an implementation that dropped the ownership key entirely fails too.
 
-        **The sweep is what said this case was needed**, not a reading of the
-        statement: deleting `available.is_(True)` survived every other case
-        here, because `own` writes `available = true` and nothing else ever
-        wrote the column.
+        **Deleting `available.is_(True)` survives every other case here**, because `own`
+        writes `available = true` and nothing else ever writes the column.
         """
         retracted = self._candidate("Deleted From The Server", vote_count=900_000)
         kept = self._candidate("Still On The Shelf", vote_count=3)
@@ -897,9 +856,7 @@ class TitleRepositoryCandidateContract:
     async def test_a_genre_the_household_watches_outranks_a_more_voted_stranger(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """The genre-affinity key.
-
-        which is the only household-shaped signal in the base ordering.
+        """The genre-affinity key, the only household-shaped signal in the ordering.
 
         The distractor is a title of another genre with five orders of
         magnitude more votes: `[0]` when the key is dropped, and the affinity
@@ -930,14 +887,11 @@ class TitleRepositoryCandidateContract:
         reverse of the answer, and the unknown count is seeded *first* so
         Postgres's `NULLS FIRST` default under `DESC` puts it top and fails.
 
-        **A title voted *zero* times is here because without it the "unknown
-        last" rule is unobservable on the fake arm**, and the sweep is what
-        said so rather than a reading of the code: the natural Python spelling
-        collapses a NULL to `0` via `-(vote_count or 0)`, and with no genuine
-        zero in the fixture that collapse produces the identical list.
-        Deleting the fake's `vote_count is None` key survived the whole suite
-        until this row existed. Seeded second, so the two also disagree on id
-        order.
+        **A title voted *zero* times is here because without it the "unknown last" rule
+        is unobservable on the fake arm**: the natural Python spelling collapses a NULL
+        to `0` via `-(vote_count or 0)`, and with no genuine zero in the fixture that
+        collapse produces the identical list. Seeded second, so the two also disagree on
+        id order.
         """
         unknown = self._candidate("Never Rated", vote_count=None)
         never_voted = self._candidate("Rated By Nobody", vote_count=0)
@@ -957,23 +911,20 @@ class TitleRepositoryCandidateContract:
     async def test_two_titles_alike_in_everything_are_ordered_by_id(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """**The tiebreak.
+        """The tiebreak, and it is the whole of the pool's stability.
 
-        and it is the whole of ADR-0028's stability.** The prompt addresses candidates
-        by small integer index, so a pool whose ties resolve to "whatever the storage
-        returned" is a pool whose index 7 is a different film on a re-read -- and the
-        service's index->UUID map is then a map of nothing.
+        The prompt addresses candidates by small integer index, so a pool whose ties
+        resolve to "whatever the storage returned" is a pool whose index 7 is a
+        different film on a re-read -- and the service's index->UUID map is then a map
+        of nothing.
 
-        Why ties are ordinary rather than exotic here, and why losing the tail
-        changes the pool's *membership* rather than only its order, is argued
-        once on `TitleRepository.list_unwatched_candidates` and deliberately
-        not restated: a count that lives in four places is a count three of
-        them will eventually disagree with, which this milestone has already
-        paid for twice.
+        Why ties are ordinary rather than exotic here, and why losing the tail changes
+        the pool's *membership* rather than only its order, is argued once on
+        `TitleRepository.list_unwatched_candidates` and deliberately not restated.
 
-        The two are inserted in **descending** id order, so insertion order
-        -- which is heap order on a freshly-seeded table and dict order in
-        the fake -- is the reverse of the answer.
+        The two are inserted in **descending** id order, so insertion order -- heap
+        order on a freshly-seeded table, dict order in the fake -- is the reverse of the
+        answer.
         """
         first, second = new_id(), new_id()
         assert first < second, "the fixture must know its own id order"
@@ -992,10 +943,8 @@ class TitleRepositoryCandidateContract:
     ) -> None:
         """A limit applied before the ordering keeps whichever rows the scan reached first.
 
-        and this limit is the pool *size*, which ADR-0028's measurements are scoped to.
-
-        Seeded worst-first, so a limit honoured before the sort answers with
-        the two least-voted titles.
+        And this limit is the pool *size*. Seeded worst-first, so a limit honoured
+        before the sort answers with the two least-voted titles.
         """
         seeded = []
         for index in range(5):
@@ -1013,7 +962,7 @@ class TitleRepositoryCandidateContract:
     ) -> None:
         """A cold start is the *normal* state, not a degraded one.
 
-        PRD 06's own words -- and an implementation whose exclusion joined rather than
+        PRD 06's own words, and an implementation whose exclusion joined rather than
         anti-joined answers with nothing at all here.
 
         Positional rather than `len(rows) > 0`, which is satisfied by
@@ -1032,7 +981,7 @@ class TitleRepositoryCandidateContract:
     async def test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title(
         self, repo: TitleRepository, user_id: uuid.UUID, own: Own
     ) -> None:
-        """**The tier the pool is mostly made of, seeded for the first time.**."""
+        """The tier the pool is mostly made of."""
         enriched = self._candidate("Enriched And Quiet", vote_count=5)
         skeleton = self._candidate(
             "A Skeleton Everybody Voted For",
@@ -1073,7 +1022,7 @@ _BROWSE_POPULATION: tuple[tuple[str, int | None, float | None, int | None], ...]
     ("Charlie", 2010, None, None),
 )
 
-# : What each sort makes of `_BROWSE_POPULATION`, by name.
+#: What each sort makes of `_BROWSE_POPULATION`, by name.
 _BROWSE_EXPECTED: dict[str, tuple[str, ...]] = {
     "name": ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"),
     "year": ("Foxtrot", "Charlie", "Delta", "Echo", "Alpha", "Bravo"),
@@ -1119,7 +1068,7 @@ class TitleRepositoryBrowseContract:
             keywords=keywords,
             year=year,
             # The builder's own keyword names are test-local vocabulary and
-            # stay; only the `Title` fields they feed moved. ADR-0040.
+            # stay; only the `Title` fields they feed moved.
             tmdb_popularity=popularity,
             tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
@@ -1142,11 +1091,11 @@ class TitleRepositoryBrowseContract:
 
         The walk stops on an **empty** page rather than on a short one, which
         is the repository-level shape of `over_fetch`'s argument one layer up:
-        a population whose size is an exact multiple of `limit` has a full
-        last page, and reading "full" as "there is more" is precisely the
-        off-by-one ADR-0034 exists to remove. Here that costs one extra
-        request; at the route it costs a client a round trip to learn it has
-        finished, which is why the route over-fetches instead.
+        a population whose size is an exact multiple of `limit` has a full last page,
+        and reading "full" as "there is more" is precisely the off-by-one the keyset
+        exists to remove. Here that costs one extra request; at the route it costs a
+        client a round trip to learn it has finished, which is why the route
+        over-fetches instead.
         """
         collected: list[Title] = []
         after: BrowseCursorPosition | None = None
@@ -1165,13 +1114,10 @@ class TitleRepositoryBrowseContract:
     async def test_a_row_inserted_before_the_cursor_between_two_pages_neither_duplicates_nor_drops(
         self, repo: TitleRepository
     ) -> None:
-        """**PRD 07's stated reason for the whole design.
+        """PRD 07's stated reason for the whole design, as a test.
 
-        as a test.** *"Offset paging is not offered -- it degrades badly over a 1.3M-row
-        catalog and produces duplicates under concurrent writes."* The first half is
-        measured; the second half is this case, and until it existed the argument
-        ADR-0034 rests on shipped unverified (that ADR's own *Uncertainty* section says
-        so and files it against group B's first paged route).
+        *"Offset paging is not offered -- it degrades badly over a 1.3M-row catalog and
+        produces duplicates under concurrent writes."* This case is the second half.
 
         Page 1 is served, a row is inserted that sorts **inside** it, page 2 is
         served from the cursor. Under a keyset the client sees the pre-insert
@@ -1221,15 +1167,13 @@ class TitleRepositoryBrowseContract:
         """The paged walk and the unpaged read are the same list.
 
         **`limit=2` over six rows is the exact-exhaustion arm and it is not
-        decoration.** ADR-0034 measured that the off-by-one this design exists
-        to remove *"is invisible outside `count % limit == 0`"*: at `limit=4`
-        the population partitions 4 + 2 and a wrong terminating rule still
-        looks right. Both arms run over the same fixture so the difference is
-        the arithmetic and nothing else.
+        decoration.** The off-by-one this design exists to remove is invisible outside
+        `count % limit == 0`: at `limit=4` the population partitions 4 + 2 and a wrong
+        terminating rule still looks right. Both arms run over the same fixture so the
+        difference is the arithmetic and nothing else.
 
-        The premise guards against the trap this repository has paid for five
-        times over: a UUIDv7 primary key makes `ORDER BY id` and `ORDER BY <the
-        real key>` agree by accident, and then a walk that ignored the sort
+        The premise guards the trap a UUIDv7 primary key sets: `ORDER BY id` and `ORDER
+        BY <the real key>` agree by accident, and then a walk that ignored the sort
         entirely would satisfy this.
         """
         await self._seed_population(repo)
@@ -1277,7 +1221,7 @@ class TitleRepositoryBrowseContract:
     async def test_a_page_boundary_inside_the_unkeyed_group_does_not_drop_the_rest_of_it(
         self, repo: TitleRepository, sort: BrowseSort
     ) -> None:
-        """**The NULL trap, and it is the quietest defect in this port.**."""
+        """The NULL trap, and it is the quietest defect in this port."""
         keys: dict[str, tuple[int | None, float | None, int | None]] = {
             "year": (2001, None, None),
             "popularity": (None, 9.0, None),
@@ -1314,13 +1258,11 @@ class TitleRepositoryBrowseContract:
         )
 
     async def test_every_sort_the_enum_declares_is_served(self, repo: TitleRepository) -> None:
-        """A member added to `BrowseSort` with no order behind it must fail here rather than.
+        """A member added to `BrowseSort` with no order behind it must fail here.
 
-        fall back to something plausible.
-
-        The floor on the member count is the premise: an enum that lost three
-        members would make an "every member works" loop trivially true, which
-        is the `len(x) > 0` failure arriving at a `for`.
+        Rather than fall back to something plausible. The floor on the member count is
+        the premise: an enum that lost three members would make an "every member works"
+        loop trivially true, which is the `len(x) > 0` failure arriving at a `for`.
         """
         assert len(list(BrowseSort)) >= 4, "the premise: there are sorts to be exhaustive about"
         await self._seed_population(repo)
@@ -1334,7 +1276,7 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """`FilterNotSupported`'s own argument, applied to the sort.
 
-        an ignored order answers with *more* rows in some other sequence, and more rows
+        An ignored order answers with *more* rows in some other sequence, and more rows
         reads as working.
 
         The `cast` is the point rather than a wart. `BrowseSort` is closed, so
@@ -1375,15 +1317,12 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_filter_answers_one_concept_across_both_source_spellings(
         self, repo: TitleRepository
     ) -> None:
-        """**Issue #30's user-visible half.
+        """Two importers spell one genre concept two different ways.
 
-        as a test.** `titles.genres` is written by two importers with no shared
-        vocabulary: the IMDb bulk phase spells it `Sci-Fi` and `EnrichService` spells it
-        `Science Fiction`, and on the live catalog the two never co-occur (20,051 /
-        6,223 / **0** both, 2026-08-19).
-
-        Exact containment therefore answers half a concept under either spelling, and
-        looks completely right doing it.
+        `titles.genres` is written by two importers with no shared vocabulary: the IMDb
+        bulk phase spells it `Sci-Fi` and `EnrichService` spells it `Science Fiction`,
+        and the two never co-occur on a row. Exact containment therefore answers half a
+        concept under either spelling, and looks completely right doing it.
 
         **Both arms are asserted, and the order is the assertion.** A filter
         that expanded only the canonical spelling would pass a
@@ -1435,7 +1374,7 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """The natural wrong spelling of two filters is `OR`.
 
-        which answers with a strictly larger, less relevant page that still looks right.
+        Which answers with a strictly larger, less relevant page that still looks right.
         """
         both = self._browsable("Both", genres=("Horror",), year=1999)
         genre_only = self._browsable("Genre Only", genres=("Horror",), year=2001)
@@ -1455,26 +1394,21 @@ class TitleRepositoryBrowseContract:
     async def test_owned_means_an_available_title_level_copy(
         self, repo: TitleRepository, own: Own
     ) -> None:
-        """**The two readings of "owned" in this codebase.
+        """The two readings of "owned", settled by a fixture rather than by a join.
 
-        settled by a fixture rather than by whichever join got written.**.
+        `MediaItemRepository.owned_title_ids` carries `episode_id IS NULL` and counts a
+        retracted copy; `list_owned_by_tag` requires `available` and carries no episode
+        bound. Browse takes one leg from each, and each of the two distractors here is
+        the row the *other* reading would have answered with:
 
-        `MediaItemRepository.owned_title_ids` carries `episode_id IS NULL` and
-        counts a retracted copy; `list_owned_by_tag` requires `available` and
-        carries no episode bound. Browse takes one leg from each, and each of
-        the two distractors here is the row the *other* reading would have
-        answered with:
-
-        - **the retracted copy**, which `owned_title_ids`' reading keeps and a
-          "show me what I can play" filter must not;
+        - **the retracted copy**, which `owned_title_ids`' reading keeps and a "show me
+          what I can play" filter must not;
         - **the series owned only through its episode files**, which
-          `list_owned_by_tag`'s reading keeps and a title-level screen must
-          not -- the cost `owned_title_ids` already records and accepts.
+          `list_owned_by_tag`'s reading keeps and a title-level screen must not.
 
-        All three arms are asserted, because `owned=False` is the complement
-        rather than "no predicate": a two-valued flag would make *unset* and
-        *the user asked for unowned* the same request, and the `None` arm
-        would then be untestable.
+        All three arms are asserted, because `owned=False` is the complement rather than
+        "no predicate": a two-valued flag would make *unset* and *the user asked for
+        unowned* the same request, and the `None` arm would then be untestable.
         """
         playable = self._browsable("Playable")
         retracted = self._browsable("Retracted")
@@ -1503,7 +1437,7 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """A limit applied before the ordering keeps whichever rows the scan reached first.
 
-        which on a freshly-seeded table is insertion order.
+        On a freshly-seeded table that is insertion order.
         """
         await self._seed_population(repo)
 
@@ -1514,11 +1448,12 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_facet_is_counted_without_its_own_predicate(
         self, repo: TitleRepository
     ) -> None:
-        """**The facet's whole job.** With `genre=Horror` active the genre facet must still say.
+        """**The facet's whole job**: it counts outside its own filter.
 
-        how many comedies there are, or the client cannot navigate anywhere: a facet
-        folded back onto its own filter answers "how many Horror films are Horror",
-        which is the size of the page already on screen.
+        With `genre=Horror` active the genre facet must still say how many comedies
+        there are, or the client cannot navigate anywhere: a facet folded back onto its
+        own filter answers "how many Horror films are Horror", which is the size of the
+        page already on screen.
 
         The assertion is that the map is *unchanged* by activating the filter,
         which is the strongest form and the one that catches the fold-back on
@@ -1540,10 +1475,10 @@ class TitleRepositoryBrowseContract:
     async def test_the_genre_facet_offers_one_button_per_concept_not_per_spelling(
         self, repo: TitleRepository
     ) -> None:
-        """**The other half of issue #30.** `GET /browse?facets=true` offered `Sci-Fi` (20,075).
+        """The facet bar offers one button per concept, not one per spelling.
 
-        and `Science Fiction` (6,204) as two buttons for one concept, so whichever a
-        viewer pressed silently lost the other.
+        `GET /browse?facets=true` offering `Sci-Fi` and `Science Fiction` as two buttons
+        for one concept means whichever a viewer presses silently loses the other.
 
         The assertion is on the **whole map**, which is what catches the two
         wrong implementations that both look right: one that emits the
@@ -1570,11 +1505,10 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """The facet and the filter are one rule read twice.
 
-        and this is the case that fails if they drift apart.
-
-        A count collapsed into a canonical label that the filter does not expand — or
-        expanded by a filter the facet does not collapse — leaves a button whose number
-        is not the number of rows pressing it produces.
+        This is the case that fails if they drift apart. A count collapsed into a
+        canonical label the filter does not expand -- or expanded by a filter the facet
+        does not collapse -- leaves a button whose number is not the number of rows
+        pressing it produces.
         """
         for index in range(3):
             await repo.add(self._browsable(f"Skeleton {index}", genres=("Sci-Fi",)))
@@ -1606,9 +1540,9 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """`test_the_genre_facet_is_counted_without_its_own_predicate`'s twin.
 
-        and it is a separate case because the two facets are two statements: a drop-
-        your-own-predicate rule applied to one of them and forgotten for the other is
-        exactly the shape a shared docstring hides.
+        A separate case because the two facets are two statements: a drop-your-own-
+        predicate rule applied to one of them and forgotten for the other is exactly the
+        shape a shared docstring hides.
         """
         for index in range(2):
             await repo.add(self._browsable(f"Nineties {index}", year=1999))
@@ -1630,7 +1564,7 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """The other half of the rule, and the one a "drop the filters" shortcut gets wrong.
 
-        the genre facet drops the *genre* predicate and keeps the year and ownership
+        The genre facet drops the *genre* predicate and keeps the year and ownership
         ones.
 
         Without this, a facet bar computed over the whole catalog reports
@@ -1664,7 +1598,7 @@ class TitleRepositoryBrowseContract:
     ) -> None:
         """`count_by_state`'s *"never a sparse dict"* rule.
 
-        narrowed to the values the request itself named -- a genre vocabulary is open,
+        Narrowed to the values the request itself named -- a genre vocabulary is open,
         so "every possible key" is not a thing this can promise.
 
         A `GROUP BY` returns only the values that have rows, so the defect is
@@ -1698,7 +1632,7 @@ class TitleRepositoryBrowseContract:
 class TitleRepositoryGenreSweepContract:
     """`list_genres_page` and `replace_genres`.
 
-    the narrow projection the write-time genre backfill walks and the batched write it
+    The narrow projection the write-time genre backfill walks, and the batched write it
     lands.
     """
 
@@ -1721,7 +1655,7 @@ class TitleRepositoryGenreSweepContract:
     ) -> None:
         """The whole population, ordered, with no row served twice.
 
-        asserted as a walk rather than as one page, because `>=` and `>` differ only at
+        Asserted as a walk rather than as one page, because `>=` and `>` differ only at
         a boundary two abutting pages have and one page does not.
         """
         added = [self._titled(f"Title {index}", "Drama") for index in range(5)]
@@ -1744,7 +1678,8 @@ class TitleRepositoryGenreSweepContract:
     ) -> None:
         """A projection, not an entity.
 
-        the sweep reads 1.27M rows and has no use for 33 columns of each.
+        The sweep reads the whole catalog and has no use for thirty-three columns of
+        each row.
         """
         title = self._titled("The Quiet Vacuum", "Sci-Fi", "Drama")
         await repo.add(title)
@@ -1754,12 +1689,11 @@ class TitleRepositoryGenreSweepContract:
         assert [(row.id, row.genres) for row in page] == [(title.id, ("Sci-Fi", "Drama"))]
 
     async def test_a_title_with_no_genres_is_still_in_the_walk(self, repo: TitleRepository) -> None:
-        """**The population is every title.
+        """The population is every title, not every title with a genre.
 
-        not every title with a genre.** A read filtered on `cardinality(genres) > 0`
-        would be a second, silent definition of "affected" living in SQL, next to the
-        one in `usher.domain.genres` — the `_FINGERPRINT_SQL` failure shape, one column
-        over.
+        A read filtered on `cardinality(genres) > 0` would be a second, silent
+        definition of "affected" living in SQL, next to the one in `usher.domain.genres`
+        -- the `_FINGERPRINT_SQL` failure shape, one column over.
         """
         bare = self._titled("Untagged")
         await repo.add(bare)
@@ -1784,11 +1718,10 @@ class TitleRepositoryGenreSweepContract:
     async def test_replacing_genres_with_what_the_row_already_holds_writes_nothing(
         self, repo: TitleRepository
     ) -> None:
-        """**The idempotence guard.
+        """The idempotence guard, in the statement rather than only in the caller.
 
-        in the statement rather than only in the caller.** A re-run over a normalised
-        catalog must be observably free, and `rowcount` is what an operator reads to
-        believe it.
+        A re-run over a normalised catalog must be observably free, and `rowcount` is
+        what an operator reads to believe it.
         """
         title = self._titled("The Quiet Vacuum", "Science Fiction")
         await repo.add(title)
@@ -1819,10 +1752,10 @@ class TitleRepositoryGenreSweepContract:
     async def test_an_empty_batch_writes_nothing_and_asks_nothing(
         self, repo: TitleRepository
     ) -> None:
-        """A page that changed nothing must not reach the database at all — an `UPDATE ...
+        """A page that changed nothing must not reach the database at all.
 
-        FROM (VALUES)` with no rows is a syntax error, so this is a real refusal rather
-        than a tidiness case.
+        An `UPDATE ... FROM (VALUES)` with no rows is a syntax error, so this is a real
+        refusal rather than a tidiness case.
         """
         assert await repo.replace_genres([]) == 0
 
@@ -1837,7 +1770,7 @@ class TitleRepositoryGenreSweepContract:
 
 
 class TitleRepositoryNaturalKeyContract:
-    """`resolve_natural_keys` — the read K4's restore is built on.
+    """`resolve_natural_keys` -- the read a restore is built on.
 
     Every case here seeds through `add`, so the fixture is the same object
     on both arms: a `Title`. What differs is what the two implementations
@@ -1867,9 +1800,8 @@ class TitleRepositoryNaturalKeyContract:
     ) -> None:
         """The whole point: the artifact's id is not the answer, the target's is.
 
-        `db/repositories/bulk.py:611` mints a fresh UUIDv7 per staged row, so two
-        catalogs built from one dump agree on `imdb_id` and on nothing else (ADR-0003,
-        ADR-0045).
+        `db/repositories/bulk.py` mints a fresh UUIDv7 per staged row, so two catalogs
+        built from one dump agree on `imdb_id` and on nothing else.
         """
         held = Title(kind=TitleKind.MOVIE, name="Held", sort_name="Held", imdb_id="tt99000101")
         await repo.add(held)
@@ -1882,14 +1814,11 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_title_with_no_imdb_id_resolves_on_the_tmdb_rung(
         self, repo: TitleRepository
     ) -> None:
-        """The fallback the live catalog needs.
+        """The fallback the live catalog needs, because some titles carry no `imdb_id`.
 
-        72 of 1,272,888 titles carry no `imdb_id` (2026-08-21), and it was 13 eight days
-        earlier.
-
-        Two references in one call, so the case is a statement about the
-        *ladder* rather than about a repository that only ever looks at
-        `tmdb_id` — the sibling resolving on the rung above is the control.
+        Two references in one call, so the case is a statement about the *ladder* rather
+        than about a repository that only ever looks at `tmdb_id` -- the sibling
+        resolving on the rung above is the control.
         """
         no_imdb = Title(
             kind=TitleKind.MOVIE, name="Crosswalked", sort_name="Crosswalked", tmdb_id=99000201
@@ -1913,13 +1842,10 @@ class TitleRepositoryNaturalKeyContract:
         }
 
     async def test_the_tmdb_rung_is_namespaced_by_kind(self, repo: TitleRepository) -> None:
-        """ADR-0011.
+        """TMDb keys movies and series in separate spaces, and the two overlap.
 
-        TMDb keys movies and series in separate spaces that overlap on 26,968 measured
-        ids, so `tmdb_id` alone resolves a series' watch state onto whichever film
-        shares the integer.
-
-        Both rows are seeded and both references asked in one call, so a
+        So `tmdb_id` alone resolves a series' watch state onto whichever film shares the
+        integer. Both rows are seeded and both references asked in one call, so a
         resolver that dropped `kind` cannot pass by answering one of them.
         """
         film = Title(kind=TitleKind.MOVIE, name="Film", sort_name="Film", tmdb_id=99000301)
@@ -1958,12 +1884,9 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_raw_id_resolves_only_against_a_target_that_already_holds_it(
         self, repo: TitleRepository
     ) -> None:
-        """ADR-0003 makes a title with neither provider id a first-class citizen and the live.
-
-        catalog holds six of them (2026-08-21, against zero on 2026-08-13).
+        """A title with neither provider id is a first-class citizen, and they exist.
 
         The artifact carries the UUID and the target is *asked* rather than trusted.
-
         Both arms in one case: the id the catalog holds, and one it does not.
         """
         orphan = Title(kind=TitleKind.MOVIE, name="Orphan", sort_name="Orphan")
@@ -1978,9 +1901,7 @@ class TitleRepositoryNaturalKeyContract:
         assert await repo.resolve_natural_keys([held, stranger]) == {held: orphan.id}
 
     async def test_the_imdb_rung_wins_over_the_tmdb_one(self, repo: TitleRepository) -> None:
-        """Precedence.
-
-        asserted rather than left to whichever row a `UNION` happened to return first.
+        """Precedence, asserted rather than left to whichever row a `UNION` returns first.
 
         The fixture is the state a merge leaves behind: two rows, one holding
         the `imdb_id` the artifact carries and one holding its `tmdb_id`.
@@ -2006,7 +1927,7 @@ class TitleRepositoryNaturalKeyContract:
     ) -> None:
         """Absent, never mapped to `None`.
 
-        the port's contract, and what `usher.db.backup_identity.resolve_titles` turns
+        The port's contract, and what `usher.db.backup_identity.resolve_titles` turns
         into a named refusal.
 
         The premise is a sibling that does resolve in the same call.
@@ -2032,7 +1953,7 @@ class TitleRepositoryNaturalKeyContract:
     async def test_a_repeated_reference_is_answered_once(self, repo: TitleRepository) -> None:
         """A household names one title once per watch state.
 
-        so a batch carrying it twice is the ordinary shape rather than a defect.
+        So a batch carrying it twice is the ordinary shape rather than a defect.
 
         Two probes for one reference would make the ordinal disagree with the caller's
         list, which is the failure mode the mapping cannot survive.

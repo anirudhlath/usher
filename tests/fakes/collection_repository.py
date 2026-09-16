@@ -16,8 +16,7 @@ class SeededMediaItem:
     `episode_id` is modelled because `list_owned`'s predicate excludes those
     rows: `IngestService` writes an episode's row with its series' `title_id`
     **and** its own `episode_id`, so a join on `title_id` alone reads a series
-    as owned once per episode file -- 999,827 of the one measured deployment's
-    1,126,789 items.
+    as owned once per episode file.
     """
 
     title_id: uuid.UUID
@@ -69,8 +68,7 @@ class FakeCollectionRepository(CollectionRepository):
             collection_id=collection_id,
             name=name,
             # Insertion order, because this fake has no release date. The
-            # sequence is therefore asserted only in the integration arm; see
-            # the module docstring's sixth divergence.
+            # sequence is therefore asserted only in the integration arm.
             title_ids=tuple(members),
             owned_title_ids=frozenset(members) & self._owned_titles(),
         )
@@ -78,11 +76,10 @@ class FakeCollectionRepository(CollectionRepository):
     def _owned_titles(self) -> set[uuid.UUID]:
         """`episode_id IS NULL AND available`, which both reads apply.
 
-        One helper here and **two written-out copies in Postgres**, where
-        `_LIST_OWNED` and `_GET_COLLECTION` are separate statements. That is a
-        divergence worth knowing about rather than tidying: each of those
-        copies has its own contract case, and a mutation to one of them fails
-        only that case there while failing both here.
+        One helper here and two written-out copies in Postgres, where
+        `_LIST_OWNED` and `_GET_COLLECTION` are separate statements. Each copy
+        has its own contract case, so a mutation to one fails only that case
+        there while failing both here.
         """
         return {
             item.title_id

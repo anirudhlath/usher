@@ -28,10 +28,9 @@ _TEMPLATES = {
 # `test_provider_ids_use_canonical_lowercase_keys` only means something if
 # the server actually speaks the casing the adapter has to normalise away.
 _EMBY_PROVIDER_KEYS = {"tmdb": "Tmdb", "imdb": "Imdb", "tvdb": "Tvdb"}
-# The vocabulary Emby 4.9.5.0 actually emits, transcribed from the live server on
-# 2026-07-31: `VideoRange` plus `ExtendedVideoType`/ `ExtendedVideoSubType`, and **no
-# `VideoRangeType` and no `DvProfile`** -- neither appeared once across 200 movies, all
-# 34 Dolby Vision files included.
+# The vocabulary Emby 4.9.5.0 emits: `VideoRange` plus `ExtendedVideoType` and
+# `ExtendedVideoSubType`, and no `VideoRangeType` and no `DvProfile` -- neither
+# appears, Dolby Vision files included.
 _HDR_WIRE: dict[HdrFormat | None, dict[str, str]] = {
     None: {"VideoRange": "SDR", "ExtendedVideoType": "None", "ExtendedVideoSubType": "None"},
     HdrFormat.HDR10: {
@@ -69,17 +68,12 @@ _PLAYED = re.compile(r"^/Users/(?P<user>[^/]+)/PlayedItems/(?P<item>[^/]+)$")
 
 
 def _identity_of(request: httpx.Request) -> tuple[str, str] | None:
-    """`(Device.
+    """`(Device, DeviceId)` from the MediaBrowser header, or `None` if it is malformed.
 
-    DeviceId)` from the MediaBrowser header, or `None` if the header is missing or
-    malformed.
-
-    Emby derives a session's device from this header, so a request without
-    it is attributed to an anonymous client -- which is precisely the
-    accumulating-pile-of-sessions failure PRD 03's durable-client identity
-    exists to prevent. Every field is required, not just the two returned:
-    an empty `DeviceId` is not a durable identity, and a `Client` that is
-    not `Usher` is some other application's traffic.
+    Emby derives a session's device from this header, so a request without it is
+    attributed to an anonymous client -- the accumulating-pile-of-sessions failure PRD
+    03's durable-client identity exists to prevent. Every field is required, not just
+    the two returned: an empty `DeviceId` is not a durable identity.
     """
     identity = request.headers.get("Authorization", "")
     if not identity.startswith("MediaBrowser "):
@@ -100,9 +94,8 @@ def _identity_of(request: httpx.Request) -> tuple[str, str] | None:
 def _stamp(value: datetime) -> str:
     """The coarse form used for `MinDateLastSaved` comparisons.
 
-    matching what `usher.adapters.emby.mapping.emby_datetime` produces.
-
-    Compared as strings, which is chronological for same-format UTC ISO stamps.
+    Matches what `usher.adapters.emby.mapping.emby_datetime` produces, and compares as
+    strings, which is chronological for same-format UTC ISO stamps.
     """
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -154,8 +147,8 @@ class FakeEmbyServer:
         self.credentials_valid = True
         self.offline = False
         # `Policy.IsAdministrator` for the seeded account. `False` is the
-        # configuration ADR-0012 assumes and the live 2026-07-31 probe
-        # observed; `True` is the one nothing enforces and M5 reports.
+        # configuration the adapter assumes and the live probe observed;
+        # `True` is the one nothing enforces.
         self.is_administrator = False
         # `GET /Users/Me` answers 500 on Emby 4.9.5.0. This models a build
         # that did the same for `GET /Users/{id}`, which must narrow the
@@ -242,10 +235,7 @@ class FakeEmbyServer:
         return None if state is None else (state.position_seconds, state.played)
 
     def expire_session(self) -> None:
-        """The exact Emby failure.
-
-        the credentials are still right, the session token simply stopped working.
-        """
+        """The exact Emby failure: the credentials are right, the session token stopped."""
         self._session_token = None
 
     def reject_credentials(self) -> None:
@@ -382,24 +372,14 @@ class FakeEmbyServer:
         )
 
     def _ordered(self, params: httpx.QueryParams) -> list[str]:
-        """The listing order.
+        """The listing order, honouring the `SortBy` fields asked for and nothing else.
 
-        honouring exactly the `SortBy` fields asked for and inventing nothing beyond
-        them.
-
-        Deliberately *not* a `sorted(..., key=(changed_at, external_id))`.
-        That supplied a total order the adapter never requested, so a walk
-        paging over a non-total sort key looked perfectly stable here while
-        reshuffling under its own cursor against a real server -- the one
-        failure the port exists to make impossible, hidden by the test
-        double meant to expose it.
-
-        Items this request gave the server no way to tell apart are rotated
-        by the number of listings served so far. That is what "the server
-        may order ties however it likes, and differently on the next
-        request" looks like from the outside: deterministic enough to
-        reproduce a failure, adversarial enough that a missing tiebreak
-        drops items instead of getting away with it.
+        Deliberately not a `sorted(..., key=(changed_at, external_id))`: that supplies a
+        total order the adapter never requested, so a walk paging over a non-total sort
+        key looks stable here while reshuffling under its own cursor against a real
+        server. Items this request gave the server no way to tell apart are rotated by
+        the number of listings served so far, which is what a real server's tie ordering
+        looks like from the outside.
         """
         since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
         fields = [field for field in (params.get("SortBy") or "").split(",") if field]
@@ -440,43 +420,25 @@ class FakeEmbyServer:
         return httpx.Response(200, json=self._payload(external_id, for_listing=False))
 
     def _state_of(self, external_id: str) -> SourceWatchState:
-        """The item's current state.
+        """The item's current state, or the all-zero one Emby reports for an untouched item.
 
-        or the all-zero one Emby reports for an item nobody has touched.
-
-        Never `None`: every write below *evolves* this rather than building a
-        replacement, so there has to be something to evolve.
-
-        `play_count=0` explicitly, rather than the DTO's `None` default: on
-        the port, `None` means "this read could not determine it", and a
-        server reading its own storage always can. An untouched item really
-        has been played zero times, and that zero is a positive claim.
+        Never `None`: every write below evolves this rather than building a replacement.
+        `play_count=0` explicitly rather than the DTO's `None` default -- on the port
+        `None` means "this read could not determine it", and a server reading its own
+        storage always can.
         """
         return self._states.get(external_id) or SourceWatchState(
             external_id=external_id, position_seconds=0, played=False, play_count=0
         )
 
     def _write_user_data(self, request: httpx.Request, external_id: str) -> httpx.Response:
-        """`POST /Users/{user}/Items/{item}/UserData`.
+        """`POST /Users/{user}/Items/{item}/UserData` -- a resume position, no session.
 
-        the route that writes a resume position without a play session.
-
-        204, no body.
-
-        Two behaviours transcribed from the live server on 2026-07-31, both
-        of which a more forgiving fake would hide:
-
-        - **An omitted `Played` is not "leave it alone", it is `false`.** The
-          body deserialises into a DTO whose unset fields take their C#
-          defaults, so a body carrying only `PlaybackPositionTicks` really
-          did flip a played item to unplayed. Modelled with
-          `body.get("Played", False)` rather than a `if "Played" in body`
-          merge, because the merge is the mistake.
-        - **`PlayCount` and `LastPlayedDate` survive that same omission.**
-          `replace`, not a fresh `SourceWatchState`: rebuilding one from the
-          fields this route carries would zero the play history, and the
-          loss is invisible to a harness that reads back only position and
-          played. (`replace` rather than `.evolve()` because the port's DTOs
+        204, no body. Two behaviours from the live server that a more forgiving fake
+        would hide: an omitted `Played` is `false` rather than "leave it alone", which is
+        why this reads `body.get("Played", False)` rather than merging on presence; and
+        `PlayCount` and `LastPlayedDate` survive that same omission, which is why the
+        state is `replace`d rather than rebuilt from the fields this route carries.
         """
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
@@ -494,19 +456,11 @@ class FakeEmbyServer:
         """`POST`/`DELETE /Users/{user}/PlayedItems/{item}`.
 
         200, with the updated `UserData` as the body, which is how the live server
-        answers.
-
-        **Both directions clear the resume position**, verified live: the
-        POST is why the adapter writes the position first and the played
-        flag last, and the DELETE is why the adapter does not use this route
-        to report an item unplayed at all. The DELETE also resets
-        `PlayCount` to 0 and clears `LastPlayedDate` -- destruction worth
-        modelling, because it is the reason the unplayed path is a
-        `UserData` write instead.
-
-        `max(previous, 1)` rather than `+ 1`: marking an already-counted item
-        played left `PlayCount` at 1 on the live server rather than
-        incrementing it, which is what makes the adapter's retry idempotent.
+        answers. Both directions clear the resume position: the POST is why the adapter
+        writes the position first and the played flag last, and the DELETE -- which also
+        resets `PlayCount` and clears `LastPlayedDate` -- is why the adapter does not use
+        this route to report an item unplayed. `max(previous, 1)` rather than `+ 1`,
+        because marking an already-counted item played does not increment it.
         """
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
@@ -606,17 +560,11 @@ class FakeEmbyServer:
         payload["MediaSources"] = [*alternates, media]
 
     def _user_data(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
-        """One item's `UserData`.
+        """One item's `UserData`, rendered differently for the two routes that carry it.
 
-        rendered **differently for the two routes that carry it**, because the live
-        server does.
-
-        Until M4 this method took no `for_listing` and both routes got the
-        item-route rendering, which is precisely the fake-agrees-with-the-
-        adapter shape that let M3's write-back ship broken: with the fake
-        supplying a play count the real listing does not, an adapter that
-        read one from a walk looked correct here and wrote zeros in
-        production.
+        The live server does the same. A fake that gave both routes the item-route
+        rendering supplies a play count the real listing does not, so an adapter reading
+        one from a walk looks correct here and writes zeros in production.
         """
         state = self._state_of(external_id)
         user_data: dict[str, Any] = {
@@ -626,10 +574,8 @@ class FakeEmbyServer:
         }
         if for_listing:
             # Emby 4.9.5.0's listing route reports `PlayCount: 0` and omits
-            # `LastPlayedDate` *entirely* -- not null, absent -- for an item whose
-            # single-item route reports the real values (verified 2026-07-31 against the
-            # live server, with `Fields=UserDataPlayState`, `Fields=UserData`,
-            # `EnableUserData=true`, and an explicit `Ids` restriction each tried and
+            # `LastPlayedDate` entirely -- not null, absent -- for an item whose
+            # single-item route reports the real values.
             user_data["PlayCount"] = 0
             return user_data
         # The item route.
@@ -644,30 +590,20 @@ class FakeEmbyServer:
             user_data["LastPlayedDate"] = _emby_stamp(state.last_played_at)
         return user_data
 
-    # -- push frames --------------------------------------------------- Rendered from
-    # the committed `push_*.json` fixtures with the seeded values substituted in,
-    # exactly as `_payload` renders an item: the *shape* comes from a file M5's live
-    # verification will diff against a real capture, and the *values* come from the
-    # test.
+    # -- push frames ---------------------------------------------------
+    # Rendered from the committed `push_*.json` fixtures with the seeded values
+    # substituted in, exactly as `_payload` renders an item: the shape comes from
+    # a file and the values come from the test.
 
     def user_data_changed_frame(self, external_ids: Sequence[str]) -> str:
         """A `UserDataChanged` envelope for these items' current state.
 
-        Every entry is the fixture's own entry with the identity and state
-        fields overwritten, and `LastPlayedDate` **popped** when the seeded
-        state carries none -- otherwise the fixture's invented date shows
-        through for every item, which is the same trap `given_item`'s
-        docstring names and which an earlier renderer here fell into for
-        `SeriesId`/`IndexNumber`.
-
-        `PlayCount` and `LastPlayedDate` are rendered from the seeded state
-        as *true* values, and the adapter is required to report `None` for
-        both (ADR-0014: a `UserDataChanged` entry is a third payload shape
-        and no run here has parsed one). That is deliberately the same
-        three-valued shape `test_a_walk_never_reports_play_history_it_
-        cannot_know` asserts on: either the truth or an explicit absence,
-        never a third number -- so a mapper that fabricated a `0` is caught
-        and one that reads the real value is not forbidden.
+        Every entry is the fixture's own with the identity and state fields overwritten,
+        and `LastPlayedDate` popped when the seeded state carries none -- otherwise the
+        fixture's invented date shows through for every item. `PlayCount` and
+        `LastPlayedDate` are rendered as true values while the adapter is required to
+        report `None` for both, so a mapper that fabricated a `0` is caught and one that
+        reads the real value is not forbidden.
         """
         message = load_emby_fixture("push_user_data_changed")
         template: dict[str, Any] = message["Data"]["UserDataList"][0]
@@ -722,23 +658,13 @@ class FakeEmbyServer:
         return json.dumps(message)
 
     def sessions_frame(self) -> str:
-        """The periodic message.
+        """The periodic message: it maps to no event and keeps an idle channel alive.
 
-        It maps to no event and is the reason an idle library's channel stays measurably
-        alive.
-
-        ADR-0004 observed `Sessions` arriving "periodically" and **not at
-        what interval**, which is the single assumption
-        `DEFAULT_STALE_AFTER_SECONDS = 90.0` rested on. M5's live run
-        measured it -- median 38.7 s, max 72.9 s over 182 intervals -- and
-        found it is **not an interval at all**: an authenticated socket
-        receives a frame when its row-filtered view changes, where an
-        unauthenticated one receives the literal 1 s cadence
-        `SessionsStart`'s `"0,1000"` asks for. Nothing here models either,
-        deliberately: a fake that emitted on a timer would be asserting a
-        cadence that is a property of a household rather than of the
-        protocol. This renders one frame on demand, and the watchdog's own
-        cases drive an injected clock instead.
+        It is not an interval. An authenticated socket receives a frame when its
+        row-filtered view changes, where an unauthenticated one receives the literal 1 s
+        cadence `SessionsStart`'s `"0,1000"` asks for. Nothing here models either: a fake
+        emitting on a timer would assert a cadence that is a property of a household
+        rather than of the protocol, so this renders one frame on demand.
         """
         message = load_emby_fixture("push_sessions")
         for session in message["Data"]:
