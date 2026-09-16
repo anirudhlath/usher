@@ -237,8 +237,8 @@ class PushApplyService:
         the events arriving before the nightly walk acts on them.
         """
         logger.info(
-            "{source} reported {count} items removed; availability is retracted only by a "
-            "full walk (ADR-0015), so nothing changes until the nightly reconcile",
+            "{source} reported {count} items removed; availability is retracted only by "
+            "a full walk, so nothing changes until the nightly reconcile",
             source=source.name,
             count=len(event.external_ids),
         )

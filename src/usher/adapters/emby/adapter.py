@@ -216,7 +216,7 @@ class EmbyAdapter(SourceAdapter):
                 logger.warning(
                     "source {source} is configured with an Emby administrator account; "
                     "a captured playback URL or push socket then grants administrator "
-                    "access -- configure a normal user (ADR-0012)",
+                    "access -- configure a normal user",
                     source=self._source.name,
                 )
             return SourceStatus(
