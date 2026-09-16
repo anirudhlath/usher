@@ -15,9 +15,9 @@ from usher.services.events import SentEvent
 
 router = APIRouter(tags=["events"])
 
-# : This route is on `PROBLEM_EXEMPTIONS` for its **stream** -- once it has : answered
-# `200 text/event-stream` there is no status code left to carry a : document, and its
-# in-stream vocabulary is an SSE event instead.
+#: This route is on `PROBLEM_EXEMPTIONS` for its **stream** -- once it has
+#: answered `200 text/event-stream` there is no status code left to carry a
+#: document, and its in-stream vocabulary is an SSE event instead.
 _EVENTS_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ProblemResponse, "description": "`?titles=` is not a comma-separated id list."},
 }
@@ -60,11 +60,11 @@ async def events(
         # for the life of the process.
         async with bus.subscribe(titles=wanted, last_event_id=last_event_id) as sent_events:
             iterator = aiter(sent_events)
-            # **The pending `__anext__` is kept across heartbeats, never cancelled and
-            # re-issued, and that is not a style choice.**
-            # `asyncio.wait_for(anext(iterator), timeout)` cancels the `__anext__` it is
-            # waiting on when the timeout fires, and cancelling `__anext__` *closes the
-            # async generator* -- so the next `anext` raises `StopAsyncIteration` and
+            # **The pending `__anext__` is kept across heartbeats, never cancelled
+            # and re-issued.** `asyncio.wait_for(anext(iterator), timeout)` cancels
+            # the `__anext__` it waits on when the timeout fires, and cancelling
+            # `__anext__` *closes the async generator* -- the next `anext` then
+            # raises `StopAsyncIteration` and the stream ends on the first quiet gap.
             pending: asyncio.Task[SentEvent] | None = None
             try:
                 while True:

@@ -22,10 +22,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from usher.db.base import Base, enum_column
 from usher.domain.curation import LLMPurpose
 
-#: `NUMERIC(12, 8)`. Declared as a constant because the migration and this
-#: model must agree exactly or `test_migration_matches_the_orm_metadata`
-#: reports drift, and because the two numbers are a decision rather than a
-#: default -- see the module docstring's measured table.
+#: `NUMERIC(12, 8)`. A constant because the migration and this model must agree
+#: exactly or `test_migration_matches_the_orm_metadata` reports drift, and because
+#: the two numbers are a decision rather than a default.
 COST_PRECISION = 12
 COST_SCALE = 8
 
@@ -38,21 +37,18 @@ class CuratedRowRow(Base):
     would differ from it by the width of a transaction.
 
     **The table holds one generation per user.** `replace_for_user` is
-    delete-then-insert in one transaction, so a committed state never
-    contains two. That is a property of the writer rather than of the schema,
-    and the read is deliberately written to survive its violation — see
-    `ix_curated_rows_user_newest` below, and the unique constraint refused
-    beside it.
+    delete-then-insert in one transaction, so a committed state never contains
+    two -- a property of the writer, not of the schema, which is why the read
+    is written to survive its violation.
     """
 
     __tablename__ = "curated_rows"
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    # CASCADE, and it is `user_taste`'s case rather than `watch_states`'.
-    # ADR-0010 makes `watch_states.user_id` protect state a delete would
-    # destroy irrecoverably; a curated row protects nothing and is re-derived
-    # by running the generation again. RESTRICT would make deleting a user
-    # fail because a model wrote them a shelf last night.
+    # CASCADE, `user_taste`'s case rather than `watch_states`': a curated row
+    # protects no state a delete would destroy irrecoverably, since running the
+    # generation again re-derives it. RESTRICT would make deleting a user fail
+    # because a model wrote them a shelf last night.
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -60,8 +56,8 @@ class CuratedRowRow(Base):
     # rows are `curated-01` … `curated-10`.
     slug: Mapped[str] = mapped_column(Text, nullable=False)
     # The model's own prose, rendered as the shelf heading -- the one string in this
-    # schema that a language model wrote and a user reads verbatim, which is why
-    # ADR-0028's validator is the only thing between the two.
+    # schema that a language model wrote and a user reads verbatim, with only the
+    # curation validator between the two.
     title: Mapped[str] = mapped_column(Text, nullable=False)
     # Nullable, and reachable: none of M7's nine providers can produce a row
     # with nothing to explain, and a model that returns an empty reason
@@ -74,10 +70,10 @@ class CuratedRowRow(Base):
     # The model's own ordering of the rows within one generation, `ge=0` because it
     # indexes the list the model returned.
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    # `title_embeddings.model_name`'s reason (ADR-0020): it makes "these rows
-    # were written by a model we no longer run" a query rather than something
-    # inferred from a date. Deliberately *not* an invalidation predicate --
-    # nothing recomputes curated rows on a model change.
+    # `title_embeddings.model_name`'s reason: it makes "these rows were written
+    # by a model we no longer run" a query rather than something inferred from a
+    # date. Deliberately *not* an invalidation predicate -- nothing recomputes
+    # curated rows on a model change.
     model_name: Mapped[str] = mapped_column(Text, nullable=False)
     # What makes a replacement atomic and a partial write visible. No foreign
     # key: there is no `generations` table and inventing one would be a row
@@ -111,8 +107,8 @@ class CuratedRowRow(Base):
         # the screen. The row is discarded whole instead, never padded from
         # the pool.
         CheckConstraint("cardinality(card_title_ids) > 0", name="ck_curated_rows_cards_not_empty"),
-        # The array shape's one liability, closed. A child table's `NOT NULL`
-        # would have done this; see the module docstring.
+        # The array shape's one liability, closed: an element can be NULL where
+        # a child table's `NOT NULL` would have refused the row.
         CheckConstraint(
             "array_position(card_title_ids, NULL) IS NULL",
             name="ck_curated_rows_cards_have_no_nulls",
@@ -145,8 +141,8 @@ class LLMCallRow(Base):
     # operator discovers they never priced a hosted model.
     tokens_in: Mapped[int] = mapped_column(Integer, nullable=False)
     tokens_out: Mapped[int] = mapped_column(Integer, nullable=False)
-    # `NUMERIC(12, 8)`, never `Float`. The module docstring carries the
-    # measured table behind both numbers.
+    # `NUMERIC(12, 8)`, never `Float`: a ledger summed over many rows cannot
+    # carry binary rounding error.
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(COST_PRECISION, COST_SCALE), nullable=False)
     # `time.monotonic()` across the whole request -- transport and decode included, not
     # the provider's own reported generation time.
@@ -154,8 +150,8 @@ class LLMCallRow(Base):
     # Not "the HTTP call returned 200". It is "this generation produced
     # something", and the two disagree in exactly one direction: a call that
     # answered perfectly and validated to zero rows is `ok = false` with a
-    # reason (ADR-0028). That is the only signal separating a validator that
-    # ate the output from a model that had nothing to say.
+    # reason. That is the only signal separating a validator that ate the
+    # output from a model that had nothing to say.
     ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # Present exactly when `ok` is false, enforced by the CHECK below as well
     # as by `LLMCall._ok_and_error_must_agree`. `Text` rather than a code: an
@@ -179,8 +175,7 @@ class LLMCallRow(Base):
             "(ok AND error IS NULL) OR (NOT ok AND error IS NOT NULL AND error <> '')",
             name="ck_llm_calls_ok_error_agree",
         ),
-        # **The two `m08a` deferred, landed by `m10c`** -- and the deferral is
-        # discharged rather than forgotten.
+        # `at` carries the retention sweep and every time-bucketed dashboard.
         Index("ix_llm_calls_at", "at"),
         # `(generation_id)` serves dashboard 5's "cost per curated row", joining
         # `curated_rows`.
@@ -189,8 +184,7 @@ class LLMCallRow(Base):
             "generation_id",
             postgresql_where=text("generation_id IS NOT NULL"),
         ),
-        # Not indexed even now: `purpose` and `model`. A deployment holds
-        # one or two values of each, so a btree over either is a structure
-        # with two entries -- `title_embeddings.model_name`'s refusal, one
-        # module over.
+        # Not indexed: `purpose` and `model`. A deployment holds one or two
+        # values of each, so a btree over either is a structure with two
+        # entries -- `title_embeddings.model_name`'s refusal, one module over.
     )

@@ -43,7 +43,4 @@ class Embedder(ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Release held resources (e.g.
-
-        a GPU-resident model).
-        """
+        """Release held resources, such as a GPU-resident model."""

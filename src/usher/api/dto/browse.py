@@ -1,7 +1,4 @@
-"""`GET /browse`'s wire shape.
-
-**written after the measurement, because the measurement changed it.**.
-"""
+"""`GET /browse`'s wire shape."""
 
 import uuid
 from enum import StrEnum
@@ -29,17 +26,12 @@ class FacetsOmitted(StrEnum):
 
 
 class BrowseFacetsResponse(BaseModel):
-    """What else this client could have asked for, counted.
-
-    or an explicit statement that nobody counted.
+    """What else this client could have asked for, counted -- or that nobody counted.
 
     `computed` is always present and is the field a client branches on.
     `reason` is present exactly when `computed` is false; `genres` and `years`
     exactly when it is true. The route serialises with
-    `response_model_exclude_unset=True`, so "not set" really is "not on the
-    wire" -- and `test_the_facet_response_carries_every_field_of_its_own_model`
-    is what stops a field added here and forgotten in the two constructors
-    below from silently vanishing instead of failing.
+    `response_model_exclude_unset=True`, so "not set" really is "not on the wire".
     """
 
     computed: bool
@@ -73,16 +65,14 @@ class BrowseItemResponse(BaseModel):
     would put "Matrix, The" on a card.
 
     `popularity` is nullable and stays nullable, for `SearchResultResponse`'s
-    recorded reason: it is `null` for every title TMDb's daily export has never
-    described -- **980,523 of the 1,272,367 rows** this route was measured
-    against -- and `popularity or 0.0` would render "nobody has measured this"
-    identically to "measured, and unpopular" (ADR-0014).
+    reason: it is `null` for every title TMDb's daily export has never described,
+    most of the catalog, and `popularity or 0.0` would render "nobody has rated
+    this" identically to "rated, and unpopular".
 
     **No artwork key**, deliberately: C6's `artwork` is one `images.id` chosen
     against a row's `display_hint`, read in one batched call by
-    `services/rows/base.py`, and browse has no such read. Adding one here is
-    additive and belongs in the task that adds the port call, not in a DTO
-    that would have to answer `null` for every row.
+    `services/rows/base.py`, and browse has no such read. Adding one belongs in
+    the task that adds the port call, not in a DTO answering `null` for every row.
     """
 
     title_id: uuid.UUID

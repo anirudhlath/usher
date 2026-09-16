@@ -9,8 +9,8 @@ from usher.domain.rows import DisplayHint, RowFamily
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows.base import BaseRow, Chapter, label
 
-# **0.90, fixed, and directly below Continue Watching.** Same intent -- carry on with
-# what you were doing -- one step less immediate: you finished the last episode rather
+# Fixed, and directly below Continue Watching. Same intent -- carry on with what
+# you were doing -- one step less immediate: you finished the last episode rather
 # than stopping mid-title.
 NEXT_UP_SCORE = 0.90
 
@@ -78,11 +78,11 @@ class NextUpProvider(RowProvider):
         return _SLUG
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
-        # **Two calls, both batch, and the count does not move with the number of series
-        # in progress.** `list_recent` rolls watched episodes up to their series
-        # (`COALESCE(ws.title_id, e.title_id)`), which is what makes this work on a
-        # television household at all -- a title-only history read returns nothing for
-        # the household this row is entirely about.
+        # Two calls, both batch, and the count does not move with the number of
+        # series in progress. `list_recent` rolls watched episodes up to their
+        # series (`COALESCE(ws.title_id, e.title_id)`), which is what makes this
+        # work on a television household at all -- a title-only history read
+        # returns nothing for the household this row is entirely about.
         recent = await ctx.watch_states.list_recent(ctx.user.id, limit=self._seeds)
         if not recent:
             # The household has played nothing. Not "S01E01 of everything
@@ -99,11 +99,10 @@ class NextUpProvider(RowProvider):
             # a degraded state.
             return []
 
-        # **Ordered by the household's own recency, not by the mapping.** A
-        # `dict` from a batch read is in whatever order the statement produced,
-        # and this row's order is the answer -- the show you watched last night
-        # belongs first. Re-imposed from `list_recent`'s order, which is the
-        # only recency this provider has.
+        # Ordered by the household's own recency, not by the mapping. A `dict`
+        # from a batch read is in whatever order the statement produced, and this
+        # row's order is the answer -- the show you watched last night belongs
+        # first. Re-imposed from `list_recent`'s order, the only recency there is.
         owned = await ctx.media_items.owned_episode_ids(
             [episode.id for episode in upcoming.values()]
         )
@@ -112,10 +111,10 @@ class NextUpProvider(RowProvider):
             episode = upcoming.get(entry.title_id)
             if episode is None:
                 continue
-            # **The one filter this provider owns.** A next episode with no copy is
-            # omitted rather than shown unplayable: "next up" that cannot be played is
-            # worse than absent, and `next_up` answers what comes next rather than what
-            # is available.
+            # The one filter this provider owns. A next episode with no copy is
+            # omitted rather than shown unplayable: "next up" that cannot be played
+            # is worse than absent, and `next_up` answers what comes next rather
+            # than what is available.
             if episode.id not in owned:
                 continue
             entries.append(

@@ -1,4 +1,4 @@
-"""Emby's WebSocket push channel (PRD 03, ADR-0004)."""
+"""Emby's WebSocket push channel (PRD 03)."""
 
 import asyncio
 import json
@@ -22,9 +22,8 @@ from usher.ports.source import SourceEvent, SourceEventKind
 
 WEBSOCKET_PATH = "/embywebsocket"
 
-# ADR-0004's own subscription, verbatim: the frame its end-to-end session sent before
-# `Sessions` and `UserDataChanged` started arriving, and the one thing about this
-# channel's protocol that was measured against the live server rather than read.
+# The subscription, verbatim: neither `Sessions` nor `UserDataChanged` arrives
+# until this frame has been sent.
 SUBSCRIBE_FRAME = '{"MessageType": "SessionsStart", "Data": "0,1000"}'
 
 # How long one `recv` waits before reporting "nothing yet". A *tick*, not a
@@ -99,18 +98,16 @@ class PushHealth:
     def is_delivering(self, *, now: float) -> bool:
         """Whether this channel is a push channel a caller may rely on.
 
-        **All three clauses, and the middle one is the milestone.**
-        `connected` alone is the answer this whole design refuses to give:
-        it is `True` for a proxy that upgraded and buffers, for a NAT entry
-        that has been dropped while both ends still believe otherwise, and
-        for ADR-0004's own control handshake against a path that does not
-        exist. `messages_received > 0` is what those cannot satisfy.
+        **All three clauses, and the middle one is the milestone.** `connected`
+        alone is `True` for a proxy that upgraded and buffers, for a NAT entry
+        dropped while both ends still believe otherwise, and for a handshake
+        against a path that does not exist. `messages_received > 0` is what
+        those cannot satisfy.
 
-        The staleness clause is what keeps the answer honest *after* the
-        first message: a socket that delivered once an hour ago and nothing
-        since is not working, and `websockets`' `ping_interval`/
-        `ping_timeout` cannot tell -- a peer answering pongs while
-        delivering nothing passes the keepalive and fails this.
+        The staleness clause keeps the answer honest *after* the first message:
+        a socket that delivered once an hour ago is not working, and
+        `websockets`' `ping_interval`/`ping_timeout` cannot tell -- a peer
+        answering pongs while delivering nothing passes the keepalive.
         """
         return (
             self.connected
@@ -120,12 +117,11 @@ class PushHealth:
         )
 
     def silent_for(self, *, now: float) -> float:
-        """Seconds since anything last arrived, measured from the open when nothing has.
+        """Seconds since anything last arrived, or since the open when nothing has.
 
         Zero before a connection exists. That branch is unreachable from the
-        loop that calls this (it runs only while a connection is open), and
-        it is spelled rather than left to a `None`-minus-`float` `TypeError`
-        that would take a lane down instead of reconnecting it.
+        loop that calls this, and it is spelled rather than left to a
+        `None`-minus-`float` `TypeError` that would take a lane down.
         """
         since = self.last_message_at if self.last_message_at is not None else self.opened_at
         return 0.0 if since is None else now - since
@@ -197,11 +193,10 @@ def to_source_events(
     malformed frame is worse than dropping the frame, and the nightly
     reconcile covers what a dropped frame would have carried.
 
-    **A message that maps to nothing is still a message.** `Sessions` -- the
-    periodic one ADR-0004 observed -- produces no event by design, because
-    deriving anything from it would mean tracking play sessions Usher never
-    starts. Its value is that it arrives, and the counting happens in
-    `EmbyPushChannel` on every frame, before this function is consulted. An
+    **A message that maps to nothing is still a message.** The periodic
+    `Sessions` frame produces no event by design: deriving anything from it
+    would mean tracking play sessions Usher never starts. Its value is that it
+    arrives, and `EmbyPushChannel` counts every frame before consulting this. An
     unknown `MessageType` behaves identically, so a future Emby build's new
     message costs nothing rather than taking a lane down.
     """
@@ -240,22 +235,15 @@ class SessionLike(Protocol):
     """The two things this channel asks of an `EmbySession`.
 
     Named so the channel's own tests can substitute without constructing a
-    session, an httpx client and a credential -- and so the dependency is
-    *two methods* rather than "an `EmbySession`", which is what keeps a
-    later reader from reaching for `request()` from inside a socket loop.
+    session, an httpx client and a credential -- and so the dependency is *two
+    methods* rather than "an `EmbySession`", which keeps a later reader from
+    reaching for `request()` from inside a socket loop.
 
-    **A `Protocol`, and `PushConnection` twelve lines up is an `ABC`.** That
-    is not an inconsistency and it is not ADR-0001 being ignored: ADR-0001
-    governs *ports*, and neither of these is one. The two seams differ in
-    the thing ADR-0001's argument turns on -- whether an implementation can
-    inherit. `websockets.ClientConnection` cannot, so `PushConnection` needs
-    a wrapper anyway and gets fail-fast instantiation for free. `EmbySession`
-    already has both methods, in the same package, and making it inherit
-    from here would have `session.py` import `push.py` -- the wrong
-    direction, and one import away from a cycle the day this module wants a
-    session. The plan specified an ABC for both; that version does not
-    type-check at the call site, because `EmbySession` is not a subclass and
-    `abc.register()` is invisible to mypy.
+    A `Protocol` where `PushConnection` is an `ABC`, because the two seams
+    differ in whether an implementation can inherit. `websockets`'
+    `ClientConnection` cannot. `EmbySession` already has both methods in this
+    same package, and making it inherit from here would have `session.py`
+    import `push.py` -- the wrong direction, and one import from a cycle.
     """
 
     async def access_token(self) -> str: ...
@@ -268,13 +256,11 @@ class EmbyPushChannel:
 
     Reuses `EmbySession` rather than authenticating: PRD 03's durable-client
     property comes from authenticating *once* with a stable `DeviceId`, and
-    verified 2026-07-31, presenting an existing token alongside a different
-    `DeviceId` neither forks nor invalidates the session -- Emby binds a
-    session to the token's own authentication record. A channel that
-    authenticated per reconnect would mint a session per reconnect and undo
-    the one property the header exists for. Reusing the session also
-    inherits its single-flight re-authentication, its negative cache, and
-    its exactly-one-retry for free.
+    presenting an existing token alongside a different `DeviceId` neither forks
+    nor invalidates the session -- Emby binds a session to the token's own
+    authentication record. A channel that authenticated per reconnect would mint
+    a session per reconnect and undo the one property the header exists for.
+    Reusing it also inherits single-flight re-auth and the negative cache.
     """
 
     def __init__(
@@ -301,26 +287,19 @@ class EmbyPushChannel:
         return self._health
 
     async def _socket_url(self) -> str:
-        """`/embywebsocket?api_key=<token>&deviceId=<id>`.
+        """`/embywebsocket?api_key=<token>&deviceId=<id>`, for the connector.
 
-        built and handed straight to the connector.
+        **Never stored on the instance, never returned outside this module,
+        never logged, never interpolated into an exception, never a span
+        attribute** -- the second place this token is materialised. `quote` on
+        both values because a device id is a persisted string an operator could
+        have influenced, exactly as `EmbyAdapter._segment` argues for a path.
 
-        **Never stored on the instance, never returned to a caller outside
-        this module, never logged, never interpolated into an exception,
-        never a span attribute.** ADR-0012's handling rules, applied to the
-        second place this token is materialised. `quote` on both values
-        because an `external_id`-shaped rule applies to a device id too: it
-        is a persisted string an operator could have influenced, and
-        `EmbyAdapter._segment` documents the same reasoning for a path.
+        The token is read from the session on **every** open rather than cached
+        here, so a channel reconnecting after a silent re-authentication
+        presents the new token instead of a revoked one forever.
 
-        The token is read from the session on **every** open rather than
-        cached here, so a channel that reconnects after a silent
-        re-authentication presents the new token; a cached one would present
-        a revoked credential forever.
-
-        `http`/`https` become `ws`/`wss`. Emby accepts either scheme on this
-        route, and using the WebSocket scheme is what keeps a reader from
-        wondering; `websockets` requires one.
+        `http`/`https` become `ws`/`wss`, which `websockets` requires.
         """
         token = await self._session.access_token()
         parts = urlsplit(self._base_url.rstrip("/"))
@@ -350,10 +329,10 @@ class EmbyPushChannel:
             # would bury the reason behind a generic one.
             raise
         except Exception as exc:
-            # A bare `except Exception` on purpose, and carrying no suppression
-            # directive: the plan wrote one for `BLE001`, which is not in this project's
-            # ruff selection, and `RUF100` -- which is -- rejects a directive for a rule
-            # nothing enables.
+            # A bare `except Exception` on purpose, with no suppression
+            # directive: `BLE001` is not in this project's ruff selection, and
+            # `RUF100` -- which is -- refuses a directive for a rule nothing
+            # enables.
             raise PortUnavailable(
                 f"{WEBSOCKET_PATH} could not be opened: {type(exc).__name__}"
             ) from exc
@@ -368,7 +347,6 @@ class EmbyPushChannel:
     async def _events(self, connection: PushConnection) -> AsyncIterator[SourceEvent]:
         source_user_id = await self._session.user_id()
         while True:
-            # One cooperative yield per iteration, and it is not decoration.
             await asyncio.sleep(0)
             try:
                 frame = await connection.recv(self._poll_seconds)
@@ -410,19 +388,14 @@ class EmbyPushChannel:
 
 
 class _WebsocketsConnection(PushConnection):
-    """`websockets.asyncio.client.ClientConnection`, behind this adapter's own three methods.
+    """`websockets`' `ClientConnection`, behind this adapter's three methods.
 
     The wrapper exists so that **no `websockets` exception ever crosses into
-    `usher.ports.errors` carrying its own message.**
-    `websockets.exceptions.InvalidURI.__str__` is
-    `f"{self.uri} isn't a valid URI: {self.msg}"` -- read from the installed
-    library, not assumed -- and this channel's URI carries the session
-    token; `InvalidProxy` has the same shape for a proxy URL, and
+    `usher.ports.errors` carrying its own message.** `InvalidURI.__str__` is
+    `f"{self.uri} isn't a valid URI: {self.msg}"` and this channel's URI carries
+    the session token; `InvalidProxy` has the same shape for a proxy URL, and
     `InvalidStatus` carries the response. Every translation below therefore
-    names the exception's *type* and nothing else -- the same spelling
-    `usher.adapters.http.failure_detail` now gives `EmbySession`, which had
-    interpolated `{exc}` until issue #35 measured that empty for every httpx
-    timeout.
+    names the exception's *type* and nothing else.
     """
 
     def __init__(self, connection: "ClientConnection") -> None:
@@ -432,10 +405,8 @@ class _WebsocketsConnection(PushConnection):
         try:
             await self._connection.send(message)
         except Exception as exc:
-            # A bare `except Exception` and no suppression directive, for
-            # the reason `EmbyPushChannel.open` records: `BLE001` is not in
-            # this project's ruff selection and `RUF100` -- which is --
-            # rejects a directive for a rule nothing enables.
+            # A bare `except Exception` and no suppression directive, for the
+            # reason `EmbyPushChannel.open` records.
             raise PortUnavailable(f"{WEBSOCKET_PATH} send failed: {type(exc).__name__}") from exc
 
     async def recv(self, timeout: float) -> str:
@@ -465,11 +436,9 @@ class _WebsocketsConnection(PushConnection):
         try:
             await self._connection.close()
         except Exception as exc:
-            # Never raises: this runs in a `finally` that is itself often
-            # unwinding the `PortUnavailable` explaining why the lane
-            # dropped, and a close failure replacing the real reason is
-            # worse than a log line. The port documents `aclose` as never
-            # raising for exactly this.
+            # Never raises: this runs in a `finally` that is often unwinding
+            # the `PortUnavailable` explaining why the lane dropped, and a
+            # close failure replacing the real reason is worse than a log line.
             logger.debug("push connection close failed: {kind}", kind=type(exc).__name__)
 
 

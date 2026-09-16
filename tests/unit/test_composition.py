@@ -2,7 +2,6 @@
 
 import ast
 import dataclasses
-import inspect
 import io
 import os
 import pathlib
@@ -103,7 +102,6 @@ from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
 from usher.services.handlers import SourceBinding
-from usher.services.jobs import JobWorker
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RowCache
 from usher.services.taste import TasteService
@@ -709,17 +707,14 @@ async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_rep
     assert queue.jobs_of(JobKind.WATCH_WRITEBACK) == [], "a successful job kept its row"
 
 
-def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_them() -> None:
-    """`JobWorker.registered_kinds`' docstring names which kinds are in every build.
+def test_a_bare_build_registers_exactly_the_five_unconditional_kinds() -> None:
+    """The four conditional kinds are `ENRICH`, `DERIVE`, `INDEX` and `CURATE`.
 
-    That sentence is written to be falsifiable here, because updating it silently is the
-    failure it exists to prevent. Derived from the bare build rather than from a literal
-    list, so a sixth unconditional kind cannot be added without the prose moving with
-    it. The claim is pinned rather than the prose: a verbatim assertion on the sentence
-    would fail every copy-edit that left the claim intact.
+    A set equality rather than a membership check: a sixth kind registered
+    unconditionally and a fifth one quietly made conditional are both failures,
+    and only the equality catches the second. The three cases below are the
+    controls that keep this from passing on a worker that registers nothing.
     """
-    doc = inspect.getdoc(JobWorker.registered_kinds)
-    assert doc is not None
     bare = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
@@ -729,10 +724,16 @@ def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_
         registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
-    assert bare.registered_kinds, "the premise: a bare build registers something"
 
-    unnamed = sorted(kind.name for kind in bare.registered_kinds if kind.name not in doc)
-    assert unnamed == [], f"in every build and unmentioned by the docstring: {unnamed}"
+    assert bare.registered_kinds == frozenset(
+        {
+            JobKind.BOOTSTRAP,
+            JobKind.MATCH,
+            JobKind.SYNC,
+            JobKind.WATCH_HISTORY,
+            JobKind.WATCH_WRITEBACK,
+        }
+    )
 
 
 def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:

@@ -1,7 +1,4 @@
-"""The image proxy's orchestration.
-
-resolve the row, clamp the width, ask the store, fetch and store on a miss.
-"""
+"""The image proxy: resolve the row, clamp the width, fetch and store on a miss."""
 
 import uuid
 from collections.abc import Iterable
@@ -24,11 +21,9 @@ __all__ = ["ImageProxyService", "servable_images"]
 
 _meter = metrics.get_meter("usher.images")
 
-# **A filter with no counter is invisible**, which is the requirement
-# `is_servable_path`'s own docstring hands to its consumers: once the unservable rows
-# are dropped, *"this catalog has no logos"* and *"this proxy dropped all of them"*
-# produce the identical body and the identical empty space on a screen, and nothing
-# anywhere reports which happened.
+# A filter with no counter is invisible: once the unservable rows are dropped,
+# *"this catalog has no logos"* and *"this proxy dropped all of them"* produce the
+# identical body and the identical empty space on a screen.
 _image_references = _meter.create_counter(
     "usher.images.references",
     unit="1",
@@ -59,8 +54,8 @@ _CACHE_LABEL = {"cache": "image"}
 class ImageProxyService:
     """`GET /images/{id}`'s whole behaviour, minus its headers.
 
-    C5 owns the route, its caching headers and the `immutable` question; this
-    class owns which bytes those headers are about.
+    The route owns its caching headers and the `immutable` question; this class
+    owns which bytes those headers are about.
     """
 
     def __init__(
@@ -71,25 +66,21 @@ class ImageProxyService:
         self._store = store
 
     async def serve(self, image_id: uuid.UUID, *, width: int | None = None) -> StoredImage | None:
-        """The bytes for `image_id` at the rung `width` clamps to.
+        """The bytes for `image_id` at the rung `width` clamps to, or `None`.
 
-        or `None` when no row carries that id.
-
-        **`None` and not a raise**, so C5's 404 is a value: a client holding an
-        artwork reference the catalog re-derived away is an ordinary request
+        `None` and not a raise, so the route's 404 is a value: a client holding
+        an artwork reference the catalog re-derived away is an ordinary request
         with an ordinary answer, and the alternative makes the commonest
         recoverable case an exception path.
 
         `PortUnavailable` and `PortDataMalformed` cross this method untouched.
-        They are the two things C5 has to tell apart — an upstream that may
-        answer later, and an answer that will be just as wrong next time — and
-        collapsing them here would leave the route with one status for both.
+        They are the two things the route has to tell apart -- an upstream that
+        may answer later, and an answer that will be just as wrong next time --
+        and collapsing them here would leave one status for both.
 
-        **The row is read before the store, not after.** The key needs the
-        row's `provider` and `provider_path`, and a store keyed on the image id
-        instead would tie every cached entry to an id whose stability is
-        `m09c`'s property rather than the CDN's — two rows re-derived to the
-        same path would then be two copies of one file.
+        The row is read before the store, not after. The key needs the row's
+        `provider` and `provider_path`; a store keyed on the image id instead
+        would make two rows re-derived to the same path two copies of one file.
         """
         image = await self._images.get(image_id)
         if image is None:

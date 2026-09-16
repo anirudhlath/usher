@@ -86,20 +86,17 @@ _ITEM = " "
 class EmbeddingDocument:
     """One title as an embedder sees it, plus the hash of exactly that.
 
-    **Deliberately not `ports.search.SearchDocument`**, which is a retrieval
+    Deliberately not `ports.search.SearchDocument`, which is a retrieval
     document with weight classes aimed at `index_many`. Sharing a type would
-    invite the fingerprint being computed over the weighted form, which is
-    the one way to get this wrong that nothing downstream can detect.
+    invite the fingerprint being computed over the weighted form, which is the
+    one way to get this wrong that nothing downstream can detect.
 
-    `is_degenerate` is a flag on a fully-formed document, **never an
-    absence**. A refused title still gets a `title_embeddings` row carrying
-    this `fingerprint` and a `NULL` embedding, so it stops matching the stale
+    `is_degenerate` is a flag on a fully-formed document, never an absence. A
+    refused title still gets a `title_embeddings` row carrying this
+    `fingerprint` and a `NULL` embedding, so it stops matching the stale
     predicate and starts matching the `embedding IS NULL` one a diagnostic
     counts. Returning `None` here would leave the caller nothing to write and
-    the title re-claimed by every backfill pass forever -- the failure this
-    repository has already shipped once, one lane over, when the
-    watch-history repair carried the walk's instant and was refused by the
-    very row it existed to repair.
+    the title re-claimed by every backfill pass forever.
     """
 
     text: str
@@ -126,13 +123,8 @@ def compose_document(title: Title, *, credits: Sequence[str] = ()) -> EmbeddingD
         # `hashlib.md5` as S324, and the flag is the honest statement -- this is a
         # content hash for change detection and nothing about it is a security boundary.
         fingerprint=hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest(),
-        # `not text.strip()`, and nothing more elaborate.
         is_degenerate=not text.strip(),
     )
-
-
-# `SuggestTier` lived here until `m10c` and now lives in `usher.ports.search`, beside
-# `SearchMode`.
 
 
 #: One `SearchQueryRepository` per batch, committed on a clean exit. A callable
@@ -273,10 +265,7 @@ class SearchQueryBuffer:
 
 @dataclass(frozen=True, slots=True)
 class SearchAnalytics:
-    """`search_queries`' retrieval half.
-
-    the repository, and the commit that makes what it wrote durable.
-    """
+    """`search_queries`' write side: the repository, and the commit for it."""
 
     queries: SearchQueryRepository
     commit: Callable[[], Awaitable[None]]
@@ -289,18 +278,17 @@ class SearchAnalytics:
 class SemanticSearchUnavailable(Exception):
     """This deployment has no `Embedder`, so a semantic query cannot be served.
 
-    **Deliberately not a `UsherPortError`**: that family's docstring says
-    "every error a port implementation may raise", and nothing failed here --
-    the deployment is configured without a model and said so once, at startup.
-    Filed there it would land in the `except UsherPortError` arms that mean "an
-    upstream is broken", where the response is a retry and no retry can help.
-    **And not a `ValueError`**, which a caller wrapping a search would catch
-    alongside every argument failure in the call. M9 gives it a `code` in PRD
-    07's vocabulary; M6 invents no status code for a route that does not exist.
+    Deliberately not a `UsherPortError`: that family means "every error a port
+    implementation may raise", and nothing failed here -- the deployment is
+    configured without a model and said so once, at startup. Filed there it
+    would land in the `except UsherPortError` arms that mean "an upstream is
+    broken", where the response is a retry and no retry can help. And not a
+    `ValueError`, which a caller wrapping a search would catch alongside every
+    argument failure in the call.
     """
 
 
-# `k / (k + rank)`, and **k is 1 rather than `search_rrf_k`'s 60**.
+# `k / (k + rank)`, and k is 1 rather than `search_rrf_k`'s 60.
 _RELEVANCE_K = 1.0
 
 # Popularity squashed to [0, 1) by `p / (p + midpoint)`: bounded, monotone, and --
@@ -318,7 +306,7 @@ _RECENCY_MIDPOINT_YEARS = 25.0
 # decimal place of this divisor cannot reach a result.
 _DAYS_IN_YEAR = 365.25
 
-# PRD 05's six ranking terms, all of them, as of M9.
+# PRD 05's six ranking terms, all of them.
 _WEIGHTS: dict[str, float] = {
     "relevance": 0.70,
     "popularity": 0.15,
@@ -369,11 +357,11 @@ class SearchService:
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._index = index
-        # **Two `SuggestIndex` implementations, both required, and neither optional.**
-        # The argument `embedder` and `expander` make one parameter over -- a capability
-        # an operator may not have installed -- does not transfer: both indexes are
-        # btree/GIN reads over tables `m09a` creates unconditionally, so "built or not
-        # built" has no state left to express.
+        # Two `SuggestIndex` implementations, both required. The argument
+        # `embedder` and `expander` make one parameter over -- a capability an
+        # operator may not have installed -- does not transfer: both indexes are
+        # btree/GIN reads over tables `m09a` creates unconditionally, so "built or
+        # not built" has no state left to express.
         self._tiers: dict[SuggestTier, SuggestIndex] = {
             SuggestTier.PREFIX: prefix_suggestions,
             SuggestTier.FUZZY: fuzzy_suggestions,
@@ -386,11 +374,10 @@ class SearchService:
         # before they search. What is optional is the *argument* to `search`,
         # because a caller may legitimately have no household to speak for.
         self._watch_states = watch_states
-        # **Not an `Embedder` and not a `TasteService`, and both absences are the
-        # point.** The taste term needs a centroid; computing one is a walk over ~50
-        # titles and an embed, which is a job rather than a request, so what reaches the
-        # blend is a centroid some *other* process wrote -- `TasteRepository.latest`,
-        # one indexed single-row probe.
+        # Not an `Embedder` and not a `TasteService`, and both absences are the
+        # point: the taste term needs a centroid, computing one is a job rather
+        # than a request, so what reaches the blend is a centroid some *other*
+        # process wrote -- `TasteRepository.latest`, one indexed single-row probe.
         self._taste = taste
         # Read only when a centroid was found, and scoped by the model that
         # wrote it. See `_rank`.
@@ -400,26 +387,21 @@ class SearchService:
         # term is a function of the instant it is scored at, and a term read
         # off the wall clock is one no case can pin an age against.
         self._now = now
-        # **The interval clock, and it is a second callable rather than a second reading
-        # of `now`.** `_now` is a wall clock and answers an `AwareDatetime` because
-        # `search_queries.at` is a timestamp somebody will join against; this one is a
-        # monotone counter whose epoch is unspecified, and it exists because
-        # `latency_ms` and `usher.search.duration` are a *duration*.
+        # The interval clock, a second callable rather than a second reading of
+        # `now`: `_now` is a wall clock answering an `AwareDatetime` because
+        # `search_queries.at` is a timestamp somebody will join against, while this
+        # is a monotone counter whose epoch is unspecified.
         self._clock = clock
         # Optional, and a deployment without it still has search: full-text and
-        # trigram are PRD 05's catalog-lookup tier and serve all 1,271,138
-        # titles with no model at all.
+        # trigram are PRD 05's catalog-lookup tier and serve the whole catalog
+        # with no model at all.
         self._embedder = embedder
-        # Optional on the same terms and off by default **twice**: `USHER_LLM_ENABLED`
+        # Optional on the same terms and off by default twice: `USHER_LLM_ENABLED`
         # is `false`, so `composition.build_pipeline` is handed no client; and
-        # `USHER_QUERY_EXPANSION_ENABLED` is `false` even when it is handed one, because
-        # PRD 05's 2026-08-07 measurement put expansion's effect on retrieval the wrong
-        # way round.
+        # `USHER_QUERY_EXPANSION_ENABLED` is `false` even when it is handed one.
         self._expander = expander
-        # **Optional, and the reason is a *caller* state rather than a deployment state
-        # -- which is the difference from the two suggest indexes above.** Those are
-        # required because `m09a` creates their tables unconditionally, so "built or not
-        # built" had no state left to express.
+        # Optional, and the reason is a *caller* state rather than a deployment
+        # state -- which is the difference from the two suggest indexes above.
         self._analytics = analytics
         # A second switch beside it, narrowing one surface rather than the
         # collaborator: `analytics=None` is a caller inside a unit of work it
@@ -453,7 +435,7 @@ class SearchService:
         # default) even though the value is frozen. The sentinel is the
         # spelling, not the reason.
         filters: SearchFilters | None = None,
-        # **A keyword here and deliberately not a `SearchFilters` field.** PRD 05 says
+        # A keyword here and deliberately not a `SearchFilters` field. PRD 05 says
         # `SearchFilters` is a closed vocabulary with no user field, and the practical
         # half of that is `usher search`'s `--filter`-shaped flags and `GET /search`'s
         # query string: a household reachable from a query string is a household any
@@ -470,9 +452,9 @@ class SearchService:
             return SearchAnswer(requested_mode=requested, mode=requested)
 
         started = self._clock()
-        # Resolved once and used twice -- by the coverage probe below and by
-        # the request -- so the population the guard measured is the population
-        # the search runs over. Two spellings of the same default would be two
+        # Resolved once and used twice -- by the coverage probe below and by the
+        # request -- so the population the guard checked is the population the
+        # search runs over. Two spellings of the same default would be two
         # populations the day either grew a branch.
         applied = filters or SearchFilters()
         vector: tuple[float, ...] | None = None
@@ -491,11 +473,10 @@ class SearchService:
                 # The narrowing is carried in the answer, not hidden in it.
                 mode = SearchMode.FULL_TEXT
             else:
-                # **One completion, immediately in front of the embed, and its position
-                # is the cost argument.** Inside this `else` it is bought only by a
-                # search that was going to embed something -- so `full_text` pays
-                # nothing, a deployment with no model pays nothing, a blank query pays
-                # nothing (the guard above returned already) and `suggest`, which a
+                # One completion, immediately in front of the embed, and its position
+                # is the cost argument: inside this `else` it is bought only by a
+                # search that was going to embed something, so `full_text`, a
+                # deployment with no model and a blank query all pay nothing.
                 if (
                     self._expander is not None
                     and await self._index.semantic_coverage(applied) > 0.0
@@ -507,7 +488,7 @@ class SearchService:
 
         outcome = await self._index.search(
             SearchRequest(
-                # **The typed words, never the rewrite.** Only the vector is computed
+                # The typed words, never the rewrite: only the vector is computed
                 # from an expansion, so under RRF the lexical lane goes on matching what
                 # the viewer actually wrote while the semantic lane matches the
                 # paraphrase.
@@ -526,10 +507,9 @@ class SearchService:
             mode=mode,
             # Passed through, never recomputed. It is the fraction of the
             # *filtered population* that had a vector; derived from the hits it
-            # would read 1.0 whenever every returned hit had one, which is
-            # exactly the case a green test seeds.
+            # would read 1.0 whenever every returned hit had one.
             semantic_coverage=outcome.semantic_coverage,
-            # **Reported, never silently substituted.** This is the string that
+            # Reported, never silently substituted. This is the string that
             # was embedded whenever it is not `None`, so a caller can print it
             # beside the results; `usher search` does. A field that echoed the
             # typed query when nothing was expanded would put a line on every
@@ -543,7 +523,7 @@ class SearchService:
         labels = {"mode": mode.value}
         _search_duration.record(elapsed, labels)
         _search_results.record(len(answer.results), labels)
-        # **Outside the window, deliberately.** An INSERT inside it would be counted as
+        # Outside the window, deliberately: an INSERT inside it would be counted as
         # search latency by both the histogram and the row itself.
         return replace(
             answer,
@@ -561,12 +541,10 @@ class SearchService:
         results: int,
         elapsed: float,
     ) -> uuid.UUID | None:
-        """One `search_queries` row for one answered search.
+        """One `search_queries` row for one answered search, and its commit.
 
-        and the commit that makes it durable.
-
-        **Answers the row's own id, or `None` when no row was written** -- which is the
-        value `SearchAnswer.search_id` carries and therefore what `GET /search` echoes.
+        Answers the row's own id, or `None` when no row was written -- the value
+        `SearchAnswer.search_id` carries and therefore what `GET /search` echoes.
         """
         analytics = self._analytics
         if analytics is None or user_id is None:
@@ -593,10 +571,7 @@ class SearchService:
         results: int,
         elapsed: float,
     ) -> None:
-        """One `search_queries` row for one answered keystroke.
-
-        PRD 10's amendment 2, and the writer `m10c` shipped the columns for.
-        """
+        """One `search_queries` row for one answered keystroke."""
         analytics = self._analytics
         if analytics is None or user_id is None or not self._suggest_analytics:
             return
@@ -625,13 +600,13 @@ class SearchService:
         limit: int = 10,
         *,
         tier: SuggestTier,
-        # **`None`-able and mirroring `search`'s, and the default is the decision.** A
-        # household is not a thing this path *uses* -- there is no blend here, so no
-        # watch-state term and no taste term -- it is a thing the row *needs*, because
-        # `search_queries.user_id` is `NOT NULL` behind `ON DELETE RESTRICT`.
+        # `None`-able and mirroring `search`'s, and the default is the decision: a
+        # household is not a thing this path *uses* -- there is no blend here -- it
+        # is a thing the row *needs*, because `search_queries.user_id` is
+        # `NOT NULL` behind `ON DELETE RESTRICT`.
         user_id: uuid.UUID | None = None,
     ) -> tuple[SearchResult, ...]:
-        """Type-ahead candidates from one tier, hydrated and **not re-ranked**."""
+        """Type-ahead candidates from one tier, hydrated and not re-ranked."""
         if not prefix.strip():
             return ()
         started = self._clock()
@@ -647,10 +622,10 @@ class SearchService:
             if hit.title_id in by_id
         )
         elapsed = self._clock() - started
-        # **The measured interval is the whole method and not the tier call**, because
+        # The timed interval is the whole method and not the tier call, because
         # hydration is what a client waits for and it is the same two reads for both
-        # tiers by construction -- so a window around `self._tiers[tier].suggest` alone
-        # would report the half of the cost that does not differ between the two things
+        # tiers by construction -- so a window around the tier call alone would
+        # report the half of the cost that does not differ between the two things
         # the label distinguishes.
         _suggest_duration.record(elapsed, {"tier": tier.value})
         _suggest_results.record(len(results), {"tier": tier.value})
@@ -671,12 +646,10 @@ class SearchService:
     ) -> tuple[SearchResult, ...]:
         """PRD 05 stage 2, over one already-retrieved candidate set.
 
-        **Three reads with a household and two without, regardless of hit
-        count** -- which is the whole reason `list_by_ids`, `owned_title_ids`
-        and `played_title_ids` exist in the batch shape they do. This docstring
-        said "two reads" until the household arrived; the count is asserted
-        against fakes rather than described, because a per-hit spelling answers
-        identically and costs a statement a hit.
+        Three reads with a household and two without, regardless of hit count --
+        which is the whole reason `list_by_ids`, `owned_title_ids` and
+        `played_title_ids` exist in the batch shape they do. A per-hit spelling
+        answers identically and costs a statement a hit.
 
         `played_title_ids` rolls a watched episode up to its series through
         `COALESCE(ws.title_id, e.title_id)`, which is what keeps this from
@@ -716,15 +689,13 @@ class SearchService:
                     relevance=_RELEVANCE_K / (_RELEVANCE_K + rank),
                     popularity=_popularity_term(titles[hit.title_id].tmdb_popularity),
                     owned=1.0 if hit.title_id in owned else 0.0,
-                    # **A small boost, never a demotion, and the direction is the
-                    # decision PRD 05 leaves open.** A search is overwhelmingly a re-
-                    # find intent -- somebody typing a title's name usually wants that
-                    # title -- so demoting what the household has finished buries the
-                    # exact film they just named.
+                    # A small boost, never a demotion, and the direction is the
+                    # decision PRD 05 leaves open: a search is overwhelmingly a
+                    # re-find intent, so demoting what the household has finished
+                    # buries the exact film they just named.
                     played=None if user_id is None else (1.0 if hit.title_id in played else 0.0),
                     recency=_recency_term(titles[hit.title_id], today=today),
-                    # **`None` rather than 0.0 in both absent cases** -- ADR-0014, in a
-                    # sixth place.
+                    # `None` rather than 0.0 in both absent cases.
                     taste=_taste_term(centroid, vectors.get(hit.title_id)),
                 ),
             )
@@ -734,19 +705,16 @@ class SearchService:
             # -- a 500 on a search because one row went away.
             if hit.title_id in titles
         ]
-        # Ties broken by id. Falling back to the index's own order is not an
-        # order: this repository has measured `UPDATE ... RETURNING` handing
-        # rows back in heap order on a small table, and a search that reorders
-        # equal-scoring rows between two identical calls cannot be paginated.
+        # Ties broken by id. Falling back to the index's own order is not an order
+        # -- `UPDATE ... RETURNING` hands rows back in heap order on a small table
+        # -- and a search that reorders equal-scoring rows between two identical
+        # calls cannot be paginated.
         results.sort(key=lambda result: (-result.score, result.title_id))
         return tuple(results)
 
 
 def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
-    """Positions, with equal index scores sharing a position.
-
-    and an exact name match in a group of its own.
-    """
+    """Positions: equal index scores share one, an exact name match sits alone."""
     ranks: list[int] = []
     rank = 0
     previous: tuple[bool, float] | None = None
@@ -760,20 +728,15 @@ def _dense_ranks(hits: Sequence[SearchHit]) -> list[int]:
 
 
 def _popularity_term(popularity: float | None) -> float | None:
-    """`p / (p + midpoint)`, or `None` when nobody has measured it.
+    """`p / (p + midpoint)`, or `None` when the catalog carries no popularity.
 
-    **`None` is not 0.0** -- ADR-0014, in a fourth place.
-    `titles.tmdb_popularity`
-    is null for every title TMDb's daily export has never described: **all**
-    of a `--phase imdb` catalog and **~77%** of a `--phase all` one (Task 36
-    measured 291,584 of 1,271,570 titles carrying a popularity, 2026-08-05).
-    `popularity or 0.0` would rank a title nobody measured identically to one
-    measured as unpopular, burying the whole un-enriched catalog beneath the
-    enriched tier while looking like arithmetic and raising nothing. `_blend`
-    below was re-checked against the populated catalog and is unchanged: it
-    drops an absent signal from numerator and denominator, so a partially
-    populated catalog scores each title on what is known about it, not on a
-    zero it never measured.
+    `None` is not 0.0. `titles.tmdb_popularity` is null for every title TMDb's
+    daily export has never described -- all of a `--phase imdb` catalog and most
+    of a `--phase all` one -- and `popularity or 0.0` would rank an unknown title
+    identically to an unpopular one, burying the whole un-enriched catalog
+    beneath the enriched tier while looking like arithmetic and raising nothing.
+    `_blend` drops an absent signal from numerator and denominator, so each title
+    is scored on what is known about it.
     """
     if popularity is None:
         return None
@@ -781,7 +744,7 @@ def _popularity_term(popularity: float | None) -> float | None:
 
 
 def _recency_term(title: Title, *, today: date) -> float | None:
-    """`1 / (1 + age / midpoint)`, or `None` when nobody has dated it."""
+    """`1 / (1 + age / midpoint)`, or `None` when the title carries no date."""
     released = title.release_date or (None if title.year is None else date(title.year, 1, 1))
     if released is None:
         return None
@@ -812,23 +775,18 @@ def _taste_term(
 def _blend(**signals: float | None) -> float:
     """A weighted mean over the signals that are actually present.
 
-    An absent signal leaves **both** the numerator and the denominator, so a
-    title with no popularity is scored on what is known about it rather than
-    penalised for what is not. The observable consequence: at equal relevance,
-    unknown popularity ranks above a measured zero, and an undated title ranks
-    above one with a measured old year.
+    An absent signal leaves both the numerator and the denominator, so a title
+    with no popularity is scored on what is known about it rather than penalised
+    for what is not. At equal relevance, unknown popularity ranks above a stored
+    zero, and an undated title above one carrying an old year.
 
     Written as a sum over an explicit signal list -- the same skeleton
-    `SimilarityService` uses -- so that landing a term is adding a term and a
-    weight in both places rather than rewriting two scorers. Watch state and
-    recency arrived that way; the taste centroid is the one still to come.
+    `SimilarityService` uses -- so landing a term is adding a term and a weight
+    in both places rather than rewriting two scorers.
 
-    **It is scale-invariant, which is what lets new terms arrive without moving
-    old scores.** Multiplying every weight by the same factor changes nothing,
-    and adding a term changes only the rows where that term is *present* -- so
-    a hit with no popularity, no year and no household scores exactly what M6
-    scored it, and `_WEIGHTS`' comment says why the three M6 numbers therefore
-    cannot be re-balanced against each other.
+    It is scale-invariant, which is what lets new terms arrive without moving old
+    scores: multiplying every weight by the same factor changes nothing, and
+    adding a term changes only the rows where that term is *present*.
     """
     total = 0.0
     applied = 0.0
@@ -841,17 +799,12 @@ def _blend(**signals: float | None) -> float:
 
 
 def _ms(seconds: float) -> int:
-    """`search_queries.latency_ms`.
+    """`search_queries.latency_ms`, which the column requires to be `>= 0`.
 
-    which is `>= 0` in the column (`ck_search_queries_latency_ms_non_negative`).
-
-    **The clamp is `adapters/llm/openai_compatible.py:181`'s shape and it
-    defends a promise the shipped clock never breaks.** `time.perf_counter` is
-    non-decreasing by contract, so a negative delta is unreachable with it --
-    the injected clock is the only thing that can produce one, which is exactly
-    what makes a guard against a promise nobody breaks testable at all. Without
-    it a backwards clock is a `RepositoryConflict` on the path that has just
-    answered a search correctly.
+    `time.perf_counter` is non-decreasing by contract, so a negative delta is
+    unreachable with the shipped clock and only an injected one can produce it.
+    Without the clamp a backwards clock is a `RepositoryConflict` on the path
+    that has just answered a search correctly.
     """
     return max(0, int(seconds * 1000))
 

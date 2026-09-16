@@ -29,17 +29,12 @@ _HKDF_INFO = b"usher.source-credentials.v1"
 def build_cipher(secret_key: SecretStr) -> Fernet:
     """Derive this deployment's credential-encryption key.
 
-    Module-level and public so a rotation command (PRD 08's "a documented
-    rotation command handles the bulk case") can build both the old and the
-    new cipher without instantiating two repositories.
-
-    ✅ **That caller exists since M10's K7** and is `cli._rotate`, which makes
-    the two calls at the composition root -- `usher.services` may not import
-    `usher.db` (`pyproject.toml`'s third contract), so `RotationService` is
-    handed two `Fernet` objects and never a key. This function had **no caller
-    in `src/` from M3 until then**, and the seam is why the rotation service
-    holds no plaintext key: `get_secret_value()` is unwrapped exactly once,
-    here, and only the HKDF output outlives the call.
+    Module-level and public so a rotation command can build both the old and the
+    new cipher without instantiating two repositories. `cli._rotate` makes both
+    calls at the composition root, because `usher.services` may not import
+    `usher.db`, so `RotationService` is handed two `Fernet` objects and never a
+    key: `get_secret_value()` is unwrapped exactly once, here, and only the HKDF
+    output outlives the call.
     """
     derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_HKDF_INFO).derive(
         secret_key.get_secret_value().encode("utf-8")
@@ -139,9 +134,7 @@ class PostgresCredentialRotationStore(CredentialCiphertextStore):
 
     async def write_ciphertext(self, ref: str, ciphertext: bytes) -> None:
         # `updated_at` is set here because `source_credentials` carries no
-        # `set_updated_at` trigger -- see `SourceCredentialRow`'s docstring, which named
-        # `PostgresCredentialStore` as the table's only writer until this class became
-        # the second one.
+        # `set_updated_at` trigger: every writer of this table names the column.
         await self._session.execute(
             update(SourceCredentialRow)
             .where(SourceCredentialRow.ref == ref)

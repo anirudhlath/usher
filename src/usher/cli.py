@@ -95,9 +95,9 @@ from usher.telemetry import (
     register_search_gauges,
 )
 
-# `--phase all` runs `FULL_SEQUENCE` in order -- the six members of `BootstrapPhase`
-# that are *steps* -- and three of its edges are measured rather than stylistic;
-# `usher.domain.bootstrap.BootstrapPhase` carries the argument and the numbers.
+# `--phase all` runs `FULL_SEQUENCE` in order -- the six members of
+# `BootstrapPhase` that are *steps*. Three of its edges are required ordering
+# rather than style.
 PHASES = tuple(phase.value for phase in BootstrapPhase)
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
 # real `SyncRunKind` and is deliberately absent: `sync` always runs it after
@@ -174,12 +174,10 @@ def _vocabulary_line(verdict: VocabularyVerdict) -> str:
     the_cli_report_the_same_vocabulary_verdict` feeds the route's own document
     back through this function and requires the byte-identical line.
 
-    Pure and synchronous — every read it used to make is `vocabulary_verdict`'s
-    now. It sits beside the `MIXED RELEASES` line
-    `composition._report_coverage` prints for the sibling condition on
-    `genome_scores`, and the reason the mixed case
-    reads *"not checked"* rather than a verdict is recorded on
-    `VocabularyState` itself.
+    Pure and synchronous: every read belongs to `vocabulary_verdict`. It sits
+    beside the `MIXED RELEASES` line `composition._report_coverage` prints for
+    the sibling condition on `genome_scores`, and why the mixed case reads *"not
+    checked"* rather than a verdict is recorded on `VocabularyState` itself.
     """
     if verdict.state is VocabularyState.NO_VECTORS:
         return "genome vocabulary: no vectors to name"
@@ -439,11 +437,10 @@ async def _work(settings: Settings, *, once: bool) -> None:
     # jobs for one that has, and the backlog is the number that says so.
     backlog = SearchGauges()
     register_search_gauges(backlog.read)
-    # **A session factory, not a session.** This command held exactly one
-    # `AsyncSession` for the life of the process until M9's W1, which is what
-    # bound the whole lane to one job at a time: `AsyncSession` is not
-    # concurrency-safe, so the worker now opens one per claim and one per job
-    # through the same `unit_of_work` the server's lanes use.
+    # **A session factory, not a session.** `AsyncSession` is not
+    # concurrency-safe, and one held for the life of the process binds the
+    # whole lane to one job at a time. The worker opens one per claim and one
+    # per job through the same `unit_of_work` the server's lanes use.
     work = unit_of_work(sessions, settings, events=NullEventPublisher(), provider=provider)
     try:
         async with sessions() as bootstrap_session:
@@ -476,15 +473,12 @@ async def _work(settings: Settings, *, once: bool) -> None:
             recovered += claims
 
         def _report(ran: int) -> None:
-            """Print the pass line at startup.
+            """Print the pass line at startup, then only when the total moves.
 
-            and after that only when the recovered total has moved.
-
-            **On a change, never per pass.** A line per pass is ~17,280 a day
-            at the idle floor, which is the rate that trains an operator to
-            ignore output; a line only at startup reports the total when it is
-            almost always zero, hiding every later recovery in the only mode a
-            container runs.
+            A line per pass is ~17,280 a day at the idle floor, which is the
+            rate that trains an operator to ignore output; a line only at
+            startup reports a total that is almost always zero, hiding every
+            later recovery.
             """
             nonlocal printed
             if printed != recovered:
@@ -527,7 +521,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
 
 
 async def _schedule(settings: Settings, *, once: bool) -> None:
-    """Run the scheduled-work loop, or one tick of it (ADR-0046)."""
+    """Run the scheduled-work loop, or one tick of it."""
     engine = build_engine(
         settings.database_url.get_secret_value(),
         pool_size=settings.db_pool_size,
@@ -540,10 +534,8 @@ async def _schedule(settings: Settings, *, once: bool) -> None:
         if once:
             ran = await scheduler.tick()
             # Both numbers, because `ran` alone cannot distinguish "nothing
-            # was due" from "nothing is registered" -- and the second was the
-            # shipped state for one commit, so a line that hid it would have
-            # read as a healthy night on a deployment where the scheduler
-            # could never do anything.
+            # was due" from "nothing is registered", and the second reads as a
+            # healthy night on a deployment whose scheduler can do nothing.
             print(f"{ran} of {registered} scheduled jobs ran")
             return
         print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
@@ -650,10 +642,7 @@ async def _genres(
     limit: int,
     after: uuid.UUID | None,
 ) -> None:
-    """Report how much of `titles.genres` is written in a source's spelling.
-
-    or rewrite it into Usher's own vocabulary.
-    """
+    """Report `titles.genres`' spelling, or rewrite it into Usher's vocabulary."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         service = GenreNormalisationService(
@@ -857,19 +846,15 @@ async def _eval(
 
 
 async def _similar_status(pipeline: Pipeline) -> None:
-    """The whole-table half of issue #17's *"staleness is at least observable"*.
-
-    how old `title_neighbors` is, and how much of it was computed under a different
-    blend.
-    """
+    """How old `title_neighbors` is, and how much of it disagrees with the blend."""
     computed_at = await pipeline.similar.computed_at()
     if computed_at is None:
         print("no neighbours have ever been computed -- run `usher similar --rebuild`")
     else:
         age = datetime.now(UTC) - computed_at
-        # Hours, because the walk is measured in hours and a period is too. A
-        # day-resolution line cannot distinguish "finished an hour ago" from
-        # "finished this morning", which is the comparison an operator makes.
+        # Hours: a day-resolution line cannot distinguish "finished an hour
+        # ago" from "finished this morning", which is the comparison an
+        # operator makes.
         print(
             f"neighbour table's oldest row: {computed_at.isoformat()} "
             f"({age.total_seconds() / 3600:.1f}h old)"
@@ -926,8 +911,7 @@ async def _similar(
 
         if title_id is None:
             # The whole-table form. After the rebuild branch above, `None`
-            # here can only mean "no arguments at all", which `parse_args`
-            # now allows and used to refuse.
+            # here can only mean "no arguments at all".
             await _similar_status(pipeline)
             return
         rows = await pipeline.similar.neighbors_of(title_id, limit=limit)
@@ -998,9 +982,8 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
         # `--repeat 0`, and `assert` is not available in shipped code.
         reports: list[ComposeReport] = []
         for _ in range(repeat):
-            # Cleared *before* each run, so every one of them is cold. Without
-            # this the second run is a cache hit and the measurement silently
-            # becomes a benchmark of a dict.
+            # Cleared *before* each run, so every one is cold: otherwise the
+            # second run is a cache hit and the number times a dict lookup.
             cache.clear()
             reports.append(await service.compose_report(ctx))
         report = reports[-1]
@@ -1109,9 +1092,9 @@ async def _curate(settings: Settings) -> None:
         async with _session_for(settings) as session:
             pipeline = build_pipeline(session, settings)
             service = build_curation_service(pipeline, settings, client)
-            # `ensure_default_user`, not `default_user`: this command needs an
-            # id and nothing else, and PRD 01's authentication seam is a
-            # singleton row until M9 gives it a request to come from.
+            # `ensure_default_user`, not `default_user`: this command needs
+            # an id and nothing else, and PRD 01's authentication seam is a
+            # singleton row with no request to derive one from.
             user_id = await ensure_default_user(session)
             try:
                 report = await service.generate(user_id)
@@ -1209,7 +1192,7 @@ async def _backup(settings: Settings, *, output: Path | None) -> None:
     _print_backup_report(report)
 
 
-# : How many refused rows `_print_restore_report` names before it summarises.
+#: How many refused rows `_print_restore_report` names before it summarises.
 _REFUSALS_NAMED: Final = 20
 
 
@@ -1237,21 +1220,12 @@ async def _restore(
 def _restore_refused(report: RestoreReport) -> str:
     """The exit line for a run that refused, and what an operator can do next.
 
-    🔴 **It used to say *"enrich or import what the lines above name"*, and for
-    the one rung a correctly rebuilt catalog actually fails on that is false.**
-    K2's ladder is `imdb_id`, then `(kind, tmdb_id)`, then the raw id -- and the
-    third is a *check on the target*, not a key. A title reaches it only by
-    carrying neither provider id, which on the deployment this project measures
-    means an unmatched **stub** the ingest ladder created: it is in no IMDb
-    dump, has no TMDb id to enrich by, and a rebuild mints it a new UUID. So
-    the sentence sent an operator to run an importer that cannot possibly
-    help. Measured 2026-08-25 -- 6 such titles of 1,272,891, accounting for
-    **304 of the artifact's `media_items` rows**, which refused the whole file
-    including 3,347 resolved watch states.
-
-    The line now separates the two: a reference naming a provider id is
-    something an importer fixes, and one naming only an id is not, and the
-    second names the flag rather than an errand.
+    Two kinds of refusal, and only one is an errand: a reference naming a
+    provider id is something an importer fixes, and one naming only a raw id is
+    not. The ladder's third rung is a check on the target rather than a key, so
+    a title reaches it only by carrying neither provider id -- an unmatched stub
+    that is in no IMDb dump, has no TMDb id to enrich by, and gets a new UUID on
+    every rebuild. The second case names the flag rather than an errand.
     """
     refused = len(report.refused)
     unfindable = sum(1 for one in report.refused if all(key.startswith("id=") for key in one.keys))
@@ -1499,9 +1473,8 @@ def _print_rotation_report(report: RotationReport, *, new_key_env: str) -> None:
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
-    `--probe` is the operator-facing form of ADR-0004's caveat: it reports
-    the **messages and events that arrived**, never that the handshake
-    succeeded, because a handshake against a nonexistent path also upgrades
+    `--probe` reports the **messages and events that arrived**, never that the
+    handshake succeeded: a handshake against a nonexistent path also upgrades
     and also receives `Sessions`. It is the one thing in this project that
     opens a socket on purpose to answer a question, which is why `verify()`
     does not have to.
@@ -1653,8 +1626,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # `usher work`'s shape exactly, because they are the same bargain one
     # abstraction apart: a daemon form for a deployment, and a `--once` form
-    # for an operator's own crontab -- which is the supported path for a
-    # wall-clock schedule a `ScheduledJob.period` cannot express (ADR-0046).
+    # for an operator's own crontab, which is the supported path for a
+    # wall-clock schedule a `ScheduledJob.period` cannot express.
     schedule = sub.add_parser("schedule", help="run scheduled batches whose period has elapsed")
     schedule.add_argument("--once", action="store_true", help="one tick, then exit")
 
@@ -1678,7 +1651,7 @@ def build_parser() -> argparse.ArgumentParser:
     derive.add_argument("--limit", type=int, default=0, help="stop after N payloads; 0 drains")
     # 500 rather than `index`'s 1000: a page here carries whole JSONB payloads
     # rather than title ids, and 500 TMDb detail responses at ~8 kB is ~4 MB in
-    # flight. A number to keep in mind, not a measured optimum.
+    # flight. A number to keep in mind, not an optimum.
     derive.add_argument("--page-size", type=int, default=500)
 
     genres = sub.add_parser(
@@ -1702,8 +1675,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query", help="what to search for")
     # `SearchMode`'s values, taken from the enum rather than retyped: a
     # hand-copied list drifts silently and offers an operator a mode the
-    # service cannot serve -- or, worse, omits the one ADR-0002's whole design
-    # is about.
+    # service cannot serve -- or, worse, omits the fused one.
     search.add_argument(
         "--mode", choices=[mode.value for mode in SearchMode], default=SearchMode.FUSED.value
     )
@@ -1725,10 +1697,8 @@ def build_parser() -> argparse.ArgumentParser:
     suggest = sub.add_parser("suggest", help="type-ahead over titles")
     suggest.add_argument("prefix")
     suggest.add_argument("--limit", type=int, default=10)
-    # **Defaults to `fuzzy`, where the route defaults to `prefix`.** Stated in
-    # `_suggest`'s docstring and in ADR-0031: this command has been the
-    # typo-tolerant one since M6, and a command typed once can afford a cost a
-    # keystroke path cannot.
+    # **Defaults to `fuzzy`, where the route defaults to `prefix`.** A command
+    # typed once can afford a cost a keystroke path cannot.
     suggest.add_argument(
         "--tier",
         choices=[tier.value for tier in SuggestTier],
@@ -1821,9 +1791,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="where to write it; default usher-backup-<UTC>.jsonl.gz here",
     )
 
-    # The nineteenth subcommand, stated with the date it was measured rather than
-    # maintained -- the habit the row above records, and the correction this one
-    # inherits.
     restore = sub.add_parser("restore", help="merge one backup artifact into this database")
     # **Positional and required**, unlike `backup --output`, and the asymmetry
     # is the point: a backup with no destination has an obvious default (a
@@ -1851,9 +1818,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # The twentieth subcommand, stated with the date it was measured rather than
-    # maintained -- the habit the two rows above record, and the correction they
-    # inherit.
     rotate = sub.add_parser(
         "rotate-secret",
         help="re-encrypt stored credentials under a new USHER_SECRET_KEY",
@@ -1884,10 +1848,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _parse_without_echoing_unknown_values(
     parser: argparse.ArgumentParser, argv: list[str]
 ) -> argparse.Namespace:
-    """`parser.parse_args`.
-
-    except that `rotate-secret`'s unrecognised arguments are refused **without** them.
-    """
+    """`parser.parse_args`, without echoing `rotate-secret`'s unrecognised values."""
     args, unknown = parser.parse_known_args(argv)
     if unknown:
         if getattr(args, "command", None) == "rotate-secret":
@@ -1949,11 +1910,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         if args.repeat < 1:
             parser.error("--repeat must be at least 1")
     if args.command == "similar":
-        # ⚠️ **No arguments is now the whole-table report and no longer an error.** It
-        # was refused as "a read of nothing" until M10's J6, which is what issue #17's
-        # *"a `usher similar` line that says how old the table is relative to the
-        # embedding population"* asks for -- the per-title form already printed two of
-        # the three facts and had no whole-table spelling.
+        # **No arguments is the whole-table report rather than an error**: the
+        # per-title form prints two of the three staleness facts and has no
+        # whole-table spelling, which is what issue #17 asks for.
         if args.title_id and args.rebuild:
             # `parser.error` again -- exit 2 with usage rather than exit 1 with
             # a traceback.
@@ -2033,11 +1992,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
-    """The command table.
-
-    lifted out of `main` so the boundary there is one `try` around all of it rather than
-    one per arm.
-    """
+    """The command table, lifted out of `main` so one `try` there wraps every arm."""
     if args.command == "bootstrap":
         asyncio.run(_bootstrap(settings, BootstrapPhase(args.phase)))
     elif args.command == "bootstrap-status":

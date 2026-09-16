@@ -13,11 +13,10 @@ from usher.domain.ids import new_id
 class SyncRunKind(StrEnum):
     """Which of PRD 03's reconciliation lanes this run is.
 
-    `FULL` is the nightly walk with no `since`; `DELTA` is a walk from a
-    stored cursor; `WATCH_STATE` walks `watch_state(since=…)` rather than
-    `list_items`, because the two use different upstream filters
-    (`MinDateLastSaved` vs `MinDateLastSavedForUser`, measured as genuinely
-    different: 28,934 vs 29,005 items over the same 30-day window) and a
+    `FULL` is the nightly walk with no `since`; `DELTA` is a walk from a stored
+    cursor; `WATCH_STATE` walks `watch_state(since=…)` rather than `list_items`,
+    because the two use different upstream filters (`MinDateLastSaved` vs
+    `MinDateLastSavedForUser`) and return genuinely different item sets, so a
     single run kind could not record both cursors.
     """
 

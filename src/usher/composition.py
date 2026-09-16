@@ -205,8 +205,8 @@ class Pipeline:
     watch_states: WatchStateRepository
     payloads: RawPayloadStore
     runs: SyncRunRepository
-    # M2's two bulk-import ports, on the pipeline since M9's E5 for the reason every
-    # other port here is: `run_bootstrap` is one dispatch two roots call, and
+    # M2's two bulk-import ports, on the pipeline for the reason every other
+    # port here is: `run_bootstrap` is one dispatch two roots call, and
     # `build_worker` sees a `Pipeline` and nothing else.
     bulk: BulkCatalogRepository
     import_runs: ImportRunRepository
@@ -222,8 +222,8 @@ class Pipeline:
     # M8's cost ledger. Write-only from here -- nothing in `src/` reads it
     # back, and PRD 10's spend dashboards are SQL against the table -- so it
     # is on the pipeline for the reason every other port is: `services/` may
-    # not import `db/` (ADR-0009), and a `CurationService` handed a ledger of
-    # its own would attribute a real charge to an object nobody reads.
+    # not import `db/`, and a `CurationService` handed a ledger of its own
+    # would attribute a real charge to an object nobody reads.
     llm_calls: LLMCallRepository
     people: PersonRepository
     credits: CreditRepository
@@ -262,9 +262,9 @@ class Pipeline:
 def source_gates(settings: Settings) -> SourceGateRegistry:
     """This process's outbound rate gates, one per source.
 
-    **Built once at a composition root and handed down**, which is the whole
-    of ADR-0043 §4 and the reason `adapter_factory` below takes it rather than
-    reading the rate itself. `create_app`'s lifespan builds one and puts it on
+    **Built once at a composition root and handed down**, which is why
+    `adapter_factory` below takes it rather than reading the rate itself.
+    `create_app`'s lifespan builds one and puts it on
     `app.state` so the two lanes and every request share it; `usher work` and
     `usher sync` each build one for the life of the command. `unit_of_work`
     builds one when nobody hands it one, so the default is *shared across every
@@ -433,18 +433,16 @@ def build_pipeline(
             # vectors and the name is what `blend_fingerprint` hashes.
             embedding_model=settings.embedding_model,
         ),
-        # **The embedder is passed and may be `None`, which is the shipped default.**
-        # `TasteService.centroid` then returns `None` rather than a zero vector, every
-        # consumer drops the signal (ADR-0014), and `genre_affinity` is unaffected
-        # because it reads counts rather than vectors -- which is the whole reason Task
-        # 23 declines PRD 06's "taste centroid concentrated in a genre".
+        # **The embedder is passed and may be `None`, which is the shipped
+        # default.** `TasteService.centroid` then returns `None` rather than a
+        # zero vector and every consumer drops the signal; `genre_affinity` is
+        # unaffected because it reads counts rather than vectors.
         row_providers=row_providers(semantic=embedder is not None),
         row_provider_settings=PostgresRowProviderSettingsRepository(session),
         taste=taste,
-        # The pool is the whole of M8's retrieval half, and its size is the prompt's
-        # token budget -- **~20.4 prompt tokens a candidate**, measured 2026-08-07
-        # against the *shipped* prompt at four pool sizes: the marginal cost is 20.40
-        # tokens/candidate from 8 -> 200 and 20.45 from 200 -> 600.
+        # The pool is the whole of M8's retrieval half, and its size is the
+        # prompt's token budget: **~20.4 prompt tokens a candidate**, flat from
+        # a pool of 8 to a pool of 600.
         pool=CandidatePoolService(
             titles=titles,
             embeddings=embeddings,
@@ -586,10 +584,9 @@ def build_enrich_service(
     `events` is explicit for the reason `build_push_applier`'s is, pointing
     the other way: the applier's publisher **must** be the live bus, and this
     one's must **not** be. An enrichment runs inside a job, so its frames are
-    `JobWorker`'s to offer once the job's own transaction has committed
-    ([ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)),
-    and `pipeline.events` -- the right answer for every caller outside a job
-    -- would put them back inside the residual window. Required rather than
+    `JobWorker`'s to offer once the job's own transaction has committed, and
+    `pipeline.events` -- the right answer for every caller outside a job --
+    would put them back inside the residual window. Required rather than
     defaulted to `pipeline.events`, because a default is what a sixth caller
     forgets and `mypy` cannot see.
     """
@@ -600,11 +597,11 @@ def build_enrich_service(
         provider=provider,
         commit=pipeline.commit,
         events=events,
-        # The *same* queue `MatchService` and `IngestService` hold. This is
-        # what a composition root is for: `services/` may not import `db/`
-        # (ADR-0009), so nothing below here can discover that these are one
-        # table, and a second queue would enqueue index work into an object
-        # nothing ever claims from -- enriched titles, no vectors, no error.
+        # The *same* queue `MatchService` and `IngestService` hold. `services/`
+        # may not import `db/`, so nothing below here can discover that these
+        # are one table, and a second queue would enqueue index work into an
+        # object nothing ever claims from -- enriched titles, no vectors, no
+        # error.
         queue=pipeline.queue,
         # Process-scoped where the pipeline is session-scoped, on
         # `build_push_applier`'s terms: `None` is a root that composes no
@@ -786,7 +783,7 @@ def similarity_scope(
 def build_scheduler(
     settings: Settings, *, sessions: async_sessionmaker[AsyncSession] | None
 ) -> Scheduler:
-    """The scheduled-work loop and its registry (ADR-0046, M10 J4, J5 and J6)."""
+    """The scheduled-work loop and its registry."""
     scheduler = Scheduler(tick_seconds=settings.scheduler_tick_seconds)
     if sessions is not None:
         scheduler.register(
@@ -800,10 +797,9 @@ def build_scheduler(
         scheduler.register(
             NeighborRebuildJob(
                 similarity_scope(sessions, settings),
-                # Hours off the setting rather than a constant, because the
-                # number this period has to clear is the walk's own duration
-                # and that is a function of catalog size. `config.py` carries
-                # the arithmetic and the measurement.
+                # Hours off the setting rather than a constant: the number this
+                # period has to clear is the walk's own duration, which is a
+                # function of catalog size.
                 period=timedelta(hours=settings.similar_rebuild_period_hours),
             )
         )
@@ -829,10 +825,9 @@ def _worker_handlers(
     """
     handlers: dict[JobKind, Handler] = {}
     # The resolver is bound to *this* scope's repositories and to the
-    # process-lifetime adapter cache. `SourceRegistry` used to hold the
-    # pipeline and be `rebind`-ed once a pass; holding one under concurrent
-    # jobs would have put two of them on the same session through the door
-    # nobody was looking at, since `resolve` issues two reads of its own.
+    # process-lifetime adapter cache. A registry holding the pipeline itself
+    # would put two concurrent jobs on one session, because `resolve` issues
+    # two reads of its own.
     resolve = registry.bound(pipeline)
     handlers[JobKind.MATCH] = match_handler(pipeline.matcher, pipeline.media_items, resolve)
     handlers[JobKind.WATCH_HISTORY] = watch_history_handler(
@@ -953,9 +948,9 @@ async def metadata_provider(
 ) -> tuple[MetadataProvider | None, Callable[[], Awaitable[None]]]:
     """The TMDb provider and the callable that closes its transport."""
     if settings.tmdb_api_key is None:
-        # Both kinds named, not just `enrich`: `derive` has been registered
-        # under this same guard since M7 and this sentence still promised an
-        # operator that one kind would go unclaimed while two did.
+        # Both kinds named, not just `enrich`: `derive` is registered under
+        # this same guard, so naming one would promise an operator that one
+        # kind goes unclaimed while two do.
         logger.warning("no TMDb API key configured; enrich and derive jobs will not be claimed")
         return None, nothing
     client = httpx.AsyncClient(timeout=settings.source_timeout_seconds)
@@ -1020,23 +1015,15 @@ async def llm_client(
 ) -> tuple[LLMClient | None, Callable[[], Awaitable[None]]]:
     """The completion client and the callable that releases it.
 
-    **Deliberately the same shape as `embedder` and `metadata_provider`
-    above**, down to the return type, and for the same reasons: one per
-    process rather than per worker pass, `(None, no-op)` rather than a raise
-    so a deployment without an LLM is *narrowed* rather than unstartable, and
-    this is the one place the degradation is reported.
+    One per process rather than per worker pass, and `(None, no-op)` rather
+    than a raise so a deployment without an LLM is *narrowed* rather than
+    unstartable -- the shape `embedder` and `metadata_provider` above take,
+    and the one place the degradation is reported.
 
-    **Off by default is the honest default twice over here.** Nine of ten row
-    providers need no model, so `GET /home` is a shorter screen rather than a
-    broken one -- that is `embedding_enabled`'s argument. The second reason is
-    this project's only one of its kind: turning this on sends the household's
-    watch history to whatever `USHER_LLM_BASE_URL` names, which may be a
-    machine the household does not own. A default that curated out of the box
-    would make that something an operator discovers rather than chooses.
-
-    **No lazy import and no extra**, unlike the embedder. There is nothing to
-    import lazily -- the client is httpx, which every entry point already
-    loads -- which is the whole of ADR-0027 arriving as an absence.
+    **Off by default.** Nine of ten row providers need no model, so `GET /home`
+    is a shorter screen rather than a broken one; and turning this on sends the
+    household's watch history to whatever `USHER_LLM_BASE_URL` names, which may
+    be a machine the household does not own.
     """
     if not settings.llm_enabled:
         if report:
@@ -1049,9 +1036,9 @@ async def llm_client(
         and not settings.llm_price_in_per_mtok
         and not settings.llm_price_out_per_mtok
     ):
-        # **Both prices default to zero, so `cost_usd` reads `0.00000000` for an
-        # operator who never set them** -- a number that looks like a measurement and is
-        # an absence.
+        # **Both prices default to zero, so `cost_usd` reads `0.00000000` for
+        # an operator who never set them** -- a number that looks like a price
+        # and is an absence.
         logger.warning(
             "an LLM credential is configured and USHER_LLM_PRICE_IN_PER_MTOK and "
             "USHER_LLM_PRICE_OUT_PER_MTOK are both unset; llm_calls.cost_usd will "
@@ -1073,10 +1060,7 @@ async def llm_client(
 def image_proxy(
     settings: Settings,
 ) -> tuple[ImageFetcher, ImageBlobStore, Callable[[], Awaitable[None]]]:
-    """The image proxy's two process-scoped halves.
-
-    and the callable that closes the fetcher's transport.
-    """
+    """The image proxy's two process-scoped halves, and the transport's closer."""
     client = httpx.AsyncClient(timeout=settings.image_fetch_timeout_seconds)
     fetcher = ProviderCdnImageFetcher(
         client,
@@ -1353,7 +1337,7 @@ class SearchGauges:
 # The bulk bootstrap, as one dispatch both roots call (PRD 04, M9's E5).
 # ---------------------------------------------------------------------------
 
-# : Where a phase's own report goes.
+# Where a phase's own report goes.
 BootstrapReporter = Callable[[str], None]
 
 
@@ -1494,10 +1478,7 @@ async def _credit_names(
     service: BootstrapService,
     report: BootstrapReporter,
 ) -> None:
-    """`name.basics` x `title.principals` -> `titles.credit_names`.
-
-    and the report that says how much of the catalog gained a name.
-    """
+    """`name.basics` x `title.principals` -> `titles.credit_names`, and its report."""
     if await catalog.count_titles() == 0:
         report(
             "credit-names needs a catalog to join against: title.principals is "
@@ -1611,11 +1592,7 @@ async def _movielens(
     commit: Callable[[], Awaitable[None]],
     report: BootstrapReporter,
 ) -> None:
-    """The MovieLens tag genome.
-
-    its tag vocabulary, and the coverage report that is the actual deliverable of this
-    phase.
-    """
+    """The MovieLens tag genome, its vocabulary, and the coverage report."""
     if await catalog.count_titles() == 0:
         report(
             "movielens needs a catalog to join against: the genome is keyed "

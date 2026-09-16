@@ -91,11 +91,9 @@ class _Accumulator:
         self.seeds += len(page)
         self.seeds_with_genome += sum(1 for seed in page if seed.has_genome)
         for seed in page:
-            # **The pool, not `_neighbors_for(seed, pool)`.** Measured on a
-            # 40-title fixture, the stored spelling answers 147/1000 = 14.70%
-            # where the pool answers 182/1560 = 11.67% — a plausible number,
-            # four percentage points high, from a population the blend has
-            # already sorted by the signal being counted.
+            # **The pool, not `_neighbors_for(seed, pool)`.** The stored
+            # spelling counts a population the blend has already sorted by the
+            # signal being counted, and reads several points high.
             pool = pools.get(seed.title_id, [])
             self.candidate_pairs += len(pool)
             self.pairs_with_genome += sum(1 for one in pool if one.tags is not None)

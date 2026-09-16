@@ -6,12 +6,10 @@ from enum import StrEnum
 class Verdict(StrEnum):
     """A run's outcome.
 
-    `Judgement`'s four members plus the run-level two.
-
-    `SKIPPED` and `BASELINE_INVALID` exit **0**: a surface whose preconditions
-    are unmet and a catalog that moved under the baseline are both "this
-    measurement did not happen", and blaming a diff for either is how the job
-    gets disabled.
+    `Judgement`'s four members plus the run-level two. `SKIPPED` and
+    `BASELINE_INVALID` exit **0**: a surface whose preconditions are unmet and a
+    catalog that moved under the baseline both mean the run did not happen, and
+    blaming a diff for either is how the job gets disabled.
     """
 
     # S105: a verdict, not a credential -- bandit matches the member *name*. The

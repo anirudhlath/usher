@@ -12,7 +12,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.create_table(
         "source_credentials",
         sa.Column("ref", sa.Text(), nullable=False),
@@ -45,6 +44,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     op.drop_index("ix_source_credentials_source_id", table_name="source_credentials")
     op.drop_table("source_credentials")

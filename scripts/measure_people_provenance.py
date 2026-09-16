@@ -24,9 +24,8 @@ from usher.db.base import build_engine
 BAR_PATH = Path("/var/tmp/t4r/BAR.md")  # noqa: S108 -- /var/tmp is durable here; /tmp is tmpfs
 BAR_SHA256 = "fbb9ced3f33840989d81841c48b51dcaeefb1d4ada5bfb2ad5df157ded223e30"
 
-# Only the two files this design reads. `title.akas` is T7's and is already
-# measured; HEADing it here would put a number in this log that no phase below
-# consumes.
+# Only the two files this design reads. `title.akas` is T7's; HEADing it here
+# would put a number in this log that no phase below consumes.
 FILES: tuple[str, ...] = ("name.basics.tsv.gz", "title.principals.tsv.gz")
 
 # IMDb's `category` values that are cast rather than crew, copied from
@@ -37,9 +36,7 @@ CAST_CATEGORIES: frozenset[str] = frozenset({"actor", "actress", "self"})
 
 
 def _check_bar() -> None:
-    """Refuse to measure anything if the pre-registered bar is not the one this script was.
-
-    written against.
+    """Refuse to run unless the pre-registered bar is the one this was written against.
 
     A bar that can be edited after a number is seen is not a bar. This is the
     cheap half of that guarantee; the durable half is that `/var/tmp` is btrfs
@@ -213,9 +210,8 @@ def _extract_principals(
     titles_hit: set[str] = set()
     categories: dict[str, int] = {}
     # Whole-file uniqueness of `(tconst, ordering)`, tracked streaming rather
-    # than by holding 101M tuples: the file is grouped by tconst (measured --
-    # zero lexicographic descents over 101,151,422 rows) so a per-title set
-    # that resets on a new tconst sees every collision.
+    # than by holding 101M tuples: the file is grouped by tconst, so a
+    # per-title set that resets on a new tconst sees every collision.
     file_orderings: set[str] = set()
     file_current = ""
     file_ordering_collisions = 0
@@ -366,8 +362,8 @@ _INDEX_DDL = (
     "WHERE tmdb_credit_id IS NOT NULL",
 )
 
-# The one index this design adds beyond the shipped shape, measured on its own
-# so the base figure stays comparable with T3's.
+# The one index this design adds beyond the shipped shape, timed on its own so
+# the base figure stays comparable with T3's.
 _NATURAL_KEY_INDEX = (
     "CREATE UNIQUE INDEX ix_t4r_credits_source_natural_key "
     "ON t4r_credits (title_id, source, billing_order) NULLS NOT DISTINCT "
@@ -508,7 +504,7 @@ async def _report_sizes(engine: AsyncEngine, label: str) -> int:
 
 # The shipped `credits` shape, whose only unique key is on `tmdb_credit_id` --
 # NULL on every IMDb row. This arm must DOUBLE on a second load, or the key the
-# design adds is a key nobody measured.
+# design adds is a key nothing needed.
 _NAIVE_DDL = """
 CREATE TABLE t4r_credits_naive (
     id uuid PRIMARY KEY, person_id uuid NOT NULL, title_id uuid NOT NULL,
@@ -549,9 +545,9 @@ FROM t4r_principals s JOIN t4r_people p ON p.imdb_id = s.nconst
 
 
 # The staged design copied into the **real** `people`/`credits`, which is what `--phase
-# latency --label after` has to read: every probe in `_PROBES` names the shipped tables
-# and is served by the shipped indexes, so measuring against `t4r_credits` would price a
-# table nothing queries.
+# latency --label after` has to read: every probe in `_PROBES` names the shipped
+# tables and is served by the shipped indexes, so running against `t4r_credits`
+# would price a table nothing queries.
 _APPLY_PEOPLE = """
 INSERT INTO people (id, tmdb_id, imdb_id, name, sort_name, known_for_department,
                     created_at, updated_at)

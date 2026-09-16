@@ -29,11 +29,10 @@ class JobRow(Base):
     by staged bulk upserts; nothing bulk-loads through a path that could
     forget. Same call `SourceCredentialRow` made, for the same reason.
 
-    A completed job's row is deleted, so this table's steady-state size is
-    the outstanding work, not the work ever done. A first full walk of the
-    one measured source enqueues 1,126,674 match jobs at once and then
-    drains them; the churn is why `ix_jobs_claim` is partial on `pending`
-    rather than covering the whole table.
+    A completed job's row is deleted, so this table's steady-state size is the
+    outstanding work, not the work ever done. A first full walk enqueues a match
+    job per library item at once and then drains them; that churn is why
+    `ix_jobs_claim` is partial on `pending` rather than covering the table.
     """
 
     __tablename__ = "jobs"

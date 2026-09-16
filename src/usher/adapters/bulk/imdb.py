@@ -38,15 +38,13 @@ _RETAINED_TYPES: dict[str, TitleKind] = {
 
 _BASICS_COLUMNS = 9
 _RATINGS_COLUMNS = 3
-# Taken from the real header at the pinned snapshot
-# `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"` (2026-08-11), never from IMDb's published
-# schema: `titleId ordering title region language types attributes isOriginalTitle`.
+# Taken from the real header, never from IMDb's published schema:
+# `titleId ordering title region language types attributes isOriginalTitle`.
 _AKAS_COLUMNS = 8
-# Both taken from the real headers at the same pinned pass -- `nconst
-# primaryName birthYear deathYear primaryProfession knownForTitles` and
-# `tconst ordering nconst category job characters`. Measured over all
-# 15,563,615 and all 101,151,422 data rows respectively: zero rows split to
-# any other count, so a wrong count is a real signal rather than noise.
+# Both taken from the real headers too -- `nconst primaryName birthYear
+# deathYear primaryProfession knownForTitles` and `tconst ordering nconst
+# category job characters`. No row splits to any other count, so a wrong
+# count is a real signal rather than noise.
 _NAMES_COLUMNS = 6
 _PRINCIPALS_COLUMNS = 6
 
@@ -84,12 +82,10 @@ def _optional_int(value: str, *, imdb_id: str, column: str) -> int | None:
 def _required_int(value: str, *, imdb_id: str, column: str) -> int:
     r"""`_optional_int`, for a column whose absence is itself a format change.
 
-    Same `\N`-then-`int()` path, so a numeric column that stopped being
-    numeric is still a hard failure naming the row and the column -- and a
-    `\N` where the dump has never had one is the same kind of news. Used for
-    `title.akas`' `ordering`, which is present and integral on all 58,906,368
-    rows of the pinned snapshot (min 1, max 300) and is the only per-title
-    tiebreak a deduplicating writer has.
+    Same `\N`-then-`int()` path, so a column that stopped being numeric is
+    still a hard failure naming the row and the column -- and so is a `\N`
+    where the dump has never had one. Used for `title.akas`' `ordering`, the
+    only per-title tiebreak a deduplicating writer has.
     """
     number = _optional_int(value, imdb_id=imdb_id, column=column)
     if number is None:
@@ -142,14 +138,10 @@ def parse_basics_row(line: str) -> ImdbTitle | None:
 def parse_ratings_row(line: str) -> ImdbRating | None:
     """One `title.ratings.tsv.gz` line, or `None` for the header.
 
-    `averageRating` is already on IMDb's 0-10 scale, which is the scale
-    every rating field on `Title` promises (`Field(ge=0, le=10)`, on
-    `tmdb_vote_average` and `imdb_average_rating` alike -- ADR-0040 split the
-    column and did not move the bound, because both sources use 0-10, which is
-    exactly why the dual write was silent), so nothing is rescaled. A value
-    outside that range is malformed rather than clamped --
-    the matching CHECK constraint would reject it during `COPY` anyway, and
-    failing here names the offending row.
+    `averageRating` is already on IMDb's 0-10 scale, the scale every rating
+    field on `Title` promises (`Field(ge=0, le=10)`), so nothing is rescaled. A
+    value outside it is malformed rather than clamped -- the matching CHECK
+    would reject it during `COPY` anyway, and failing here names the row.
     """
     fields = line.split("\t")
     if len(fields) != _RATINGS_COLUMNS:
@@ -188,9 +180,8 @@ def parse_akas_row(line: str) -> ImdbAka | None:
     if imdb_id == "titleId":  # the header line
         return None
     if is_original == "1":
-        # Spelled the way `parse_basics_row` spells `isAdult == "1"`, and for
-        # the same reason: the measured vocabulary of this column is exactly
-        # `0` and `1` with no `\N` over all 58,906,368 rows, and the flag is
+        # Spelled the way `parse_basics_row` spells `isAdult == "1"`: this
+        # column's vocabulary is `0` and `1` with no `\N`, and the flag is
         # advisory -- the writer's casefold comparison against the stored
         # title is the filter that has to be right.
         return None
@@ -209,11 +200,9 @@ def parse_akas_row(line: str) -> ImdbAka | None:
 def _person_key(nconst: str, *, imdb_id: str) -> int:
     """The integer inside an `nconst`, which is what the name index addresses.
 
-    Refuses anything that is not `nm` + digits with `PortDataMalformed`
-    rather than skipping it. Measured over all 15,563,615 rows of the pinned
-    `name.basics.tsv.gz` and all 101,151,422 of `title.principals.tsv.gz`:
-    **zero** ids of any other shape, so one arriving is an upstream format
-    change and not a row to route around.
+    Refuses anything that is not `nm` + digits with `PortDataMalformed` rather
+    than skipping it: no other id shape occurs upstream, so one arriving is a
+    format change and not a row to route around.
     """
     if not nconst.startswith("nm") or not nconst[2:].isdigit():
         raise PortDataMalformed(
@@ -282,10 +271,9 @@ class ImdbNameIndex:
     def add(self, row: ImdbName) -> None:
         """Store one parsed `name.basics` row.
 
-        A second row for an `nconst` already held overwrites it. Measured:
-        **0 duplicate `nconst` values** in 15,563,615 rows, so the rule is
-        stated rather than exercised, and last-write-wins is chosen only
-        because it costs nothing to spell.
+        A second row for an `nconst` already held overwrites it. Upstream has
+        no duplicates, so last-write-wins is stated only because it costs
+        nothing to spell.
         """
         chunk, slot = divmod(_person_key(row.imdb_id, imdb_id=row.imdb_id), 1 << self._CHUNK_BITS)
         table = self._chunks.get(chunk)
@@ -302,10 +290,8 @@ class ImdbNameIndex:
     def get(self, nconst: str) -> str | None:
         """The stored name, or `None` if no `name.basics` row holds this id.
 
-        `None` is routine rather than exceptional: the seven IMDb dumps are
-        not one snapshot, and **3,734 distinct `nconst` values over 7,701
-        rows** of the pinned `title.principals` are in no `name.basics` row at
-        all.
+        `None` is routine rather than exceptional: the seven IMDb dumps are not
+        one snapshot, so `title.principals` cites ids `name.basics` never had.
         """
         chunk, slot = divmod(_person_key(nconst, imdb_id=nconst), 1 << self._CHUNK_BITS)
         table = self._chunks.get(chunk)
@@ -324,9 +310,7 @@ class ImdbNameIndex:
         """What this index costs, so an importer can report it.
 
         The buffers only -- Python's own per-object overhead is a handful of
-        headers and a small dict, and is not worth modelling. Measured
-        against peak RSS on the real file: 361,703,752 B reported against
-        361.3 MB observed.
+        headers and a small dict, and is not worth modelling.
         """
         return (
             len(self._blob)
@@ -336,11 +320,7 @@ class ImdbNameIndex:
 
 
 class _ImdbDataset[RowT](BulkDataset[RowT]):
-    """Shared streaming/batching machinery for both IMDb files.
-
-    Subclasses supply a filename, a name, and a row parser. Everything about
-    resumption, batching, and cursor arithmetic lives here once.
-    """
+    """Shared streaming/batching machinery for both IMDb files."""
 
     def __init__(
         self,
@@ -363,10 +343,7 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
         """Parse one line, or return None for a header or filtered row."""
 
     def group_of(self, row: RowT) -> str | None:
-        """The id whose rows must reach one writer call together.
-
-        or `None` when any batch boundary is safe.
-        """
+        """The id whose rows must reach one writer call together, else `None`."""
         return None
 
     @property
@@ -401,10 +378,8 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
         batch: list[RowT] = []
         position = skip
         # Lines consumed through the last point a batch may safely end at. For
-        # an ungrouped dataset that is every kept row, so this tracks
-        # `position` and the arithmetic below is what it always was; for a
-        # grouped one it lags until the open group closes, which is only
-        # visible once the *next* group's first line has been consumed.
+        # a grouped dataset it lags `position` until the open group closes,
+        # which is only visible once the next group's first line is consumed.
         boundary = skip
         group: str | None = None
         for line in self._file.lines(skip=skip):
@@ -644,22 +619,16 @@ def _credit_names(
 ) -> ImdbCreditNames | None:
     """One title's principals, resolved to names -- or `None` if none resolve.
 
-    Three rules, each measured against the pinned dump:
+    Three rules:
 
-    - **Sorted by `ordering`.** The order *is* the ranking, and it is what
-      weight class B indexes first. The real file already ascends within
-      every one of its 11,491,032 titles, so the sort is unobservable against
-      production data -- which is exactly why the fixture is deliberately
-      disordered and the case asserts that premise.
-    - **Deduplicated, keeping first position.** **9,404,442 of 101,151,422
-      rows** repeat a person already credited on the same title (a director
-      who also wrote it). Repeating the name inflates its term frequency in
-      the tsvector for no reason a searcher would recognise -- the same
-      argument `services/derive._credit_names` makes on the TMDb side.
-    - **`None`, never an empty tuple.** 156 titles in the pinned dump have
-      every principal dangling. An empty tuple would reach the writer and
-      *blank* whatever `credit_names` another source had filled, which is the
-      one shape a re-import cannot repair.
+    - **Sorted by `ordering`.** The order *is* the ranking, and weight class B
+      indexes it first.
+    - **Deduplicated, keeping first position.** A person credited twice on one
+      title -- a director who also wrote it -- would inflate that name's term
+      frequency in the tsvector for no reason a searcher would recognise.
+    - **`None`, never an empty tuple.** Some titles have every principal
+      dangling, and an empty tuple would reach the writer and *blank* whatever
+      `credit_names` another source had filled.
     """
     names: list[str] = []
     for principal in sorted(principals, key=lambda one: one.ordering):

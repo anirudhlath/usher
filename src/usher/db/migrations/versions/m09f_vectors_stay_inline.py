@@ -29,15 +29,14 @@ def _set_storage(mode: str) -> None:
     """Set the storage mode on every vector column and rewrite each table.
 
     The `VACUUM FULL` is what moves values that already exist; without it this
-    migration changes only how future rows are written, which is the failure
-    mode that would make it look applied and measure unchanged.
+    migration changes only how future rows are written, so it looks applied and
+    changes nothing.
     """
     for table, column in _VECTOR_COLUMNS:
         op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} SET STORAGE {mode}")
-    # Outside the migration's transaction, because `VACUUM` refuses to run in
-    # one. Each table separately rather than a bare `VACUUM FULL`: this touches
-    # three relations and a database-wide rewrite would take every other table
-    # with it, including the 1.27M-row `titles`.
+    # Outside the migration's transaction, because `VACUUM` refuses to run in one.
+    # Each table separately rather than a bare `VACUUM FULL`: this touches three
+    # relations and a database-wide rewrite would take `titles` with it.
     with op.get_context().autocommit_block():
         for table, _ in _VECTOR_COLUMNS:
             op.execute(f"VACUUM FULL {table}")

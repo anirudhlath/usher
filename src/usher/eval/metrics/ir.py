@@ -41,10 +41,10 @@ class Ranking:
 
 
 def library_version() -> str:
-    """`ranx.__version__` does not exist.
+    """`ranx`'s version, which it exposes through no `__version__` attribute.
 
-    Recorded in every run's provenance so a metric that moves can be attributed to a
-    library rather than to the system under test.
+    Recorded in every run's provenance so a metric that moves can be attributed
+    to the library rather than to the system under test.
     """
     return importlib.metadata.version("ranx")
 
@@ -57,20 +57,18 @@ def score(
     """Score `rankings` against one relevant document per query.
 
     One relevant document is the shape every E1 judgement has: a typo probe
-    should find the title it was mutated from. `recall@5` over a single
-    relevant document is therefore the gate's own hit rate, which is what
-    makes E1's numbers comparable with 2026-08-03's.
+    should find the title it was mutated from, so `recall@5` over a single
+    relevant document is the gate's own hit rate.
 
-    **The denominator is `relevant`, always.** Both directions of a mismatch
-    are refused rather than repaired, because the tempting repair for the
-    second one -- dropping the judgement instead of adding an empty ranking --
-    makes recall *rise* as the system gets worse.
+    **The denominator is `relevant`, always.** Both directions of a mismatch are
+    refused rather than repaired, because the tempting repair for the second --
+    dropping the judgement instead of adding an empty ranking -- makes recall
+    *rise* as the system gets worse.
 
     **Four guards, and the fourth is the same failure mode arriving through the
     judgements rather than through the rankings**: a judgement naming
     `NO_RESULT` is satisfied by the substitution this function makes for an
-    empty ranking, so the query that returned nothing scores 1.0. Refused, with
-    the measurement on the guard itself.
+    empty ranking, so the query that returned nothing would score 1.0.
     """
     by_query = {ranking.query_id: ranking for ranking in rankings}
     if len(by_query) != len(rankings):
@@ -116,6 +114,6 @@ def score(
     )
     raw = evaluate(qrels, run, list(metrics))
     if not isinstance(raw, dict):
-        # The one-element-list case. Measured, not defensive.
+        # The one-element-list case, which `ranx` hands back as a bare float.
         return {metrics[0]: float(raw)}
     return {name: float(value) for name, value in raw.items()}

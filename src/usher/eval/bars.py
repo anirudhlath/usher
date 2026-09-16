@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-# : The three kinds a bar may declare, and a fourth spelling is a typo rather : than a
-# new idea -- `load_bars` refuses one instead of falling through to : the bound
-# comparisons, where an unregistered kind would be judged as a : window and reported as
-# a verdict.
+#: The three kinds a bar may declare. A fourth spelling is a typo rather than a
+#: new idea, so `load_bars` refuses one instead of falling through to the bound
+#: comparisons, where an unregistered kind would be judged as a window and
+#: reported as a verdict.
 _KINDS = frozenset({"window", "floor", "pending"})
 
 
@@ -63,21 +63,17 @@ class BarSet:
         """The bar registered for exactly this key, or `None`.
 
         **All four keys, matched together.** Three of the five shipped bars
-        agree on surface, tier and metric and differ only in `stratum` -- the
-        band ADR-0002 failed on, the typo class it measured at 0.0%, and the
-        mean over everything -- so a lookup comparing three of the four would
-        answer one stratum's bar to another stratum's question and quote its
-        reasoning in the report.
+        agree on surface, tier and metric and differ only in `stratum`, so a
+        lookup comparing three of the four would answer one stratum's bar to
+        another stratum's question and quote its reasoning in the report.
 
-        **All four keyword-only, and that is a guard rather than a style.**
-        Four adjacent `str` parameters, two of which -- `metric` and `stratum`
-        -- read most alike and are the pair E2's new surfaces will be
-        inventing. Transposed positionally the lookup finds nothing, `judge`
-        answers `UNBARRED`, and `UNBARRED` fails at no level: not the
-        judgement, not the verdict, not the exit code. `mypy` cannot see it
-        either, because all four are `str`. Keyword-only makes the positional
-        spelling unspellable, which is the only check available for a defect
-        whose whole symptom is silence.
+        **All four keyword-only, and that is a guard rather than a style.** Of
+        the four adjacent `str` parameters, `metric` and `stratum` read most
+        alike. Transposed positionally the lookup finds nothing, `judge` answers
+        `UNBARRED`, and `UNBARRED` fails at no level: not the judgement, not the
+        verdict, not the exit code. `mypy` cannot see it either, all four being
+        `str`. Keyword-only makes the positional spelling unspellable, the only
+        check available for a defect whose whole symptom is silence.
         """
         for bar in self.bars:
             if (bar.surface, bar.tier, bar.metric, bar.stratum) == (
@@ -107,12 +103,7 @@ class BarSet:
     def judge(
         self, *, surface: str, tier: str, metric: str, stratum: str, value: float
     ) -> Judgement:
-        """The verdict alone, for a caller that does not need the bar.
-
-        Delegates rather than repeating the comparisons, so there is exactly
-        one implementation of the precedence and one lookup behind both
-        spellings -- see `judge_with_bar`, which is where the argument lives.
-        """
+        """The verdict alone, for a caller that does not need the bar."""
         _, judgement = self.judge_with_bar(
             surface=surface, tier=tier, metric=metric, stratum=stratum, value=value
         )

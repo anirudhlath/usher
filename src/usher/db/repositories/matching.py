@@ -10,9 +10,8 @@ from usher.domain.enums import EnrichmentState
 from usher.ports.ingest import NameYearProbe, ProviderRef
 from usher.ports.repository import TitleMatchRepository
 
-# `t.kind = p.kind` is not optional and not a convenience filter: TMDb's movie
-# and series id spaces overlap on 26,968 ids (measured), so `tmdb_id` alone
-# identifies nothing. ADR-0011.
+# `t.kind = p.kind` is not optional and not a convenience filter: TMDb's movie and
+# series id spaces overlap heavily, so `tmdb_id` alone identifies nothing.
 _MATCH_TMDB = """
 SELECT p.value AS value, p.kind AS kind, t.id AS id
 FROM unnest(CAST(:values AS integer[]), CAST(:kinds AS text[])) AS p(value, kind)
@@ -35,16 +34,18 @@ WITH probe AS (
     SELECT p.name AS name, p.year AS year, p.kind AS kind, t.id AS id,
            count(*) OVER (PARTITION BY p.name, p.year, p.kind) AS matches
     FROM probe p
-    -- lower(t.name), not lower(<the probe>) against t.name -- see the module
-    -- docstring. Note the deliberate circumlocution: SQLAlchemy's text()
-    -- bind-parameter regex scans SQL comments too, so writing the wrong
-    -- spelling out literally here declares a bind parameter nothing supplies
-    -- and every call raises `A value is required for bind parameter 'name'`.
-    -- `t.year BETWEEN p.year - 1 AND p.year + 1` is also what
-    -- makes a probe with no year, and a title with no year, resolve to
-    -- nothing: NULL propagates through BETWEEN and the row never qualifies.
-    -- Spelling it any other way (COALESCE, IS NOT DISTINCT FROM) would match
-    -- a 2016 probe against every undated IMDb skeleton of the same name.
+    -- lower(t.name), never lower(<the probe>) against t.name: the index is
+    -- ix_titles_name_lower_year (lower(name), year), and an expression index
+    -- is only usable when the query names the same expression. Both spellings
+    -- return identical rows, so only a plan assertion tells them apart --
+    -- which is what name_year_sql() below exists for. The circumlocution is
+    -- deliberate: SQLAlchemy's text() bind-parameter regex scans SQL comments
+    -- too, so writing the other spelling out literally here would declare a
+    -- bind parameter nothing supplies and every call would raise.
+    -- BETWEEN is also what makes a probe with no year, and a title with no
+    -- year, resolve to nothing: NULL propagates through it and the row never
+    -- qualifies. COALESCE or IS NOT DISTINCT FROM would match a dated probe
+    -- against every undated skeleton of the same name.
     JOIN titles t
       ON lower(t.name) = lower(p.name)
      AND t.kind = p.kind

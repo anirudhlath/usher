@@ -1,7 +1,4 @@
-"""Reads over `genome_scores` and `genome_tags`.
-
-the MovieLens tag-genome vectors, and the vocabulary that names their lanes.
-"""
+"""Reads over `genome_scores` and `genome_tags` -- the tag-genome vectors and their lanes."""
 
 import uuid
 from typing import Any, cast
@@ -26,10 +23,9 @@ _GET = text(
     "WHERE title_id = CAST(:title_id AS uuid)"
 ).columns(*_COLUMNS)
 
-# Two equality predicates rather than `IN`: see the module docstring for the
-# self-pair the `IN` spelling gets wrong. No `ORDER BY` -- the two rows are
-# keyed back to the caller's own arguments below rather than by position,
-# which is the same rule `SourceEvent.watch_states` states one layer up.
+# No `ORDER BY`: the two rows are keyed back to the caller's own arguments below
+# rather than by position, the same rule `SourceEvent.watch_states` states one
+# layer up.
 _GET_PAIR = text(
     "SELECT title_id, relevance, genome_revision FROM genome_scores "
     "WHERE title_id = CAST(:left AS uuid) OR title_id = CAST(:right AS uuid)"

@@ -1,4 +1,4 @@
-"""The per-column ledger behind ADR-0044 and issue #10."""
+"""The per-column ledger behind issue #10."""
 
 import argparse
 import ast
@@ -27,12 +27,11 @@ _MIGRATIONS = _PACKAGE / "db" / "migrations" / "versions"
 
 
 def _written_sources() -> list[pathlib.Path]:
-    """Every module in the package.
+    """Every module in the package, not just `usher.db.repositories`.
 
-    because `usher.db.repositories` is not the whole of the write surface:
-    `adapters/search/postgres.py` holds a second writer of `title_embeddings`, and a
-    scan of the repositories package alone reports that column's translation from one of
-    its two writers.
+    That package is not the whole write surface: `adapters/search/postgres.py`
+    holds a second writer of `title_embeddings`, and a scan of the repositories
+    alone reports that column's translation from one of its two writers.
     """
     return sorted(path for path in _PACKAGE.rglob("*.py") if "migrations" not in path.parts)
 
@@ -75,7 +74,7 @@ _UNBOUNDED_PREFIXES = (
 )
 
 # The three failure shapes a bounded column can produce, which is the
-# distinction issue #10 does not make and ADR-0044 turns into a decision.
+# distinction issue #10 does not make.
 SHAPE_OVERFLOW = "OverflowError"  # client-side, asyncpg's binary encoder, no SQLSTATE
 SHAPE_22001 = "22001"  # server-side during COPY, SQLSTATE on a non-DBAPIError
 SHAPE_SQLA = "DBAPIError"  # a SQLAlchemy statement, so a translatable exception
@@ -114,9 +113,7 @@ class WriteSite:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RefusalPoint:
-    """One call in a method that can make Postgres refuse a row.
-
-    with the rank of the translation lexically enclosing it.
+    """One call that can make Postgres refuse a row, and its enclosing rank.
 
     `call` is `""` for a statement the method runs itself and the callee's name
     for one it delegates. `bound_select` marks the case this file deliberately
@@ -468,18 +465,16 @@ def _executing_functions(tree: ast.Module) -> set[str]:
 _ROW_TABLES: Mapping[str, str] = {
     name: getattr(usher.db.models, name).__tablename__ for name in usher.db.models.__all__
 }
-# `add_all` and `insert` were in these two until 2026-08-20 and nothing in
-# `usher` calls either -- found by pointing `_check_call_lists_are_live` at all
-# three lists instead of only at `_EXECUTING_CALLS`.
+# `add_all` and `insert` are deliberately absent: nothing in `usher` calls
+# either, and `_check_call_lists_are_live` is what keeps that true.
 _ORM_WRITE_CALLS = frozenset({"add", "flush"})
 _ORM_STATEMENT_CALLS = frozenset({"update", "delete", "pg_insert"})
 
 
 def _constructed_rows(tree: ast.Module) -> dict[str, set[str]]:
-    """Per module-level function.
+    """Per module-level function, the tables whose mapped class it constructs.
 
-    the tables whose mapped class it *constructs*, followed transitively across calls
-    inside this module.
+    Followed transitively across calls inside this module.
     """
     functions = {
         node.name: node
@@ -547,9 +542,9 @@ def _orm_destinations(
     return (referenced if flushed else set()) | statement_targets
 
 
-# : Ranked weakest-first, and the *order* is the whole content: `except :
-# IntegrityError` does not catch a column refusing a **value**, because : neither shape
-# `_errors.py` measures is an `IntegrityError`.
+#: Ranked weakest-first, and the *order* is the whole content: `except
+#: IntegrityError` does not catch a column refusing a **value**, because
+#: neither shape `_errors.py` classifies is an `IntegrityError`.
 _TRANSLATION_RANK = (
     "none",
     "except IntegrityError",
@@ -557,8 +552,8 @@ _TRANSLATION_RANK = (
     "refusals_as_conflict",
 )
 
-# : The two calls that reach Postgres on the **raw asyncpg connection**, outside :
-# SQLAlchemy's error translation entirely.
+#: The two calls that reach Postgres on the **raw asyncpg connection**,
+#: outside SQLAlchemy's error translation entirely.
 _COPY_EXECUTION = frozenset({"stage_records", "copy_records_to_table"})
 
 #: A call is a session call only when its receiver is spelled `_session` or
@@ -576,14 +571,12 @@ def _call_name(node: ast.Call) -> str:
 def _is_local_call(node: ast.Call, local: frozenset[str]) -> bool:
     """Whether this call really is a call into a function of this module.
 
-    🔴 **The receiver check is not tidiness, and its absence was a live defect
-    found on 2026-08-20 by the narrowed `SELECT` predicate.** Matching a bare
-    attribute name against the module's function names reads
-    `credit_names.get(scoped_id, ())` -- a `dict.get` on a caller's mapping --
-    as a delegated call into `PostgresPersonRepository.get`, because
-    `people.py` happens to define a method by that name. That invented edge
-    carried `get`'s rank into `replace_for_titles` and was invisible until a
-    second scoring pass disagreed with the first.
+    **The receiver check is not tidiness.** Matching a bare attribute name
+    against the module's function names reads `credit_names.get(scoped_id, ())`
+    -- a `dict.get` on a caller's mapping -- as a delegated call into
+    `PostgresPersonRepository.get`, because `people.py` happens to define a
+    method by that name, and that invented edge carries `get`'s rank into
+    `replace_for_titles`.
 
     A delegation is `self.<name>(...)` or a bare `<name>(...)` -- the second
     for module-level helpers like `title.py:_to_row`. Anything called on some
@@ -649,7 +642,7 @@ def _refusal_points(
 ) -> Iterator[RefusalPoint]:
     """Every call in this subtree that can make Postgres refuse a *row*.
 
-    paired with the rank of the translation **lexically enclosing it**.
+    Each is paired with the rank of the translation **lexically enclosing it**.
     """
     if isinstance(node, ast.AsyncWith | ast.With):
         inner = covered
@@ -683,11 +676,11 @@ def _refusal_points(
             yield RefusalPoint("", covered)
         elif _is_session_call(node, _EXECUTE_CALL):
             if _core_dml(node):
-                # A Core DML construct -- `execute(update(SyncRunRow)...)` -- carries no
-                # SQL text for `_statement_text` to read, and the strings it *does*
-                # contain are arguments rather than statements:
-                # `.execution_options(synchronize_session="fetch")` reads back as the
-                # statement `"fetch"`, which matches none of the three write regexes and
+                # A Core DML construct carries no SQL text for
+                # `_statement_text` to read, and the strings it *does* contain
+                # are arguments: `synchronize_session="fetch"` reads back as
+                # the statement `"fetch"`, matching no write regex, which would
+                # drop the write entirely.
                 yield RefusalPoint("", covered)
             else:
                 statement = _statement_text(node, texts)
@@ -799,10 +792,9 @@ def _score(
 ) -> dict[tuple[str, int], str]:
     """The translation of every definition, as a fixed point over call edges.
 
-    `strict=False` drops the bind-carrying `SELECT`s, which is the predicate
-    this file used until 2026-08-20. `write_sites` runs both and refuses to
-    answer where they disagree -- see the second exemption in
-    `_refusal_points`. Where they agree there is nothing to settle: a method
+    `strict=False` drops the bind-carrying `SELECT`s. `write_sites` runs both
+    predicates and refuses to answer where they disagree -- see the second
+    exemption in `_refusal_points`. Where they agree there is nothing to settle: a method
     whose own untranslated statement already makes it `none` is not made more
     `none` by a `SELECT` beside it.
     """
@@ -881,9 +873,9 @@ def write_sites() -> list[WriteSite]:
             destinations |= _orm_destinations(node, constructed)
             destinations &= set(Base.metadata.tables)
             if not destinations:
-                # **A write that resolves to no table must fail, not vanish**, and this
-                # is the degeneracy class ADR-0044's own testing missed: it covered dead
-                # scans and empty maps, never "a writer the scan cannot place".
+                # **A write that resolves to no table must fail, not vanish.** A
+                # dead scan and an empty map are caught elsewhere; this is the
+                # third degeneracy, "a writer the scan cannot place".
                 if any(
                     isinstance(inner, ast.Call) and _is_session_call(inner, frozenset({"flush"}))
                     for inner in ast.walk(node)
@@ -1015,9 +1007,8 @@ def _bound_of(annotation: Any, metadata: Sequence[Any]) -> str:
     return "; ".join(sorted(parts)) if parts else ""
 
 
-# `usher.domain` declares **no `max_length` at all** -- measured 2026-08-20, zero
-# occurrences across all nineteen modules -- so the only thing that can bound a `str`
-# above is an anchored `pattern`, and there is exactly one such pattern in the package.
+# `usher.domain` declares **no `max_length` at all**, so the only thing that can
+# bound a `str` above is an anchored `pattern`, and the package has exactly one.
 _PATTERN_MAX_LENGTH: Mapping[str, int] = {r"^tt\d{7,8}$": 10}
 
 
@@ -1055,9 +1046,9 @@ def _staging_sources() -> dict[str, tuple[str, type[Any]]]:
         texts = _module_texts(tree)
         # **Imported lazily, and only for a module that really stages.**
         # `_written_sources()` is every module in the package on purpose, and importing
-        # all of them eagerly made this scan depend on every optional dependency any of
-        # them has: `usher/eval/metrics/ir.py` raises `EvalDependencyMissing` at import
-        # time when the `eval` extra is not synced, so the whole ledger crashed on a
+        # importing them all eagerly would make this scan depend on every
+        # optional dependency any of them has -- `usher/eval/metrics/ir.py`
+        # raises `EvalDependencyMissing` without the `eval` extra.
         module: Any = None
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -1470,9 +1461,7 @@ def _replay_loop(
     literals: Mapping[str, Any],
     strings: Mapping[str, str],
 ) -> None:
-    """Unroll `for a, b, ...
-
-    in <module constant>:` and replay the body per item.
+    """Unroll `for a, b, ... in <module constant>:`, replaying the body per item.
 
     Only over an iterable that resolves to a literal sequence -- which is the
     one shape this chain uses (`m10a`'s `_RENAMES`). Anything else raises,
@@ -1631,9 +1620,9 @@ def _shape(destination_type: str, staging_type: str | None) -> str:
     return SHAPE_SQLA
 
 
-# : The three readings of "the value set is closed", and the ADR publishes all : three
-# because choosing between them moves published figures and the choice : has to be
-# visible rather than fallen into.
+#: The three readings of "the value set is closed". All three are published,
+#: because choosing between them moves the figures and the choice has to be
+#: visible rather than fallen into.
 READINGS = ("closure", "path", "pydantic")
 DEFAULT_READING = "path"
 
@@ -1643,9 +1632,9 @@ class DegenerateScan(RuntimeError):
 
     This project's own rule, and the reason this exception exists rather than a
     comment: *a scan that globs nothing passes identically to a scan that
-    passes.* Stubbing `write_sites()` to `[]` used to leave every exposed
-    bucket empty and exit 0 -- and ADR-0044 specifies F9's guard as "assert the
-    `exposed-sqlalchemy` bucket is empty", which a dead scan satisfies
+    passes.* Stubbing `write_sites()` to `[]` leaves every exposed bucket empty
+    and exits 0, which is exactly what "assert the `exposed-sqlalchemy` bucket
+    is empty" accepts
     perfectly. Every derivation this file depends on is checked for emptiness
     before a single column is classified.
     """
@@ -1732,7 +1721,7 @@ def build_ledger(
     statement this file can honestly make, and it is labelled as such wherever
     it is printed: the writers, the `except` clauses and the source classes are
     all today's, so `--at m08b` answers "how would this rule score M8's schema",
-    not "what did M8 measure".
+    not "what did M8 itself report".
 
     ⚠️ `scans` is a hoist for a caller building several ledgers, **not** a
     cache. It must stay optional and it must stay off by default: the
@@ -1897,8 +1886,8 @@ def _classify(
 def _fully_bounded(sql_type: str, domain: str) -> bool:
     """`_errors.py`'s own rule, run forwards.
 
-    safe when the field is bounded on every side the column is, and exposed when it is
-    bounded on fewer.
+    Safe when the field is bounded on every side the column is, exposed when it
+    is bounded on fewer.
     """
     if not domain:
         return False
@@ -2029,14 +2018,15 @@ def counts(rows: Sequence[LedgerRow]) -> dict[str, int]:
 
 BUCKETS = ("safe", "translated", "exposed-copy", "exposed-sqlalchemy")
 
-# : The figures ADR-0044 publishes, keyed by reading.
+#: The published figures this audit is pinned against, keyed by reading.
 PUBLISHED: Mapping[str, Mapping[str, int]] = {
     "closure": {"safe": 20, "translated": 33, "exposed-copy": 30, "exposed-sqlalchemy": 1},
     "path": {"safe": 18, "translated": 34, "exposed-copy": 31, "exposed-sqlalchemy": 1},
     "pydantic": {"safe": 14, "translated": 34, "exposed-copy": 34, "exposed-sqlalchemy": 2},
 }
 
-# : Same, at M8's head, which is what the roadmap's corrections are scored : against.
+#: Same, at M8's head, which is what the roadmap's corrections are scored
+#: against.
 PUBLISHED_AT_M08B: Mapping[str, Mapping[str, int]] = {
     "closure": {"safe": 18, "translated": 23, "exposed-copy": 29, "exposed-sqlalchemy": 1},
     "path": {"safe": 16, "translated": 24, "exposed-copy": 30, "exposed-sqlalchemy": 1},
@@ -2159,9 +2149,9 @@ def summary(
     return "\n".join(lines)
 
 
-# : The three columns whose width the migration chain writes as an imported : constant
-# -- `HALFVEC(GENOME_TAG_COUNT)`, `HALFVEC(EMBEDDING_DIMENSIONS)` and :
-# `sa.Numeric(COST_PRECISION, COST_SCALE)`.
+#: The three columns whose width the migration chain writes as an imported
+#: constant -- `HALFVEC(GENOME_TAG_COUNT)`, `HALFVEC(EMBEDDING_DIMENSIONS)` and
+#: `sa.Numeric(COST_PRECISION, COST_SCALE)`.
 _TAUTOLOGOUS = (
     ("genome_scores", "relevance"),
     ("user_taste", "centroid"),

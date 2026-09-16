@@ -42,14 +42,12 @@ _ROW_KEYS: Final[frozenset[str]] = frozenset({"table", "row"})
 class RestoreRefused(Exception):
     """The artifact cannot be applied to this database, and nothing was.
 
-    **Not a member of `cli.OPERATOR_ERRORS` and deliberately not a new one.**
-    ADR-0026 rejects a per-command error boundary and permits a command that
-    knows what a failure *means* to render it -- which is what
+    Not a member of `cli.OPERATOR_ERRORS` and deliberately not a new one: a
+    command that knows what a failure *means* renders it itself, as
     `cli._curate` already does for the two conditions it can name. `_restore`
-    catches this and exits with the sentence; the tuple does not grow, and
-    every other failure this command can have (a missing file, a full disk, a
-    database that is not up) is already `OSError` or `DBAPIError` and reaches
-    the one boundary in `main`.
+    catches this and exits with the sentence; every other failure this command
+    can have (a missing file, a full disk, a database that is not up) is already
+    `OSError` or `DBAPIError` and reaches the one boundary in `main`.
     """
 
 
@@ -57,7 +55,7 @@ class RestoreRefused(Exception):
 class RestoreReport:
     """What one run did, in three numbers per table plus the refusals.
 
-    **Three counts and not one**, which is the whole reason this type exists:
+    Three counts and not one, which is the whole reason this type exists:
     *"restored 9 rows"* over an artifact holding 50 is precisely the failure
     this command is built to make visible, and an operator reading it has no
     second copy of the database to compare against.
@@ -118,8 +116,8 @@ class RestoreReport:
     def refused_by_table(self) -> Mapping[str, int]:
         """How many rows each table refused.
 
-        **Exact whatever the renderer caps**, which is the half of K5's finding 4 that a
-        truncated list of lines cannot carry.
+        Exact whatever the renderer caps, which a truncated list of lines cannot
+        carry.
         """
         return {
             table: len(outcome.refused)
@@ -210,19 +208,18 @@ class RestoreService:
 def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
     """The artifact, as its header object and its body objects.
 
-    **Read with `gzip` and `json` and nothing else**, so this parses the file
-    an operator can `zcat`, and every way it can be damaged arrives here.
+    Read with `gzip` and `json` and nothing else, so this parses the file an
+    operator can `zcat`, and every way it can be damaged arrives here.
 
     Damage to the gzip itself is `DAMAGED_GZIP`'s set, shared with the dataset
-    cache so neither reader can catch a subset of it. `UnicodeDecodeError`
-    joins it only here, because this file is decoded strictly: the artifact is
-    the household's own history and a byte that is not UTF-8 in it is damage,
-    where a replacement character in one row of a public dataset is not.
+    cache so neither reader can catch a subset of it. `UnicodeDecodeError` joins
+    it only here, because this file is decoded strictly: the artifact is the
+    household's own history and a byte that is not UTF-8 in it is damage, where
+    a replacement character in one row of a public dataset is not.
 
-    ⚠️ **The line number comes from the enumeration and never from
-    `JSONDecodeError.lineno`.** Each line is decompressed and parsed on its
-    own, so that attribute is the position inside the one-line string handed
-    to `json.loads` and is **1** for every damaged line in the file. A message
+    The line number comes from the enumeration and never from
+    `JSONDecodeError.lineno`. Each line is decompressed and parsed on its own,
+    so that attribute is `1` for every damaged line in the file, and a message
     saying *"line 1"* about the four-thousandth row sends an operator to the
     header.
     """
@@ -262,10 +259,7 @@ def _read(source: Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
 def _refuse_a_short_body(
     source: Path, header: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
 ) -> None:
-    """The header's per-table counts against the body's.
-
-    which is the truncation check two files had claimed for a milestone.
-    """
+    """The header's per-table counts against the body's: the truncation check."""
     claimed = header.get("rows")
     if not isinstance(claimed, dict):
         raise RestoreRefused(
@@ -298,10 +292,9 @@ def _refuse_a_schema_mismatch(header: Mapping[str, Any], revision: str | None) -
     database or a newer backup, and one from a newer schema wants
     `alembic upgrade head` here first.
 
-    ⚠️ Compared against **`database_revision`**, which the repository supplies,
-    and never against `code_head_revision()`. The two are equal on a healthy
-    deployment, which is exactly why nothing but a case that makes them differ
-    can tell this implementation from the wrong one.
+    Compared against `database_revision`, which the repository supplies, and
+    never against `code_head_revision()`. The two are equal on a healthy
+    deployment, so only a database mid-migration tells the two apart.
     """
     stamped = header.get("schema_revision")
     if stamped != revision:
@@ -339,10 +332,10 @@ def _decode_rows(
     table: the artifact interleaves tables freely, and a pass per table to
     find its batch is a scan the decode is already making.
 
-    The key set is compared against `restored_columns` rather than trusted,
-    which is the *truncated row* half of refusal 1: a row that lost a column
-    is still valid JSON and would otherwise reach a bind parameter that is not
-    there. Safe to compare exactly because the schema stamp has already been
+    The key set is compared against `restored_columns` rather than trusted: a
+    row that lost a column is still valid JSON and would otherwise reach a bind
+    parameter that is not there. Safe to compare exactly because the schema
+    stamp has already been
     checked one function up -- two databases at one revision have one column
     set, so a mismatch here is a damaged file and not a version skew.
     """
@@ -380,7 +373,7 @@ def _decode(value: Any, position: int) -> object:
     hand asyncpg a `dict` for a scalar column and report it as a database
     error.
 
-    **The scalars are deliberately *not* decoded here.** A UUID, a timestamp
+    The scalars are deliberately *not* decoded here. A UUID, a timestamp
     and a `NUMERIC` all travel as JSON strings, and which of the three a given
     string is depends on the column it is going into -- schema knowledge this
     layer is not allowed to hold. `db/repositories/backup.py::_coerce` does it
@@ -422,12 +415,10 @@ def _title(value: Any, position: int) -> TitleReference:
 def _title_reference(value: Mapping[str, Any], position: int) -> TitleReference:
     """A `TitleReference` from its four carried keys, all four required.
 
-    `kind` is required and has no default, which is
-    [ADR-0011](../../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md)
-    held by the type: TMDb's movie and series id spaces overlap on 26,968 ids,
-    so a `tmdb_id` resolved without a kind lands on whichever of the two shares
-    the integer. A kind the enum does not know is a refusal rather than a
-    coerced string, for the same reason.
+    `kind` is required and has no default, because TMDb's movie and series id
+    spaces overlap: a `tmdb_id` resolved without a kind lands on whichever of
+    the two shares the integer. A kind the enum does not know is a refusal
+    rather than a coerced string, for the same reason.
     """
     try:
         kind = TitleKind(value["kind"])

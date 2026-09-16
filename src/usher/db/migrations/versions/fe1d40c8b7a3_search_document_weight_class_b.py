@@ -12,10 +12,8 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-# Weight class B fills the slot fa2b6c1e9d30 reserved for it -- "reserved for cast and
-# crew and deliberately absent rather than filled with something else" -- and slots
-# between A and C, which is where ts_rank's default weight vector {0.1, 0.2, 0.4, 1.0}
-# puts it.
+# Weight class B fills the slot fa2b6c1e9d30 left open for cast and crew, between A
+# and C -- where ts_rank's default weight vector {0.1, 0.2, 0.4, 1.0} puts it.
 _COLUMN = """
 ALTER TABLE titles ADD COLUMN search_document tsvector
 GENERATED ALWAYS AS (
@@ -29,10 +27,9 @@ GENERATED ALWAYS AS (
 ) STORED
 """
 
-# fa2b6c1e9d30's expression, restated rather than imported: a migration must
-# not import application code that can change under it, and `downgrade()` has
-# to restore the definition that revision installed rather than whatever the
-# model happens to say today.
+# fa2b6c1e9d30's expression, spelled out here: a migration must not import
+# application code that can change under it, and `downgrade()` has to restore the
+# definition that revision installed rather than whatever the model says today.
 _M6_COLUMN = """
 ALTER TABLE titles ADD COLUMN search_document tsvector
 GENERATED ALWAYS AS (
@@ -60,19 +57,18 @@ def upgrade() -> None:
             server_default=sa.text("'{}'"),
         ),
     )
-    # Then the forced rewrite. Drop-and-re-add rather than
-    # `UPDATE titles SET id = id`: both force a full rewrite, but the update
-    # also leaves 1.27M dead tuples and their WAL behind for autovacuum.
+    # Then the forced rewrite. Drop-and-re-add rather than `UPDATE titles SET
+    # id = id`: both force a full rewrite, but the update also leaves a dead tuple
+    # per row, and its WAL, behind for autovacuum.
     op.drop_index("ix_titles_search_document", table_name="titles")
     op.execute("ALTER TABLE titles DROP COLUMN search_document")
-    # (fa2b6c1e9d30's third step, CREATE OR REPLACE FUNCTION, is deliberately
-    # absent -- the wrapper's body is unchanged. See the docstring.)
+    # fa2b6c1e9d30's CREATE OR REPLACE FUNCTION step is deliberately absent: the
+    # wrapper's body is unchanged.
     op.execute(_COLUMN)
-    # `fastupdate=off` is carried across the rewrite deliberately and is
-    # spelled out at both call sites rather than shared through a dict: its
-    # default pending list cost a measured 231 buffers against 30 -- 7.7x
-    # read amplification, invisible in EXPLAIN unless you look at buffers --
-    # and an index recreated without it loses that silently.
+    # `fastupdate=off` is carried across the rewrite deliberately, spelled out at
+    # both call sites rather than shared through a dict: the default pending list
+    # costs read amplification that is invisible in EXPLAIN unless you look at
+    # buffers, so an index recreated without it loses the setting silently.
     op.create_index(
         "ix_titles_search_document",
         "titles",
@@ -92,11 +88,10 @@ def downgrade() -> None:
     op.execute("ALTER TABLE titles DROP COLUMN search_document")
     op.drop_column("titles", "credit_names")
     op.execute(_M6_COLUMN)
-    # `fastupdate=off` is carried across the rewrite deliberately and is
-    # spelled out at both call sites rather than shared through a dict: its
-    # default pending list cost a measured 231 buffers against 30 -- 7.7x
-    # read amplification, invisible in EXPLAIN unless you look at buffers --
-    # and an index recreated without it loses that silently.
+    # `fastupdate=off` is carried across the rewrite deliberately, spelled out at
+    # both call sites rather than shared through a dict: the default pending list
+    # costs read amplification that is invisible in EXPLAIN unless you look at
+    # buffers, so an index recreated without it loses the setting silently.
     op.create_index(
         "ix_titles_search_document",
         "titles",

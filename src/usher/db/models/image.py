@@ -1,7 +1,4 @@
-"""`images`.
-
-[PRD 02](../../../../docs/prd/02-data-model.md)'s `Image`, and the one entity on that
-"""
+"""`images` -- PRD 02's `Image`."""
 
 import uuid
 
@@ -24,15 +21,13 @@ from usher.domain.enums import ImageKind
 class ImageRow(Base):
     """One artwork reference, owned by exactly one of a title, an episode or a person.
 
-    **Three nullable owner columns and a CHECK, rather than three tables or a
-    polymorphic `(owner_kind, owner_id)` pair.** The pair cannot carry a
-    foreign key at all — it is the `curated_rows.card_title_ids` trade one
-    table over, and here there is no reason to take it, because the three
-    owners are a closed set declared in this schema. Three tables would mean
-    three repositories and three routes for one concept. So: three real
+    **Three nullable owner columns and a CHECK.** A polymorphic
+    `(owner_kind, owner_id)` pair cannot carry a foreign key at all, and the
+    three owners are a closed set declared in this schema; three tables would
+    mean three repositories and three routes for one concept. So three real
     foreign keys, three real delete rules, and
-    `num_nonnulls(title_id, episode_id, person_id) = 1` standing where a
-    single `NOT NULL` would have.
+    `num_nonnulls(title_id, episode_id, person_id) = 1` standing where a single
+    `NOT NULL` would have.
     """
 
     __tablename__ = "images"
@@ -59,11 +54,10 @@ class ImageRow(Base):
     # holding TMDb and Emby artwork side by side stays legible after either
     # one is turned off.
     provider: Mapped[str] = mapped_column(Text, nullable=False)
-    # **The provider's own path, with no base and no rung** -- `m09c` renamed
-    # this from `remote_url`. ADR-0032's proxy fetches `{base}{rung}{path}`, so
-    # a stored full URL bakes a rung into the natural key below and makes rung
-    # selection string surgery on somebody else's URL. The base is a setting;
-    # the path is the row.
+    # **The provider's own path, with no base and no rung.** The image proxy
+    # fetches `{base}{rung}{path}`, so a stored full URL bakes a rung into the
+    # natural key below and makes rung selection string surgery on somebody
+    # else's URL. The base is a setting; the path is the row.
     provider_path: Mapped[str] = mapped_column(Text, nullable=False)
     # Nullable: a provider that reports no dimensions is ordinary, and a
     # placeholder `0` would be a lie a layout engine acts on.
@@ -87,20 +81,19 @@ class ImageRow(Base):
         # reporting an error, which is the family of failure this schema
         # mirrors every text bound as a CHECK for.
         CheckConstraint("provider_path <> ''", name="ck_images_provider_path_not_empty"),
-        # Nullable-safe: `NULL > 0` is NULL, which a CHECK treats as
-        # satisfied, so the `IS NULL` disjunct is documentation rather than
-        # logic — and it is written out because the reader who deletes it is
-        # the one who thinks the column is NOT NULL.
+        # `NULL > 0` is NULL, which a CHECK treats as satisfied, so the
+        # `IS NULL` disjunct is spelled out for the reader who would otherwise
+        # take the column for NOT NULL.
         CheckConstraint("width IS NULL OR width > 0", name="ck_images_width_positive"),
         CheckConstraint("height IS NULL OR height > 0", name="ck_images_height_positive"),
         # The three cascades' own lookups.
         Index("ix_images_title_id", "title_id"),
         Index("ix_images_episode_id", "episode_id"),
         Index("ix_images_person_id", "person_id"),
-        # **The natural key, `m09c`, and the obvious spelling of it is inert.** An image
-        # has no provider integer id, so `(the one owner, provider, provider_path)` is
-        # what makes a re-derivation an upsert rather than a fresh UUIDv7 per sighting
-        # -- which is the whole of what ADR-0032's `Cache-Control: immutable` rests on.
+        # **The natural key.** An image has no provider integer id, so `(the one
+        # owner, provider, provider_path)` is what makes a re-derivation an upsert
+        # rather than a fresh UUIDv7 per sighting -- and a stable id is what the
+        # proxy's `Cache-Control: immutable` rests on.
         UniqueConstraint(
             "title_id",
             "episode_id",
@@ -110,8 +103,7 @@ class ImageRow(Base):
             name="uq_images_owner_provider_path",
             postgresql_nulls_not_distinct=True,
         ),
-        # **No unique index on "one primary per owner per kind".** It is a tempting
-        # invariant and the write model makes it unnecessary: an owner's image set is
-        # replaced wholesale, so two primaries would be a defect inside one statement
-        # rather than a race between two.
+        # **No unique index on "one primary per owner per kind".** An owner's image
+        # set is replaced wholesale, so two primaries would be a defect inside one
+        # statement rather than a race between two.
     )

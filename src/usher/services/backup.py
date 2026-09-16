@@ -32,11 +32,10 @@ __all__ = [
     "default_output_name",
 ]
 
-#: The artifact's shape, not the manifest's contents. It moves when K4 would
-#: have to read an older file differently -- a header key removed, the row
-#: envelope renamed, a reference spelled another way -- and it does **not**
-#: move when a table changes class, because `schema_revision` is already the
-#: stamp for the schema this classification is about.
+#: The artifact's shape, not the manifest's contents. It moves when a reader
+#: would have to treat an older file differently -- a header key removed, the
+#: row envelope renamed -- and not when a table changes class, because
+#: `schema_revision` already stamps the schema.
 MANIFEST_VERSION: Final = 1
 
 #: Both extensions, because both are true and each is load-bearing to a
@@ -44,8 +43,8 @@ MANIFEST_VERSION: Final = 1
 #: what tells a human the decompressed bytes are one object per line.
 ARTIFACT_SUFFIX: Final = ".jsonl.gz"
 
-# : Printed on **every** run, and one sentence rather than a flag, because an : operator
-# who learns this at restore time learns it too late.
+#: Printed on **every** run, and a sentence rather than a flag: an operator
+#: who learns this at restore time learns it too late.
 CREDENTIAL_KEY_WARNING: Final = (
     "source credentials travel as ciphertext and this file holds no key: keep "
     "USHER_SECRET_KEY with it, or the restored credentials will be undecryptable "
@@ -57,10 +56,8 @@ CREDENTIAL_KEY_WARNING: Final = (
 class BackupReport:
     """What one run wrote, for a terminal to render.
 
-    A value rather than printed lines, for the reason `ComposeReport` and
-    `CurationReport` are values: the CLI owns the rendering and a service
-    that printed would be unusable from the route this becomes when a
-    milestone gives backup an HTTP surface.
+    A value rather than printed lines: the CLI owns the rendering, and a
+    service that printed would be unusable from an HTTP route.
     """
 
     path: Path
@@ -77,14 +74,12 @@ class BackupReport:
 def default_output_name(at: datetime) -> str:
     """`usher-backup-<UTC ISO 8601 basic>.jsonl.gz`.
 
-    **Basic form (`20260825T143000Z`) rather than extended.** The extended
-    form's colons are legal in a POSIX filename and are a quoting hazard in
-    every shell that will ever move this file, and Windows refuses them
-    outright -- an artifact an operator cannot copy to the machine they have
-    is not a backup. Second resolution because two runs in one second would
-    collide, and a run that silently overwrote the previous artifact is the
-    one failure a backup command must not have; two runs in one second are
-    not reachable at 14,259 rows over a real database round trip.
+    Basic form (`20260825T143000Z`) rather than extended: the extended form's
+    colons are a quoting hazard in every shell that will move this file, and
+    Windows refuses them outright. Second resolution because silently
+    overwriting the previous artifact is the one failure a backup must not
+    have, and two runs inside one second are not reachable over a real
+    database round trip.
     """
     return f"usher-backup-{at.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}{ARTIFACT_SUFFIX}"
 
@@ -92,11 +87,8 @@ def default_output_name(at: datetime) -> str:
 class BackupService:
     """Read the carried set, write one file, answer what was written.
 
-    **`now` is injected** so the header's stamp and the default filename are
-    the same instant and both are observable from a test -- not because the
-    clock is a dependency worth abstracting, but because a filename derived
-    from a second reading can differ from the header by a second at exactly
-    the boundary a case would have to be flaky to catch.
+    `now` is injected so the header's stamp and the default filename are the
+    same instant, and so a test can observe both.
     """
 
     def __init__(
@@ -155,12 +147,11 @@ def _refuse_a_missing_directory(path: Path) -> None:
 
 
 def _compress(handle: IO[bytes], *, lines: Iterable[str]) -> None:
-    """The body of the artifact, gzipped into an open file.
+    r"""The body of the artifact, gzipped into an open file.
 
-        An explicit encoding and newline: JSON Lines is defined as UTF-8 with
-        `
-    ` separators, and leaving either to the platform would make an
-        artifact written on one host unreadable as lines on another.
+    Encoding and newline are explicit: JSON Lines is defined as UTF-8 with
+    `\n` separators, and leaving either to the platform would make an artifact
+    written on one host unreadable as lines on another.
     """
     with (
         gzip.GzipFile(fileobj=handle, mode="wb") as compressed,
@@ -173,14 +164,10 @@ def _line(obj: Mapping[str, Any]) -> str:
     r"""One JSON object, one newline.
 
     `ensure_ascii=False` because a household's titles and search queries are
-    not ASCII and `\u00e9` is not what property 3 above means by readable;
-    the file declares UTF-8 by being written as UTF-8. `sort_keys` is
-    deliberately **off**: the insertion order is the column order the schema
-    declares, which is the order an operator reading a row expects, and the
-    header's two independent writes (`manifest_version` and `usher_version`)
-    are unordered facts that `json.dumps` serialises in whatever order they
-    were built -- so swapping them is an equivalent mutant, since every
-    assertion anywhere reads this by key.
+    not ASCII and `\u00e9` is not readable; the file declares UTF-8 by being
+    written as UTF-8. `sort_keys` is deliberately off: insertion order is the
+    column order the schema declares, which is the order an operator reading a
+    row expects.
     """
     return json.dumps(obj, ensure_ascii=False) + "\n"
 
@@ -206,11 +193,10 @@ def _encode(value: object) -> Any:
         case list():
             return [_encode(item) for item in value]
         case bool() | int() | float() | str() | None:
-            # One arm rather than four, and `bool` named in it rather than
-            # left to `int`: `isinstance(True, int)` is true, so a `bool`
-            # that fell through to a narrower `int` arm elsewhere would be
-            # written as `1` and every `played`, `enabled` and `ok` in the
-            # artifact would stop being a boolean.
+            # One arm rather than four, with `bool` named in it rather than
+            # left to `int`: `isinstance(True, int)` is true, so a `bool` that
+            # fell through to a narrower `int` arm would be written as `1` and
+            # every `played`, `enabled` and `ok` would stop being a boolean.
             return value
         case uuid.UUID():
             return str(value)
@@ -220,10 +206,9 @@ def _encode(value: object) -> Any:
             # As text, exactly.
             return f"{value:f}"
         case bytes():
-            # `source_credentials.ciphertext`, base64'd because JSON has no
-            # byte string. Fernet tokens are already URL-safe base64 ASCII,
-            # so this is a second encoding of an encoded value -- and it is
-            # still right, because the column is `bytea` and nothing here
+            # base64'd because JSON has no byte string. Fernet tokens are
+            # already URL-safe base64 ASCII, so this encodes an encoded value
+            # -- still right, because the column is `bytea` and nothing here
             # may assume what a future scheme puts in it.
             return {"base64": base64.b64encode(value).decode("ascii")}
         case _:

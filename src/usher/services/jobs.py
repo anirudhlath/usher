@@ -21,8 +21,8 @@ from usher.services.events import DeferredEventPublisher
 
 Handler = Callable[[Job], Awaitable[None]]
 
-# : How long a claim may sit in `running` without being heartbeated before any : worker
-# may take it back.
+#: How long a claim may sit in `running` without being heartbeated before any
+#: worker may take it back.
 DEFAULT_LEASE_SECONDS: Final = 300.0
 
 #: How much of the lease may pass between heartbeats. A third, so two
@@ -30,8 +30,8 @@ DEFAULT_LEASE_SECONDS: Final = 300.0
 #: leave a margin before another worker may take the claim.
 HEARTBEAT_FRACTION: Final = 3.0
 
-# : Per-kind ceilings on jobs in flight, `None` meaning "whatever the deployment :
-# configured globally" (`Settings.job_concurrency`).
+#: Per-kind ceilings on jobs in flight, `None` meaning "whatever the deployment
+#: configured globally" (`Settings.job_concurrency`).
 KIND_CONCURRENCY: Final[Mapping[JobKind, int | None]] = MappingProxyType(
     {
         JobKind.ENRICH: None,
@@ -91,9 +91,9 @@ class JobWorker:
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ) -> None:
         self._scopes = scopes
-        # **The registration list and the concurrency table are one object.** `run_once`
-        # claims `list(self._concurrency)`, so a kind this worker cannot run cannot be
-        # claimed, and a kind it can run cannot be missing a ceiling.
+        # The registration list and the concurrency table are one object:
+        # `run_once` claims `list(self._concurrency)`, so a kind this worker cannot
+        # run cannot be claimed, and a kind it can run cannot be missing a ceiling.
         self._concurrency = dict(concurrency)
         self._max_in_flight = max(1, max_in_flight)
         # Refill when the pool is half empty rather than when it is empty: a
@@ -112,37 +112,30 @@ class JobWorker:
     def registered_kinds(self) -> frozenset[JobKind]:
         """Exactly what `run_once` will claim.
 
-        A read-only view rather than a test reaching into `_concurrency`, and
-        the property that assertion needs is the one `run_once` relies on:
-        **four of the nine kinds are registered conditionally** by
+        A read-only view rather than a test reaching into `_concurrency`. Four
+        of the nine kinds are registered conditionally by
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
         `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
-        deployment cannot run that kind" is wiring a test has to be able to
-        see, and `MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`, `SYNC` and
-        `BOOTSTRAP` are the five in every build. `SYNC` joined them in M9's
-        E3 and `BOOTSTRAP` in E5: there is no optional process resource
-        behind a triggered sync or a bulk import, only the adapter factory
-        and the outbound client every root already builds, so both are
-        registered exactly as unconditionally as the other three.
+        deployment cannot run that kind" is wiring a test has to be able to see.
+        The other five are in every build: there is no optional process resource
+        behind a triggered sync or a bulk import, only the adapter factory and
+        the outbound client every root already builds.
         """
         return frozenset(self._concurrency)
 
     async def recover(self) -> int:
-        """Return **abandoned** claims to `pending`.
+        """Return abandoned claims to `pending`.
 
-        Returns how many.
+        Returns how many. PRD 08's *"startup requeues anything left
+        `in_progress`"*, with two qualifications:
 
-        PRD 08's *"startup requeues anything left `in_progress`"*, corrected in
-        two ways that are the same correction:
-
-        - **It is an age threshold, not everything.** `requeue_running()`'s
+        - An age threshold, not everything. `requeue_running()`'s
           `older_than_seconds=0.0` default requeues every `running` row, which
-          at two workers means a restart steals the other's live claims. With
-          concurrency inside one process it would steal *its own*.
-        - **It is called repeatedly, not once at startup.** Recovery that only
-          runs when a process starts cannot recover a process that died and did
-          not come back -- which is precisely S3's twenty orphans, unrecoverable
-          because the only lever also corrupted the two surviving workers.
+          at two workers means a restart steals the other's live claims, and
+          under concurrency inside one process it would steal its own.
+        - Called repeatedly, not once at startup. Recovery that only runs when a
+          process starts cannot recover a process that died and did not come
+          back.
 
         Safe against a *live* claim because `_heartbeat` moves
         `jobs.updated_at` for everything in flight, so a claim older than the
@@ -171,7 +164,7 @@ class JobWorker:
         the wrong process -- and a job parked that way needs a human to
         release it.
 
-        **`asyncio.wait`, never a `TaskGroup` and never `gather`.** A bug in
+        `asyncio.wait`, never a `TaskGroup` and never `gather`. A bug in
         one handler must cost its own job: a task group cancels its siblings on
         the first escape, which would turn one poisoned job into `N` claims
         abandoned mid-write, and `gather(return_exceptions=False)` returns while
@@ -206,11 +199,10 @@ class JobWorker:
                     for job in claimed
                 }
                 if len(claimed) < room:
-                    # **A short claim means the queue is drained, so stop asking and let
-                    # the pool finish.** Without this the pass issues a second, empty
-                    # claim immediately -- and it really is immediate, because
-                    # `create_task` only *schedules*, so not one of the jobs just
-                    # claimed has started yet.
+                    # A short claim means the queue is drained, so stop asking and
+                    # let the pool finish. Without this the pass issues a second,
+                    # empty claim immediately -- `create_task` only *schedules*, so
+                    # not one of the jobs just claimed has started yet.
                     break
         except BaseException:
             # Including `CancelledError`, which is how a lane is stopped. A
@@ -232,9 +224,9 @@ class JobWorker:
     async def _claim(self, limit: int) -> list[Job]:
         """One claim, on its own scope, committed before it is returned.
 
-        The commit that makes the claim durable while the work runs -- see the
-        module docstring. It has to happen before the first handler, and the
-        scope closes here rather than being held for the batch: a session kept
+        The commit that makes the claim durable while the work runs. It has to
+        happen before the first handler, and the scope closes here rather than
+        being held for the batch: a session kept
         open across the slowest upstream is the transaction this design exists
         to avoid, and under concurrency it would also be a session two jobs
         could reach.
@@ -252,20 +244,18 @@ class JobWorker:
     async def _run_in_scope(self, job: Job) -> None:
         """One job, gated by its kind's ceiling, on a session of its own.
 
-        The gate is taken **before** the scope is opened, so a kind waiting at
-        its ceiling is not also holding a connection out of the pool. That
-        matters most for the kinds whose ceiling is 1 -- an `INDEX` backlog
-        would otherwise pin `max_in_flight` connections doing nothing.
+        The gate is taken *before* the scope is opened, so a kind waiting at its
+        ceiling is not also holding a connection out of the pool. That matters
+        most for the kinds whose ceiling is 1 -- an `INDEX` backlog would
+        otherwise pin `max_in_flight` connections doing nothing.
 
-        ⚠️ **`_in_flight` is joined *before* the gate, not after it, and the
-        two spellings differ by a lost job.** The claim was committed the
+        `_in_flight` is joined before the gate, not after it, and the two
+        spellings differ by a duplicate execution. The claim was committed the
         moment it was claimed, so from the queue's point of view this row is
-        `running` while it waits its turn -- and a wait can be long: twenty
-        `index` jobs at a ceiling of one, thirty seconds each, is ten minutes
-        for the last of them, well past the 300 s lease. Heartbeated only from
-        the gate inwards, that job ages out and **another worker takes a claim
-        this one still intends to run**, which is a duplicate execution rather
-        than a lost one. "In flight" means claimed and not yet settled.
+        `running` while it waits its turn -- and a wait at a ceiling of one can
+        outlast the lease. Heartbeated only from the gate inwards, that job ages
+        out and another worker takes a claim this one still intends to run. "In
+        flight" means claimed and not yet settled.
         """
         self._in_flight.add(job.id)
         try:
@@ -278,10 +268,9 @@ class JobWorker:
         """Keep every in-flight claim out of `recover()`'s reach.
 
         Without this the lease has to exceed the longest job -- and the longest
-        job here is a `bootstrap` phase measured in hours, which would make the
-        orphan window hours too. With it the lease is a property of the
-        *process being alive* rather than of what it happens to be running, so
-        S3's twenty orphans would have come back in five minutes.
+        job here is a `bootstrap` phase that runs for hours, which would make
+        the orphan window hours too. With it the lease is a property of the
+        *process being alive* rather than of what it happens to be running.
 
         A failed beat is logged and not fatal: the worst case is that a claim
         ages past its lease and is re-run, and redelivery is safe by
@@ -317,10 +306,9 @@ class JobWorker:
                 except UsherPortError as exc:
                     await self._fail(job, exc, scope, retryable=True)
                 except Exception:
-                    # **Records and re-raises; it does not handle.** Property 3 above is
-                    # untouched -- a bug is still not an upstream failure, still does
-                    # not reach `fail()`, and still leaves this pass by the `raise`
-                    # below.
+                    # Records and re-raises; it does not handle. A bug is still not
+                    # an upstream failure, still does not reach `fail()`, and still
+                    # leaves this pass by the `raise` below.
                     span.set_attribute("usher.job.crashed", True)
                     logger.opt(exception=True).error(
                         "{kind} job {key} crashed; the claim stays running until the lease "
@@ -335,10 +323,10 @@ class JobWorker:
                     # must not re-run the nineteen. Redelivery is safe by
                     # construction (PRD 08), but doing it for free is not.
                     await scope.commit()
-                    # ADR-0033, and it is the last thing that happens: every write this
-                    # unit of work made -- the handler's own, the `BACKFILL` requests it
-                    # staged, and the `DELETE` that completed the job -- is committed
-                    # above, so a client told now can refetch anything the frame names.
+                    # The last thing that happens: every write this unit of work made
+                    # -- the handler's own, the `BACKFILL` requests it staged, and the
+                    # `DELETE` that completed the job -- is committed above, so a
+                    # client told now can refetch anything the frame names.
                     await scope.events.flush()
             finally:
                 # The clear at the end of this job, and it is here rather than on the
@@ -404,10 +392,10 @@ class WorkerLoop:
         self._refresh = refresh
         self._recovered = recovered
         self._failure = failure
-        # **`-inf`, never `0.0`.** `time.monotonic()` is seconds since boot
-        # on Linux, so a `0.0` origin suppresses recovery for the first half
-        # lease of host uptime -- exactly when a stack coming up with the
-        # machine is holding the previous boot's orphans.
+        # `-inf`, never `0.0`: `time.monotonic()` is seconds since boot on Linux,
+        # so a `0.0` origin suppresses recovery for the first half lease of host
+        # uptime -- exactly when a stack coming up with the machine is holding the
+        # previous boot's orphans.
         self._throttled_at = float("-inf")
 
     async def pass_once(self) -> int:
@@ -433,19 +421,17 @@ class WorkerLoop:
     async def guarded_pass(self) -> int:
         """`pass_once`, with a crashed pass costing the pass rather than the process.
 
-        Returns `0` on a crash, which is what makes the caller sleep instead of hot-
-        looping a failing pass.
+        Returns `0` on a crash, which is what makes the caller sleep instead of
+        hot-looping a failing pass.
 
-        **`logger.exception`, never `logger.warning`.** An arm that
-        swallowed a bug and logged a *message* would turn a dead worker --
-        which is at least visible -- into a healthy-looking one silently
-        retrying a deterministic fault. The stack is what makes the next
-        occurrence evidence; `configure_logging` sets `diagnose=False`, so the
-        frames carry no locals.
+        `logger.exception`, never `logger.warning`: an arm that swallowed a bug
+        and logged a *message* would turn a dead worker -- at least visible --
+        into a healthy-looking one silently retrying a deterministic fault.
+        `configure_logging` sets `diagnose=False`, so the frames carry no locals.
 
-        **`Exception`, never `BaseException`:** `CancelledError` is how a
-        SIGINT reaches this loop, and catching it would build a worker that
-        cannot be stopped out of the arm that stops it dying.
+        `Exception`, never `BaseException`: `CancelledError` is how a SIGINT
+        reaches this loop, and catching it would build a worker that cannot be
+        stopped out of the arm that stops it dying.
         """
         try:
             return await self.pass_once()
@@ -488,7 +474,7 @@ def _first_failure(done: "set[asyncio.Task[None]]") -> BaseException | None:
     `task.exception()` rather than `task.result()`: reading the exception is
     what marks it retrieved, so a job that failed and whose sibling failed too
     does not also produce CPython's "exception was never retrieved" line at GC
-    time -- the shape `api/lanes._guard` exists for, arriving through a task.
+    time.
     """
     for task in done:
         if task.cancelled():

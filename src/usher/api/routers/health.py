@@ -19,9 +19,9 @@ from usher.db.migrations.status import code_head_revision, database_revision
 
 router = APIRouter(tags=["meta"])
 
-# : **The one non-2xx in this API that is not a problem document**, declared so : that
-# is a fact `/openapi.json` states rather than one a reader has to infer : from its
-# absence.
+#: **The one non-2xx in this API that is not a problem document**, declared so
+#: that it is a fact `/openapi.json` states rather than one a reader has to
+#: infer from its absence.
 _DEGRADED: Final[dict[int | str, dict[str, Any]]] = {
     503: {
         "model": ReadinessResponse,
@@ -44,27 +44,24 @@ async def _check_database(session: AsyncSession) -> bool:
         await session.execute(text("SELECT 1"))
         return True
     except Exception as exc:
-        # Rolling back here, not just catching, matters beyond hygiene: get_session's
-        # own commit-on-success (see deps.py) runs right after this handler returns, and
-        # committing a session left mid a failed statement can raise
-        # PendingRollbackError -- verified directly that an explicit rollback here
-        # avoids that.
+        # Rolling back here, not just catching: `get_session`'s commit-on-success
+        # runs right after this handler returns, and committing a session left mid
+        # failed statement raises `PendingRollbackError`.
         logger.warning(f"readiness check failed: database unreachable: {exc}")
         await session.rollback()
         return False
 
 
 async def _check_migrations(session: AsyncSession) -> bool:
-    """PRD 08.
+    """PRD 08's "refuses to serve on a schema mismatch rather than guessing".
 
-    "the app refuses to serve on a schema mismatch rather than guessing." `alembic
-    upgrade head && uvicorn ...` (Task 13) runs migrations on container start, but is
-    not itself a mismatch check: a stale image running an older migration chain against
-    a newer-than-expected database (or vice versa) would otherwise serve happily.
+    `alembic upgrade head` on container start is not itself a mismatch check: a
+    stale image running an older migration chain against a newer-than-expected
+    database, or the reverse, would otherwise serve happily.
 
-    Only called once `_check_database` has already succeeded -- a database that can't be
-    reached can't have its migration state read either, and attempting to would hit the
-    exact PendingRollbackError class of bug `_check_database`'s own rollback avoids.
+    Only called once `_check_database` has succeeded -- a database that cannot be
+    reached cannot have its migration state read, and attempting it would hit the
+    `PendingRollbackError` `_check_database`'s own rollback avoids.
     """
     try:
         db_revision = await database_revision(session)
@@ -86,38 +83,22 @@ async def _check_migrations(session: AsyncSession) -> bool:
 async def ready(
     session: SessionDep, lanes: LaneSupervisorDep, response: Response
 ) -> ReadinessResponse:
-    """Readiness.
+    """Readiness, reporting each dependency separately.
 
-    Reports each dependency separately.
-
-    Sets the response status to 503 when degraded rather than leaving the
-    default 200: no doc pins a status code here, so this is a deliberate
-    call, not a plan default. A readiness probe's entire contract *is*
-    the status code -- Kubernetes, Docker `healthcheck`, and load
-    balancers gate on it and never parse the body, so a 200 "degraded"
-    response tells every one of them "keep sending traffic here," which
-    is exactly wrong.
-
-    Takes the `Response` object as a parameter and mutates its
-    `status_code` rather than constructing a `JSONResponse` directly, so
-    FastAPI still runs this handler's return value through
-    `response_model` normally instead of the caller being responsible for
-    matching that shape by hand (FastAPI's own docs: returning a
-    `Response` directly "bypasses automatic data filtering and
-    serialization").
+    **503 when degraded, 200 when ready**, and the status code is the whole
+    contract: Kubernetes, Docker `healthcheck` and load balancers gate on it and
+    never parse the body. `checks` names the dependency that failed; `lanes` is
+    reported and never gated on.
     """
     database_ok = await _check_database(session)
     migrations_ok = await _check_migrations(session) if database_ok else False
     checks = ReadinessChecks(database=database_ok, migrations=migrations_ok)
 
-    # all(...) over the model's own fields, not a hand-maintained boolean expression --
-    # guards the same "reported ready having checked nothing" risk a bare dict had, but
-    # structurally: a checks dict could accidentally end up empty; a checks *model*
-    # can't, since every field is required, so M3 adding a per-source check is a mypy
-    # error at every construction site if forgotten, not a silent gap.
+    # `all(...)` over the model's own fields, not a hand-maintained boolean: a checks
+    # dict could end up empty and report ready having checked nothing, a checks *model*
+    # cannot, since every field is required.
     is_ready = all(checks.model_dump().values())
     response.status_code = 200 if is_ready else 503
-    # `checks` alone, exactly as before.
     return ReadinessResponse(
         status="ready" if is_ready else "degraded",
         checks=checks,

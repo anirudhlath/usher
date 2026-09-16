@@ -1,7 +1,4 @@
-"""M9's whole schema in one revision.
-
-`images`, `search_queries`, `row_provider_settings`, `title_search_names`, and the two
-"""
+"""`images`, `search_queries`, `row_provider_settings` and `title_search_names`."""
 
 import sqlalchemy as sa
 from alembic import op
@@ -91,8 +88,8 @@ def upgrade() -> None:
         # `server_default`. `at` rather than `created_at` because PRD 10's
         # column list says `at` -- `llm_calls`' call, one table over.
         sa.Column("at", sa.DateTime(timezone=True), nullable=False),
-        # RESTRICT: a household's search history is user state, ADR-0010's
-        # `fk_watch_states_episode_id_episodes` side of the asymmetry.
+        # RESTRICT: a household's search history is user state, the same side of
+        # the asymmetry `fk_watch_states_episode_id_episodes` sits on.
         sa.Column(
             "user_id",
             sa.dialects.postgresql.UUID(as_uuid=True),
@@ -189,16 +186,14 @@ def upgrade() -> None:
         sa.Column("language", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_title_search_names"),
         sa.CheckConstraint("name <> ''", name="ck_title_search_names_name_not_empty"),
-        # The btree bound, with its arithmetic in this migration's docstring.
-        # The constant is imported so the CHECK body cannot drift from the
-        # model's -- `m08b` imported `GENOME_TAG_COUNT` for the same reason.
+        # The btree bound `SEARCH_NAME_MAX_CHARS` states, imported rather than
+        # spelled out so the CHECK body cannot drift from the model's.
         sa.CheckConstraint(
             f"length(name) <= {SEARCH_NAME_MAX_CHARS}",
             name="ck_title_search_names_name_within_btree_bound",
         ),
         # **No unique constraint.** The write is replace-scoped on
-        # `(title_id, kind)`, matching `credits`; what would reverse that is a
-        # writer that upserts.
+        # `(title_id, kind)`, matching `credits`, so nothing here upserts.
     )
     op.create_index(
         "ix_title_search_names_title_id", "title_search_names", ["title_id"], unique=False
@@ -207,8 +202,7 @@ def upgrade() -> None:
     # The two tier-1 prefix indexes. The opclass is inside the `text()`
     # deliberately: `postgresql_ops` keys match columns and not expressions, so
     # the other spelling compiles to a plain `(lower(name))` with no error and
-    # builds an index that cannot serve the query it exists for -- measured by
-    # compiling both.
+    # builds an index that cannot serve the query it exists for.
     op.create_index(
         "ix_titles_name_lower_prefix",
         "titles",

@@ -54,7 +54,7 @@ async def _plan(
     hand-copied lookalike and both were replaced: a copy drifts from the code
     it claims to describe and then reads like coverage.
     """
-    # Warmed once and discarded before the measured run.
+    # Warmed once and discarded before the timed run.
     async with session.begin_nested() as warm:
         await session.execute(text(f"EXPLAIN (ANALYZE) {statement}"), parameters)
         await warm.rollback()
@@ -72,11 +72,11 @@ async def _plan(
 
 
 async def _seed(session: AsyncSession, scale: int) -> None:
-    """A synthetic household at the measured deployment's proportions.
+    """A synthetic household at a real deployment's proportions.
 
     `generate_series` rather than a walk: the point is the read, not how the
-    rows got there. Scaled linearly off `scale`, whose default is the one
-    measured library's item count.
+    rows got there. Scaled linearly off `scale`, whose default is one real
+    library's item count.
     """
     factor = scale / 1_126_674
     movies = int(94_448 * factor)
@@ -129,8 +129,8 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             "FROM measure_series s"
         )
     )
-    # Series 0 is the measured pathological one -- 20,000 episodes in 200
-    # seasons -- and it is the reason Recently Added's dedup is not free.
+    # Series 0 is the pathological one -- 20,000 episodes in 200 seasons --
+    # and it is the reason Recently Added's dedup is not free.
     await session.execute(
         text(
             "CREATE TABLE measure_ep (series_idx integer, season_number integer, "
@@ -181,8 +181,8 @@ async def _seed(session: AsyncSession, scale: int) -> None:
                 f"FROM {source}"  # `source`/`column`/`prefix` are module literals
             )
         )
-    # 85% played, ~0.3% in progress, and `last_played_at` NULL on ~70%, which is
-    # ADR-0014's walk-sourced shape rather than a convenient one.
+    # 85% played, ~0.3% in progress, and `last_played_at` NULL on ~70%, which
+    # is a real walk's shape rather than a convenient one.
     for target, source, other in (
         ("d.id", "episodes", "NULL"),
         ("NULL", "titles", "d.id"),
@@ -200,9 +200,9 @@ async def _seed(session: AsyncSession, scale: int) -> None:
                 f"random() AS c FROM {source}) d"  # `source`/`target` are module literals
             )
         )
-    # 200 stale rows, which is the nightly shape `f1a7d3c9e824` measured its
-    # sweep against. Without them the sweep's UPDATE plans against nothing and
-    # the re-measurement this script exists to take is vacuous.
+    # 200 stale rows, which is the nightly shape `f1a7d3c9e824`'s sweep index
+    # exists for. Without them the sweep's UPDATE plans against nothing and this
+    # script's whole reason to run is vacuous.
     await session.execute(
         text(
             "UPDATE media_items SET last_seen_at = now() - interval '3 days' "

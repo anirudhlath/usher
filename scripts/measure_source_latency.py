@@ -40,7 +40,7 @@ from usher.adapters.http import SourceGate
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import UsherPortError
 
-# : S1's identities, as **defaults** rather than as module constants.
+#: S1's identities, as **defaults** rather than as module constants.
 DEFAULT_BAR = Path("/var/tmp/m10-gate/BAR-S1.md")  # noqa: S108 -- durable, not tmpfs
 
 METRIC = "usher.source.request.duration"
@@ -50,7 +50,7 @@ METRIC = "usher.source.request.duration"
 #: to put a household identifier into.
 DEFAULT_SOURCE_LABEL = "s1-probe"
 
-#: `EmbyAdapter`'s own default page size, so `list` measures the page the
+#: `EmbyAdapter`'s own default page size, so `list` times the page the
 #: reconcile walk actually asks for.
 PAGE_SIZE = 200
 
@@ -73,16 +73,12 @@ FINE_BOUNDARIES: tuple[float, ...] = tuple(round(0.01 * (1.05**k), 6) for k in r
 class BudgetExceeded(Exception):
     """The declared live-request budget is spent and the next request is refused.
 
-    🔴 **`Exception`, deliberately not `RuntimeError`, and this is load-bearing
-    rather than stylistic.** The budget is spent at the transport, so the
-    refusal is raised *inside* `EmbySession._send`'s `try` -- and
-    `UNTRANSLATED_FAILURES` (`usher.adapters.http`) lists `RuntimeError`, so a
-    `RuntimeError` subclass is caught there and re-raised as
-    `PortUnavailable(f"{method} {path} failed: ...")`. Measured: the identical
-    refusal spelled as a `RuntimeError` subclass comes back as
-    `PortUnavailable: GET /a failed: budget refused`, which reads as "the
-    household's server is down" and would be recorded as a failed run rather
-    than a bounded one. Spelled as `Exception` it propagates unchanged.
+    **`Exception`, deliberately not `RuntimeError`.** The budget is spent at the
+    transport, so the refusal is raised *inside* `EmbySession._send`'s `try`,
+    and `UNTRANSLATED_FAILURES` (`usher.adapters.http`) lists `RuntimeError` --
+    a `RuntimeError` subclass comes back as `PortUnavailable`, which reads as
+    "the household's server is down" and records a bounded run as a failed one.
+    Spelled as `Exception` it propagates unchanged.
     """
 
 
@@ -94,17 +90,13 @@ class ProbeFailed(RuntimeError):
 class Budget:
     """One unit per **request on the wire**, spent before the wire sees it.
 
-    🔴 **Not one unit per `Probe`, which is what this counted until a review
-    priced it.** `EmbySession.request` retries once on a 401
-    (`session.py:406-415`) and `_TokenSession._authenticate_locked` issues no
-    request of its own, so a single 401 anywhere in the run made one probe cost
-    two requests and nothing noticed. Demonstrated against a stub answering one
-    401: `spent = 5` against a limit of 5, and **6 requests on the wire**. That
-    falsifies the only property this budget exists to have, and Group S's
-    <= 256 ceiling is assembled out of these declarations.
+    **Not one unit per `Probe`.** `EmbySession.request` retries once on a 401,
+    so a single 401 anywhere in the run makes one probe cost two requests and a
+    limit of 5 put 6 requests on the wire -- which falsifies the only property
+    this budget exists to have.
 
-    So the spend happens in an `httpx` request event hook -- the last thing
-    before the transport, downstream of every retry, redirect and
+    So the spend happens in an `httpx` request event hook, the last thing
+    before the transport and downstream of every retry, redirect and
     re-authentication `EmbySession` can perform. `install(client)` is how it
     gets there.
 
@@ -379,10 +371,10 @@ async def issue(session: EmbySession, probe: Probe) -> tuple[Timing, dict[str, A
     from the one the transport sees.
 
     Timed around `session.request`, which is `_send` plus a span -- deliberately
-    *not* around `json_body`, so that the wall clock and the histogram
-    `_send`'s `finally` records are measuring as nearly the same span as two
-    instruments can. The JSON decode of a 200-item page is tens of milliseconds
-    and belongs to neither.
+    *not* around `json_body`, so the wall clock and the histogram `_send`'s
+    `finally` records cover as nearly the same span as two instruments can. The
+    JSON decode of a 200-item page is tens of milliseconds and belongs to
+    neither.
 
     The one asymmetry, stated rather than smoothed over: the anonymous probe
     goes through `anonymous_json`, which is what the shipped `verify()` calls,
@@ -422,19 +414,14 @@ async def issue(session: EmbySession, probe: Probe) -> tuple[Timing, dict[str, A
 async def run_probes(session: EmbySession, probes: Sequence[Probe], into: list[Timing]) -> None:
     """The request loop, appending into a **caller-owned** list.
 
-    🔴 **Caller-owned because a run that ends early otherwise loses every
-    observation it bought.** Returning a fresh list meant `BudgetExceeded` on
-    request 60 of 60 discarded the 59 that had already been paid for against a
-    real household server -- unrecoverable, and S1's entire share of the group
-    budget, for nothing.
+    **Caller-owned because a run that ends early otherwise loses every
+    observation it bought.** Returning a fresh list would let `BudgetExceeded`
+    on the last request discard everything already paid for against a real
+    household server.
 
-    **There is no `budget.limit == 0` guard here any more.** There was one, it
-    was dead code -- the only production caller is downstream of `_run`'s early
-    return, so `limit` is never 0 by the time control arrives -- and it
-    *disagreed* with `Budget.spend`, returning `[]` where the real guard
-    raises. Two spellings of one rule is how the wrong one gets tested. The
-    guards that remain have distinct jobs: `_run` returns before building
-    anything at all, and `Budget.spend` refuses at the transport.
+    **No `budget.limit == 0` guard here**, deliberately: the two that remain
+    have distinct jobs -- `_run` returns before building anything at all, and
+    `Budget.spend` refuses at the transport.
     """
     for probe in probes:
         timing, _ = await issue(session, probe)
@@ -512,8 +499,8 @@ def prometheus_query(container: str, query: str) -> Any:
     """Prometheus has no published port on this host -- see CLAUDE.md.
 
     `docker exec` into the container is the documented route; the alternative
-    is publishing 9090 on an internet-facing box for the duration of a
-    measurement, which is not a trade this harness gets to make.
+    is publishing 9090 on an internet-facing box for the duration of a run,
+    which is not a trade this harness gets to make.
     """
     result = subprocess.run(  # noqa: S603 -- fixed argv, no shell
         ["docker", "exec", container, "wget", "-qO-", f"http://localhost:9090{query}"],  # noqa: S607
@@ -723,13 +710,9 @@ PROBE_CLASSES = 4
 def check_budget_is_sufficient(*, budget: int, reps: int) -> None:
     """Refuse a run the budget cannot finish, **before the first request**.
 
-    🔴 **Because the alternative was measured and it is the worst outcome this
-    harness can produce.** `--reps 15 --budget 60` spends all sixty requests
-    against a real household server, raises `BudgetExceeded` on the last one,
-    and -- before the `finally` work below existed -- produced no table, no
-    timings file and no flush. Sixty live requests, S1's entire share of the
-    group ceiling, unrecoverable, for nothing. Arithmetic that is knowable
-    before the first packet belongs before the first packet.
+    The worst outcome this harness can produce is spending a whole budget
+    against a real household server and raising on the last request. Arithmetic
+    that is knowable before the first packet belongs before the first packet.
 
     ⚠️ **S7 note:** the `WARMUP_REQUESTS + PROBE_CLASSES * reps` formula is
     S1's *sequential* plan. A concurrency arm with a different probe plan needs
@@ -918,11 +901,11 @@ async def _run(
                     f"against a wall-clock median of {by_op[op].median:.4f}"
                 )
 
-    # ⚠️ **A local-CPU guard on a network-bound measurement.** This process is
-    # idle-blocked on a socket for most of a run, so contention on the path to
+    # **A local-CPU guard on a network-bound run.** This process is
+    # idle-blocked on a socket most of the time, so contention on the path to
     # the household server -- the thing that could actually invalidate it -- is
     # not sampled at all. A TCP-connect RTT sample to the same host, before and
-    # after, costs no Emby request and is the right addition.
+    # after, costs no Emby request and would close that.
     if not quiet_closing(opening):
         return 1
     return 1 if failure is not None else 0

@@ -60,19 +60,16 @@ class PostgresImportRunRepository(ImportRunRepository):
                         setattr(row, key, value)
             await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `position`, `rows_seen` and `rows_written` are `integer` and
-            # `ImportRun` bounds all three `ge=0` with no ceiling, so a resumable
-            # importer's own cursor is a validly constructed model this table cannot
-            # hold.
+            # **`DBAPIError` rather than `IntegrityError`.** `position`, `rows_seen`
+            # and `rows_written` are `integer` and `ImportRun` bounds all three
+            # `ge=0` with no ceiling, so a resumable importer's own cursor is a
+            # validly constructed model this table cannot hold.
             if not is_row_refusal(exc):
                 raise
             # `dataset` is unique: two processes bootstrapping the same dataset at once
             # is a real operator mistake, and it must surface as a port error rather
-            # than a raw sqlalchemy exception (ADR-0009).
+            # than a raw sqlalchemy exception.
             await self._session.rollback()
-            # **The `constraint=` widens with the `except` and the sentence branches on
-            # it**, which is not the same thing as generalising the sentence.
             constraint = constraint_name(exc)
             detail = (
                 f"already exists under a different id ({constraint})"

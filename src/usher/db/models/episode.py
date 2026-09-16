@@ -86,11 +86,10 @@ class EpisodeRow(Base):
     )
 
     __table_args__ = (
-        # The lookup ingest performs once per episode item, 999,827 times a
-        # night. Also the ON CONFLICT target for the staged upsert, which is
-        # why it is a UniqueConstraint rather than a plain Index -- and it
-        # leads with title_id, so titles' CASCADE finds this table's rows
-        # through it without a second index.
+        # The lookup ingest performs once per episode item on every walk, and
+        # the ON CONFLICT target for the staged upsert -- hence a
+        # UniqueConstraint rather than a plain Index. It leads with title_id,
+        # so titles' CASCADE finds this table's rows without a second index.
         UniqueConstraint(
             "title_id",
             "season_number",

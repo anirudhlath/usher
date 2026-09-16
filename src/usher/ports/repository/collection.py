@@ -18,15 +18,13 @@ __all__ = [
 class OwnedCollection:
     """A franchise and the household's coverage of it.
 
-    **Lists, not counts, and the two counts are `len()`.** PRD 06's franchise
-    signal is "you own 2 of 4", which is two numbers *and* the cards to
-    render. Storing `owned_count` beside `owned_title_ids` would permit the
-    two to disagree, which is a state no consumer could interpret -- the same
-    argument `title_neighbors`' primary key makes about `(title_id, rank)`.
+    Lists, not counts: the franchise signal is "you own 2 of 4", which needs
+    two numbers *and* the cards to render, and storing a count beside the
+    list would let the two disagree into a state no consumer can interpret.
 
-    `title_ids` is every member in release order, `owned_title_ids` the subset
-    with an available media item. The difference is the completeness signal,
-    and it is what makes a franchise row say something a genre row cannot.
+    `title_ids` is every member in release order, `owned_title_ids` the
+    subset with an available media item. The difference is the completeness
+    signal, and it is what a genre row cannot say.
     """
 
     collection_id: uuid.UUID
@@ -36,46 +34,38 @@ class OwnedCollection:
 
 
 class CollectionRepository(ABC):
-    """Persistence for TMDb's movie franchise grouping.
+    """Persistence for TMDb's movie franchise grouping, and the writer of `titles.collection_id`.
 
-    and the writer `titles.collection_id` has never had.
-
-    **Movies only, and the port says so rather than a provider discovering
-    it.** `belongs_to_collection` is a field of `/movie/{id}` with no
-    `/tv/{id}` counterpart -- verified against the recorded payloads. So on a
-    television-only household PRD 06's ">= 2 owned titles in a collection" is
-    unsatisfiable **by construction** rather than by absence of data, which is
-    the fact an operator debugging a missing row needs, and it is why
-    `attach_titles` filters on kind rather than trusting its caller.
+    Movies only, said here rather than discovered by a provider:
+    `belongs_to_collection` is a field of `/movie/{id}` with no `/tv/{id}`
+    counterpart. On a television-only household a franchise row is therefore
+    unsatisfiable by construction rather than by absence of data -- the fact
+    an operator debugging a missing row needs, and why `attach_titles`
+    filters on kind rather than trusting its caller.
 
     Flushes, never commits.
     """
 
     @abstractmethod
     async def get(self, collection_id: uuid.UUID) -> OwnedCollection | None:
-        """One franchise and the household's coverage of it.
-
-        or `None` when the catalog does not hold it.
-        """
+        """One franchise and the household's coverage of it, or `None` when the catalog lacks it."""
 
     @abstractmethod
     async def upsert_many(self, collections: Sequence[Collection]) -> BulkWriteResult:
         """Insert or update, keyed on `tmdb_id`.
 
-        Keyed on `tmdb_id` rather than `Collection.id` for
-        `PersonRepository.upsert_many`'s reason: the derivation mints a fresh
-        UUIDv7 per sighting, so an id-keyed upsert grows a duplicate franchise
-        per pass. A batch names the same collection once per member film, so
-        deduplication is the common case rather than the odd one.
+        Keyed on `tmdb_id` rather than `Collection.id`: the derivation mints
+        a fresh UUIDv7 per sighting, so an id-keyed upsert grows a duplicate
+        franchise per pass. A batch names one collection once per member
+        film, so deduplication is the common case.
         """
 
     @abstractmethod
     async def resolve_tmdb_ids(self, tmdb_ids: Sequence[int]) -> dict[int, uuid.UUID]:
         """`tmdb_id` -> collection id, in one round trip.
 
-        Absent keys mean "no such collection", never "not asked". Same argument as
-        `PersonRepository.resolve_tmdb_ids`, and it is what `attach_titles`' pairs are
-        built from.
+        Absent keys mean "no such collection", never "not asked".
+        `attach_titles`' pairs are built from this.
         """
 
     @abstractmethod
@@ -87,12 +77,11 @@ class CollectionRepository(ABC):
 
     @abstractmethod
     async def count(self) -> int:
-        """How many franchises the catalog holds -- `usher derive`'s report.
+        """How many franchises the catalog holds.
 
-        Deliberately **not** scoped to franchises with owned members, which is
-        `list_owned`'s question: this one answers "did the derivation write
-        collections", and narrowing it would make an empty answer ambiguous
-        between "nothing derived" and "nothing owned".
+        Not scoped to franchises with owned members -- that is `list_owned`'s
+        question. Narrowing it would make an empty answer ambiguous between
+        "nothing derived" and "nothing owned".
         """
 
     @abstractmethod

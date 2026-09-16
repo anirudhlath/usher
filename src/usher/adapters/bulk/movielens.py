@@ -47,14 +47,12 @@ _MAX_IMDB_DIGITS = 8
 
 
 def _imdb_id(raw: str) -> str:
-    """`links.csv`'s bare `imdbId` digits as the catalog's `'tt'`-prefixed, zero-padded id.
+    """`links.csv`'s bare `imdbId` digits as a `'tt'`-prefixed, zero-padded id.
 
-    `zfill(7)` rather than bare concatenation -- see the module docstring for
-    the width distribution this rests on. A value that is empty, non-numeric
-    or wider than 8 digits is `PortDataMalformed` rather than a skipped row:
-    measured, none exists, so its appearance is an upstream format change,
-    and `imdb_id` is the join key, so dropping the row would silently shrink
-    the join by an amount nothing reports.
+    A value that is empty, non-numeric or wider than 8 digits is
+    `PortDataMalformed` rather than a skipped row: `imdb_id` is the join key, so
+    dropping the row would silently shrink the join by an amount nothing
+    reports.
     """
     if not raw.isdigit() or len(raw) > _MAX_IMDB_DIGITS:
         raise PortDataMalformed(
@@ -77,15 +75,12 @@ def _optional_int(raw: str, *, movie_id: str, column: str) -> int | None:
 class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
     """The MovieLens tag genome, streamed as resumable batches of dense vectors.
 
-    **One dataset, one `import_runs` row, three members.** The alternative --
-    three `BulkDataset`s -- is wrong because two of the three members are
-    *inputs to the third's rows* rather than row sources of their own: a
+    One dataset, one `import_runs` row, three members: two of the three are
+    *inputs to the third's rows* rather than row sources of their own, and a
     checkpoint for `links.csv` would checkpoint a join that has no rows.
 
-    `expected_tags` is injected the same way `TMDbIdDataset` injects `today`:
-    a test pinning the vocabulary width is otherwise impossible without a
-    1,128-row fixture for every edge case. The production width is exercised
-    end to end by the integration case that drives the real archive.
+    `expected_tags` is injected the same way `TMDbIdDataset` injects `today`, so
+    a test can pin the vocabulary width without a 1,128-row fixture.
     """
 
     def __init__(
@@ -112,16 +107,11 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         return MOVIELENS_ATTRIBUTION
 
     async def revision(self) -> str:
-        """The archive's ETag -- measured `"14ea425b-600f0e149d407"`, unchanged since 2023-07-20.
+        """The archive's ETag.
 
         Raises `PortUnavailable` if `files.grouplens.org` is unreachable or
-        answers 4xx/5xx, **and `PortRateLimited` if it answers 429**. Both are
-        real rather than theoretical: `CachedDatasetFile.revision` routes a 429
-        through exactly that translation, and `BulkDataset.revision`'s own
-        docstring records that naming only one of them is what let a
-        `PortRateLimited` escape uncaught from a caller that had guarded only
-        against `PortUnavailable`. A caller must catch both from this call the
-        same way it catches both from `batches()`.
+        answers 4xx/5xx, and `PortRateLimited` if it answers 429. A caller must
+        catch both here the same way it catches both from `batches()`.
         """
         return await self._file.revision()
 
@@ -138,8 +128,7 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
     def _vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
         """`genome-tags.csv`, parsed and checked, before a single score is read.
 
-        1,128 rows and 18,103 bytes, so a changed vocabulary costs one 18 kB read rather
-        than a 521 MB pass.
+        A changed vocabulary costs one 18 kB read rather than a 521 MB pass.
         """
         if self._tags is not None and self._tags[0] == revision:
             return self._tags[1]
@@ -182,18 +171,14 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         return self._tags[1]
 
     def _links(self) -> dict[int, tuple[str, int | None]]:
-        """All 86,537 `links.csv` rows, held in memory.
+        """All `links.csv` rows, held in memory.
 
-        1,925,962 bytes uncompressed; 86,537 entries of
-        `int -> (str, int | None)` is a few MB of Python objects against a
-        process that is about to stream a 521 MB member past itself. Stated
-        rather than implied, because "read the whole file into a dict" is the
-        kind of line that gets questioned later.
+        A few MB of Python objects against a process that is about to stream a
+        521 MB member past itself.
 
         All three columns are numeric, so `split(",")` with an exact column
-        count is enough. An empty `tmdbId` becomes `None` (measured: none is
-        empty, and a nullable carry-through costs nothing); an empty `imdbId`
-        is malformed, because it is the join key.
+        count is enough. An empty `tmdbId` becomes `None`; an empty `imdbId` is
+        malformed, because it is the join key.
         """
         links: dict[int, tuple[str, int | None]] = {}
         for line in self._file.member_lines(_LINKS_MEMBER, skip=1):
@@ -215,10 +200,9 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
     async def _batches(
         self, resume_from: BulkCursor | None, revision: str | None
     ) -> AsyncIterator[BulkBatch[GenomeVector]]:
-        # The dataset-level revision *is* the archive's ETag -- like IMDb and unlike
-        # TMDb, whose date-shaped checkpoint revision is coarser than its ETag and whose
-        # adapter therefore reconciles `LocalFile.replaced` (see `tmdb_ids.py`'s "two
-        # distinct revisions" section).
+        # The dataset-level revision *is* the archive's ETag -- like IMDb and
+        # unlike TMDb, whose date-shaped checkpoint revision is coarser than its
+        # ETag and whose adapter therefore reconciles `LocalFile.replaced`.
         resolved = revision if revision is not None else await self._file.revision()
         usable = resume_from if resume_from and resume_from.revision == resolved else None
         skip_runs = usable.position if usable else 0
@@ -241,14 +225,11 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         run_len = 0
 
         def close_run(movie_id: int) -> None:
-            """Validate the open run.
+            """Validate the open run, emit its vector, retire the movie into `seen`.
 
-            emit its vector if it joins, and retire the movie into `seen`.
-
-            Takes the id rather than reading `current`, so the "a run is only
-            ever closed for a movie that has one" precondition is expressed by
-            the signature instead of by an `assert` the runtime would strip
-            under `-O`.
+            Takes the id rather than reading `current`, so the "only ever closed
+            for a movie that has one" precondition is expressed by the signature
+            instead of by an `assert` the runtime would strip under `-O`.
             """
             if run_len != width or len(run_tags) != width:
                 raise PortDataMalformed(
@@ -324,10 +305,9 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
                     "MovieLens genome-scores.csv has a non-numeric relevance",
                     detail=f"{movie}.{tag}",
                 ) from exc
-            # A value outside [0, 1] is deliberately NOT rejected, and the asymmetry
-            # with `parse_ratings_row` is the point: IMDb's rating is bounded by
-            # `Title`'s rating fields (`Field(ge=0, le=10)`) and a matching CHECK, so an
-            # out-of-range value would abort a COPY anyway.
+            # A value outside [0, 1] is deliberately NOT rejected. The asymmetry
+            # with `parse_ratings_row` is that IMDb's rating has a matching
+            # CHECK, so an out-of-range value would abort a COPY anyway.
             run_tags.add(tag)
             run_len += 1
             lanes[tag - 1] = value

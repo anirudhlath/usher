@@ -16,5 +16,6 @@ class LLMCallRepository(ABC):
     async def record(self, call: LLMCall) -> None:
         """Append one *attempted* completion to the ledger, whether or not it worked.
 
-        and "worked" is not "got an answer".
+        "Worked" is not "got an answer": a reply that failed validation is
+        still a call that cost money.
         """

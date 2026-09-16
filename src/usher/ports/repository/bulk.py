@@ -50,14 +50,11 @@ class CreditNamesFillResult:
 class CrosswalkLinkResult:
     """Outcome of stamping crosswalk pairs onto catalog titles.
 
-    `conflicted` is not an error condition — it is measured and expected.
-    TMDb's movie and series id spaces overlap: 26,968 of the 56,975 distinct
-    TMDb series ids Wikidata knows are also live TMDb *movie* ids (measured
-    2026-07-30), so `titles.tmdb_id` alone cannot identify a TMDb entity and
-    the unique index over it is `(tmdb_id, kind)` (ADR-0011). Two different
-    IMDb ids also sometimes claim the same TMDb id (569 such ids, same
-    measurement); only one can win, and the loser is counted here instead of
-    raising.
+    `conflicted` is expected, not an error. TMDb's movie and series id spaces
+    overlap heavily, so `titles.tmdb_id` alone cannot identify a TMDb entity
+    and the unique index over it is `(tmdb_id, kind)`. Two IMDb ids also
+    sometimes claim one TMDb id; only one can win, and the loser is counted
+    here rather than raised.
     """
 
     linked: int
@@ -69,20 +66,13 @@ class CrosswalkLinkResult:
 class GenomeWriteResult:
     """What one batch of genome vectors actually changed.
 
-    `inserted`/`updated` split for the reason every write on this port
-    splits them: rowcount alone reports their sum, so a re-import would be
-    indistinguishable from a first run. That matters more here than
-    anywhere, because "did this phase actually do anything" is the question
-    the whole `movielens` phase exists to answer.
+    `inserted`/`updated` are split because rowcount alone reports their sum,
+    which makes a re-import indistinguishable from a first run.
 
-    **`unmatched` is the third field and it is the deliverable.** It counts
-    staged rows whose `imdb_id` is in no title — mirroring
-    `CrosswalkLinkResult(linked, unmatched, conflicted)`, which is this
-    project's precedent for reporting a join's misses as a count rather than
-    as silence. `links.csv` holds 86,537 movies and the catalog holds
-    whatever IMDb's dump retained, so the difference is real and expected;
-    what is not acceptable is a join that matched almost nothing looking
-    identical to one that matched everything.
+    `unmatched` counts staged rows whose `imdb_id` is in no title. The
+    MovieLens links and IMDb's dump legitimately disagree, so misses are
+    expected -- what is not acceptable is a join that matched almost nothing
+    looking identical to one that matched everything.
     """
 
     inserted: int
@@ -92,7 +82,7 @@ class GenomeWriteResult:
 
 @dataclass(frozen=True, slots=True)
 class GenomeCoverage:
-    """Genome coverage with its denominators, because "~7%" never had one."""
+    """Genome coverage, carrying every denominator a fraction of it needs."""
 
     with_vector: int
     titles: int
@@ -107,9 +97,9 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
-        """Scope inside which the implementation may relax storage-level optimisations that only.
+        """Scope inside which storage-level optimisations for one-row writes may be relaxed.
 
-        pay for themselves on one-row-at-a-time writes, restoring them on exit.
+        Restored on exit.
         """
 
     @abstractmethod
@@ -130,10 +120,7 @@ class BulkCatalogRepository(ABC):
 
     @abstractmethod
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
-        """Set `imdb_average_rating`/`imdb_num_votes` on titles that already exist.
-
-        returning how many rows changed.
-        """
+        """Set `imdb_average_rating`/`imdb_num_votes` on existing titles, returning rows changed."""
 
     @abstractmethod
     async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:
@@ -147,8 +134,6 @@ class BulkCatalogRepository(ABC):
         self, rows: Sequence[ImdbAka], *, imdb_ids: Sequence[str]
     ) -> AliasWriteResult:
         """Replace the `alias` half of `title_search_names` for the titles `imdb_ids` names.
-
-        from IMDb `title.akas`.
 
         Never creates a title, and never touches a row of any other `kind`.
         """
@@ -180,24 +165,19 @@ class BulkCatalogRepository(ABC):
     ) -> GenomeWriteResult:
         """Store genome vectors against the titles their `imdb_id` resolves to.
 
-        returning what changed and how many resolved to nothing.
+        Reports what changed and how many resolved to nothing.
         """
 
     @abstractmethod
     async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
-        """Replace the whole genome tag vocabulary with `tags` at `revision`.
-
-        returning how many rows it wrote.
-        """
+        """Replace the genome tag vocabulary with `tags` at `revision`, returning rows written."""
 
     @abstractmethod
     async def genome_coverage(self) -> GenomeCoverage:
         """Genome coverage against every denominator that has one.
 
         Two set-based reads -- the counts, and the `genome_revision`
-        histogram -- run at the end of the `movielens` phase and printed. See
-        `GenomeCoverage` for why the enriched-tier fraction is the one that
-        matters and the other three are ceilings.
+        histogram -- so it runs once at the end of a phase, not per row.
         """
 
     @abstractmethod

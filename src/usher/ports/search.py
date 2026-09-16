@@ -13,16 +13,15 @@ from usher.ports.errors import UsherPortError
 class FilterNotSupported(UsherPortError):
     """This index cannot express a filter it was asked for.
 
-    Lives here rather than in `ports/errors.py` for the reason
-    `SourceNotSupported` lives in `ports/source.py`: it is a property of one
-    port's contract, and a service catching `UsherPortError` catches it
+    Lives here rather than in `ports/errors.py` because it is a property of
+    one port's contract, and a service catching `UsherPortError` catches it
     either way.
 
-    **Raising is the whole point.** An index that quietly dropped a filter it
-    did not understand would return *more* rows than it was asked for, and
-    more rows reads as working -- nothing is missing, nothing errors, the
-    page is full. That is how two backends drift into two different meanings
-    for `owned_only` with no failing test anywhere.
+    Raising is the point. An index that quietly dropped a filter it did not
+    understand returns more rows than it was asked for, and more rows reads
+    as working -- nothing missing, nothing erroring, the page full. That is
+    how two backends drift into two meanings for `owned_only` with no failing
+    test anywhere.
     """
 
     def __init__(self, field_name: str) -> None:
@@ -42,9 +41,8 @@ class SearchHit:
 class SearchMode(StrEnum):
     """`SearchRequest.mode`'s three reachable values.
 
-    Reciprocal Rank Fusion is the design (ADR-0002), not a hypothetical option alongside
-    a bool -- which is why this replaced a `semantic: bool` that could not express
-    `FUSED` at all.
+    Three, not a bool: Reciprocal Rank Fusion is the design, and `FUSED` is
+    not expressible as a flag over the other two.
     """
 
     FULL_TEXT = "full_text"
@@ -53,19 +51,15 @@ class SearchMode(StrEnum):
 
 
 class SearchSurface(StrEnum):
-    """Which surface asked -- `search_queries.surface`, PRD 10's amendment 2.
+    """Which surface asked -- `search_queries.surface`.
 
-    Two members, and the whole point of the column is that they are **not**
-    `SearchMode` values. A suggest request is parameterised by a disjoint
-    `SuggestTier`; storing both under `mode` is the
-    two-vocabularies-under-one-name hazard PRD 10 already refuses for
-    `provider`, and it would make every mode-split panel in dashboards 1 and 4
-    a measure of the type-ahead box.
+    The point of the column is that these are *not* `SearchMode` values. A
+    suggest request is parameterised by a disjoint `SuggestTier`, so storing
+    both under `mode` puts two vocabularies under one name and turns every
+    mode-split dashboard panel into a view of the type-ahead box.
 
-    `SUGGEST` is declared here by `m10c` and **emitted by the suggest analytics
-    writer in the same phase**. An enum member nothing emits is what
-    `LLMPurpose.QUERY_EXPANSION` was for two milestones; the member does not
-    ship without its writer.
+    A member here ships with the writer that emits it. One that nothing
+    emits is a column value no query will ever find.
     """
 
     SEARCH = "search"
@@ -84,20 +78,13 @@ class SearchDocument:
     """Everything an index needs about one title, assembled by the caller.
 
     The service builds this from a `Title` it is already holding, which is
-    what makes `index_many` a single statement rather than N round-trips
-    back into the database an engine may not even be able to reach.
+    what makes `index_many` one statement rather than N round trips back into
+    a database an engine may not be able to reach.
 
-    `credits` is **reserved and always empty in M6** (boundary call 2):
-    there is no `Person`/`Credit` table in `src/`, the only place credits
-    physically exist is `raw_payloads.payload`, and building a document out
-    of a *provider's* JSON shape would put a TMDb-shaped concept in
-    `services/`. Weight class B is therefore reserved rather than
-    repurposed, and M7 fills it with a migration rather than a port change.
-
-    `vector` is `None` for a title with no embedding, and that is a
-    *different state from a zero vector*: a title with no vector is not a
-    semantic candidate at all. Treating absence as the origin makes every
-    unembedded title a mediocre match for every query, which is the failure
+    `vector` is `None` for a title with no embedding, which is a different
+    state from a zero vector: a title with no vector is not a semantic
+    candidate at all. Treating absence as the origin makes every unembedded
+    title a mediocre match for every query, which is what
     `SearchOutcome.semantic_coverage` exists to make visible.
     """
 
@@ -120,18 +107,17 @@ class SearchDocument:
 class SearchFilters:
     """The closed vocabulary a request may narrow on.
 
-    A dataclass rather than a `dict[str, Any]` so the key space is one
-    thing, spelled once. Two implementations of a dict-shaped filter
-    argument do not disagree loudly -- they disagree by returning different
-    result sets for the same call.
+    A dataclass rather than a `dict[str, Any]` so the key space is one thing,
+    spelled once. Two implementations of a dict-shaped filter argument do not
+    disagree loudly; they disagree by returning different result sets for the
+    same call.
 
-    **Two of these six name facts a `SearchDocument` does not carry, and
-    that is deliberate.** `owned_only` is a fact about `media_items` and
-    `min_enrichment` is a fact about `titles.enrichment_state`; neither can
-    live on a document without the document becoming a copy of the row. So
-    an engine that stores only documents is structurally unable to express
-    them and must raise `FilterNotSupported` -- which is ADR-0002's "Postgres
-    already holds the join" stated in the type system instead of in prose.
+    Two members name facts a `SearchDocument` does not carry: `owned_only`
+    belongs to `media_items` and `min_enrichment` to
+    `titles.enrichment_state`, and neither can live on a document without the
+    document becoming a copy of the row. An engine that stores only documents
+    is therefore structurally unable to express them and must raise
+    `FilterNotSupported`.
     """
 
     kinds: tuple[TitleKind, ...] = ()
@@ -151,9 +137,8 @@ class SearchRequest:
     query_vector: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
-        # The same move `SourceEvent.__post_init__` makes one port over: a DTO that can
-        # be constructed in a state no implementation can serve pushes the failure onto
-        # whichever backend notices first.
+        # A DTO constructible in a state no implementation can serve pushes
+        # the failure onto whichever backend notices first.
         if self.mode is not SearchMode.FULL_TEXT and self.query_vector is None:
             raise ValueError(f"a {self.mode} request needs a query_vector; the caller embeds")
 
@@ -177,13 +162,12 @@ class SearchIndex(ABC):
     async def index_many(self, documents: Sequence[SearchDocument]) -> None:
         """Insert or update a batch of documents, keyed by `title_id`.
 
-        Idempotent: the job queue redelivers by design (PRD 08), so indexing
-        the same document twice must leave one document, not two.
+        Idempotent: the job queue redelivers by design, so indexing the same
+        document twice must leave one document, not two.
 
-        Returns nothing on purpose. A written-row count is the one thing an
-        in-memory double reports differently from a real upsert -- see
-        `FakeJobQueue`'s seventh divergence, which cost a milestone -- so
-        nothing is invited to branch on it.
+        Returns nothing on purpose. A written-row count is the thing an
+        in-memory double reports differently from a real upsert, so nothing
+        is invited to branch on it.
         """
 
     @abstractmethod
@@ -205,12 +189,9 @@ class SearchIndex(ABC):
 
     @abstractmethod
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        """`SearchOutcome.semantic_coverage` for this filtered population.
+        """`SearchOutcome.semantic_coverage` for this filtered population, without a search.
 
-        without running a search.
-
-        The same number over the same denominator -- see that field for what the
-        denominator is, and is not.
+        The same number over the same denominator as that field.
         """
 
 

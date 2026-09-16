@@ -23,7 +23,7 @@ _run_duration = _meter.create_histogram(
     "usher.sync.run.duration", unit="s", description="Wall time per sync run"
 )
 
-# : What fraction of a source a finished full walk retracted, or would have.
+#: What fraction of a source a finished full walk retracted, or would have.
 _retraction_fraction = _meter.create_histogram(
     "usher.sync.retraction.fraction",
     unit="1",
@@ -34,11 +34,11 @@ _retraction_fraction = _meter.create_histogram(
 def _fraction(part: int, whole: int) -> float:
     """`part / whole`, with an empty source recording a real 0.0.
 
-    The guard itself is a **count comparison rather than a division** for this
-    reason (`db/repositories/media_item.py:482-485`) -- an empty source divides
-    by zero -- and a metric that skipped the record instead would reintroduce
-    the silence the instrument exists to remove: a source with no items would
-    publish nothing, which reads exactly like a source that was never swept.
+    The guard itself is a count comparison rather than a division for the same
+    reason -- an empty source divides by zero -- and a metric that skipped the
+    record instead would reintroduce the silence the instrument exists to
+    remove: a source with no items would publish nothing, which reads exactly
+    like a source that was never swept.
     """
     return part / whole if whole else 0.0
 
@@ -46,12 +46,11 @@ def _fraction(part: int, whole: int) -> float:
 # The two lanes that walk `list_items`.
 _ITEM_LANES: tuple[SyncRunKind, ...] = (SyncRunKind.FULL, SyncRunKind.DELTA)
 
-# The first token of a bounded walk's `error`, and the reason it is a constant rather
-# than prose.
+# The first token of a bounded walk's `error`. A constant rather than prose
+# because the CLI branches on it to decide which flag to offer.
 CEILING_ERROR_CODE = "gap_delta_ceiling"
 
-# The same device for the *other* failure an operator has a command for, and added for
-# the same reason one token over (M10 S9).
+# The same device for the *other* failure an operator has a command for.
 RETRACTION_ERROR_CODE = "availability_ceiling"
 
 
@@ -73,21 +72,18 @@ def _recorded_failure(exc: UsherPortError) -> tuple[str, str | None]:
 class _Progress:
     """The run as the walk has most recently checkpointed it.
 
-    Mutable on purpose, and it exists to fix a real defect rather than to
-    read nicely. `SyncRun` is frozen and `_flush` saves an *evolved* copy
-    after every batch, so a `_walk` that returns its final run leaves
-    `reconcile`'s own binding at whatever it was **before any of that
-    progress** the moment the walk raises. Evolving that stale value into the
-    `FAILED` row then writes `items_seen = 0` over a checkpoint that had
-    recorded eight -- the durable record lies about how far the run got, and
-    PRD 10's dashboard 3 plots exactly that number.
+    Mutable on purpose. `SyncRun` is frozen and `_flush` saves an *evolved* copy
+    after every batch, so a `_walk` that returned its final run would leave
+    `reconcile`'s own binding at whatever it was before any of that progress the
+    moment the walk raises. Evolving that stale value into the `FAILED` row
+    writes `items_seen = 0` over a checkpoint that had recorded eight -- the
+    durable record then lies about how far the run got, and PRD 10's dashboard 3
+    plots exactly that number.
 
-    `BootstrapService.import_dataset` documents the identical trap one
-    milestone down ("evolving that stale value would silently regress the
-    checkpoint backwards on every failure") and solves it by re-fetching;
-    there is no equivalent read here, because `SyncRunRepository` is a
-    history rather than a per-source checkpoint and "the run I started" is
-    only knowable by holding on to it.
+    `BootstrapService.import_dataset` solves the identical trap by re-fetching;
+    there is no equivalent read here, because `SyncRunRepository` is a history
+    rather than a per-source checkpoint and "the run I started" is only knowable
+    by holding on to it.
     """
 
     __slots__ = ("run",)
@@ -228,12 +224,11 @@ class ReconcileService:
         it: the column is what a machine reads, this is what an operator
         reads, and neither is recoverable from the other.
 
-        **It takes no `max_items`, and that is the honest shape rather than
-        an omission.** The count and the ceiling are the same number by
-        construction -- a truncated walk saw exactly `max_items` and stopped
-        -- so a signature carrying both would invite a reader to render two
-        numbers that can never differ. It is rendered once, and the ceiling
-        is named by the setting an operator would change.
+        It takes no `max_items`, and that is the honest shape rather than an
+        omission: the count and the ceiling are the same number by construction,
+        so a signature carrying both would invite a reader to render two numbers
+        that can never differ. The ceiling is named by the setting an operator
+        would change.
         """
         return (
             f"stopped after {run.items_seen} items, this walk's USHER_PUSH_GAP_MAX_ITEMS "
@@ -242,10 +237,7 @@ class ReconcileService:
         )
 
     async def cursor_for(self, source: Source, kind: SyncRunKind) -> AwareDatetime | None:
-        """`None` for a full walk.
-
-        the newest completed item-lane run's start instant for a delta.
-        """
+        """`None` for a full walk; a delta's newest completed run's start instant."""
         if kind is not SyncRunKind.DELTA:
             return None
         cursors = [
@@ -307,15 +299,14 @@ class ReconcileService:
     async def _publish_progress(self, source: Source, run: SyncRun) -> None:
         """One `sync.progress` per batch, scoped to no title.
 
-        **Per batch rather than per run**, because an admin UI's progress bar
-        is the whole point of the event and one at the end is a bar that
-        jumps from 0% to 100%. A nightly walk of the one measured library
-        flushes 1,127 of these.
+        Per batch rather than per run, because an admin UI's progress bar is the
+        whole point of the event and one at the end is a bar that jumps from 0%
+        to 100%. A nightly walk of a real library flushes a thousand of them.
 
-        **Scoped to no title**, which is what makes PRD 07's "Admin UI only"
-        true rather than advisory: a `?titles=` subscriber never sees one, and
-        a detail screen that re-rendered on each of those 1,127 is the failure
-        the filter exists for.
+        Scoped to no title, which is what makes PRD 07's "Admin UI only" true
+        rather than advisory: a `?titles=` subscriber never sees one, and a
+        detail screen re-rendering on every one of those is the failure the
+        filter exists for.
 
         The *name*, not the id: a payload a client renders should carry the
         name an operator configured, and `run.source_id` is a UUID nothing
@@ -339,9 +330,9 @@ class ReconcileService:
         """Retract availability -- full walks only, and only after one finished.
 
         `source_name` is carried in for the metric's label rather than read off
-        the run, which holds only a `source_id`: `usher.sync.run.duration`
-        beside it is already labelled by name, and a second per-source identity
-        in telemetry is what ADR-0043 §2 refuses.
+        the run, which holds only a `source_id`: `usher.sync.run.duration` beside
+        it is already labelled by name, and a second per-source identity in
+        telemetry is one identity too many.
         """
         if kind is not SyncRunKind.FULL:
             return run

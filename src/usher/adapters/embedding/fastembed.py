@@ -14,26 +14,19 @@ from usher.ports.errors import PortDataMalformed, PortUnavailable
 RUNTIME = "fastembed"
 _SEPARATOR = ":"
 
-# Comfortably above the measured 5.96e-08 and comfortably below the 8.99 a
-# missing `2_Normalize` module produces, so the check cannot be tripped by
-# float noise and cannot be passed by the failure it exists to catch.
+# Comfortably above float noise and comfortably below the 8.99 a missing
+# `2_Normalize` module produces, so the check cannot be tripped by rounding
+# and cannot be passed by the failure it exists to catch.
 _NORM_TOLERANCE = 1e-4
-
-# **`_DIMENSION = 384` was here until `m09e` and is deliberately not replaced by
-# `_DIMENSION = 1024`.** A literal was defensible while this adapter served one
-# checkpoint; the moment the storage width is a thing a deployment chooses, a literal
-# here is a *second* declaration of it that agrees with the column by coincidence.
 
 
 def checkpoint_of(model_name: str) -> str:
     """`fastembed:BAAI/bge-small-en-v1.5` -> `BAAI/bge-small-en-v1.5`.
 
-    `partition`, not `rpartition`: a checkpoint id contains `/` and may
-    contain `:` in a revision suffix, and it is the *first* colon that
-    separates the runtime. A bare name with no prefix is taken as the
-    checkpoint, so an operator who wrote one gets the model rather than a
-    parse error -- the `model_name` column still records what this
-    deployment was configured with, which is what makes a swap detectable.
+    `partition`, not `rpartition`: a checkpoint id contains `/` and may contain
+    `:` in a revision suffix, so it is the *first* colon that separates the
+    runtime. A bare name with no prefix is taken as the checkpoint, so an
+    operator who wrote one gets the model rather than a parse error.
     """
     runtime, separator, checkpoint = model_name.partition(_SEPARATOR)
     return checkpoint if separator and runtime == RUNTIME else model_name
@@ -42,23 +35,20 @@ def checkpoint_of(model_name: str) -> str:
 class FastEmbedEmbedder(Embedder):
     """One loaded model, held for the life of the process.
 
-    Constructed by `usher.composition.embedder` and by nothing else. A model
-    is a process-lifetime resource: `build_worker` runs once per worker
-    *pass* at a 5 s floor, and a load is 4.84 s cold / 0.13 s warm over 65 MB
-    of ONNX, so one built per pass would spend more time loading than
-    working, forever, with nothing in the logs saying so.
+    Constructed by `usher.composition.embedder` and by nothing else. A model is
+    a process-lifetime resource: `build_worker` runs once per worker *pass* at a
+    5 s floor, and a cold load costs seconds, so one built per pass would spend
+    more time loading than working with nothing in the logs saying so.
 
     `TextEmbedding.embed` is synchronous and CPU-bound, so every call goes
-    through `asyncio.to_thread`: run inline it would block the event loop for
-    the whole batch, which in the server process is every request and every
-    push frame waiting on an embedding.
+    through `asyncio.to_thread`: inline it would block the event loop for the
+    whole batch -- in the server process, every request waiting on an embedding.
     """
 
     def __init__(self, model_name: str, *, batch_size: int = 16) -> None:
-        # Imported here rather than at module scope, the way `connect_websocket` imports
-        # `websockets`: this dependency lives behind an extra, and `usher.composition`
-        # -- which builds this -- is imported by every entry point including `usher
-        # bootstrap-status`.
+        # Imported here rather than at module scope: this dependency lives
+        # behind an extra, and `usher.composition` -- which builds this -- is
+        # imported by every entry point.
         from fastembed import TextEmbedding
 
         self._model_name = model_name
@@ -95,25 +85,21 @@ class FastEmbedEmbedder(Embedder):
         try:
             vectors = await asyncio.to_thread(self._embed_sync, batch)
         except (OSError, RuntimeError, ValueError) as exc:
-            # The model file has gone, the process is out of memory, the
-            # runtime failed. All three are `PortUnavailable`: `JobWorker`
-            # backs off rather than parking, and a restart genuinely fixes
-            # every one of them. A park would need a human to release work
-            # whose only problem was a bad five minutes.
+            # Model file gone, out of memory, runtime failed: all three are
+            # `PortUnavailable`, so `JobWorker` backs off rather than parking
+            # work whose only problem was a bad five minutes.
             raise PortUnavailable("the embedding model could not run this batch") from exc
         if len(vectors) != len(batch):
             # Order is the port's contract and a length mismatch is the
             # observable half of breaking it: an implementation that
-            # deduplicated internally lands title *n*'s vector on title *m*,
-            # which is the most damaging bug available in this milestone and
-            # is invisible to any per-vector assertion.
+            # deduplicated internally lands title *n*'s vector on title *m*.
             raise PortDataMalformed(
                 f"{self._model_name} returned {len(vectors)} vectors for {len(batch)} texts"
             )
         if not self._norm_checked:
             self._norm_checked = True
-            # **Asserted, not taken from the model card**, and the reason is mechanical
-            # rather than defensive.
+            # Asserted rather than trusted: a checkpoint whose normalize module
+            # is missing returns vectors cosine distance cannot compare.
             norm = math.sqrt(sum(value * value for value in vectors[0]))
             if abs(norm - 1.0) > _NORM_TOLERANCE:
                 raise PortDataMalformed(
@@ -125,20 +111,16 @@ class FastEmbedEmbedder(Embedder):
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
         """The blocking half.
 
-        `fastembed` yields numpy arrays; the port promises `list[float]`, and a caller
-        comparing two vectors with `==` must not be handed something whose `==` returns
-        an array.
+        `fastembed` yields numpy arrays; the port promises `list[float]`, and a
+        caller comparing two vectors with `==` must not get an array back.
         """
         return [[float(value) for value in vector] for vector in self._model.embed(texts)]
 
     async def aclose(self) -> None:
         """Nothing to release.
 
-        `fastembed`'s ONNX session has no close, and the model is freed with this
-        object.
-
-        Present because the port declares it and because a future GPU-resident
-        implementation will have something to do here.
+        `fastembed`'s ONNX session has no close and the model is freed with this
+        object; present because the port declares it.
         """
         return None
 

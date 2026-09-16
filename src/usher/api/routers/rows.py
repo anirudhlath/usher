@@ -23,7 +23,7 @@ from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/rows", tags=["admin"])
 
-# : What `/openapi.json` says the toggle answers when it fails.
+#: What `/openapi.json` says the toggle answers when it fails.
 _TOGGLE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     404: {"model": ProblemResponse, "description": "No provider is registered under that slug."},
     422: {"model": ProblemResponse, "description": "The request was rejected."},
@@ -60,8 +60,8 @@ async def regenerate_rows(queue: JobQueueDep, user_id: DefaultUserIdDep) -> Rege
                 # front of the nightly sweep.
                 priority=JobPriority.DEMAND,
                 # PRD 10's "why did the title I just opened take 45 seconds",
-                # for the one kind whose answer is measured in dollars: the
-                # worker's span links back to this request, minutes later.
+                # for the one kind whose answer costs dollars: the worker's span
+                # links back to this request, minutes later.
                 traceparent=current_traceparent(),
             )
         ]
@@ -75,19 +75,13 @@ async def list_row_providers(
 ) -> list[RowProviderResponse]:
     """Every registered row provider, and whether it composes.
 
-    **Derived from `ROW_PROVIDERS`, never from a literal and never from the
-    table.** The registry is the set of providers that exist -- a provider that
-    is not registered is dead code (boundary call 9) -- and
-    `row_provider_settings` holds only what an operator has touched, so a
-    listing read off the *table* would answer nothing on a fresh install and
-    would grow a row at a time as somebody clicked. The join is a **left** one
-    in `services/rows/__init__.py`, which is also where the default lives:
-    absence means enabled, and this endpoint is where a caller would otherwise
-    be tempted to spell that for itself.
+    **Derived from `ROW_PROVIDERS`, never from the overrides table.** The registry
+    is the set of providers that exist; the table holds only what an operator has
+    touched, so a listing read off it would answer nothing on a fresh install and
+    would grow a row at a time as somebody clicked. Absence means enabled.
 
-    In registry order rather than sorted by slug, so an operator's screen is
-    the same order as `usher home`'s report and does not reshuffle when a
-    provider is renamed.
+    In registry order rather than sorted by slug, so an operator's screen matches
+    `usher home`'s report and does not reshuffle when a provider is renamed.
     """
     return [
         RowProviderResponse(slug=one.slug, enabled=one.enabled)
@@ -111,9 +105,8 @@ async def set_row_provider_enabled(
         )
     await provider_settings.set_enabled(slug, enabled=update.enabled)
     cache.clear()
-    # Built from the slug the registry matched and the value just written,
-    # rather than re-read: `set_enabled` flushes without committing, so a
-    # read-back would answer out of this request's own uncommitted transaction
-    # and could only ever agree with itself. What proves the write landed is
-    # the *next* request's `GET`, which is the assertion both test files make.
+    # Built from the slug the registry matched and the value just written, rather
+    # than re-read: `set_enabled` flushes without committing, so a read-back would
+    # answer out of this request's own uncommitted transaction and could only ever
+    # agree with itself. What proves the write landed is the *next* request's GET.
     return RowProviderResponse(slug=slug, enabled=update.enabled)

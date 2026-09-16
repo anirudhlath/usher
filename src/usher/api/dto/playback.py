@@ -27,8 +27,7 @@ class PlaySourceResponse(BaseModel):
 class PlayTargetResponse(BaseModel):
     """One ranked way to play, as a client sees it.
 
-    The ten fields of `StreamTarget`, named one at a time -- see the module
-    docstring for why a dump is not an option here.
+    Every field of `StreamTarget`, named one at a time rather than dumped.
 
     **`url` is a ticket URL and never a source URL.** It is an absolute
     `https://.../stream/{ticket}` for a `direct` target, or a deep link
@@ -50,10 +49,7 @@ class PlayTargetResponse(BaseModel):
 
     @classmethod
     def of(cls, resolved: PlaybackTarget) -> Self:
-        """Field by field, deliberately.
-
-        See the module docstring.
-        """
+        """Field by field, deliberately."""
         target = resolved.target
         return cls(
             kind=target.kind,

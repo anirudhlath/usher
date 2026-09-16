@@ -20,7 +20,7 @@ class BulkCursor:
 class BulkBatch[RowT]:
     """One committable unit of work.
 
-    the rows, plus the cursor that is correct *after* they have been persisted.
+    The rows, plus the cursor that is correct *after* they are persisted.
 
     Generic over the row type rather than carrying `Mapping[str, object]`:
     every implementation yields exactly one record shape, and a weakly-typed
@@ -57,18 +57,12 @@ class ImdbRating:
     """One row of `title.ratings.tsv.gz`, named for the source that supplied it.
 
     `average_rating` is IMDb's `averageRating`, already on the 0-10 scale
-    `titles.imdb_average_rating` promises, so no rescaling happens anywhere.
+    `titles.imdb_average_rating` promises, so nothing rescales it.
 
-    **The names carry the source because the columns do.** These were
-    `community_rating` and `vote_count` until ADR-0040, which is how an IMDb
-    import came to overwrite TMDb's figures with nothing recording which
-    source had won. **The gap is ~38x, over one identified population counted
-    both ways**: of the frozen tier's 130,647 enriched rows, median TMDb
-    `vote_count` **15** against a median frozen IMDb `numVotes` of **576**
-    (`.claude/rules/tmdb-and-enrichment.md`, group S3). That pairing is
-    before-and-after over one frozen set of ids rather than two columns read
-    off one row -- no row could hold both until `m10a` and this port's own
-    redirect, which is the entire defect.
+    The names carry the source because the columns do. IMDb's vote counts are
+    an order of magnitude above TMDb's for the same titles, so a source-blind
+    name lets one import overwrite the other's figures with nothing recording
+    which won.
     """
 
     imdb_id: str
@@ -99,19 +93,14 @@ class ImdbName:
 class ImdbPrincipal:
     """One row of IMDb's `title.principals.tsv.gz`: a person on a title.
 
-    **`category`, `job` and `characters` are read and dropped**, the way
-    `ImdbAka` reads and drops `types` and `attributes`: nothing downstream of
-    this record has a column for a role, because there is no `credits` row.
-    The 13 categories are measured in `usher.adapters.bulk.imdb` and none is
-    filtered on.
+    `category`, `job` and `characters` are read and dropped, as `ImdbAka`
+    drops `types` and `attributes`: nothing downstream has a column for a
+    role, because there is no `credits` row. No category is filtered on.
 
     `ordering` is IMDb's own 1-based per-title rank, carried unconverted --
-    there is no `billing_order` to re-base it onto. It is the only ranking the
-    dump supplies and it is what orders `titles.credit_names`, whose order
-    *is* the ranking. Measured over the pinned `title.principals.tsv.gz`
-    (`"08ce60665889cb40c7371e1eab44a1f2-93"`, 101,151,422 data rows,
-    2026-08-11): present and integral on every row, min 1, max 75, and
-    ascending within every one of the 11,491,032 titles.
+    there is no `billing_order` to re-base it onto. It is the only ranking
+    the dump supplies, and it is what orders `titles.credit_names`, whose
+    order *is* the ranking.
     """
 
     imdb_id: str
@@ -123,15 +112,13 @@ class ImdbPrincipal:
 class ImdbCreditNames:
     """Every name IMDb credits on one title, resolved and in rank order.
 
-    **The join of `title.principals` and `name.basics`, done in the adapter
-    because there is nowhere else to do it.** With no `people` table the
-    right-hand side of that join has no home in the database, so
-    `IMDbCreditNamesDataset` resolves it against an in-memory index and this
-    record is what crosses the port -- already ordered, already deduplicated,
-    and never empty. A title whose principals all name people `name.basics`
-    does not hold yields no record at all rather than an empty one, because
-    the writer *sets* `titles.credit_names` and an empty tuple would blank an
-    array some other source filled.
+    The join of `title.principals` and `name.basics`, done in the adapter
+    because with no `people` table the right-hand side has no home in the
+    database. Already ordered, already deduplicated, and never empty: a title
+    whose principals all name people `name.basics` does not hold yields no
+    record rather than an empty one, because the writer *sets*
+    `titles.credit_names` and an empty tuple would blank what another source
+    filled.
     """
 
     imdb_id: str
@@ -202,11 +189,9 @@ class GenomeVector:
 class BulkDataset[RowT](ABC):
     """A third-party bulk dataset, streamed as resumable batches.
 
-    Implementations: `IMDbTitleDataset`, `IMDbRatingDataset`,
-    `IMDbAkaDataset`, `TMDbIdDataset`, `WikidataCrosswalkDataset`,
-    `MovieLensGenomeDataset` (`usher.adapters.bulk`). Port named for the
-    role, implementations for the service — the same split as
-    `SourceAdapter`/`EmbyAdapter` (ADR-0009).
+    Implementations live in `usher.adapters.bulk`. The port is named for the
+    role and they are named for the service, so a second provider of one
+    dataset does not rename this.
     """
 
     @property
@@ -221,12 +206,10 @@ class BulkDataset[RowT](ABC):
     @property
     @abstractmethod
     def attribution(self) -> str:
-        """The attribution string this dataset's licence requires a client to display (PRD 04's.
+        """The attribution string this dataset's licence requires a client to display.
 
-        hard rule 4).
-
-        Never empty — a dataset with no attribution requirement returns its own name and
-        source URL, so the API surface has something to serve either way.
+        Never empty -- a dataset with no attribution requirement returns its
+        own name and source URL, so the API has something to serve either way.
         """
 
     @abstractmethod
@@ -234,16 +217,11 @@ class BulkDataset[RowT](ABC):
         """The current upstream snapshot token, cheaply.
 
         Raises `PortUnavailable` if upstream cannot be reached, or
-        `PortRateLimited` if it answered but asked to be backed off (e.g. an
-        HTTP 429) — both `usher.ports.errors`, and both real: the shared
-        download helper every M2 adapter's `revision()` delegates to routes
-        a 429 through exactly that translation. This is the first call a
-        run makes, so an unreachable or rate-limited dataset fails before
-        any write happens, and a caller must catch both from this call the
-        same way it catches both from `batches()` — a port's docstring
-        naming only one of the errors it actually raises is what let a
-        `PortRateLimited` here escape uncaught in an earlier draft of the
-        caller that drives this port.
+        `PortRateLimited` if it answered but asked to be backed off. Both are
+        real: the shared download helper routes an HTTP 429 through that
+        translation. This is the first call a run makes, so an unreachable or
+        rate-limited dataset fails before any write happens, and a caller
+        must catch both here exactly as it catches both from `batches()`.
         """
 
     @abstractmethod

@@ -238,12 +238,10 @@ async def _probe_one_job(url: str, title_id: uuid.UUID) -> dict[str, int]:
 def _upgrade_head(url: str) -> None:
     """The real chain, driven the way `tests/integration/conftest.py` drives it.
 
-    🔴 **`config.set_main_option("sqlalchemy.url", ...)` is a silent no-op
-    here**, and it cost a run: `alembic/env.py` reads the URL from
-    `usher.config.get_settings()` rather than from `alembic.ini` -- deliberately,
-    and its own docstring says so -- so the migration ran against whatever
-    `USHER_DATABASE_URL` happened to hold, the container stayed empty, and the
-    first `INSERT` answered `relation "titles" does not exist`. The env vars are
+    **`config.set_main_option("sqlalchemy.url", ...)` is a silent no-op here.**
+    `alembic/env.py` reads the URL from `usher.config.get_settings()` rather
+    than from `alembic.ini`, so the migration would run against whatever
+    `USHER_DATABASE_URL` holds and leave the container empty. The env vars are
     what `env.py` reads, so the env vars are what get set.
     """
     import os
@@ -319,8 +317,8 @@ def main() -> int:
             # Re-seeded per rung, so every rung derives titles nothing has
             # derived before. `DeriveService`'s write is a *replace*, so a
             # second pass over the same titles is a different -- cheaper --
-            # workload than the first, and comparing a warm rung against a
-            # cold one would measure the seeding rather than the concurrency.
+            # workload than the first, and a warm rung against a cold one
+            # times the seeding rather than the concurrency.
             title_ids = asyncio.run(
                 seed(url, titles=args.titles, fixture=fixture, offset=seed_offset)
             )

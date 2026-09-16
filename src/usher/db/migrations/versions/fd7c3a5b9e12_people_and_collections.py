@@ -41,7 +41,6 @@ def _adopt_collection_links_orphaned_by_an_earlier_downgrade() -> None:
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.create_table(
         "collections",
         sa.Column("id", sa.UUID(), nullable=False),
@@ -152,8 +151,8 @@ def upgrade() -> None:
         postgresql_where=sa.text("tmdb_credit_id IS NOT NULL"),
     )
 
-    # The M1 column finally gets its target, plus the index the referential
-    # check needs and PRD 02 had deferred to M9. See this module's docstring.
+    # `titles.collection_id` gets its target, plus the index the referential
+    # check needs.
     _adopt_collection_links_orphaned_by_an_earlier_downgrade()
     op.create_index(
         "ix_titles_collection_id",
@@ -183,7 +182,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     for table_name in reversed(_TRIGGERED_TABLES):
         op.execute(f"DROP TRIGGER IF EXISTS trg_{table_name}_set_updated_at ON {table_name}")
 

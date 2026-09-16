@@ -20,7 +20,7 @@ from usher.ports.repository import UnmatchedCursorPosition
 
 router = APIRouter(prefix="/admin/unmatched", tags=["admin"])
 
-# : What `/openapi.json` says the paged read answers when it fails.
+#: What `/openapi.json` says the paged read answers when it fails.
 _QUEUE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     400: {"model": ProblemResponse, "description": "The cursor is malformed or not this query's."},
     422: {"model": ProblemResponse, "description": "The request was rejected."},
@@ -35,8 +35,8 @@ _RESOLVE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ProblemResponse, "description": "The resolution was rejected."},
 }
 
-# : `usher unmatched`'s own default, so an operator moving from the CLI to the : API
-# sees the same page.
+#: `usher unmatched`'s own default, so an operator moving from the CLI to the
+#: API sees the same page.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 
@@ -46,13 +46,12 @@ def _keyset(source_id: uuid.UUID | None) -> CursorSpec:
 
     The source filter rides in `filters` rather than in the keyset, which is
     what makes a cursor minted over one source and replayed against another a
-    `400 invalid_cursor` instead of a plausible, wrong, silent page. ADR-0034:
-    the digest is coherence, not security -- it is computed over values the
-    client itself sent, and the client is the only party that ever holds the
-    cursor.
+    `400 invalid_cursor` instead of a plausible, wrong, silent page. The digest
+    is coherence, not security -- it is computed over values the client itself
+    sent, and the client is the only party that ever holds the cursor.
 
     Two components, ending in the UUIDv7 primary key because `CursorSpec`
-    refuses a keyset that does not (ADR-0003). Here the id is doing real work
+    refuses a keyset that does not. Here the id is doing real work
     rather than satisfying a rule: a source that imported a thousand files in
     one second stamps them all with the same `added_at`.
     """
@@ -66,9 +65,8 @@ def _keyset(source_id: uuid.UUID | None) -> CursorSpec:
 def _after(cursor: str | None, *, spec: CursorSpec) -> UnmatchedCursorPosition | None:
     """The wire cursor as the typed position the port takes.
 
-    ADR-0034's first decision, spelled: the base64 stops here. A port that
-    accepted a cursor would have to decode one, which means knowing the sort
-    vocabulary of the layer above it.
+    The base64 stops here. A port that accepted a cursor would have to decode
+    one, which means knowing the sort vocabulary of the layer above it.
 
     **A `None` `added_at` is a position, not a missing one.** The codec tags a
     null component `NULL` on the wire and hands it back as `None`, which is
@@ -95,12 +93,11 @@ def _after(cursor: str | None, *, spec: CursorSpec) -> UnmatchedCursorPosition |
 def _rejected(detail: str) -> ProblemException:
     """A body this catalog cannot act on.
 
-    `422 validation_failed`, on the precedent ADR-0030's table already
-    records for `GET /search`'s unservable `?mode=semantic`: the request
-    parsed, and the instruction it carries cannot be carried out. Every
-    `detail` handed here is a **fixed sentence** -- `api/errors.py`'s whole
-    reason for existing is undone one field to the left the moment one
-    interpolates a value the client submitted.
+    `422 validation_failed`, on the same footing as `GET /search`'s unservable
+    `?mode=semantic`: the request parsed, and the instruction it carries cannot
+    be carried out. Every `detail` handed here is a **fixed sentence** --
+    `api/errors.py`'s reason for existing is undone one field to the left the
+    moment one interpolates a value the client submitted.
     """
     return ProblemException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

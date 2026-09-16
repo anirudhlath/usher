@@ -26,34 +26,28 @@ __all__ = [
 class TitleGenres:
     """One title's id and its genre labels.
 
-    the whole projection the write-time genre sweep reads and writes.
+    The whole projection the write-time genre sweep reads and writes, not a
+    `Title`: the backfill walks the catalog to decide whether one `text[]`
+    needs touching, and hydrating an entity per row would detoast an
+    overview, derived tsvector state and cast names to answer that.
 
-    **Not a `Title`.** `usher genres --backfill` walks 1.27M rows to decide
-    whether two of thirty-three columns need touching, and hydrating an
-    entity per row would detoast an overview, a tsvector's worth of derived
-    state and up to ten cast names to answer a question about a `text[]`.
-    `credit_names_for`'s mapping is the nearest precedent on this port: a
-    read shaped by what the caller does with it rather than by the aggregate.
-
-    A tuple rather than a list, so it compares by value against
-    `canonicalise_genres`' own output — which is what makes "did this row
-    change" one `!=` rather than a normalisation of two container types.
+    A tuple, not a list, so it compares by value against
+    `canonicalise_genres`' output -- "did this row change" is one `!=`.
     """
 
     id: uuid.UUID
     genres: tuple[str, ...]
 
 
-# : Each sort's `titles` column -- which is also its `Title` field, because the : two
-# are 1:1 by the rule `db/models/title.py` and `_to_domain` share -- and : whether it
-# runs descending.
+#: Each sort's `titles` column -- also its `Title` field, the two being 1:1 --
+#: and whether it runs descending.
 _ORDERS: Final[Mapping[str, tuple[str, bool]]] = MappingProxyType(
     {
         "name": ("sort_name", False),
         "year": ("year", True),
-        # The keys are `BrowseSort`'s values and therefore the public
-        # `?sort=` vocabulary; the values are `Title` attributes. ADR-0040
-        # moved the attributes and deliberately left the vocabulary alone.
+        # Keys are `BrowseSort`'s values and so the public `?sort=`
+        # vocabulary; values are `Title` attributes. Renaming an attribute
+        # must not rename the query string.
         "popularity": ("tmdb_popularity", True),
         "vote_count": ("tmdb_vote_count", True),
     }
@@ -63,14 +57,13 @@ _ORDERS: Final[Mapping[str, tuple[str, bool]]] = MappingProxyType(
 class BrowseSort(StrEnum):
     """The closed vocabulary `browse` orders by.
 
-    Four members, and three of the four keys are **nullable** —
-    `titles.year`, `titles.tmdb_popularity` and `titles.tmdb_vote_count` all
-    are, and `tmdb_popularity` was measured NULL on all 1,271,138 rows of a
-    bootstrap-only catalog. That is why every order here is NULLS LAST and why the keyset
-    predicate carries an `IS NOT NULL` leg: see `TitleRepository.browse`.
+    Three of the four keys are nullable -- `titles.year`,
+    `titles.tmdb_popularity`, `titles.tmdb_vote_count` -- and a
+    bootstrap-only catalog has them NULL throughout. Hence NULLS LAST on
+    every order and the `IS NOT NULL` leg in `TitleRepository.browse`'s
+    keyset predicate.
 
-    `name` sorts on `sort_name` rather than on `name`, which is the column
-    `Title.sort_name`'s own comment reserves for "catalog ordering", and it is
+    `name` sorts on `sort_name`, the column reserved for catalog ordering and
     the one key that cannot be NULL.
     """
 
@@ -83,18 +76,13 @@ class BrowseSort(StrEnum):
     def order_for(cls, sort: "BrowseSort") -> tuple[str, bool]:
         """`(column, descending)` for `sort`, or `FilterNotSupported`.
 
-        **A classmethod taking the value rather than a property**, because the
-        argument this has to refuse is precisely one that is *not* a member:
-        a route mapping a query string, or a later member added here without
-        an entry in `_ORDERS`. `str(sort)` is the member's value for a real
-        member and the raw string for anything cast into the annotation, so
-        both reach the same lookup.
+        A classmethod taking the value, not a property, because what it must
+        refuse is an argument that is *not* a member: a raw query string, or
+        a member added without an `_ORDERS` entry. Both reach the same lookup
+        through `str(sort)`.
 
-        Raising is the whole point, and it is `FilterNotSupported`'s own
-        stated argument one port over: a sort quietly ignored answers with
-        *more* rows in some other order, and more rows reads as working. A
-        `/browse` that silently fell back to `id` would page correctly, look
-        correct, and be a different screen.
+        Raising is the point. A sort quietly ignored answers with more rows
+        in some other order, and more rows reads as working.
         """
         try:
             return _ORDERS[str(sort)]
@@ -103,12 +91,11 @@ class BrowseSort(StrEnum):
 
     @classmethod
     def position_of(cls, title: Title, *, sort: "BrowseSort") -> "BrowseCursorPosition":
-        """Where `title` sits in `sort`'s order — what a caller hands back as `browse`'s `after`.
+        """Where `title` sits in `sort`'s order -- `browse`'s `after`.
 
-        Here rather than in the caller so the sort's key is read from
-        `_ORDERS` in one place. A route that spelled `title.year` for itself
-        would be a second definition of what `year` means, free to disagree
-        with the statement it is paging.
+        Here, not in the caller, so the sort's key is read from `_ORDERS` in
+        one place. A route spelling `title.year` for itself would be a second
+        definition of `year`, free to disagree with the statement it pages.
         """
         column, _ = cls.order_for(sort)
         key: str | int | float | None = getattr(title, column)
@@ -119,19 +106,15 @@ class BrowseSort(StrEnum):
 class BrowseCursorPosition:
     """One row's place in a `BrowseSort`'s order: the sort key, and the id.
 
-    **Typed values, never a cursor.**
-    [ADR-0034](../../../docs/prd/decisions/0034-the-cursor-carries-a-position.md)
-    holds that no port takes an opaque cursor — the base64 lives in
-    `usher.api.cursor` and a port that accepted one would have to decode it,
-    which means knowing the sort vocabulary of the layer above. So the route
-    decodes, builds one of these, and hands it down.
+    Typed values, never an opaque cursor. The base64 lives in
+    `usher.api.cursor`; a port accepting one would have to decode it, which
+    means knowing the layer above's sort vocabulary. The route decodes,
+    builds one of these, and hands it down.
 
-    `key` is `None` for a row whose sort column is NULL, and that is a
-    *position* rather than a missing value: `browse` orders NULLs last, so a
-    page boundary can land inside the unkeyed group and the walk has to be
-    able to resume from it. `id` is the UUIDv7 primary key, which is what
-    makes the keyset a total order (ADR-0003, and `CursorSpec` refuses a
-    keyset that does not end in one).
+    `key` is `None` for a NULL sort column, and that is a position rather
+    than a missing value -- NULLs order last, so a page boundary can land
+    inside the unkeyed group and the walk must resume from it. `id` is the
+    UUIDv7 primary key, which is what makes the keyset a total order.
     """
 
     key: str | int | float | None
@@ -142,14 +125,11 @@ class BrowseCursorPosition:
 class BrowseFacets:
     """What else the client could have asked for, counted.
 
-    Each facet is computed over the filtered population **minus its own
-    predicate** — see `TitleRepository.browse_facets`, which is where that
-    rule is argued.
+    Each facet counts the filtered population minus its own predicate.
 
-    Both maps are wrapped in a `MappingProxyType` so a caller cannot mutate a
-    count it was handed. Immutability only: `mappingproxy` delegates
-    `__hash__` to the dict it wraps, which is `None`, so this dataclass is not
-    hashable and does not claim to be (CLAUDE.md).
+    The maps are `MappingProxyType` so a caller cannot mutate a count it was
+    handed. Immutability only -- `mappingproxy` delegates `__hash__` to the
+    dict it wraps, so this dataclass is not hashable.
     """
 
     genres: Mapping[str, int] = field(default_factory=dict)
@@ -163,49 +143,34 @@ class BrowseFacets:
 class TitleRepository(ABC):
     """Persistence for canonical titles.
 
-    kept behind a port so services depend on this ABC and never on `usher.db` directly —
-    see ADR-0009.
+    Behind a port so services depend on this ABC, never on `usher.db`.
     """
 
     @abstractmethod
     async def add(self, title: Title) -> None:
         """Persist a new title.
 
-        This is an insert, not an upsert: a duplicate `title.id` — or any
-        other unique constraint the backing store enforces — raises
-        `RepositoryConflict` (`usher.ports.errors`). Implementations
-        translate their backing store's own conflict error (e.g.
-        Postgres's `IntegrityError`) into this; callers never import a
-        storage-specific exception to handle it. See `update` for
-        mutating a title that already exists.
+        Insert, not upsert: a duplicate `title.id`, or any other unique
+        constraint the store enforces, raises `RepositoryConflict`.
+        Implementations translate the store's own conflict error into it so
+        callers never import a storage-specific exception.
 
-        The caller owns the session and the transaction: this flushes, so
-        the row and any conflict are visible immediately, but it never
-        commits. Committing or rolling back is the caller's call.
+        The caller owns the session and transaction. This flushes, so the row
+        and any conflict are visible immediately, but never commits.
         """
 
     @abstractmethod
     async def update(self, title: Title) -> None:
-        """Persist a mutated, already-existing title — e.g.
+        """Persist a mutated, already-existing title.
 
-        `title.evolve(enrichment_state=EnrichmentState.ENRICHED, ...)` after enrichment,
-        which is the read-through design's whole point (PRD 03: stub-on-sight, then
-        enrich in place).
+        Update, not upsert: a `title.id` that does not exist raises
+        `RepositoryNotFound`. Same session and transaction ownership as
+        `add` -- flushes, never commits.
 
-        This is an update, not an upsert: a `title.id` that does not
-        already exist raises `RepositoryNotFound` (`usher.ports.errors`).
-        See `add` for a brand-new title.
-
-        Same session/transaction ownership as `add`: flushes, never
-        commits.
-
-        Unconditional last-write-wins: there is no optimistic concurrency
-        check (no version column, no `WHERE` clause comparing against the
-        row's state as last read) — the incoming `title` simply overwrites
-        whatever is currently stored, even if it was read before some
-        other write landed. M4's concurrent enrichment (multiple sources
-        or workers updating the same title around the same time) will
-        eventually need one; not built here.
+        Unconditional last-write-wins. There is no optimistic concurrency
+        check, so `title` overwrites whatever is stored even if it was read
+        before another write landed; concurrent enrichment of one title will
+        eventually need one.
         """
 
     @abstractmethod
@@ -216,17 +181,11 @@ class TitleRepository(ABC):
     async def get_by_tmdb_id(self, tmdb_id: int, kind: TitleKind) -> Title | None:
         """Fetch by TMDb id *within its namespace*, or None if no title carries it.
 
-        `kind` is not optional, and not a convenience filter. TMDb keys
-        movies and TV series in separate id spaces that both land in this
-        one column, and they overlap heavily: 26,968 of the 56,975 distinct
-        TMDb series ids Wikidata knows are also live TMDb movie ids
-        (measured 2026-07-30). "Which title has tmdb_id 90000550" has no single
-        answer; "which movie has tmdb_id 90000550" does. See
-        [ADR-0011](../../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md).
-
-        Every real caller already knows the kind — M4's matcher reads it off
-        the source item alongside `ProviderIds.Tmdb` — so this costs nothing
-        it does not already have.
+        `kind` is not optional and not a convenience filter. TMDb keys movies
+        and series in separate id spaces that both land in this one column,
+        and roughly half of all series ids are also live movie ids. "Which
+        title has this tmdb_id" has no single answer; "which movie has it"
+        does. Callers read the kind off the source item anyway.
         """
 
     @abstractmethod
@@ -237,16 +196,12 @@ class TitleRepository(ABC):
     async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
         """Every title named by `title_ids` that still exists, in any order.
 
-        **A missing id is an omission, never an error.** A title deleted
-        between an index write and a search read is ordinary, and the caller
-        re-orders by its own ranking anyway — so returning fewer rows than
-        asked for is the contract, and a caller that indexes the result by id
-        must tolerate the gap.
+        A missing id is an omission, never an error: a title deleted between
+        an index write and a search read is ordinary, and the caller re-orders
+        by its own ranking anyway. Returning fewer rows than asked for is the
+        contract, so a caller indexing the result by id must tolerate gaps.
 
-        Exists because hydrating a 50-hit result set through `get()` is 50
-        statements per search: the same round-trip-per-item shape `index_many`
-        was introduced to delete from `SearchIndex`, arriving from the other
-        direction.
+        One statement, not one per hit.
         """
 
     @abstractmethod
@@ -314,12 +269,11 @@ class TitleRepository(ABC):
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         """Catalog size broken down by enrichment tier.
 
-        Always returns all three `EnrichmentState` members as keys, 0 for
-        any tier with no titles — never a sparse dict. A `GROUP BY` only
-        returns tiers with at least one row; an implementation must fill
-        in the rest itself rather than let the query's own sparsity leak
-        through (a bare `counts[EnrichmentState.ENRICHED]` must never
-        raise `KeyError` just because nothing is enriched yet).
+        Every `EnrichmentState` member is a key, 0 for an empty tier, never a
+        sparse dict. A `GROUP BY` returns only tiers with rows, so an
+        implementation fills the rest in itself: a bare
+        `counts[EnrichmentState.ENRICHED]` must not raise `KeyError` merely
+        because nothing is enriched yet.
         """
 
     @abstractmethod

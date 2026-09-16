@@ -53,16 +53,12 @@ WITH deduped AS (
     SELECT id, tmdb_id, name, sort_name, known_for_department FROM deduped
     ON CONFLICT (tmdb_id) WHERE tmdb_id IS NOT NULL DO UPDATE SET
         -- Assigned, not COALESCEd: NOT NULL and always supplied, so keeping
-        -- a stored one would make a corrected name unfixable.
+        -- a stored one would leave a renamed person unfixable.
         --
-        -- **`COALESCE(excluded.name, people.name)` here is an EQUIVALENT
-        -- mutant, not a defect**, and the plan's mutation table says it is
-        -- killed by the rename case. It is not, and nothing can kill it:
-        -- `people.name` is NOT NULL (verified off `pg_attribute.attnotnull`),
-        -- so `excluded.name` is never NULL and the COALESCE always returns
-        -- it. What the rename assertion *does* kill is `name` dropped from
-        -- this SET clause altogether, which is the real version of the
-        -- mistake -- measured, 1 case fails.
+        -- `COALESCE(excluded.name, people.name)` is indistinguishable here
+        -- rather than wrong: `people.name` is NOT NULL, so `excluded.name` is
+        -- never NULL and the COALESCE always returns it. Dropping `name` from
+        -- this SET clause is the version of the mistake that is observable.
         name = excluded.name,
         sort_name = excluded.sort_name,
         -- COALESCEd, and required rather than defensive: `created_by[]`
@@ -361,10 +357,10 @@ class PostgresCreditRepository(CreditRepository):
                 # `enum_column`'s storage identifier is the member's `.value`;
                 # binding the member itself sends "CAST" and matches nothing.
                 row.kind.value,
-                # Same, one column over. ADR-0036: the row carries the source
-                # that supplied it, and `credits.source` is NOT NULL with no
-                # server default, so omitting this is a loud refusal at the
-                # INSERT rather than a quiet `tmdb` on an IMDb row.
+                # Same, one column over. The row carries the source that supplied
+                # it, and `credits.source` is NOT NULL with no server default, so
+                # omitting this is a loud refusal at the INSERT rather than a quiet
+                # `tmdb` on an IMDb row.
                 row.source.value,
                 row.tmdb_credit_id,
                 row.character,
@@ -426,11 +422,10 @@ class PostgresCreditRepository(CreditRepository):
                     )
                     written = (await self._session.execute(text(_INSERT_CREDITS))).scalar_one()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** This method writes `title_search_names` and
-            # `titles.credit_names`, neither of which is narrower than the field feeding
-            # it -- but its statements bind caller-supplied `uuid[]`, `text[]` and
-            # `text` arrays, so every class-22 refusal they can raise is about a value
+            # **`DBAPIError` rather than `IntegrityError`.** The statements bind
+            # caller-supplied `uuid[]`, `text[]` and `text` arrays and compute
+            # nothing, so every class-22 refusal they can raise is about a value this
+            # call handed in.
             if not is_row_refusal(exc):
                 raise
             # A `title_id`/`person_id` naming a row that does not exist, a

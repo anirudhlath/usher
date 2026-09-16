@@ -21,11 +21,11 @@ from usher.services.search import SemanticSearchUnavailable
 
 router = APIRouter(tags=["search"])
 
-# : The shortest `q`, in characters after stripping, that this route will run : **tier
-# 1** for.
+#: The shortest `q`, in characters after stripping, that this route will run
+#: **tier 1** for.
 _MIN_PREFIX_CHARS: Final = 4
 
-# : Per tier, so the response can report the rule that actually applied.
+#: Per tier, so the response can report the rule that actually applied.
 _MIN_CHARS_FOR_TIER: Final[dict[SuggestTier, int]] = {
     SuggestTier.PREFIX: _MIN_PREFIX_CHARS,
     SuggestTier.FUZZY: 1,
@@ -42,8 +42,8 @@ _NO_EMBEDDER_DETAIL: Final = (
     "narrowing, or mode=full_text."
 )
 
-# : Declared so `/openapi.json` describes the failure with the shape it really : has,
-# exactly as `api/routers/playback.py` declares its three.
+#: Declared so `/openapi.json` describes the failure with the shape it really
+#: has, exactly as `api/routers/playback.py` declares its three.
 _SEARCH_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     422: {
         "model": ProblemResponse,
@@ -157,10 +157,10 @@ async def suggest(
         SuggestTier,
         Query(
             description=(
-                "`prefix` is the btree probe that answers every keystroke and has no typo "
-                "tolerance (1.9% measured); `fuzzy` is the trigram path that has it, at "
-                "p50 33.6 ms, and is meant to be debounced behind the first. Neither is a "
-                "fallback for the other."
+                "`prefix` is the btree probe that answers every keystroke and has no "
+                "typo tolerance; `fuzzy` is the trigram path that has it, at a cost "
+                "meant to be debounced behind the first. Neither is a fallback for the "
+                "other."
             )
         ),
     ] = SuggestTier.PREFIX,
@@ -176,10 +176,6 @@ async def suggest(
     ] = 10,
 ) -> SuggestResponse:
     """Answer one tier, and say which one."""
-    # The writer, and why the paragraph above is short: a route handler's
-    # docstring is published as the operation's `description` in
-    # `/openapi.json`, so the internal half of this argument is a comment.
-
     # `surface` says which box asked and `tier` says which index ran, so a
     # keystroke and a search do not collapse into one vocabulary -- and every
     # mode-split panel owes a `WHERE surface = 'search'`.

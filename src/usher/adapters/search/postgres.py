@@ -114,21 +114,19 @@ WHERE t.enrichment_state <> 'skeleton'
 async def _apply_hnsw_gucs(session: AsyncSession, ef_search: int) -> None:
     """Per-transaction pgvector settings for a filtered ANN query.
 
-    **`SET LOCAL`, never `SET`** -- it reverts at COMMIT (verified), so a
-    pooled connection is left clean for the next unrelated request.
+    **`SET LOCAL`, never `SET`** -- it reverts at COMMIT, so a pooled connection
+    is left clean for the next unrelated request.
 
-    **Interpolated from an allow-list, never bound.** `SET LOCAL` cannot take
-    a bind parameter at all, so the value is checked against the closed set
-    of legal values first and the integer is bounded before it reaches the
-    string. Neither value has any path from user input.
+    **Interpolated from an allow-list, never bound.** `SET LOCAL` cannot take a
+    bind parameter at all, so the value is checked against the closed set of
+    legal values first and the integer is bounded before it reaches the string.
+    Neither value has any path from user input.
 
-    **And there is no feature detection here, deliberately.** `pg_settings`
-    returns **zero** `hnsw.%` rows on a fresh connection and one after any
-    query that touched a vector operator -- the library loads lazily, per
-    backend. So a probe for "does this GUC exist" answers differently
-    depending on what the connection happened to do first, which is a
-    flaky-test generator. Setting the GUC on a cold connection succeeds
-    regardless, so the honest implementation just sets it.
+    **No feature detection here, deliberately.** `pg_settings` returns no
+    `hnsw.%` rows on a fresh connection and some after any query that touched a
+    vector operator, because the library loads lazily per backend -- so a probe
+    for "does this GUC exist" is a flaky-test generator. Setting it on a cold
+    connection succeeds regardless.
     """
     if _ITERATIVE_SCAN not in _ITERATIVE_SCAN_VALUES:  # pragma: no cover - constant
         raise ValueError(f"unknown hnsw.iterative_scan value {_ITERATIVE_SCAN!r}")
@@ -140,28 +138,24 @@ async def _apply_hnsw_gucs(session: AsyncSession, ef_search: int) -> None:
 
 
 async def _force_exact_scan(session: AsyncSession) -> None:
-    """Boundary call 4's exact path: no ANN, no approximation, no recall question at all.
+    """Boundary call 4's exact path: no ANN, no approximation, no recall question.
 
-    PRD 05 puts owned titles on exact brute-force cosine, and the reason it
-    is affordable is boundary call 4 -- the embedded population is the
-    enriched tier at 2k-10k, not the 1,271,138-row catalog. `owned_only` is
-    also the most selective filter in the vocabulary, which is exactly the
-    selectivity that collapses HNSW's post-filter, so the two arguments point
-    the same way.
+    PRD 05 puts owned titles on exact brute-force cosine, and it is affordable
+    because the embedded population is the enriched tier at 2k-10k rather than
+    the whole catalog. `owned_only` is also the most selective filter in the
+    vocabulary, which is the selectivity that collapses HNSW's post-filter.
 
-    **The cost is stated rather than discovered**: this also takes the index
-    away from the `media_items` EXISTS, and from every other statement in the
-    same transaction, because `SET LOCAL` is transaction-scoped and Postgres
-    has no per-statement hint mechanism. At 2k-10k rows that is affordable;
-    at 1.27M it would not be, which is another way of saying boundary call 4
-    is what makes this path exist.
+    The cost: this also takes the index away from the `media_items` EXISTS, and
+    from every other statement in the same transaction, because `SET LOCAL` is
+    transaction-scoped and Postgres has no per-statement hint mechanism. At
+    2k-10k rows that is affordable; at the whole catalog it would not be.
     """
     await session.execute(text("SET LOCAL enable_indexscan = off"))
     await session.execute(text("SET LOCAL enable_bitmapscan = off"))
 
 
-# Reciprocal Rank Fusion: **one statement, two CTEs, one snapshot.** A Python fuse is
-# legitimate -- `FakeSearchIndex` does it and is right to, having no database -- and the
+# Reciprocal Rank Fusion: **one statement, two CTEs, one snapshot.** A Python
+# fuse is legitimate -- `FakeSearchIndex` does it, having no database -- and the
 # port deliberately declines to specify.
 _FUSED = f"""
 WITH lexical AS MATERIALIZED (
@@ -193,9 +187,8 @@ vec AS MATERIALIZED (
 )
 SELECT COALESCE(lexical.id, vec.id) AS id,
        -- A vector-only row has no lexical arm to have compared a name in, and
-       -- NULL sorts first under DESC -- trap 1 in the list above, arriving
-       -- through a new column. false is the honest value and it is also the
-       -- one the vector lane answers on its own.
+       -- NULL sorts first under DESC. false is the honest value and it is also
+       -- the one the vector lane answers on its own.
        COALESCE(lexical.exact_name, false) AS exact_name,
        COALESCE(1.0 / (:rrf_k + lexical.rnk), 0.0)
      + COALESCE(1.0 / (:rrf_k + vec.rnk), 0.0) AS score
@@ -213,8 +206,7 @@ LIMIT :limit
 # How many candidates each lane contributes before fusion. Wider than the
 # result limit because a title that is rank 40 in one lane and rank 3 in the
 # other is exactly the row fusion exists to surface -- a lane window equal to
-# the limit can only ever re-order what both lanes already had in their top
-# `limit`, which is trap 2 arriving through a constant instead of a JOIN.
+# the limit can only re-order what both lanes already had in their top `limit`.
 _LANE_MULTIPLIER = 5
 
 
@@ -252,9 +244,10 @@ def _genres(value: tuple[str, ...], parameters: dict[str, object]) -> str | None
 def _owned_only(value: bool, parameters: dict[str, object]) -> str | None:
     if not value:
         return None
-    # **EXISTS, never JOIN.** `media_items.title_id` carries the series' id on every
-    # episode row -- 20,000 of them on one measured series -- so a join returns one hit
-    # per file and the LIMIT truncates a single series into a page of itself.
+    # **EXISTS, never JOIN.** `media_items.title_id` carries the series' id on
+    # every episode row -- tens of thousands on a long-running series -- so a
+    # join returns one hit per file and the LIMIT truncates one series into a
+    # page of itself.
     return (
         "EXISTS (SELECT 1 FROM media_items AS m WHERE m.title_id = t.id AND m.episode_id IS NULL)"
     )
@@ -339,11 +332,11 @@ class PostgresSearchIndex(SearchIndex):
                         },
                     )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `title_embeddings.embedding` is `halfvec(1024)`; this writer
-            # stages the vector as `text` and casts it in the statement, so a vector of
-            # another width is a class-22 refusal of a **bound value** rather than of an
-            # expression this statement computed.
+            # **`DBAPIError` rather than `IntegrityError`.**
+            # `title_embeddings.embedding` is `halfvec(1024)`; this writer stages
+            # the vector as `text` and casts it in the statement, so a vector of
+            # another width is a class-22 refusal of a **bound value** rather
+            # than of an expression this statement computed.
             if not is_row_refusal(exc):
                 raise
             # A `title_id` naming no `titles` row. Translated so nothing above
@@ -385,18 +378,14 @@ class PostgresSearchIndex(SearchIndex):
         """The port's pre-search probe, over `_COVERAGE` and nothing new.
 
         **The one statement, not a second definition of coverage.** It reaches
-        `_predicates` and `_coverage` -- the same two the two vector lanes
-        above already compose -- so this method cannot come to disagree with
-        the number the same request's `SearchOutcome` reports. A fresh `SELECT`
-        here would be the shape `services/search.py`'s module docstring refuses
-        for the fingerprint: one question, two spellings, both of them
-        answering.
+        `_predicates` and `_coverage` -- the same two the vector lanes above
+        compose -- so this method cannot come to disagree with the number the
+        same request's `SearchOutcome` reports.
 
-        It costs what `_coverage` costs, which is a count over the enriched
-        tier through `ix_titles_enrichment_state` -- so it is a read a caller
-        must decide to make rather than one it makes by reflex.
-        `SearchService` makes it only where a completion is otherwise about to
-        be bought.
+        It costs what `_coverage` costs, a count over the enriched tier through
+        `ix_titles_enrichment_state`, so it is a read a caller must decide to
+        make rather than one it makes by reflex. `SearchService` makes it only
+        where a completion is otherwise about to be bought.
         """
         predicates, parameters = _predicates(filters)
         return await self._coverage(predicates, parameters)
@@ -408,9 +397,9 @@ class PostgresSearchIndex(SearchIndex):
             text(_FULL_TEXT.format(predicates=predicates)),
             {**parameters, "query": request.query, "limit": max(request.limit, 0)},
         )
-        # 0.0 rather than a measured fraction: no semantic lane ran, and
-        # reporting coverage for a lane that did not run invites a caller to
-        # read it as a fact about the catalog.
+        # 0.0 rather than a real fraction: no semantic lane ran, and reporting
+        # coverage for a lane that did not run invites a caller to read it as a
+        # fact about the catalog.
         return SearchOutcome(
             hits=tuple(
                 SearchHit(title_id=row.id, score=float(row.score), exact_name=bool(row.exact_name))
@@ -460,7 +449,7 @@ class PostgresSearchIndex(SearchIndex):
                 "limit": limit,
             },
         )
-        # Coverage is *measured*, never derived from the hits. The fraction of
+        # Coverage is queried, never derived from the hits. The fraction of
         # returned hits that had a vector is 0/0 on an unembedded catalog and
         # 1.0 on a request the vector lane happened to dominate -- neither of
         # which answers "can the semantic lane see this catalog yet".
@@ -479,8 +468,8 @@ class PostgresSearchIndex(SearchIndex):
         return 0.0 if row.total == 0 else float(row.embedded / row.total)
 
 
-# **The floor this module's own integration contract runs at -- which is NOT the floor
-# the shipped path runs at**, and the difference was invisible for a whole milestone.
+# The floor this module's own integration contract runs at, which is **not** the
+# floor the shipped path runs at.
 _TRIGRAM_THRESHOLD = 0.1
 
 # `pg_trgm.similarity_threshold`'s allowed range, which is also
@@ -492,13 +481,13 @@ _THRESHOLD_RANGE = (0.0, 1.0)
 # Levenshtein's ceiling for a re-ranked candidate.
 _MAX_DISTANCE = 2
 
-# `fuzzystrmatch`'s hard limit, measured rather than read: an input of 300
-# characters answers `ERROR: levenshtein argument exceeds maximum length of
-# 255 characters`. The catalog is bulk-loaded from a dump nobody has audited
-# for its longest name, and here the walk that must not abort is a keystroke.
+# `fuzzystrmatch`'s hard limit: a longer input answers `ERROR: levenshtein
+# argument exceeds maximum length of 255 characters`. The catalog is bulk-loaded
+# from a dump nobody has audited for its longest name, and here the walk that
+# must not abort is a keystroke.
 _LEVENSHTEIN_MAX_INPUT = 255
 
-# The verified statement, adapted to `titles`.
+# The suggest statement, over `titles`.
 _SUGGEST = f"""
 WITH candidates AS MATERIALIZED (
     SELECT t.id, t.name, t.tmdb_popularity, t.tmdb_vote_count,
@@ -510,10 +499,10 @@ WITH candidates AS MATERIALIZED (
     -- statement exists to avoid, one line above the cap that avoids it.
     WHERE t.name % :prefix
     -- **Ordered, and that is load-bearing rather than tidy.** An unordered
-    -- cap truncates arbitrarily, which is what makes a *lower* floor score
-    -- *worse* recall (66.2% at 0.3 -> 48.5% at 0.1 -> 2.6% at 0.05,
-    -- measured). The id keeps the cap itself deterministic when many names
-    -- score identically, which on a `Vane NNNN` family is all of them.
+    -- cap truncates arbitrarily, which is what makes a *lower* trigram floor
+    -- score *worse* recall rather than better. The id keeps the cap itself
+    -- deterministic when many names score identically, which on a
+    -- `Vane NNNN` family is all of them.
     ORDER BY similarity(t.name, :prefix) DESC, t.id
     LIMIT :candidates
 ),
@@ -530,65 +519,23 @@ SELECT id, dist, sim
 FROM scored
 WHERE dist <= :max_distance
 -- Distance first, then `tmdb_popularity`, then `tmdb_vote_count`, then id.
--- Popularity is
--- what stops the type-ahead box's first row from being arbitrary among
--- equally-good matches; NULLS LAST because `titles.tmdb_popularity` is
--- nullable and a descending sort puts NULLs first by default, which would
--- hand the box to whichever skeleton the scan reached first. The id makes the
--- order total.
+-- Popularity is what stops the type-ahead box's first row from being arbitrary
+-- among equally-good matches; NULLS LAST because `titles.tmdb_popularity` is
+-- nullable and a descending sort puts NULLs first by default, which would hand
+-- the box to whichever skeleton the scan reached first. The id makes the order
+-- total.
 --
--- **`tmdb_vote_count` is here because `tmdb_popularity` is sparse, and both
--- the claim and M6's old wording of it are measured rather than suspected.**
--- (Both columns were spelled without the `tmdb_` prefix until ADR-0040 gave
--- every rating column its source; every measurement below was taken against
--- the same bytes and is restated in the new spelling, never re-derived.) M6
--- wrote here that `titles.tmdb_popularity` is NULL on **all 1,271,138 rows --
--- nothing in `src/` writes it except TMDb enrichment**; Task 36 re-measured
--- that on a realistic catalog (2026-08-05) and both halves were wrong:
---   * "NULL on all rows" is true of a **`--phase imdb`** catalog only, which
---     is what M6's gate ran against. `link_crosswalk` writes
---     `tmdb_popularity` from `tmdb_ids` on `--phase crosswalk|all`
---     (`ports/repository.py`), so a real operator's catalog is **partially**
---     populated.
---   * Measured on a `--phase all` catalog of 1,271,570 titles: **291,584
---     (22.9%) carry a popularity, of which exactly 3 are 0.0** -- the daily
---     export ships real values, not the `NOT NULL DEFAULT 0` filler the
---     column permits. On the ~77% that stay NULL this clause degenerates to
---     `dist ASC, id ASC` (a UUIDv7, i.e. insertion order), and
---     `tmdb_vote_count` -- written by the bootstrap on 539,350 rows -- is
---     what orders them.
+-- **`tmdb_vote_count` is the tiebreak because `tmdb_popularity` is sparse**:
+-- only TMDb enrichment writes either column, so on a bootstrap-only catalog
+-- both are NULL and this `ORDER BY` degenerates to `dist ASC, id ASC` --
+-- insertion order, and worth a few points of recall@5.
 --
--- ⚠️ **That last sentence is dated 2026-08-05 and ADR-0040's Task 2 moved the
--- writer it names (2026-08-19).** `BulkCatalogRepository.apply_ratings` filled
--- this column when the 539,350 was taken; it now fills `imdb_num_votes`, so
--- nothing but TMDb enrichment reaches `tmdb_vote_count` and **a bootstrap-only
--- catalog leaves it NULL on every row** rather than on the 732,220 of 1,271,570
--- measured then. Where both keys are NULL this `ORDER BY` is `dist ASC, id ASC`
--- outright -- insertion order -- which is the state M6's gate measured and
--- ADR-0002 recorded costing 4.2 points of recall@5 overall and 8.3 on the
--- 2-4-character band. The measurement above stands for the catalog it was taken
--- on and no longer describes what a fresh bootstrap produces.
---
--- **Deliberately not repaired here.** Pointing this key at `imdb_num_votes`
--- would restore its reach, but it is a *ranking* change with its own
--- measurement owed -- the two columns count different electorates -- and it is
--- issue #39, which the rating-provenance work is scoped not to build. The same
--- ⚠️ is on `adapters/search/prefix.py` and on
+-- **Deliberately not repaired here.** Pointing the tiebreak at
+-- `imdb_num_votes` would restore its reach on such a catalog, but the two
+-- columns count different electorates, so that is a ranking change rather than
+-- a fix: issue #39. The same note is on `adapters/search/prefix.py` and on
 -- `ports/repository/title.py::list_unwatched_candidates`, the three sites that
 -- share this key.
--- **The shipped ordering was re-measured and deliberately kept.** Same 2,993
--- typo cases, same seed, the populated arm against the all-NULL one: the
--- populated catalog costs **1.3 pts overall (83.4 -> 82.1)**, entirely
--- out-ranked misses where a real `tmdb_popularity` promotes a wrong candidate --
--- inside Task 36's 2.0-pt regression bar, so `CLAUDE.md`'s "partial catalog
--- is worse than either extreme" is **refuted**. Making `tmdb_vote_count` the
--- primary key (dropping `tmdb_popularity`) recovers all 1.3 pts and does not hurt
--- the all-NULL arm, but its behaviour on a *genuinely enriched* tier --
--- boundary call 4's population -- could not be measured on this skeleton
--- catalog, so it is an M9 change to re-measure, not shipped here.
--- `NULLIF(tmdb_popularity, 0)` recovers nothing: only 3 zeros exist.
--- `tmdb_vote_count` remains a tiebreak *under* `tmdb_popularity`, so an
--- enriched catalog is unaffected.
 ORDER BY dist ASC, tmdb_popularity DESC NULLS LAST, tmdb_vote_count DESC NULLS LAST, id ASC
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant

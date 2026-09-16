@@ -115,8 +115,7 @@ class PostgresImageRepository(ImageRepository):
         # **What this table can refuse.** A `title_id` naming no title
         # (`fk_images_title_id_titles`); a row with no owner or two
         # (`ck_images_exactly_one_owner`); an empty provider or path, a non-positive
-        # dimension (the four remaining CHECKs) -- all of which `Image`'s own field
-        # bounds already refuse at construction, so they are reachable here only through
+        # dimension (the four remaining CHECKs).
         async with refusals_as_conflict(self._session, "an image batch conflicts with the catalog"):
             # **Before the early return, and inside the same SAVEPOINT.** A
             # guard reading `if not records: return 0` here is the defect the
@@ -181,8 +180,7 @@ def _to_domain(row: RowMapping) -> Image:
 
     No filter and no projection: `Image` is `extra="forbid"` and the statements
     above are `SELECT *`, so a column added to `images` and to nothing else
-    raises here rather than reading back clean. That is the same call
-    `curation.py` records, and it is what keeps the 1:1 rule enforcing itself
-    at the read as well as in `tests/unit/test_domain_image.py`.
+    raises here rather than reading back clean -- the 1:1 rule enforcing itself
+    at the read.
     """
     return Image.model_validate(dict(row))

@@ -15,7 +15,7 @@ GENRE_AFFINITY_SCORE_CEILING = 0.70
 # than the shelf they chose from would predict.
 _LIFT_SATURATION = 3.0
 
-# PRD 06 says 1-3 rows. Task 23's `_MAX_AFFINITY_ROWS` already bounds the
+# PRD 06 says 1-3 rows. `TasteService._MAX_AFFINITY_ROWS` already bounds the
 # affinities; this is the same bound applied where the rows are made, because a
 # provider that trusted its input would be correct only for as long as the
 # other cap held and would fail silently by claiming the screen.
@@ -34,7 +34,7 @@ _MAX_CARDS = 20
 _TTL = timedelta(hours=1)
 
 
-# **The provider's own stable identifier**, and every row it proposes carries a slug
+# The provider's own stable identifier, and every row it proposes carries a slug
 # that starts with it.
 _SLUG_PREFIX = "genre-affinity"
 
@@ -59,8 +59,8 @@ class GenreAffinityRow(BaseRow):
 
     @property
     def reason(self) -> str | None:
-        # **Generated from the computation, and it must not outrun it.** This
-        # is a claim about *lift*, true exactly when lift is what was ranked.
+        # Generated from the computation, and it must not outrun it: this is a
+        # claim about *lift*, true exactly when lift is what was ranked.
         return f"You watch a lot more {self._affinity.genre} than your library would suggest."
 
     @property
@@ -77,7 +77,7 @@ class GenreAffinityRow(BaseRow):
 
     async def _title_ids(self, ctx: RowContext) -> Sequence[uuid.UUID]:
         # Two reads, both batch, neither per card. The ownership semi-join is
-        # inside the first; the watched roll-up (trap 7) is inside the second.
+        # inside the first; the watched roll-up is inside the second.
         owned = await ctx.titles.list_owned_by_tag(
             genre=self._affinity.genre, limit=self._candidates
         )
@@ -106,8 +106,8 @@ class GenreAffinityProvider(RowProvider):
         return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
-        # `ctx.affinities` is Task 23's answer, already filtered by `_MIN_LIFT` and
-        # `_MIN_SUPPORT` and already ordered by lift descending.
+        # `ctx.affinities` is `TasteService`'s answer, already filtered by
+        # `_MIN_LIFT` and `_MIN_SUPPORT` and already ordered by lift descending.
         affinities = await ctx.affinities()
         return [
             ScoredRow(
@@ -116,9 +116,9 @@ class GenreAffinityProvider(RowProvider):
                 * min(affinity.lift, _LIFT_SATURATION)
                 / _LIFT_SATURATION,
             )
-            # The order is the one it was handed. Re-sorting by `support` here
-            # is the volume ranking arriving one layer later than Task 23
-            # refused it.
+            # The order is the one it was handed. Re-sorting by `support` here is
+            # the volume ranking arriving one layer after `TasteService` refused
+            # it.
             for affinity in affinities[: self._limit]
         ]
 

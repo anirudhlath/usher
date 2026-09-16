@@ -24,18 +24,14 @@ class SourceCredentials:
 
 
 class CredentialStore(ABC):
-    """Encrypted-at-rest storage for `SourceCredentials`.
+    """Encrypted-at-rest storage for `SourceCredentials`, by opaque `credentials_ref`.
 
-    addressed by an opaque `credentials_ref`.
-
-    The ref is opaque and unguessable rather than derived from the source id
-    (`f"source:{id}"` would have worked and been simpler): a derived ref
-    makes the indirection decorative, and rotation — write the new secret
-    under a new ref, flip `Source.credentials_ref`, delete the old row —
-    stops being expressible at all. `owner_id` exists so a backing store can
-    cascade the delete when its owner goes away, which is what stops a
-    crash between "delete the source" and "delete its credential" from
-    leaving an encrypted orphan nobody can attribute.
+    The ref is unguessable rather than derived from the source id: a derived
+    ref makes the indirection decorative, and rotation -- write the secret
+    under a new ref, flip `Source.credentials_ref`, delete the old row --
+    stops being expressible. `owner_id` lets a backing store cascade the
+    delete, so a crash between deleting a source and deleting its credential
+    leaves no encrypted orphan nobody can attribute.
     """
 
     @abstractmethod
@@ -71,19 +67,15 @@ class CredentialStore(ABC):
 
 
 class CredentialCiphertextStore(ABC):
-    """Stored credentials as the ciphertext they are stored as.
-
-    for `usher rotate-secret` and for nothing else.
-    """
+    """Stored credentials as ciphertext -- for `usher rotate-secret`, and nothing else."""
 
     @abstractmethod
     async def list_refs(self) -> Sequence[str]:
         """Every ref this store holds, in a stable order.
 
-        Unpaged, and that is a bound rather than an oversight: there is one
-        row per configured source, so this is single-digit on any deployment
-        and `usher.db.repositories.credentials` states the measurement. A
-        keyset here would be paging over a table smaller than the page.
+        Unpaged, and that is a bound rather than an oversight: one row per
+        configured source is single-digit on any deployment, so a keyset here
+        would page over a table smaller than the page.
         """
 
     @abstractmethod

@@ -1,7 +1,4 @@
-"""The in-process client event bus (PRD 07's SSE channel).
-
-and the publisher that holds a unit of work's events until it commits.
-"""
+"""PRD 07's SSE channel, and the publisher that holds events until a commit."""
 
 import asyncio
 import secrets
@@ -43,26 +40,22 @@ class _Subscriber:
         self.overflowed = False
 
     def wants(self, event: ClientEvent) -> bool:
-        """An unfiltered subscriber wants everything.
+        """An unfiltered subscriber wants everything; a filtered one, its titles.
 
-        a filtered one wants events for its titles and nothing else.
-
-        Matching on `title_id` and never on `episode_id`: a client watching
-        a series subscribes with the series' title, because that is the only
-        id it holds before it fetches a season.
+        Matching on `title_id` and never on `episode_id`: a client watching a
+        series subscribes with the series' title, because that is the only id
+        it holds before it fetches a season.
         """
         if self.titles is None:
             return True
         return event.title_id is not None and event.title_id in self.titles
 
     def offer(self, sent: SentEvent, resync: SentEvent) -> None:
-        """Non-blocking.
+        """Non-blocking, which is the whole design.
 
-        **This is the whole design.**
-
-        `put_nowait` and a branch, never `await put`. The awaiting spelling
-        is one character shorter and makes an enrichment completing at 04:00
-        hang until a browser tab that closed hours ago is garbage collected.
+        `put_nowait` and a branch, never `await put`. The awaiting spelling is
+        one character shorter and makes an enrichment completing at 04:00 hang
+        until a browser tab that closed hours ago is garbage collected.
         """
         if self.overflowed:
             # Already told to resync; further events would be replaced by
@@ -134,7 +127,7 @@ class InMemoryEventBus(EventPublisher):
 
         The replay is resolved here, before the subscriber is added and with
         no `await` in between, so nothing can be both replayed from the ring
-        and delivered through the queue. See the module docstring.
+        and delivered through the queue.
         """
         subscriber = _Subscriber(titles, self._queue_size)
         replay = tuple(self._replay(subscriber, last_event_id))

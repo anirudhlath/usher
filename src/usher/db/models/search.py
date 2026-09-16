@@ -23,12 +23,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from usher.db.base import Base, enum_column
 from usher.domain.enums import SearchNameKind
 
-# : **The character bound on `title_search_names.name`, and its arithmetic.** : Postgres
-# refuses a btree entry over `BTMaxItemSize` — **2,704 bytes** on the : standard 8 kB
-# page — and `ix_title_search_names_name_lower_prefix` is a : btree over `lower(name)`.
+#: The character bound on `title_search_names.name`: Postgres refuses a btree entry
+#: over `BTMaxItemSize` (2,704 bytes on the standard 8 kB page), and
+#: `ix_title_search_names_name_lower_prefix` is a btree over `lower(name)`.
 SEARCH_NAME_MAX_CHARS = 512
 
-# : The one place the width is written down on the storage side.
+#: The one place the vector width is written down on the storage side.
 EMBEDDING_DIMENSIONS = 1024
 
 
@@ -54,10 +54,10 @@ class TitleEmbeddingRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    # No trigger and no `onupdate=` -- see the module docstring. The one
-    # writer sets this explicitly, with `now()` rather than
-    # `clock_timestamp()`: nothing computes an interval against it, and a
-    # batch whose rows share one instant is the more honest record of a batch.
+    # No trigger and no `onupdate=`: the one writer sets this explicitly, with
+    # `now()` rather than `clock_timestamp()`, because nothing computes an
+    # interval against it and a batch whose rows share one instant is the more
+    # honest record of a batch.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -67,9 +67,8 @@ class TitleEmbeddingRow(Base):
         CheckConstraint(
             "source_fingerprint <> ''", name="ck_title_embeddings_fingerprint_not_empty"
         ),
-        # HNSW with pgvector's own defaults, kept **because that is what was measured**:
-        # 50,000 x halfvec(384) at m=16, ef_construction=64 built in 4.109 s into 56 MB
-        # (1,170.5 bytes/row).
+        # HNSW at pgvector's own defaults: nothing about this catalog's size or
+        # recall has given a reason to depart from them.
         Index(
             "ix_title_embeddings_hnsw",
             "embedding",
@@ -92,22 +91,17 @@ class TitleEmbeddingRow(Base):
 
 
 class TitleNeighborRow(Base):
-    """A precomputed "more like this" list.
+    """A precomputed "more like this" list, one row per (title, neighbour) pair.
 
-    one row per (title, neighbour) pair, produced wholesale by a batch and read as a
-    lookup.
+    `GET /titles/{id}/similar` is an index scan rather than a similarity
+    computation, so the freshness of these rows is a property of when the batch
+    last ran -- which is why `computed_at` is written by the batch and is the
+    only timestamp here.
 
-    The whole point is that M9's `GET /titles/{id}/similar` is an index scan
-    rather than a similarity computation. That means the freshness of these
-    rows is a property of when the batch last ran, which is why `computed_at`
-    is written by the batch and is the only timestamp here.
-
-    **This table is the milestone's one acknowledged exception to "every
-    derived artefact carries the fingerprint of its input".** There is no
-    per-row predicate that says a neighbour list is stale, because a title's
-    neighbours change when *some other title* gets an embedding. An
-    oldest-`computed_at` reading is what stands in, and it is written down as
-    the weaker guarantee it is rather than dressed up as the others.
+    **The one derived artefact that does not carry the fingerprint of its
+    input.** No per-row predicate can say a neighbour list is stale, because a
+    title's neighbours change when *some other title* gets an embedding. An
+    oldest-`computed_at` reading stands in, and it is the weaker guarantee.
     """
 
     __tablename__ = "title_neighbors"
@@ -115,11 +109,9 @@ class TitleNeighborRow(Base):
     title_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="CASCADE"), nullable=False
     )
-    # CASCADE, and it is the argued one.
     neighbor_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="CASCADE"), nullable=False
     )
-    # The blend's output.
     score: Mapped[float] = mapped_column(Float, nullable=False)
     # The batch's own ordering, stored rather than re-derived. Reading back
     # `ORDER BY score DESC` reproduces it only up to float ties, and a tie
@@ -135,13 +127,11 @@ class TitleNeighborRow(Base):
     blend_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (
-        # `(title_id, neighbor_id)`, which is the identity of the fact.
         PrimaryKeyConstraint("title_id", "neighbor_id", name="pk_title_neighbors"),
         # The cascade's own lookup. Postgres implements ON DELETE CASCADE by
-        # finding referencing rows *by that column*, and the primary key
-        # leads with `title_id`, so without this every title deletion
-        # sequentially scans this table. Identical argument to M4's
-        # `ix_media_items_episode_id` / `ix_watch_states_episode_id`.
+        # finding referencing rows *by that column*, and the primary key leads
+        # with `title_id`, so without this every title deletion sequentially
+        # scans this table.
         Index("ix_title_neighbors_neighbor_id", "neighbor_id"),
         # `NeighborRebuildJob.last_done()` is `min(computed_at)`, asked once a
         # tick forever. Without this it is a sequential scan of the whole
@@ -160,10 +150,7 @@ class TitleNeighborRow(Base):
 
 
 class TitleSearchNameRow(Base):
-    """The narrow name table M6 refused and M7 restated the refusal of.
-
-    **created here, never extended, because it has never existed.**.
-    """
+    """One name a title can be found by: an alias from the akas dump, or a person's."""
 
     __tablename__ = "title_search_names"
 
@@ -193,21 +180,20 @@ class TitleSearchNameRow(Base):
 
     __table_args__ = (
         CheckConstraint("name <> ''", name="ck_title_search_names_name_not_empty"),
-        # The btree bound. `SEARCH_NAME_MAX_CHARS`' own comment carries the
-        # arithmetic; the constraint is what makes the refusal classifiable.
+        # The btree bound `SEARCH_NAME_MAX_CHARS` states, as a CHECK -- so an
+        # over-long name is a classifiable refusal rather than an index error.
         CheckConstraint(
             f"length(name) <= {SEARCH_NAME_MAX_CHARS}",
             name="ck_title_search_names_name_within_btree_bound",
         ),
         # The cascade's own lookup, and the leading column of the
-        # `(title_id, kind)` delete scope above. Postgres implements ON DELETE
-        # CASCADE by finding referencing rows *by that column*; the same
-        # argument `ix_title_neighbors_neighbor_id` two classes up records.
+        # `(title_id, kind)` delete scope -- `ix_title_neighbors_neighbor_id`'s
+        # argument two classes up.
         Index("ix_title_search_names_title_id", "title_id"),
-        # **Tier 1 of the two-tier suggest, on the half that holds aliases and people.**
-        # Measured on a real 1,271,138-title catalog: p50 0.6 ms, p95 1.0 ms, max 10 ms,
-        # 44 MB, building in 0.559 s (`.claude/rules/search-and-embeddings.md`) --
-        # against a GIN trigram path whose p50 is 33.3 ms and whose max is 734 ms.
+        # **Tier 1 of the two-tier suggest, on the half that holds aliases and
+        # people.** A `text_pattern_ops` btree over `lower(name)`, not a GIN
+        # trigram index: suggest is a prefix match, and the btree answers one in
+        # a fraction of the trigram path's time on a catalog this size.
         Index(
             "ix_title_search_names_name_lower_prefix",
             func.lower(column("name")).label("lower_name"),

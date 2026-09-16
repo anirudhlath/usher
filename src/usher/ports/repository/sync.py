@@ -22,16 +22,13 @@ class SyncRunRepository(ABC):
     Flushes, never commits.
 
     One row per attempt, not one per source -- contrast `ImportRunRepository`,
-    which is a checkpoint updated in place. PRD 10's dashboard 3 plots run
-    outcomes over time, and ADR-0015's sweep guard rests on being able to say
-    *which* run last finished cleanly.
+    a checkpoint updated in place. Dashboards plot run outcomes over time, and
+    the sweep guard rests on being able to say *which* run last finished
+    cleanly.
 
-    **`latest_incomplete_run` is the one affordance here that reads against
-    that grain, and only for `WATCH_STATE`** (ADR-0042). It hands a walk back
-    its own unfinished row so the next attempt can continue it in place, which
-    is `ImportRunRepository`'s shape borrowed for one lane. `save` is written
-    for that reuse and is **non-destructive** in the two ways its own
-    docstring sets out.
+    `latest_incomplete_run` is the one affordance that reads against that
+    grain, and only for `WATCH_STATE`: it hands a walk back its own unfinished
+    row so the next attempt continues it in place.
     """
 
     @abstractmethod
@@ -64,9 +61,8 @@ class SyncRunRepository(ABC):
         a re-walk of a window rather than a hole in the catalog.
 
         Scoped by kind because the two lanes use different upstream filters
-        (`MinDateLastSaved` vs `MinDateLastSavedForUser`, measured as genuinely
-        different: 28,934 vs 29,005 items over the same 30-day window), so one
-        cursor cannot serve both.
+        (`MinDateLastSaved` against `MinDateLastSavedForUser`) that select
+        genuinely different populations, so one cursor cannot serve both.
         """
 
     @abstractmethod
@@ -75,49 +71,39 @@ class SyncRunRepository(ABC):
     ) -> SyncRun | None:
         """The newest run of this kind, **iff it did not complete**.
 
-        the walk a resumed run continues.
+        The walk a resumed run continues. `None` when the newest one
+        completed, and when there is none at all.
 
-        `None` when the newest one completed, and when there is none at all.
+        "The newest, and only if it is not completed", never "the newest one
+        that is not completed": the second hands back an old failure forever
+        once a later run has completed, so every later walk resumes from a
+        position that run already passed.
 
-        **"The newest, and only if it is not completed", never "the newest
-        one that is not completed."** The second spelling hands back an old
-        failure forever once a later run has completed, so every later walk
-        resumes from a position that completed run has already passed.
-
-        Used by the `WATCH_STATE` lane only (ADR-0042). The item lanes have a
-        working cursor and restart from it; this lane's first walk is the
-        whole library, so a failure has to cost a page rather than the run.
+        `WATCH_STATE` only. The item lanes have a working cursor and restart
+        from it; this lane's first walk is the whole library, so a failure
+        has to cost a page rather than the run.
         """
 
     @abstractmethod
     async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
-        """Newest first, with `id` as a tiebreak so paging is stable.
-
-        PRD 10's dashboard 3 ("sync run outcomes and duration") and the CLI's `sync-
-        status`.
-        """
+        """Newest first, with `id` as a tiebreak so paging is stable."""
 
 
 @dataclass(frozen=True, slots=True)
 class CachedPayload:
     """One `raw_payloads` row, as a walk sees it.
 
-    Carries `kind` and `reference` rather than a `title_id`, because the table
-    has neither a `title_id` column nor a foreign key to `titles` (ADR-0016:
-    the cache is keyed `(provider, kind, reference)` and nothing else). The
-    caller resolves back to a title through that pair, and **the pair is the
-    whole key** -- ADR-0011: `tmdb_id` is unique per kind, and 26,968 measured
-    TMDb ids are live in both the movie and the series id space.
+    Carries `kind` and `reference` rather than a `title_id`: the cache is
+    keyed `(provider, kind, reference)` and has no column or foreign key to
+    `titles`. The caller resolves back through that pair, and the whole pair
+    is the key -- a `tmdb_id` is unique only within a kind.
 
-    `id` is here so the caller can pass it back as `after`. It is deliberately
-    not a `title_id` in disguise.
+    `id` is here so the caller can pass it back as `after`, and is not a
+    `title_id` in disguise.
 
-    Declared immediately above the port that returns it rather than beside
-    `NeighborSeed`/`StoredEmbedding`, because this module has no
-    `from __future__ import annotations` -- an abstract method's return
-    annotation is evaluated when the class body runs, so the name has to
-    already exist. That is also where `TitleEmbeddingUpsert` sits relative to
-    `TitleEmbeddingRepository`.
+    Declared above the port that returns it because this module has no
+    `from __future__ import annotations`: an abstract method's return
+    annotation is evaluated when the class body runs.
     """
 
     id: uuid.UUID
@@ -130,14 +116,12 @@ class CachedPayload:
 class RawPayloadStore(ABC):
     """The provider response cache (PRD 02's `raw_payloads`).
 
-    **Providers only, never source items.** PRD 03's ingest stage previously
-    said to store every source item's payload here; at 1,126,674 items and
-    ~8 kB apiece that is ~9 GB against a database PRD 08 budgets at 8-12 GB
-    total, to avoid a refetch that costs one request. ADR-0016.
+    Providers only, never source items: a whole library's payloads at ~8 kB
+    apiece would outweigh the database's entire budget, to save a refetch
+    that costs one request.
 
-    `fetched_at` is also the TMDb <=6-month cache-term clock (PRD 04's
-    licensing constraint), which is why PRD 02's separate
-    `provider_cache_meta` table is not created.
+    `fetched_at` is also the TMDb cache-term clock, which is why there is no
+    separate `provider_cache_meta` table.
 
     Flushes, never commits.
     """
@@ -172,22 +156,19 @@ class RawPayloadStore(ABC):
 
     @abstractmethod
     async def oldest_fetched_at(self, provider: str) -> AwareDatetime | None:
-        """The compliance query.
+        """The compliance query: a provider's oldest cache entry.
 
-        the oldest cache entry for a provider, which is what PRD 10's dashboard-5 panel
-        plots against TMDb's 6-month ceiling.
-
-        `None` when the provider has no entries at all.
+        Plotted against TMDb's 6-month caching ceiling. `None` when the
+        provider has no entries at all.
         """
 
     @abstractmethod
     async def count(self, provider: str) -> int:
         """How many payloads this provider has cached.
 
-        The denominator of `usher derive`'s coverage report, and it is printed
-        as a **count beside another count** rather than as a percentage: PRD
-        08 requires every command to work against an empty database, and a
-        derived-coverage percentage is `0/0` on exactly that deployment.
+        The denominator of `usher derive`'s coverage report, printed as a
+        count beside another count rather than a percentage: every command
+        must work against an empty database, where a percentage is `0/0`.
         """
 
     @abstractmethod

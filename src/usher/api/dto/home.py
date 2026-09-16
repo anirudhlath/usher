@@ -1,7 +1,4 @@
-"""`GET /home`.
-
-[ADR-0006](../../../../docs/prd/decisions/0006-server-composed- home.md), PRD 06 and PRD
-"""
+"""`GET /home`'s wire shapes (PRD 06, PRD 07)."""
 
 import uuid
 
@@ -54,9 +51,9 @@ class RowResponse(BaseModel):
     was invalidated early by the push lane. PRD 07's answer to freshness is
     `row.invalidated` over SSE, which is an instruction rather than a duration.
 
-    `family` is absent for the same class of reason: it is the key the
-    composer's diversity constraints are stated in, and a client that branched
-    on it would be re-deciding a question ADR-0006 put on the server.
+    `family` is absent for the same class of reason: it is the key the composer's
+    diversity constraints are stated in, and a client that branched on it would be
+    re-deciding a question the server has already settled.
     """
 
     slug: str

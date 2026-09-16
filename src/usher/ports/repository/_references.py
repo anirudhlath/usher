@@ -15,7 +15,8 @@ __all__ = [
 class TitleReference:
     """A title named the way a backup artifact names one.
 
-    by natural key, with its own id as the last rung rather than the first.
+    By natural key, with its own id as the last rung rather than the first,
+    so an artifact restores into a catalog that minted different ids.
     """
 
     kind: TitleKind
@@ -28,7 +29,7 @@ class TitleReference:
 class EpisodeReference:
     """An episode named the way a backup artifact names one.
 
-    its series' natural key, plus the two numbers.
+    Its series' natural key, plus the two numbers.
     """
 
     title: TitleReference

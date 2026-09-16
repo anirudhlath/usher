@@ -11,14 +11,12 @@ __all__ = ["WatchWriteRequest", "watch_state_response"]
 class WatchWriteRequest(BaseModel):
     """`PUT /watch/titles/{id}` and `PUT /watch/episodes/{id}`.
 
-    Both fields are required. There is no "leave the other one alone"
-    spelling, and adding one would make a partial write reachable -- which is
-    the defect M3 measured at the source rather than a hypothetical: Emby's
-    `UserData` body deserialises into a DTO whose unset fields take their
-    defaults, so a body carrying only `PlaybackPositionTicks` flips a played
-    item to unplayed. A client that wants to change one of the two sends both,
-    and the two `/played` routes exist precisely so the common one-field press
-    needs no body at all.
+    Both fields are required. There is no "leave the other one alone" spelling,
+    and adding one would make a partial write reachable -- the defect the source
+    itself has: Emby's `UserData` body deserialises into a DTO whose unset fields
+    take their defaults, so a body carrying only `PlaybackPositionTicks` flips a
+    played item to unplayed. A client changing one of the two sends both, and the
+    `/played` routes exist so the common one-field press needs no body at all.
 
     `position_seconds` is `ge=0` because the column and `WatchState` both are;
     without it a negative value reaches Postgres and comes back as a

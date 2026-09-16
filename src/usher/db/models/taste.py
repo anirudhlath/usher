@@ -27,17 +27,16 @@ class GenomeScoreRow(Base):
     )
     relevance: Mapped[list[float]] = mapped_column(HALFVEC(GENOME_TAG_COUNT), nullable=False)
     genome_revision: Mapped[str] = mapped_column(Text, nullable=False)
-    # `computed_at` and no `updated_at`, and no trigger -- following `title_neighbors`,
-    # which has none either because "a neighbour row is a batch artefact: it is
-    # computed, wholesale, by one pass, and `computed_at` is the only timestamp that
-    # means anything about it." Identical here.
+    # `computed_at` and no `updated_at`, and no trigger, following
+    # `title_neighbors`: this is a batch artefact, computed wholesale by one
+    # pass, so `computed_at` is the only timestamp that means anything about it.
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
 class GenomeTagRow(Base):
-    """What each of `genome_scores.relevance`'s 1,128 lanes means."""
+    """What each of `genome_scores.relevance`'s lanes means."""
 
     __tablename__ = "genome_tags"
 

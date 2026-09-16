@@ -1,4 +1,4 @@
-"""The write-time half of the genre vocabulary — ADR-0039's deferred point 2."""
+"""The write-time half of the genre vocabulary."""
 
 import uuid
 from collections.abc import Awaitable, Callable

@@ -18,10 +18,9 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 
-# --- the constants, and the standing they have --------------------------- **Chosen
-# with an argument, not measured** -- the same standing this module shares with
-# `SimilarityService._WEIGHTS`, stated in the same words so a reader does not have to
-# infer it.
+# --- the constants, and the standing they have ---------------------------
+# Chosen with an argument rather than tuned against data -- the same standing
+# `SimilarityService._WEIGHTS` has.
 
 # The window.
 _WINDOW = 50
@@ -31,7 +30,7 @@ _RECENCY_FLOOR = 0.25
 
 # "Highly rated" becomes "finished, and finished twice is better." 1.00 against
 # 0.60 says a rewatched title counts for roughly one-and-two-thirds of a
-# finished one -- chosen with an argument, not measured.
+# finished one.
 _REWATCHED = 1.00
 _COMPLETED = 0.60
 
@@ -41,8 +40,8 @@ _REWATCH_COUNT = 2
 # Below this there is no centroid at all -- `None`, and a *written* refusal.
 _MIN_TITLES = 5
 
-# --- genre affinity: the taste signal that needs no embedder -------------- Below this
-# the row is describing the library rather than the household.
+# --- genre affinity: the taste signal that needs no embedder --------------
+# Below this the row is describing the library rather than the household.
 _MIN_LIFT = 1.5
 
 # Support, and it is the half that kills "a genre watched once".
@@ -71,10 +70,10 @@ class TasteService:
         self._taste = taste
         self._embedder = embedder
         self._now = now
-        # --- the two memos, and the lifetime that makes them safe ---------- **Both die
-        # with this object, and this object is per request or per unit of work.**
-        # Verified rather than assumed, because a wrong cache lifetime on a per-user
-        # read is a cross-household data leak and not a latency regression.
+        # --- the two memos, and the lifetime that makes them safe ----------
+        # Both die with this object, and this object is per request or per unit of
+        # work. A wrong cache lifetime on a per-user read is a cross-household data
+        # leak, not a latency regression.
         self._engaged_windows: dict[uuid.UUID, _Memoised] = {}
         # The library-wide aggregate takes no `user_id` at all, so there is no
         # household to key it by and nothing to leak. See `_library_genres`.
@@ -85,26 +84,23 @@ class TasteService:
 
         `None` -- never a zero vector -- in four cases: no embedder, no watch
         history, fewer than `_MIN_TITLES` engaged titles, and fewer than that
-        many *with vectors*. ADR-0014, and here the zero vector is uniquely
-        awful: `<=>` against it is undefined in pgvector and `NaN` in Python,
-        so a zero centroid either raises deep inside a provider -- a 500 on a
-        home screen because a model is not installed -- or, under a
-        `coalesce`, ranks every candidate identically, which is a similarity
-        row in physical order.
+        many *with vectors*. The zero vector is uniquely awful here: `<=>`
+        against it is undefined in pgvector and `NaN` in Python, so a zero
+        centroid either raises deep inside a provider -- a 500 on a home screen
+        because a model is not installed -- or, under a `coalesce`, ranks every
+        candidate identically, which is a similarity row in physical order.
         """
-        # **No embedder, no centroid, and the check is first for a reason
-        # beyond speed.** `model_name` is the key the stored row is
-        # invalidated on, and a deployment with no embedder has no honest
-        # value for it. There is nothing to read and nothing to write.
+        # No embedder, no centroid, and the check is first for a reason beyond
+        # speed: `model_name` is the key the stored row is invalidated on, and a
+        # deployment with no embedder has no honest value for it.
         if self._embedder is None:
             return None
         model_name = self._embedder.model_name
 
-        # **Read the watermark BEFORE the window, never after.** A merge landing between
-        # the window read and the write would otherwise be stamped as included when it
-        # was not, and the stored centroid would be stale while carrying a watermark
-        # claiming freshness -- self-certifying staleness, which no later read can
-        # detect.
+        # Read the watermark before the window, never after: a merge landing
+        # between the window read and the write would otherwise be stamped as
+        # included when it was not, leaving the stored centroid stale while
+        # carrying a watermark claiming freshness.
         watermark = await self._taste.watermark(user_id)
 
         stored = await self._taste.get(user_id, model_name=model_name)
@@ -114,15 +110,14 @@ class TasteService:
             # stands until the household's history moves.
             return _as_centroid(stored)
 
-        # **The watermark read four lines up is handed to the memo**, which is
-        # what makes it self-invalidating for free: this is the one caller that
-        # already holds `max(updated_at)` for its own reasons, so the memo is
-        # checked against the same fact ADR-0020 invalidates the *stored* row
-        # on, and costs no statement to check it with.
+        # The watermark read four lines up is handed to the memo, which is what
+        # makes it self-invalidating for free: this is the one caller that already
+        # holds `max(updated_at)`, so the memo is checked against the same fact
+        # the *stored* row is invalidated on, at no extra statement.
         window = await self._engaged(user_id, at=_Reading(watermark))
         vectors = await self._embeddings.list_for_titles([entry.title_id for entry in window])
-        # An absent vector is dropped from the mean, never averaged in as an origin --
-        # ADR-0014.
+        # An absent vector is dropped from the mean, never averaged in as an
+        # origin.
         contributions = [
             (vectors[entry.title_id], _weight(rank, len(window), entry.play_count))
             for rank, entry in enumerate(window)
@@ -130,10 +125,9 @@ class TasteService:
         ]
 
         if len(contributions) < _MIN_TITLES:
-            # **A written refusal, not a skipped write.** Without the row, a four-title
-            # household is recomputed on every read of every home screen forever, and
-            # the fifth title does not re-claim the centroid *once* -- it re-claims it
-            # always.
+            # A written refusal, not a skipped write: without the row, a
+            # four-title household is recomputed on every read of every home
+            # screen forever.
             await self._taste.put(
                 StoredTaste(
                     user_id=user_id,
@@ -223,10 +217,10 @@ class TasteService:
     async def _engaged(
         self, user_id: uuid.UUID, *, at: "_Reading | None" = None
     ) -> Sequence["_Engaged"]:
-        """The recency-ordered engaged window, and the *only* history read in this module.
+        """The recency-ordered engaged window, the only history read in this module.
 
-        **read once per household per service, and again only if the household's history
-        moves under it**.
+        Read once per household per service, and again only if the household's
+        history moves under it.
         """
         held = self._engaged_windows.get(user_id)
         if held is not None and (at is None or held.at is None or held.at == at):
@@ -248,7 +242,7 @@ class TasteService:
         return window
 
     async def _library_genres(self) -> LibraryGenres:
-        """How many owned titles carry each genre -- **once per service**."""
+        """How many owned titles carry each genre -- once per service."""
         if self._library_genres_memo is None:
             self._library_genres_memo = await self._taste.library_genre_counts()
         return self._library_genres_memo
@@ -264,8 +258,8 @@ class _Engaged:
 class _Reading:
     """One `max(updated_at)` over a household's `watch_states`, wrapped.
 
-    Wrapped rather than passed bare so that **"no reading was taken" and "the
-    reading is `None`" are different values**. `TasteRepository.watermark`
+    Wrapped rather than passed bare so that "no reading was taken" and "the
+    reading is `None`" are different values. `TasteRepository.watermark`
     answers `None` for a household with no history at all -- the common state
     on a fresh install -- and a bare `AwareDatetime | None` parameter would
     make that indistinguishable from `genre_affinity`, which takes no reading
@@ -317,12 +311,12 @@ def _weighted_mean(contributions: Sequence[tuple[tuple[float, ...], float]]) -> 
 def _normalise(vector: Sequence[float]) -> tuple[float, ...]:
     """L2, once, here.
 
-    `Embedder` guarantees unit vectors (verified to 5.96e-08) but **a mean of
-    unit vectors is not one**, and `<=>` is normalisation-invariant while `<#>`
-    is not -- so an unnormalised centroid is correct today under the shipped
-    operator class and silently wrong the day anything reaches for inner
-    product. Normalising at every reader instead would be the same arithmetic
-    in N places, each free to forget.
+    `Embedder` guarantees unit vectors but a mean of unit vectors is not one,
+    and `<=>` is normalisation-invariant while `<#>` is not -- so an
+    unnormalised centroid is correct today under the shipped operator class and
+    silently wrong the day anything reaches for inner product. Normalising at
+    every reader instead would be the same arithmetic in N places, each free to
+    forget.
     """
     norm = math.sqrt(sum(value * value for value in vector))
     if norm == 0.0:

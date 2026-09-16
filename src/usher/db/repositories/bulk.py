@@ -44,10 +44,10 @@ _SUSPENDABLE_INDEXES: dict[str, str] = {
     "ix_titles_name_lower_year": (
         "CREATE INDEX ix_titles_name_lower_year ON titles (lower(name), year)"
     ),
-    # **M9's tier-1 prefix index, and it is not the entry above.** That one carries the
+    # **The tier-1 prefix index, and it is not the entry above.** That one carries the
     # *default* opclass and cannot answer `LIKE 'pre%'` under this database's collation
-    # (measured -- `Seq Scan` even with `enable_seqscan = off`); this one carries
-    # `text_pattern_ops` and is the whole of the two-tier suggest's first tier.
+    # at all; this one carries `text_pattern_ops` and is the two-tier suggest's first
+    # tier.
     "ix_titles_name_lower_prefix": (
         "CREATE INDEX ix_titles_name_lower_prefix ON titles (lower(name) text_pattern_ops)"
     ),
@@ -77,8 +77,8 @@ CREATE TEMP TABLE stg_genome (
 ) ON COMMIT DROP
 """
 
-# One bound-parameter `INSERT`, executemany'd over 1,128 records, and neither half of
-# that is incidental.
+# One bound-parameter `INSERT`, executemany'd over the whole vocabulary: too few rows
+# for a staging table to buy anything.
 _INSERT_GENOME_TAG = text(
     "INSERT INTO genome_tags (tag_id, tag, genome_revision) "
     "VALUES (:tag_id, :tag, :genome_revision)"
@@ -136,18 +136,15 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
     ) -> None:
         """Thin positional wrapper over `usher.db.staging.stage_records`.
 
-        Kept so the four call sites below read as one line each; the
-        mechanics, and the three Postgres traps they are built around, live
-        in `usher.db.staging` because M4's repositories take the same path.
+        Kept so the four call sites below read as one line each; the mechanics
+        live in `usher.db.staging`, shared with the other repositories.
         """
         await stage_records(self._session, ddl=ddl, table=table, columns=columns, records=records)
 
     async def _rowcount(self, sql: str, *, refused: str) -> int:
-        """`rowcount` lives on `CursorResult`.
+        """`rowcount` lives on `CursorResult`, not the `Result[Any]` this is typed as.
 
-        not the `Result[Any]` `AsyncSession.execute` is typed as returning -- mypy
-        strict rejects `result.rowcount` without this narrowing (verified:
-        `"Result[Any]" has no attribute "rowcount"`).
+        Mypy strict rejects `result.rowcount` without the narrowing.
         """
         async with refusals_as_conflict(self._session, refused):
             result = await self._session.execute(text(sql))
@@ -178,11 +175,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             # `slots=True` for a reason that stops at this boundary.
             [(row.imdb_id, row.tmdb_id, list(row.relevance)) for row in rows],
         )
-        # **The destination statement, and the `CAST` in it, is why this
-        # `refusals_as_conflict` needed question (3) of ADR-0044 answered before it
-        # could be applied.** `_errors.py:66-75` bounds "class 22 means the row" to *a
-        # parameterised statement with no server-side expressions*, and this is not that
-        # statement -- so the test is whether any expression here can raise class 22
+        # `is_row_refusal` bounds "class 22 means the row" to a parameterised statement
+        # with no server-side expressions, and the destination statement's `CAST` is
+        # one -- but the only class 22 it can raise is a vector of the wrong width,
+        # which is still a value the caller handed in.
         async with refusals_as_conflict(
             self._session, "a genome vector violates genome_scores' own bounds"
         ):
@@ -223,11 +219,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         )
 
     async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
-        # Before the DELETE and before the SAVEPOINT, `replace_for_user`'s placement and
-        # for its stated reason: on *this* implementation the ordering is not
-        # observable, because the SAVEPOINT rolls the delete back with the raise, and it
-        # is here so a call that cannot mean anything never reaches Postgres and so the
-        # fake -- which has no transaction and really would empty the vocabulary -- has
+        # Before the DELETE and before the SAVEPOINT. Here the ordering is not
+        # observable -- the SAVEPOINT rolls the delete back with the raise -- but the
+        # fake has no transaction and really would empty the vocabulary, so the
+        # contract holds both to refusing before anything is written.
         _refuse_partial_vocabulary(tags, revision)
         records = [
             {"tag_id": tag.tag_id, "tag": tag.tag, "genome_revision": revision} for tag in tags
@@ -454,19 +449,18 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
                 for row in rows
             ],
         )
-        # `refusals_as_conflict` rather than this module's older bare `except
-        # IntegrityError`, and the reason is a measurement rather than a preference:
+        # `refusals_as_conflict` rather than a bare `except IntegrityError`:
         # `ck_title_search_names_name_within_btree_bound` is a column bound narrower
-        # than the field feeding it, which is exactly the shape
-        # `db/repositories/_errors.py` records as reaching SQLAlchemy as a bare
+        # than the field feeding it, which is exactly the shape `_errors.py` records
+        # as reaching SQLAlchemy as a bare `DBAPIError`.
         async with refusals_as_conflict(
             self._session, "an alias violates title_search_names' own bounds"
         ):
             # **Scoped by `kind` as well as by title, and both halves are load-
-            # bearing.** The title scope is what lets a title whose akas all disappeared
+            # bearing.** The title scope lets a title whose akas all disappeared
             # upstream lose its stale rows; the `kind` scope is about the *second
             # writer* -- `CreditRepository.replace_for_titles` lands `person` rows in
-            # this same table, and a delete on title alone makes the two mutually
+            # this same table, and a delete on title alone would erase them.
             await self._session.execute(
                 text("""
                     DELETE FROM title_search_names
@@ -605,9 +599,8 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         )
 
     async def link_crosswalk(self) -> CrosswalkLinkResult:
-        # DISTINCT ON (x.tmdb_id, x.kind): 569 TMDb ids are claimed by more than one
-        # IMDb id (measured), and without this the UPDATE would hit
-        # ix_titles_tmdb_id_kind.
+        # DISTINCT ON (x.tmdb_id, x.kind): some TMDb ids are claimed by more than one
+        # IMDb id, and without this the UPDATE would hit ix_titles_tmdb_id_kind.
         linked = await self._rowcount(
             f"""
             WITH candidate AS (
@@ -669,26 +662,20 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
 
 
 def _refuse_partial_vocabulary(tags: Sequence[GenomeTag], revision: str) -> None:
-    """The four ways a caller can hand `replace_genome_tags` something that is not a vocabulary.
-
-    refused before anything is written.
+    """The four ways `replace_genome_tags` can be handed something that is not a vocabulary.
 
     `ValueError` rather than `RepositoryConflict`: nothing has been sent to
     Postgres, and for the first two Postgres would not refuse either --
-    `ck_genome_tags_tag_id_in_vocabulary` cannot see a *gap*, and an empty
-    `tags` is a legal `DELETE` followed by a legal zero-row `INSERT`. Both are
-    a caller assembling a call that cannot mean anything, which is
-    `CuratedRowRepository.replace_for_user`'s case one table over.
+    `ck_genome_tags_tag_id_in_vocabulary` cannot see a *gap*, and an empty `tags`
+    is a legal `DELETE` followed by a legal zero-row `INSERT`.
 
-    Kept identical to `tests/fakes/bulk_catalog_repository.
-    _refuse_partial_vocabulary`; `BulkCatalogRepositoryContract` is what holds
-    the two together.
+    Kept identical to the fake in `tests/fakes/bulk_catalog_repository`, with
+    `BulkCatalogRepositoryContract` holding the two together.
 
     **The contiguity check is a set check plus a sort, never a check that the
-    input arrived sorted.** `MovieLensGenomeDataset._vocabulary` makes the same
-    call for the same reason: the vector is built by index, so within-batch
-    order genuinely does not matter, and demanding it would refuse a
-    well-formed vocabulary for the shape of the list it came in.
+    input arrived sorted.** The vector is built by index, so within-batch order
+    genuinely does not matter, and demanding it would refuse a well-formed
+    vocabulary for the shape of the list it came in.
     """
     if not tags:
         # An empty table would then mean two things -- never loaded, and

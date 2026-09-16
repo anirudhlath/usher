@@ -132,19 +132,17 @@ WHERE source_id = :source_id AND episode_id = ANY(:episode_ids)
 ORDER BY episode_id, last_seen_at DESC, external_id
 """
 
-# `ix_media_items_title_id` has existed since M4's migration with no query behind it;
-# this is the first.
+# The only query behind `ix_media_items_title_id`.
 _FOR_TITLE = """
 SELECT * FROM media_items
 WHERE title_id = :title_id AND episode_id IS NULL
 ORDER BY available DESC, last_seen_at DESC, id
 """
 
-# `list_for_title`'s counterpart, for `POST /episodes/{id}/play` -- and the reason it
-# needs no `episode_id IS NOT NULL` or title-scoping clause of its own is the same
-# three-valued-logic argument `_RECENTLY_ADDED`'s window relies on: `episode_id =
+# `list_for_title`'s counterpart, for `POST /episodes/{id}/play`. It needs no
+# `episode_id IS NOT NULL` or title-scoping clause of its own: `episode_id =
 # :episode_id` against a non-null parameter is simply not true for a row whose
-# `episode_id` is NULL, so the exclusion is free rather than a second predicate to get
+# `episode_id` is NULL, so the exclusion is free.
 _FOR_EPISODE = """
 SELECT * FROM media_items
 WHERE episode_id = :episode_id

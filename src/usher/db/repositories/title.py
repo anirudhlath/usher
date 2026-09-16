@@ -86,8 +86,7 @@ def _to_domain(row: TitleRow) -> Title:
 _NOT_UPDATABLE = {"id", "created_at", "updated_at"} | DERIVED_COLUMNS
 
 
-# The four ARRAY(Text) columns -- see the module docstring's note on
-# ARRAY(Text) always reading back as a list, never a tuple.
+# The four ARRAY(Text) columns, which read back as a list and never as a tuple.
 _ARRAY_FIELDS = ("genres", "keywords", "spoken_languages", "origin_countries")
 
 
@@ -112,19 +111,15 @@ def _to_row(title: Title) -> TitleRow:
 def _browse_filters(
     *, genre: str | None, year: int | None, owned: bool | None
 ) -> list[ColumnElement[bool]]:
-    """`browse`'s `WHERE`.
-
-    built once so `browse_facets` can leave exactly one predicate out rather than re-
-    read the filters.
+    """`browse`'s `WHERE`, built once so `browse_facets` can leave one predicate out.
 
     Two copies of a filter set is two chances for a facet to be counted over a
-    population the page is not drawn from -- the same argument
-    `_WITHOUT_DERIVED_COLUMNS` makes for looping over `DERIVED_COLUMNS`.
+    population the page is not drawn from.
     """
     clauses: list[ColumnElement[bool]] = []
     if genre is not None:
         # **`&&` over every spelling of the concept, not `@>` over the one string the
-        # client sent** (ADR-0039).
+        # client sent.**
         clauses.append(
             TitleRow.genres.bool_op("&&")(sql_cast(list(genre_spellings(genre)), PG_ARRAY(Text)))
         )
@@ -157,19 +152,16 @@ def _canonical_facet(rows: Sequence[Row[tuple[str, int]]]) -> dict[str, int]:
 def _browse_order(key: ColumnElement[Any], *, descending: bool) -> tuple[ColumnElement[Any], ...]:
     """`key <dir> NULLS LAST, id ASC` -- browse's total order."""
     ordered = nulls_last(key.desc()) if descending else nulls_last(key.asc())
-    # The total order, and the only reason two reads of one unchanged catalog
-    # agree about which page a row is on. ADR-0034 refuses to mint a cursor for
-    # a keyset that does not end in the primary key.
+    # The total order, and the only reason two reads of one unchanged catalog agree
+    # about which page a row is on: a keyset that does not end in the primary key
+    # cannot mint a stable cursor.
     return (ordered, TitleRow.id.asc())
 
 
 def _browse_after(
     key: ColumnElement[object], *, descending: bool, after: BrowseCursorPosition
 ) -> ColumnElement[bool]:
-    """ADR-0034's keyset predicate, for the order `_browse_order` builds.
-
-    NULLs last, then the key, then `id`.
-    """
+    """The keyset predicate for the order `_browse_order` builds: NULLs last, key, `id`."""
     if after.key is None:
         # The boundary is inside the unkeyed group, which sorts last, so only
         # the rest of that group can follow it.
@@ -187,13 +179,11 @@ def _browse_after(
 def _conflict(title_id: uuid.UUID, constraint: str | None) -> RepositoryConflict:
     """Builds an accurate `RepositoryConflict` for `add()`/`update()` alike.
 
-    Deliberately never claims `title_id` itself already exists -- measured bug this
-    replaced: the message used to read "title {id} already exists" unconditionally,
-    which is false whenever the actual collision was on a *different* row's
-    tmdb_id/imdb_id/tvdb_id (`id` doesn't pre-exist at all in that case; the provider id
-    does). "conflicts with an existing title" is true either way -- `title_id`'s own id
-    collided, or one of its provider ids did -- and `constraint` carries the specific,
-    structured answer for a caller that needs to branch on which.
+    Deliberately never claims `title_id` itself already exists: the collision is
+    just as often a *different* row's tmdb_id/imdb_id/tvdb_id, and in that case
+    `id` does not pre-exist at all. "conflicts with an existing title" is true
+    either way, and `constraint` carries the structured answer for a caller that
+    needs to branch on which.
     """
     detail = f" (constraint: {constraint})" if constraint else ""
     return RepositoryConflict(
@@ -211,11 +201,10 @@ class PostgresTitleRepository(TitleRepository):
                 self._session.add(_to_row(title))
                 await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `titles` carries `tmdb_id`/`tvdb_id` (`integer`, unbounded
-            # above on `Title`), `original_language` (`varchar(16)`) and
-            # `content_rating` (`varchar(32)`) -- and `usher.domain` declares no
-            # `max_length` anywhere, so nothing above this layer bounds either string.
+            # **`DBAPIError` rather than `IntegrityError`.** `titles` carries
+            # `tmdb_id`/`tvdb_id` (`integer`, unbounded above on `Title`),
+            # `original_language` (`varchar(16)`) and `content_rating`
+            # (`varchar(32)`), and `usher.domain` declares no `max_length` anywhere.
             if not is_row_refusal(exc):
                 raise
             # Postgres's own unique-violation on a duplicate id (or a duplicate
@@ -225,41 +214,35 @@ class PostgresTitleRepository(TitleRepository):
             raise _conflict(title.id, constraint_name(exc)) from exc
 
     async def update(self, title: Title) -> None:
-        # _to_row(title) raises loudly on any field/column mismatch, the same
-        # way add() does -- a setattr loop straight off title.model_dump()
-        # would not raise, it would just silently skip a would-be column
-        # that no longer has a match, undoing the "loud, not silent" point
-        # made below.
+        # _to_row(title) raises loudly on any field/column mismatch, the same way
+        # add() does. A setattr loop straight off title.model_dump() would not
+        # raise, it would silently skip a field with no column to land in.
         fresh = _to_row(title)
         try:
             async with self._session.begin_nested():
                 # session.get() lives *inside* the try and the SAVEPOINT, not just the
-                # flush below -- it autoflushes by default (SQLAlchemy's
-                # load_on_pk_identity, no_autoflush=False), so it can just as easily be
+                # flush below: it autoflushes by default, so it can just as easily be
                 # the statement that surfaces some *other*, unrelated pending row's
-                # IntegrityError on this shared session (verified: session.execute()/
+                # IntegrityError on this shared session.
                 row = await self._session.get(TitleRow, title.id)
                 if row is None:
                     raise RepositoryNotFound(f"no existing title {title.id} to update")
-                # The mutation happens *inside* the SAVEPOINT scope, not before it --
-                # verified directly that mutating `row` first and only wrapping flush()
-                # leaves the session's outer transaction DEACTIVE after a caught
-                # conflict (a second, unrelated call then raises PendingRollbackError
-                # instead of succeeding).
+                # The mutation happens *inside* the SAVEPOINT scope, not before it:
+                # mutating `row` first and wrapping only flush() leaves the session's
+                # outer transaction DEACTIVE after a caught conflict, and the next
+                # unrelated call then raises PendingRollbackError.
                 for column in TitleRow.__table__.columns:
                     if column.name not in _NOT_UPDATABLE:
                         setattr(row, column.name, getattr(fresh, column.name))
                 await self._session.flush()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** The same four columns as `add`, on the path TMDb enrichment
-            # actually takes.
+            # **`DBAPIError` rather than `IntegrityError`.** The same four columns as
+            # `add`, on the path TMDb enrichment actually takes.
             if not is_row_refusal(exc):
                 raise
-            # Same translation and same SAVEPOINT reasoning as add() -- see
-            # the module docstring. Retargeting tmdb_id/imdb_id/tvdb_id to a
-            # value another title already holds raises IntegrityError here
-            # today (verified), not just in some future schema change.
+            # Same translation and same SAVEPOINT reasoning as add(). Retargeting
+            # tmdb_id/imdb_id/tvdb_id to a value another title already holds raises
+            # IntegrityError here, not only in some future schema.
             raise _conflict(title.id, constraint_name(exc)) from exc
 
     async def get(self, title_id: uuid.UUID) -> Title | None:
@@ -416,9 +399,9 @@ class PostgresTitleRepository(TitleRepository):
             )
         statement = statement.order_by(
             # `nulls_last` spelled out: Postgres defaults a DESC sort to NULLS
-            # FIRST, and `titles.tmdb_popularity` was measured NULL on all
-            # 1,271,138 rows of a bootstrap-only catalog -- so the default
-            # puts the entire unknown population above every known one.
+            # FIRST, and on a bootstrap-only catalog `titles.tmdb_popularity` is
+            # NULL everywhere -- so the default puts the entire unknown
+            # population above every known one.
             nulls_last(TitleRow.tmdb_popularity.desc()),
             nulls_last(TitleRow.tmdb_vote_count.desc()),
             TitleRow.id,
@@ -465,10 +448,10 @@ class PostgresTitleRepository(TitleRepository):
         # deliberately.
         affine = TitleRow.genres.bool_op("&&")(sql_cast(list(genres), PG_ARRAY(Text)))
         # **The sort is over the whole catalog, so what enters it is the key and not the
-        # row.** This statement outer-joins 1,271,138 titles to a `DISTINCT` over
+        # row.** This statement outer-joins every title to a `DISTINCT` over
         # `media_items`, anti-joins `watch_states`, orders on four expressions and keeps
-        # `limit` of them -- and selecting the entity here put thirty-two of the table's
-        # thirty-three columns into that sort's working set, `overview`, `keywords` and
+        # `limit` of them -- selecting the entity would drag `overview`, `keywords` and
+        # every other wide column through that sort's working set.
         ranked = (
             select(
                 TitleRow.id.label("id"),
@@ -487,8 +470,8 @@ class PostgresTitleRepository(TitleRepository):
                 # unknown population above the known one and then let the
                 # `id` tail decide the pool.
                 nulls_last(TitleRow.tmdb_vote_count.desc()),
-                # ADR-0028's stability, and the only reason two reads of one
-                # unchanged catalog agree about what index 7 names.
+                # The tiebreak, and the only reason two reads of one unchanged
+                # catalog agree about what index 7 names.
                 TitleRow.id,
             )
             .limit(limit)
@@ -503,8 +486,7 @@ class PostgresTitleRepository(TitleRepository):
             # `ranked` because there it is a *key* -- an inner join there would
             # silently make the pool the library.
             .join(ranked, ranked.c.id == TitleRow.id)
-            # **Repeated, because a join promises no order** -- and this is a
-            # measurement rather than the caution it was written as.
+            # **Repeated, because a join promises no order.**
             .order_by(
                 ranked.c.owned.desc(),
                 ranked.c.affine.desc(),
@@ -538,10 +520,8 @@ class PostgresTitleRepository(TitleRepository):
         )
         if after is not None:
             statement = statement.where(_browse_after(key, descending=descending, after=after))
-        # `NULLS LAST` rather than the `(key IS NOT NULL) DESC` this shipped as
-        # -- identical order, 317x on `sort=name`, because only one of the two
-        # is a sort key an index can serve. `_browse_order` carries the
-        # measurement and what the legibility it replaced was worth.
+        # `NULLS LAST` rather than `(key IS NOT NULL) DESC`: identical order, but
+        # only one of the two is a sort key an index can serve.
         statement = statement.order_by(*_browse_order(key, descending=descending)).limit(limit)
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(statement)
@@ -626,11 +606,9 @@ class PostgresTitleRepository(TitleRepository):
             column("genres", PG_ARRAY(Text)),
             name="new_genres",
         ).data([(row.id, list(row.genres)) for row in rows])
-        # **`refusals_as_conflict`, added by M10's F9 (ADR-0044).** This statement is a
-        # bare parameterised `UPDATE` over a `VALUES` join -- it computes nothing
-        # server-side, so class 22 here can only be about a value the caller handed in,
-        # which is the precondition `_errors.py:66-75` states for `is_row_refusal`'s own
-        # claim.
+        # This statement is a bare parameterised `UPDATE` over a `VALUES` join -- it
+        # computes nothing server-side, so class 22 here can only be about a value the
+        # caller handed in, which is the precondition `is_row_refusal` states.
         async with refusals_as_conflict(
             self._session, "a genre batch violates the catalog's own bounds"
         ):

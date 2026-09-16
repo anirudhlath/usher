@@ -22,9 +22,9 @@ def upgrade() -> None:
 
     op.create_index("ix_search_queries_at", "search_queries", ["at"])
 
-    # Both quoted from `m08a_curation.py`'s docstring rather than re-derived.
+    # The retention sweep and every time-bucketed dashboard read `at`.
     op.create_index("ix_llm_calls_at", "llm_calls", ["at"])
-    # -- dashboard 5's "cost per curated row", joining curated_rows on -- generation_id.
+    # Dashboard 5's "cost per curated row", joining `curated_rows` on generation_id.
     op.create_index(
         "ix_llm_calls_generation_id",
         "llm_calls",
@@ -34,8 +34,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Load-bearing, all three -- see the module docstring. Nothing else drops
-    # them, and both tables outlive this revision.
+    # Dropped explicitly: nothing else drops them, and both tables outlive this
+    # revision.
     op.drop_index("ix_llm_calls_generation_id", table_name="llm_calls")
     op.drop_index("ix_llm_calls_at", table_name="llm_calls")
     op.drop_index("ix_search_queries_at", table_name="search_queries")

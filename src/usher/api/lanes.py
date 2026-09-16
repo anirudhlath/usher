@@ -48,10 +48,9 @@ from usher.telemetry import (
 _tracer = trace.get_tracer("usher.rows")
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
-# setting, for the reason `usher.cli`'s copy of this constant is not: it is
-# the polling floor of a lane that already has push as its real answer for
-# *inbound* work, and a knob would invite tuning a number that is about to
-# stop mattering. What it drains is Usher's own queue, which has no push.
+# setting, for the reason `usher.cli`'s copy is not: it is the polling floor of
+# a lane whose real answer for *inbound* work is push. What it drains is Usher's
+# own queue, which has none.
 IDLE_SLEEP_SECONDS = 5.0
 
 
@@ -79,11 +78,9 @@ class LaneSupervisor:
         # -- and it is optional for the same reason `provider` and `embedder`
         # are: a lane supervisor in a test has no `app.state` to read one off.
         self._rows = rows
-        # The stale-key handover, filled by `HomeService` on the request path
-        # and drained by the one lane below. `None` alongside `rows` is `None`
-        # -- the pair is the switch, see the module docstring -- and a
-        # supervisor given one without the other starts no refresh lane rather
-        # than half of one.
+        # The stale-key handover, filled by `HomeService` on the request path and
+        # drained by the one lane below. The pair is the switch: a supervisor given
+        # one without the other starts no refresh lane rather than half of one.
         self._refreshes = refreshes
         self._user_id = user_id
         # The scheduler's registrations need a database and do **not** need a
@@ -101,9 +98,8 @@ class LaneSupervisor:
         # lane register no `curate` handler -- so curate work waits for a
         # process that can run it rather than being claimed and parked.
         self._client = client
-        # Injected only so a test can run several worker passes without spending five
-        # seconds each: `usher work`'s equivalent is a module constant for the reason
-        # stated above, and nothing in `src/` passes this.
+        # Injected only so a test can run several worker passes without spending
+        # five seconds each. Nothing in `src/` passes it.
         self._idle_seconds = idle_seconds
         self._lanes: dict[uuid.UUID, asyncio.Task[None]] = {}
         self._names: dict[uuid.UUID, str] = {}
@@ -111,15 +107,13 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._rows_lane: asyncio.Task[None] | None = None
-        # The scheduled-work lane (ADR-0046, M10 J4). Built in `start()`
-        # rather than here, and it owns its own task rather than being one of
-        # the four above: `Scheduler.stop()` is what cancels and awaits it,
-        # for the same reason `JobWorker` owns its heartbeat.
+        # The scheduled-work lane. Built in `start()`, and it owns its own task
+        # rather than being one of the four above: `Scheduler.stop()` cancels and
+        # awaits it, for the same reason `JobWorker` owns its heartbeat.
         self._scheduler: Scheduler | None = None
-        # What `JobWorker.recover()` measured, kept rather than discarded --
-        # see `recovered_claims()` below. `None` until the first recovery pass
-        # returns, so a process that runs no worker lane reports *not probed*
-        # rather than *no orphans*.
+        # What `JobWorker.recover()` returned, kept rather than discarded -- see
+        # `recovered_claims()` below. `None` until the first recovery pass returns,
+        # so a process running no worker lane reports *not probed*, not *no orphans*.
         self._recovered_claims: int | None = None
         self._recovered_at: datetime | None = None
         self._gauges = QueueGauges()
@@ -135,11 +129,9 @@ class LaneSupervisor:
 
         Awaits nothing, connects to nothing.
 
-        `async` despite never suspending because `stop()` is, because a
-        future lane may need to, and because a lifespan calling one of a
-        pair with `await` and the other without reads as a mistake.
-        `tests/unit/test_api_lanes.py` drives this coroutine one step by
-        hand and requires `StopIteration`, which is what pins it.
+        `async` despite never suspending because `stop()` is, because a future
+        lane may need to, and because a lifespan calling one of a pair with
+        `await` and the other without reads as a mistake.
         """
         if self._settings.worker_enabled:
             self._worker = asyncio.create_task(self._run_worker(), name="usher.lane.worker")
@@ -150,15 +142,13 @@ class LaneSupervisor:
                 self._run_row_refresh(), name="usher.lane.rows.refresh"
             )
         if self._settings.scheduler_enabled:
-            # **Off by default, unlike the two switches above** -- ADR-0046's decision
-            # 3, and it is why nine existing app fixtures do not have to grow a third
-            # `scheduler_enabled=False`.
+            # **Off by default, unlike the two switches above**, so an existing app
+            # fixture does not have to grow a third `scheduler_enabled=False`.
             self._scheduler = build_scheduler(self._settings, sessions=self._sessions)
-            # Registered here rather than unconditionally in `create_app`, which is
-            # where `register_push_gauges` goes: with no scheduler there is no snapshot
-            # to read, and `_observe_job_due` answering "no reader, no observation" is
-            # exactly what keeps a scheduler-less process from publishing a series about
-            # jobs it does not run.
+            # Registered here rather than unconditionally in `create_app`: with no
+            # scheduler there is no snapshot to read, and "no reader, no observation"
+            # keeps a scheduler-less process from publishing a series about jobs it
+            # does not run.
             register_scheduler_gauges(self._scheduler.read)
             await self._scheduler.start()
 
@@ -234,37 +224,28 @@ class LaneSupervisor:
         return self._scheduler is not None and self._scheduler.running()
 
     def recovered_claims(self) -> int | None:
-        """The total `JobWorker.recover()` has returned in this process.
+        """The total `JobWorker.recover()` has returned here, or `None` if never asked.
 
-        or `None` if it has never asked.
-
-        Three values, three statements -- `None` *not probed*, `0` *asked and
-        found none*, non-zero *took some back* -- on the terms
-        `SourceStatus.push_available` (`usher.ports.source`) already sets. **The
-        whole argument for the shape, the cost and the per-process bound is on
-        `LaneReport` (`usher.api.dto.health`), which is the wire contract**;
-        stating it here too is two copies to drift.
+        Three values, three statements -- `None` *not probed*, `0` *asked and found
+        none*, non-zero *took some back* -- on the terms
+        `SourceStatus.push_available` already sets. The wire contract is on
+        `LaneReport` (`usher.api.dto.health`); restating it here is two copies to drift.
         """
         return self._recovered_claims
 
     def recovered_at(self) -> datetime | None:
         """When the last recovery pass that *found something* ran.
 
-        see `LaneReport` for why it is not "when recovery last ran".
+        `LaneReport` says why this is not "when recovery last ran".
         """
         return self._recovered_at
 
     def _note_recovery(self, recovered: int) -> None:
         """Fold one `recover()` result into the two reported fields.
 
-        Reads the **return value**, and a counter incremented before the call
-        instead is the mutation this exists to refuse. The two **diverge where
-        it matters and agree where it does not**: a pass that recovered nothing
-        reports `0` here and `1` there, while at exactly one orphan both say
-        `1` -- which is why F2's own spec, asserting `== 1` against a single
-        planted claim, could not tell them apart, and why the case that kills
-        it is the one that recovers **none**
-        (`.claude/rules/mutation-sweeps.md`, M10 F2).
+        Reads the **return value**; a counter incremented before the call instead
+        is the mutation this exists to refuse. The two agree at exactly one orphan
+        and diverge at zero, so only a pass that recovers **none** tells them apart.
         """
         self._recovered_claims = (self._recovered_claims or 0) + recovered
         if recovered:
@@ -278,8 +259,6 @@ class LaneSupervisor:
         `checks` alone: a screen refresh lane that could 503 this process would
         take it out of a load balancer for a reason restarting it cannot fix,
         while `GET /home` carries on answering from a cache and a full compose.
-        `tests/integration/test_health.py` is where a reachable database makes
-        both of those mutations die.
         """
         return self._rows_lane is not None and not self._rows_lane.done()
 
@@ -302,8 +281,8 @@ class LaneSupervisor:
     def push_available(self, source_id: uuid.UUID) -> bool | None:
         """What `GET /admin/sources/{id}/status` reports.
 
-        or `None` when no lane is running for that source -- "not probed", which is a
-        different answer from "push is broken" and is the honest one.
+        `None` when no lane is running for that source -- "not probed", a different
+        answer from "push is broken" and the honest one.
         """
         adapter = self._open_adapters.get(source_id)
         return None if adapter is None else adapter.supports_push
@@ -313,8 +292,8 @@ class LaneSupervisor:
     async def refresh(self) -> None:
         """Start a lane for every enabled source that has none.
 
-        drop the lanes of sources that have gone or been disabled, and **release the
-        adapter of a lane that has finished** without restarting it.
+        Lanes of sources that have gone or been disabled are dropped, and a lane
+        that has finished **releases its adapter** without being restarted.
         """
         async with self._work() as pipeline:
             wanted = {source.id: source for source in await selected_sources(pipeline)}
@@ -322,11 +301,8 @@ class LaneSupervisor:
                 if source_id not in wanted:
                     await self._stop_lane(source_id)
             for source_id, task in list(self._lanes.items()):
-                # `task.done()` is the whole predicate, and it is the only
-                # thing separating this from the loudest regression this file
-                # could ship -- releasing a *live* lane's adapter mid-stream.
-                # The case for this carries a positive control over a running
-                # lane for exactly that reason.
+                # `task.done()` is the whole predicate, and the only thing between
+                # this and releasing a *live* lane's adapter mid-stream.
                 if task.done():
                     await self._release_adapter(source_id)
             for source_id, source in wanted.items():
@@ -336,8 +312,7 @@ class LaneSupervisor:
     async def _refresh_loop(self) -> None:
         """Refresh, then sleep.
 
-        in that order, so the first lane set is built by this task rather than by
-        `start()`.
+        In that order, so the first lane set is built by this task, not `start()`.
         """
         while True:
             try:
@@ -404,18 +379,13 @@ class LaneSupervisor:
     async def _release_adapter(self, source_id: uuid.UUID) -> None:
         """Close this source's adapter and forget it, at most once.
 
-        The `pop` is what makes it at-most-once, and that is the property
-        rather than an optimisation: `refresh` runs on a timer, so a release
-        path that only called `aclose()` would call it again every
-        `push_source_refresh_seconds` for the life of the process. `aclose` is
-        idempotent on both implementations, so nothing would break and nothing
-        would say so -- which is why the case for this asserts a **count** and
-        not a flag.
+        The `pop` is the property, not an optimisation: `refresh` runs on a timer,
+        so a release path that only called `aclose()` would call it again every
+        `push_source_refresh_seconds` for the life of the process -- and `aclose`
+        is idempotent on both implementations, so nothing would say so.
 
-        Shared with `_stop_lane` deliberately: a source whose lane is stopped
-        and a source whose lane finished on its own must release the adapter
-        the same way, and two spellings of one rule is how the wrong one gets
-        tested.
+        Shared with `_stop_lane` deliberately: a source whose lane is stopped and
+        one whose lane finished on its own must release the adapter the same way.
         """
         adapter = self._open_adapters.pop(source_id, None)
         if adapter is not None:
@@ -446,11 +416,8 @@ class LaneSupervisor:
             # `None` is shared with `reconcile()` instead of two.
             cursor = await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA)
             if cursor is None:
-                # The source's **name**, never its base URL and never
-                # anything from its credential row -- PRD 08's
-                # credentials-are-never-logged rule, and `ReconcileService`'s
-                # own failure line is the local precedent for spelling it
-                # this way.
+                # The source's **name**, never its base URL and never anything from
+                # its credential row -- PRD 08's credentials-are-never-logged rule.
                 if self._settings.push_gap_close == "cursored":
                     logger.warning(
                         "not closing {source}'s push gap: no item sync has ever completed "
@@ -480,22 +447,20 @@ class LaneSupervisor:
                 adapter,
                 max_items=self._settings.push_gap_max_items,
             )
-            # Unconditionally, and after a bounded item walk as much as
-            # after a whole one. `reconcile` never raises, so a truncated
-            # walk arrives here as a returned `FAILED` run rather than as
-            # control flow -- and the watch lane must still run, because it
-            # is a different lane with a different cursor.
+            # Unconditionally, after a bounded item walk as much as a whole one.
+            # `reconcile` never raises, so a truncated walk arrives as a returned
+            # `FAILED` run rather than as control flow, and the watch lane must
+            # still run -- a different lane with a different cursor.
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 
     async def _write_push_available(self, source: Source, available: bool) -> None:
         async with self._work() as pipeline:
             stored = await pipeline.sources.get(source.id)
             if stored is None or stored.supports_push == available:
-                # No write when nothing changed -- and **this guard is belt-and-braces
-                # against a repository it does not own, not the thing that makes the
-                # property true.** Measured by mutation: deleting it leaves
-                # `sources.updated_at` exactly where it was, because
-                # `PostgresSourceRepository.update` sets attributes on a loaded ORM row
+                # No write when nothing changed. Belt-and-braces against a repository
+                # this does not own, not the thing that makes the property true:
+                # `PostgresSourceRepository.update` sets attributes on a loaded ORM
+                # row, so an unchanged value leaves `sources.updated_at` where it was.
                 return
             await pipeline.sources.update(stored.evolve(supports_push=available))
             await pipeline.commit()
@@ -507,9 +472,8 @@ class LaneSupervisor:
 
         One consumer, so at most one refresh is ever in flight and the pool
         sees at most one extra session. The queue in front of it is where the
-        *bound* lives: full means dropped, and a dropped key costs one hard
-        miss on the next request past `TTL + grace` -- the cost M7 already
-        pays on every expiry.
+        *bound* lives: full means dropped, and a dropped key costs one hard miss
+        on the next request past `TTL + grace` -- the cost already paid on expiry.
         """
         # Bound once rather than re-narrowed per statement -- `start()` is what
         # guarantees it is not `None`, and `assert` is not available in shipped
@@ -526,8 +490,7 @@ class LaneSupervisor:
             except Exception as exc:
                 # **Named, and named with the lane.** Without this the lane task dies
                 # and CPython reports the unretrieved exception at GC time, to stderr,
-                # with no source in it -- the shape `_guard` above exists for, arriving
-                # here through a `while True` instead of through a task.
+                # with no source in it.
                 logger.exception(
                     "the rows.refresh lane failed to refresh a screen and left the "
                     "stale one in place: {error}",
@@ -543,32 +506,24 @@ class LaneSupervisor:
     async def _refresh_screen(self, stale: StaleScreen) -> None:
         """One household's screen, rebuilt on this lane's own session.
 
-        **A root span with a `Link`, never a child.** PRD 10 specifies exactly
-        this for a worker's `job.*` and the reason is the same: the request
-        that served the stale screen has usually already returned, so a child
-        span of a finished parent misstates causality. It also corrects PRD
-        10's "the number of `row.build` children of a `home.compose` is the
-        number of misses" -- these `row.build` spans have no `home.compose`
-        parent at all, because `HomeService.rebuild` opens none.
+        **A root span with a `Link`, never a child.** The request that served the
+        stale screen has usually already returned, so a child span of a finished
+        parent misstates causality.
 
-        **It composes the same filtered registry `GET /home` does, and that is
-        not symmetry for its own sake.** A refresh runs *because* a screen
-        expired, and it writes what it builds back into the same `RowCache` --
-        so a lane composing the unfiltered `pipeline.row_providers` would put a
-        disabled provider's shelf back on the screen the toggle route had just
-        cleared, roughly `_SCREEN_TTL` after the operator switched it off. The
-        route would look like it worked and the shelf would return, which is
-        the failure mode M7's boundary call 9 refused this table over.
+        **It composes the same filtered registry `GET /home` does.** A refresh runs
+        *because* a screen expired and writes what it builds back into the same
+        `RowCache`, so a lane composing the unfiltered `pipeline.row_providers`
+        would put a disabled provider's shelf back on the screen the toggle route
+        had just cleared -- the route would look like it worked.
         """
         links = [Link(stale.link)] if stale.link.is_valid else []
         # `context=Context()` -- an empty context -- so "root" is structural rather than
         # a property of where `start()` happened to be called.
         with _tracer.start_as_current_span("rows.refresh", context=Context(), links=links) as span:
             async with self._work() as pipeline:
-                # A session this lane opened, closed when the block ends --
-                # never the request's, which `get_session` committed and closed
-                # when the handler returned. That is the whole reason M7
-                # deferred this rather than half-implementing it.
+                # A session this lane opened, closed when the block ends -- never
+                # the request's, which `get_session` committed and closed when the
+                # handler returned.
                 service = HomeService(
                     enabled_row_providers(
                         row_provider_settings(

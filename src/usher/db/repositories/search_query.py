@@ -1,7 +1,4 @@
-"""`search_queries`.
-
-one row per answered search, then attributed by up to two later calls: a click, and
-"""
+"""`search_queries` -- one row per answered search, attributed by up to two later calls."""
 
 import uuid
 from datetime import datetime
@@ -53,11 +50,10 @@ _INSERT_QUERY = text(
     bindparam("tier", type_=enum_column(SuggestTier, length=6)),
 )
 
-# **Two columns, two different conditions, deliberately not one shared guard.** A single
-# `WHERE clicked_title_id IS NULL` was the first cut of this statement and it was wrong:
-# F3's own funnel calls `record_outcome` *twice* on the same row at two different times
-# -- `GET /titles/{id}?search_id=…` attributes the click, and `POST /titles/{id}/play`
-# reports the play -- and a guard keyed on `clicked_title_id` alone silently drops the
+# **Two columns, two different conditions, deliberately not one shared guard.** The
+# funnel calls `record_outcome` *twice* on the same row at two different times --
+# `GET /titles/{id}?search_id=…` attributes the click, `POST /titles/{id}/play` reports
+# the play -- so a guard keyed on `clicked_title_id` alone would drop the second call.
 _RECORD_OUTCOME = text(
     "UPDATE search_queries "
     "SET clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id), "
@@ -76,15 +72,13 @@ _RECORD_OUTCOME = text(
 
 
 # **The one read on this port, and it is an aggregate rather than a row.**
-# `SearchQueryRetention.last_done()` is built on it (ADR-0046: a job answers "when were
-# you last done" from the artefact it maintains), and `ix_search_queries_at` --
-# `m10c`'s, added for the `DELETE` below -- makes it an Index Only Scan of the leftmost
+# `SearchQueryRetention.last_done()` answers "when were you last done" from the artefact
+# it maintains, and `ix_search_queries_at` makes this an Index Only Scan of the leftmost
 # leaf.
 _OLDEST_AT = text("SELECT min(at) FROM search_queries")
 
-# 🔴 **`<`, not `<=`**, and the port says why: a row answered at exactly the cutoff is
-# inside the window, which is the boundary PRD 10's own statement draws (`at < now() -
-# interval '90 days'`).
+# **`<`, not `<=`**: a row answered at exactly the cutoff is inside the window, which is
+# the boundary PRD 10's own statement draws (`at < now() - interval '90 days'`).
 _PRUNE = text(
     "DELETE FROM search_queries WHERE id IN ("
     "  SELECT id FROM search_queries WHERE at < :before ORDER BY at LIMIT :limit"
@@ -133,11 +127,11 @@ class PostgresSearchQueryRepository(SearchQueryRepository):
         if answered is None:
             return None
         # Aware by the column's own type: `search_queries.at` is `TIMESTAMP WITH TIME
-        # ZONE` (`m09a`), and asyncpg hands a `timestamptz` back with a `tzinfo`.
+        # ZONE`, and asyncpg hands a `timestamptz` back with a `tzinfo`.
         if not isinstance(answered, datetime) or answered.tzinfo is None:
             # `PortDataMalformed` rather than a bare `AssertionError`: this crosses a
-            # port boundary, ADR-0009 forbids a raw exception doing that, and the family
-            # is the right one -- the store answered something this port cannot use.
+            # port boundary, where a raw exception must not, and the family is the right
+            # one -- the store answered something this port cannot use.
             raise PortDataMalformed(
                 "min(search_queries.at) read back without a timezone; the column is "
                 "TIMESTAMP WITH TIME ZONE and ScheduledJob.last_done requires an aware value"

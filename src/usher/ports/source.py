@@ -32,7 +32,7 @@ class SourceEventKind(StrEnum):
 class SourceItemKind(StrEnum):
     """A source's own idea of what kind of thing an item is.
 
-    narrower than `usher.domain.enums.TitleKind` because sources address individual
+    Narrower than `usher.domain.enums.TitleKind`: sources address individual
     episodes directly, unlike `Title`.
     """
 
@@ -44,11 +44,9 @@ class SourceItemKind(StrEnum):
 class StreamTargetKind(StrEnum):
     """What a client is expected to do with a `StreamTarget.url`.
 
-    A `StrEnum` rather than the bare `str` this field carried through M1 and
-    M2, for the reason `SourceItemKind` exists: PRD 07 puts these values on
-    the wire, and a bare `str` invites `"deeplink"` (no underscore) to be
-    serialized to a client that matches on `"deep_link"` and silently
-    renders nothing.
+    These values go on the wire (PRD 07), so they are an enum rather than a
+    bare `str`: `"deeplink"` serialized to a client matching `"deep_link"`
+    renders nothing and raises nothing.
     """
 
     DIRECT = "direct"
@@ -59,16 +57,13 @@ class StreamTargetKind(StrEnum):
 class SourceItem:
     """One playable item as the source describes it, already normalised.
 
-    A plain dataclass, not a `DomainModel` — nothing here is validated at
-    construction. `SourceItemKind`, `HdrFormat`, and `AwareDatetime` below
-    state the contract an adapter must uphold, the same way `MediaItem`
-    and `Title` enforce it on the far side of the ingest boundary;
-    constructing this with a naive `datetime` or a source's raw HDR string
-    (e.g. Emby's `"DolbyVision"`) will not raise here — only later, if and
-    when something re-validates it, which is one layer too late.
+    Nothing here is validated at construction: the annotations state a
+    contract the adapter must uphold, and a naive `datetime` or a raw source
+    HDR string (Emby's `"DolbyVision"`) raises only later, if anything
+    re-validates it at all.
 
-    `provider_ids` keys are lowercase and use `CANONICAL_PROVIDER_IDS`'
-    names where they apply — see that constant.
+    `provider_ids` keys are lowercase, using `CANONICAL_PROVIDER_IDS`' names
+    where they apply.
     """
 
     external_id: str
@@ -89,11 +84,9 @@ class SourceItem:
     series_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
-    # Opaque; stored in raw_payloads (PRD 03) for debugging and future
-    # reprocessing, never interpreted above the adapter boundary. The one
-    # deliberate exception to "nothing source-specific escapes its
-    # adapter" — every other field above exists so this one doesn't have
-    # to be read by anything above the adapter.
+    # Opaque; stored in raw_payloads (PRD 03) for debugging and reprocessing,
+    # never interpreted above the adapter boundary. Every typed field above
+    # exists so that nothing above the adapter has to read this one.
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -106,10 +99,9 @@ class SourceWatchState:
     played: bool
     play_count: int | None = None
     last_played_at: AwareDatetime | None = None
-    # Emby is multi-user; None means "the source didn't distinguish", which
-    # today is fine because everything implicitly lands on the singleton
-    # default user (PRD 01's authentication seam). Cheap to carry now —
-    # becomes a breaking DTO change the moment a household has two users.
+    # `None` means the source didn't distinguish, which lands everything on
+    # the singleton default user. Carried now because adding it once a
+    # household has two users is a breaking DTO change.
     source_user_id: str | None = None
 
 
@@ -145,11 +137,8 @@ def redact_query(url: str) -> str:
     return url if cut < 0 else f"{url[:cut]}<redacted>"
 
 
-# The scheme a deep-link target opens the client with. Kept under this exact
-# name across the move D2 made -- see `wrap_deep_link` below -- because a
-# second spelling of one constant is exactly what the move exists to
-# prevent, and an earlier draft of this task's own plan used two names for
-# it in two paragraphs.
+# The scheme a deep-link target opens the client with. One name, here, so no
+# adapter grows a second spelling of it.
 INFUSE_SCHEME = "infuse"
 
 
@@ -180,20 +169,15 @@ class StreamTarget:
     def __repr__(self) -> str:
         """The generated `repr` with `url` redacted.
 
-        see the class docstring for why this is a security property rather than taste.
+        `url` carries a source credential in its query string, and a `repr`
+        of this reaches logs and tracebacks. Both halves fail safe: with
+        `repr=False`, deleting this method falls back to `object.__repr__`,
+        which leaks nothing, and `dataclasses` never overwrites a `__repr__`
+        defined in the class body, so restoring `repr=True` does not restore
+        the leaking one. Only removing both re-opens it.
 
-        Both halves fail safe. `@dataclass(repr=False)` means deleting this
-        method yields `object.__repr__` (`<StreamTarget object at 0x…>`),
-        which leaks nothing; and `dataclasses` never overwrites a
-        `__repr__` already defined in the class body, so flipping
-        `repr=False` back to `repr=True` does not silently restore the
-        leaking one either. Only deleting *both* re-opens it, which is what
-        `tests/unit/test_ports_source.py` is there to catch.
-
-        The cut itself is `redact_query` above and is deliberately *not*
-        inlined here: from M5 the push channel's socket URL carries the same
-        token in the same shape, and two copies of one rule is how the two
-        come to disagree.
+        The cut is `redact_query`, not inlined: the push channel's socket URL
+        carries the same token in the same shape.
         """
         rendered = {item.name: getattr(self, item.name) for item in fields(self)}
         rendered["url"] = redact_query(self.url)
@@ -205,40 +189,35 @@ class StreamTarget:
 class SourceStatus:
     """What `GET /admin/sources/{id}/status` (PRD 07) needs to report.
 
-    Three booleans rather than one enum, because the states are
-    independent: "reachable but the credentials are wrong" and "reachable,
-    authenticated, but a proxy is stripping `Upgrade`" are both real, and a
-    flat enum would have to enumerate the product.
+    Independent booleans rather than one enum: "reachable, credentials
+    wrong" and "reachable, authenticated, proxy stripping `Upgrade`" are
+    both real states.
 
-    `push_available` is `bool | None`, and `None` — "not probed" — is the
-    default. This is ADR-0004's health-check caveat in DTO form: a
-    WebSocket handshake against a *nonexistent* path also upgrades and also
-    receives `Sessions`, so a successful upgrade is not evidence of
-    anything. Only *received messages* are. Until M5 builds a probe that
-    asserts on messages, every adapter reports `None` here, and the admin
-    surface renders "unknown" rather than a guess.
+    `push_available` defaults to `None`, meaning not probed. A WebSocket
+    handshake against a nonexistent path also upgrades, so an upgrade is not
+    evidence; only received messages are. An adapter that has not asserted on
+    messages reports `None` and the admin surface renders "unknown".
 
-    `detail` is a short operator-facing string — a status line, not a
-    payload. It must never carry a credential: an implementation builds it
-    from its own translated `UsherPortError`s, whose messages carry a
-    method, a path, and a transport error, never a token or a password.
+    `detail` is a short operator-facing status line and must never carry a
+    credential -- build it from translated `UsherPortError`s, whose messages
+    carry a method, a path, and a transport error.
     """
 
     reachable: bool
     authenticated: bool
     push_available: bool | None = None
     server_version: str | None = None
-    # `None` means "not determined", exactly as `push_available` does, and for a
-    # stronger reason: ADR-0012 accepts the risk that an operator configures an
-    # administrator account, and its recorded mitigation is guidance rather than code.
+    # `None` means "not determined", as `push_available` does. An operator
+    # configuring an administrator account is an accepted risk mitigated by
+    # guidance, not by code, so nothing here refuses it.
     is_administrator: bool | None = None
     detail: str | None = None
 
     def __post_init__(self) -> None:
-        # Deliberately no clause for `is_administrator`. The two above refuse
-        # states no upstream produces; an administrator account is a state a
-        # real deployment is in right now, and the screen that exists to
-        # report it must be able to construct a status for it.
+        # No clause for `is_administrator`: the two below refuse states no
+        # upstream produces, but an administrator account is a state real
+        # deployments are in, and the screen reporting it must be
+        # constructible.
         if self.authenticated and not self.reachable:
             raise ValueError("a source cannot be authenticated without being reachable")
         if self.push_available and not self.authenticated:
@@ -275,24 +254,20 @@ class SourceAdapter(ABC):
     def supports_push(self) -> bool:
         """Whether this adapter has a live push channel right now.
 
-        **and the answer must be grounded in messages received rather than in a socket
-        being open.**.
+        Grounded in messages received, never in a socket being open.
         """
 
     @abstractmethod
     async def verify(self) -> "SourceStatus":
         """Report reachability, authentication, and push availability.
 
-        Returns rather than raises for every *expected* failure —
-        unreachable host, rejected credentials, a rate-limited upstream —
-        because its one caller (`GET /admin/sources/{id}/status`, PRD 07)
-        exists to render those states, not to handle them. The taxonomy in
-        `usher.ports.errors` still governs every other method on this port;
-        this is the deliberate exception, and it is why the method returns
-        a `SourceStatus` rather than a bool.
+        Returns rather than raises for every expected failure -- unreachable
+        host, rejected credentials, rate-limited upstream -- because its
+        caller renders those states rather than handling them. The one
+        exception to the `usher.ports.errors` taxonomy, which still governs
+        every other method here.
 
-        Must not claim `push_available=True` without message-level
-        evidence — see `SourceStatus`.
+        Must not claim `push_available=True` without message-level evidence.
         """
 
     @abstractmethod
@@ -303,25 +278,19 @@ class SourceAdapter(ABC):
     async def get_item(self, external_id: str) -> SourceItem | None:
         """Fetch one item.
 
-        `None` means the item is gone from the source — PRD 03's
-        reconcile marks it `available = false`. A transient failure to
-        reach the source is a different outcome and must raise (e.g.
-        `PortUnavailable` from `usher.ports.errors`), never be reported as
-        `None`; conflating the two would mark a healthy item unavailable
-        because of a flaky network, not because it was actually deleted.
+        `None` means gone from the source, and reconcile marks it
+        `available = false`. A transient failure to reach the source must
+        raise (`PortUnavailable`), never return `None` -- conflating the two
+        marks healthy items unavailable on a flaky network.
         """
 
     @abstractmethod
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         """Ranked ways to play an item, best first.
 
-        Empty for an item there is no way to play — a series or season
-        folder, or an id the source does not have. Not an error: the
-        caller's next move is identical in both cases ("not playable
-        here"), and `get_item` already exists to tell absence from
-        presence, so raising would only make the common case
-        (`POST /titles/{id}/play` for something owned but not playable)
-        travel through an exception path.
+        Empty, not an error, for anything unplayable -- a series or season
+        folder, or an unknown id. The caller's next move is the same either
+        way, and `get_item` already tells absence from presence.
         """
 
     @abstractmethod
@@ -338,48 +307,42 @@ class SourceAdapter(ABC):
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
         """Write watch state back to the source.
 
-        Must raise on failure, never swallow it. PRD 03's "best-effort"
-        describes the *caller's* behaviour — the request that triggered
-        this write never blocks or fails on a write-back error, because
-        the caller enqueues a retry instead — not this method's. That
-        guarantee only works if failures are visible: an implementation
-        that swallows an error here means the retry never happens.
+        Must raise on failure, never swallow it. "Best-effort" describes the
+        caller, which enqueues a retry rather than failing the triggering
+        request; a swallowed error here means that retry never happens.
         """
 
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
         """Push channel.
 
-        Adapters without one raise `SourceNotSupported`; the reconciler covers them. See
-        `supports_push` for the one-way relationship between the two — offering a
-        channel is not a claim that it is delivering.
+        Adapters without one raise `SourceNotSupported`; the reconciler
+        covers them. Offering a channel is not a claim it is delivering --
+        see `supports_push`.
 
-        One connection per call, not a cached one: a supervisor calls this
+        One connection per call, never a cached one: a supervisor calls this
         once per reconnect, and a cached channel hands back a closed socket
         forever.
 
-        Same must-raise-never-truncate rule as `list_items`: an iterator
-        that *stops* because the connection died is indistinguishable from a
-        source with nothing more to say, and a supervisor would read that as
-        a clean shutdown and never reconnect. A channel that has stopped
-        delivering raises rather than sitting there looking well.
+        Must raise, never truncate. An iterator that stops because the
+        connection died reads to a supervisor as a clean shutdown, and it
+        never reconnects.
         """
 
     @property
     def push_reconnects(self) -> int:
-        """How many times this adapter's push channel has re-**opened**."""
+        """How many times this adapter's push channel has reopened."""
         return 0
 
     async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:
-        """Open the push channel, wait, and report **what arrived**."""
+        """Open the push channel, wait, and report what arrived."""
         collected: list[SourceEventKind] = []
         upgraded = False
         try:
             async with self.events() as events:
-                # Set *inside* the block: a failed upgrade must report
-                # `upgraded=False`, and a channel that opened and then went
-                # stale must not — the second is the failure ADR-0004
-                # warns about and the operator's next move differs.
+                # Set inside the block so a failed upgrade reports
+                # `upgraded=False` while a channel that opened and then went
+                # stale reports `True`. The operator's next move differs.
                 upgraded = True
                 stream = aiter(events)
                 loop = asyncio.get_running_loop()
@@ -395,18 +358,16 @@ class SourceAdapter(ABC):
                     collected.append(event.kind)
                 return PushProbe(
                     upgraded=True,
-                    # Read from the adapter, never from `collected`: an
-                    # idle library's channel delivers messages that map to
-                    # no event at all, and that is precisely what keeps it
-                    # measurably alive.
+                    # Read from the adapter, never from `collected`: an idle
+                    # library's channel delivers messages that map to no
+                    # event, and those still prove it alive.
                     delivering=self.supports_push,
                     events=tuple(dict.fromkeys(collected)),
                 )
         except UsherPortError as exc:
-            # `False`, not `self.supports_push`: the channel's context
-            # manager has already exited by the time this runs, so the
-            # ledger reports closed anyway — spelled as the constant so a
-            # reader does not have to reason about that to trust it.
+            # `False`, not `self.supports_push`: the context manager has
+            # already exited here, so the ledger reports closed anyway --
+            # spelled as a constant so nobody has to work that out.
             return PushProbe(
                 upgraded=upgraded,
                 delivering=False,
@@ -416,30 +377,23 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     async def aclose(self) -> None:
-        """Release held resources — connection pools, and (from M5) the push WebSocket.
+        """Release held resources -- connection pools, the push WebSocket.
 
-        Called when a source is deleted (`DELETE /admin/sources/{id}`, PRD 07) or the
-        process shuts down.
-
-        Idempotent: calling it twice is not an error, because a shutdown
-        path and a delete path can both reach it. Afterwards every other
-        method raises `PortUnavailable` rather than whatever the underlying
-        client happens to raise — verified: a closed `httpx.AsyncClient`
-        raises a bare `RuntimeError`, which is not an `httpx.HTTPError` and
-        so escapes an adapter that only translates those.
+        Idempotent: a shutdown path and a delete path can both reach it.
+        Afterwards every other method raises `PortUnavailable`, not whatever
+        the underlying client raises -- a closed `httpx.AsyncClient` raises a
+        bare `RuntimeError`, which is no `httpx.HTTPError` and escapes an
+        adapter translating only those.
         """
 
 
 class SourceAdapterFactory(ABC):
     """Builds the right `SourceAdapter` for a configured `Source`.
 
-    Exists because `services/` may depend only on `domain/` and `ports/`
-    (PRD 01, layering rule 2), so `SourceService` cannot import
-    `EmbyAdapter` — it receives one. This is also the single place a second
-    source kind gets registered, which is the concrete form of PRD 01's
-    "additional sources" extension seam: a Jellyfin adapter adds a
-    `SourceKind` member and one branch here, and nothing else in the
-    application moves.
+    `services/` may depend only on `domain/` and `ports/`, so `SourceService`
+    cannot import an adapter -- it receives one. The single registration
+    point for a source kind: a new adapter adds a `SourceKind` member and one
+    branch here, and nothing else moves.
     """
 
     @abstractmethod

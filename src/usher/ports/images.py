@@ -25,24 +25,23 @@ __all__ = [
     "is_servable_path",
 ]
 
-# : The four widths `GET /images/{id}?w=` clamps to, smallest first.
+#: The four widths `GET /images/{id}?w=` clamps to, smallest first.
 IMAGE_LADDER: tuple[int, ...] = (154, 342, 780, 1280)
 
-#: What `w` absent means: the row card, which is the surface both of M9's two
-#: artwork consumers paint. Already a rung, so the default creates no fifth
-#: cache entry.
+#: What `w` absent means: the row card, the surface every artwork consumer
+#: paints. Already a rung, so the default creates no fifth cache entry.
 DEFAULT_IMAGE_WIDTH = 342
 
-# : The media types this proxy will cache, mapped to the extension the on-disk : entry
-# is named with.
+#: The media types this proxy will cache, mapped to the extension the on-disk
+#: entry is named with.
 SUPPORTED_MEDIA_TYPES: Mapping[str, str] = {
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
 }
 
-# : Media types the provider really serves for artwork, at a rung, on ordinary : catalog
-# data — and that this proxy declines anyway.
+#: Media types the provider really serves for artwork, at a rung, on ordinary
+#: catalog data -- and that this proxy declines anyway.
 DECLINED_MEDIA_TYPES: frozenset[str] = frozenset({"image/svg+xml"})
 
 #: The provider path suffixes that predict a `DECLINED_MEDIA_TYPES` answer, one
@@ -60,24 +59,18 @@ def is_servable_path(provider_path: str) -> bool:
 def clamp_to_ladder(width: int | None) -> int:
     """The rung a requested width is served at.
 
-    the smallest rung at or above it, the top rung for anything larger, and
-    `DEFAULT_IMAGE_WIDTH` for `None`.
+    The smallest rung at or above the request, the top rung for anything
+    larger, `DEFAULT_IMAGE_WIDTH` for `None`.
 
-    **Up, and ADR-0032 states the cost rather than implying it.** A client
-    asking for 512 px gets `w780`, which is 2.0-2.2x the bytes an exact `w500`
-    would have been, and the worst case on this ladder is a request of 343 at
-    4.3x. Down-clamping reverses that and is worse: it answers a 780-px card
-    with a 342-px image, which is a visible softness on every device rather
-    than an invisible cost on a fast link — and the party who pays is the
-    person looking at it. The ladder bounds the cache either way, so the choice
-    is purely which error to make, and this one is recoverable by asking for
-    the next rung up.
+    Up, never down, and it costs bytes. Down-clamping answers a 780-px card
+    with a 342-px image -- a visible softness paid for by the person looking
+    at it, against an invisible cost on a fast link. The ladder bounds the
+    cache either way, and this error recovers by asking for the next rung.
 
-    **A non-positive width raises rather than clamping to 154.** FastAPI's
-    `Query(gt=0)` answers 422 for it first and this is never reached from the
-    route — which is exactly why it is here: `154` is a plausible answer to an
-    impossible question, and a route that forgot the bound would serve one
-    with nothing reporting anything.
+    A non-positive width raises rather than clamping to 154. The route's
+    `Query(gt=0)` answers 422 first, so this is never reached from it, which
+    is why it is here: `154` is a plausible answer to an impossible question,
+    and a route that forgot the bound would serve one silently.
     """
     if width is None:
         return DEFAULT_IMAGE_WIDTH
@@ -133,17 +126,14 @@ def extension_for(media_type: str) -> str:
 class ImageCacheKey:
     """What one cache entry is: a provider's path at one rung.
 
-    **`provider` is a term of the key and not decoration.** A path is a
-    provider's own string and two providers may both spell one `/a.jpg`;
-    without the term the second image is served the first's bytes and nothing
-    anywhere reports an error. It is the same argument
-    `uq_images_owner_provider_path` makes one layer down, arriving at a
-    filename instead of at a row.
+    `provider` is a term of the key, not decoration: a path is a provider's
+    own string and two providers may both spell one `/a.jpg`, so without the
+    term the second image is served the first's bytes and nothing reports an
+    error.
 
-    **No media type**, deliberately: with no `Accept` sent there is one answer
-    per path, so the entry is `(image, rung)` exactly as ADR-0032 states. The
-    `Accept` successor is what would add the third term, and the store's own
-    docstring says what it costs.
+    No media type. With no `Accept` sent there is one answer per path, so the
+    entry is `(image, rung)`; negotiating `Accept` is what would add a third
+    term.
     """
 
     provider: str
@@ -153,18 +143,13 @@ class ImageCacheKey:
     def digest(self) -> str:
         """The `sha256` an on-disk name is derived from — **never** anything a client sent.
 
-        `?w=` reaches this through `clamp_to_ladder`, so the only widths that
-        can appear are four integers written in `src/`; `provider` and
-        `provider_path` come off a row this project wrote. Even so the whole
-        thing is hashed rather than interpolated, which is what makes "the
-        cache path cannot escape its root" a property of the construction
-        rather than of a filter somebody has to keep correct.
+        Every term already comes from `src/` or from a row this project
+        wrote, and the whole thing is hashed rather than interpolated anyway:
+        that makes "the cache path cannot escape its root" a property of the
+        construction rather than of a filter somebody keeps correct.
 
-        The two terms are separated by a NUL rather than concatenated, so
-        `("a", "bc")` and `("ab", "c")` are different entries. Concatenation
-        alone would make a provider named `tmdb` sharing a cache with one named
-        `tmd` and a path beginning `b` — vanishingly unlikely and free to rule
-        out.
+        The terms are NUL-separated, so `("a", "bc")` and `("ab", "c")` are
+        different entries rather than one shared cache.
         """
         return hashlib.sha256(f"{self.provider}\x00{self.provider_path}".encode()).hexdigest()
 
@@ -173,11 +158,10 @@ class ImageCacheKey:
 class FetchedImage:
     """A CDN answer in flight: its media type, and its body as a stream.
 
-    **A stream and not `bytes`, because the byte ceiling has to bite before the
-    bytes are in memory.** A response that buffers first has already paid for
-    whatever the upstream chose to send by the time anything can refuse it,
-    which on an internet-facing process is the upstream deciding this one's
-    memory budget.
+    A stream, not `bytes`: the byte ceiling has to bite before the bytes are
+    in memory. A response that buffers first has already paid for whatever
+    the upstream chose to send, which hands an internet-facing process's
+    memory budget to the upstream.
     """
 
     content_type: str
@@ -203,36 +187,32 @@ class ImageFetcher(ABC):
     def fetch(self, provider_path: str, width: int) -> AbstractAsyncContextManager[FetchedImage]:
         """Open the CDN's answer for `provider_path` at `width`.
 
-        **A context manager, so the response is closed even by a caller that
-        gives up part-way** — a store whose disk fills mid-write must not leak
-        a socket, and a streamed httpx response that is never exited holds one.
+        A context manager, so the response closes even for a caller that
+        gives up part-way: a store whose disk fills mid-write must not leak
+        the socket a streamed response holds.
 
-        `width` **must** be a member of `IMAGE_LADDER`; anything else is a
-        `ValueError` rather than a request. The CDN's own allowlist is closed
-        and answers HTTP 400 off it, so a width that got this far unclamped is
-        a defect in the caller and this is where it stops being silent.
+        `width` must be a member of `IMAGE_LADDER`; anything else is a
+        `ValueError`. The CDN's allowlist is closed and answers HTTP 400 off
+        it, so an unclamped width is a caller defect and stops being silent
+        here.
 
-        `provider_path` is the provider's own path with no base and no rung —
-        `Image.provider_path`, which is why that column is a path rather than a
-        URL. The implementation composes `{base}{rung}{path}`.
+        `provider_path` is the provider's own path with no base and no rung.
+        The implementation composes `{base}{rung}{path}`.
         """
 
 
 class ImageBlobStore(ABC):
     """The bytes on disk, addressed by `ImageCacheKey`.
 
-    **Not a general blob store and not a cache with a policy.** There is no
-    eviction, no TTL and no size accounting: the ladder bounds the entry count
-    at four an image by construction (ADR-0032), and PRD 02 already refuses
-    bulk mirroring on the arithmetic — artwork is referenced and cached on
-    demand, and this directory is not a release artifact. An operator reclaims
-    space by deleting it, which costs a re-fetch and nothing else.
+    Not a general blob store and not a cache with a policy: no eviction, no
+    TTL, no size accounting. The ladder bounds the entry count at four an
+    image by construction, artwork is referenced and cached on demand rather
+    than mirrored, and this directory is not a release artifact. An operator
+    reclaims space by deleting it, at the cost of a re-fetch.
 
-    **Two concurrent misses for one rung write twice and the second rename
-    wins.** Deliberate, and stated here rather than discovered: the bytes are
-    identical, a lock is one process's claim, and this deployment can run
-    several. Anyone reversing it needs observed overlap with recorded
-    wall-clock intervals, not a count.
+    Two concurrent misses for one rung write twice and the second rename
+    wins. The bytes are identical, and a lock would be one process's claim
+    where this deployment can run several.
     """
 
     @abstractmethod
@@ -248,21 +228,19 @@ class ImageBlobStore(ABC):
     async def put(self, key: ImageCacheKey, fetched: FetchedImage) -> StoredImage:
         """Consume `fetched.chunks` into the entry and answer what was stored.
 
-        **Atomic, and that is a requirement rather than an implementation
-        note.** C5 serves these bytes with a very long `max-age`, so a
-        partially written file is bytes a client keeps for a year. An
-        implementation writes somewhere else and moves the finished thing into
-        place; a stream that raises part-way leaves **no** entry, not a short
-        one, and the next request re-fetches.
+        Atomic, as a requirement: these bytes are served with a very long
+        `max-age`, so a partially written file is bytes a client keeps for a
+        year. Write elsewhere and move the finished thing into place -- a
+        stream that raises part-way leaves no entry, not a short one, and the
+        next request re-fetches.
 
         Returns the bytes rather than making the caller read them back, so a
         cold request costs one write and no read.
 
         A media type outside `SUPPORTED_MEDIA_TYPES` is refused and writes
-        nothing — `MediaTypeNotServable` for one the provider really serves
-        (an SVG logo), `PortDataMalformed` for anything else. **Refused here as
-        well as at the fetcher, and that is not belt and braces**: this is the
-        layer that has to name a file, so a store which took whatever it was
-        handed would be one fetcher's forgotten check away from an entry it
-        cannot serve back with the right header.
+        nothing: `MediaTypeNotServable` for one the provider really serves,
+        `PortDataMalformed` for anything else. Refused here as well as at the
+        fetcher because this is the layer that names a file, and a store
+        taking whatever it was handed is one forgotten check away from an
+        entry it cannot serve back with the right header.
         """

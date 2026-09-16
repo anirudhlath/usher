@@ -68,11 +68,11 @@ ORDER BY md5(t.id::text || '{SEED}')
 LIMIT :n
 """  # noqa: S608 - SEED is a module constant
 
-# **Stratum C is not part of the bar and is off by default.** It was added after the
-# pre-registered verdict was computed and frozen (the frozen copies are
-# `/var/tmp/usher-i21-bar/run-full.json` and `run-summary.json`, hashed in
-# `RESULTS.sha256`), it enters no verdict, and it exists for one reason: the bar
-# measures what the absent-lane bonus *costs* when the typed title is a skeleton, and
+# **Stratum C is not part of the bar and is off by default.** It postdates the
+# frozen pre-registered verdict and enters no verdict of its own. The bar prices
+# what the absent-lane bonus *costs* when the typed title is a skeleton, and the
+# same arithmetic must *buy* something when it is enriched -- reporting one
+# without the other is reporting half a trade.
 _DRAW_C = f"""
 SELECT t.id, t.name
 FROM titles AS t JOIN title_embeddings AS e ON e.title_id = t.id
@@ -178,9 +178,8 @@ class ArmSummary:
 def _binom_ge(k: int, n: int) -> float:
     """One-sided exact `P(X >= k)` for `X ~ Binom(n, 0.5)`.
 
-    Spelled out rather than pulled from scipy: this repository ships no scipy
-    and a measurement that needs a 30 MB dependency to divide by 2**n is a
-    measurement that will not run inside the container it has to run in.
+    Spelled out rather than pulled from scipy: a 30 MB dependency to divide by
+    2**n will not run inside the container this has to run in.
     """
     if n == 0:
         return float("nan")
@@ -577,10 +576,9 @@ async def measure(out: Path | None, *, n_a: int, n_b: int, n_c: int = 0) -> None
             report["coverage_t_catalog"] = await coverage_t(session)
             pipeline = build_pipeline(session, settings, embedder=model)
             # The adapter is built here rather than reached through
-            # `SearchService`'s private attribute: it is the object under
-            # measurement, `build_pipeline` constructs it from the same two
-            # settings, and a measurement that reads a `_name` is one refactor
-            # away from measuring nothing.
+            # `SearchService`'s private attribute: `build_pipeline` constructs
+            # it from the same two settings, and a run that reads a `_name` is
+            # one refactor away from scoring nothing.
             index = PostgresSearchIndex(
                 session,
                 ef_search=settings.search_hnsw_ef_search,

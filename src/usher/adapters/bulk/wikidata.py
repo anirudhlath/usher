@@ -66,17 +66,12 @@ def _pairs(bindings: Iterable[Any], column: str) -> tuple[IdCrosswalkPair, ...]:
     """Bindings -> pairs, skipping anything that cannot be a valid mapping.
 
     Skipping rather than raising: Wikidata is openly editable, so a single
-    vandalised or malformed value must not abort a bootstrap. A *structurally*
-    wrong response is different and does raise -- see `_bindings`.
+    vandalised value must not abort a bootstrap. A *structurally* wrong response
+    is different and does raise -- see `_bindings`.
 
-    The numeric side is validated by actually attempting `int(other)` in a
-    `try`/`except`, not by a `str.isdigit()` pre-check: `"²".isdigit()`
-    (superscript two) is `True`, but `int("²")` raises `ValueError` --
-    a real Python gotcha `isdigit()` alone would have let straight through
-    as "looks numeric". The result is also range-checked against Postgres's
-    `Integer` (int4) rather than accepted at any size: `"99999999999999"`
-    also satisfies `isdigit()`/`int()` but would abort the whole COPY batch
-    on the far side rather than just this one row.
+    `int()` in a `try`, not a `str.isdigit()` pre-check: `"²".isdigit()` is
+    `True` but `int("²")` raises. The range check is separate because a value
+    that parses can still be wider than int4 and abort the whole COPY batch.
     """
     out: list[IdCrosswalkPair] = []
     for binding in bindings:
@@ -187,10 +182,8 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         for index in range(start, len(_WORK_UNITS)):
             prop, column, prefix = _WORK_UNITS[index]
             pairs = _pairs(await self._bindings(prop, prefix), column)
-            # Split into batch_size-sized sub-batches -- and always at least one, even
-            # when `pairs` is empty, so an empty unit still gets a batch that advances
-            # the cursor past it (see the module docstring's "every unit yields a batch"
-            # section).
+            # Always at least one sub-batch, even when `pairs` is empty, so an
+            # empty unit still gets a batch that advances the cursor past it.
             chunks = [
                 pairs[offset : offset + self._batch_size]
                 for offset in range(0, len(pairs), self._batch_size)
@@ -208,8 +201,6 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
                 )
 
     async def aclose(self) -> None:
-        # No held resources beyond the shared httpx client, which is owned
-        # by whoever constructed it (the CLI's composition root) and closed
-        # there -- see `usher.adapters.bulk.imdb._ImdbDataset.aclose` for
-        # the same rationale spelled out once.
+        # No held resources beyond the shared httpx client, which is owned by
+        # whoever constructed it (the CLI's composition root) and closed there.
         return None

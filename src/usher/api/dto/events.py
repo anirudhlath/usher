@@ -20,11 +20,10 @@ class SseEventKind(StrEnum):
     RESYNC_REQUIRED = "resync_required"
 
 
-# Exhaustive by convention *and* by two cases, which is the honest wording: an internal
-# kind with no wire name is a `KeyError` raised in the middle of a response that already
-# answered 200, where there is no status code left to report it with -- and **mypy does
-# not check a dict literal for exhaustiveness over its key enum**, so nothing here makes
-# it true by construction.
+# Exhaustive by convention and by two cases: an internal kind with no wire name is a
+# `KeyError` raised mid-response, after 200, where there is no status code left to
+# report it with -- and **mypy does not check a dict literal for exhaustiveness over
+# its key enum**, so nothing here makes it true by construction.
 _WIRE: dict[ClientEventKind, SseEventKind] = {
     ClientEventKind.TITLE_UPDATED: SseEventKind.TITLE_UPDATED,
     ClientEventKind.WATCHSTATE_UPDATED: SseEventKind.WATCHSTATE_UPDATED,

@@ -31,8 +31,8 @@ FRANCHISE_SCORE_CEILING = 0.55
 
 # A two-film collection is a weaker franchise claim than an eight-film one, and
 # the arithmetic saturates because the difference between 8 owned and 12 owned
-# is not a difference in how much the household wants the row. **Chosen with an
-# argument, not measured.**
+# is not a difference in how much the household wants the row. Chosen with an
+# argument rather than tuned against data.
 _SATURATION = 4
 
 # One hour. The population moves when a file lands or a member is watched --
@@ -40,7 +40,7 @@ _SATURATION = 4
 _TTL = timedelta(hours=1)
 
 
-# **The provider's own stable identifier**, and every row it proposes carries a slug
+# The provider's own stable identifier, and every row it proposes carries a slug
 # that starts with it.
 _SLUG_PREFIX = "franchise"
 
@@ -61,9 +61,9 @@ class FranchiseRow(BaseRow):
 
     @property
     def reason(self) -> str | None:
-        # **The owned count, never the collection's size.** Spoken aloud, so
-        # "You own 27 of the James Bond films" to a household holding two is a
-        # sentence a listener catches instantly.
+        # The owned count, never the collection's size. Spoken aloud, so "You own
+        # 27 of the James Bond films" to a household holding two is a sentence a
+        # listener catches instantly.
         return f"You own {len(self._owned)} of the {self._name} films."
 
     @property
@@ -81,9 +81,9 @@ class FranchiseRow(BaseRow):
         return _TTL
 
     async def _title_ids(self, ctx: RowContext) -> Sequence[uuid.UUID]:
-        # Every owned member, **including the watched ones**, in the
-        # collection's own order. A franchise reads in order and hiding the
-        # watched chapters breaks the sequence.
+        # Every owned member, including the watched ones, in the collection's own
+        # order. A franchise reads in order and hiding the watched chapters breaks
+        # the sequence.
         return self._owned
 
 
@@ -117,10 +117,9 @@ class FranchiseProvider(RowProvider):
                 )
             return []
 
-        # **One statement for every candidate's members**, not one per
-        # collection: the unplayed clause is a membership test over a set the
-        # provider is already holding, and `played_title_ids` is bounded by its
-        # argument.
+        # One statement for every candidate's members, not one per collection: the
+        # unplayed clause is a membership test over a set the provider is already
+        # holding, and `played_title_ids` is bounded by its argument.
         members = [title_id for one in owned for title_id in one.owned_title_ids]
         played = await ctx.watch_states.played_title_ids(ctx.user.id, members)
 

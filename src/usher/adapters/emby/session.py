@@ -132,7 +132,7 @@ class EmbySession:
         self._app_version = app_version
         self._reauth_cooldown = reauth_cooldown_seconds
         self._clock = clock
-        # The proactive outbound gate (ADR-0043), **handed in rather than minted**.
+        # The proactive outbound gate, **handed in rather than minted**.
         self._limiter = (
             limiter if limiter is not None else SourceGate(0.0, source=source_name, clock=clock)
         )
@@ -165,18 +165,16 @@ class EmbySession:
         """Every public entry point calls this, not just `request`.
 
         `user_id()` and `access_token()` are entry points too -- `EmbyAdapter
-        ._fetch` calls `user_id()` *before* it calls `request()` -- so a
-        check only on `request` would let a closed adapter authenticate
-        against a live transport and succeed.
+        ._fetch` calls `user_id()` *before* it calls `request()` -- so a check
+        only on `request` would let a closed adapter authenticate against a live
+        transport and succeed.
 
-        Not made redundant by `UNTRANSLATED_FAILURES` now catching the
-        bare `RuntimeError` a closed `httpx.AsyncClient` raises. That
-        translation governs what crosses the port when a send *fails*; this
-        governs the send never happening at all -- and when the client was
-        *injected* it is not closed, so nothing but this flag stands
-        between a closed adapter and a working request against somebody
-        else's media server (measured 0.1649 s mean for a single-item read,
-        6.04 s for a page -- M10 S1, `.claude/rules/emby-push-and-ingest.md`).
+        Not made redundant by `UNTRANSLATED_FAILURES` catching the bare
+        `RuntimeError` a closed `httpx.AsyncClient` raises: that governs what
+        crosses the port when a send *fails*, this governs the send never
+        happening at all. An *injected* client is not closed, so nothing but
+        this flag stands between a closed adapter and a working request against
+        somebody else's media server.
         """
         if self._closed:
             raise PortUnavailable("this source adapter has been closed")
@@ -184,14 +182,11 @@ class EmbySession:
     def _raise_if_blocked(self) -> None:
         """The negative cache's read side.
 
-        The deadline is never cleared once it passes, and does not need to
-        be: `self._clock` is monotonic, so a deadline in the past stays in
-        the past, and the next rejection overwrites it with a fresh one. An
-        `else: self._blocked_until = None` after a successful
-        authentication looks like the missing half of this and is not --
-        every path to `_authenticate_locked` runs this method first, so it
-        could only ever run with an *expired* deadline, and clearing an
-        expired deadline changes nothing any caller can observe.
+        The deadline is never cleared once it passes and does not need to be:
+        `self._clock` is monotonic, so a deadline in the past stays in the past
+        and the next rejection overwrites it. Clearing it after a successful
+        authentication could only ever run against an expired deadline, which
+        changes nothing any caller can observe.
         """
         if self._blocked_until is not None and self._clock() < self._blocked_until:
             raise PortAuthFailed(
@@ -279,11 +274,7 @@ class EmbySession:
             return user_id
 
     async def access_token(self) -> str:
-        """The current session token.
-
-        Used only to build direct-play URLs -- see ADR-0012 for why a playback URL
-        carries one at all.
-        """
+        """The current session token, used only to build direct-play URLs."""
         self._raise_if_closed()
         token, _ = await self._session()
         return token
@@ -300,22 +291,20 @@ class EmbySession:
         headers: Mapping[str, str],
         op: str,
     ) -> httpx.Response:
-        # Pace before the wire, and before the clock the request duration is
-        # measured against starts: the gate's wait is its own series
+        # Pace before the wire, and before the clock the request duration runs
+        # against starts: the gate's wait is its own series
         # (`usher.source.throttle.wait`), never folded into request latency.
         await self._limiter.take()
         started = self._clock()
         try:
-            # Built explicitly, then sent as a *reference* on its own line -- not
-            # `self._client.request(..., json=payload, ...)` inline.
             request = self._client.build_request(
                 method, path, params=params, json=payload, headers=dict(headers)
             )
             return await self._client.send(request)
         except UNTRANSLATED_FAILURES as exc:
-            # `failure_detail`, never `{exc}`: every httpx timeout stringifies to the
-            # empty string, so `{exc}` recorded an hour of work as a message ending at a
-            # colon (issue #35).
+            # `failure_detail`, never `{exc}`: every httpx timeout stringifies
+            # to the empty string, so `{exc}` reports an hour of work as a
+            # message ending at a colon.
             raise PortUnavailable(
                 f"{method} {redact_path(path)} failed: {failure_detail(exc)}"
             ) from exc

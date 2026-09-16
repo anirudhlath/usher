@@ -127,10 +127,9 @@ def kind_of_payload(payload: Mapping[str, Any]) -> TitleKind:
     pure function of a payload that may have come out of `raw_payloads`
     months after the fetch that produced it, with no ref alongside it.
 
-    **Exactly one of `title`/`name` must be present.** Neither is a payload
-    that is not an entity; both is ambiguous, and guessing picks between two
-    id spaces that overlap on 26,968 measured ids (ADR-0011) — which is a
-    series' metadata written onto a film, silently.
+    **Exactly one of `title`/`name` must be present.** Neither is a payload that
+    is not an entity; both is ambiguous, and guessing picks between two id spaces
+    that overlap -- which is a series' metadata written onto a film, silently.
     """
     has_title = "title" in payload
     has_name = "name" in payload
@@ -152,10 +151,10 @@ def title_from_payload(
 ) -> Title:
     """One TMDb detail response -> one canonical `Title`.
 
-    `title_id` is passed in and never minted (ADR-0003). `enrichment_state`
-    is left at the model default and is `EnrichService`'s to raise through
-    `ENRICHMENT_RANK` (ADR-0008) — a mapper that stamped `ENRICHED` would
-    promote a title on a payload carrying nothing but an id.
+    `title_id` is passed in and never minted. `enrichment_state` is left at the
+    model default and is `EnrichService`'s to raise through `ENRICHMENT_RANK` --
+    a mapper that stamped `ENRICHED` would promote a title on a payload carrying
+    nothing but an id.
     """
     kind = kind_of_payload(payload)
     tmdb_id = _as_int(payload.get("id"))
@@ -190,7 +189,7 @@ def title_from_payload(
         "origin_countries": _strings(payload.get("origin_country")),
         "content_rating": _content_rating(payload, kind, region),
         # The payload keys are TMDb's own and do not move; the `Title` fields
-        # they land in now name their source, which is the whole of ADR-0040.
+        # they land in name their source.
         "tmdb_vote_average": _bounded(payload.get("vote_average"), 0.0, 10.0),
         "tmdb_vote_count": _non_negative_int(payload.get("vote_count")),
         "tmdb_popularity": _non_negative_float(payload.get("popularity")),
@@ -277,11 +276,10 @@ def people_and_credits(
             person_id=people[one.tmdb_id].id,
             title_id=title_id,
             kind=one.kind,
-            # Named here rather than defaulted on the model, which is
-            # ADR-0036's whole point: this adapter is the only thing in `src/`
-            # that constructs a `Credit`, and it is the only thing that knows
-            # which source it read. A default would let the *next* writer --
-            # an IMDb one -- inherit `tmdb` by forgetting.
+            # Named here rather than defaulted on the model: this adapter is
+            # the only thing in `src/` that constructs a `Credit`, and the only
+            # thing that knows which source it read. A default would let the
+            # *next* writer -- an IMDb one -- inherit `tmdb` by forgetting.
             source=CreditSource.TMDB,
             tmdb_credit_id=one.tmdb_credit_id,
             character=one.character,
@@ -303,8 +301,7 @@ def images_from_payload(
 
     # Keyed by path so the fold below finds the row it has to flag, and
     # insertion-ordered so `Image.id` is minted in first-sighting order -- the
-    # tiebreak `(is_primary DESC, id)` reads, since `m09c` carries no
-    # `sort_order` column.
+    # tiebreak `(is_primary DESC, id)` reads, there being no `sort_order` column.
     by_path: dict[str, Image] = {}
     for field, kind in _IMAGE_ARRAYS:
         taken = 0
@@ -354,9 +351,8 @@ def collection_from_payload(payload: Mapping[str, Any]) -> Collection | None:
 
     **Three shapes reach `None` and all three are ordinary.** `null` is the
     common case for a standalone film; the key is **absent entirely** on every
-    series, verified against the recorded `series.json`'s top-level key set;
-    and an object missing an `id` or a usable `name` is dropped rather than
-    raised on, because `Collection.name` is `min_length=1` and a
+    series; and an object missing an `id` or a usable `name` is dropped rather
+    than raised on, because `Collection.name` is `min_length=1` and a
     `pydantic.ValidationError` is not a `UsherPortError`.
 
     `tmdb_id` is what makes a re-derivation an update rather than a duplicate.
@@ -494,11 +490,10 @@ def _credit_entries(payload: Mapping[str, Any]) -> list[_CreditEntry]:
             billing_order=None,
         )
 
-    # The ninth divergence row. A series' creators are a *top-level* array,
-    # not part of `credits.crew` -- which is `[]` on the recorded series
-    # payload -- so a mapper that read the crew returns nothing for every
-    # series in the catalog, silently. `created_by[]` entries carry no `job`,
-    # no `department` and no `order`, so all three are supplied here.
+    # A series' creators are a *top-level* array, not part of `credits.crew` --
+    # which is `[]` on a series payload -- so a mapper that read the crew
+    # returns nothing for every series, silently. `created_by[]` entries carry
+    # no `job`, no `department` and no `order`, so all three are supplied here.
     for entry in _mappings(payload.get("created_by")):
         _append(
             entries,
@@ -570,8 +565,8 @@ def _episodes_of(entry: Mapping[str, Any], season: Season, title_id: uuid.UUID) 
                 runtime_minutes=_non_negative_int(raw.get("runtime")),
                 tmdb_id=_as_int(raw.get("id")),
                 # TMDb's episode payload carries no IMDb id without a second
-                # `external_ids` request per episode. 999,827 episodes makes
-                # that request count a design defect, not a gap.
+                # `external_ids` request per episode, which across a catalog of
+                # episodes is a design defect rather than a gap.
                 imdb_id=None,
             )
         )
@@ -598,10 +593,10 @@ def _external_ids(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _imdb_id(payload: Mapping[str, Any]) -> str | None:
-    """Top-level for a movie, `external_ids` for a series.
+    """Top-level for a movie, `external_ids` for a series, both tried for both.
 
-    and both are tried for both, because reading a field a payload does not carry costs
-    nothing and TMDb serves `external_ids` for movies too.
+    Reading a field a payload does not carry costs nothing, and TMDb serves
+    `external_ids` for movies too.
     """
     for candidate in (payload.get("imdb_id"), _external_ids(payload).get("imdb_id")):
         if isinstance(candidate, str) and _IMDB_ID.match(candidate):
@@ -729,8 +724,8 @@ def _non_negative_int(value: Any) -> int | None:
 def _positive_int(value: Any) -> int | None:
     """`Image.width`/`height` are `gt=0`, not `ge=0`.
 
-    a stored `0` is a placeholder a layout engine divides by, and `None` is the honest
-    answer for a dimension the provider did not report.
+    A stored `0` is a placeholder a layout engine divides by, and `None` is the
+    honest answer for a dimension the provider did not report.
     """
     number = _as_int(value)
     return number if number is not None and number > 0 else None
@@ -739,21 +734,17 @@ def _positive_int(value: Any) -> int | None:
 def _non_negative_float(value: Any) -> float | None:
     """`None` for anything `Title.popularity` will not take, **including a non-finite one**.
 
-    `math.isfinite` is not decoration beside `value >= 0`: `float("inf") >= 0`
-    is `True`, and `json.loads` maps any JSON number that overflows binary64 --
-    `1e400`, which is well-formed JSON -- straight onto `inf` with no error.
-    Before M10's F9 that value reached `titles.popularity` (`double
-    precision`, where IEEE `Infinity` is legal and satisfies the column's own
-    `>= 0` CHECK) and sorted above every real title forever. `DomainModel`
-    carries `allow_inf_nan=False`, so without this filter the same payload
-    would raise `pydantic.ValidationError` out of the constructor below --
-    which is not a `UsherPortError`, and this module's contract is that nothing
-    TMDb can put in a payload may raise.
+    `math.isfinite` is not decoration beside `value >= 0`: `float("inf") >= 0` is
+    `True`, and `json.loads` maps any JSON number that overflows binary64 --
+    `1e400`, which is well-formed JSON -- straight onto `inf` with no error. A
+    `double precision` column takes IEEE `Infinity` and satisfies its own `>= 0`
+    CHECK, so such a title sorts above every real one forever. `DomainModel`
+    carries `allow_inf_nan=False`, so without this filter the payload raises
+    `pydantic.ValidationError`, which is not a `UsherPortError`, and this
+    module's contract is that nothing TMDb can put in a payload may raise.
 
-    `_bounded` needs no such clause and is left alone: `low <= inf <= high` is
-    `False` and every comparison against `NaN` is `False`, so a ceiling
-    excludes both already. That is why `community_rating` never had this
-    defect and `popularity` did.
+    `_bounded` needs no such clause: `low <= inf <= high` is `False` and every
+    comparison against `NaN` is `False`, so a ceiling excludes both already.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None

@@ -41,11 +41,11 @@ _INSERT_CALL = text(
     bindparam("generation_id", type_=PGUUID(as_uuid=True)),
 )
 
-# **`cost_usd` is this table's reason for catching `DBAPIError` and filtering on
-# SQLSTATE class rather than catching `IntegrityError` like most of its siblings.** The
-# column is `NUMERIC(12, 8)`, so a call above `$9,999.99999999` raises `numeric field
-# overflow` -- reachable from a *validly constructed* `LLMCall`, since the model bounds
-# that field with `ge=0` and no ceiling, and the exact misconfiguration precision 12 was
+# **`cost_usd` is why this table catches `DBAPIError` and filters on SQLSTATE class
+# rather than catching `IntegrityError` like most of its siblings.** The column is
+# `NUMERIC(12, 8)`, so a call above `$9,999.99999999` raises `numeric field overflow`
+# -- reachable from a validly constructed `LLMCall`, which bounds that field `ge=0`
+# with no ceiling.
 
 
 class PostgresLLMCallRepository(LLMCallRepository):
@@ -55,9 +55,9 @@ class PostgresLLMCallRepository(LLMCallRepository):
     async def record(self, call: LLMCall) -> None:
         # **The SAVEPOINT `refusals_as_conflict` opens buys more here than on any
         # sibling.** `record()` is called from inside an exception handler that is
-        # typically still holding curated rows it has to commit, so a refused ledger row
-        # that aborted the caller's transaction would turn a failed *call* into a lost
-        # *generation* -- and the next statement on that session would raise
+        # typically still holding curated rows to commit, so a refused ledger row
+        # that aborted the caller's transaction would turn a failed *call* into a
+        # lost *generation*.
         async with refusals_as_conflict(
             self._session, "an llm call violates the ledger's own bounds"
         ):
@@ -67,10 +67,9 @@ class PostgresLLMCallRepository(LLMCallRepository):
 def _parameters(call: LLMCall) -> dict[str, object]:
     """The eleven columns, spelled out.
 
-    A `model_dump()` would be shorter and would couple the statement's
-    parameter names to the model's field names, so a field renamed in
-    `domain/curation.py` would reach Postgres as an unbound parameter rather
-    than as a type error here.
+    A `model_dump()` would couple the statement's parameter names to the model's
+    field names, so a field renamed in `domain/curation.py` would reach Postgres
+    as an unbound parameter rather than as a type error here.
     """
     return {
         "id": call.id,
@@ -82,10 +81,8 @@ def _parameters(call: LLMCall) -> dict[str, object]:
         "purpose": call.purpose,
         "tokens_in": call.tokens_in,
         "tokens_out": call.tokens_out,
-        # The `Decimal` itself. Never `float(...)`, which is this project's
-        # `1 / (60 + rank)` one column over: the value is summed over a month
-        # and `$3/Mtok x 1,200 tokens` is exactly `0.0036`, which binary
-        # floating point cannot represent.
+        # The `Decimal` itself, never `float(...)`: the value is summed over a
+        # month, and a price like `0.0036` has no binary representation.
         "cost_usd": call.cost_usd,
         "latency_ms": call.latency_ms,
         # Written from `call.ok`, never derived from `error is None`.

@@ -27,11 +27,10 @@ class SearchResultResponse(BaseModel):
     "clearly marked": a client that had to ask a second question to render the
     badge would either ask it per row or not render it.
 
-    `popularity` is nullable and stays nullable — it is `null` for every title
-    TMDb's daily export has never described, which is ~77% of a fully
-    bootstrapped catalog and **all** of an IMDb-only one. `popularity or 0.0`
-    here would render "nobody has measured this" identically to "measured, and
-    unpopular" (ADR-0014).
+    `popularity` is nullable and stays nullable -- it is `null` for every title
+    TMDb's daily export has never described, most of a fully bootstrapped catalog
+    and **all** of an IMDb-only one. `popularity or 0.0` here would render
+    "nobody has rated this" identically to "rated, and unpopular".
     """
 
     title_id: uuid.UUID

@@ -49,7 +49,6 @@ def _adopt_links_orphaned_by_an_earlier_downgrade() -> None:
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.create_table(
         "jobs",
         sa.Column("id", sa.UUID(), nullable=False),
@@ -284,8 +283,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_episodes_season_id", "episodes", ["season_id"], unique=False)
 
-    # The two dangling M1 columns finally get targets, plus the index each
-    # one's referential check needs. See this module's docstring.
+    # The two dangling columns get their targets, plus the index each one's
+    # referential check needs.
     _adopt_links_orphaned_by_an_earlier_downgrade()
     op.create_index("ix_media_items_episode_id", "media_items", ["episode_id"], unique=False)
     op.create_foreign_key(
@@ -319,7 +318,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     for table_name in reversed(_TRIGGERED_TABLES):
         op.execute(f"DROP TRIGGER IF EXISTS trg_{table_name}_set_updated_at ON {table_name}")
 

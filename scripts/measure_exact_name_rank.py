@@ -26,8 +26,7 @@ from usher.ports.search import SearchMode
 from usher.services.search import SearchService
 
 # The route's own default, not a number chosen here: `GET /search`'s `limit`
-# defaults to 20 and a measurement taken at a different depth would be a
-# measurement of a request nobody makes.
+# defaults to 20, and a different depth would score a request nobody makes.
 _LIMIT = 20
 
 # Whether the target can be reached by its own name at all. Answered per miss

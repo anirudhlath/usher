@@ -34,10 +34,9 @@ class CandidatePoolService:
         `list_for_titles` over the whole pool, for the reason
         `TasteService._engaged` gives one module over.
         """
-        # **The affinity first, and it is not the centroid.** `genre_affinity`
-        # is counts over `titles.genres` and needs no model, so this half of
-        # the household's taste survives the default configuration -- which is
-        # the whole of why `GenreAffinityProvider` reads it too.
+        # The affinity first, and it is not the centroid: `genre_affinity` is
+        # counts over `titles.genres` and needs no model, so this half of the
+        # household's taste survives the default configuration.
         affinities = await self.taste.genre_affinity(user_id)
         pool = await self._titles.list_unwatched_candidates(
             user_id,
@@ -49,10 +48,10 @@ class CandidatePoolService:
             # catalog is PRD 08's operator rule rather than an edge case, and
             # `list_for_titles([])` would be a round trip to learn nothing.
             return pool
-        # **Read *after* the pool, and only when there is a pool to re-rank.**
+        # After the pool, and only when there is a pool to re-rank, because
         # `centroid()` writes: a household below `_MIN_TITLES` gets a stored
-        # refusal row, which is a write this service must not make on behalf
-        # of a household it has nothing to recommend to anyway.
+        # refusal row, which is a write this service must not make on behalf of
+        # a household it has nothing to recommend to anyway.
         centroid = await self.taste.centroid(user_id)
         if centroid is None:
             # The shipped default, and the new household.
@@ -66,18 +65,14 @@ def _reranked(
     centroid: Centroid,
     vectors: Mapping[uuid.UUID, tuple[float, ...]],
 ) -> list[Title]:
-    """A **new** list.
+    """A new list: `pool`'s comparable members permuted by proximity.
 
-    `pool` with its comparable members permuted by proximity, each staying inside the
-    set of positions they already held.
+    Nothing is mutated -- `pool` is untouched -- and this says so because "in
+    place" is the phrase the function invites and means the opposite here.
 
-    Nothing is mutated -- `pool` is untouched and the answer is a fresh list --
-    and the docstring says so because "in place" is the phrase this function
-    invites and means the opposite in Python.
-
-    The property is *positional*: the answer has the same length, the same
+    The property is positional: the answer has the same length, the same
     members, and the same title at every index the centroid could not speak
-    about. See the module docstring for what that defends.
+    about.
     """
     # `(base rank, similarity)` for the members the centroid can speak about,
     # built by walking `pool` in order, so this list is ascending in its first

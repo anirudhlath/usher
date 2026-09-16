@@ -43,7 +43,4 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def list_runs(self) -> list[ImportRun]:
-        """Every stored run, most recent activity first.
-
-        what the CLI's `bootstrap-status` prints.
-        """
+        """Every stored run, most recent activity first."""

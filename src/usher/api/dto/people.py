@@ -53,10 +53,10 @@ class FilmographyTitleResponse(BaseModel):
 class FilmographyGroupResponse(BaseModel):
     """One role, and the titles the person holds it on.
 
-    `role` is a label to print, never a key to branch on -- see the module
-    docstring. The titles are newest first with `title_id` breaking a tie, and
-    a title appears **once** in a group however many credits put it there: two
-    characters in one film is one entry in `cast`.
+    `role` is a label to print, never a key to branch on. The titles are newest
+    first with `title_id` breaking a tie, and a title appears **once** in a group
+    however many credits put it there: two characters in one film is one `cast`
+    entry.
     """
 
     role: str
@@ -69,11 +69,9 @@ class PersonResponse(BaseModel):
     **`groups` is absent rather than empty when there is nothing to group**,
     which is group B's convention for this whole surface and needs
     `response_model_exclude_unset=True` on the route to survive
-    serialisation. A client cannot tell `[]` from "this person's credits have
-    not been derived yet", and on a catalog whose enriched tier is single-digit
-    thousands of titles out of 1.27M the second is the common case -- so an
-    empty list would be a page that says "no known credits" about a working
-    actor.
+    serialisation. A client cannot tell `[]` from "this person's credits have not
+    been derived yet", and on a mostly unenriched catalog the second is the common
+    case -- an empty list would say "no known credits" about a working actor.
     """
 
     id: uuid.UUID
@@ -123,11 +121,9 @@ def _group(
     """Credits into role groups, each group newest-first.
 
     **A credit naming a title the catalog no longer holds is dropped, not a
-    `KeyError`.** `list_by_ids` returns fewer rows than it was asked for --
-    the port says so -- and a title deleted between the credit read and the
-    hydration is ordinary. `SearchService._rank` and
-    `SimilarityService.neighbors_of` both already guard exactly this, and this
-    is the third call site.
+    `KeyError`.** `list_by_ids` returns fewer rows than it was asked for -- the
+    port says so -- and a title deleted between the credit read and the hydration
+    is ordinary.
 
     **Groups are ordered `cast` first, then the crew labels alphabetically.**
     Not dict insertion order: `list_for_person` orders by `billing_order` nulls

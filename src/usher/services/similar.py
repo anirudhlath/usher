@@ -25,18 +25,17 @@ from usher.ports.scheduler import JobOutcome, ScheduledJob
 
 _tracer = trace.get_tracer("usher.similar")
 
-# Boundary call 8's signal list.
+# PRD 05's similarity signals, and what each is worth.
 _WEIGHTS: dict[str, float] = {
     "cosine": 0.45,
     "keywords": 0.20,
     "genres": 0.10,
 }
 
-# 20 is where the halfvec ordering starts to diverge from float32, and there
-# the scores are already within 2e-4. 25 is deliberately just past it: PRD 06's
-# SimilarityRow renders ten to twenty items and a consumer that filters --
-# already watched, not owned -- needs headroom, while storing 200 would be
-# storing an ordering the storage format cannot honour, at eight times the rows.
+# Deliberately just past where the halfvec ordering starts to diverge from
+# float32. PRD 06's `SimilarityRow` renders ten to twenty items and a consumer
+# that filters -- already watched, not owned -- needs headroom, while storing 200
+# would be storing an ordering the storage format cannot honour.
 _NEIGHBORS_PER_TITLE = 25
 
 # Candidates per seed before the blend. Larger than what is stored, because the
@@ -76,10 +75,9 @@ class NeighborRebuild:
     # operator finds out that a swathe of the catalog composes to an empty
     # document.
     without_embedding: int
-    # **The genome's coverage, reported by the path that consumes it.** PRD 05 has
-    # promised "~7% coverage" since before an importer existed and has never said of
-    # what; these three are the denominators that answer it, and they arrive from the
-    # rebuild rather than from a second query somebody has to think to run.
+    # The genome's coverage, reported by the path that consumes it: these three
+    # are the denominators behind PRD 05's "~7% coverage", and they arrive from
+    # the rebuild rather than from a second query somebody has to think to run.
     seeds_with_genome: int
     candidate_pairs: int
     pairs_with_tags: int
@@ -90,10 +88,10 @@ class SimilarityService:
 
     PRD 05: "item vectors are static, so this is a cheap batch artifact that
     makes 'more like this' instant and engine-independent." PRD 06's
-    `SimilarityRow` is the consumer, in M7, with a TTL of hours.
+    `SimilarityRow` is the consumer.
 
-    **Per boundary call 1 there is no HTTP route here.** M9 owns
-    `GET /titles/{id}/similar`, over this service and this table.
+    There is no HTTP route here: `GET /titles/{id}/similar` is the API's, over
+    this service and this table.
     """
 
     def __init__(
@@ -109,38 +107,32 @@ class SimilarityService:
         self._neighbors = neighbors
         self._titles = titles
         # Injected because `services/` may depend only on `domain/` and
-        # `ports/` (ADR-0009), and a session is neither.
+        # `ports/`, and a session is neither.
         self._commit = commit
-        # **Not an `Embedder`, and the difference is the whole reason this service
-        # starts in 0.13 s.** It reads stored vectors and never embeds anything, so it
-        # needs the model's *name* -- for `blend_fingerprint` -- and not the model.
+        # Not an `Embedder`, and the difference is the whole reason this service
+        # costs nothing to construct: it reads stored vectors and never embeds, so
+        # it needs the model's *name* -- for `blend_fingerprint` -- not the model.
         self._embedding_model = embedding_model
 
     @property
     def embedding_model(self) -> str:
-        """What this service was configured with.
-
-        for the one caller that has to *report* it rather than hash it.
+        """What this service was configured with, for the caller that reports it.
 
         `NeighborRebuildJob`'s refusal names both sides -- the configured model
-        and what the table holds -- because "the table is mixed" is not a
-        message anybody can act on. Exposed rather than reached for through
-        `_embedding_model` so the log line is a property of the service's
-        declared configuration.
+        and what the table holds -- because "the table is mixed" is not a message
+        anybody can act on.
         """
         return self._embedding_model
 
     async def neighbors_of(
         self, title_id: uuid.UUID, *, limit: int = 10
     ) -> tuple[SimilarTitle, ...]:
-        """One seed's precomputed neighbours, hydrated.
+        """One seed's precomputed neighbours, hydrated -- a lookup, not a scan.
 
-        A lookup, not a scan.
-
-        Empty for a title that has none **and** for a table that has never been
-        built. `computed_at()` is what separates the two, and a caller that
-        does not ask will tell an operator that a film has nothing like it when
-        the truth is that nothing has run.
+        Empty for a title that has none *and* for a table that has never been
+        built. `computed_at()` is what separates the two, and a caller that does
+        not ask will tell an operator that a film has nothing like it when the
+        truth is that nothing has run.
         """
         stored = await self._neighbors.list_for(title_id, limit=limit)
         neighbour_ids = [row.neighbor_title_id for row in stored]
@@ -168,20 +160,17 @@ class SimilarityService:
         return await self._neighbors.computed_at()
 
     async def foreign_embedding_models(self) -> tuple[str, ...]:
-        """Stored vector model names that are **not** this service's configured one, sorted.
+        """Stored vector model names that are not this service's configured one.
 
-        Empty means the table agrees with the deployment.
+        Sorted; empty means the table agrees with the deployment.
+        `blend_fingerprint` hashes the *configured* model and this asks what the
+        vectors actually are, so the two together answer *"is the fingerprint I
+        am about to stamp a true label for the rows I am about to compute?"*
 
-        The read behind M10 J6's model guard. `blend_fingerprint` hashes the
-        *configured* model and this asks what the vectors actually are, so the
-        two together answer *"is the fingerprint I am about to stamp a true
-        label for the rows I am about to compute?"*
-
-        **The guard built on this lives on the scheduled registration and not
-        in `rebuild`**, deliberately: `usher similar --rebuild` is an operator
-        typing a command about a table they can see, and a mid-swap force is a
-        thing an operator may legitimately want. A timer starting a
-        multi-hour walk unasked is not. See `NeighborRebuildJob.run`.
+        The guard built on this lives on the scheduled registration and not in
+        `rebuild`: `usher similar --rebuild` is an operator typing a command
+        about a table they can see, and a mid-swap force is a thing an operator
+        may legitimately want. A timer starting a multi-hour walk unasked is not.
         """
         stored = await self._embeddings.stored_model_names()
         return tuple(name for name in stored if name != self._embedding_model)
@@ -200,8 +189,8 @@ class SimilarityService:
             # run, and a per-page call would let a table be stamped with two
             # fingerprints if they somehow could.
             fingerprint = blend_fingerprint(embedding_model=self._embedding_model)
-            # Read once, before the first page, and only when asked for. See
-            # the docstring: a starting offset, never a loop predicate.
+            # Read once, before the first page, and only when asked for: a
+            # starting offset, never a loop predicate.
             after: uuid.UUID | None = (
                 await self._neighbors.resume_cursor(blend_fingerprint=fingerprint)
                 if resume
@@ -267,8 +256,8 @@ class SimilarityService:
         command can say "these neighbours were computed under a different
         blend" without a second definition of what "different" means.
 
-        **A non-zero answer is not a broken table**, and the message an
-        operator sees says so: the rows are readable and internally consistent,
+        A non-zero answer is not a broken table, and the message an operator
+        sees says so: the rows are readable and internally consistent,
         they were simply computed under a different meaning. PRD 08's
         degradation rule -- narrowed, not broken.
         """
@@ -281,16 +270,14 @@ class SimilarityService:
 def _neighbors_for(
     seed: NeighborSeed, candidates: Sequence[NeighborCandidate]
 ) -> list[ScoredNeighbor]:
-    """Blend, order, cap.
-
-    The whole of what M6 means by "similar".
+    """Blend, order, cap -- the whole of what this project means by "similar".
 
     Ties break by `neighbor_title_id`. Two candidates at the same blended score
     are ordinary here -- one shared genre, no keywords, near-identical cosines --
-    and "whatever the candidate query returned" is not an order: this repository
-    has measured `UPDATE ... RETURNING` handing rows back in heap order on a
-    small table. Without the tiebreak, two identical rebuilds disagree and every
-    `SimilarityRow` M7 renders shuffles for no reason.
+    and "whatever the candidate query returned" is not an order: `UPDATE ...
+    RETURNING` hands rows back in heap order on a small table. Without the
+    tiebreak, two identical rebuilds disagree and every `SimilarityRow` shuffles
+    for no reason.
     """
     scored = [
         (
@@ -300,11 +287,10 @@ def _neighbors_for(
                 cosine=max(0.0, candidate.cosine),
                 genres=_jaccard(seed.genres, candidate.genres),
                 keywords=_jaccard(seed.keywords, candidate.keywords),
-                # **`candidate.tags` is deliberately not passed.** The genome cosine is
+                # `candidate.tags` is deliberately not passed. The genome cosine is
                 # still read, still carried on the port DTO and still counted by
-                # `rebuild` -- it is no longer *blended*, because S5 measured its
-                # candidate-pair rate at 2.4746% against the 10% floor the 0.25 weight
-                # assumed.
+                # `rebuild` -- it is no longer *blended*, because its candidate-pair
+                # rate is far under the floor its old weight assumed.
             ),
             candidate.title_id,
         )
@@ -324,10 +310,10 @@ def _neighbors_for(
 def _jaccard(left: Sequence[str], right: Sequence[str]) -> float | None:
     """Set overlap, or `None` when one of the sets has nothing to say.
 
-    **`None` rather than 0.0 -- ADR-0014 applied to a set-valued field.** Two
-    wrong implementations, the second worse. `len(a & b) / len(a | b)` raises
-    `ZeroDivisionError` on two empty sets, inside a batch job, which aborts a
-    rebuild mid-page and leaves a table half old and half new. Returning 0.0 is
+    `None` rather than 0.0, for a set-valued field. `len(a & b) / len(a | b)`
+    raises `ZeroDivisionError` on two empty sets, inside a batch job, which
+    aborts a rebuild mid-page and leaves a table half old and half new.
+    Returning 0.0 is
     silent: it gives the same answer for "these two share no genres" -- real
     evidence -- as for "we do not know either one's genres", which is a fact
     about enrichment rather than about the films, and scoring it pushes every
@@ -352,18 +338,17 @@ def _blend(**signals: float | None) -> float:
     return total / applied if applied else 0.0
 
 
-#: `NeighborRebuildJob.name`. **Stable, because it is a metric label**
-#: (`usher.scheduler.job.duration`, `.failures` and `.due` are all labelled
-#: `job`) and a span name (`scheduler.similar.rebuild`), and a renamed label is
-#: an emptied panel and a histogram split across two populations.
+#: `NeighborRebuildJob.name`. Stable, because it is a metric label and a span
+#: name (`scheduler.similar.rebuild`), and a renamed label is an emptied panel
+#: and a histogram split across two populations.
 SIMILAR_REBUILD_JOB_NAME = "similar.rebuild"
 
-# : One `SimilarityService`, in a scope that owns a session for the whole call.
+#: One `SimilarityService`, in a scope that owns a session for the whole call.
 SimilarityScope = Callable[[], AbstractAsyncContextManager[SimilarityService]]
 
 
 class NeighborRebuildJob(ScheduledJob):
-    """`usher similar --rebuild` on a period (M10's J6, ADR-0046)."""
+    """`usher similar --rebuild`, on a period."""
 
     name = SIMILAR_REBUILD_JOB_NAME
 
@@ -378,10 +363,10 @@ class NeighborRebuildJob(ScheduledJob):
     async def last_done(self) -> datetime | None:
         """`min(title_neighbors.computed_at)`, or `None` if nothing has ever been built.
 
-        `None` is *"never built, therefore due"*, which is right here and is
-        the opposite of `SearchQueryRetention`'s answer: this artefact has to
-        be **constructed**, where retention maintains an invariant an empty
-        table satisfies vacuously. A fresh deployment genuinely owes a walk --
+        `None` is *"never built, therefore due"*, which is right here and is the
+        opposite of `SearchQueryRetention`'s answer: this artefact has to be
+        constructed, where retention maintains an invariant an empty table
+        satisfies vacuously. A fresh deployment genuinely owes a walk --
         it just has no embeddings to walk yet, which is the other half of why
         `USHER_SCHEDULER_ENABLED` is off by default.
 
@@ -395,20 +380,18 @@ class NeighborRebuildJob(ScheduledJob):
     async def run(self) -> JobOutcome:
         """Refuse a mixed table, else walk it with `resume=True`.
 
-        **The refusal is `JobOutcome.DECLINED` rather than a raise or a bare
-        return.** A raise would describe a job that tried and broke; a bare
-        return was indistinguishable from a completed walk. `JobOutcome`
-        carries what declining buys, and `last_done()` is untouched either
-        way, so nothing is recorded as done.
+        The refusal is `JobOutcome.DECLINED` rather than a raise or a bare
+        return: a raise would describe a job that tried and broke, and a bare
+        return is indistinguishable from a completed walk. `last_done()` is
+        untouched either way, so nothing is recorded as done.
 
-        **`resume=True`, which is what makes a registration converge.** A run
-        cancelled by `Scheduler.stop()` or a process restart leaves a prefix of
-        the catalog stamped current, and the next run starts after it rather
-        than at page one -- so a deployment restarted more often than 3.58 h
-        still reaches the end of its catalog. Cancellation-safe for the reason
+        `resume=True` is what makes a registration converge. A run cancelled by
+        `Scheduler.stop()` or a process restart leaves a prefix of the catalog
+        stamped current, and the next run starts after it rather than at page
+        one, so a deployment restarted more often than one period still reaches
+        the end of its catalog. Cancellation-safe for the reason
         `ScheduledJob.run` requires: each page deletes and re-inserts its own
-        seeds' rows in one transaction, so the cancelled page rolls back and a
-        later run redoes exactly it.
+        seeds' rows in one transaction, so a cancelled page rolls back whole.
         """
         async with self._scope() as similar:
             foreign = await similar.foreign_embedding_models()

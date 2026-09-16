@@ -14,7 +14,7 @@ from usher.services.rows.base import BaseRow
 class Window:
     """One stretch of the calendar and what it means.
 
-    `start`/`end` are `(month, day)` and **both are inclusive**. A tuple rather
+    `start`/`end` are `(month, day)` and both are inclusive. A tuple rather
     than a `date` because a window is a recurring fact about the calendar and a
     `date` would carry a year that means nothing -- and because the comparison
     that decides whether today is inside it is then the tuple comparison the
@@ -30,7 +30,6 @@ class Window:
     slug: str
 
 
-# **Curated by the author.
 _SLUG_PREFIX = "seasonal"
 
 
@@ -66,11 +65,11 @@ WINDOWS: tuple[Window, ...] = (
     ),
 )
 
-# **Flat, and deliberately not scaled by depth into the window.** Inside a
-# window the row is either right or absent; there is no continuum. A Halloween
-# row on 30 October is not more relevant than one on 25 October in any way a
-# viewer perceives, and scaling by proximity to a date the author invented
-# would be a second guess stacked on the first.
+# Flat, and deliberately not scaled by depth into the window. Inside a window
+# the row is either right or absent; there is no continuum. A Halloween row on
+# 30 October is not more relevant than one on 25 October in any way a viewer
+# perceives, and scaling by proximity to an invented date would be a second guess
+# stacked on the first.
 SEASONAL_SCORE = 0.60
 
 # An empty or two-card Halloween row is worse than none, and a household that
@@ -78,11 +77,9 @@ SEASONAL_SCORE = 0.60
 _MIN_CARDS = 5
 _MAX_CARDS = 20
 
-# **Twelve hours, and it is bounded by the shortest window rather than chosen.**
-# A TTL longer than a window serves a row that was correct when built and is
-# wrong when served. `test_no_row_ttl_outlives_the_shortest_seasonal_window`
-# compares the two rather than pinning either, so a future four-day window
-# fails as loudly as a future long TTL.
+# Twelve hours, bounded by the shortest window rather than chosen: a TTL longer
+# than a window serves a row that was correct when built and is wrong when
+# served.
 _TTL = timedelta(hours=12)
 
 
@@ -144,9 +141,8 @@ class SeasonalProvider(RowProvider):
         return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
-        # **`ctx.now()`, never `datetime.now()`.** The single most important
-        # line in the module: this provider's entire behaviour is window
-        # boundaries, and a wall-clock read makes every one of them
+        # `ctx.now()`, never `datetime.now()`: this provider's entire behaviour is
+        # window boundaries, and a wall-clock read makes every one of them
         # unverifiable except on the day it matters.
         today = ctx.now().date()
         window = _current(today.month, today.day)
@@ -171,9 +167,8 @@ def _current(month: int, day: int) -> Window | None:
     """The window today falls inside, or `None`.
 
     Both bounds inclusive, compared as `(month, day)` tuples -- which is also
-    what makes a wrapping window silently unsatisfiable and is why
-    `test_no_seasonal_window_wraps_the_year_end` asserts `start <= end` on the
-    table rather than probing 365 dates.
+    what makes a wrapping window silently unsatisfiable, so the table is checked
+    for `start <= end` rather than probed over 365 dates.
     """
     for window in WINDOWS:
         if window.start <= (month, day) <= window.end:

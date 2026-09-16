@@ -11,22 +11,17 @@ from usher.domain.base import DomainModel
 class Centroid(DomainModel):
     """A user's taste, as one vector, with the evidence for its currency.
 
-    `model_name` is the field with an argument attached: it records the
-    embedding *runtime and checkpoint* (`fastembed:BAAI/bge-small-en-v1.5`),
-    which is what makes a centroid computed under a different embedder
-    detectable by `IS DISTINCT FROM` rather than by somebody remembering to
-    write a migration. `ports/embedding.py`'s own `model_name` docstring makes
-    the case at length, and a centroid is a derived vector with exactly the
-    same staleness shape as a `title_embedding` -- ADR-0020.
+    `model_name` records the embedding *runtime and checkpoint*
+    (`fastembed:BAAI/bge-small-en-v1.5`), which makes a centroid computed under
+    a different embedder detectable by `IS DISTINCT FROM` rather than by
+    somebody remembering to write a migration.
 
-    **A centroid over no titles is not constructible**, and that is ADR-0014
-    applied to the taste signal rather than to a source's play history. A
-    vector averaged over nothing is not "neutral taste": it is a point
-    equidistant from everything, which makes every genre equally affine and
-    every seed equally close -- a row that is noise wearing a reason. The
-    honest value for a household that has watched nothing is
-    `RowContext.taste = None`, so the zero-vector stand-in is refused here
-    rather than guarded against at every reader.
+    **A centroid over no titles is not constructible.** A vector averaged over
+    nothing is not "neutral taste": it is a point equidistant from everything,
+    which makes every genre equally affine and every seed equally close -- noise
+    wearing a reason. The honest value for a household that has watched nothing
+    is `RowContext.taste = None`, refused here rather than guarded against at
+    every reader.
     """
 
     user_id: uuid.UUID
@@ -48,20 +43,17 @@ class Centroid(DomainModel):
 class GenreAffinity:
     """One genre the household watches disproportionately to its own library.
 
-    **In `domain/` rather than beside the service that computes it**, and the
-    reason is `Centroid`'s exactly: `RowContext` carries it, `ports/rows.py`
-    must name the type, and a port may name a domain type or one of its own
-    and nothing else. `services/taste.py` re-exports it, because that is
-    where it is *computed* and where every existing caller names it.
+    **In `domain/` rather than beside the service that computes it**:
+    `RowContext` carries it, `ports/rows.py` must name the type, and a port may
+    name a domain type or one of its own and nothing else. `services/taste.py`
+    re-exports it, where it is computed and where callers name it.
 
-    A plain frozen dataclass rather than a `DomainModel`, unlike `Centroid`:
-    it is never stored, never validated at a boundary, and never round-trips
-    through a repository -- it is the return shape of one method.
+    A plain frozen dataclass rather than a `DomainModel`: never stored, never
+    validated at a boundary, never round-tripping through a repository.
 
-    All three fields are read by `GenreAffinityProvider`: `lift` for the score,
-    `genre` for the query and the sentence, and `support` because a row built
-    from four titles and a row built from forty are different claims and the
-    reason string must not pretend otherwise.
+    `support` is carried because a row built from four titles and a row built
+    from forty are different claims, and the reason string must not pretend
+    otherwise.
     """
 
     genre: str

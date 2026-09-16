@@ -16,15 +16,12 @@ class ClientEventKind(StrEnum):
     # Payload is a **row slug**, and deliberately no `title_id`: a row is not a title.
     ROW_INVALIDATED = "row.invalidated"
     SYNC_PROGRESS = "sync.progress"
-    # Scoped to **no title**, the same call `sync.progress` makes, and it is what makes
-    # PRD 07's "Admin UI only" true rather than advisory: a `?titles=` subscriber never
-    # sees one.
+    # Scoped to no title, as `sync.progress` is, which is what makes
+    # "admin UI only" true rather than advisory: a `?titles=` subscriber
+    # never sees one.
     BOOTSTRAP_PROGRESS = "bootstrap.progress"
     # Not a domain event: the channel telling a client its own stream has a
-    # hole in it. PRD 07: "On buffer overflow the server emits
-    # `resync_required` rather than silently skipping events -- a client
-    # that missed changes is told to refetch instead of being left quietly
-    # stale."
+    # hole in it, so it refetches instead of going quietly stale.
     RESYNC_REQUIRED = "resync_required"
 
 
@@ -56,28 +53,25 @@ class EventPublisher(ABC):
     async def publish(self, event: ClientEvent) -> None:
         """Offer an event to whoever is listening.
 
-        **Never raises, and never blocks on a subscriber.** Both halves are
-        contract rather than courtesy: this is called from
-        `EnrichService.enrich`, from the push lane, and from a reconcile's
-        per-batch flush, and none of those may fail or stall because a
-        client stopped reading. An implementation that cannot deliver drops
-        or diverts, and tells *that subscriber* (`RESYNC_REQUIRED`) rather
-        than telling the publisher.
+        Never raises, and never blocks on a subscriber. Both are contract:
+        callers include enrichment, the push lane and a reconcile's per-batch
+        flush, and none may fail or stall because a client stopped reading.
+        An implementation that cannot deliver drops or diverts, and tells
+        *that subscriber* (`RESYNC_REQUIRED`), not the publisher.
 
-        Delivery is best-effort and unordered *across* subscribers. Within
-        one subscriber's stream, order is preserved and a gap is announced.
-        That is the whole guarantee, and it is drawn to be satisfiable by a
-        lossy transport rather than by an in-process queue.
+        Delivery is best-effort and unordered across subscribers. Within one
+        subscriber's stream, order is preserved and a gap is announced. That
+        is the whole guarantee, drawn to be satisfiable by a lossy transport
+        rather than by an in-process queue.
         """
 
 
 class NullEventPublisher(EventPublisher):
     """Publishes nowhere.
 
-    A real deployment rather than a test double: `usher work` as a
-    standalone process has no SSE clients to tell, and M5's bus is
-    in-process. Without this, every service would need a
-    `publisher is not None` branch, which is three places to forget it.
+    A real deployment rather than a test double: a standalone worker process
+    has no SSE clients to tell, and the bus is in-process. Without this,
+    every service needs a `publisher is not None` branch.
     """
 
     async def publish(self, event: ClientEvent) -> None:

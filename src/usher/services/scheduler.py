@@ -1,7 +1,4 @@
-"""The scheduler loop (ADR-0046).
-
-One `asyncio` task per deployment.
-"""
+"""The scheduler loop: one `asyncio` task per deployment."""
 
 import asyncio
 import time
@@ -77,8 +74,8 @@ class Scheduler:
         self._now = now
         self._jobs: list[ScheduledJob] = []
         self._task: asyncio.Task[None] | None = None
-        # Whether the "nothing is registered" line has been said. Per
-        # scheduler rather than per tick -- see the module docstring.
+        # Whether the "nothing is registered" line has been said, once per
+        # process rather than once per tick.
         self._said_empty = False
         # PRD 10's `usher.scheduler.job.due`, as a synchronous snapshot. A new
         # mapping is assigned rather than the old one mutated, because the
@@ -86,20 +83,16 @@ class Scheduler:
         # atomic where an in-place update is not.
         self._due: Mapping[str, float] = {}
         # The one piece of state this component holds, and it is about *this
-        # process's* attempts rather than a durable last-run timestamp, which
-        # ADR-0046 refuses. Without it a failed run is indistinguishable from
-        # one never run, so a job that raises is due again on the very next
-        # tick and retries at the tick rate forever.
+        # process's* attempts rather than a durable last-run timestamp. Without
+        # it a failed run is indistinguishable from one never run, so a job that
+        # raises is due again on the next tick and retries at the tick rate.
         self._backoff: dict[str, _Backoff] = {}
 
     # -- the registry ----------------------------------------------------
 
     @property
     def jobs(self) -> tuple[ScheduledJob, ...]:
-        """What is registered, in registration order.
-
-        which is the order a tick runs them in, and the only ordering there is.
-        """
+        """What is registered, in registration order -- the order a tick runs."""
         return tuple(self._jobs)
 
     def register(self, job: ScheduledJob) -> None:
@@ -119,9 +112,7 @@ class Scheduler:
     # -- observation -----------------------------------------------------
 
     def read(self) -> Mapping[str, float]:
-        """PRD 10's `usher.scheduler.job.due`.
-
-        seconds since `last_done()` minus the period, per job.
+        """PRD 10's `usher.scheduler.job.due`: seconds overdue, per job.
 
         Negative means not due.
         """
@@ -143,9 +134,7 @@ class Scheduler:
     # -- the lifecycle ---------------------------------------------------
 
     async def start(self) -> None:
-        """Create the loop task.
-
-        **Awaits nothing, connects to nothing.**
+        """Create the loop task, awaiting nothing and connecting to nothing.
 
         `create_app`'s lifespan builds an engine and opens no connection, and
         that is load-bearing: `/health` answers 200 with Postgres down while
@@ -179,15 +168,13 @@ class Scheduler:
         await asyncio.gather(task, return_exceptions=True)
 
     async def run(self) -> None:
-        """Tick, then sleep.
-
-        in that order, so the first tick is this task's work rather than `start()`'s.
+        """Tick, then sleep -- in that order, so the first tick is this task's.
 
         The `except Exception` here is the loop's own boundary and is not the
         one that isolates a failing job: `tick` already catches per job, so
         anything arriving here is a failure no job owns. A loop that returned
-        would leave the deployment with no scheduler and nothing saying so
-        until the next restart, which is the same shape `_run_worker` refuses.
+        would leave the deployment with no scheduler and nothing saying so until
+        the next restart.
         """
         while True:
             try:
@@ -203,7 +190,7 @@ class Scheduler:
     async def tick(self) -> int:
         """Walk the registry once and run whatever is due.
 
-        Returns how many did the work, which is **not** how many were due.
+        Returns how many did the work, which is *not* how many were due.
 
         Two results are excluded: a job that raised, and one that answered
         `JobOutcome.DECLINED`. The number says *"how much work happened"*, and
@@ -270,23 +257,20 @@ class Scheduler:
     async def _run(self, job: ScheduledJob) -> bool:
         """One job, inside its own root span.
 
-        Returns whether it did the work.
+        Returns whether it did the work. A `JobOutcome.DECLINED` is neither
+        timed nor counted as a failure -- `JobOutcome` carries why -- and the
+        caller spaces it out.
 
-        **A `JobOutcome.DECLINED` is neither timed nor counted as a failure**
-        -- `JobOutcome` carries why -- and the caller spaces it out.
+        A root span with a `Link`, never a child, and `context=Context()` -- an
+        empty context -- is what makes "root" structural rather than a property
+        of where the task happened to be created. `asyncio.create_task` copies
+        the ambient context, so a lifespan that started the scheduler inside a
+        span would otherwise make every scheduled run a child of one request
+        forever.
 
-        **A root span with a `Link`, never a child**, and `context=Context()`
-        -- an empty context -- is what makes "root" structural rather than a
-        property of where the task happened to be created. `asyncio.create_task`
-        copies the ambient context, so a lifespan or a test that started the
-        scheduler inside a span would otherwise make every scheduled run a
-        child of one request forever. PRD 10 specifies exactly this for a
-        worker's `job.*`, and `rows.refresh` takes the same shape.
-
-        **The `except Exception` is named and logged with the job name.**
-        Without it the loop task dies and CPython reports the unretrieved
-        exception at GC time, to stderr, with no job name in it -- the shape
-        `LaneSupervisor._guard` exists for. `asyncio.CancelledError` is
+        The `except Exception` is named and logged with the job name. Without it
+        the loop task dies and CPython reports the unretrieved exception at GC
+        time, to stderr, with no job name in it. `asyncio.CancelledError` is
         re-raised and never swallowed, so `stop()` works.
         """
         ambient = trace.get_current_span().get_span_context()
@@ -328,10 +312,7 @@ class Scheduler:
     # -- the retry backoff -----------------------------------------------
 
     def _back_off(self, job: ScheduledJob) -> None:
-        """Do not offer this job again for a doubling number of ticks.
-
-        **capped at its own period**.
-        """
+        """Hold this job off for a doubling number of ticks, capped at its period."""
         held = self._backoff.get(job.name)
         failures = (held.failures if held is not None else 0) + 1
         doublings = min(failures - 1, _MAX_BACKOFF_DOUBLINGS)
@@ -348,25 +329,23 @@ class Scheduler:
             self._due = {key: value for key, value in self._due.items() if key != name}
 
 
-# : How long one `search_queries` prune may leave the table over-length before : the
-# scheduler offers the job again -- `SearchQueryRetention.period`, and : **one
-# definition**: `composition.build_scheduler` passes this by name so a : registration
-# reads with its period at the call site.
+#: How long one `search_queries` prune may leave the table over-length before
+#: the scheduler offers the job again. One definition:
+#: `composition.build_scheduler` passes this by name, so a registration reads
+#: with its period at the call site.
 RETENTION_PERIOD = timedelta(days=1)
 
-#: `SearchQueryRetention.name`. **Stable, because it is a metric label**
-#: (`usher.scheduler.job.duration`, `.failures` and `.due` are all labelled
-#: `job`) and a span name (`scheduler.search_queries.retention`), and a
-#: renamed label is an emptied panel and a histogram split across two
-#: populations.
+#: `SearchQueryRetention.name`. Stable, because it is a metric label and a span
+#: name (`scheduler.search_queries.retention`), and a renamed label is an
+#: emptied panel and a histogram split across two populations.
 RETENTION_JOB_NAME = "search_queries.retention"
 
-# : One `SearchQueryRepository`, in a scope that **commits on a clean exit**.
+#: One `SearchQueryRepository`, in a scope that commits on a clean exit.
 SearchQueryScope = Callable[[], AbstractAsyncContextManager[SearchQueryRepository]]
 
 
 class SearchQueryRetention(ScheduledJob):
-    """PRD 10's 90-day `search_queries` prune, as a scheduled job (M10's J5)."""
+    """PRD 10's 90-day `search_queries` prune, as a scheduled job."""
 
     name = RETENTION_JOB_NAME
 
@@ -399,22 +378,18 @@ class SearchQueryRetention(ScheduledJob):
         return self._period
 
     async def last_done(self) -> datetime | None:
-        """`min(min(at) + window, now)` -- see the class docstring.
+        """`min(min(at) + window, now)`.
 
-        **The cap at `now` is what makes this a *last* anything.** Without it
-        an untouched table answers a time in the future, which is not a
-        completion; the scheduler would still read it as not-due (a negative
-        age), so the cap changes no decision -- what it changes is
-        `Scheduler.read()`'s series, which would otherwise carry an
-        unboundedly negative *"due in"* for a table nobody has searched
-        against in a year.
+        The cap at `now` is what makes this a *last* anything: without it an
+        untouched table answers a time in the future, which is not a completion.
+        The scheduler would read that as not-due either way, so the cap changes
+        no decision -- what it changes is `Scheduler.read()`'s series, which
+        would otherwise carry an unboundedly negative *"due in"*.
 
         One scope, one aggregate, and the scope is closed before the clock is
-        read so the reading is never older than the query. The two clocks in
-        play -- this one and the scheduler's, taken a moment earlier -- can
-        differ by microseconds, and the skew can only ever make the job
-        *less* due, because a `last_done()` slightly in the scheduler's future
-        subtracts to a negative age.
+        read so the reading is never older than the query. This clock and the
+        scheduler's can differ by microseconds, and the skew can only ever make
+        the job *less* due.
         """
         async with self._scope() as queries:
             oldest = await queries.oldest()

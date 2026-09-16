@@ -26,15 +26,11 @@ _CHUNK_BYTES = 1024 * 1024
 def _revision_from(response: httpx.Response) -> str:
     """An opaque snapshot token, preferring `ETag` over `Last-Modified`.
 
-    Both hosts supply both (verified 2026-07-30: `datasets.imdbws.com`
-    returns `etag: "b02872da39cb78095c20432f215e1ecd-27"` plus
-    `last-modified`; `files.tmdb.org` likewise). `ETag` is preferred because
-    it is the token `If-Range` compares against, so the resume path and the
+    `ETag` is the token `If-Range` compares against, so the resume path and the
     checkpoint agree on what "the same snapshot" means by construction.
     """
-    # Annotated explicitly: httpx types `Headers.get` as returning `Any`, so
-    # a bare `return response.headers.get("etag")` fails mypy strict with
-    # "Returning Any from function declared to return 'str'".
+    # Annotated: httpx types `Headers.get` as returning `Any`, so a bare return
+    # fails mypy strict.
     etag: str | None = response.headers.get("etag")
     if etag:
         return etag
@@ -56,19 +52,13 @@ def _raise_for_status(response: httpx.Response, url: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class LocalFile:
-    """Where an `ensure_local` call left the file.
+    """Where an `ensure_local` call left the file, and whether the bytes changed.
 
-    and whether that call actually fetched different bytes than were already cached.
-
-    `replaced` exists for a dataset whose own checkpoint revision is
-    coarser than a single file's real identity -- TMDb's is a calendar
-    date, this file's is an ETag -- so such a caller can notice when
-    `ensure_local` silently discovered that upstream republished different
-    content under what the caller's own coarser revision still considers
-    unchanged. `True` on every path except the short-circuit at the very
-    top of `ensure_local`: a first-ever download counts as `replaced` too,
-    deliberately -- there is no prior body a caller's own resume position
-    could safely apply to either.
+    `replaced` exists for a dataset whose checkpoint revision is coarser than a
+    single file's identity -- TMDb's is a calendar date, this file's is an ETag
+    -- so the caller can notice upstream republishing different content under a
+    revision it still reads as unchanged. A first-ever download counts as
+    `replaced` too: there is no prior body a resume position could apply to.
     """
 
     path: Path
@@ -76,10 +66,7 @@ class LocalFile:
 
 
 class CachedDatasetFile:
-    """One remote compressed file.
-
-    cached under `cache_dir` and re-fetched only when its upstream revision changes.
-    """
+    """One remote compressed file, re-fetched only when its revision changes."""
 
     def __init__(self, client: httpx.AsyncClient, url: str, cache_dir: Path) -> None:
         self._client = client
@@ -94,20 +81,16 @@ class CachedDatasetFile:
     async def revision(self) -> str:
         """One `HEAD` request.
 
-        Raises `PortUnavailable` if unreachable or if upstream answers 4xx/5xx, and
-        `PortRateLimited` if it answers 429 -- both via `_raise_for_status` below, so
-        both are real, not theoretical. Naming only the first is what let a
-        `PortRateLimited` escape uncaught from a caller that had only guarded against
-        `PortUnavailable`; every `BulkDataset.revision()` that delegates here inherits
-        both. Either way a run fails before it writes anything.
+        Raises `PortUnavailable` if unreachable or on 4xx/5xx, `PortRateLimited` on
+        429; every `BulkDataset.revision()` delegating here inherits both. Either
+        way a run fails before it writes anything.
         """
         try:
             response = await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
-            # `failure_detail`, never `{exc}`: every httpx timeout
-            # stringifies to the empty string (issue #35), and a stalled
-            # multi-gigabyte dump is both the likeliest failure on this path
-            # and the most expensive one to have to reproduce.
+            # `failure_detail`, never `{exc}`: every httpx timeout stringifies
+            # to the empty string, and a stalled multi-gigabyte dump is the
+            # most expensive failure here to have to reproduce.
             raise PortUnavailable(f"HEAD {self._url} failed: {failure_detail(exc)}") from exc
         _raise_for_status(response, self._url)
         return _revision_from(response)
@@ -155,20 +138,14 @@ class CachedDatasetFile:
     def lines(self, *, skip: int = 0) -> Iterator[str]:
         """Decompressed lines, newline stripped, with the first `skip` discarded.
 
-        Skipping by re-reading rather than seeking: a gzip member is not
-        randomly seekable, and the decompression cost of a prefix is small
-        against the cost of getting resumption wrong. Every line is decoded
-        UTF-8 with `errors="replace"` -- a single undecodable byte in a
-        12.7M-line dump must not abort an import, and a replacement character
-        in one title's name is a far better outcome than no catalog.
+        Skipping re-reads rather than seeks: a gzip member is not randomly
+        seekable. Decoding is `errors="replace"` so one undecodable byte cannot
+        abort an import -- a mangled title beats no catalog.
 
-        A body that isn't valid gzip at all -- realistic whenever a CDN or
-        proxy serves an error page with HTTP status 200 instead of the
-        dataset -- raises `PortDataMalformed`, not the raw `gzip`/`zlib`
-        exception. `gzip.open` is lazy, so that raw exception would
-        otherwise surface for the first time here, deep inside a batching
-        loop, as a type no caller written against `usher.ports.errors` can
-        catch.
+        A body that isn't gzip at all -- a CDN error page served with HTTP 200 --
+        raises `PortDataMalformed`. `gzip.open` is lazy, so the raw `gzip`/`zlib`
+        exception would otherwise surface here, inside a batching loop, as a type
+        no caller written against `usher.ports.errors` can catch.
         """
         try:
             with gzip.open(self.path, "rt", encoding="utf-8", errors="replace") as stream:
@@ -182,18 +159,14 @@ class CachedDatasetFile:
             ) from exc
 
     def member_lines(self, member: str, *, skip: int = 0) -> Iterator[str]:
-        """Decompressed lines of one member of a zip archive.
-
-        newline stripped, with the first `skip` discarded.
-        """
+        """Lines of one zip member, newline stripped, first `skip` discarded."""
         try:
             with zipfile.ZipFile(self.path) as archive:
                 try:
                     entry = archive.open(member)
                 except KeyError as exc:
-                    # Not a bare KeyError: it names nothing an operator can act on, and
-                    # it escapes from inside a generator being consumed by a batching
-                    # loop.
+                    # Not a bare KeyError: it names nothing an operator can act
+                    # on, and it escapes from inside a generator.
                     raise PortDataMalformed(
                         f"{self.path} has no member {member}", detail=member
                     ) from exc
@@ -203,10 +176,8 @@ class CachedDatasetFile:
                             continue
                         yield line.rstrip("\n")
         except (zipfile.BadZipFile, *DAMAGED_GZIP) as exc:
-            # `DAMAGED_GZIP` belongs here as much as `BadZipFile`: a member
-            # whose deflate stream is corrupt fails during *iteration* rather
-            # than at open, and deflate damage is the same damage whichever
-            # container carries it.
+            # `DAMAGED_GZIP` as well as `BadZipFile`: a member whose deflate
+            # stream is corrupt fails during iteration, not at open.
             raise PortDataMalformed(
                 f"{self.path} is not a valid zip file", detail=str(self.path)
             ) from exc

@@ -51,9 +51,9 @@ async def get_collection(
     """
     collection = await collections.get(collection_id)
     if collection is None:
-        # V1's vocabulary, generic on purpose: RFC 9457's `instance` already
-        # carries `/collections/{id}`, so a `collection_not_found` member would
-        # be a second spelling of what the document says. ADR-0030.
+        # The shared vocabulary, generic on purpose: RFC 9457's `instance` already
+        # carries `/collections/{id}`, so a `collection_not_found` member would be a
+        # second spelling of what the document says.
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,

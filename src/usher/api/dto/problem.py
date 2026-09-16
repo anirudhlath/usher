@@ -17,10 +17,7 @@ _TYPE_PREFIX: Final = "https://usher.dev/errors/"
 
 
 class ProblemCode(StrEnum):
-    """The machine-readable `code`.
-
-    **Seven members, closed by ADR-0030.**
-    """
+    """The machine-readable `code`, and the vocabulary is closed."""
 
     NOT_FOUND = "not_found"
     VALIDATION_FAILED = "validation_failed"
@@ -43,17 +40,16 @@ def problem_type(code: ProblemCode) -> str:
 
 
 def problem_title(code: ProblemCode) -> str:
-    """The short human-readable summary.
+    """The short human-readable summary, derived from the code.
 
-    derived from the code for the same reason `problem_type` is.
-
-    PRD 07's example pairs `source_unavailable` with `"Source unavailable"`.
+    For the same reason `problem_type` is. PRD 07's example pairs
+    `source_unavailable` with `"Source unavailable"`.
     """
     return code.value.replace("_", " ").capitalize()
 
 
-# : The two routes whose non-2xx is deliberately **not** a problem document, : each with
-# the reason it is exempt.
+#: The two routes whose non-2xx is deliberately **not** a problem document,
+#: each with the reason it is exempt.
 PROBLEM_EXEMPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "/health/ready": (
@@ -112,8 +108,8 @@ class ProblemResponse(BaseModel):
     ) -> Self:
         """The only sanctioned construction.
 
-        so `type` and `title` are always the derivations rather than whatever a caller
-        typed.
+        `type` and `title` are always the derivations rather than whatever a
+        caller typed.
         """
         return cls(
             type=problem_type(code),

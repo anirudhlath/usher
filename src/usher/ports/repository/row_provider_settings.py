@@ -1,4 +1,4 @@
-"""`row_provider_settings` -- the writer M7 refused until a route could reach it."""
+"""`row_provider_settings` -- which row providers an operator has turned off."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -9,13 +9,10 @@ __all__ = ["RowProviderSettingsRepository"]
 class RowProviderSettingsRepository(ABC):
     """One row per provider an operator has ever touched; nothing for the rest.
 
-    Two methods, and the whole port is the discipline of never letting
-    "never configured" collapse into "explicitly disabled" -- the trap M7's
-    boundary call warns about, arriving here as a read rather than as a
-    migration seed.
+    The whole port is the discipline of never letting "never configured"
+    collapse into "explicitly disabled".
 
-    Same session ownership as every repository in this package: both methods
-    flush and return, and neither commits.
+    Both methods flush and return, and neither commits.
     """
 
     @abstractmethod

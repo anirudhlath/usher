@@ -97,8 +97,8 @@ REFUSED_EMBEDDING = f"NOT ({STALE_EMBEDDING}) AND e.embedding IS NULL"
 # the whole scan off an index that already exists.
 _POPULATION = "t.enrichment_state <> 'skeleton'"
 
-# --- the similarity precompute ------------------------------------------ One page of
-# seeds, with the two tag columns the blend reads.
+# --- the similarity precompute ---------------------------------------------------
+# One page of seeds, with the two tag columns the blend reads.
 _LIST_EMBEDDED = """
 SELECT e.title_id, t.genres, t.keywords,
        EXISTS (SELECT 1 FROM genome_scores AS g WHERE g.title_id = e.title_id) AS has_genome
@@ -141,10 +141,9 @@ JOIN genome_scores AS gc ON gc.title_id = p.neighbor_id
 """
 
 # **Exact, not approximate, and bracketed around one statement rather than left on for
-# the transaction.** PRD 05 puts brute-force exact cosine at this scale (10k x 384
-# halfvec is 7.7 MB, inside this host's 96 MB L3), and the argument is sharper than "it
-# is affordable": recall loss in a live query is per-query, and recall loss in a cached
-# artefact is permanent -- a neighbour an approximate scan missed is missed by every
+# the transaction.** Recall loss in a live query is per-query; recall loss in a cached
+# artefact is permanent -- a neighbour an approximate scan misses is missed by every
+# later read of the row it wrote.
 _EXACT_SCAN_OFF = ("SET LOCAL enable_indexscan = off", "SET LOCAL enable_bitmapscan = off")
 _EXACT_SCAN_ON = ("SET LOCAL enable_indexscan = on", "SET LOCAL enable_bitmapscan = on")
 
@@ -199,14 +198,13 @@ ORDER BY rank, neighbor_id
 LIMIT :limit
 """
 
-# `min`, not `max`. The newest row would report a whole-table rebuild as fresh
-# the moment its first page committed, which is this milestone's own failure
-# mode -- looks healthy while describing yesterday -- wearing an accessor.
-# `NULL` for an empty table is the "never computed" signal, and it is a
-# different fact from "this title has no neighbours".
+# `min`, not `max`: the newest row would report a whole-table rebuild as fresh the
+# moment its first page committed -- healthy-looking while describing yesterday.
+# `NULL` for an empty table is the "never computed" signal, a different fact from
+# "this title has no neighbours".
 _OLDEST_NEIGHBOR = "SELECT min(computed_at) FROM title_neighbors"
 
-# The resume cursor (M10 J6): where an interrupted walk picks its keyset back up.
+# The resume cursor: where an interrupted walk picks its keyset back up.
 _RESUME_CURSOR = """
 WITH first_uncovered AS (
     SELECT e.title_id FROM title_embeddings e
@@ -270,11 +268,10 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     result = await self._session.execute(text(_UPSERT))
                     inserted, updated = result.one()
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `title_embeddings.embedding` is `halfvec(1024)` and
-            # `TitleEmbeddingUpsert.embedding` is a bare `tuple[float, ...]`, so a
-            # vector of another width reaches the `CAST` in the destination statement as
-            # SQLSTATE `22000` (`expected 1024 dimensions, not N`, measured).
+            # **`DBAPIError` rather than `IntegrityError`.** `title_embeddings.embedding`
+            # is `halfvec(1024)` and `TitleEmbeddingUpsert.embedding` is a bare
+            # `tuple[float, ...]`, so a vector of another width reaches the `CAST` in
+            # the destination statement as SQLSTATE `22000`.
             if not is_row_refusal(exc):
                 raise
             # A `title_id` naming no title, or a CHECK on model_name /
@@ -361,8 +358,8 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                 # **The outer parentheses are load-bearing and their absence is
                 # silent.** `where()` joins its fragments with `AND`, and `AND` binds
                 # tighter than `OR`, so the unparenthesised form parses as (population
-                # AND stale AND after IS NULL) OR (t.id > after) which is exactly right
-                # on the *first* page -- `after` is NULL, the left arm is the real
+                # AND stale AND after IS NULL) OR (t.id > after) -- right on the first
+                # page and wrong on every one after it.
                 text("(CAST(:after AS uuid) IS NULL OR t.id > CAST(:after AS uuid))"),
             )
             .order_by(t.id)
@@ -442,7 +439,7 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     genres=genres,
                     keywords=keywords,
                     # Absent means "one of these two has no genome vector",
-                    # which is `None` and never 0.0 (ADR-0014).
+                    # which is `None` and never 0.0.
                     tags=genome.get((row.seed_id, row.neighbor_id)),
                 )
             )
@@ -530,11 +527,10 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
                             },
                         )
         except DBAPIError as exc:
-            # **`DBAPIError` rather than `IntegrityError`, widened by M10's F9
-            # (ADR-0044).** `title_neighbors.rank` is `integer` and
-            # `ScoredNeighbor.rank` is a bare `int`, so a blend that computed one is
-            # refused by asyncpg's binary encoder before a byte is sent -- no SQLSTATE,
-            # and no `IntegrityError`.
+            # **`DBAPIError` rather than `IntegrityError`.** `title_neighbors.rank` is
+            # `integer` and `ScoredNeighbor.rank` is a bare `int`, so an out-of-range
+            # rank is refused by asyncpg's binary encoder before a byte is sent -- no
+            # SQLSTATE, and no `IntegrityError`.
             if not is_row_refusal(exc):
                 raise
             # A score outside [0, 1], a self-neighbour, a negative rank, or a title id
@@ -587,12 +583,12 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
 
 
 def _as_vector_literal(embedding: tuple[float, ...] | None) -> str | None:
-    """Pgvector's own text form, which the staging table holds and the `INSERT ...
+    """Pgvector's own text form, which the staging table holds and the `INSERT` casts.
 
-    SELECT` casts. `repr` per component because it is the shortest round-tripping form
-    -- `halfvec` quantises it to float16 anyway (measured max cosine error 1.21e-04), so
-    precision beyond round-trip buys nothing, and a lossy formatter here would be
-    indistinguishable from the quantisation it hides behind.
+    `repr` per component because it is the shortest round-tripping form --
+    `halfvec` quantises to float16 anyway, so precision beyond round-trip buys
+    nothing, and a lossy formatter here would be indistinguishable from the
+    quantisation it hides behind.
 
     `None` for a refused title, which stages as NULL and casts to NULL.
     """

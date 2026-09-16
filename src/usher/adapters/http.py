@@ -54,19 +54,16 @@ _TIMEOUT_PHASES: Mapping[type[httpx.TimeoutException], str] = {
 def _timeout_budget(exc: BaseException) -> tuple[str, float] | None:
     """The phase and the seconds a timeout exhausted, or `None`.
 
-    Recovered rather than invented. `httpx.Client.build_request` writes
-    `extensions["timeout"] = Timeout(...).as_dict()` -- from the client's
-    default, or from a per-request `timeout=` kwarg, which is the form
-    `WikidataCrosswalkDataset` uses -- and httpx sets `.request` on every
-    `RequestError` on the way out of `send`. So the number is already on the
-    exception these adapters catch. Verified against httpx 0.28.1.
+    Recovered rather than invented: `httpx.Client.build_request` writes
+    `extensions["timeout"] = Timeout(...).as_dict()` and httpx sets `.request`
+    on every `RequestError`, so the number is already on the exception these
+    adapters catch.
 
-    Four guards, each covering a shape that really occurs. `RuntimeError`
-    from a closed client is not a `RequestError` and has no `.request` at
-    all; `RequestError.request` is a property that **raises** `RuntimeError`
-    rather than answering `None` when it was never set; `extensions` is
-    caller-supplied and may carry no `timeout` key; and a custom transport
-    may put something other than a number under it.
+    Four guards, each covering a shape that really occurs. `RuntimeError` from a
+    closed client is not a `RequestError` and has no `.request`;
+    `RequestError.request` **raises** `RuntimeError` rather than answering
+    `None` when it was never set; `extensions` is caller-supplied and may carry
+    no `timeout` key; and a custom transport may put a non-number under it.
     """
     phase = next((name for cls, name in _TIMEOUT_PHASES.items() if isinstance(exc, cls)), None)
     if phase is None:
@@ -94,19 +91,13 @@ def failure_detail(exc: BaseException) -> str:
 
 
 def retry_after_seconds(value: str | None) -> float | None:
-    """Parse a `Retry-After` header value into seconds from now.
+    """A `Retry-After` header as seconds from now, or `None` if unparseable.
 
-    or `None` if there was no header or it couldn't be parsed at all.
-
-    RFC 9110 permits `Retry-After` to be *either* an integer number of
-    seconds *or* an HTTP-date -- `float(value)` alone raises `ValueError`
-    on the latter (`could not convert string to float: 'Wed, 21 Oct 2026
-    07:28:00 GMT'`), and this is the 429 path: the one moment upstream is
-    explicitly asking for backoff. A caller that only handled the numeric
-    form would raise instead of backing off exactly when backing off
-    matters most. Shared by every adapter's 429 handling rather than
-    duplicated -- the bug this fixes existed in two places for exactly
-    that reason.
+    RFC 9110 permits *either* an integer number of seconds *or* an HTTP-date,
+    and `float(value)` alone raises `ValueError` on the latter. This is the 429
+    path -- the one moment upstream is explicitly asking for backoff -- so a
+    caller handling only the numeric form would raise exactly when backing off
+    matters most. Shared by every adapter's 429 handling rather than duplicated.
     """
     if value is None:
         return None
@@ -143,7 +134,7 @@ def port_error_for(
 ) -> UsherPortError | None:
     """The status-code ladder `TmdbClient` and `OpenAICompatibleClient` share.
 
-    or `None` when the status is not an error at all.
+    `None` when the status is not an error at all.
     """
     status = response.status_code
     if status == 429:
@@ -170,12 +161,9 @@ def port_error_for(
 class _MinInterval:
     """A minimum-interval outbound gate.
 
-    one source's calls spaced `1/rate` seconds apart, with **no burst credit**, under a
-    lock held *across* the wait.
-
-    The proactive half PRD 01 promised and this module never had -- every other rate
-    concept here (`retry_after_seconds`, `port_error_for`'s 429 arm) is about a limit
-    already hit.
+    One source's calls spaced `1/rate` seconds apart, with **no burst credit**,
+    under a lock held *across* the wait. Every other rate concept in this module
+    is about a limit already hit; this one is the proactive half.
     """
 
     def __init__(
@@ -212,9 +200,9 @@ class _MinInterval:
         _throttle_wait.record(wait, {"source": self._source})
 
 
-# : **The public name for the object above**, and it exists because a private : name had
-# reached three public signatures: `EmbySession.__init__`, : `EmbyAdapter.__init__` and
-# `SourceGateRegistry.gate`'s return type.
+#: The public name for the object above, because a private one had reached
+#: three public signatures: `EmbySession.__init__`, `EmbyAdapter.__init__` and
+#: `SourceGateRegistry.gate`'s return type.
 SourceGate = _MinInterval
 
 

@@ -28,10 +28,10 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """The literal DSN from settings, unwrapped once, here, and handed straight to SQLAlchemy.
+    """The DSN from settings, unwrapped once, here, and handed straight to SQLAlchemy.
 
-    never stored in a variable that outlives this call, never logged, and never passed
-    through `alembic.config.Config`.
+    Never stored in a variable that outlives this call, never logged, and never
+    passed through `alembic.config.Config`.
     """
     try:
         return get_settings().database_url.get_secret_value()
@@ -57,10 +57,9 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    # `hide_parameters=True` for `db/base.py::build_engine`'s reason, and this is the
-    # **second** engine constructor in the project rather than the only other one being
-    # a detail: a reader who grepped `build_engine` alone would conclude the flag was
-    # set everywhere.
+    # `hide_parameters=True` for `db/base.py::build_engine`'s reason. This is the
+    # **second** engine constructor in the project, so grepping `build_engine` alone
+    # does not show where the flag is set.
     connectable = create_async_engine(_database_url(), poolclass=NullPool, hide_parameters=True)
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

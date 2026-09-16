@@ -118,7 +118,7 @@ def _pinned(pin_path: Path, name: str) -> str:
 async def _fetch_pinned(cache_dir: Path, pin_path: Path, name: str) -> CachedDatasetFile:
     """Download `name` at exactly the revision `--phase head` pinned.
 
-    Refuses rather than measures if upstream served a different snapshot in
+    Refuses rather than runs if upstream served a different snapshot in
     between: the whole point of the pin is that one run reads one snapshot.
     """
     settings = get_settings()
@@ -445,16 +445,15 @@ _INDEX_DDL = (
     ),
 )
 
-# Not in `_INDEX_DDL`, and measured on its own afterwards: this is the index
-# T4 would have to add for an IMDb upsert to be idempotent, because `credits`'
-# only unique key is on `tmdb_credit_id`, which is NULL on every IMDb row and
-# whose index is therefore partial over none of them. Its cost is reported
-# separately so (A)'s number stays the shipped design's.
+# Not in `_INDEX_DDL`, and timed on its own afterwards: this is the index T4
+# would have to add for an IMDb upsert to be idempotent, because `credits`' only
+# unique key is on `tmdb_credit_id`, which is NULL on every IMDb row. Its cost is
+# reported separately so (A)'s number stays the shipped design's.
 _EXTRA_INDEX = (
     "CREATE INDEX ix_t3_credits_imdb_natural_key ON t3_credits (title_id, person_id, kind)"
 )
 
-# The trimmed variant, and the reason it is measured rather than reasoned about.
+# The trimmed variant, run rather than reasoned about.
 _TRIMMED_DDL = (
     "DROP TABLE IF EXISTS t3_credits_trimmed CASCADE",
     """
@@ -485,7 +484,7 @@ SELECT (SELECT count(*) FROM t3_credits_trimmed) AS rows,
 
 
 async def _report_trimmed(engine: AsyncEngine, entity_full: int) -> None:
-    """(A) re-measured against the smallest credits row that is still a credit."""
+    """(A) again, against the smallest credits row that is still a credit."""
     async with engine.begin() as conn:
         for statement in _TRIMMED_DDL:
             await conn.execute(text(statement))
@@ -619,10 +618,9 @@ SELECT (SELECT count(*) FROM t3_akas_raw)                              AS retain
 
 
 async def _report_sizes(engine: AsyncEngine) -> int:
-    """Print (A) and (B).
+    """Print (A) and (B), and return (A)'s full-column figure.
 
-    and hand (A)'s full-column figure back for the trimmed variant to be compared
-    against in the same run.
+    The trimmed variant is compared against it in the same run.
     """
     async with engine.connect() as conn:
         counts = {name: rows for name, rows in (await conn.execute(text(_ROW_COUNTS))).all()}
@@ -671,7 +669,7 @@ async def _report_sizes(engine: AsyncEngine) -> int:
 
 
 async def phase_blast(catalog_url: str, scratch_url: str) -> None:
-    """The `search_document`/embedding blast radius, measured against the catalog."""
+    """The `search_document`/embedding blast radius, against the real catalog."""
     engine = build_engine(catalog_url)
     try:
         async with engine.connect() as conn:

@@ -65,10 +65,10 @@ class PushApplyService:
         self._watch = watch
         self._events = events
         self._commit = commit
-        # **The push lane invalidates; the nightly walk expires.** A push event *is* a
-        # change -- the same sentence PRD 07 uses to explain why this lane publishes
-        # `watchstate.updated` and the walk does not -- so the fan-out is per *event*,
-        # over a small fixed slug set, rather than per merged row.
+        # The push lane invalidates; the nightly walk expires. A push event *is* a
+        # change -- PRD 07's own reason for this lane publishing
+        # `watchstate.updated` where the walk does not -- so the fan-out is per
+        # *event*, over a small fixed slug set, rather than per merged row.
         self._cache = cache
         self._max_items = max_items_per_event
 
@@ -142,17 +142,15 @@ class PushApplyService:
         return PushOutcome(states_merged=outcome.rows_written)
 
     async def _invalidate_rows(self, user_id: uuid.UUID) -> None:
-        """Drop this household's watch-state rows and its composed screen.
+        """Drop this household's watch-state rows, and say which to refetch.
 
-        and tell every connected client which rows to refetch.
-
-        **Trap 5, on the right side of it.** The nightly walk merges up to
-        1,126,789 states and invalidates *nothing*: one invalidation per merged
-        row is the fan-out per row per night that PRD 07 already refuses for
-        `watchstate.updated`, and the walk's changes reach the screen through
-        the 30 s screen TTL and a demand read -- a walk that finishes at 04:00
-        is on the screen by 04:00:30. Here the unit is one pushed event, whose
-        slug set is `WATCH_STATE_ROWS` and is fixed.
+        The nightly walk merges the whole library's states and invalidates
+        *nothing*: one invalidation per merged row is the fan-out per row per
+        night that PRD 07 already refuses for `watchstate.updated`, and the
+        walk's changes reach the screen through the 30 s screen TTL and a demand
+        read -- a walk that finishes at 04:00 is on the screen by 04:00:30. Here
+        the unit is one pushed event, whose slug set is `WATCH_STATE_ROWS` and is
+        fixed.
 
         Guarded on `rows_written` for the reason the publish beside it is: a
         merge refused by "latest `updated_at` wins" is the source echoing back a
@@ -161,10 +159,10 @@ class PushApplyService:
         """
         if self._cache is not None:
             self._cache.invalidate(user_id, WATCH_STATE_ROWS)
-        # **One event per invalidated slug, and no `title_id`.** PRD 07's payload for
-        # this event is a row slug and its client action is "refetch that row", so the
-        # slug is the whole payload -- a frame without it is an instruction with no
-        # object.
+        # One event per invalidated slug, and no `title_id`: PRD 07's payload for
+        # this event is a row slug and its client action is "refetch that row", so
+        # the slug is the whole payload -- a frame without it is an instruction with
+        # no object.
         for slug in WATCH_STATE_ROWS:
             await self._events.publish(
                 ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": slug})
@@ -227,12 +225,11 @@ class PushApplyService:
     def _ignore_removal(self, source: Source, event: SourceEvent) -> PushOutcome:
         """A removal event retracts nothing, and says so.
 
-        [ADR-0015](../../../docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md):
-        availability is retracted only by a walk that provably finished,
-        because there is no way to tell a genuine deletion from an unmounted
-        drive, a library removed by accident, or a permissions change -- and
-        only one of those is reversible. Emby emits `ItemsRemoved` during an
-        ordinary library refresh for items that have not gone anywhere.
+        Availability is retracted only by a walk that provably finished, because
+        there is no way to tell a genuine deletion from an unmounted drive, a
+        library removed by accident, or a permissions change -- and only one of
+        those is reversible. Emby emits `ItemsRemoved` during an ordinary
+        library refresh for items that have not gone anywhere.
 
         PRD 08 already prices the delay: "Availability goes stale, not
         wrong." Counted and logged rather than dropped silently, so an
@@ -240,8 +237,8 @@ class PushApplyService:
         the events arriving before the nightly walk acts on them.
         """
         logger.info(
-            "{source} reported {count} items removed; availability is retracted only by a "
-            "full walk (ADR-0015), so nothing changes until the nightly reconcile",
+            "{source} reported {count} items removed; availability is retracted only by "
+            "a full walk, so nothing changes until the nightly reconcile",
             source=source.name,
             count=len(event.external_ids),
         )
@@ -310,13 +307,13 @@ class PushSupervisor:
         while failures < self._max_failures:
             try:
                 async with adapter.events() as events:
-                    # **After** the connection, deliberately.
+                    # After the connection, deliberately.
                     await self._gap(source, adapter, gate)
                     delivering = await self._note(source, adapter, delivering)
                     async for event in events:
                         delivering = await self._note(source, adapter, delivering)
                         if delivering:
-                            # Reset on **delivery**, never on connection.
+                            # Reset on delivery, never on connection.
                             failures = 0
                         outcome = await self._apply(source, adapter, event)
                         if outcome.deferred_to_delta:

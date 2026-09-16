@@ -27,9 +27,8 @@ class JobKind(StrEnum):
 class JobStatus(StrEnum):
     """A job is waiting, held by a worker, or poisoned.
 
-    Not a ladder -- unlike `EnrichmentState` (ADR-0008) there is no "is this
-    an improvement" comparison to get wrong -- so no rank mapping exists and
-    none is needed.
+    Not a ladder: there is no "is this an improvement" comparison to get wrong,
+    so no rank mapping exists and none is needed.
     """
 
     PENDING = "pending"
@@ -42,19 +41,13 @@ class JobPriority(IntEnum):
 
     **Higher is more urgent**, so every claim query orders
     `priority DESC, created_at ASC`. An `IntEnum` rather than a `StrEnum`
-    because the column is an integer a `GREATEST()` runs over during
-    promotion, and because the ordering has to be arithmetic rather than
-    lexicographic -- which is the same trap `ENRICHMENT_RANK` exists for,
-    avoided here by the type rather than by a side table.
-
-    `DEMAND` and `VISIBLE` are unused in M4: nothing here serves a client.
-    They are defined now because the promotion clause in the enqueue
-    statement (`SET priority = GREATEST(...)`) is written in M4 and would
-    otherwise be written against a scale that does not yet have a top.
+    because the column is an integer a `GREATEST()` runs over during promotion,
+    and because the ordering has to be arithmetic rather than lexicographic --
+    the same trap `ENRICHMENT_RANK` exists for, avoided here by the type.
     """
 
-    DEMAND = 100  # a client opened this title right now (M5)
-    VISIBLE = 80  # in a row the client just requested (M5)
+    DEMAND = 100  # a client opened this title right now
+    VISIBLE = 80  # in a row the client just requested
     NEW = 50  # newly seen on a source
     BACKFILL = 20  # background sweep
 
