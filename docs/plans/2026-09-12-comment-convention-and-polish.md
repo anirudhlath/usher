@@ -14,12 +14,19 @@ stage reads rationale that the next one deletes.
 | stage | state |
 |---|---|
 | 1 — the `/simplify` findings | ✅ 34 of 35 fixed; item 26 refused with its reason |
-| 2 — code prose | 🚧 two mechanical passes landed; the judgement pass is running |
+| 2 — code prose | ✅ `src/usher` 62.4% -> 38.2%, `tests` 41.8% -> 29.6%, `scripts` -> 23.2% |
 | 3 — `docs/prd/decisions/` | ✅ 48 records and the register deleted, every pointer stripped |
-| 4 — the PRD | ✅ 13,236 -> 4,909 lines |
+| 4 — the PRD | ✅ 13,236 -> 4,909 lines; the link check prints `OK` |
 
 The hook and ruff's `D` selection are both in place, so the convention is
-enforced rather than described.
+enforced rather than described. `D` went 6,790 -> 0.
+
+**The prose work changed no behaviour, and that is checked rather than
+asserted.** Comparing every Python file's AST between stage 1's close and here,
+with docstring statements removed and every string constant blanked, **693 of
+705 files are identical**. The twelve that are not: `guard_prose.py`, and eleven
+test files, each one a prose guardian re-pointed at the code or deleted. No file
+under `src/usher` or `scripts` changed at all.
 ## Why
 
 `src/usher` is 63.5% comment and docstring by non-blank line, `tests` 41.8%,
