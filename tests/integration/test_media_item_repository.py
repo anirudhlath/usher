@@ -1,7 +1,4 @@
-"""The shared contract against real Postgres, plus the five things a fake cannot express.
-
-a duplicate that raises rather than being last-wins, a CHECK that fires, a foreign key,
-"""
+"""The shared contract against real Postgres, plus the things a fake cannot express."""
 
 import dataclasses
 import uuid
@@ -63,9 +60,9 @@ async def title_id(session: AsyncSession) -> uuid.UUID:
 async def episode_id(session: AsyncSession) -> uuid.UUID:
     """A real episode, which needs a real series and a real season.
 
-    both FKs are `NOT NULL`, and `media_items.episode_id` is itself a foreign key -- the
-    whole reason the contract's episode cases mean something here and are dict entries
-    in the unit half.
+    Both FKs are `NOT NULL`, and `media_items.episode_id` is itself a foreign key,
+    which is why the contract's episode cases mean something here and are dict
+    entries in the unit half.
     """
     series = Title(kind=TitleKind.SERIES, name="Contract Series", sort_name="Contract Series")
     await PostgresTitleRepository(session).add(series)
@@ -159,22 +156,16 @@ class TestPostgresMediaItemRepository(
 async def test_a_negative_dimension_is_a_port_error_not_an_integrity_error(
     repository: PostgresMediaItemRepository, source_id: uuid.UUID
 ) -> None:
-    """`ck_media_items_width_non_negative` is one of five CHECKs mirroring `MediaItem`'s own.
+    """`ck_media_items_width_non_negative` is one of five CHECKs mirroring pydantic bounds.
 
-    pydantic bounds, and the staged path bypasses pydantic entirely -- a `COPY` never
-    constructs a `MediaItem`.
-
-    So the database is the only thing standing between a bad width and a stored row, and
-    the repository has to translate what it raises: a raw
+    The staged path bypasses pydantic entirely -- a `COPY` never constructs a
+    `MediaItem` -- so the database is the only thing between a bad width and a stored
+    row, and the repository has to translate what it raises: a raw
     `sqlalchemy.exc.IntegrityError` escaping here would break "db is driven, not
-    driving" for every caller written against `usher.ports.errors`.
-
-    Note *where* it fires. The staging table carries no constraints, so the
-    `COPY` succeeds and the following `INSERT ... SELECT` is what raises --
-    which is why catching `IntegrityError` is sufficient. Had the constraint
-    been on the staging table, `copy_records_to_table` runs on the raw
-    asyncpg connection, outside SQLAlchemy's error translation, and would
-    have raised `asyncpg.exceptions.CheckViolationError` straight through.
+    driving" for every caller written against `usher.ports.errors`. The staging table
+    carries no constraints, so the `COPY` succeeds and the following
+    `INSERT ... SELECT` is what raises, which is why catching `IntegrityError` is
+    sufficient.
     """
     bad = dataclasses.replace(item(source_id, "movie-1"), width=-1)
     with pytest.raises(RepositoryConflict):
@@ -192,11 +183,9 @@ async def test_an_unknown_title_id_is_a_port_error_not_an_integrity_error(
 async def test_a_caught_conflict_leaves_the_session_usable(
     repository: PostgresMediaItemRepository, source_id: uuid.UUID
 ) -> None:
-    """The bug `PostgresImportRunRepository` shipped with.
+    """A caught conflict must not poison the session for the next unrelated call.
 
-    Postgres aborts the *entire* transaction on any statement error until a ROLLBACK, so
-    a caught conflict poisons the session for the next unrelated call.
-
+    Postgres aborts the *entire* transaction on any statement error until a ROLLBACK.
     This repository uses a SAVEPOINT rather than a full rollback, because its caller
     genuinely does have other pending work -- a batch of items and its sync-run
     checkpoint commit together.
@@ -210,14 +199,12 @@ async def test_a_caught_conflict_leaves_the_session_usable(
 async def test_a_caught_conflict_leaves_no_staging_table_behind(
     repository: PostgresMediaItemRepository, source_id: uuid.UUID
 ) -> None:
-    """The rollback-to-SAVEPOINT has to take the staging table's DDL with it (Postgres DDL is.
+    """The rollback-to-SAVEPOINT has to take the staging table's DDL with it.
 
-    transactional), or the next batch's `CREATE UNLOGGED TABLE` either fails or -- with
-    the `DROP ...
-
-    IF EXISTS` in front of it -- silently inherits nothing while the failed batch's rows
-    sit in a table nobody reads. Verified by writing a second batch and checking its
-    counts, which the test above already does; this one checks the mechanism directly.
+    Postgres DDL is transactional, so otherwise the next batch's
+    `CREATE UNLOGGED TABLE` either fails or -- with the `DROP ... IF EXISTS` in front
+    of it -- silently inherits nothing while the failed batch's rows sit in a table
+    nobody reads. This case checks that mechanism directly.
     """
     with pytest.raises(RepositoryConflict):
         await repository.upsert_many([item(source_id, "movie-1", title_id=new_id())])
@@ -262,13 +249,10 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
 ) -> None:
     """One statement per batch is a scale requirement, not an aesthetic.
 
-    At 1,126,674 items a per-row write is ~21 minutes of pure repository
-    overhead per walk before a byte of upstream I/O, on the same measurement
-    that put `BulkCatalogRepository` outside `TitleRepository`.
-
-    Asserted as "the count does not grow with the batch" rather than as a
-    magic number, so adding a legitimate statement to the path does not
-    break this and making one of them per-row does.
+    At catalog scale a per-row write is minutes of pure repository overhead per walk
+    before a byte of upstream I/O. Asserted as "the count does not grow with the
+    batch" rather than as a magic number, so adding a legitimate statement to the
+    path does not break this and making one of them per-row does.
     """
     statement_counter.clear()
     await repository.upsert_many([item(source_id, f"small-{index}") for index in range(5)])
@@ -288,9 +272,7 @@ async def test_the_sweep_costs_the_same_number_of_statements_however_big_it_is(
     other_source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """A sweep that loaded rows to decide which to retract is the design defect this milestone.
-
-    is warned about.
+    """A sweep that loaded rows to decide which to retract is the design defect here.
 
     It is also the *obvious* implementation, because the guard needs a count and the
     retraction needs a set -- reading the rows once gives you both.
@@ -343,13 +325,10 @@ async def _seed_a_series_with_episodes(
 ) -> uuid.UUID:
     """One series, one season, `episodes` real episodes, and a `media_items` row for each.
 
-    plus one for the series itself, which is what a real Emby walk produces (a `Series`
-    item has no `MediaSource`, so its row carries no quality facts, and M4's live run
-    counted exactly 20 such rows among 601).
-
-    Raw `INSERT ... SELECT generate_series` rather than the repository,
-    because the point is to make the *episode count* large cheaply; the read
-    under test is the only thing being measured.
+    Plus one for the series itself, which is what a real Emby walk produces: a
+    `Series` item has no `MediaSource`, so its row carries no quality facts. Raw
+    `INSERT ... SELECT generate_series` rather than the repository, because the point
+    is to make the *episode count* large cheaply.
     """
     series = Title(kind=TitleKind.SERIES, name="Bounded Series", sort_name="Bounded Series")
     await PostgresTitleRepository(session).add(series)
@@ -402,7 +381,7 @@ async def test_list_for_title_does_not_grow_with_a_series_episode_count(
     source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """The bound, measured rather than asserted about a lookalike."""
+    """The bound, against real SQL rather than against a lookalike."""
     small = await _seed_a_series_with_episodes(session, source_id, episodes=5)
     large = await _seed_a_series_with_episodes(session, source_id, episodes=500)
 

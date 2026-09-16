@@ -1,6 +1,6 @@
 """`/admin/rows/*` through real requests against real Postgres.
 
-`POST .../regenerate` (M8) and `GET`/`PUT .../providers` (M9).
+`POST .../regenerate`, and `GET`/`PUT .../providers`.
 """
 
 import uuid
@@ -55,14 +55,10 @@ def settings(postgres_url: str) -> Settings:
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
-    """Two predicates now, and the second is as narrow as the first.
+    """`row_provider_settings` ships empty and is never seeded, so `DELETE FROM` restores it.
 
-    `row_provider_settings` is the table E2's routes write, it ships **empty**
-    and it is never seeded (M1's `m09a`, and PRD 09 item 9's *"deliberately not
-    seeded with ten slugs"*), so "no rows at all" is its shipped state and
-    `DELETE FROM` it restores exactly that. Emptying it is also what makes the
-    provider cases' premise -- *every provider answers `enabled` on a virgin
-    database* -- a fact rather than a hope about test ordering.
+    Emptying it is what makes the provider cases' premise -- every provider answers
+    `enabled` on a virgin database -- a fact rather than a hope about test ordering.
     """
     async with sessions() as session:
         await session.execute(text("DELETE FROM jobs WHERE kind = :kind"), {"kind": "curate"})
@@ -120,13 +116,11 @@ async def _stored_household(sessions: async_sessionmaker[AsyncSession]) -> uuid.
 
 
 def _queue(session: AsyncSession) -> PostgresJobQueue:
-    """The **real** queue.
+    """The real queue, for the two cases that need a state only a worker reaches.
 
-    for the two cases that have to put the row into a state only a worker reaches.
-
-    Neither `claim` nor `fail` is reachable through any route, and driving
-    them through `FakeJobQueue` would put the row in the fake's dict rather
-    than in the table the next request writes to.
+    Neither `claim` nor `fail` is reachable through any route, and driving them through
+    `FakeJobQueue` would put the row in the fake's dict rather than in the table the
+    next request writes to.
     """
     return PostgresJobQueue(session, max_attempts=5, backoff_seconds=0.01)
 
@@ -136,17 +130,11 @@ async def test_a_regeneration_commits_a_job_for_the_stored_household(
 ) -> None:
     """The route's whole contract, against the queue it actually writes to.
 
-    Read back on a **different connection**, which is the assertion a fake
-    cannot make: a handler that enqueued and never committed leaves a green
-    unit file and an empty `jobs` table.
-
-    The key is compared against the `users` row rather than against the
-    response's own value, so the two cannot agree by construction. `User.id`
-    is `default_factory=new_id`, so a wiring that built a `User` instead of
-    reading one would produce a syntactically perfect 202 naming a household
-    that has never existed -- `api/deps.py::get_default_user` records that as
-    this milestone's headline failure arriving through a constructor default,
-    and this is the same failure one route along.
+    Read back on a different connection, which is the assertion a fake cannot make: a
+    handler that enqueued and never committed leaves a green unit file and an empty
+    `jobs` table. The key is compared against the `users` row rather than against the
+    response's own value, so a wiring that built a `User` instead of reading one cannot
+    produce a perfect 202 naming a household that has never existed.
     """
     response = await client.post(ROUTE)
     household = await _stored_household(sessions)
@@ -163,9 +151,9 @@ async def test_a_regeneration_commits_a_job_for_the_stored_household(
 async def test_asking_twice_writes_nothing_the_second_time(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"*.
+    """PRD 06's *"one modest completion per user per day"*, read off the queue itself.
 
-    measured rather than asserted about a count the route never sees.
+    The route never sees the count it is being held to.
     """
     first = await client.post(ROUTE)
     before = await _curate_rows(sessions)
@@ -188,20 +176,13 @@ async def test_asking_twice_writes_nothing_the_second_time(
 async def test_a_repeat_while_the_generation_runs_is_accepted_and_then_discarded(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """**The sharpest limit on what this 202 means**, and the one the route's docstring rests on.
+    """The sharpest limit on what this 202 means.
 
-    `status = 'running'` appears nowhere in `_ENQUEUE`'s `WHERE`, so a repeat
-    arriving mid-generation is coalesced into the run already in flight -- and
-    `complete()` then deletes that row, so the *requested* generation never
-    happens and the caller was told 202. Measured here at `DEMAND` against
-    `DEMAND`, which is the only pair this route can produce: 0 rows written,
-    the row left `('running', 100)`, and nothing at all afterwards.
-
-    That is the wanted answer for a cost rule and it is a genuine limit, so it
-    is pinned at the route rather than only in `tests/integration/
-    test_job_queue.py`: a client needing a generation *newer than* one in
-    flight has to arrange that above the queue, because no return value here
-    distinguishes the two.
+    `status = 'running'` appears nowhere in `_ENQUEUE`'s `WHERE`, so a repeat arriving
+    mid-generation is coalesced into the run already in flight, and `complete()` then
+    deletes that row -- the requested generation never happens and the caller was told
+    202. A client needing a generation newer than one in flight has to arrange that
+    above the queue, because no return value here distinguishes the two.
     """
     await client.post(ROUTE)
     async with sessions() as session:
@@ -224,23 +205,12 @@ async def test_a_repeat_while_the_generation_runs_is_accepted_and_then_discarded
 async def test_a_parked_generation_is_accepted_and_left_exactly_as_it_was(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 08: *"Re-enqueueing does not un-park...
+    """PRD 08: re-enqueueing does not un-park, and does not promote a parked job.
 
-    and a parked job's priority is not promoted behind their back either."*
-
-    A household whose candidate pool cannot be served parks
-    (`CurationService.generate` raises `PortDataMalformed` for an empty pool,
-    which `JobWorker` parks immediately), and asking again releases nothing --
-    `_ENQUEUE`'s `WHERE jobs.status <> 'parked'` is absolute, and at `DEMAND`
-    it is the *only* clause doing the work, since the priority half would let
-    this write through if the row had parked at a lower rung.
-
-    So this is the shape of "accepted" that delivers nothing until an operator
-    intervenes, and the whole row is compared before and after rather than just
-    the status: `updated_at` is what says no branch was taken at all, and
-    `last_error` is what an operator is actually reading. A route that "helped"
-    by clearing the error, or by re-enqueueing at a rung above the parked one,
-    fails on one of the two.
+    `_ENQUEUE`'s `WHERE jobs.status <> 'parked'` is absolute, and at `DEMAND` it is the
+    only clause doing the work. The whole row is compared before and after rather than
+    just the status: a route that "helped" by clearing `last_error`, or by re-enqueueing
+    above the parked rung, fails on `updated_at` or on the error an operator is reading.
     """
     await client.post(ROUTE)
     async with sessions() as session:
@@ -258,8 +228,7 @@ async def test_a_parked_generation_is_accepted_and_left_exactly_as_it_was(
     assert before[0].last_error == "no candidate survived the pool"
 
 
-# --------------------------------------------------------------------------- `GET`/`PUT
-# /admin/rows/providers` (E2) -- the toggle, and the screen it has to reach.
+# --- `GET`/`PUT /admin/rows/providers` -- the toggle, and the screen it reaches ---
 
 PROVIDERS = "/admin/rows/providers"
 
@@ -268,11 +237,9 @@ PROVIDERS = "/admin/rows/providers"
 async def household(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
     """The singleton default user, created before any request runs.
 
-    Created here rather than left to `get_default_user` because the watch state
-    below has to be keyed to the household the route will resolve -- a fixture
-    that minted its own `User.id` would seed a Continue Watching shelf for a
-    household `GET /home` never asks about, and the positive control would fail
-    for a reason that has nothing to do with this feature.
+    Created here rather than left to `get_default_user` because the watch state below has
+    to be keyed to the household the route resolves: a fixture that minted its own
+    `User.id` would seed a shelf for a household `GET /home` never asks about.
     """
     async with sessions() as session:
         user_id = await ensure_default_user(session)
@@ -292,24 +259,16 @@ class _Screen:
 async def screen(
     sessions: async_sessionmaker[AsyncSession], household: uuid.UUID
 ) -> AsyncIterator[_Screen]:
-    """A household with a genuinely non-empty `continue-watching` shelf.
+    """A household with a non-empty `continue-watching` shelf and a second shelf beside it.
 
-    and a second shelf beside it.
+    Two titles, because one cannot tell "the toggle worked" from "the screen went
+    empty": `resuming` satisfies `list_in_progress`' predicate, `arrived` is what
+    `RecentlyAddedProvider` fires on and is the control that survives the toggle.
 
-    **Two titles, because one cannot tell "the toggle worked" from "the screen
-    went empty".** `resuming` is owned and part-way through, which is
-    `list_in_progress`' whole predicate (`NOT played AND position_seconds >
-    0`); `arrived` is owned and freshly added, which is what
-    `RecentlyAddedProvider` fires on. The second is the control that survives
-    the toggle.
-
-    Committed for real and deleted by id afterwards. **`watch_states` is
-    deleted explicitly and `media_items` is not**, which is measured rather
-    than assumed: this fixture's first run died in teardown on
-    `fk_watch_states_title_id_titles`, so that FK is `NO ACTION` while
-    `media_items`' cascades. The `sources` row goes last for the same reason.
-    The `users` row is the singleton every file in this suite reaches by
-    `ON CONFLICT (name) DO NOTHING` and is left standing.
+    Committed for real and deleted by id afterwards. `watch_states` is deleted
+    explicitly and `media_items` is not, because `fk_watch_states_title_id_titles` is
+    `NO ACTION` while `media_items`' cascades; the `sources` row goes last for the same
+    reason, and the singleton `users` row is left standing.
     """
     source = Source(
         kind=SourceKind.EMBY,
@@ -402,10 +361,7 @@ async def _stored_overrides(sessions: async_sessionmaker[AsyncSession]) -> dict[
 async def test_a_disabled_provider_stops_appearing_on_the_home_screen(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], screen: _Screen
 ) -> None:
-    """**The centre of this task**, and the reason M7 refused the table at all.
-
-    a toggle nothing reads is worse than no toggle.
-    """
+    """A toggle nothing reads is worse than no toggle, so the screen is what is asserted."""
     before = await _slugs(client)
     assert "continue-watching" in before, (
         "the fixture's in-progress title produced no shelf, so nothing below can fail"
@@ -429,9 +385,9 @@ async def test_a_toggle_committed_by_another_process_reaches_the_next_screen(
     sessions: async_sessionmaker[AsyncSession],
     screen: _Screen,
 ) -> None:
-    """**The filter reads the table, not something the `PUT` left in memory.
+    """The filter reads the table, not something the `PUT` left in memory.
 
-    and the ~30 s window in between is asserted rather than hidden.**.
+    The ~30 s cache window in between is asserted rather than hidden.
     """
     assert "continue-watching" in await _slugs(client), "the fixture seeded no shelf to remove"
 
@@ -459,14 +415,11 @@ async def test_the_listing_and_the_toggle_round_trip_through_real_postgres(
 ) -> None:
     """`GET` and `PUT` over the real repository, and the row read back on another connection.
 
-    What only this level can see is the **upsert**: `ON CONFLICT (slug_prefix)
-    DO UPDATE` is what makes a second toggle one row rather than an
-    `IntegrityError`, and `FakeRowProviderSettingsRepository` is a dict, so it
-    cannot fail either way. Three writes over two slugs must leave two rows.
-
-    The virgin-database arm is asserted against `{p.slug_prefix for p in
-    ROW_PROVIDERS}` rather than a literal for the reason the unit case is: an
-    eleventh provider must appear on this surface with no edit here.
+    What only this level can see is the upsert: `ON CONFLICT (slug_prefix) DO UPDATE` is
+    what makes a second toggle one row rather than an `IntegrityError`, and
+    `FakeRowProviderSettingsRepository` is a dict, so it cannot fail either way. The
+    virgin-database arm is asserted against `ROW_PROVIDERS` rather than a literal, so a
+    further provider appears on this surface with no edit here.
     """
     listed = await client.get(PROVIDERS)
     assert listed.status_code == 200, listed.text

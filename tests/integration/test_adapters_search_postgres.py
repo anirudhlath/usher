@@ -1,6 +1,6 @@
 """`PostgresSearchIndex` against real Postgres.
 
-real `websearch_to_tsquery`, the real analyzer, real `ts_rank_cd`, the real generated
+The real analyzer, `websearch_to_tsquery`, `ts_rank_cd`, and the real generated column.
 """
 
 import dataclasses
@@ -104,10 +104,9 @@ async def _insert_title(
     in: the fake models the weight, the real one reads a column somebody has
     to fill.
 
-    `enrichment_state` defaults to `enriched` because a `SearchDocument`
-    exists for a title worth indexing -- and because it is the denominator of
-    `semantic_coverage` (Task 18): a skeleton is not "missing an embedding",
-    it is outside the embedded population by design.
+    `enrichment_state` defaults to `enriched` because a `SearchDocument` exists for a
+    title worth indexing, and because it is the denominator of `semantic_coverage`: a
+    skeleton is not "missing an embedding", it is outside the embedded population.
     """
     columns = (
         "id, kind, name, sort_name, original_name, overview, tagline, "
@@ -121,11 +120,9 @@ async def _insert_title(
         ":popularity, :vote_count, :enrichment_state"
     )
     await session.execute(
-        # **The bind names are not the column names and only the columns
-        # moved.** `:popularity` is read off `SearchDocument.popularity`,
-        # which ADR-0040 deliberately did not rename; the column it lands
-        # in is `titles.tmdb_popularity`. Renaming the bind as well would
-        # have meant renaming the attribute read below with it.
+        # The bind names are not the column names: `:popularity` is read off
+        # `SearchDocument.popularity`, and the column it lands in is
+        # `titles.tmdb_popularity`.
         text(f"INSERT INTO titles ({columns}) VALUES ({values})"),  # noqa: S608
         {
             "id": document.title_id,
@@ -152,25 +149,18 @@ async def _insert_title(
 
 
 async def _ctids(session: AsyncSession) -> dict[uuid.UUID, str]:
-    """Every visible title's physical location.
-
-    so a rewrite can be shown to have actually moved one.
-    """
+    """Every visible title's physical location, so a rewrite can be shown to move one."""
     rows = await session.execute(text("SELECT id, ctid::text FROM titles"))
     return {uuid.UUID(str(title_id)): str(ctid) for title_id, ctid in rows}
 
 
 async def _own(session: AsyncSession, title_id: uuid.UUID, *, copies: int = 1) -> None:
-    """`copies` `media_items` rows pointing at one title.
+    """`copies` `media_items` rows pointing at one title, which is what `owned_only` asks.
 
-    which is what makes `owned_only` a real question.
-
-    `media_items.title_id` carries the *series'* id on every episode row, so
-    one owned series is many rows -- 20,000 of them on one measured series.
-    The rows here carry a NULL `episode_id` rather than real `episodes`
-    rows, because the fan-out an `EXISTS` has to survive is a property of the
-    row count and not of what the rows point at; seeding a season and three
-    episodes would exercise two more foreign keys and change nothing.
+    `media_items.title_id` carries the *series'* id on every episode row, so one owned
+    series is many rows. They carry a NULL `episode_id` rather than real `episodes`
+    rows, because the fan-out an `EXISTS` has to survive is a property of the row count
+    and not of what the rows point at.
     """
     source_id = new_id()
     await session.execute(
@@ -240,11 +230,9 @@ async def _own_every_title(session: AsyncSession) -> None:
 
 @pytest.mark.integration
 class TestPostgresSearchIndex(SearchIndexContract):
-    # Flipped from False by Task 18, which is what turns the four semantic
-    # and fusion cases -- plus the removal case's semantic branch -- from
-    # skips into assertions. **If any of those five still skips, the flag
-    # was never flipped and the milestone's most delicate logic silently
-    # did not run.**
+    # True is what turns the four semantic and fusion cases -- plus the removal
+    # case's semantic branch -- from skips into assertions. If any of those five
+    # still skips, this file's most delicate logic silently did not run.
     supports_semantic = True
     # This backend expresses the whole vocabulary, including the two the port's
     # docstring says a document-only engine cannot: `owned_only` is an EXISTS over
@@ -256,9 +244,9 @@ class TestPostgresSearchIndex(SearchIndexContract):
 
     @pytest_asyncio.fixture
     async def index(self, session: AsyncSession) -> AsyncIterator[PostgresSearchIndex]:
-        # **100 is no longer `Settings.search_hnsw_ef_search`, which moved to 200 on
-        # 2026-08-19, and the divergence is stated rather than left to be inferred** --
-        # the same shape as `_TRIGRAM_THRESHOLD` one module over.
+        # 100 is deliberately not `Settings.search_hnsw_ef_search`, and the
+        # divergence is stated rather than left to be inferred -- the same shape
+        # as `_TRIGRAM_THRESHOLD` one module over.
         yield PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
 
     @pytest.fixture(autouse=True)
@@ -273,18 +261,13 @@ class TestPostgresSearchIndex(SearchIndexContract):
 async def test_a_renamed_title_is_findable_under_its_new_name_without_reindexing(
     session: AsyncSession,
 ) -> None:
-    """**The generated column, asserted from the adapter's side.**.
+    """The generated column, asserted from the adapter's side.
 
-    Fails an implementation that has started maintaining its own copy of the
-    text -- a `title_search_documents` side table, a trigger, an `index` job
-    that rebuilds the document alongside the embedding. Every one of those
-    reintroduces the failure this milestone exists to delete: a stale index
-    does not raise, it answers.
-
-    Nothing calls `index_many` here at all, and that is the assertion. The
-    `UPDATE` is a plain one through no repository, because the point is that
-    *no* code path can write a title and skip its document -- including a
-    hand-written statement, a migration backfill, or a bulk `COPY`.
+    Fails an implementation maintaining its own copy of the text -- a side table, a
+    trigger, an `index` job that rebuilds the document alongside the embedding -- each
+    of which reintroduces an index that does not raise when stale, it answers. Nothing
+    calls `index_many` here, and the `UPDATE` goes through no repository, because the
+    point is that no code path can write a title and skip its document.
     """
     document = _doc("The Quiet Vacuum")
     await _insert_title(session, document)
@@ -376,16 +359,11 @@ async def test_owned_only_does_not_multiply_a_series_by_its_episodes(
 ) -> None:
     """A `JOIN media_items` in place of the `EXISTS`.
 
-    `media_items.title_id` carries the *series'* id on every episode row, so
-    the join returns one hit per file and the `LIMIT` then truncates a single
-    series into a page of itself. Measured on the shipped `list_for_title`
-    statement, one series, 80,201 `media_items`: 1 row / 0.251 ms / 21
-    buffers with the bound, 20,001 rows / 22.901 ms / 402 buffers without.
-
-    Seeds one series with three episode rows plus one unowned distractor
-    that also matches the query, so both directions bite: the join spelling
-    returns three copies of the series, and a filter that does nothing
-    returns the distractor.
+    `media_items.title_id` carries the *series'* id on every episode row, so the join
+    returns one hit per file and the `LIMIT` truncates a single series into a page of
+    itself. Seeds one series with three episode rows plus one unowned distractor that
+    also matches the query, so both directions bite: the join spelling returns three
+    copies of the series, and a filter that does nothing returns the distractor.
     """
     owned = _doc("Vacuum Chamber Diaries", kind=TitleKind.SERIES)
     unowned = _doc("The Quiet Vacuum")
@@ -446,33 +424,23 @@ async def test_min_enrichment_is_a_rank_and_not_a_string_comparison(
 
 
 def test_the_translator_table_covers_every_filter_the_vocabulary_has() -> None:
-    """The failure this backend can actually reach.
+    """A member added to `SearchFilters` that nothing here was taught about.
 
-    a member added to `SearchFilters` in a later milestone that nothing here was taught
-    about.
-
-    An untranslated member is silently dropped, and a dropped filter returns
-    *more* rows than were asked for, which reads as working -- exactly the
-    drift `FilterNotSupported` exists to prevent, arriving from inside the
-    one backend rather than between two.
-
-    Compared both ways on purpose: a name here that the vocabulary does not
-    have is a translator for a filter nobody can send, which is dead SQL
-    that will be maintained for years.
+    An untranslated member is silently dropped, and a dropped filter returns more rows
+    than were asked for, which reads as working. Compared both ways on purpose: a name
+    here that the vocabulary does not have is a translator for a filter nobody can send,
+    which is dead SQL that will be maintained for years.
     """
     assert set(_TRANSLATORS) == {field.name for field in dataclasses.fields(SearchFilters)}
 
 
 def test_an_untranslated_filter_raises_rather_than_being_ignored() -> None:
-    """The same guard from the other side.
+    """The same guard from the other side, so the table's behaviour is pinned too.
 
-    so the table's *behaviour* is pinned and not just its keys.
-
-    Fails an implementation whose loop `continue`s past a name it does not
-    recognise. Driven through a stand-in dataclass carrying one unknown
-    member, because `SearchFilters` itself cannot be given one -- which is
-    the point: the failure only exists in the future, so the case has to
-    build the future.
+    Fails an implementation whose loop `continue`s past a name it does not recognise.
+    Driven through a stand-in dataclass carrying one unknown member, because
+    `SearchFilters` itself cannot be given one: the failure only exists in the future,
+    so the case has to build the future.
     """
     future = dataclasses.make_dataclass("FutureFilters", [("people", tuple[str, ...], ())])
     with pytest.raises(FilterNotSupported, match="people"):
@@ -503,16 +471,11 @@ async def _candidate_rows(
 ) -> int:
     """`Actual Rows` for the candidate CTE of the shipped suggest statement.
 
-    **The statement is imported, not transcribed.** `_SUGGEST` is the literal
-    constant `PostgresSuggestIndex` issues, so this cannot drift from what
-    ships -- and a hand-copied lookalike that drifts reads exactly like
-    coverage, which is how two earlier tasks in this repository were
-    replaced.
-
-    Asserted on the plan rather than on a clock because the property is
-    "levenshtein ran over the cap, not the table", and at fixture scale every
-    spelling is fast. The same arithmetic as the 300,000-row measurement:
-    417 kept + 1,357 removed = 1,774 = this node's row count.
+    The statement is imported, not transcribed: `_SUGGEST` is the literal constant
+    `PostgresSuggestIndex` issues, and a hand-copied lookalike that drifts reads exactly
+    like coverage. Asserted on the plan rather than on a clock, because the property is
+    "levenshtein ran over the cap, not the table" and at fixture scale every spelling is
+    fast.
     """
     await session.execute(text(f"SET LOCAL pg_trgm.similarity_threshold = {threshold:.6f}"))
     plan = await session.execute(
@@ -550,9 +513,7 @@ class TestPostgresSuggestIndex(TypoTolerantSuggestIndexContract):
         self._session = session
 
     async def given_title(self, index: SuggestIndex, *, name: str, popularity: float) -> uuid.UUID:
-        """The port has no write method (ADR-0021) and this implementation writes nothing at all.
-
-        it reads `titles`.
+        """The port has no write method and this implementation writes nothing: it reads.
 
         So the arrangement is an insert into a table somebody else owns, which is the
         honest shape of a read-only port and the reason this is a hook.
@@ -562,16 +523,11 @@ class TestPostgresSuggestIndex(TypoTolerantSuggestIndexContract):
         return document.title_id
 
     async def rerank_candidates(self, index: SuggestIndex) -> int:
-        """How many rows `levenshtein` actually ran over.
+        """How many rows `levenshtein` ran over, read out of the statement's own plan.
 
-        read out of the plan of the statement the implementation issues.
-
-        **The constant is imported, never transcribed.** A hand-copied
-        lookalike drifts from the shipped SQL and then reads like coverage;
-        this repository has replaced two tasks for exactly that. The number
-        comes from the candidate CTE's `Actual Rows`, which is the same
-        arithmetic the 300,000-row measurement used: 417 kept + 1,357 removed
-        = 1,774 = the CTE's row count, against 300,000 rows in the table.
+        The constant is imported, never transcribed: a hand-copied lookalike drifts from
+        the shipped SQL and then reads like coverage. The number comes from the
+        candidate CTE's `Actual Rows`.
         """
         return await _candidate_rows(
             self._session,
@@ -584,20 +540,14 @@ class TestPostgresSuggestIndex(TypoTolerantSuggestIndexContract):
 
 @pytest.mark.integration
 async def test_the_candidate_predicate_uses_the_trigram_index(session: AsyncSession) -> None:
-    """An implementation whose predicate is `similarity(name, :p) > :t` rather than `name % :p`.
+    """`similarity(name, :p) > :t` in place of `name % :p`.
 
-    The two are equivalent in *meaning* and not in *plan*: only the `%`
-    operator has a `gin_trgm_ops` operator class behind it, so the
-    similarity spelling is a sequential scan with a function call per row --
-    the exact cliff the cap exists to avoid, reintroduced one line above the
-    cap. Measured at 2.08M names: 1.671 ms / 205 buffers for the operator
-    against 182.5 ms / 31,174 for the function.
-
-    Forced with `SET LOCAL enable_seqscan = off`, because on a fixture-sized
-    table a sequential scan is genuinely cheaper and the planner is right to
-    take it. The same lever `test_the_claim_orders_by_created_at` needs, for
-    the same reason: a plan assertion at fixture scale is asserting about a
-    plan the fixture would not otherwise produce.
+    The two are equivalent in meaning and not in plan: only the `%` operator has a
+    `gin_trgm_ops` operator class behind it, so the similarity spelling is a sequential
+    scan with a function call per row -- the cliff the cap exists to avoid, reintroduced
+    one line above the cap. Forced with `SET LOCAL enable_seqscan = off`, because on a
+    fixture-sized table a sequential scan is genuinely cheaper and the planner is right
+    to take it.
     """
     for number in range(20):
         await _insert_title(session, _doc(f"Vane {number:04d}"))
@@ -618,19 +568,13 @@ async def test_the_candidate_predicate_uses_the_trigram_index(session: AsyncSess
 
 @pytest.mark.integration
 async def test_a_high_trigram_floor_destroys_fuzzy_recall(session: AsyncSession) -> None:
-    """**The cliff, demonstrated rather than described.**.
+    """The threshold cliff, demonstrated rather than described.
 
-    Measured on this host against the very fixtures the shared contract
-    seeds: `similarity('Vane', 'vame') = 0.25` and
-    `similarity('Vane', 'vnae') = 0.111`, so a floor of 0.3 admits *neither*
-    while 0.1 admits both. That is a setting turning the feature off while
-    every test that ships with the higher default stays green, and it is the
-    measured reason `_TRIGRAM_THRESHOLD` is 0.1 rather than pg_trgm's own
-    0.3 default -- see the constant's own comment.
-
-    Same title, same typo, two thresholds. Fails an implementation that
-    ignores its configured threshold entirely (a hard-coded `set_limit`, a
-    forgotten `SET LOCAL`), because then both halves return the same thing.
+    A one-character typo scores well under pg_trgm's own 0.3 default, so that floor
+    admits nothing while 0.1 admits it -- a setting turning the feature off while every
+    test shipping with the higher default stays green, which is why `_TRIGRAM_THRESHOLD`
+    is 0.1. Same title, same typo, two thresholds: an implementation ignoring its
+    configured threshold returns the same thing from both halves.
     """
     wanted = _doc("Vane")
     await _insert_title(session, wanted)
@@ -663,15 +607,11 @@ async def test_the_threshold_does_not_leak_into_the_next_statement(postgres_url:
 async def test_a_very_long_name_does_not_abort_the_suggest(session: AsyncSession) -> None:
     """`fuzzystrmatch`'s `levenshtein` refuses inputs longer than 255 characters.
 
-    measured, `levenshtein argument exceeds maximum length of 255 characters` -- and the
-    catalog is bulk-loaded from a dump nobody has audited for its longest name.
-
-    Same rule as `usher.services.matching._as_imdb`: nothing a source can put
-    in a payload may abort a walk, and here the walk is a keystroke. Seeds a
-    400-character synthetic name alongside a short one and asserts the short
-    one still comes back; then types a 400-character query, which is the half
-    that bounds the *other* argument. An unbounded implementation raises
-    instead of ranking, and the exception surfaces in the type-ahead box.
+    The catalog is bulk-loaded from a dump nobody has audited for its longest name, and
+    nothing a source can put in a payload may abort a walk -- here the walk is a
+    keystroke. Seeds a 400-character name alongside a short one, then types a
+    400-character query, which bounds the other argument. An unbounded implementation
+    raises instead of ranking, and the exception surfaces in the type-ahead box.
     """
     long_name = "Vane " + "abcde " * 80
     assert len(long_name) > _LEVENSHTEIN_MAX_INPUT
@@ -729,10 +669,7 @@ async def test_a_null_popularity_does_not_take_the_first_row(session: AsyncSessi
 async def test_vote_count_orders_the_box_when_every_popularity_is_null(
     session: AsyncSession,
 ) -> None:
-    """**The catalog is not "mostly" NULL-popularity.
-
-    It is entirely so**, and that is what this case exists for.
-    """
+    """The catalog is not "mostly" NULL-popularity here: it is entirely so."""
     voteless = _doc("Vane Alpha", popularity=None)
     await _insert_title(session, voteless, vote_count=None)
     obscure = _doc("Vane Bravo", popularity=None)
@@ -768,8 +705,8 @@ _A_REAL_MODEL_NAME = "fastembed:BAAI/bge-small-en-v1.5"
 # The standard RRF constant, and the value the shared contract's two fusion
 # cases are arranged around: at k=60 a title ranked second in both lanes
 # scores 1/62 + 1/62 against 1/61 for each lane's own leader, a 2x margin
-# that does not rest on float noise. Task 23 gives it a setting; the tests
-# pass it explicitly so no case is secretly asserting a default.
+# that does not rest on float noise. It is passed explicitly, so no case here is
+# secretly asserting a default.
 _RRF_K = 60
 
 
@@ -891,34 +828,21 @@ def _series_request(query_vector: tuple[float, ...]) -> SearchRequest:
 @pytest.mark.leaks_statistics(
     "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
 )
-# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the rollback,
-# and that is deliberate for exactly these three cases -- the cleanup runs once, after
-# the last of them, because the control case's non-vacuity is partly borrowed from the
-# leak (2 failures in 12 when the cleanup ran between them; see
+# `_seed_embedded_catalog`'s rows and its two `ANALYZE`s outlive the rollback, and that
+# is deliberate for exactly these three cases: the cleanup runs once, after the last of
+# them, because the control case's non-vacuity is partly borrowed from the leak (see
 # `restores_the_statistics_this_seed_leaks`).
 @pytest.mark.integration
 async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
     session: AsyncSession,
 ) -> None:
-    """**The case that catches a missing `hnsw.iterative_scan`.**.
+    """The case that catches a missing `hnsw.iterative_scan`.
 
-    With the GUC at its default `off`, a request for 10 results under a
-    2%-selective filter returns **0.88 rows on average** at 50,000 rows --
-    measured, 25 query vectors -- and `EXPLAIN` says why in one line:
-    `rows=1, Rows Removed by Filter: 39`. HNSW visits `ef_search`
-    candidates, the filter kills them, the scan ends. That is an empty
-    endpoint, not a worse ranking. Reproduced on this fixture at 5-6 rows of
-    10.
-
-    Asserts the **row count**, not recall, and deliberately. Recall over an
-    arbitrary point cloud is noise and a recall threshold is a number
-    somebody loosens the first time it goes red; the row count is
-    deterministic for fixed vectors and "asked for ten, got ten" is
-    checkable by reading it.
-
-    Ten query vectors rather than one, summed, so a single lucky draw cannot
-    carry the case -- the failing implementation loses a few rows per query
-    and the sum turns that into a gap no draw can close.
+    With the GUC at its default `off`, a request for ten results under a selective
+    filter comes back near-empty: HNSW visits `ef_search` candidates, the filter kills
+    them, the scan ends. That is an empty endpoint, not a worse ranking. Asserts the row
+    count rather than recall, which is noise over an arbitrary point cloud, and sums ten
+    query vectors so a single lucky draw cannot carry the case.
     """
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
@@ -935,32 +859,21 @@ async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
 @pytest.mark.leaks_statistics(
     "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
 )
-# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the rollback,
-# and that is deliberate for exactly these three cases -- the cleanup runs once, after
-# the last of them, because the control case's non-vacuity is partly borrowed from the
-# leak (2 failures in 12 when the cleanup ran between them; see
+# `_seed_embedded_catalog`'s rows and its two `ANALYZE`s outlive the rollback, and that
+# is deliberate for exactly these three cases: the cleanup runs once, after the last of
+# them, because the control case's non-vacuity is partly borrowed from the leak (see
 # `restores_the_statistics_this_seed_leaks`).
 @pytest.mark.integration
 async def test_the_default_guc_is_what_makes_that_fail(
     session: AsyncSession,
 ) -> None:
-    """The control.
+    """The control that makes the case above evidence rather than a passing assertion.
 
-    and the reason the case above is evidence rather than an assertion that happens to
-    pass.
-
-    Same fixture, same queries, the same shipped statement, with
-    `hnsw.iterative_scan` forced back to `off` for the transaction. Asserts
-    strictly fewer rows come back. Without this half, the case above passes
-    against an implementation that never needed the GUC -- because the
-    planner chose a sequential scan on a small table, say -- and the
-    milestone would ship a `SET LOCAL` nobody has shown does anything.
-
-    Note the ordering hazard this case is written around: `SET LOCAL` reverts
-    at COMMIT and the integration suite's fixture is one transaction per
-    test, so a GUC set by the search under test is **still set** for the next
-    statement in the same test. The adapter's own call therefore runs first
-    and the `off` is set explicitly *after* it, over the top.
+    Same fixture, same queries, the same shipped statement, with `hnsw.iterative_scan`
+    forced back to `off`: strictly fewer rows must come back, or the GUC is one nobody
+    has shown does anything. `SET LOCAL` reverts at COMMIT and this suite is one
+    transaction per test, so a GUC set by the search under test is still set for the
+    next statement -- hence the adapter's call runs first and `off` is set over the top.
     """
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
@@ -993,10 +906,9 @@ async def test_the_default_guc_is_what_makes_that_fail(
 @pytest.mark.leaks_statistics(
     "titles", "title_embeddings", restored_by="restores_the_statistics_this_seed_leaks"
 )
-# `_seed_embedded_catalog`'s 26,624 rows and its two `ANALYZE`s outlive the rollback,
-# and that is deliberate for exactly these three cases -- the cleanup runs once, after
-# the last of them, because the control case's non-vacuity is partly borrowed from the
-# leak (2 failures in 12 when the cleanup ran between them; see
+# `_seed_embedded_catalog`'s rows and its two `ANALYZE`s outlive the rollback, and that
+# is deliberate for exactly these three cases: the cleanup runs once, after the last of
+# them, because the control case's non-vacuity is partly borrowed from the leak (see
 # `restores_the_statistics_this_seed_leaks`).
 @pytest.mark.integration
 async def test_the_owned_path_does_not_use_the_ann_index(
@@ -1004,25 +916,14 @@ async def test_the_owned_path_does_not_use_the_ann_index(
     session: AsyncSession,
     analyze: Analyze,
 ) -> None:
-    """Boundary call 4's exact half, asserted on the plan.
+    """Owned titles skip ANN entirely, asserted on the plan.
 
-    PRD 05 says owned titles skip ANN entirely, and that is only affordable
-    because the embedded population is the enriched tier -- 2k-10k titles,
-    not 1,271,138. An implementation that quietly used HNSW here would return
-    a *subset* of the household's own library for a query about it, which is
-    the one place an approximate answer is least excusable and least
-    visible.
-
-    Fails an implementation that forgets the `enable_indexscan` lever, and
-    the control above the assertion is what makes that a real risk rather
-    than a hypothetical: with the ANN GUCs applied and index scans left on,
-    the identical statement over the identical predicates **does** name the
-    HNSW index. Every title is owned here on purpose -- a selective
-    `owned_only` would make the planner abandon HNSW by itself, and the case
-    would then pass against an implementation with no lever at all.
-
-    Wall clock at real scale is Task 26's to record; what is decided here is
-    the rule.
+    That is affordable because the embedded population is the enriched tier, and an
+    implementation quietly using HNSW here would return a subset of the household's own
+    library for a query about it. The control above the assertion is what makes the
+    `enable_indexscan` lever a real risk: with the ANN GUCs applied and index scans left
+    on, the identical statement does name the HNSW index. Every title is owned here on
+    purpose, since a selective `owned_only` makes the planner abandon HNSW by itself.
     """
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
     await _own_every_title(session)
@@ -1068,18 +969,13 @@ async def test_the_owned_path_does_not_use_the_ann_index(
 async def test_coverage_does_not_count_skeletons_it_was_never_going_to_embed(
     session: AsyncSession,
 ) -> None:
-    """**The denominator, which is a decision and not a detail.**.
+    """The denominator is the enriched tier, which is a decision and not a detail.
 
-    Counting every filtered title would put 1,271,138 skeletons under a
-    numerator of ~10,000 and report 0.008 coverage on a perfectly healthy
-    catalog -- a number that reads as "semantic search is broken", forever,
-    on a system working exactly as designed. A skeleton is not missing an
-    embedding; boundary call 4 excludes it from the population on purpose,
-    and `ix_titles_enrichment_state` is already the partial index over
-    exactly that set.
-
-    Seeds two enriched titles (one embedded) and fifty skeletons. The wrong
-    denominator reports 1/52; the right one reports 1/2.
+    Counting every filtered title puts a catalog of skeletons under a numerator of the
+    embedded few and reports a coverage that reads as "semantic search is broken",
+    forever, on a system working as designed. A skeleton is not missing an embedding.
+    Seeds two enriched titles (one embedded) and fifty skeletons: the wrong denominator
+    reports 1/52, the right one 1/2.
     """
     embedded = _doc("Harbour Lights", vector=_vec(1.0))
     bare = _doc("Vacuum Chamber")
@@ -1108,7 +1004,7 @@ async def test_coverage_does_not_count_skeletons_it_was_never_going_to_embed(
 async def test_a_document_indexed_through_the_port_is_still_stale(
     session: AsyncSession,
 ) -> None:
-    """Task 16's write half, asserted now that there is a vector lane to see it with.
+    """The write half, asserted through the vector lane that can see it.
 
     `index_many` writes a sentinel `model_name` and `source_fingerprint`, so
     the row is `IS DISTINCT FROM` every real model name and the backfill
@@ -1141,22 +1037,12 @@ async def test_a_document_indexed_through_the_port_is_still_stale(
 async def test_the_hnsw_gucs_do_not_outlive_the_transaction(postgres_url: str) -> None:
     """`SET` in place of `SET LOCAL` for `hnsw.iterative_scan`/`ef_search`.
 
-    Verified for both extensions and stated as a standing rule: a bare `SET`
-    in one session is still readable from a brand-new transaction on the same
-    pooled connection after it is returned. That is one search's ANN tuning
-    governing the next unrelated request -- a different answer, in code that
-    never touched this module, for a reason nothing in a log can explain.
-
-    **This case exists because the rest of the file structurally cannot see
-    it.** The suite's fixture is one transaction per test, so within it `SET`
-    and `SET LOCAL` are indistinguishable; measured, the mutation survives
-    every other case here. The discriminating boundary is a COMMIT, so this
-    builds its own engine, exactly as the suggest path's own leak case does.
-
-    The warm-up is not decoration: `hnsw.%` GUCs do not exist on a backend
-    that has not yet evaluated a vector operator, so `SHOW` on a cold
-    connection raises rather than answering -- which is also why
-    `_apply_hnsw_gucs` sets the value instead of probing for it first.
+    A bare `SET` in one session is still readable from a brand-new transaction on the
+    same pooled connection after it is returned -- one search's ANN tuning governing the
+    next unrelated request. The rest of the file cannot see it: the suite's fixture is
+    one transaction per test, where `SET` and `SET LOCAL` are indistinguishable, so this
+    builds its own engine. The warm-up is not decoration either: `hnsw.%` GUCs do not
+    exist on a backend that has not yet evaluated a vector operator.
     """
     engine = build_engine(postgres_url)
     try:
@@ -1191,20 +1077,14 @@ async def test_the_hnsw_gucs_do_not_outlive_the_transaction(postgres_url: str) -
 async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
     session: AsyncSession,
 ) -> None:
-    """**Trap 1: the missing `COALESCE`, which inverts the entire ordering.**.
+    """Trap 1: the missing `COALESCE`, which inverts the entire ordering.
 
-    A row in one lane only scores `NULL + 1/(60+r)` = `NULL`, and Postgres
-    defaults to `NULLS FIRST` under `ORDER BY ... DESC`. So every single-lane
-    row sorts *above* every correctly-scored row and the one id both lanes
-    agree on lands **last** -- reproduced, and the failure is silent because
-    the result set is full, plausibly ordered, and completely backwards.
-
-    Seeds three titles: text-only, vector-only, and one both lanes rank
-    second. RRF at k=60 gives the shared title 1/62 + 1/62 against 1/61 for
-    each single-lane leader -- a 2x margin, so this rests on arithmetic
-    rather than on float noise. Asserts the shared title is **first** and,
-    separately, that it is not last, because the two failures look different
-    in a diff and only one of them is this trap.
+    A row in one lane only scores `NULL + 1/(60+r)` = `NULL`, and Postgres defaults to
+    `NULLS FIRST` under `ORDER BY ... DESC`, so every single-lane row sorts above every
+    correctly-scored one and the id both lanes agree on lands last -- silently, because
+    the result set is full and plausibly ordered. RRF at k=60 gives the shared title a
+    2x margin, so this rests on arithmetic rather than float noise, and it is asserted
+    first and separately not last, because the two failures look different in a diff.
     """
     lexical_leader = _doc("Vacuum Chamber")
     shared = _doc("Harbour Lights", overview="Inside the vacuum.", vector=_vec(0.8, 0.6))
@@ -1251,17 +1131,13 @@ async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
 
 @pytest.mark.integration
 async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession) -> None:
-    """**Trap 2: `INNER JOIN` in place of `FULL OUTER JOIN`.**.
+    """Trap 2: `INNER JOIN` in place of `FULL OUTER JOIN`.
 
-    Measured: 1 fused row where 5 were correct. It is not a ranking defect,
-    it is a search that answers only when two independent retrieval methods
-    coincide -- which is the opposite of the reason for having two.
-
-    Seeds lanes with **no overlap at all**, so the inner-join spelling
-    returns an empty result set for a query that matched four titles. Also
-    asserts every hit has a real `title_id`: without `COALESCE(ft.id,
-    vec.id)` a single-lane row surfaces with a NULL id, which is a hit
-    pointing at nothing and a shape that survives every ordering assertion.
+    Not a ranking defect but a search that answers only when two independent retrieval
+    methods coincide, which is the opposite of the reason for having two. Seeds lanes
+    with no overlap at all, so the inner-join spelling returns an empty result set for a
+    query that matched four titles. Every hit must also carry a real `title_id`: without
+    `COALESCE(ft.id, vec.id)` a single-lane row surfaces pointing at nothing.
     """
     lexical = [_doc("Vacuum Chamber"), _doc("The Quiet Vacuum")]
     vectors = [
@@ -1311,7 +1187,7 @@ async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession
 async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
     session: AsyncSession,
 ) -> None:
-    """**Trap 3: ties are pervasive, not occasional.**."""
+    """Trap 3: ties are pervasive rather than occasional, so the tiebreak is total."""
     # **The vector-lane titles are minted first, and that is the whole of what makes
     # this case bite.** Every id is a UUIDv7, so creation order is id order; the join
     # emits the lexical lane's rows first, and PostgreSQL's small-N sort is stable.
@@ -1331,11 +1207,10 @@ async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
         "no two fused scores tied, so this fixture cannot see a missing tiebreak at all"
     )
 
-    # **The plant, and whether it landed.** The docstring's whole argument is
-    # that this `UPDATE` is non-HOT and therefore moves the rows in the heap;
-    # a HOT update leaves every `ctid` where it was and the rewrite silently
-    # does nothing, which reads exactly like a tiebreak that held. So the
-    # `ctid`s are read on both sides and required to have moved.
+    # The argument above is that this `UPDATE` is non-HOT and therefore moves the
+    # rows in the heap; a HOT update leaves every `ctid` where it was and the
+    # rewrite silently does nothing, which reads exactly like a tiebreak that held.
+    # So the `ctid`s are read on both sides and required to have moved.
     before_ctids = await _ctids(session)
     for document in sorted((*lexical, *vectors), key=lambda one: one.title_id.bytes, reverse=True):
         await session.execute(
@@ -1377,23 +1252,14 @@ async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
 async def test_fusion_against_a_catalog_with_no_embeddings_degrades_and_says_so(
     session: AsyncSession,
 ) -> None:
-    """**Point 3 of "the one thing this milestone must not get wrong".**.
+    """With no embeddings at all, `FUSED` is the full-text order in a blended score.
 
-    With no embeddings at all, `FUSED` returns exactly the full-text order
-    wearing a blended-looking score, and nothing in the result set says the
-    semantic lane contributed nothing. RRF cannot tell "ranked last" from
-    "never a candidate"; `semantic_coverage` is the only thing that can.
-
-    Fails two implementations. One that reports a coverage it did not
-    measure -- a hard-coded 1.0, or the fraction of the *returned hits* that
-    had a vector, which is 0/0 here and reads as either. And one that
-    returns nothing at all for `FUSED` when the vector lane is empty, which
-    is a `JOIN` where a `FULL OUTER JOIN` belongs, arriving from the same
-    place as trap 2.
-
-    Asserts both halves: the order equals the `FULL_TEXT` order exactly, and
-    `semantic_coverage == 0.0`. Either alone is satisfiable by an
-    implementation that is wrong about the other.
+    Nothing in the result set says the semantic lane contributed nothing: RRF cannot
+    tell "ranked last" from "never a candidate", and `semantic_coverage` is the only
+    thing that can. Fails a hard-coded coverage, a coverage taken over the returned hits
+    (0/0 here), and a `FUSED` that returns nothing when the vector lane is empty. Both
+    halves are asserted, because either alone is satisfied by being wrong about the
+    other.
     """
     loud = _doc("Vacuum Chamber")
     quiet = _doc("Harbour Lights", overview="A study of the vacuum between two stars.")
@@ -1426,20 +1292,14 @@ async def test_fusion_against_a_catalog_with_no_embeddings_degrades_and_says_so(
 async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
     session: AsyncSession,
 ) -> None:
-    """`_LANE_MULTIPLIER = 1`.
+    """`_LANE_MULTIPLIER = 1`, which is trap 2 arriving through a constant.
 
-    which is trap 2 arriving through a constant instead of through a `JOIN`.
-
-    A lane window equal to the result limit can only ever *re-order* what
-    both lanes already had in their own top `limit` -- so the title that is
-    rank 40 in one lane and rank 3 in the other, which is precisely the row
-    fusion exists to surface, is never a candidate at all. The failure looks
-    like a plausible ranking of the wrong set.
-
-    Seeds `wanted` third in the lexical lane and third in the vector lane and
-    asks for two results. RRF gives it 1/63 + 1/63 against 1/61 for each
-    lane's own leader -- so it must be **first**, and with a lane window of
-    two it is not in the statement at all.
+    A lane window equal to the result limit can only re-order what both lanes already
+    had in their own top `limit`, so the title ranked 40th in one lane and 3rd in the
+    other -- precisely the row fusion exists to surface -- is never a candidate, and the
+    failure looks like a plausible ranking of the wrong set. Seeds `wanted` third in
+    each lane and asks for two results: RRF puts it first, and a lane window of two
+    leaves it out of the statement altogether.
     """
     first = _doc("Vacuum One")
     second = _doc("Vacuum Two")
@@ -1451,9 +1311,9 @@ async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
     index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many([wanted, near, nearer])
 
-    # These two are the case's premises rather than its subject, and they are the ones
-    # that lose: issue #26's reproduction on 2026-08-19 failed here, on the semantic
-    # lane, missing `Salt Flats` -- the row at distance 0.0.
+    # These two are the case's premises rather than its subject, and they are the
+    # ones that lose first: a semantic lane that dropped the row at distance 0.0
+    # fails here rather than in the fusion assertion below.
     lexical = await index.search(SearchRequest(query="vacuum", limit=10))
     assert [hit.title_id for hit in lexical.hits] == [
         first.title_id,

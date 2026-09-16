@@ -22,8 +22,8 @@ from usher.ports.errors import RepositoryConflict
 class PostgresImageSeeder(ImageSeeder):
     """A real `titles` row.
 
-    because all three of this table's foreign keys are real and
-    `fk_images_title_id_titles` is the one every case crosses.
+    All three of this table's foreign keys are real, and `fk_images_title_id_titles`
+    is the one every case crosses.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -61,7 +61,7 @@ async def _row_count(session: AsyncSession, title_id: uuid.UUID) -> int:
 async def test_the_key_is_nulls_not_distinct_and_the_obvious_spelling_would_not_be(
     session: AsyncSession,
 ) -> None:
-    """**The case `m09c` exists for, and the only one that can see it.**."""
+    """The only case that can see `NULLS NOT DISTINCT` doing its work."""
     person_id = new_id()
     await session.execute(
         text(
@@ -136,11 +136,9 @@ async def test_the_constraint_is_declared_nulls_not_distinct_in_the_catalog(
 async def test_a_re_derivation_writes_one_row_and_not_two(session: AsyncSession) -> None:
     """The physical claim behind the id-stability case.
 
-    and one the in-memory dict cannot get wrong by construction: the shared contract
-    asserts the id is the same, which a fake satisfies by keying on the tuple.
-
-    This asserts the *row count*, which is what separates "the upsert found it" from
-    "the read happened to return the newer of two rows".
+    The shared contract asserts the id is the same, which a fake satisfies by keying
+    on the tuple. This asserts the *row count*, which is what separates "the upsert
+    found it" from "the read happened to return the newer of two rows".
     """
     seeder = PostgresImageSeeder(session)
     repository = PostgresImageRepository(session)
@@ -157,14 +155,12 @@ async def test_an_image_for_a_title_that_does_not_exist_is_a_port_error(
 ) -> None:
     """`fk_images_title_id_titles`, translated.
 
-    The fake enforces no foreign key, so this arm is the only one that can see it — and
-    the translation is what ADR-0009 requires: a raw `sqlalchemy.exc` reaching a service
-    is the one thing that must never cross this boundary.
-
-    The session stays usable afterwards, which is the half a caller depends on:
-    `DeriveService` commits a batch of images together with its job checkpoint,
-    so a caught conflict must not leave the next unrelated statement raising
-    `PendingRollbackError`.
+    The fake enforces no foreign key, so this arm is the only one that can see it,
+    and a raw `sqlalchemy.exc` reaching a service is the one thing that must never
+    cross this boundary. The session stays usable afterwards, which is the half a
+    caller depends on: `DeriveService` commits a batch of images together with its
+    job checkpoint, so a caught conflict must not leave the next unrelated statement
+    raising `PendingRollbackError`.
     """
     repository = PostgresImageRepository(session)
     absent = new_id()
@@ -180,20 +176,16 @@ async def test_an_image_for_a_title_that_does_not_exist_is_a_port_error(
 async def test_a_width_the_column_cannot_hold_is_a_port_error_too(
     session: AsyncSession,
 ) -> None:
-    """**Not an `IntegrityError`.
+    """Not an `IntegrityError`, and that is the whole point.
 
-    and that is the whole point.** `images.width` is `integer` and `Image.width` is
-    `Field(gt=0)` with no ceiling, so `2**31` is a *validly constructed* domain model
-    this column cannot hold.
-
-    Measured on `curated_rows."position"` and recorded in `_errors.py`: asyncpg refuses
-    it client-side before a byte is sent, as a bare `sqlalchemy.exc.DBAPIError` with
-    SQLSTATE `22000`, which `except IntegrityError` does not catch.
-
-    So this case is what pins the choice of `refusals_as_conflict` over the
-    older house `except IntegrityError` for this repository. `constraint` is
-    `None`, correctly: a column's declared width refusing a value is not a
-    named constraint firing.
+    `images.width` is `integer` and `Image.width` is `Field(gt=0)` with no ceiling,
+    so `2**31` is a *validly constructed* domain model this column cannot hold.
+    asyncpg refuses it client-side before a byte is sent, as a bare
+    `sqlalchemy.exc.DBAPIError` with SQLSTATE `22000`, which `except IntegrityError`
+    does not catch -- so this is what pins the choice of `refusals_as_conflict` over
+    the older house `except IntegrityError` for this repository. `constraint` is
+    `None`, correctly: a column's declared width refusing a value is not a named
+    constraint firing.
     """
     seeder = PostgresImageSeeder(session)
     repository = PostgresImageRepository(session)

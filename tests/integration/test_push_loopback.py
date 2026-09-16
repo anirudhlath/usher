@@ -97,7 +97,7 @@ async def server() -> AsyncIterator[_Server]:
     """A real server on `127.0.0.1:0`, with its own logger silenced.
 
     `logger=socket_logger()` is not tidiness -- see the module docstring and
-    the case that measures what happens without it.
+    the case that shows what happens without it.
     """
     handler = _Server()
     async with serve(handler.handle, "127.0.0.1", 0, logger=socket_logger()) as running:
@@ -155,7 +155,7 @@ async def _consuming(channel: EmbyPushChannel) -> AsyncIterator[list[SourceEvent
 
     Nothing reads the socket until somebody calls `__anext__` -- `_events`
     is an async generator -- so a case that opened the channel and waited
-    would measure a socket nobody was reading. This is the consumer, and it
+    would be sitting on a socket nobody was reading. This is the consumer, and it
     is a separate task so the case itself can wait on the ledger.
     """
     received: list[SourceEvent] = []
@@ -199,7 +199,7 @@ async def test_a_real_handshake_carries_the_token_and_the_device_id(server: _Ser
 
 
 async def test_the_subscription_frame_arrives_verbatim(server: _Server) -> None:
-    """ADR-0004's own frame, byte for byte, as a real text frame.
+    """The subscription frame, byte for byte, as a real text frame.
 
     Without it Emby holds the socket open and sends nothing -- which is
     indistinguishable from every other upgraded-but-silent failure this
@@ -217,7 +217,7 @@ async def test_the_subscription_frame_arrives_verbatim(server: _Server) -> None:
 async def test_a_real_message_becomes_a_real_event(server: _Server) -> None:
     """Bytes on a socket into a `SourceEvent`.
 
-    with nothing faked in between, and the ledger moving because a frame really arrived.
+    Nothing is faked in between, and the ledger moves because a frame really arrived.
     """
     server.to_send = [_library_changed(str(FIRST_ITEM_ID))]
     channel = _channel(server.base_url)
@@ -235,22 +235,17 @@ async def test_a_real_message_becomes_a_real_event(server: _Server) -> None:
 async def test_the_ledger_reports_delivering_only_once_a_real_frame_has_arrived(
     server: _Server,
 ) -> None:
-    """The milestone's central rule, over a socket that really upgraded.
+    """The central rule, over a socket that really upgraded.
 
     The handshake succeeds and `connected` is true the instant it does, so
     an implementation reading health off the connection object answers
     `True` here -- against a peer that has said nothing. Only the message
     clause makes that read `False`.
 
-    **And the silence is long enough to matter**, which makes this the push
-    lane's answer to the defect `GET /events` had: several `poll_seconds`
+    **And the silence is long enough to matter**: several `poll_seconds`
     elapse before the frame is sent, so the channel's `asyncio.wait_for`
     around `recv()` has cancelled and re-issued a pending receive at least
     three times, and the message that arrives afterwards still arrives.
-    `websockets` documents cancelling `recv` as safe ("the next invocation
-    will return the next message") and a coroutine method is not an async
-    generator's `__anext__`, so the failure the SSE route had is not
-    reachable here -- but that is an argument, and this is the measurement.
     """
     channel = _channel(server.base_url)
     async with _consuming(channel):
@@ -269,7 +264,7 @@ async def test_every_frame_sent_while_the_lane_was_not_reading_is_still_delivere
 ) -> None:
     """The premise `PushSupervisor`'s connect-then-walk ordering rests on.
 
-    a real socket loses nothing while the lane is somewhere else.
+    A real socket loses nothing while the lane is somewhere else.
     """
     count = 300
     channel = _channel(server.base_url)
@@ -294,9 +289,7 @@ async def test_every_frame_sent_while_the_lane_was_not_reading_is_still_delivere
 async def test_a_real_server_close_raises_port_unavailable_out_of_the_iterator(
     server: _Server,
 ) -> None:
-    """A real close frame with a real code.
-
-    translated, raised out of the channel's own `async for`.
+    """A real close frame with a real code, translated out of the channel's `async for`.
 
     The unit suite arranges this with `FakePushConnection.drop`, which
     raises the exception the wrapper is *supposed* to produce -- so it can
@@ -320,10 +313,7 @@ async def test_a_real_server_close_raises_port_unavailable_out_of_the_iterator(
 async def test_a_real_ping_is_answered_while_the_poll_loop_is_cancelling_recv(
     server: _Server,
 ) -> None:
-    """A real ping.
-
-    a real pong, through a poll loop that keeps cancelling the receive underneath it.
-    """
+    """A real ping, a real pong, through a poll loop that keeps cancelling `recv`."""
     channel = _channel(server.base_url)
     async with _consuming(channel):
         await _until(lambda: bool(server.received), what="the handshake to complete")
@@ -337,9 +327,7 @@ async def test_a_real_ping_is_answered_while_the_poll_loop_is_cancelling_recv(
 
 
 async def test_a_failed_connection_names_no_url(server: _Server) -> None:
-    """`websockets.exceptions.InvalidURI.__str__` contains the URI.
-
-    and this URI contains the token.
+    """`websockets.exceptions.InvalidURI.__str__` contains the URI, and this URI the token.
 
     Arranged against a port nothing is listening on, which is a real `OSError` out of
     the real connector rather than a fake's ready-made `PortUnavailable`.
@@ -442,14 +430,10 @@ async def test_a_stock_server_logger_leaks_the_token_from_the_harness_side(
 ) -> None:
     """**Why the fixture above passes `logger=socket_logger()` to its own server**.
 
-    pinned as a measurement rather than left as a comment.
-
     `websockets/server.py:561` is the mirror of the client's line and logs
     the same request line -- so a loopback file that silenced only the
     client fails on its own harness, at which point the tempting repair is
-    to weaken the assertion in the case above. Measured here: exactly one
-    occurrence, from the server, with `connect_websocket`'s own logger
-    already silenced.
+    to weaken the assertion in the case above.
 
     If this case ever *stops* leaking, the library has changed and the
     fixture's `logger=` argument should be re-read rather than deleted.

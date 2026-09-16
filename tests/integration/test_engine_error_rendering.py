@@ -40,15 +40,12 @@ async def _refusal(engine: sa_asyncio.AsyncEngine) -> DBAPIError:
 async def test_a_bound_parameter_is_not_rendered_into_a_refused_statements_error(
     postgres_url: str,
 ) -> None:
-    """The absence claim, and its premise is an engine that *does* render it.
+    """The shipped engine hides bound values from a refusal's message.
 
-    Without the control this case passes against a statement that never bound
-    the canary at all, against a column that silently accepted `36000`, and
-    against a SQLAlchemy release that stopped rendering parameters on its own —
-    three ways for a green run to mean nothing. So the same statement, the same
-    parameters and the same database are put through an engine built with
-    `hide_parameters=False`, and the canary must be **there** before its absence
-    anywhere else is worth asserting.
+    A control engine built with `hide_parameters=False` runs the same statement
+    first, so the canary is proven to reach the driver and to be renderable.
+    Without it the absence claim would also pass against a statement that never
+    bound the canary or a column that quietly accepted `36000`.
     """
     control = sa_asyncio.create_async_engine(postgres_url, hide_parameters=False)
     try:
@@ -73,21 +70,12 @@ async def test_a_bound_parameter_is_not_rendered_into_a_refused_statements_error
 async def test_hiding_the_parameters_costs_nothing_the_translation_reads(
     postgres_url: str,
 ) -> None:
-    """What is kept, measured beside what is removed.
+    """Hiding parameters leaves every translation accessor answering the same.
 
-    The trade-off this was weighed on: bound parameters are genuinely useful
-    for diagnosing a refusal, so the case for hiding them rests on the two
-    accessors every repository in this package translates through answering
-    **identically**. They read `exc.orig.__cause__`'s SQLSTATE and constraint
-    fields (`db/repositories/_errors.py`), which are structured attributes on
-    the asyncpg exception and not parsed out of the rendered string — so
-    `ADR-0044`'s whole ledger is untouched by this change. Asserted rather than
-    argued, because "it only affects the message" is exactly the kind of claim
-    this repository has been wrong about.
-
-    The statement itself is kept too, which is the other half of the trade: a
-    developer still learns *which* statement failed and which parameter slot
-    (`$1`) it failed on.
+    The accessors in `db/repositories/_errors.py` read SQLSTATE and constraint
+    fields off the asyncpg exception rather than parsing the rendered string, so
+    hiding bound values must not move them. The statement and Postgres's own
+    explanation survive too, which is what keeps a refusal diagnosable.
     """
     control = sa_asyncio.create_async_engine(postgres_url, hide_parameters=False)
     try:

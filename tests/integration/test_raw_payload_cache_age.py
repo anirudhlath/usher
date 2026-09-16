@@ -1,6 +1,6 @@
-"""TMDb's <=6-month caching term.
+"""The dashboard panel for TMDb's <=6-month raw-payload caching term.
 
-which is the one dashboard panel in PRD 10 whose failure is a **licence breach** rather
+Its failure is a licence breach rather than a slow page.
 """
 
 import pytest
@@ -17,12 +17,11 @@ _SEED = text(
     "now() - interval '6 months' + (:offset_days * interval '1 day'))"
 )
 """One payload, placed relative to the ceiling rather than to `now()`, so the
-fixture reads as its own diagram and the boundary case is the literal `0`.
+boundary case is the literal `0`.
 
 The offset is a *count* multiplied by `interval '1 day'` rather than an interval
 literal bound as a parameter: asyncpg infers `$n`'s type from the cast around it,
-so `CAST(:offset AS interval)` makes it reject the Python `str` it was handed
-before the statement ever reaches Postgres.
+so `CAST(:offset AS interval)` makes it reject the Python `str` it was handed.
 """
 
 _IN_TERM = (1, 30, 100)
@@ -32,27 +31,22 @@ _ON_THE_CEILING = 0
 _PLAN_ROWS = 5_000
 """Enough that the planner prefers the index over a scan, and small enough to
 seed in one `INSERT ... SELECT`. The count arm deliberately does **not** run at
-this size: `A_DECISIVE_MARGIN`'s docstring records what a plan assertion costs
-at fixture scale, and a count assertion pays none of it."""
+this size, because a count assertion needs none of what a plan assertion costs."""
 
 
 def _executable(statement: str) -> str:
     """The statement without its leading `--` commentary.
 
-    PRD 10 labels each target in the fence, and `EXPLAIN <statement>` would put
-    that label between the keyword and the query -- legal, but it reads as a
-    trap the first time it is edited. Stripped for both arms, so the two run the
-    same text.
+    Each panel target is labelled in the fence, and `EXPLAIN <statement>` would put
+    that label between the keyword and the query -- legal, but it reads as a trap the
+    first time it is edited. Stripped for both arms, so the two run the same text.
     """
     lines = [line for line in statement.splitlines() if not line.strip().startswith("--")]
     return "\n".join(lines).strip()
 
 
 async def _explain(session: AsyncSession, statement: str) -> str:
-    """`EXPLAIN` in **text** format.
-
-    because `total_cost` reads the root node's cost off the first line.
-    """
+    """`EXPLAIN` in **text** format, so `total_cost` reads the cost off the first line."""
     rows = (await session.execute(text(f"EXPLAIN {_executable(statement)}"))).scalars().all()
     return "\n".join(rows)
 
@@ -62,20 +56,13 @@ async def test_the_cache_age_panel_counts_the_rows_past_the_ceiling(
 ) -> None:
     """**The boundary row is not past the ceiling**.
 
-    which is what makes `<` versus `<=` a decision rather than a detail: TMDb's term is
+    Which is what makes `<` versus `<=` a decision rather than a detail: TMDb's term is
     *<=6 months*, so a payload cached exactly six months ago is still in term and a
     panel that counts it is reporting a breach that has not happened.
 
-    The sweep target this arm exists for is the ceiling respelled as
-    `interval '180 days'`. Measured on `pgvector/pgvector:pg17` over the 1,461
-    days from 2026-01-01 to 2029-12-31, `now() - interval '180 days'` is **1 to
-    4 days later** than `now() - interval '6 months'` and is never equal to it,
-    so the boundary row is counted under the respelling and this case is red
-    every day of the year rather than seasonally.
-
-    Note the direction, because M10's task text has it backwards: the later
-    cutoff matches *more* rows, so `'180 days'` over-reports the breach. It is
-    wrong because it is not the term TMDb states, not because it flatters.
+    Respelling the ceiling as `interval '180 days'` puts the cutoff a day or more later
+    than `interval '6 months'` and never on it, so the boundary row falls past the
+    respelt ceiling and the panel over-reports the breach.
     """
     statements = compliance_panel_sql()
     for offset in (*_IN_TERM, *_PAST_CEILING, _ON_THE_CEILING):
@@ -120,9 +107,9 @@ async def test_the_cache_age_panel_counts_the_rows_past_the_ceiling(
 async def test_the_cache_age_panel_plans_onto_the_fetched_at_index(
     session: AsyncSession, analyze: Analyze
 ) -> None:
-    """`ix_raw_payloads_fetched_at` is ascending **because the question asks for the minimum**.
+    """`ix_raw_payloads_fetched_at` is ascending because the question asks for the minimum.
 
-    and this is what proves it is asked that way.
+    The plan is what proves it is asked that way.
     """
     statements = compliance_panel_sql()
     await session.execute(

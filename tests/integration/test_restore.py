@@ -50,9 +50,8 @@ CREDENTIAL_REF = "restore-case-credential"
 COLUMN_SHAPE_HOUSEHOLD = "restore-case column shape"
 
 # A real revision from this chain that is not and will never be its head, used
-# to make the artifact's stamp disagree with the database's. `m09e` is the
-# `halfvec` widening (ADR-0038); the mismatch case asserts it differs from the
-# database's own revision before relying on it.
+# to make the artifact's stamp disagree with the database's. The mismatch case
+# asserts it differs from the database's own revision before relying on it.
 STALE_REVISION = "m09e"
 
 
@@ -392,19 +391,16 @@ async def test_a_watch_state_whose_title_is_missing_refuses_the_whole_file_and_w
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The failing test this task was written around.**.
+    """A missing title refuses the whole file and writes nothing.
 
     Two watch states: one for a title the rebuilt catalog holds, one for
     `tt99000599` which it does not. The refusal has to name the missing key,
     and -- the half that makes it a statement about the *transaction* rather
-    than about a service that declines to write anything ever -- the watch
-    state that **would** have landed must not be in the database either, read
-    on a session that is not the writer's.
-
-    `assert resolvable is not None` is the plan's own premise and it is not
-    optional: without it *"`watch_states` is empty"* is satisfied by a restore
-    that writes nothing under any circumstances, which is the assertion this
-    repository has shipped five times under a different name.
+    than about a service that declines to write anything ever -- the watch state
+    that *would* have landed must not be in the database either, read on a
+    session that is not the writer's. `assert resolvable is not None` is the
+    premise and is not optional: without it "`watch_states` is empty" is
+    satisfied by a restore that writes nothing under any circumstances.
     """
     async with sessions() as probe:
         resolvable = (
@@ -455,10 +451,7 @@ async def test_a_schema_mismatch_is_refused_with_both_revisions_in_the_message(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The refusal fires and names both values, and **that is all this case says**.
-
-    which is less than its first version claimed.
-    """
+    """The refusal fires and names both values, and that is all this case says."""
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
     assert head != STALE_REVISION, (
@@ -540,16 +533,13 @@ async def test_a_dry_run_reports_what_a_real_run_would_and_commits_nothing(
 ) -> None:
     """`--dry-run` is the identical path with the commit withheld.
 
-    so the two reports have to be equal in every count.
-
-    Asserted by running the *same file* twice against the *same* target -- dry
-    first, then for real -- and comparing the two reports field by field. That
-    ordering is what makes the comparison meaningful: if the dry run had
-    committed anything, the real run's counts would move, and the equality
-    would fail rather than the absence assertion. Both halves are here because
-    *"nothing was committed"* on its own is satisfied by a dry run that
-    resolved nothing at all, and *"the reports are equal"* on its own is
-    satisfied by two runs that both did nothing.
+    So the two reports have to be equal in every count. Asserted by running the
+    *same file* twice against the *same* target -- dry first, then for real --
+    and comparing the reports field by field. That ordering is what makes the
+    comparison meaningful: if the dry run had committed anything, the real run's
+    counts would move. Both halves are here because "nothing was committed" alone
+    is satisfied by a dry run that resolved nothing, and "the reports are equal"
+    alone is satisfied by two runs that both did nothing.
     """
     _write_artifact(
         artifact_path,
@@ -692,19 +682,16 @@ async def test_a_second_source_under_the_same_name_is_refused_rather_than_insert
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **The refusal the schema cannot make, which is why it needs a case.**.
+    """The refusal the schema cannot make, which is why it needs a case.
 
-    Measured on the live schema 2026-08-25: `pg_constraint` for `sources`
-    holds only `pk_sources PRIMARY KEY (id)`, and the count of unique indexes
-    on `name` is **0** -- so nothing in the database stops two sources
-    pointing at one server, and an `ON CONFLICT (name)` here would not even
-    compile. Contrast `users`, which really does have `uq_users_name`; that
-    asymmetry is the thing this case exists to stop being assumed away.
-
-    The premise is asserted from `information_schema` rather than recalled,
-    because the whole case rests on a constraint's *absence* and an absence
-    that has quietly become a presence would make this pass for the wrong
-    reason.
+    `pg_constraint` for `sources` holds only `pk_sources PRIMARY KEY (id)` and no
+    unique index on `name`, so nothing in the database stops two sources pointing
+    at one server, and an `ON CONFLICT (name)` here would not even compile.
+    Contrast `users`, which really does have `uq_users_name`; that asymmetry is
+    what this case exists to stop being assumed away. The premise is asserted
+    from `information_schema` rather than recalled, because the whole case rests
+    on a constraint's *absence*, and an absence that has quietly become a
+    presence would make this pass for the wrong reason.
     """
     unique_on_name = await _count(
         sessions,
@@ -764,8 +751,8 @@ _INSERT_SOURCE = (
 async def _seed_source(session: AsyncSession, source_id: uuid.UUID) -> None:
     """The source a walk would have created.
 
-    with the same values the artifact carries so a case about a *name* collision is not
-    also about a value.
+    With the same values the artifact carries, so a case about a *name* collision
+    is not also about a value.
     """
     row = _source(identifier=source_id)
     await session.execute(
@@ -851,17 +838,15 @@ async def test_every_unresolved_reference_is_counted_rather_than_the_first(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """Refusal 4 over a real catalog, and the assertion is the **number**.
+    """Every unresolved reference is counted, not only the first.
 
     Three watch states name titles this catalog does not hold and one names a
     title it does. An implementation that stopped at the first missing title
-    still produces a non-empty `refused` and still refuses the file -- so a
-    presence assertion cannot tell it from this one, and the count can. That
-    distinction is the whole reason the plan asks for a number here.
-
-    The keys are asserted as a set, because *"41 titles are missing"* is only
-    actionable if the report says **which** -- an operator's next move is to
-    enrich or import exactly those.
+    still produces a non-empty `refused` and still refuses the file, so a
+    presence assertion cannot tell it from this one and the count can. The keys
+    are asserted as a set, because "some titles are missing" is only actionable
+    if the report says *which* -- an operator's next move is to enrich or import
+    exactly those.
     """
     missing = ("tt99000591", "tt99000592", MISSING_IMDB_ID)
     _write_artifact(
@@ -896,18 +881,14 @@ async def test_a_search_query_whose_clicked_title_is_missing_is_written_with_a_n
 ) -> None:
     """The one table whose unresolved rule is `NULL` rather than `REFUSE`.
 
-    and the contrast with `watch_states` is the case.
-
     `backup_identity.UNRESOLVED_RULE` makes the argument per table:
-    `search_queries.clicked_title_id` is already `ON DELETE SET NULL`, so a
-    null is a state the column and every reader handle, and the analytic value
-    of the row is the query text and the outcome rather than the id. A watch
-    state whose title is missing is a real loss and the operator has to see it.
-
-    Both rows are in one artifact so the two rules are exercised against one
-    catalog: the search query lands with a null and the whole file still
-    commits, which an implementation that refused on any unresolved reference
-    could not do.
+    `search_queries.clicked_title_id` is already `ON DELETE SET NULL`, so a null
+    is a state the column and every reader handle, and the analytic value of the
+    row is the query text and the outcome rather than the id. A watch state whose
+    title is missing is a real loss the operator has to see. Both rows are in one
+    artifact so the two rules are exercised against one catalog: the search query
+    lands with a null and the whole file still commits, which an implementation
+    that refused on any unresolved reference could not do.
     """
     _write_artifact(
         artifact_path,
@@ -945,15 +926,12 @@ async def test_a_household_the_target_already_has_keeps_its_own_id(
 ) -> None:
     """`users` merges on the name.
 
-    and every reference in the file adopts the id the target already holds.
-
-    This is the ordinary shape of a restore onto a rebuilt catalog:
-    `ensure_default_user` has already run, so a household exists, and the
-    artifact's own `users.id` is one no other row in this database names. A
-    restore that inserted it anyway would leave two households and write the
-    watch history to the one nothing else reads.
-
-    The premise is that the two ids really differ, which is what makes the
+    Every reference in the file adopts the id the target already holds. This is
+    the ordinary shape of a restore onto a rebuilt catalog: `ensure_default_user`
+    has already run, so a household exists, and the artifact's own `users.id` is
+    one no other row in this database names. A restore that inserted it anyway
+    would leave two households and write the watch history to the one nothing
+    else reads. The premise is that the two ids really differ, which makes the
     assertion about adoption rather than about a coincidence.
     """
     already_here = new_id()
@@ -1000,25 +978,18 @@ async def test_an_artifact_this_projects_own_backup_wrote_restores_into_a_rebuil
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The loop closed.
-
-    `usher backup` writes it, `usher restore` reads it, and the ids in between are
-    different.**.
+    """The loop closed: backup writes it, restore reads it, the ids differ.
 
     Every other case in this file hand-builds the artifact, which is what lets
-    them plant a stale revision and an unknown table -- and which leaves them
-    all resting on this project's own idea of the file's shape. This one
-    writes the artifact with the real `BackupService` against a seeded
-    household, then **re-mints every title id** so the target is a catalog
-    rebuilt from the same dumps rather than the database the backup came from,
-    which is the ordinary path and the one `backup_identity` exists for.
-    `db/repositories/bulk.py` mints `new_id()` per row per import, so this is
-    not a contrived state -- it is what a bootstrap does.
-
-    The premise is asserted: after the re-mint the target holds the same
-    `imdb_id` under a *different* id, so a restore that carried raw ids would
-    resolve nothing and a restore that carried natural keys resolves
-    everything.
+    them plant a stale revision and an unknown table, and which leaves them all
+    resting on this project's own idea of the file's shape. This one writes the
+    artifact with the real `BackupService` against a seeded household, then
+    re-mints every title id so the target is a catalog rebuilt from the same
+    dumps rather than the database the backup came from -- the ordinary path, and
+    the one `backup_identity` exists for. The premise is asserted: after the
+    re-mint the target holds the same `imdb_id` under a *different* id, so a
+    restore carrying raw ids resolves nothing and one carrying natural keys
+    resolves everything.
     """
     source_id = new_id()
     async with sessions() as session:
@@ -1130,10 +1101,7 @@ async def test_the_artifact_columns_are_what_a_backup_writes(session: AsyncSessi
 async def test_the_stamp_the_refusal_compares_is_the_databases_and_not_the_codes(
     session: AsyncSession, artifact_path: Path
 ) -> None:
-    """🔴 **The mismatch is against `database_revision`.
-
-    and only a database that disagrees with the code can say so.**.
-    """
+    """The mismatch is against `database_revision`, so only the database can say."""
     head = code_head_revision()
     assert head is not None, "the code has no single head, so there is nothing to disagree with"
     assert head != STALE_REVISION, (
@@ -1164,10 +1132,7 @@ async def test_two_sources_in_one_artifact_under_one_name_land_once_and_refuse_o
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The bug the first version of this merge shipped.
-
-    the refusal read the target once and never saw its own writes.**.
-    """
+    """A refusal that reads the target once never sees its own writes."""
     first, second = new_id(), new_id()
     assert first != second
     _write_artifact(
@@ -1214,24 +1179,17 @@ async def test_a_watch_state_the_target_already_holds_adopts_the_artifacts_value
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **The artifact wins on a conflict.
+    """The artifact wins on a conflict, so `DO NOTHING` is not the merge.
 
-    and `DO NOTHING` in place of the `DO UPDATE SET` passes every other case in this
-    file.**.
-
-    This is the operational shape of the whole command. Emby resets a title to
+    `DO NOTHING` in place of `DO UPDATE SET` passes every other case in this file.
+    This is the operational shape of the whole command: Emby resets a title to
     unwatched, `usher sync` writes `played=false, play_count=0,
     position_seconds=0` over the household's real history, and the operator
-    restores last week's artifact to get it back. Under the degraded merge the
-    row conflicts, nothing is written, the report says `skipped`, the command
-    exits 0 -- and the history is not recovered. That is *"restored 9 rows"*
-    over an artifact holding 50 arriving on the one table PRD 08 calls
-    load-bearing.
-
-    The values are asserted field by field against the artifact's rather than
-    checked for having changed, because *"something moved"* is satisfied by a
-    merge that adopted the wrong three columns. Every one of them is
-    deliberately different from what the walk left behind.
+    restores last week's artifact to get it back. Under the degraded merge the row
+    conflicts, nothing is written, the report says `skipped`, the command exits 0
+    -- and the history is not recovered. The values are asserted field by field
+    against the artifact's rather than checked for having changed, because
+    "something moved" is satisfied by a merge that adopted the wrong columns.
     """
     movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
     carried = _watch_state(title=movie, position=1_800, played=True, play_count=7)
@@ -1356,22 +1314,17 @@ async def test_an_episode_media_item_link_carries_the_episode_and_not_only_the_s
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **No case anywhere restored an episode link**.
-
-    so `episode_id` could be written `NULL` with the whole suite green.
+    """An episode link carries the episode, not only the series.
 
     `media_items` carries two link columns and every other case in this file
     exercises one of them: a movie's row names a title and nothing else. An
-    episode's row names **both** -- the series under `title` and the episode
-    under `episode` (`ports/ingest.py::MediaItemTarget`, and K3's own backup
-    case asserts the writing half) -- and on the household this project
-    measures 999,827 of 1,126,674 items are episodes, so the untested column
-    is the one almost every row uses.
-
-    The damage is quiet: the item stays linked to its *series*, so nothing
-    404s and no foreign key complains, while every episode-level read --
-    `NextUpProvider`, the playback route's episode arm, the unmatched
-    queue -- sees an item that belongs to no episode.
+    episode's row names *both* -- the series under `title` and the episode under
+    `episode` (`ports/ingest.py::MediaItemTarget`) -- and episodes are almost
+    every row of a real library, so `episode_id` could be written `NULL` with the
+    whole suite green. The damage is quiet: the item stays linked to its *series*,
+    so nothing 404s and no foreign key complains, while every episode-level read
+    -- `NextUpProvider`, the playback route's episode arm, the unmatched queue --
+    sees an item that belongs to no episode.
     """
     source_id = new_id()
     series = _title(kind="series", imdb_id=SERIES_IMDB_ID)
@@ -1434,18 +1387,14 @@ async def test_a_credential_whose_source_is_not_in_this_database_is_refused(
 ) -> None:
     """The branch a hand-edited artifact reaches.
 
-    disclosed as untested at the first commit and closed here.
-
     `fk_source_credentials_source_id_sources` would answer a credential whose
     source is absent with an `IntegrityError` -- a `RepositoryConflict`, which
-    this command renders as *"a value the column will not take"*: a sentence
-    about the wrong thing, naming no source. The absence is read and reported
-    instead, so the refusal names the `ref` and the `source_id` an operator
-    can go and look for.
-
+    this command renders as "a value the column will not take": a sentence about
+    the wrong thing, naming no source. The absence is read and reported instead,
+    so the refusal names the `ref` and the `source_id` an operator can look for.
     The positive control is the same artifact with its `sources` row put back:
-    the credential then lands, so the refusal is about the missing source
-    rather than about `source_credentials` never being written.
+    the credential then lands, so the refusal is about the missing source rather
+    than about `source_credentials` never being written.
     """
     source_id = new_id()
     _write_artifact(
@@ -1523,10 +1472,9 @@ async def test_the_flag_skips_the_unresolvable_rows_and_commits_everything_else(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 **K5's drill.
+    """`--skip-unresolvable` drops only the rows the manifest calls re-derivable.
 
-    a correctly rebuilt catalog refused the whole file on rows the manifest calls re-
-    derivable.**.
+    Without it a correctly rebuilt catalog refuses the whole file on them.
     """
     unfindable = {"kind": "series", "id": str(new_id()), "imdb_id": None, "tmdb_id": None}
     async with sessions() as probe:
@@ -1596,22 +1544,17 @@ async def test_the_flag_does_not_skip_a_household_the_target_does_not_hold(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **The line the flag draws, and it is narrower than its name.**.
+    """The line the flag draws, and it is narrower than its name.
 
-    `--skip-unresolvable` is for references the **importers rebuild**: a title
-    stub is re-derived by the next `usher sync` and losing its link costs
-    nothing, which is K1's own argument for carrying all links in the first
-    place. A household is rebuilt by nothing. Skipping it would silently drop
-    **every watch state in the file** -- the exact loss this command exists to
-    carry -- through the escape hatch built for the opposite case, and an
-    operator who typed the flag to get past 304 links would lose 3,347 rows
-    and be told the run committed.
-
-    So a household the target does not hold stays a refusal **with the flag
-    set**, which is what this asserts. The `sources` name collision and a
-    credential whose source is absent are out of scope for the same reason and
-    for the same test: neither is *"this catalog is at a different bootstrap
-    phase"*.
+    `--skip-unresolvable` is for references the *importers rebuild*: a title stub
+    is re-derived by the next `usher sync` and losing its link costs nothing. A
+    household is rebuilt by nothing, so skipping it would silently drop every
+    watch state in the file -- the exact loss this command exists to carry --
+    through the escape hatch built for the opposite case, and an operator who
+    typed the flag to get past a few hundred links would lose thousands of rows
+    and be told the run committed. So a household the target does not hold stays
+    a refusal *with the flag set*. The `sources` name collision and a credential
+    whose source is absent are out of scope for the same reason.
     """
     movie = _title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=HELD_TMDB_ID)
     # No `users` row, so the household resolves against nothing.
@@ -1664,16 +1607,13 @@ async def test_the_flag_composes_with_dry_run(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """The two flags together are how an operator finds out what the trade costs before taking.
+    """The two flags together are how an operator prices the trade before taking it.
 
-    it.
-
-    A dry run under `--skip-unresolvable` reports the rows that *would* be
-    dropped and the rows that *would* land, and commits nothing -- which is the
-    whole answer to *"can I afford this?"*, and is why the plan required the
-    two to compose rather than assuming they would. The counts are compared
-    against the real run over the same state, so a dry run that resolved
-    nothing would fail the equality rather than pass the absence.
+    A dry run under `--skip-unresolvable` reports the rows that *would* be dropped
+    and the rows that *would* land, and commits nothing, which is the whole answer
+    to "can I afford this?". The counts are compared against the real run over the
+    same state, so a dry run that resolved nothing would fail the equality rather
+    than pass the absence.
     """
     unfindable = {"kind": "series", "id": str(new_id()), "imdb_id": None, "tmdb_id": None}
     source_id = new_id()
@@ -1722,14 +1662,11 @@ async def test_an_artifact_whose_header_over_counts_its_body_is_refused(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """🔴 The check `services/backup.py` and `ports/repository/backup.py` both described in the.
+    """A header that over-counts its body is refused, against a real schema.
 
-    present tense before it existed, against a real schema.
-
-    K5's drill restored an artifact whose header claimed `media_items: 10819`
-    over a body holding **10,515** and got **0 refusals and exit 0** -- a
-    subset written and reported as success. This builds the same shape at
-    fixture scale and asserts both halves: the file is refused, and nothing
+    An artifact whose header claims more `media_items` than its body holds would
+    otherwise be a subset written and reported as success. This builds that shape
+    at fixture scale and asserts both halves: the file is refused, and nothing
     reached the database, read on a second session.
     """
     rows: list[tuple[str, Mapping[str, Any]]] = [("users", _user()), ("users", _user())]
@@ -1757,24 +1694,18 @@ async def test_two_artifact_rows_on_one_conflict_target_land_as_one_row(
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **Unexecuted at the commit that wrote it**.
-
-    `tests/integration/` shares one container and the suite was not run.
+    """Two artifact rows on one conflict target land as one row.
 
     The source's `uq_watch_states_user_title` makes two rows on one
-    `(household, title)` unwritable *there*, and resolution is what can
-    collapse them *here*: the two references below name the same target title
-    through different rungs of K2's ladder -- one by `imdb_id`, one by
-    `(kind, tmdb_id)` -- so one artifact arrives holding two rows for one
-    conflict target.
-
-    A set-based upsert cannot carry both: the second is SQLSTATE `21000`,
-    which is outside `ROW_REFUSED_SQLSTATE_CLASSES` and would cross the port
-    as a raw `DBAPIError` rather than as a refusal anything renders. So
-    `_one_per` drops it, the artifact's first row wins, and the assertions
-    below are the three halves of that: one row in the table, the *first*
-    row's values in it, and a report whose buckets still add up to what was
-    submitted.
+    `(household, title)` unwritable *there*, and resolution is what can collapse
+    them *here*: the two references below name the same target title through
+    different rungs of the ladder -- one by `imdb_id`, one by `(kind, tmdb_id)`.
+    A set-based upsert cannot carry both: the second is SQLSTATE `21000`, outside
+    `ROW_REFUSED_SQLSTATE_CLASSES`, and would cross the port as a raw `DBAPIError`
+    rather than as a refusal anything renders. So `_one_per` drops it, the
+    artifact's first row wins, and the assertions below are the three halves of
+    that: one row in the table, the *first* row's values in it, and a report whose
+    buckets still add up to what was submitted.
     """
     first = _watch_state(
         title=_title(kind="movie", imdb_id=HELD_IMDB_ID, tmdb_id=None), position=111
@@ -1818,24 +1749,17 @@ async def test_an_over_length_enum_value_is_refused_rather_than_silently_truncat
     rebuilt: Mapping[str, uuid.UUID],
     artifact_path: Path,
 ) -> None:
-    """⚠️ **Unexecuted at the commit that wrote it**, for the case above's reason.
+    """An explicit cast to a bounded character type truncates in silence.
 
-    🔴 **An explicit cast to a bounded character type truncates in silence.**
     `search_queries.surface` is `VARCHAR(8)` under
-    `enum_column(native_enum=False, create_constraint=False)`, so nothing in
-    the schema would catch a shortened value either: it would be written,
-    reported `written`, and then raise `LookupError` out of the Enum result
-    processor on every later read of the row -- damage this command inflicted,
-    discovered by whatever next read the analytics surface makes.
-
-    The bind is therefore cast to `TEXT[]` and the width is enforced where it
-    always was, by the `INSERT`'s assignment coercion, which raises `22001`
-    -- class 22, so `refusals_as_conflict` turns it into the `RepositoryConflict`
-    this command renders as *a value the column will not take*.
-
-    The positive control is the same artifact with a legal `surface`, so the
-    refusal is about the width rather than about `search_queries` never being
-    written at all.
+    `enum_column(native_enum=False, create_constraint=False)`, so nothing in the
+    schema would catch a shortened value either: it would be written, reported
+    `written`, and then raise `LookupError` out of the Enum result processor on
+    every later read of the row. The bind is therefore cast to `TEXT[]` and the
+    width is enforced where it always was, by the `INSERT`'s assignment coercion,
+    which raises `22001` -- class 22, so `refusals_as_conflict` turns it into the
+    `RepositoryConflict` this command renders as *a value the column will not
+    take*. The positive control is the same artifact with a legal `surface`.
     """
     query = _search_query(clicked=None)
     _write_artifact(

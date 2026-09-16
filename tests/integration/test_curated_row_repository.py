@@ -77,10 +77,9 @@ class PostgresCuratedRowSeeder(CuratedRowSeeder):
 def _relations_scanned(node: dict[str, Any]) -> list[str]:
     """Every relation the plan tree touches, one entry per scan node.
 
-    Recursive over `Plans`, which is where Postgres nests an `InitPlan` and a
-    `SubPlan` as well as ordinary children -- so a table probed once by an
-    uncorrelated subquery and once by the outer scan appears twice, which is
-    the whole measurement.
+    Recursive over `Plans`, where Postgres nests an `InitPlan` and a `SubPlan` as
+    well as ordinary children, so a table probed once by an uncorrelated subquery
+    and once by the outer scan appears twice.
     """
     found = [node["Relation Name"]] if "Relation Name" in node else []
     for child in node.get("Plans", []):
@@ -106,9 +105,9 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         session: AsyncSession,
         user_id: uuid.UUID,
     ) -> None:
-        """**One read of one household's shelves should be one look at the table.
+        """One read of one household's shelves is one look at the table.
 
-        and the correlated-subquery spelling is two.**.
+        The correlated-subquery spelling probes it twice.
         """
         # One `generation_id` per generation, not per row: a generation is what
         # `replace_for_user` writes in one call, and a comprehension minting one
@@ -140,11 +139,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_a_generation_for_a_household_that_does_not_exist_is_a_port_error(
         self, repository: PostgresCuratedRowRepository
     ) -> None:
-        """Postgres-only: the fake is a list and has nothing to violate.
+        """Postgres-only: the fake is a list with no `fk_curated_rows_user_id_users`.
 
-        `fk_curated_rows_user_id_users`. A raw `IntegrityError` escaping here
-        is the one thing ADR-0009 says must never happen -- the only way a
-        caller could handle it is to import sqlalchemy itself.
+        A raw `IntegrityError` escaping here would leave a caller no handling short
+        of importing sqlalchemy itself.
         """
         orphan = new_id()
         with pytest.raises(RepositoryConflict) as raised:
@@ -158,17 +156,11 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         repository: PostgresCuratedRowRepository,
         user_id: uuid.UUID,
     ) -> None:
-        """`ck_curated_rows_cards_not_empty`.
+        """`ck_curated_rows_cards_not_empty`, reached through the repository.
 
-        reached through the repository rather than through raw SQL.
-
-        Constructed with `model_construct`, because `CuratedRow`'s own
-        `min_length=1` refuses it first -- which is exactly why the CHECK
-        exists: a heading with no shelf under it is a validator that ran and
-        kept nothing, and the row is discarded whole rather than padded from
-        the pool. `tests/integration/test_curation_schema.py` owns the
-        constraint; this owns the translation, which is the half a caller
-        sees.
+        `model_construct` is needed because `CuratedRow`'s own `min_length=1` refuses
+        the empty row first; the CHECK is what catches a writer that bypasses the
+        model. This case owns the translation, not the constraint itself.
         """
         valid = curated_row(user_id, position=0, generation_id=new_id())
         empty = valid.model_construct(**{**valid.model_dump(), "card_title_ids": ()})
@@ -180,22 +172,12 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_one_row_id_twice_in_a_batch_is_a_port_error(
         self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """`pk_curated_rows`.
+        """`pk_curated_rows`, translated rather than raised raw.
 
-        and it is here because the enumeration beside the `except` clause said "a CHECK
-        or a foreign key" and was wrong by a whole class of constraint.
-
-        Postgres-only: the fake is a list and has no primary key, so a batch
-        naming one id twice is stored twice there. Reachable as a
-        caller-assembly mistake -- an id reused across two shelves of one
-        generation, which nothing else in this port refuses, since
-        `replace_for_user`'s two `ValueError`s are about the household and the
-        generation rather than about the ids.
-
-        Also pins that it is *translated*: a raw `IntegrityError` out of here
-        is the one thing ADR-0009 says must never happen, and the constraint
-        name is what tells a caller this was its own duplicate rather than a
-        conflict with somebody else's row.
+        Postgres-only: the fake is a list with no primary key, so a batch naming one
+        id twice is stored twice there. An id reused across two shelves of one
+        generation is a caller-assembly mistake nothing else in this port refuses,
+        and the constraint name is what tells the caller the duplicate was its own.
         """
         generation, reused = new_id(), new_id()
         with pytest.raises(RepositoryConflict) as raised:
@@ -211,10 +193,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_a_position_wider_than_the_column_is_a_port_error(
         self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """**The refusal that is not a constraint**.
+        """The refusal that is not a constraint, translated all the same.
 
-        and the one that crossed this port boundary raw until the `except` clause
-        widened.
+        A too-wide position is a driver-level error, not a named constraint, so
+        `RepositoryConflict.constraint` is None and nothing raw escapes the port.
         """
         wide = curated_row(user_id, position=2**31, generation_id=new_id())
 
@@ -234,10 +216,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         user_id: uuid.UUID,
         seeder: PostgresCuratedRowSeeder,
     ) -> None:
-        """**The SAVEPOINT.
+        """The SAVEPOINT, and why `replace_for_user` is one transaction.
 
-        and the reason `replace_for_user` is one transaction rather than two
-        statements.**.
+        A delete-then-insert pair would leave the household with no screen at all
+        when the insert half fails.
         """
         survivor = [curated_row(user_id, position=0, generation_id=new_id())]
         await repository.replace_for_user(user_id, survivor)

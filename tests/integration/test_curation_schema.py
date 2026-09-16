@@ -1,4 +1,4 @@
-"""M8's two tables, and the four consequences of their two shape decisions."""
+"""The curation tables, and what their `uuid[]` and `NUMERIC` shapes commit to."""
 
 import uuid
 from datetime import UTC, datetime
@@ -35,10 +35,7 @@ def _call(
     tokens_out: int = 340,
     cost_usd: Decimal = Decimal("0.00870000"),
 ) -> LLMCall:
-    """A valid ledger row.
-
-    PRD 10's own worked example by default.
-    """
+    """A valid ledger row, PRD 10's worked example by default."""
     return LLMCall(
         id=new_id(),
         at=datetime(2026, 8, 5, 3, 0, tzinfo=UTC),
@@ -105,20 +102,11 @@ async def _insert_row(
 async def test_the_card_array_reads_back_in_the_order_it_was_written(
     session: AsyncSession,
 ) -> None:
-    """The property the `uuid[]` shape was chosen for.
+    """The property the `uuid[]` shape was chosen for: order is the storage.
 
-    and the reason it is asserted rather than assumed.
-
-    A curated row *is* an ordering — it is the only judgement the completion
-    was bought for — so nothing downstream may re-sort it. In the child-table
-    shape that guarantee is a `rank` column plus an `ORDER BY` every reader
-    has to remember; here it is the storage, and this case is what says so.
-
-    **The premise is asserted first**, because this suite has been caught
-    five times by a UUIDv7 primary key making `ORDER BY id` and
-    `ORDER BY <the real key>` agree by accident: the ids are deliberately
-    written in *descending* mint order, so a read that returned them sorted —
-    by id, by anything — would come back reversed and fail.
+    A curated row *is* an ordering, so nothing downstream may re-sort it. The ids
+    are written in *descending* mint order, so a read that returned them sorted —
+    by id or by anything else — comes back reversed and fails.
     """
     user_id = await _user(session)
     first, second, third = new_id(), new_id(), new_id()
@@ -136,11 +124,9 @@ async def test_the_card_array_reads_back_in_the_order_it_was_written(
 async def test_an_empty_curated_row_cannot_be_stored(session: AsyncSession) -> None:
     """`CuratedRow.card_title_ids`' `min_length=1`, in the database.
 
-    An empty curated row is not a state, it is a validator that ran and kept
-    nothing — and persisting one puts a heading with no shelf under it on the
-    screen. The domain model refuses it, and this is the guard for the writer
-    that does not go through the model: a hand-written `INSERT`, or a
-    repository that builds its statement from a list it forgot to check.
+    Persisting an empty row puts a heading with no shelf under it on the screen.
+    The model refuses it; this is the guard for a writer that bypasses the model,
+    such as a hand-written `INSERT`.
     """
     user_id = await _user(session)
     with pytest.raises(DBAPIError, match="ck_curated_rows_cards_not_empty"):
@@ -148,15 +134,11 @@ async def test_an_empty_curated_row_cannot_be_stored(session: AsyncSession) -> N
 
 
 async def test_a_null_card_id_cannot_be_stored(session: AsyncSession) -> None:
-    """The one liability the array shape introduces that a child table's `NOT NULL` column would.
+    """A `uuid[]` admits a NULL element where a `NOT NULL` column could not.
 
-    have closed for free.
-
-    A `uuid[]` admits a NULL element; a `curated_row_cards.title_id NOT NULL`
-    could not. A NULL element reads back as a card that denotes nothing, and
-    it would survive `cardinality(...) > 0` — the row is not empty, it is
-    holed. `array_position` is `IMMUTABLE` and does find a NULL element,
-    which is what makes the CHECK expressible at all.
+    A NULL element reads back as a card that denotes nothing and survives
+    `cardinality(...) > 0` — the row is not empty, it is holed. `array_position`
+    is `IMMUTABLE` and does find a NULL, which is what makes the CHECK expressible.
     """
     user_id = await _user(session)
     with pytest.raises(DBAPIError, match="ck_curated_rows_cards_have_no_nulls"):
@@ -166,21 +148,12 @@ async def test_a_null_card_id_cannot_be_stored(session: AsyncSession) -> None:
 async def test_deleting_a_title_leaves_a_dangling_card_id_rather_than_failing(
     session: AsyncSession,
 ) -> None:
-    """**The price of the array shape, asserted so it stays a known price.**.
+    """The price of the array shape, pinned so it stays a known price.
 
-    Postgres has no foreign key over array elements, so a `title_id` in here
-    is a value nothing checks and nothing cascades. This case pins all three
-    halves of what `db/models/curation.py` says follows from that: the delete
-    succeeds, the stored row keeps its full array, and the id now denotes
-    nothing.
-
-    The alternative shape does *not* fix this, it relocates it — a child
-    table's `ON DELETE CASCADE` would empty this row inside the database,
-    producing the heading-with-no-shelf that `min_length=1` exists to refuse,
-    and `ON DELETE RESTRICT` would make a title undeletable because a model
-    mentioned it last night. The hydration in `LLMRow.build` is where a missing
-    card is handled, and `tests/unit/test_rows_curated.py` is where that is
-    pinned -- dropped rather than raised, with the heading kept.
+    Postgres has no foreign key over array elements, so a `title_id` here is a
+    value nothing checks and nothing cascades: the delete succeeds, the stored row
+    keeps its full array, and the id now denotes nothing. Hydration in `LLMRow.build`
+    is what drops the missing card and keeps the heading.
     """
     user_id = await _user(session)
     kept = await _title(session, "The Quiet Vacuum")
@@ -204,10 +177,9 @@ async def test_deleting_a_user_takes_their_curated_rows_with_them(
 ) -> None:
     """CASCADE, and it is `user_taste`'s case rather than `watch_states`'.
 
-    ADR-0010 makes `watch_states.user_id` RESTRICT because a watch record
-    *is* the thing worth keeping; a curated row protects nothing and is
-    re-derived by running the generation again. RESTRICT here would make
-    deleting a user fail because a model wrote them a shelf last night.
+    A watch record *is* the thing worth keeping, so it RESTRICTs; a curated row
+    protects nothing and is re-derived by running the generation again. RESTRICT
+    here would make deleting a user fail because a model wrote them a shelf.
     """
     user_id = await _user(session)
     await _insert_row(session, user_id, [await _title(session, "The Quiet Vacuum")])
@@ -221,22 +193,15 @@ async def test_deleting_a_user_takes_their_curated_rows_with_them(
 
 
 async def test_a_sub_cent_cost_round_trips_exactly_as_a_decimal(session: AsyncSession) -> None:
-    """`NUMERIC(12, 8)`'s whole reason, against the value PRD 10 uses as its own worked example.
+    """`NUMERIC(12, 8)`'s whole reason, over PRD 10's worked example.
 
-    `$3/Mtok x 1,200 in` plus `$15/Mtok x 340 out` is exactly `0.0087`, which
-    binary floating point cannot represent — the sentence
-    `LLMCall.cost_usd`'s comment and `OpenAICompatibleClient._cost`'s
-    docstring both carry. The wrong implementations this kills are a `Float`
-    column (which reads back something that is not equal to `0.0087`) and a
-    scale below eight: measured, at scale 4 the third row below stores as
-    `0.0000` and a whole class of cheap calls reads as free.
+    The wrong implementations this kills are a `Float` column, which reads back
+    something not equal to `0.0087`, and a scale below eight, at which the third
+    row below stores as zero and a whole class of cheap calls reads as free.
 
-    Every value goes into the database **through the model** rather than as a
-    hand-typed literal, so this is the whole `Decimal → NUMERIC → Decimal`
-    path the ledger will actually use. `==` on `Decimal` is exact, and
-    comparing against a `Decimal` built from a *string* is deliberate:
-    `Decimal(0.0087)` from a float is already the wrong number before the
-    database sees it.
+    Values go into the database through the model, so this exercises the real
+    `Decimal → NUMERIC → Decimal` path; the expected values are built from strings
+    because `Decimal(0.0087)` from a float is already wrong.
     """
     for tokens_in, tokens_out, expected in (
         (1200, 340, Decimal("0.00870000")),
@@ -257,9 +222,10 @@ async def test_a_sub_cent_cost_round_trips_exactly_as_a_decimal(session: AsyncSe
 async def test_the_database_refuses_an_ok_error_disagreement_the_model_no_longer_can(
     session: AsyncSession,
 ) -> None:
-    """`LLMCall._ok_and_error_must_agree`, in the database.
+    """`LLMCall._ok_and_error_must_agree`, in the database as well as the model.
 
-    and this case is the reason "rather than as a CHECK alone" has an *alone* in it.
+    A row assembled around the validator — `model_construct`, or a raw `INSERT` —
+    still cannot record a success with an error or a failure without one.
     """
     valid = _call()
     for changes in (

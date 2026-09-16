@@ -1,7 +1,4 @@
-"""`IngestService` against the real repositories.
-
-for the four things its port fakes structurally cannot express.
-"""
+"""`IngestService` against the real repositories, for what its port fakes cannot express."""
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -82,15 +79,11 @@ def service(session: AsyncSession) -> IngestService:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues.
+    """Every SQL statement SQLAlchemy issues, so "one round trip per stage" is real.
 
-    so "one round trip per stage" is measured rather than asserted about a fake's call
-    counter.
-
-    Same shape as `tests/integration/test_media_item_repository.py`'s, and
-    with the same caveat: `copy_records_to_table` runs on the raw asyncpg
-    connection and is invisible here, which is the point -- a `COPY` is one
-    command however many records stream through it.
+    `copy_records_to_table` runs on the raw asyncpg connection and is invisible
+    here, which is the point -- a `COPY` is one command however many records
+    stream through it.
     """
     seen: list[str] = []
 
@@ -145,13 +138,11 @@ async def test_re_ingesting_an_episode_keeps_the_stored_ids(
     media_items: PostgresMediaItemRepository,
     source_id: uuid.UUID,
 ) -> None:
-    """The mutation the unit suite cannot see.
+    """The mutation the unit suite cannot see: skipping either resolve.
 
-    skipping either resolve and trusting the freshly-minted UUIDv7.
-
-    On the *second* walk that id names no row, so `episodes.season_id` and then
-    `media_items.episode_id` both point at nothing. A dict stores that happily; Postgres
-    does not.
+    Trusting the freshly-minted UUIDv7 means that on the *second* walk that id names
+    no row, so `episodes.season_id` and then `media_items.episode_id` both point at
+    nothing. A dict stores that happily; Postgres does not.
     """
     await service.ingest_batch(source_id, [SERIES, EPISODE], observed_at=RUN_AT)
     first = await media_items.get_by_external_id(source_id, "episode-1")
@@ -171,9 +162,8 @@ async def test_a_second_walk_reuses_the_stub_the_first_walk_created(
     """`titles` is one table read through two ports.
 
     `TitleRepository.add` flushes, so the stub the match stage wrote on walk one is
-    visible to walk two's `match_by_provider_ids` -- and if it were not, walk two would
-    try to create it again and conflict on `ix_titles_tvdb_id`. The fakes kept two dicts
-    and reproduced exactly that failure, which is why they no longer do.
+    visible to walk two's `match_by_provider_ids`; without that flush walk two would
+    try to create it again and conflict on `ix_titles_tvdb_id`.
     """
     await service.ingest_batch(source_id, [SERIES], observed_at=RUN_AT)
     first = await media_items.get_by_external_id(source_id, "series-1")
@@ -192,15 +182,12 @@ async def test_a_batch_of_episodes_costs_a_bounded_number_of_statements(
     source_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """The scale property, measured against real SQL rather than a fake's call counter.
+    """The scale property, against real SQL rather than a fake's call counter.
 
-    200 episodes across two series in one page: the statement count must not grow with
-    the page.
-
-    Not an exact number -- the staged `COPY` path issues DDL plus a
-    `SAVEPOINT` per upsert, and pinning the total would break on any
-    unrelated change to `usher.db.staging`. The property is that 200 episodes
-    and 20 cost the same.
+    The statement count must not grow with the page. Not an exact number -- the
+    staged `COPY` path issues DDL plus a `SAVEPOINT` per upsert, and pinning the
+    total would break on any unrelated change to `usher.db.staging`. The property
+    is that 200 episodes and 20 cost the same.
     """
     other_series = SourceItem(
         external_id="series-2",
@@ -240,8 +227,8 @@ async def test_a_walk_enqueues_enrichment_only_for_what_needs_it(
 ) -> None:
     """`enrichment_states` against real SQL, through the service.
 
-    An already-enriched title must produce no job -- a nightly walk that enqueued
-    1,126,674 of them makes the queue permanently the size of the library.
+    An already-enriched title must produce no job -- a nightly walk that enqueued one
+    per title makes the queue permanently the size of the library.
     """
     enriched = Title(
         kind=TitleKind.SERIES,

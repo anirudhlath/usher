@@ -1,7 +1,4 @@
-"""The 429 path end to end, against a stub.
-
-because provoking a real one is refused, and the refusal is the point rather than a
-"""
+"""The 429 path end to end, against a stub rather than a real upstream."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -42,8 +39,8 @@ from usher.services.matching import MatchService
 #: wrong about.
 RETRY_AFTER_SECONDS = 120.0
 
-# : The queue's own parameters, named here because every bound below is derived : from
-# them rather than written as a literal.
+#: The queue's own parameters, named here because every bound below is derived
+#: from them rather than written as a literal.
 BACKOFF_SECONDS = 30.0
 MAX_ATTEMPTS = 5
 
@@ -63,23 +60,19 @@ PROBE_IDENTITY = 'MediaBrowser Client="Usher", Device="probe", DeviceId="probe",
 
 
 def _item_path(external_id: str) -> str:
-    """`GET /Users/{user}/Items/{item}`, written out here rather than imported from the adapter.
+    """The item path, written out here rather than imported from the adapter.
 
-    `tests/fakes/emby_server.py`'s own module docstring requires it: every path
-    in that file is spelled independently of the adapter's constants so a typo
-    on one side fails rather than cancelling out. The same argument applies to
-    a test arming a route on it -- and the failure is *loud* here, because an
-    armed path nothing matches means no 429 fires at all, which the premise
-    assertions below are what catch.
+    Every path in `tests/fakes/emby_server.py` is spelled independently of the
+    adapter's constants so a typo on one side fails rather than cancelling out,
+    and the same argument applies to a test arming a route on it. An armed path
+    nothing matches means no 429 fires at all, which the premise assertions below
+    are what catch.
     """
     return f"/Users/{USER_ID}/Items/{external_id}"
 
 
 def _is_numeric(value: str) -> bool:
-    """Whether `retry_after_seconds` can answer this header without reaching its date arm -- i.e.
-
-    `float(value)` succeeds.
-    """
+    """Whether `retry_after_seconds` answers this header without its date arm."""
     try:
         float(value)
     except ValueError:
@@ -88,19 +81,14 @@ def _is_numeric(value: str) -> bool:
 
 
 def _retry_after(form: str) -> tuple[str, float, float]:
-    """One arm's header value, plus the closed interval the hint it parses to has to fall inside.
+    """One arm's header value, plus the interval its parsed hint must fall inside.
 
-    **Computed inside the case rather than at collection time**, and that is
-    not tidiness: an HTTP-date built when the module is imported is minutes
-    stale by the time the case runs, `parsedate_to_datetime` yields an instant
-    in the past, `max(0.0, ...)` floors the hint to **zero**, and the arm ends
-    up asserting the ordinary backoff while reading as a pass.
-
-    The date form carries a two-second floor rather than an exact number for
-    one measured reason: HTTP-date has **one-second resolution**, so formatting
-    truncates this instant's fraction and the hint the adapter parses is a
-    little under `RETRY_AFTER_SECONDS` rather than exactly it. The integer form
-    has no such slack and is asserted exactly.
+    Computed inside the case rather than at collection time: an HTTP-date built
+    at import is minutes stale by the time the case runs, so the hint floors to
+    zero and the arm asserts the ordinary backoff while reading as a pass. The
+    date form carries a two-second floor rather than an exact number because
+    HTTP-date has one-second resolution, so formatting truncates this instant's
+    fraction. The integer form has no such slack and is asserted exactly.
     """
     if form == "integer":
         return str(int(RETRY_AFTER_SECONDS)), RETRY_AFTER_SECONDS, RETRY_AFTER_SECONDS
@@ -110,10 +98,9 @@ def _retry_after(form: str) -> tuple[str, float, float]:
 
 @dataclass(frozen=True, slots=True)
 class _Row:
-    """One `jobs` row as this file reads it.
+    """One `jobs` row, with `run_after` resolved against the database's own clock.
 
-    with `run_after` already resolved against the database's own clock -- twice, because
-    the two resolutions answer two different questions.
+    Twice, because the two resolutions answer two different questions.
     """
 
     status: str
@@ -145,14 +132,12 @@ async def _rows(sessions: async_sessionmaker[AsyncSession]) -> dict[str, _Row]:
 
 
 def _hint_in(last_error: str) -> float:
-    """The parsed hint `PortRateLimited` carried, read back out of the column that stores it.
+    """The parsed hint, read back out of the column that stores it.
 
     `jobs.last_error` holds `str(exc)`, and `PortRateLimited.__init__` renders
-    exactly `rate limited, retry_after={value}`. Reading the number back is
-    what separates "a 429 reached the queue" from "a 429 reached the queue
-    carrying the interval the upstream asked for" -- and until D9 that column
-    was the *only* place the hint survived at all, which is what the entry this
-    file is about was written to close.
+    exactly `rate limited, retry_after={value}`. Reading the number back is what
+    separates "a 429 reached the queue" from "a 429 reached the queue carrying
+    the interval the upstream asked for".
     """
     prefix = "rate limited, retry_after="
     assert last_error.startswith(prefix), last_error
@@ -161,7 +146,7 @@ def _hint_in(last_error: str) -> float:
 
 @pytest.fixture
 def source() -> Source:
-    """The configured source, **not persisted**.
+    """The configured source, deliberately not persisted.
 
     Nothing on the path under test reads it back: `match_handler` reaches
     `binding.source` only for a log line and for the `media_items` lookup that
@@ -196,13 +181,12 @@ def emby() -> FakeEmbyServer:
 
 @pytest_asyncio.fixture
 async def adapter(emby: FakeEmbyServer, source: Source) -> AsyncIterator[EmbyAdapter]:
-    """The **shipped** adapter over the stub's transport, and unthrottled.
+    """The shipped adapter over the stub's transport, and unthrottled.
 
-    `limiter=None` is what a directly-constructed adapter gets, and
-    `EmbySession` turns it into a `SourceGate(0.0, ...)` whose `take()` returns
-    before it computes an interval -- so no request here waits `1 / rate`. That
-    is checked rather than assumed: S3 moved the gate's ownership to the
-    composition root, and a test that silently spaced its requests would be a
+    `limiter=None` is what a directly-constructed adapter gets, and `EmbySession`
+    turns it into a `SourceGate(0.0, ...)` whose `take()` returns before it
+    computes an interval -- so no request here waits `1 / rate`. Checked rather
+    than assumed, because a test that silently spaced its requests would be a
     slow test nobody diagnoses.
     """
     client = httpx.AsyncClient(transport=emby.transport(), base_url=source.base_url)
@@ -264,12 +248,10 @@ def _resolver(source: Source, adapter: EmbyAdapter) -> SourceResolver:
 def _worker(
     sessions: async_sessionmaker[AsyncSession], resolve: SourceResolver, *, batch_size: int
 ) -> JobWorker:
-    """The shipped worker with the shipped `match` handler, one session per scope.
+    """The shipped worker and `match` handler, in `build_worker`'s own shape.
 
-    `composition.build_worker`'s own shape.
-
-    `max_in_flight=1` so the two jobs settle one after the other: their
-    backoffs are compared against each other, and two failures racing to
+    `max_in_flight=1` so the two jobs settle one after the other: their backoffs
+    are compared against each other, and two failures racing to
     `clock_timestamp()` would put the comparison's margin at the mercy of the
     scheduler rather than of the arithmetic under test.
     """
@@ -325,15 +307,12 @@ async def test_a_429_from_a_source_defers_the_job_by_the_interval_the_upstream_a
     sessions: async_sessionmaker[AsyncSession],
     form: str,
 ) -> None:
-    """A 429 with a `Retry-After` pushes `jobs.run_after` out past the hint.
+    """A `Retry-After` pushes `jobs.run_after` past the hint; no header does not.
 
-    and the same job under a 429 with no header lands on the ordinary jittered backoff
-    -- which is strictly sooner.
-
-    Both arms, and the second is not decoration. "The job backed off" is what a
-    worker that dropped the hint on the floor also produces, and that is the
-    state PRD 09's entry describes as the defect D9 closed; only the comparison
-    between the two says *which* backoff was chosen.
+    Both arms, and the second is not decoration: "the job backed off" is what a
+    worker that dropped the hint on the floor also produces, so only the
+    comparison between the hinted and unhinted schedules says *which* backoff was
+    chosen.
     """
     header, hint_floor, hint_ceiling = _retry_after(form)
     assert _is_numeric(header) is (form == "integer"), (
@@ -345,10 +324,9 @@ async def test_a_429_from_a_source_defers_the_job_by_the_interval_the_upstream_a
     emby.rate_limit(hinted_path, retry_after=header)
     emby.rate_limit(plain_path)
 
-    # The stub's own arm, asserted before the chain and separately from it. At
-    # this task's base commit `FakeEmbyServer` could not answer 429 at all, so
-    # without these four lines a green run is equally consistent with a stub
-    # that never rate-limited and a worker that was never provoked.
+    # The stub's own arm, asserted before the chain and separately from it:
+    # without these four lines a green run is equally consistent with a stub that
+    # never rate-limited and a worker that was never provoked.
     hinted_probe = _probe(emby, source, hinted_path)
     assert hinted_probe.status_code == 429, (
         "the fake did not rate-limit and a chain that was never provoked proves nothing"

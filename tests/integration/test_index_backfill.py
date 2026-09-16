@@ -59,11 +59,9 @@ async def _wipe(session: AsyncSession) -> None:
     await session.execute(
         text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{_MARK} %"}
     )
-    # `stg_jobs` and `stg_title_embeddings` were dropped here until M6: DDL is
-    # transactional and this module commits, so it was the kind that leaked a
-    # staging table -- surfacing as schema drift in `test_migrations.py`, a
-    # different file that then failed only in combination. `CREATE TEMP TABLE
-    # ... ON COMMIT DROP` means the commit below removes them instead.
+    # No staging tables are dropped here: they are `CREATE TEMP TABLE ... ON
+    # COMMIT DROP`, so the commit below removes them. A module that commits and
+    # leaks one surfaces as schema drift in `test_migrations.py` instead.
     await session.commit()
 
 
@@ -99,18 +97,12 @@ async def _seed(sessions: async_sessionmaker[AsyncSession], *titles: Title) -> N
 
 
 async def _sweep(settings: Settings, *, limit: int = 0, page_size: int = 1000) -> None:
-    """`usher index --backfill`, bounded.
+    """`usher index --backfill`, bounded, for every sweep in this file.
 
-    **Every sweep in this file goes through this bound, not just the drain
-    case.** The failure mode a backfill has is non-termination, and it is
-    reachable from more than one mutation: a cursor that advances only when a
-    page wrote rows loops forever on the *second* run, where the honest
-    answer is zero writes. Measured -- that mutation leaves the re-run case
-    hanging rather than failing, and a hang in a sweep log reads like a
-    mutation nothing observed rather than one everything caught.
-
-    `asyncio.wait_for` rather than `pytest-timeout`, which is deliberately
-    not a dependency: the bound belongs to the cases that need it.
+    A backfill's failure mode is non-termination: a cursor that advances only when a
+    page wrote rows loops forever on the second run, where the honest answer is zero
+    writes. Without the bound that hangs the suite instead of failing a case.
+    `asyncio.wait_for` rather than `pytest-timeout`, which is not a dependency.
     """
     await asyncio.wait_for(
         _index(settings, backfill=True, limit=limit, page_size=page_size), timeout=30.0
@@ -120,20 +112,12 @@ async def _sweep(settings: Settings, *, limit: int = 0, page_size: int = 1000) -
 async def _is_stale(sessions: async_sessionmaker[AsyncSession], title_id: uuid.UUID) -> bool:
     """The shipped predicate, imported and scoped to one title.
 
-    **Imported rather than transcribed**, which is what
-    `db/repositories/search.py`'s own docstring asks of later tasks: "a
-    predicate written twice is two predicates, and the failure that produces
-    is a dashboard reading zero while the backfill still claims rows".
-
-    **Scoped by id rather than read off `count_stale`**, and that is not
-    tidiness either. This module commits for real -- `_index` opens its own
-    engine, so a rolled-back fixture transaction would be invisible to it --
-    so every row any other module in this suite has committed is inside
-    `count_stale`'s population too. A count would be an assertion about the
-    whole database; `EXISTS` over one id is an assertion about this case.
-    `_POPULATION` is deliberately left off for the same reason: the title
-    below is `ENRICHED` by construction and the claim here is about the
-    staleness half alone.
+    Imported rather than transcribed, because a predicate written twice is two
+    predicates — a dashboard reading zero while the backfill still claims rows. Scoped
+    by id rather than read off `count_stale` because this module commits for real, so
+    every row another module committed is inside that population too: a count would be
+    an assertion about the whole database. `_POPULATION` is left off for the same
+    reason, the title below being `ENRICHED` by construction.
     """
     async with sessions() as session:
         result = await session.execute(
@@ -152,9 +136,8 @@ async def _index_keys(sessions: async_sessionmaker[AsyncSession]) -> set[str]:
 def _record_statements(sink: list[str]) -> Iterator[None]:
     """Capture SQL off `before_cursor_execute`, never transcribed.
 
-    A hand-copied lookalike drifts and then reads like coverage, which this
-    project has recorded twice. The listener goes on the `Engine` class so it
-    catches the engine `_index` builds for itself.
+    A hand-copied lookalike drifts and then reads like coverage. The listener goes on
+    the `Engine` class so it catches the engine `_index` builds for itself.
     """
     from sqlalchemy import Engine
 
@@ -178,18 +161,12 @@ def _record_statements(sink: list[str]) -> Iterator[None]:
 async def test_the_backfill_enqueues_one_index_job_per_stale_enriched_title(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """Boundary call 4, asserted on the *population* rather than on a count.
+    """The sweep is asserted on the population rather than on a count.
 
-    Three titles: enriched with no embedding (stale), enriched with a current
-    embedding (not stale), and a skeleton (outside the population entirely --
-    its full-text document is a generated column, so it is already fully
-    indexed and needs no job at all).
-
-    Fails: an implementation sweeping every title. On the measured catalog
-    that is 1,271,138 jobs against ~10,000, and 4-6 hours against 25 s to 2
-    minutes. Also fails an implementation that ignores the embedding join and
-    re-enqueues titles that are already current, which is the same sweep
-    wearing a smaller number.
+    Three titles: enriched with no embedding (stale), enriched with a current embedding
+    (not stale), and a skeleton, which is outside the population entirely because its
+    full-text document is a generated column. Rules out a sweep over every title, and
+    one that ignores the embedding join and re-enqueues titles already current.
     """
     stale = _title("The Quiet Vacuum")
     current = _title("Ledgerhand")
@@ -219,23 +196,13 @@ async def test_re_running_the_backfill_writes_zero_rows(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`enqueue`'s upsert already carries `WHERE jobs.status <> 'parked' AND jobs.priority <.
+    """A second sweep at BACKFILL over jobs already at BACKFILL writes nothing.
 
-    excluded.priority`, so a second sweep at BACKFILL over jobs already at BACKFILL
-    costs one index probe per row and no writes.
-
-    **This cannot be written against `FakeJobQueue`**, which counts a no-op
-    re-enqueue as a row written -- it would pass and assert the opposite of
-    the truth. Same reason `test_services_titles.py`'s promotion case needed
-    a real backend.
-
-    Without this the backfill is not re-runnable: nightly it would produce
-    ~10,000 dead-weight row versions plus the WAL and the vacuum, on a table
-    whose entire purpose is to stay small.
-
-    Read off stdout rather than off a return value, because the printed
-    number is what an operator acts on -- and "0 index jobs written" on the
-    second run is the property observed rather than inferred.
+    `enqueue`'s upsert only promotes, so the re-sweep costs one index probe per row.
+    Without that the backfill is not re-runnable and a nightly one produces dead-weight
+    row versions on a table whose whole purpose is to stay small. It cannot be written
+    against `FakeJobQueue`, which counts a no-op re-enqueue as a write. Read off stdout,
+    because the printed number is what an operator acts on.
     """
     await _seed(sessions, _title("The Quiet Vacuum"), _title("Ledgerhand"))
 
@@ -256,24 +223,13 @@ async def test_the_backfill_drains_across_pages_and_terminates(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Seven stale titles, three per page.
+    """Seven stale titles, three per page: the sweep has to terminate.
 
-    **The case that catches the non-draining backfill.** An implementation
-    re-reading the predicate each pass instead of advancing a cursor is
-    indistinguishable from this one while every row leaves the predicate --
-    and loops forever the moment one does not, which is exactly what happens
-    here, because *enqueueing a job does not make a title stop being stale*.
-    Only the worker's write does. So this sweep is precisely the shape that
-    non-terminates: the predicate is unchanged at the end of every page.
-
-    This repository has shipped that: the watch-history repair carrying the
-    walk's instant was refused by the row it existed to repair and matched
-    `played AND play_count = 0` forever.
-
-    Bounded with `asyncio.wait_for`, so a non-converging loop fails the case
-    rather than hanging the suite -- the same bound
-    `test_the_bounded_backfill_terminates` uses one lane over, and the reason
-    `pytest-timeout` is deliberately not a dependency.
+    Enqueueing a job does not make a title stop being stale — only the worker's write
+    does — so the predicate is unchanged at the end of every page. An implementation
+    re-reading the predicate instead of advancing a cursor loops forever on exactly this
+    shape. Bounded with `asyncio.wait_for`, so a non-converging loop fails the case
+    rather than hanging the suite.
     """
     titles = [_title(f"Title {index}") for index in range(7)]
     await _seed(sessions, *titles)
@@ -289,14 +245,10 @@ async def test_the_cursor_is_a_keyset_and_not_an_offset(
 ) -> None:
     """Asserted on the statement, not the clock.
 
-    `OFFSET` pagination is measured in this repository at 43.7 ms at offset 0
-    and 388.9 ms at offset 1,126,574 -- linear per page, quadratic to drain --
-    and a timing assertion at fixture scale cannot tell the two apart, because
-    at five rows they cost the same.
-
-    Captured off `before_cursor_execute` and never transcribed. The assertion
-    is that the paging statement compares an id and that no statement in the
-    whole sweep carries an `OFFSET`.
+    `OFFSET` pagination is linear per page and quadratic to drain, and at fixture scale
+    a timing assertion cannot tell it from keyset paging. Captured off
+    `before_cursor_execute`: the paging statement compares an id, and no statement in
+    the whole sweep carries an `OFFSET`.
     """
     await _seed(sessions, *[_title(f"Title {index}") for index in range(5)])
     statements: list[str] = []
@@ -357,15 +309,12 @@ async def test_the_bare_form_writes_nothing(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """What makes `usher index` safe to run on a production box while diagnosing something.
+    """A dry run reports the counters and the sizing estimate and enqueues nothing.
 
-    It reports the two counters and the sizing estimate and enqueues nothing at all.
-
-    The counters are asserted as a *pair*: `count_stale` and `count_refused`
-    partition the population, and a `count_refused` spelled as a bare
-    `embedding IS NULL` would also count rows refused under an older model --
-    which are stale -- so the two would sum above the population and "the
-    backfill has drained" would stop being an observable condition.
+    The counters are asserted as a pair: `count_stale` and `count_refused` partition the
+    population, and a `count_refused` spelled as a bare `embedding IS NULL` would also
+    count rows refused under an older model — which are stale — so the two would sum
+    above the population and "the backfill has drained" would stop being observable.
     """
     stale = _title("The Quiet Vacuum")
     refused = _title("Ledgerhand")
@@ -397,9 +346,8 @@ async def test_limit_stops_the_sweep_early(
 ) -> None:
     """`--limit` is the operator's brake on a first backfill over a large enriched tier.
 
-    Checked because a `limit` compared against the wrong counter -- rows *written*
-    rather than rows *seen* -- stops early on a re-run, where nothing is written and the
-    honest answer is 0.
+    A `limit` compared against rows written rather than rows seen never fires on a
+    re-run, where nothing is written and the honest answer is zero.
     """
     await _seed(sessions, *[_title(f"Title {index}") for index in range(5)])
 
@@ -411,13 +359,10 @@ async def test_limit_stops_the_sweep_early(
 async def test_uuid_is_the_cursor_type(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """A guard on the import, not on behaviour.
+    """A guard on the import: `_index` declares its cursor as `uuid.UUID | None`.
 
-    `_index` declares its cursor as `uuid.UUID | None`, and this file is where a change
-    to that would be seen.
-
-    Kept trivial deliberately -- it exists so `uuid` is a used import rather than a
-    decorative annotation.
+    Kept trivial deliberately, so `uuid` is a used import rather than a decorative
+    annotation.
     """
     assert uuid.UUID(str(_title("Ledgerhand").id))
 
@@ -425,20 +370,13 @@ async def test_uuid_is_the_cursor_type(
 async def test_the_sweep_enqueues_at_backfill_and_does_not_promote(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """`BACKFILL`, asserted on the stored row.
+    """`BACKFILL`, asserted on the stored row rather than through a re-sweep.
 
-    Nothing a client renders depends on a search document, so an index job
-    must never sit in front of a `match` or a demand-promoted `enrich`. It is
-    also the priority `EnrichService` uses, and that agreement is what makes
-    a re-sweep write nothing: `_ENQUEUE`'s `WHERE jobs.priority <
-    excluded.priority` matches only a genuine promotion.
-
-    **The re-run case does not catch `priority=NEW` and the plan predicted it
-    would.** Measured: a sweep at NEW followed by a second sweep at NEW also
-    writes zero rows, because `NEW < NEW` is false just as `BACKFILL <
-    BACKFILL` is -- the two sweeps agree with each other whatever they agree
-    on. What NEW actually breaks is the ordering against every other kind,
-    and the only way to see that is to read the priority back.
+    Nothing a client renders depends on a search document, so an index job must never
+    sit in front of a `match` or a demand-promoted `enrich`. It is also the priority
+    `EnrichService` uses, and that agreement is what makes a re-sweep write nothing. A
+    sweep at `NEW` writes zero rows on its second run too, so only reading the priority
+    back can see the ordering it would break.
     """
     title = _title("The Quiet Vacuum")
     await _seed(sessions, title)
@@ -456,23 +394,13 @@ async def test_a_re_run_terminates_and_still_honours_limit(
     clean: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The case that catches a cursor advanced on writes rather than on ids**.
+    """Rules out a cursor advanced on writes rather than on ids, which needs a second run.
 
-    and it has to be a *second* run to do it.
-
-    On a first sweep every page writes, so a cursor spelled `after =
-    page[-1].id if written else after` advances exactly as the correct one
-    does and every case above passes. On the second sweep no page writes
-    anything -- that is the whole zero-rows property -- so the cursor stops
-    moving, the same page is re-read forever, and the command never returns.
-    Measured: without the `asyncio.wait_for` in `_sweep` that mutation hangs
-    the suite instead of failing a case, which in a mutation log reads like a
-    mutation nothing observed rather than one everything caught.
-
-    `--limit` is checked here for the same reason: compared against rows
-    *written* rather than rows *seen*, it never fires on a re-run, so the
-    brake an operator reached for silently sweeps the whole population. Both
-    defects live on the second run and neither is visible on the first.
+    On a first sweep every page writes, so `after = page[-1].id if written else after`
+    advances exactly as the correct cursor does. On the second sweep no page writes
+    anything, so that cursor stops moving and the command never returns — hence the
+    `asyncio.wait_for` in `_sweep`. `--limit` is checked here for the same reason: it
+    never fires on a re-run, so the operator's brake sweeps the whole population.
     """
     await _seed(sessions, *[_title(f"Title {index}") for index in range(5)])
     await _sweep(settings, page_size=2)
@@ -487,7 +415,7 @@ async def test_a_re_run_terminates_and_still_honours_limit(
 async def test_a_title_embedded_before_its_credits_landed_is_stale_again(
     sessions: async_sessionmaker[AsyncSession], settings: Settings, clean: None
 ) -> None:
-    """**Why one backfill pass over a freshly enriched tier is not enough.**."""
+    """Credits landing after the embed make the title stale again."""
     title = _title("The Quiet Vacuum")
     await _seed(sessions, title)
     async with sessions() as session:

@@ -165,13 +165,12 @@ async def _walk(client: AsyncClient, *, limit: int) -> tuple[list[str], int]:
 async def test_paging_the_queue_with_a_cursor_returns_every_item_exactly_once_including_the_undated_ones(  # noqa: E501
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The case ADR-0034's corrected predicate exists for.
+    """The keyset predicate has to resume from inside the undated group.
 
-    Three dated items and four undated ones at `limit=3` puts page 2's
-    boundary **inside the undated group**, which is the position the refuted
-    row-comparison spelling resumes from by answering NULL -- dropping every
-    remaining undated row while page 2 still looked full. Page 1's boundary is
-    a dated item, so both arms of the predicate are walked in one case.
+    Three dated items and four undated ones at `limit=3` puts page 2's boundary
+    among the undated rows, where a plain row comparison answers NULL and drops
+    every remaining undated row while the page still looks full. Page 1's boundary
+    is a dated item, so both arms of the predicate are walked in one case.
 
     `pages > 1` is asserted because a route that ignored `limit` and served
     everything at once satisfies the set assertion perfectly.
@@ -223,10 +222,8 @@ async def test_resolving_an_item_commits_the_row_and_the_queue_no_longer_holds_i
 ) -> None:
     """Durable, not a flush the response outlives.
 
-    read back on a second session, after the request's own transaction is gone.
-
-    `get_session` is the request's commit boundary and this is the one write in this
-    task.
+    The row is read back on a second session, after the request's own transaction
+    is gone, because `get_session` is the request's commit boundary.
     """
     source_id = await _given_source(sessions, "resolve")
     seeded = await _given_items(sessions, source_id, {"orphan": None})
@@ -249,13 +246,10 @@ async def test_an_unknown_title_is_refused_by_the_route_rather_than_by_a_foreign
 ) -> None:
     """What only a schema with real foreign keys can say.
 
-    Against `FakeMediaItemRepository` there are no foreign keys at all, so its
-    unit twin cannot tell "the route refused this" from "there was nothing
-    here to refuse". Here `media_items.title_id` really does reference
-    `titles`, so an unchecked write is an `IntegrityError` --
-    `PostgresMediaItemRepository` translates it to `RepositoryConflict`, which
-    no handler catches, which is a **500** for a value a client typed. The
-    route's own read is what makes it a 422 instead.
+    The unit twin has no foreign keys, so it cannot tell "the route refused this"
+    from "there was nothing here to refuse". Here an unchecked write raises
+    `IntegrityError`, which reaches the client as a 500 for a value they typed;
+    the route's own read is what makes it a 422 instead.
     """
     source_id = await _given_source(sessions, "ghost title")
     seeded = await _given_items(sessions, source_id, {"orphan": None})
@@ -274,15 +268,12 @@ async def test_an_unknown_title_is_refused_by_the_route_rather_than_by_a_foreign
 async def test_nothing_in_the_schema_stops_an_episode_of_another_title_so_the_route_must(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The premise for the check, measured rather than asserted about.
+    """The premise is exercised, not assumed.
 
-    `media_items` carries `title_id` and `episode_id` as two independent
-    foreign keys with **no CHECK tying them together** -- deliberately, since
-    an episode's row is supposed to hold its series' title beside its own
-    episode. So the first half of this case writes the mismatched pair through
-    the port directly and watches Postgres accept it: nothing downstream
-    detects a file pointed at an episode of another series. The second half is
-    the same pair through the route, refused, with the row read back unchanged.
+    `media_items` carries `title_id` and `episode_id` as two independent foreign
+    keys with no CHECK tying them together, so the first half writes the mismatched
+    pair through the port and watches Postgres accept it. The second half sends the
+    same pair through the route, which refuses it and leaves the row unchanged.
     """
     source_id = await _given_source(sessions, "episode mismatch")
     seeded = await _given_items(sessions, source_id, {"direct": None, "routed": None})

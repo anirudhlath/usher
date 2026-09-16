@@ -63,13 +63,11 @@ def settings(postgres_url: str) -> Settings:
 
 @pytest_asyncio.fixture
 async def household(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
-    """The singleton default user's id.
+    """The singleton default user's id: the cache key, and what the queue hands the lane.
 
-    the cache key, and the value the queue hands to the lane.
-
-    Created here rather than read, because the route's own `get_default_user`
-    would create it on the first request and a case that planted a screen
-    before that would key it to a household that does not exist yet.
+    Created here rather than read, because the route's own `get_default_user` would
+    create it on the first request and a case that planted a screen before that would
+    key it to a household that does not exist yet.
     """
     async with sessions() as session:
         user_id = await ensure_default_user(session)
@@ -253,11 +251,10 @@ class _SessionLog:
     def record_commit(self, session: Session) -> None:
         """Credit a commit to the session that made it, pinning it first.
 
-        `after_commit` fires *before* `after_transaction_end` (measured on this
-        host 2026-09-07), so at this moment nothing else has pinned the
-        session yet. Writing the address down without holding it would leave
-        `commits` carrying an address the log does not own, and a later session
-        landing on it inherits the credit -- a false green on
+        `after_commit` fires *before* `after_transaction_end`, so at this moment
+        nothing else has pinned the session yet. Writing the address down without
+        holding it would leave `commits` carrying an address the log does not own, and
+        a later session landing on it inherits the credit -- a false green on
         `request_sessions <= commits`, never a red.
         """
         self.commits.add(self.pin(session))
@@ -319,29 +316,22 @@ def session_log() -> Iterator[_SessionLog]:
     )
 
 
-# The denominator for the recycling control below. 2,000 is the size F6 used
-# when it re-measured the hazard on this host on 2026-09-07, kept here so the
-# number in `_SessionLog`'s docstring and the number this file actually
-# exercises are the same number.
+# The denominator for the recycling control below, named once so the number in
+# `_SessionLog`'s docstring and the number this file exercises are the same.
 _RECYCLE_TRIALS = 2000
 
 
 async def test_the_session_log_holds_every_session_it_records_so_no_address_is_recycled() -> None:
     """`_SessionLog.held` is the whole of why `id(session)` is a safe key.
 
-    and nothing asserted it until this case.
+    `held` is a deliberate leak and reads like an oversight, so a `held` deleted as one
+    looks exactly like a `held` that works. Every other assertion in this file would
+    then be comparing recycled addresses, and
+    `refresh_sessions.isdisjoint(request_sessions)` would accuse the code of the one
+    defect serve-stale exists to prevent.
 
-    **This is a guard for a repair that is already in the tree**, not a repair.
-    `held` landed in `271b0d4` on 2026-08-19 and closes the hazard issue #7
-    predicted; what was missing is that a `held` deleted as a leak -- it *is* a
-    deliberate leak, and reads like an oversight -- looks exactly like a `held`
-    that works. Every other assertion in this file would then be comparing
-    recycled addresses, and `refresh_sessions.isdisjoint(request_sessions)`
-    would accuse the code of the one defect serve-stale exists to prevent.
-
-    Two positive controls first, because without them an interpreter that
-    never freed a `Session` and never reused an address would pass this case
-    for the wrong reason -- this repository's most-repeated failure shape.
+    Two positive controls first, because without them an interpreter that never freed a
+    `Session` and never reused an address would pass this case for the wrong reason.
     """
     # Control 1: a `Session` nothing holds is refcount-freed by `del`, with no
     # collector pass. If it were not, `held` would be pinning nothing and the
@@ -354,11 +344,10 @@ async def test_the_session_log_holds_every_session_it_records_so_no_address_is_r
         "tell a pinned session from an unpinned one"
     )
 
-    # Control 2: the addresses really are handed out again. Measured on this
-    # host 2026-09-07: 2,000 created-and-freed Sessions occupy 7 distinct
-    # `id()` values; 2,000 held by a strong reference occupy 2,000. Asserted as
-    # an inequality rather than as `== 7`, because 7 is an allocator detail and
-    # the claim is only that reuse happens at all.
+    # Control 2: the addresses really are handed out again. Asserted as an
+    # inequality rather than against a count, because how many distinct `id()`
+    # values come back is an allocator detail and the claim is only that reuse
+    # happens at all.
     addresses = set()
     for _ in range(_RECYCLE_TRIALS):
         churn = Session()
@@ -395,7 +384,7 @@ async def test_the_session_log_holds_the_session_at_the_moment_it_credits_a_comm
 ) -> None:
     """The commit credit must pin for itself.
 
-    not inherit a pin from a handler that happens to run next.
+    It must not inherit a pin from a handler that happens to run next.
     """
     held_when_credited: list[bool] = []
 
@@ -464,10 +453,10 @@ async def test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_o
     session_log: _SessionLog,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """The whole feature.
+    """The whole feature, end to end.
 
-    end to end, with the lane held back across the request so both orderings are facts
-    rather than races.
+    The lane is held back across the request so both orderings are facts rather than
+    races.
     """
     await owned("A Film That Arrived Before The Request")
     await app.state.lanes.stop()
@@ -523,7 +512,7 @@ async def test_the_refresh_reads_state_committed_after_the_screen_was_cached(
     household: uuid.UUID,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """**The refresh's session is genuinely new, shown by what it can see.**.
+    """The refresh's session is genuinely new, shown by what it can see.
 
     Identity is one half of "its own session"; freshness is the other, and it
     is the half a stale connection would fail. A title committed on a third
@@ -575,10 +564,7 @@ async def test_a_screen_refresh_reuses_a_row_whose_own_ttl_has_not_moved(
     household: uuid.UUID,
     owned: Callable[[str], "asyncio.Future[uuid.UUID]"],
 ) -> None:
-    """**PRD 06's two layers, and the consequence of them a reader will not guess**.
-
-    found by writing the case above without it and watching the refreshed screen come
-    back unchanged.
+    """PRD 06's two layers, and the consequence of them a reader will not guess.
 
     The screen is ~30 s and `recently-added` is five minutes, so a screen
     refresh re-proposes, re-selects and re-orders while *reusing* every row

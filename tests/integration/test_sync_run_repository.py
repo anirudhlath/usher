@@ -1,6 +1,6 @@
-"""The shared contract against real Postgres, plus the three things a dict cannot express.
+"""The shared contract against real Postgres, plus what a dict cannot express.
 
-a foreign key, a CHECK constraint, and a poisoned session.
+A foreign key, a CHECK constraint, and a poisoned session.
 """
 
 import uuid
@@ -63,8 +63,8 @@ async def test_a_source_id_no_source_carries_is_a_port_error(
 ) -> None:
     """A dict has no foreign keys, so the fake stores a run attributed to nothing.
 
-    Postgres raises, and `services/` must not import `sqlalchemy.exc` to handle it
-    (ADR-0009).
+    Postgres raises, and the refusal has to reach the caller as a port error rather than
+    as `sqlalchemy.exc`.
     """
     with pytest.raises(RepositoryConflict) as caught:
         await repository.add(run(new_id()))
@@ -74,11 +74,11 @@ async def test_a_source_id_no_source_carries_is_a_port_error(
 async def test_a_caught_conflict_leaves_the_session_usable(
     repository: PostgresSyncRunRepository, source_id: uuid.UUID
 ) -> None:
-    """Postgres aborts the entire transaction on any statement error until a ROLLBACK.
+    """Postgres aborts the whole transaction on a statement error until a ROLLBACK.
 
-    so without a SAVEPOINT a caught conflict poisons the session for the caller's next,
-    unrelated call -- and this repository's caller commits a run's checkpoint together
-    with the batch it describes.
+    Without a SAVEPOINT a caught conflict poisons the session for the caller's next,
+    unrelated call — and this caller commits a run's checkpoint together with the batch
+    it describes.
     """
     with pytest.raises(RepositoryConflict):
         await repository.add(run(new_id()))
@@ -93,13 +93,11 @@ async def test_the_cursor_query_uses_the_source_kind_index(
     source_id: uuid.UUID,
     analyze: Analyze,
 ) -> None:
-    """`ix_sync_runs_source_kind_started` is `(source_id.
+    """The index is `(source_id, kind, started_at DESC)`, so the newest run is its first entry.
 
-    kind, started_at DESC)`, so "the newest completed run of this kind" is the index's
-    first qualifying entry rather than a sort over a source's whole history.
-
-    `status` is deliberately not a key -- a scan back through consecutive failures is
-    bounded by how many times in a row it failed.
+    "The newest completed run of this kind" must come off the index rather than out of a
+    sort over a source's whole history. `status` is deliberately not a key: a scan back
+    through consecutive failures is bounded by how many times in a row it failed.
     """
     for index in range(500):
         one = run(source_id, started_at=EARLIER.replace(year=2020) + (LATER - EARLIER) * index)
@@ -130,24 +128,13 @@ async def test_the_resume_query_uses_the_source_kind_index(
     source_id: uuid.UUID,
     analyze: Analyze,
 ) -> None:
-    """`_INCOMPLETE`'s comment claims the index supplies the ordering and that the `id` tiebreak.
+    """The index supplies the ordering, and the `id` tiebreak costs one Incremental Sort.
 
-    costs only an Incremental Sort over one `started_at` group.
-
-    The neighbouring `_CURSOR` claim is pinned; this one was resting on a reading of the
-    SQL until this case.
-
-    **Not `"Sort" not in plan`**, which the case above can assert and this one
-    cannot: `Incremental Sort` contains it. The two are very different plans --
-    a full sort over a source's whole history versus a sort of one tied group
-    at the head of an index scan -- so this asserts the node it wants by name,
-    plus the `Presorted Key` that says the index really did supply the leading
-    key rather than the planner sorting everything.
-
-    `_INCOMPLETE` is imported rather than transcribed: the case above pastes
-    `_CURSOR` in, which is why this module would otherwise hold two copies of
-    one statement and a plan assertion that can drift off the statement it
-    describes.
+    Not `"Sort" not in plan`, which `Incremental Sort` contains: the two plans are a full
+    sort over a source's whole history versus a sort of one tied group at the head of an
+    index scan, so this names the node it wants plus the `Presorted Key` that says the
+    index really did supply the leading key. `_INCOMPLETE` is imported rather than
+    transcribed so the assertion cannot drift off the statement it describes.
     """
     for index in range(500):
         await repository.add(
@@ -176,13 +163,10 @@ async def test_the_resume_query_uses_the_source_kind_index(
 async def test_a_negative_counter_is_a_port_error(
     repository: PostgresSyncRunRepository, source_id: uuid.UUID
 ) -> None:
-    """`ck_sync_runs_items_seen_non_negative` mirrors `SyncRun`'s own `Field(ge=0)`.
+    """The CHECK mirrors `SyncRun`'s `Field(ge=0)`, and fires on the way to disk.
 
-    and the two fire at different moments: pydantic on the way in, the CHECK on the way
-    to disk.
-
-    Only the second one is still there if a future caller writes this row without going
-    through the model, so it is worth knowing it reaches the caller as a port error.
+    Only the CHECK is still there for a caller that writes the row without going through
+    the model, so it has to reach that caller as a port error.
     """
     one = run(source_id)
     await repository.add(one)
@@ -195,12 +179,10 @@ async def test_a_negative_counter_is_a_port_error(
 async def test_started_at_survives_a_save(
     session: AsyncSession, repository: PostgresSyncRunRepository, source_id: uuid.UUID
 ) -> None:
-    """`started_at` is the availability sweep's own `seen_since` (ADR-0015).
+    """`started_at` is the availability sweep's `seen_since`, so a save must not refresh it.
 
-    so a save that quietly refreshed it would let a run retract items it had already
-    seen.
-
-    It has no `server_default`-on-update and no trigger, and this is what says so.
+    A refreshed value would let a run retract items it had already seen. There is no
+    `server_default`-on-update and no trigger, and this is what says so.
     """
     one = run(source_id, started_at=EARLIER)
     await repository.add(one)

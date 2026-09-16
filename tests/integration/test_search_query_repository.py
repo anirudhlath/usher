@@ -133,9 +133,7 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         repository: PostgresSearchQueryRepository,
         ledger: PostgresSearchQueryLedger,
     ) -> None:
-        """`fk_search_queries_user_id_users`.
-
-        reached through the repository rather than through raw SQL.
+        """`fk_search_queries_user_id_users`, through the repository not raw SQL.
 
         The wrong implementation this kills: a `record()` that catches only
         the numeric-overflow shape and lets an ordinary foreign-key violation
@@ -174,9 +172,9 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The case the whole error contract rests on**.
+        """The case the whole error contract rests on.
 
-        and Postgres-only because a Python `int` has no ceiling to hit.
+        Postgres-only, because a Python `int` has no ceiling to hit.
         """
         too_large = search_query_record(user_id=user_id, latency_ms=2**31)
 
@@ -218,10 +216,10 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The SAVEPOINT.** The wrong implementation this kills.
+        """The SAVEPOINT, and the lost request there is without one.
 
-        a `record()` with no nested transaction, whose refused `INSERT` aborts the
-        caller's whole transaction so the very next statement raises
+        Kills a `record()` with no nested transaction, whose refused `INSERT` aborts
+        the caller's whole transaction so the very next statement raises
         `PendingRollbackError` -- turning a failed analytics write into a lost request.
 
         Three assertions, in the order the damage would arrive: the earlier
@@ -246,9 +244,9 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
     async def test_search_queries_carries_no_updated_at_trigger(
         self, session: AsyncSession
     ) -> None:
-        """M1's second ruling.
+        """`search_queries` carries no `updated_at` trigger.
 
-        outcome columns are updated in place on the row `record()` wrote, and first
+        Outcome columns are updated in place on the row `record()` wrote and first
         write wins, so no row is ever touched more than twice in its whole life --
         `llm_calls`' shape rather than `watch_states`'.
 
@@ -277,10 +275,10 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
     ) -> None:
         """The other side of the error contract.
 
-        a dropped connection, a statement timeout or a missing table must not arrive at
-        a caller as "this row is not storable" -- the one distinction ADR-0009 requires
-        a caller be able to make, since a bad row is a bug in the analytics write and a
-        transport that is gone is something a retry fixes.
+        A dropped connection, a statement timeout or a missing table must not arrive at
+        a caller as "this row is not storable" -- the one distinction a caller has to be
+        able to make, since a bad row is a bug in the analytics write and a transport
+        that is gone is something a retry fixes.
 
         SQLSTATE `42P01` (undefined table) is class 42, outside the `22`/`23`
         classes this repository's SAVEPOINT translates, and deterministic

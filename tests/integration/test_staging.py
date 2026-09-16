@@ -12,11 +12,7 @@ _DDL = "CREATE TEMP TABLE stg_probe (n integer, label text) ON COMMIT DROP"
 
 
 async def test_a_staging_table_is_recreated_per_batch(session: AsyncSession) -> None:
-    """The caller commits between batches.
-
-    so a leftover table from a crashed batch would otherwise merge into the next one --
-    silently doubling a batch rather than failing.
-    """
+    """A leftover table from a crashed batch would merge into the next one, doubling it."""
     await stage_records(
         session, ddl=_DDL, table="stg_probe", columns=("n", "label"), records=[(1, "a")]
     )
@@ -28,22 +24,12 @@ async def test_a_staging_table_is_recreated_per_batch(session: AsyncSession) -> 
 
 
 async def test_a_destination_check_is_not_enforced_by_the_copy(session: AsyncSession) -> None:
-    """The plan this was built from says "CHECK constraints fire during `COPY`.
+    """Staging tables carry no constraints, so the `COPY` enforces the destination's none.
 
-    so one bad row aborts its batch", which is true of a `COPY` straight into a
-    constrained table and **not** true of this path: these staging tables are declared
-    without constraints, so the violating value lands in staging and only fails at the
-    `INSERT ...
-
-    SELECT` that follows.
-
-    That difference decides which exception a repository has to catch.
-    `copy_records_to_table` runs on the raw asyncpg connection, outside
-    SQLAlchemy's error translation, so a CHECK firing there would surface as
-    `asyncpg.exceptions.CheckViolationError`; the follow-up statement goes
-    through `session.execute`, so it surfaces as
-    `sqlalchemy.exc.IntegrityError`. `PostgresMediaItemRepository` catches
-    the latter, and this is why that is sufficient.
+    The violating value lands in staging and fails only at the `INSERT ... SELECT` that
+    follows, which runs through `session.execute` and so surfaces as
+    `sqlalchemy.exc.IntegrityError` — the exception `PostgresMediaItemRepository`
+    catches.
     """
     await stage_records(
         session,
@@ -56,29 +42,21 @@ async def test_a_destination_check_is_not_enforced_by_the_copy(session: AsyncSes
 
 
 async def test_the_raw_connection_is_the_asyncpg_driver(session: AsyncSession) -> None:
-    """Two unwrapping layers deep and typed `Any` on the way out.
-
-    so nothing static catches this going stale across a SQLAlchemy upgrade.
-    """
+    """Two unwrapping layers deep and typed `Any`, so nothing static catches it going stale."""
     driver = await raw_connection(session)
     assert type(driver).__module__.startswith("asyncpg")
     assert hasattr(driver, "copy_records_to_table")
 
 
-# -------------------------------------------------------------------------- ADR-0044's
-# two COPY-path failure shapes, observed rather than asserted
-# --------------------------------------------------------------------------
-# [ADR-0044](../../docs/prd/decisions/0044-a-bounded-column-is-a-declared-type-that-
-# refuses.md) closes its Evidence with 🔴 *"the `22001` server-side COPY refusal is the
+# ---------------------------------------------------------------------------
+# The COPY path's two failure shapes, observed rather than asserted
+# ---------------------------------------------------------------------------
 
 
 async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
     session: AsyncSession,
 ) -> None:
-    """The shape ADR-0044 predicted and had not run.
-
-    It predicts correctly.
-    """
+    """The refusal is raw asyncpg: not a `DBAPIError`, with no `.orig` chain to read."""
     with pytest.raises(asyncpg.exceptions.StringDataRightTruncationError) as caught:
         await stage_records(
             session,
@@ -98,18 +76,12 @@ async def test_the_copy_refuses_an_over_long_string_server_side_as_22001(
 async def test_the_copy_refuses_an_out_of_range_integer_with_no_sqlstate_at_all(
     session: AsyncSession,
 ) -> None:
-    """The *other* of ADR-0044's two shapes.
+    """The other failure shape carries no SQLSTATE at all.
 
-    and the reason it says a fix that widens `bigint` and forgets `text` reaches 28 of
-    31 rather than all of them.
-
-    An out-of-range `int` never reaches Postgres: asyncpg's binary encoder
-    refuses it client-side as a bare `builtins.OverflowError`, which has no
-    `sqlstate` attribute, is not a `DBAPIError` and is not even an
-    `asyncpg.exceptions.PostgresError`. Recorded beside the `22001` case
-    because the two are the same bucket and need different repairs — and
-    because reading either one alone makes the COPY path look like something
-    an `except` clause could cover.
+    An out-of-range `int` never reaches Postgres: asyncpg's binary encoder refuses it
+    client-side as a bare `builtins.OverflowError`, which is neither a `DBAPIError` nor
+    an `asyncpg.exceptions.PostgresError`, so no single `except` clause covers both
+    shapes.
     """
     with pytest.raises(OverflowError) as caught:
         await stage_records(
@@ -127,14 +99,10 @@ async def test_the_copy_refuses_an_out_of_range_integer_with_no_sqlstate_at_all(
 async def test_a_bigint_staging_column_takes_the_same_value_the_integer_one_refused(
     session: AsyncSession,
 ) -> None:
-    """The control for ADR-0044's scope item 2.
+    """The control for widening a staging column to `bigint`.
 
-    which widens `stg_genome.tmdb_id` and `stg_akas.ordering` to `bigint`.
-
-    Without this the widening's whole claim — that the value now *stages* —
-    rests on the two cases above failing, which is an absence. The same
-    `2**31` that aborts an `integer` batch lands in a `bigint` column and reads
-    back unchanged.
+    The same `2**31` that aborts an `integer` batch lands in a `bigint` column and reads
+    back unchanged, so the widening rests on a positive rather than on an absence.
     """
     await stage_records(
         session,

@@ -71,11 +71,9 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 def statement_counter() -> Iterator[list[str]]:
     """Every SQL statement SQLAlchemy issues, from every engine in the process.
 
-    including the app's own, which is the one under measurement.
-
-    Captured off `before_cursor_execute` rather than transcribed: M4 replaced
-    two tasks that asserted on a hand-copied lookalike of a query, because the
-    copy drifts from the repository and then reads like coverage.
+    Including the app's own, which is the one being counted. Captured off
+    `before_cursor_execute` rather than transcribed, because a hand-copied lookalike of
+    a query drifts from the repository and then reads like coverage.
     """
     seen: list[str] = []
 
@@ -109,10 +107,7 @@ async def _given_title(
 async def _given_seasons(
     sessions: async_sessionmaker[AsyncSession], title_id: uuid.UUID, numbers: Sequence[int]
 ) -> dict[int, uuid.UUID]:
-    """Seeded in the order given.
-
-    so a caller can make the minted UUIDv7s disagree with the season numbers on purpose.
-    """
+    """Seeded in the order given, so minted UUIDv7s can disagree with season numbers."""
     async with sessions() as session:
         repository = PostgresEpisodeRepository(session)
         await repository.upsert_seasons(
@@ -175,12 +170,12 @@ async def test_a_series_answers_its_seasons_ordered_by_postgres(
 async def test_a_season_pages_through_postgres_and_the_pages_abut(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The keyset `WHERE` this milestone ships, executed.
+    """The keyset `WHERE`, executed against Postgres.
 
-    Nine episodes at `limit=4` -- deliberately not a divisor of nine, so the
-    walk ends on a short page -- and then a second walk at `limit=3`, which
-    exhausts the season exactly and must still carry no cursor. That second
-    case is the one ADR-0034 says is invisible outside `count % limit == 0`.
+    Nine episodes at `limit=4` -- deliberately not a divisor of nine, so the walk ends
+    on a short page -- and then a second walk at `limit=3`, which exhausts the season
+    exactly and must still carry no cursor. Only a walk whose last page is exactly full
+    can catch a cursor minted past the end.
     """
     series = await _given_title(sessions, "Paged Series")
     seasons = await _given_seasons(sessions, series.id, [1])
@@ -248,7 +243,7 @@ async def test_a_movie_answers_200_and_an_id_no_title_carries_answers_404(
 ) -> None:
     """The distinguishability case, against a real `titles` table.
 
-    the fake arm cannot tell a missing row from a title with no seasons any better than
+    The fake arm cannot tell a missing row from a title with no seasons any better than
     this one, but only here is the existence read a real statement.
     """
     movie = await _given_title(sessions, "A Film", kind=TitleKind.MOVIE)
@@ -304,10 +299,9 @@ async def test_the_episodes_route_costs_one_statement_for_the_page_however_big(
     """Two statements per page, fixed: the season's existence, and the page.
 
     The page size varies and the season is held fixed. This is the N+1 that
-    `resolve_episodes` and `next_up` both exist to prevent, arriving at a
-    route -- and 999,827 of the one measured source's 1,126,674 items are
-    episodes, so a per-row read here is the defect batching exists to remove
-    wearing a paged response.
+    `resolve_episodes` and `next_up` both exist to prevent, arriving at a route -- and
+    on a television-heavy source nearly every item is an episode, so a per-row read here
+    is the defect batching exists to remove, wearing a paged response.
     """
     series = await _given_title(sessions, "Counted Series")
     seasons = await _given_seasons(sessions, series.id, [1])
@@ -336,7 +330,7 @@ async def test_the_episode_route_costs_one_statement(
 ) -> None:
     """`list_by_ids([id])` in one round trip.
 
-    and never `list_for_title`, which would read 20,000 rows to find one.
+    Never `list_for_title`, which reads a title's whole tree to find one episode.
     """
     series = await _given_title(sessions, "Single Episode Series")
     seasons = await _given_seasons(sessions, series.id, [1])

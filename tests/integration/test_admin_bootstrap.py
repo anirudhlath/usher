@@ -1,6 +1,6 @@
-"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against real Postgres.
+"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against Postgres.
 
-and the run-time facts the two routes depend on and cannot check.
+With the run-time facts the two routes depend on and cannot check.
 """
 
 import gzip
@@ -76,12 +76,11 @@ async def test_a_bootstrap_phase_runs_end_to_end_through_the_shared_dispatch(
 ) -> None:
     """The `bootstrap` handler's whole body, against real Postgres.
 
-    the two IMDb passes inside one load window, a real catalog afterwards, and a
-    `COMPLETED` checkpoint per dataset.
-
-    Driven through `run_bootstrap` rather than through `BootstrapService`
-    because that is the function the handler holds, and the point of the
-    extraction is that this is the *same* code `usher bootstrap` runs.
+    The two IMDb passes inside one load window, a real catalog afterwards, and a
+    `COMPLETED` checkpoint per dataset. Driven through `run_bootstrap` rather than
+    through `BootstrapService`, because that is the function the handler holds and
+    the point of the extraction is that this is the *same* code `usher bootstrap`
+    runs.
     """
     monkeypatch.setattr(
         usher.composition,
@@ -115,15 +114,13 @@ async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_noth
 ) -> None:
     """`JobWorker` requires the claim to be committed before the handler runs.
 
-    and the handler commits per batch inside it -- so no transaction spans the work, and
-    a run killed halfway leaves what it had already written.
-
-    The property with teeth is the **cursor**, not the row count: every write
-    here is an upsert, so `count_titles()` recovers either way, and only a
-    non-zero `position` on the checkpoint distinguishes "committed four rows
-    and stopped" from "wrote four rows into a transaction that vanished".
-    Asserted from a second, independent session, because the first one's own
-    view cannot tell a commit from a pending write.
+    The handler commits per batch inside it, so no transaction spans the work and a
+    run killed halfway leaves what it had already written. The property with teeth is
+    the **cursor**, not the row count: every write here is an upsert, so
+    `count_titles()` recovers either way, and only a non-zero `position` on the
+    checkpoint distinguishes a commit from a transaction that vanished. Asserted from
+    a second, independent session, because the first one's own view cannot tell them
+    apart.
     """
     monkeypatch.setattr(
         usher.composition,
@@ -133,8 +130,7 @@ async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_noth
     # Engine-bound sessions rather than the suite's rolled-back fixture: a checkpoint
     # that survives a crash is a claim about a *commit*, and the shared fixture's outer
     # transaction makes a commit structurally unobservable -- the same reason
-    # `test_bootstrap_concurrency.py` and
-    # `test_bulk_load_window_commits_the_callers_own_pending_work` build their own, with
+    # `test_bootstrap_concurrency.py` builds its own.
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     try:
@@ -187,27 +183,22 @@ async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_noth
 class _Killed(Exception):
     """Not a `UsherPortError`.
 
-    `BootstrapService` records those and returns, which is the graceful path rather than
-    the abrupt one this case needs.
+    `BootstrapService` records those and returns, which is the graceful path rather
+    than the abrupt one this case needs.
     """
 
 
 async def test_the_load_window_declines_on_a_live_catalog_and_keeps_both_indexes(
     session: AsyncSession,
 ) -> None:
-    """`bulk_load_window()` suspends `ix_titles_sort_name` and `ix_titles_name_lower_year`.
+    """`bulk_load_window()` suspends two indexes **only into an empty table**.
 
-    **only into an empty table**, and that guard is now load-bearing for a *serving*
-    process rather than for an operator's own command.
-
-    Before M9 the only caller was `usher bootstrap`, so dropping two indexes
-    on a live catalog would have been one person's mistake at their own
-    terminal. `POST /admin/bootstrap/imdb` is unauthenticated and takes a
-    path parameter, so the same press against a 1.27M-title catalog would
-    take browse ordering away from every reader for the length of a rebuild
-    -- except that it does not, because the window declines. Asserted rather
-    than trusted: the indexes are read from `pg_indexes` **inside** the
-    window, which is the only place the difference exists.
+    That guard is load-bearing for a *serving* process rather than for an operator's
+    own command: `POST /admin/bootstrap/imdb` is unauthenticated and takes a path
+    parameter, so the same press against a live catalog would take browse ordering
+    away from every reader for the length of a rebuild -- except that the window
+    declines. Asserted rather than trusted: the indexes are read from `pg_indexes`
+    **inside** the window, which is the only place the difference exists.
     """
     catalog = PostgresBulkCatalogRepository(session)
     await session.execute(
@@ -234,7 +225,7 @@ async def test_the_load_window_declines_on_a_live_catalog_and_keeps_both_indexes
 class _ContendedDataset(BulkDataset[object]):
     """A dataset whose `revision()` resolves and whose `batches()` must never be reached.
 
-    a `RepositoryConflict` from `start()` short-circuits before `_drain`, and raising
+    A `RepositoryConflict` from `start()` short-circuits before `_drain`, and raising
     here turns that into something this case verifies rather than assumes.
     """
 
@@ -277,20 +268,15 @@ class _AlwaysFreshStart(PostgresImportRunRepository):
 async def test_a_second_bootstrap_leaves_the_owning_processs_checkpoint_untouched(
     postgres_url: str,
 ) -> None:
-    """The `_concede_to_other_owner` path.
+    """The `_concede_to_other_owner` path, reachable in anger because of this route.
 
-    reachable in anger for the first time because of this route.
-
-    `(kind, key)` stops two *jobs* for one phase from existing, and the
-    single `JobWorker` lane stops two claims running at once -- neither says
-    anything about the case this route creates, which is a worker claiming
-    `(bootstrap, imdb)` while an operator has `usher bootstrap --phase imdb`
-    running in a terminal. That is two processes on one `import_runs` row.
-
-    The assertion is the M2 defect's own: not "the loser did not crash" --
-    which a re-fetch-and-overwrite fix also satisfies, because it evolves a
-    copy -- but the winner's row read **back** from the winner's own session,
-    byte for byte.
+    `(kind, key)` stops two *jobs* for one phase from existing, and the single
+    `JobWorker` lane stops two claims running at once -- neither says anything about
+    a worker claiming `(bootstrap, imdb)` while an operator has `usher bootstrap
+    --phase imdb` running in a terminal, which is two processes on one `import_runs`
+    row. The assertion is not "the loser did not crash" -- which a
+    re-fetch-and-overwrite fix also satisfies, because it evolves a copy -- but the
+    winner's row read **back** from the winner's own session, byte for byte.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
@@ -335,13 +321,12 @@ async def test_the_route_writes_a_real_job_row_and_no_import_run(
 ) -> None:
     """End to end over the un-overridden dependency graph.
 
-    the request writes one `jobs` row at `DEMAND` and touches `import_runs` not at all.
-
-    `tests/unit/test_api_bootstrap.py` asserts the same shape against
-    `FakeJobQueue`; what this adds is the wiring -- `get_job_queue`,
-    `get_session`'s commit boundary and `PostgresJobQueue`'s own statement --
-    and the negative half, which is the whole reason the route is a 202: a
-    request that had started importing would have left a `RUNNING` row here.
+    The request writes one `jobs` row at `DEMAND` and touches `import_runs` not at
+    all. `tests/unit/test_api_bootstrap.py` asserts the same shape against
+    `FakeJobQueue`; what this adds is the wiring -- `get_job_queue`, `get_session`'s
+    commit boundary and `PostgresJobQueue`'s own statement -- and the negative half,
+    which is the whole reason the route is a 202: a request that had started
+    importing would have left a `RUNNING` row here.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -503,24 +488,15 @@ async def test_the_status_route_answers_200_against_a_database_no_import_has_tou
 ) -> None:
     """The empty-database case first.
 
-    because PRD 08's operator rule is that a diagnostic must work before the thing it
-    diagnoses has run -- and because an empty answer is where a report assembled from
-    four reads is most likely to raise.
-
-    200 rather than 404: "no import has ever run" is a fact about the thing
-    being described, not a failure of the request. That is the rule
-    `GET /admin/sources/{id}/status` already sets, and the same reason
-    `vocabulary_verdict` catches `PortDataMalformed` and answers with a state
-    rather than letting a status route answer "what state is my genome in?"
-    with a 500.
-
-    The `runs == []` arm is what a route that 500'd on `revisions[0]` cannot
-    reach, and the vocabulary arm is what a report that only assembled the
-    runs would leave absent. `genome.titles == titles` is the arm that says
-    both aggregates really ran against the same database rather than one of
-    them answering a default -- the shared container carries titles other
-    cases committed, so neither number is assertable as a literal and their
-    *agreement* is.
+    PRD 08's operator rule is that a diagnostic must work before the thing it
+    diagnoses has run, and an empty answer is where a report assembled from four
+    reads is most likely to raise. 200 rather than 404: "no import has ever run" is a
+    fact about the thing being described, not a failure of the request. The
+    `runs == []` arm is what a route that 500'd on `revisions[0]` cannot reach, the
+    vocabulary arm is what a report that only assembled the runs would leave absent,
+    and `genome.titles == titles` says both aggregates really ran against the same
+    database -- the shared container carries titles other cases committed, so neither
+    number is assertable as a literal and their *agreement* is.
     """
     body = await _status_body(postgres_url)
     genome = body["genome"]
@@ -556,20 +532,14 @@ async def test_the_route_and_the_cli_report_the_same_vocabulary_verdict(
 ) -> None:
     """One decision, two renderings.
 
-    asserted over every branch the verdict has, including the mixed-releases one whose
-    comment records why it exists (*"asking for one of several releases would report the
-    vocabulary as wrong when what is wrong is the vectors"*).
-
-    The assertion that makes this a test of *sharing* rather than of two
-    agreeing implementations is the last one: the document the route
-    serialised is fed back through **the CLI's own renderer** and must produce
-    the byte-identical line `usher bootstrap-status` printed. A route that
-    re-derived the verdict would have to get every branch right independently,
-    and the branch it would get wrong is the one no operator ever sees.
-
-    `state` is asserted by name as well, so the pair cannot agree vacuously:
-    two surfaces both answering `not_loaded` for a loaded vocabulary satisfy
-    the equality and nothing else.
+    Asserted over every branch the verdict has, including the mixed-releases one
+    whose comment records why it exists. The assertion that makes this a test of
+    *sharing* rather than of two agreeing implementations is the last one: the
+    document the route serialised is fed back through **the CLI's own renderer** and
+    must produce the byte-identical line `usher bootstrap-status` printed. `state` is
+    asserted by name as well, so the pair cannot agree vacuously -- two surfaces both
+    answering `not_loaded` for a loaded vocabulary satisfy the equality and nothing
+    else.
     """
     async with sessions() as session:
         await seed(session)  # type: ignore[operator]
@@ -606,20 +576,15 @@ async def test_a_failed_run_reaches_the_body_as_the_stored_string_and_carries_no
     sessions: async_sessionmaker[AsyncSession],
     clean_status: None,
 ) -> None:
-    """`error` is what `BootstrapService` wrote.
+    """`error` is what `BootstrapService` wrote: `str(exc)`, never the exception object.
 
-    `str(exc)`, never the exception object and never a payload -- and 200 is the answer
-    for a catalog holding one.
-
-    The credential arm is the half worth having: a dataset whose upstream
-    failure message quotes a URL is the realistic shape (`PortUnavailable`
-    from the shared download helper renders the request it made), and PRD 08's
-    "credentials are never logged" rule reaches a response body exactly as it
-    reaches a log line. So the stored string carries a URL *with* a query
-    parameter that looks like a key, and the assertion is that the route
-    neither invents a redaction nor loses the sentence: what is stored is what
-    is served, and what an operator must not be able to read out of it is the
-    part `BootstrapService` never puts there in the first place.
+    200 is the answer for a catalog holding one. The credential arm is the half worth
+    having: a dataset whose upstream failure message quotes a URL is the realistic
+    shape (`PortUnavailable` from the shared download helper renders the request it
+    made), and PRD 08's "credentials are never logged" rule reaches a response body
+    exactly as it reaches a log line. So the stored string carries a URL *with* a
+    query parameter that looks like a key, and the assertion is that the route
+    neither invents a redaction nor loses the sentence.
     """
     stored = (
         "GET https://example.invalid/exports/movie_ids.json.gz failed: "

@@ -26,14 +26,12 @@ from usher.domain.ids import new_id
 
 
 async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> None:
-    """The three `set_updated_at` triggers are hand-written `op.execute()` calls in the migration.
+    """The three `set_updated_at` triggers are invisible to `Base.metadata.create_all`.
 
-    entirely invisible to `Base.metadata.create_all`.
-
-    Their own migration comment calls them "what actually guarantees updated_at reflects
-    every write, regardless of how it was made", specifically for M2/M4's `ON CONFLICT
-    DO UPDATE` bulk paths -- true only if something actually runs the migration that
-    creates them, which is exactly what `postgres_url` now does.
+    They are hand-written `op.execute()` calls in the migration, and they are what
+    guarantees `updated_at` reflects every write regardless of how it was made --
+    including the `ON CONFLICT DO UPDATE` bulk paths -- but only if something actually
+    runs the migration that creates them, which is what `postgres_url` does.
     """
     engine = build_engine(postgres_url)
     async with engine.connect() as conn:
@@ -59,14 +57,13 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
 
 
 async def test_migration_matches_the_orm_metadata(postgres_url: str) -> None:
-    """Autogenerate-diffing the *migrated* database against `Base.metadata` is what actually.
+    """Autogenerate-diffs the *migrated* database against `Base.metadata`.
 
-    proves the hand-maintained migration and the SQLAlchemy models it's supposed to
-    mirror haven't drifted apart -- catching exactly the two categories of change
-    CLAUDE.md already warns `--autogenerate` alone is blind to (CHECK constraint bodies,
-    and triggers/functions) requires running it against a database the migration itself
-    built, not one `create_all` built directly from the same models it would be compared
-    against.
+    That is what proves the hand-maintained migration and the models it mirrors have
+    not drifted apart, and catching the two categories `--autogenerate` alone is blind
+    to (CHECK constraint bodies, and triggers/functions) requires running it against a
+    database the migration itself built, not one `create_all` built from the same
+    models it would be compared against.
     """
 
     def _diff(connection: Connection) -> list[object]:
@@ -92,8 +89,6 @@ _BETWEEN = re.compile(r"(\w+)\s+BETWEEN\s+(\S+)\s+AND\s+(\S+)", re.IGNORECASE)
 def _normalise_check_body(sql: str) -> str:
     """Enough normalisation to compare a hand-written CHECK body against what Postgres stores.
 
-    and no more.
-
     Postgres re-prints a constraint from its parse tree: it parenthesises
     aggressively, lowercases keywords inconsistently with the source, and
     inserts explicit casts (`''::text`, `(0)::double precision`). None of
@@ -112,18 +107,14 @@ async def test_every_check_constraint_in_the_models_exists_in_the_database(
 ) -> None:
     """The gap `test_migration_matches_the_orm_metadata` cannot see.
 
-    Verified by mutation: deleting
-    `sa.CheckConstraint("episode_number >= 0", ...)` from the M4 migration
-    leaves every other test in this file passing, because
-    `compare_metadata` does not diff CHECK constraints in either direction.
-    This schema deliberately mirrors every Pydantic bound as a CHECK
-    precisely so the bulk `COPY` path -- which constructs no Pydantic model
-    at all -- cannot store a value the domain model would reject, so a
-    constraint the migration forgot is a silent hole in that guarantee.
+    `compare_metadata` does not diff CHECK constraints in either direction. This
+    schema deliberately mirrors every Pydantic bound as a CHECK precisely so the bulk
+    `COPY` path -- which constructs no Pydantic model at all -- cannot store a value
+    the domain model would reject, so a constraint the migration forgot is a silent
+    hole in that guarantee.
 
-    Bodies are compared, not just names: CLAUDE.md's original finding was
-    that *loosening a bound* produces an empty `pass` migration with no
-    warning, and a name-only check would still be green for it.
+    Bodies are compared, not just names: *loosening a bound* produces an empty `pass`
+    migration with no warning, and a name-only check would still be green for it.
     """
     expected = {
         constraint.name: _normalise_check_body(str(constraint.sqltext))
@@ -154,23 +145,16 @@ async def test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_give
 ) -> None:
     """Read back off `pg_constraint`, not off `Base.metadata`.
 
-    `confdeltype` is what Postgres will actually do, and it is the whole content of the
-    ADR-0010 asymmetry.
-
-    `n` is SET NULL, `r` is RESTRICT.
+    `confdeltype` is what Postgres will actually do, and it is the whole content of
+    the delete-rule asymmetry: `n` is SET NULL, `r` is RESTRICT.
 
     `confdeltype::text` is not decoration -- the column's type is `"char"`,
     which asyncpg hands back as `bytes`, so the uncast comparison fails
     against `b'n'`.
 
-    **Scoped by `conrelid`, and that is a correction M9 forced.** This read
-    was `conname LIKE '%episode_id_episodes'`, which was exhaustive when M4
-    wrote it and stopped being so the moment `m09a` gave `images` a third
-    foreign key to `episodes` -- the case then failed on an entry that is
-    correct, in a table it is not about. Widening the expected map instead
-    would make an M4 case about ADR-0010's two-way asymmetry silently own
-    every future episode FK's delete rule; `images`' three are asserted in
-    `test_api_surface_schema.py`, beside the CHECK that decides them.
+    **Scoped by `conrelid`**, not by constraint name: `images` also carries a foreign
+    key to `episodes`, and this case is not about that table. Its three are asserted
+    in `test_api_surface_schema.py`, beside the CHECK that decides them.
     """
     engine = build_engine(postgres_url)
     async with engine.connect() as conn:
@@ -195,16 +179,14 @@ async def test_both_new_foreign_keys_have_an_index_the_referential_check_can_use
 ) -> None:
     """Every referenced-side DELETE runs a lookup by the *referencing* column.
 
-    to NULL those rows, or to refuse -- and neither pre-existing index can serve it
-    (`uq_media_items_source_external` leads with `source_id`,
+    It runs to NULL those rows, or to refuse -- and neither pre-existing index can
+    serve it (`uq_media_items_source_external` leads with `source_id`,
     `uq_watch_states_user_episode` with `user_id`).
 
     This asserts the plan is index-shaped rather than a scan; `enable_seqscan = off`
     forces the planner to reveal whether a usable index exists at all, which is the
     property being claimed. An empty table would otherwise seq-scan regardless of how
-    many indexes it has, and prove nothing.
-
-    Neither index was in the M4 plan. The identical argument is already
+    many indexes it has, and prove nothing. The identical argument is already
     written into `db/models/watch.py` for `ix_watch_states_title_id`.
     """
     probes = [
@@ -230,11 +212,10 @@ async def test_both_new_foreign_keys_have_an_index_the_referential_check_can_use
 
 
 async def test_deleting_a_title_cascades_into_its_episodes(session: AsyncSession) -> None:
-    """`seasons`/`episodes` CASCADE from `titles` because neither protects any user state and.
+    """`seasons`/`episodes` CASCADE from `titles`.
 
-    both are re-derivable from a cached provider payload.
-
-    Contrast the RESTRICT one test below.
+    Neither protects any user state and both are re-derivable from a cached provider
+    payload. Contrast the RESTRICT one test below.
     """
     title_id, season_id, episode_id = new_id(), new_id(), new_id()
     await _insert_series_tree(session, title_id, season_id, episode_id)
@@ -253,9 +234,8 @@ async def test_a_titles_cascade_is_refused_when_watch_history_hangs_off_an_episo
 
     `titles -> episodes` is CASCADE and `watch_states.episode_id` is RESTRICT, so
     deleting a series whose episodes carry history fails at the DELETE two levels down
-    instead of silently destroying that history. That is ADR-0010's argument reaching
-    episodes, and it is the reason `episode_id` is RESTRICT rather than the CASCADE that
-    would have been the shorter diff.
+    instead of silently destroying that history. That is why `episode_id` is RESTRICT
+    rather than the CASCADE that would have been the shorter diff.
     """
     title_id, season_id, episode_id = new_id(), new_id(), new_id()
     await _insert_series_tree(session, title_id, season_id, episode_id)
@@ -304,9 +284,9 @@ async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
 ) -> None:
     """`compare_metadata` does not diff a partial index's predicate or a btree's null ordering.
 
-    so `test_migration_matches_the_orm_metadata` is green against an index missing
-    either -- and an index missing either is not an error, it just silently stops
-    serving the query it was built for.
+    `test_migration_matches_the_orm_metadata` is therefore green against an index
+    missing either -- and an index missing either is not an error, it just silently
+    stops serving the query it was built for.
     """
     for name, expected in (
         (
@@ -333,13 +313,12 @@ async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
 async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> None:
     """`ix_watch_states_user_played` is replaced rather than supplemented.
 
-    because `(user_id, played, last_played_at DESC NULLS LAST)` is a strict prefix
-    superset -- anything the narrow one could serve, the wide one serves.
+    `(user_id, played, last_played_at DESC NULLS LAST)` is a strict prefix superset --
+    anything the narrow one could serve, the wide one serves.
 
     Two indexes where one suffices is a write cost on every merge of every
-    nightly walk -- up to 1,126,789 states -- for no read. Asserted rather
-    than assumed because a migration that creates the new one and forgets
-    the drop passes every other case in this suite.
+    nightly walk for no read. Asserted rather than assumed because a migration
+    that creates the new one and forgets the drop passes every other case here.
     """
     result = await session.execute(
         text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_watch_states_user_played'")
@@ -350,7 +329,7 @@ async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> N
 async def test_m10a_moves_field_provenance_keys_in_both_directions(postgres_url: str) -> None:
     """**The one thing `m10a` does that no schema reader in this file can see**.
 
-    and the only statement in it that touches a row.
+    It is the only statement in the revision that touches a row.
 
     `field_provenance` is `field -> provider` and `adapters/tmdb/mapping.py`
     derives its keys from the `Title` field names this revision renames, so a
@@ -486,9 +465,9 @@ async def test_m10b_gives_an_existing_sync_run_a_zero_position(postgres_url: str
 
 
 async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
-    """`downgrade base` then `upgrade head`.
+    """`downgrade base` then `upgrade head`, on a throwaway database.
 
-    on a throwaway database, with the index set compared before and after.
+    The index set is compared before and after.
     """
     admin, scratch, url = await scratch_database(postgres_url, "cycle")
     try:
@@ -500,10 +479,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `ffc`) a forgotten `create_index` in its own `downgrade`, is observable at
         # all.
         await asyncio.to_thread(run_alembic, url, "-1")
-        # **Asserted against whatever the current head actually reverses**, so every new
-        # migration breaks this block and has to re-point it. Sixteen landings,
-        # sixteen loud breaks -- `test_db_migration_status.py` reds if that count
-        # and the chain on disk disagree, here or in `db-and-sql.md`.
+        # **Asserted against whatever the current head actually reverses**, so every
+        # new migration breaks this block and has to re-point it.
         at_m10e_columns = await column_set(url, "sync_runs")
         assert "error_code" not in at_m10e_columns, "error_code should not exist below m10f"
         # The premise, for the reason the `m09a` stop below records: an empty
@@ -511,8 +488,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # would pass at any depth at which `sync_runs` had ceased to exist.
         assert at_m10e_columns, "the premise: `sync_runs` still exists at `m10e`"
 
-        # **A named stop at `m10d`, holding `m10e`'s one.** Displaced from the
-        # `-1` half the moment `m10f` became head.
+        # **A named stop at `m10d`, holding `m10e`'s one.**
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10d", direction="down"))
         at_m10d_indexes = await index_set(url)
         assert "ix_title_embeddings_model_name" not in at_m10d_indexes, (
@@ -525,10 +501,8 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             "the premise: `title_embeddings` still exists at `m10d`"
         )
 
-        # **A named stop at `m10c`, holding `m10d`'s one.** Displaced from the
-        # `-1` half the moment `m10e` became head, and displaced *because it
-        # had teeth*: `-1`-from-`m10e` lands on `m10d`'s applied state, where
-        # the index is present and `not in` is false.
+        # **A named stop at `m10c`, holding `m10d`'s one.** `-1` alone lands on
+        # `m10d`'s applied state, where the index is present and `not in` is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10c", direction="down"))
         at_m10c_indexes = await index_set(url)
         assert "ix_title_neighbors_computed_at" not in at_m10c_indexes
@@ -539,10 +513,9 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             "the premise: `title_neighbors` still exists at `m10c`"
         )
 
-        # **A named stop at `m10b`, holding `m10c`'s five.** Displaced from the `-1`
-        # half the moment `m10d` became head, and displaced *because they had teeth*:
-        # `-1`-from-`m10d` landed on `m10c`'s applied state, where all five are present
-        # and every `not in` below is false.
+        # **A named stop at `m10b`, holding `m10c`'s five.** `-1` alone lands on
+        # `m10c`'s applied state, where all five are present and every `not in`
+        # below is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10b", direction="down"))
         at_m10b_columns = await column_set(url, "search_queries")
         assert "surface" not in at_m10b_columns, "surface should not exist below m10c"
@@ -554,19 +527,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert "ix_llm_calls_generation_id" not in at_m10b_indexes
         assert "pk_llm_calls" in at_m10b_indexes, "the premise: `llm_calls` still exists at `m10b`"
 
-        # **A named stop at `m10a`, holding `m10b`'s one.** Displaced from the `-1` half
-        # the moment `m10c` became head, and displaced *because it had teeth*:
-        # `-1`-from-`m10c` lands on `m10b`'s applied state, where `sync_runs.position`
-        # is present and `not in` is false.
+        # **A named stop at `m10a`, holding `m10b`'s one.** `-1` alone lands on
+        # `m10b`'s applied state, where `sync_runs.position` is present and
+        # `not in` is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m10a", direction="down"))
         at_m10a_columns = await column_set(url, "sync_runs")
         assert "position" not in at_m10a_columns, "position should not exist below m10b"
         assert at_m10a_columns, "the premise: `sync_runs` still exists at `m10a`"
 
-        # **A named stop at `m09f`, holding `m10a`'s seven.** Displaced from the `-1`
-        # half the moment `m10b` became head, and displaced *because they had teeth*:
-        # `-1`-from-`m10b` lands on `m10a`'s applied state, where the renames have
-        # happened and every `not in` below is false.
+        # **A named stop at `m09f`, holding `m10a`'s seven.** `-1` alone lands on
+        # `m10a`'s applied state, where the renames have happened and every
+        # `not in` below is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09f", direction="down"))
         at_m09f_columns = await column_set(url, "titles")
         for new in ("tmdb_vote_average", "tmdb_vote_count", "tmdb_popularity"):
@@ -582,10 +553,9 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         assert "ck_titles_community_rating_range" in at_m09f_constraints
         assert "ck_titles_tmdb_vote_average_range" not in at_m09f_constraints
 
-        # **A named stop at `m09e`, holding `m09f`'s four.** Displaced from the
-        # `-1` half the moment `m10a` became head, and displaced *because they
-        # had teeth*: `-1`-from-`m10a` lands on `m09f`'s applied state, where
-        # `attstorage` is `p` and `== "e"` is false on all three columns.
+        # **A named stop at `m09e`, holding `m09f`'s four.** `-1` alone lands on
+        # `m09f`'s applied state, where `attstorage` is `p` and `== "e"` is false
+        # on all three columns.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09e", direction="down"))
         for table, column in (
             ("title_embeddings", "embedding"),
@@ -597,19 +567,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             )
         assert "ix_title_embeddings_hnsw" in await index_set(url)
 
-        # **A named stop at `m09d`, holding `m09e`'s three.** Displaced from the
-        # `-1` half the moment `m09f` became head, and displaced *because they
-        # had teeth*: `-1`-from-`m09f` lands on `m09e`'s applied state, where
-        # both columns are already 1024 wide and `== "halfvec(384)"` is false.
+        # **A named stop at `m09d`, holding `m09e`'s three.** `-1` alone lands on
+        # `m09e`'s applied state, where both columns are already 1024 wide and
+        # `== "halfvec(384)"` is false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09d", direction="down"))
         assert await _column_type(url, "title_embeddings", "embedding") == "halfvec(384)"
         assert await _column_type(url, "user_taste", "centroid") == "halfvec(384)"
         assert "ix_title_embeddings_hnsw" in await index_set(url)
 
-        # **A named stop at `m09c`, holding `m09d`'s five.** Displaced from the `-1`
-        # half the moment `m09e` became head, and displaced *because they had teeth*:
-        # `-1`-from-`m09e` lands on `m09d`'s applied state, where every one of these
-        # artefacts is present and every `not in` above was false.
+        # **A named stop at `m09c`, holding `m09d`'s five.** `-1` alone lands on
+        # `m09d`'s applied state, where every one of these artefacts is present and
+        # every `not in` above was false.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09c", direction="down"))
         at_m09c = await index_set(url)
         assert "ix_credits_source_natural_key" not in at_m09c
@@ -630,10 +598,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # there vacuous in one direction and false in the other.
         await asyncio.to_thread(functools.partial(run_alembic, url, "m09a", direction="down"))
         at_m09a = await index_set(url)
-        # `m09c`'s four, displaced from the `-1` half the moment `m09d` became head --
-        # and displaced *because they had teeth*: `uq_images_owner_provider_path` failed
-        # loudly on the first run with `m09d` present, which is the eighth landing in a
-        # row to do so.
+        # `m09c`'s four, checked here rather than after `-1`.
         assert "uq_images_owner_provider_path" not in at_m09a
         images_columns = await column_set(url, "images")
         assert "provider_path" not in images_columns
@@ -646,9 +611,9 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # pass at any depth below `m09a` while asserting nothing.
         assert images_columns, "the premise: `images` still exists at `m09a`"
 
-        # Then down to the revision *below* `ff`, which is where M7 group E's two index
-        # changes become observable -- `ffa` sits between head and them now, and `-1`
-        # alone no longer reaches them.
+        # Then down to the revision *below* `ff`, which is where the two index changes
+        # become observable -- `ffa` sits between head and them, and `-1` alone no
+        # longer reaches them.
         await asyncio.to_thread(
             functools.partial(run_alembic, url, "fe1d40c8b7a3", direction="down")
         )
@@ -657,17 +622,12 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `-1`.
         assert "ix_titles_popularity" in stepped
         assert "pk_genome_scores" not in stepped
-        # `m08a`'s two, displaced from the `-1` half the moment `m08b` became head.
+        # `m08a`'s two, checked here rather than after `-1`.
         assert "pk_curated_rows" not in stepped
         assert "pk_llm_calls" not in stepped
-        # `m08b`'s one, displaced from the `-1` half the moment `m09a` became head --
-        # and it is displaced *because it had teeth*, not because it stopped having
-        # them: it failed loudly on the first run with `m09a` present, which is the
-        # sixth landing in a row to do so.
+        # `m08b`'s one, checked here rather than after `-1`.
         assert "pk_genome_tags" not in stepped
-        # `m09a`'s five, displaced from the `-1` half the moment `m09c` became head --
-        # and displaced *because they had teeth*: `pk_images` failed loudly on the first
-        # run with `m09c` present, which is the seventh landing in a row to do so.
+        # `m09a`'s five, checked here rather than after `-1`.
         assert "pk_images" not in stepped
         assert "pk_search_queries" not in stepped
         assert "pk_row_provider_settings" not in stepped

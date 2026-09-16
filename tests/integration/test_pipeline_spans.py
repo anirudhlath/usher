@@ -64,21 +64,16 @@ def _movie(external_id: str) -> SourceItem:
 def span_exporter() -> InMemorySpanExporter:
     """Installed *before* `create_app`.
 
-    so `configure_tracing`'s `isinstance` idempotency guard leaves this provider in
+    `configure_tracing`'s `isinstance` idempotency guard then leaves this provider in
     place instead of replacing it with an unexported one.
 
-    **The `uninstrument()` is the ProxyTracer trap, one library over, and it
-    is load-bearing for the third case in this file.**
-    `SQLAlchemyInstrumentor` is a process-wide singleton with its own
-    already-instrumented guard, and `instrument()` resolves its tracer
-    *once*, eagerly, against whatever provider is global at that instant --
-    a real `Tracer` held inside a `wrapt` closure, not a `ProxyTracer`, so
-    `tests/conftest.py`'s reset (which walks `usher.*` modules for
-    `ProxyTracer`s) cannot reach it. Without this line the first test in a
-    session to call `create_app` owns every database span for the rest of
-    it: measured directly here, where
-    `test_the_databases_own_spans_nest_under_the_pipeline` passes alone and
-    finds an empty exporter when it runs third in its own file.
+    **The `uninstrument()` is the ProxyTracer trap one library over, and it is
+    load-bearing for the third case in this file.** `SQLAlchemyInstrumentor` is a
+    process-wide singleton that resolves its tracer *once*, eagerly, against whatever
+    provider is global at that instant -- a real `Tracer` held inside a `wrapt` closure,
+    not a `ProxyTracer`, so `tests/conftest.py`'s reset cannot reach it. Without this
+    line the first test in a session to call `create_app` owns every database span for
+    the rest of it.
     """
     SQLAlchemyInstrumentor().uninstrument()
     exporter = InMemorySpanExporter()
@@ -143,17 +138,12 @@ async def seeded_source(postgres_url: str) -> AsyncIterator[None]:
     Written on its own connection and committed, because the route runs in the request's
     session and cannot see an uncommitted write made in a different one.
 
-    **Everything the probe writes has to be undone, not just the source.**
-    The route goes through `get_session`, which is the request's
-    commit boundary, so a walk driven from a route *commits for real*
-    against the session-scoped container -- unlike every rolled-back test
-    in this suite. Measured the hard way: leaving the stubbed `titles` and
-    the enqueued `jobs` behind took down four tests in three other files
-    (a duplicate `ix_titles_tmdb_id_kind`, a queue depth of 2 where 0 was
-    expected, a claim that found 3 jobs instead of 1, and a global
-    `count_by_state`), each of which passes in isolation. `media_items`
-    and `sync_runs` go with the source's `ON DELETE CASCADE`; `titles` and
-    `jobs` do not.
+    **Everything the probe writes has to be undone, not just the source.** The route
+    goes through `get_session`, which is the request's commit boundary, so a walk driven
+    from a route *commits for real* against the session-scoped container -- unlike every
+    rolled-back test in this suite, and stubbed `titles` or enqueued `jobs` left behind
+    are visible to every later file. `media_items` and `sync_runs` go with the source's
+    `ON DELETE CASCADE`; `titles` and `jobs` do not.
     """
     from usher.db.base import build_engine, build_session_factory
 
@@ -184,11 +174,9 @@ async def seeded_source(postgres_url: str) -> AsyncIterator[None]:
             await session.execute(
                 text("DELETE FROM titles WHERE sort_name LIKE 'Movie %' AND tmdb_id >= 965000")
             )
-            # No `DROP TABLE IF EXISTS stg_*` any longer: M6's staging tables
-            # are `CREATE TEMP TABLE ... ON COMMIT DROP`, so a committing
-            # module like this one no longer leaks one into `public` for
-            # `test_migration_matches_the_orm_metadata` to find in a later
-            # file.
+            # No `DROP TABLE IF EXISTS stg_*`: the staging tables are
+            # `CREATE TEMP TABLE ... ON COMMIT DROP`, so a committing module
+            # like this one cannot leak one into `public` for a later file.
             await session.commit()
         await engine.dispose()
         _SOURCES.clear()
@@ -226,16 +214,13 @@ def _ancestry_of(spans: tuple[ReadableSpan, ...], start: ReadableSpan) -> list[s
 async def test_pipeline_spans_nest_under_the_server_span(
     probe: AsyncClient, span_exporter: InMemorySpanExporter
 ) -> None:
-    """The property M1's instrumentation was wired for.
+    """The instrumentation's central property, asserted as parentage, not existence.
 
-    asserted as parentage rather than as existence.
-
-    `sync.reconcile` -> `ingest.item` -> `match.title` all hang off the
-    FastAPI server span, so the whole chain shares one trace and "what
-    happened in this request" includes the work the request triggered. A
-    pipeline that called `tracer.start_span(..., context=Context())` (a new
-    root) passes every other assertion in this repository and fails only
-    this one.
+    `sync.reconcile` -> `ingest.item` -> `match.title` all hang off the FastAPI server
+    span, so the whole chain shares one trace and "what happened in this request"
+    includes the work the request triggered. A pipeline that called
+    `tracer.start_span(..., context=Context())` (a new root) passes every other
+    assertion in this repository and fails only this one.
     """
     assert (await probe.get("/_probe/sync")).status_code == 200
     spans = span_exporter.get_finished_spans()
@@ -252,9 +237,7 @@ async def test_pipeline_spans_nest_under_the_server_span(
 async def test_the_whole_pipeline_shares_the_requests_trace(
     probe: AsyncClient, span_exporter: InMemorySpanExporter
 ) -> None:
-    """The same property stated the way Tempo asks it.
-
-    one `trace_id` for the request and everything it caused.
+    """The same property as Tempo asks it: one `trace_id` for the request and its work.
 
     A root-started pipeline span mints a *new* trace id, so the request's trace ends at
     the handler and the work appears in an unrelated trace with no link back.
@@ -272,9 +255,7 @@ async def test_the_whole_pipeline_shares_the_requests_trace(
 async def test_the_databases_own_spans_nest_under_the_pipeline(
     probe: AsyncClient, span_exporter: InMemorySpanExporter
 ) -> None:
-    """`SQLAlchemyInstrumentor` is wired in `configure_tracing` and its spans are what make "why.
-
-    was this batch slow" answerable at all.
+    """The database spans are what make "why was this batch slow" answerable at all.
 
     They only help if they land *inside* the pipeline span rather than beside it, which
     is a property of the pipeline using `start_as_current_span` (context-setting) rather
@@ -382,10 +363,7 @@ async def test_a_row_build_nests_under_the_composition_and_that_under_the_reques
 async def test_every_propose_nests_under_the_composition_and_that_under_the_request(
     probe: AsyncClient, span_exporter: InMemorySpanExporter, a_recent_arrival: uuid.UUID
 ) -> None:
-    """M10's `propose`, closed end to end.
-
-    and the arm the unit case cannot reach, because there is no request to be a parent
-    of in a unit test.
+    """`propose`, closed end to end, and the arm the unit case cannot reach.
 
     **Every one of them, not the last one.** The composer emits a `propose` per
     *registered* provider, so a name-keyed walk would assert about whichever

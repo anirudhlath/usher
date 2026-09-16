@@ -59,7 +59,7 @@ def _service(session: AsyncSession) -> SearchService:
 
     The suggest half has its own contract driver against real Postgres in
     `tests/integration/test_adapters_search_postgres.py`; re-running it through
-    here would measure the same statement twice, and every case in this file is
+    here would exercise the same statement twice, and every case in this file is
     about the search path's hydration.
     """
     return SearchService(
@@ -82,8 +82,8 @@ def _dot(left: Sequence[float], right: Sequence[float]) -> float:
     """Cosine over two unit vectors, for a case's own premise.
 
     A bare dot is a cosine only because both sides are unit before the cast and
-    drift by at most 1.21e-04 after it; every case using this asserts a gap two
-    orders of magnitude wider than that.
+    drift only within half-precision's own resolution after it; every case using
+    this asserts a gap far wider than that.
     """
     return sum(one * other for one, other in zip(left, right, strict=True))
 
@@ -143,7 +143,7 @@ async def _seed_episode_copy(
 ) -> uuid.UUID:
     """One `media_items` row shaped the way `IngestService` writes an episode.
 
-    the *series'* `title_id` **and** the episode's own `episode_id`.
+    It carries the *series'* `title_id` **and** the episode's own `episode_id`.
 
     Written through raw SQL rather than through `upsert_many` because
     `media_items.episode_id` is a real foreign key and this case does not care
@@ -192,8 +192,7 @@ async def _seed_episode_copy(
 def _record_statements(session: AsyncSession, sink: list[str]) -> Iterator[None]:
     """Capture SQL off `before_cursor_execute`, never transcribed.
 
-    A hand-copied lookalike drifts and then reads like coverage, which is a
-    failure this repository has recorded twice.
+    A hand-copied lookalike drifts and then reads like coverage.
     """
     engine = session.get_bind().engine
 
@@ -218,16 +217,14 @@ def _record_statements(session: AsyncSession, sink: list[str]) -> Iterator[None]
 async def test_a_search_costs_the_same_statements_at_5_hits_and_at_50(
     session: AsyncSession,
 ) -> None:
-    """The N+1 this task's two port additions exist to delete.
+    """The N+1 the two port additions exist to delete.
 
-    asserted the way M4's ingest cases assert it: hold the *shape* fixed and vary the
-    thing that would multiply.
+    Hold the *shape* fixed and vary the thing that would multiply.
 
     Fails: `titles.get(hit.title_id)` per hit, and `media_items.list_for_title`
     per hit. The second is worse than N+1 -- a read on `media_items.title_id`
-    alone is a read of the whole show, measured in this repository at 20,001
-    rows / 22.901 ms / 402 buffers against 1 row / 0.251 ms / 21 buffers with
-    `AND episode_id IS NULL`.
+    alone is a read of the whole show, where `AND episode_id IS NULL` reads the
+    one row that was wanted.
 
     Captured off `before_cursor_execute`, never transcribed.
     """
@@ -263,8 +260,7 @@ async def test_ownership_counts_a_retracted_copy(session: AsyncSession, source: 
     This is also the case that pins the *shared* definition: the same predicate
     backs `SearchFilters.owned_only` in `PostgresSearchIndex`, and two
     definitions of owned is how a filtered list and a boosted list stop
-    agreeing. Both halves are asserted here, in one case, because asserting
-    either alone is what let them drift in the first place.
+    agreeing. Both halves are asserted here, in one case.
     """
     retracted = await _seed_title(session, "The Quiet Vacuum")
     await _seed_copy(session, source_id=source.id, title_id=retracted.id, external_id="retracted-1")
@@ -297,9 +293,9 @@ async def test_a_series_owned_only_through_its_episodes_is_read_once(
 
     `owned_title_ids` carries `AND episode_id IS NULL`, so a library that reported
     episodes but never their series row reads as not-owned for that series -- the same
-    bound `resolve_external_ids`' title branch already accepts, and the alternative is
-    the 20,001-row read above. Asserted so the trade is visible if anyone later calls it
-    a bug.
+    bound `resolve_external_ids`' title branch already accepts, and the alternative
+    is the whole-show read above. Asserted so the trade is visible if anyone later
+    calls it a bug.
 
     Both sides again: the boost's read and the `owned_only` filter must give
     the same answer for this row shape, or a series appears in a filtered list
@@ -351,8 +347,8 @@ async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
 ) -> None:
     """Hydration through the real repository.
 
-    where a `Title` is 31 columns and `search_document` is a deferred generated column
-    the read must not touch.
+    A `Title` is 31 columns and `search_document` is a deferred generated column the
+    read must not touch.
 
     Fails: a `list_by_ids` whose `defer(..., raiseload=True)` reaches
     `_to_domain` -- which would be a `MissingGreenlet` rather than a wrong
@@ -405,9 +401,9 @@ async def test_a_household_costs_exactly_two_more_statements_and_it_names_them(
 async def test_a_stored_centroid_ranks_a_search_on_a_process_that_holds_no_model(
     session: AsyncSession,
 ) -> None:
-    """PRD 05's sixth term end to end, over the two `halfvec` round trips no fake can express.
+    """PRD 05's sixth term end to end, over two `halfvec` round trips no fake can express.
 
-    the centroid's and the candidates'.
+    The centroid's and the candidates'.
     """
     near = await _seed_title(session, "Vacuum Study Alpha")
     far = await _seed_title(session, "Vacuum Study Beta")
@@ -556,7 +552,7 @@ async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSe
 async def test_the_analytics_row_is_committed_and_a_second_session_can_read_it(
     postgres_url: str,
 ) -> None:
-    """**The commit, observed from outside the transaction that made it.**."""
+    """The commit, observed from outside the transaction that made it."""
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     household = new_id()

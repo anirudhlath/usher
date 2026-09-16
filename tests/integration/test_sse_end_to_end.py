@@ -67,7 +67,6 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM jobs",
             "DELETE FROM raw_payloads WHERE provider = 'tmdb'",
-            # Three `DROP TABLE IF EXISTS stg_*` statements stood here until M6.
         ):
             await session.execute(text(statement))
         # **`tmdb_id` as well as the name mark, because enrichment renames the row.**
@@ -214,20 +213,12 @@ async def _read_frame(lines: AsyncIterator[str]) -> str:
 
 
 async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None:
-    """The route subscribes inside its response generator.
+    """The route subscribes inside its response generator, not when the request returns.
 
-    so the subscription lands when the first chunk is produced rather than when the
-    request returns.
-
-    Publishing before it lands is a publish to nobody, and this project has already had
-    one concurrency case time out on exactly that harness bug rather than on the code it
-    was written for.
-
-    `count` is for the two-subscriber case below, where waiting for *one*
-    would let the bootstrap start with the filtered stream not yet attached
-    -- and "the filtered subscriber saw nothing" would then be true for the
-    wrong reason, which is the failure that case's liveness control exists
-    to make impossible.
+    Publishing before the subscription lands is a publish to nobody. `count` is for the
+    two-subscriber case below, where waiting for one would let the bootstrap start with
+    the filtered stream unattached, making "the filtered subscriber saw nothing" true
+    for the wrong reason.
     """
     for _ in range(400):
         if bus.subscribers >= count:
@@ -239,11 +230,10 @@ async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None
 
 
 async def _job_xmin(sessions: async_sessionmaker[AsyncSession], key: uuid.UUID) -> str | None:
-    """The row version.
+    """The row version: `xmin` is the transaction that last wrote the row.
 
-    `xmin` is the transaction that last wrote this row, so an unchanged one is proof no
-    new row version was created -- which a `SELECT priority` cannot show, since a
-    rewrite to the same value reads identically.
+    An unchanged `xmin` is proof no new row version was created, which a
+    `SELECT priority` cannot show, since a rewrite to the same value reads identically.
     """
     async with sessions() as session:
         return (
@@ -260,25 +250,15 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     bus: InMemoryEventBus,
     worker: tuple[LaneSupervisor, _CommittedStateProbe],
 ) -> None:
-    """**The loop PRD 03 diagrams, end to end, in one case.**.
+    """The read-through loop, end to end, in one case.
 
-    A client opens a stub and gets it immediately; the open promotes its
-    enrichment to `DEMAND`; a worker lane in this process claims it, enriches
-    it, commits, and publishes; the client is told on the SSE stream it
-    already had open; and the refetch that the notice provokes reads the
-    enriched row.
-
-    The stream is opened with `?titles=`, so this also asserts the filter a
-    real client would use rather than an unfiltered firehose: PRD 07's detail
-    screen subscribes to one title.
-
-    **This case is also the one that found the heartbeat defect**, and it is
-    the reason a case that looks like an end-to-end demonstration is worth
-    its cost. The enrichment takes long enough for several
-    `sse_heartbeat_seconds` to elapse, and the route used to cancel its own
-    pending `__anext__` on each one -- which closes the async generator, so
-    the stream ended before the event it was waiting for ever arrived. It
-    fails against that route today.
+    A client opens a stub and gets it immediately; the open promotes its enrichment to
+    `DEMAND`; a worker lane in this process claims it, enriches it, commits, and
+    publishes; the client is told on the SSE stream it already had open; and the refetch
+    reads the enriched row. The stream is opened with `?titles=`, so the filter a real
+    client uses is asserted too. The enrichment outlasts several
+    `sse_heartbeat_seconds`, so a route that cancelled its pending `__anext__` on each
+    heartbeat — closing the generator before the event arrived — fails here.
     """
     supervisor, probe = worker
     stub = await _given_stub(sessions, "A Film")
@@ -316,10 +296,9 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     assert refetched.json()["enrichment_state"] == "enriched", (
         "the client was told before the enrichment committed"
     )
-    # **The residual window, closed.** ADR-0033 measured its exact contents -- the two
-    # `BACKFILL` requests `enrich.py:270-277` stages and the `DELETE` that completes the
-    # job -- and G2 made the ordering a property of `JobWorker` rather than of each
-    # handler, so the frame is offered after `complete(job.id)` and its commit.
+    # The residual window is closed: the ordering is a property of `JobWorker` rather
+    # than of each handler, so the frame is offered after `complete(job.id)` and its
+    # commit -- with the two `BACKFILL` enqueues and the claim's `DELETE` inside it.
     assert probe.jobs_seen == [[("derive", "pending"), ("index", "pending")]], (
         "at the instant of the frame every write the job made should be committed -- "
         "the two BACKFILL enqueues visible and the claim gone with the DELETE"
@@ -333,14 +312,12 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
 async def test_a_second_open_writes_no_row(
     client: httpx.AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """M4's `WHERE jobs.priority < excluded.priority`, called from a client for the first time.
+    """A detail screen a user opens twice must not cost a row version.
 
-    A detail screen a user opens twice must not cost a row version.
-    Asserted on `xmin` rather than on the stored priority, because a rewrite
-    to the same value is invisible to a `SELECT`: `enqueue` answering "1 row
-    written" for the second open is both a wrong number and, at a nightly
-    walk's scale, 1,126,674 dead row versions a night. `FakeJobQueue` counts
-    that same re-enqueue as a write, so no unit case can see this.
+    Asserted on `xmin` rather than on the stored priority, because a rewrite to the same
+    value is invisible to a `SELECT` — and at a nightly walk's scale it is a dead row
+    version per title. `FakeJobQueue` counts the re-enqueue as a write, so no unit case
+    can see this.
     """
     stub = await _given_stub(sessions, "A Twice-Opened Film")
 
@@ -355,21 +332,13 @@ async def test_a_second_open_writes_no_row(
 async def test_a_slow_client_is_told_to_resync_and_the_publisher_is_unaffected(
     client: httpx.AsyncClient, bus: InMemoryEventBus, settings: Settings
 ) -> None:
-    """PRD 07's one in-stream failure vocabulary.
+    """The in-stream failure vocabulary, as a real SSE frame down a real response body.
 
-    delivered as a real SSE frame down a real response body.
-
-    A client that opens the stream and does not read it fills its queue. The
-    publisher must finish anyway -- `EnrichService` completing a title at
-    04:00 may not wait on a browser tab that closed hours ago -- and the
-    client must be *told* rather than left quietly stale.
-
-    The burst is deliberately tight and unawaited between publishes:
-    `InMemoryEventBus.publish` never suspends (pinned by driving the
-    coroutine one step by hand in `tests/unit/test_services_events.py`), so
-    the route's generator cannot drain the queue mid-burst and the overflow
-    is deterministic rather than a race. A publish that started awaiting
-    would show up here as no `resync_required` at all.
+    A client that opens the stream and does not read it fills its queue. The publisher
+    must finish anyway rather than wait on a browser tab that closed hours ago, and the
+    client must be told rather than left quietly stale. The burst is tight and unawaited
+    between publishes because `InMemoryEventBus.publish` never suspends, so the route's
+    generator cannot drain the queue mid-burst and the overflow is deterministic.
     """
     async with client.stream("GET", "/events") as stream:
         lines = aiter(stream.aiter_lines())
@@ -401,10 +370,7 @@ async def test_a_bootstrap_batch_reaches_an_unfiltered_subscriber_and_never_a_fi
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`bootstrap.progress` on the wire.
-
-    the row PRD 07's SSE table carried with no milestone against it until M9's E7.
-    """
+    """`bootstrap.progress` on the wire, as a client would receive it."""
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     fixtures = pathlib.Path(__file__).parent.parent / "fixtures" / "bulk"

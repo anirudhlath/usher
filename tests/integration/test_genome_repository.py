@@ -88,8 +88,8 @@ async def test_a_vector_of_the_wrong_width_is_refused_by_the_column(
     This is what the fake cannot fail on -- a dict stores whatever it is handed -- and
     it is why `MovieLensGenomeDataset` verifies the vocabulary width against `genome-
     tags.csv` *before* reading a score: a release whose vocabulary grew must fail naming
-    both widths, not 16,376 rows later inside a COPY with a dimension error naming
-    neither the dataset nor the release.
+    both widths, not later inside a COPY with a dimension error naming neither the
+    dataset nor the release.
     """
     seeder = PostgresGenomeSeeder(session)
     title_id = await seeder.title()
@@ -100,20 +100,15 @@ async def test_a_vector_of_the_wrong_width_is_refused_by_the_column(
 async def test_deleting_a_title_takes_its_genome_vector_with_it(
     session: AsyncSession,
 ) -> None:
-    """`ON DELETE CASCADE`.
+    """`ON DELETE CASCADE`, like `title_embeddings` and unlike `watch_states`.
 
-    and it is the `title_embeddings` case rather than the `watch_states` one.
+    A genome vector is neither user state nor irrecoverable -- it is fully
+    re-derivable from the archive plus the title's `imdb_id` -- so it should die with
+    the title rather than block the delete or survive attached to nothing.
 
-    ADR-0010 makes `watch_states.title_id` RESTRICT because a watch state is *user
-    state* a delete would destroy silently. A genome vector is neither user state nor
-    irrecoverable -- it is fully re-derivable from the archive plus the title's
-    `imdb_id`. The merge case runs the same way: after a repointing merge the loser's
-    vector describes a film that is no longer the canonical title, so it should die with
-    the loser rather than block the delete or survive attached to nothing.
-
-    Kills a migration written with `RESTRICT` (which would make every title
-    merge fail once the genome is loaded) and one with no `ondelete` at all
-    (Postgres defaults to `NO ACTION`, i.e. the same refusal).
+    Kills a migration written with `RESTRICT` (which would make every title merge fail
+    once the genome is loaded) and one with no `ondelete` at all (Postgres defaults to
+    `NO ACTION`, i.e. the same refusal).
     """
     seeder = PostgresGenomeSeeder(session)
     title_id = await seeder.title()
@@ -131,23 +126,13 @@ async def test_deleting_a_title_takes_its_genome_vector_with_it(
 async def test_genome_scores_carries_no_index_beyond_its_primary_key(
     session: AsyncSession,
 ) -> None:
-    """Pins boundary call 7's index decision.
+    """The primary key is the only index this table carries.
 
-    The access pattern is a pair lookup by `title_id`, not a KNN -- nothing
-    asks this table for its nearest neighbours -- and an HNSW index cannot
-    help a lookup by primary key at all. Measured against a real 15,565-row
-    load: `get_pair` is **0.062 ms**, two primary-key probes under a
-    `BitmapOr`. An unindexed KNN over the same table is 59.4-66.2 ms, so if a
-    future consumer ever wants one this reopens on evidence rather than being
-    foreclosed. M6 separately measured a planner-*preferred* index costing
-    4.3x for byte-identical recall, and an index nothing reads is
-    `ix_titles_popularity` again.
+    The access pattern is a pair lookup by `title_id`, not a KNN -- nothing asks this
+    table for its nearest neighbours -- and an HNSW index cannot help a lookup by
+    primary key at all.
 
-    (The plan's "1.190 ms for a full pairwise cosine" is wrong: a real full
-    pairwise self-join measures 384 s. See the migration docstring.)
-
-    Kills a later migration that adds one "for similarity". The 624 kB of
-    index inside the measured 45 MB is this primary key.
+    Kills a later migration that adds one "for similarity".
     """
     result = await session.execute(
         text("SELECT indexname FROM pg_indexes WHERE tablename = 'genome_scores' ORDER BY 1")
