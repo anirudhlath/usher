@@ -47,10 +47,10 @@ Rules for this subsystem; the evidence is in the docstrings named here.
   table-creating head needs one assertion **per table**, and a `-1` half that
   stays *green* after a new head is the alarm: it had no teeth.
 - **Sixteen landings, sixteen loud breaks.** The count is written out in words
-  here and in `test_migrations.py`, and `test_db_migration_status.py` goes red if
-  a landing re-points the chain without editing both. Keep the cardinal and the
-  noun on one line — the guard matches `(\w+) landings`, so a wrap between them
-  reads as no count at all.
+  here, and `test_db_migration_status.py` goes red if a landing re-points the
+  chain without editing it. Keep the cardinal and the noun on one line — the
+  guard matches `(\w+) landings`, so a wrap between them reads as no count at
+  all.
 - **`--autogenerate` is blind to CHECK constraint *bodies* and to triggers and
   functions entirely** — verify by eye. This schema mirrors every Pydantic field
   constraint as a CHECK, so changing a bound yields an empty `pass` migration.
