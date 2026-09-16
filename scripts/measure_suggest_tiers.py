@@ -409,9 +409,9 @@ def _mutate(name: str, typo_class: str, chooser: random.Random) -> str | None:
 
     **A transposition draws from the positions that transpose to something
     else**, rather than drawing uniformly and declining on a doubled letter.
-    The gate's case count is `3000 - 7` -- the seven being the two-character
-    names that admit no deletion -- so its transposition arm declined nothing,
-    and only drawing from the valid positions reproduces that.
+    The gate's whole shortfall from 3,000 is two-character names that admit no
+    deletion, so its transposition arm declined nothing -- and only drawing
+    from the valid positions reproduces that.
     """
     length = len(name)
     if typo_class == "substitution":
