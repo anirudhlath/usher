@@ -49,20 +49,14 @@ class _ScriptedModel:
 
 
 async def test_a_vector_that_is_not_unit_normalised_is_refused() -> None:
-    """**The mutation with the largest silent blast radius in this milestone.**.
+    """A vector whose norm is not 1.0 is refused rather than served.
 
-    Normalisation is baked into this *checkpoint* as a third module
-    (Transformer -> Pooling -> Normalize), not applied by the library:
-    `normalize_embeddings=False` returns bit-identical vectors and norms are
-    1.0 to within 5.96e-08, while the same backbone with `2_Normalize`
-    removed returns norms **8.99-9.46**. So a model swap that drops that
-    module makes every dot-product score ~85x too large -- a
-    plausible-looking ranking that is wrong everywhere, with nothing raising.
-
-    `EmbedderContract` cannot see this: it runs against the model the
-    deployment shipped with, not the one it is running now. So the check is
-    the implementation's, and this is the case that holds the tolerance in
-    place. Fails: `_NORM_TOLERANCE = 10.0`, or deleting the check.
+    Normalisation is baked into the *checkpoint* rather than applied by the
+    library, so a model swap that drops that module makes every dot-product
+    score far too large -- a plausible-looking ranking that is wrong everywhere,
+    with nothing raising. `EmbedderContract` cannot see it, because it runs
+    against the model the deployment shipped with, so the check has to be the
+    implementation's.
     """
     norm_nine = [value * 9.0 for value in _unit()]
 
@@ -91,11 +85,10 @@ async def test_a_unit_vector_passes_and_is_checked_only_once() -> None:
 async def test_a_batch_that_comes_back_the_wrong_length_is_malformed() -> None:
     """Order is the port's contract and a length mismatch is its observable half.
 
-    an implementation that deduplicated internally lands title *n*'s vector on title
-    *m*, which is invisible to any per-vector assertion.
-
-    `PortDataMalformed` rather than retryable -- no backoff makes a model
-    return a different number of vectors for the same input.
+    An implementation that deduplicated internally lands title *n*'s vector on title
+    *m*, which is invisible to any per-vector assertion. `PortDataMalformed` rather
+    than retryable -- no backoff makes a model return a different number of vectors
+    for the same input.
     """
     with pytest.raises(PortDataMalformed):
         await _embedder([_unit(), _unit(2.0)]).embed(["only one text"])
@@ -103,8 +96,6 @@ async def test_a_batch_that_comes_back_the_wrong_length_is_malformed() -> None:
 
 async def test_an_empty_batch_is_not_a_call() -> None:
     """On a GPU-resident model this is the difference between a no-op and a stall.
-
-    and the port states it as a contract rather than an optimisation.
 
     Asserted on the call that did not happen, never on the empty result -- an
     implementation that called and got nothing back returns `[]` too.
@@ -119,9 +110,9 @@ async def test_an_empty_batch_is_not_a_call() -> None:
 async def test_a_model_that_fails_at_runtime_is_retryable() -> None:
     """The model file has gone, or the process is out of memory.
 
-    `JobWorker` backs off rather than parking, because a restart genuinely fixes all
-    three -- and a park needs a human to release work whose only problem was a bad five
-    minutes.
+    `JobWorker` backs off rather than parking, because a restart genuinely fixes
+    both -- and a park needs a human to release work whose only problem was a bad
+    five minutes.
     """
 
     class _Broken:
@@ -145,8 +136,7 @@ async def test_a_model_that_fails_at_runtime_is_retryable() -> None:
         ("BAAI/bge-small-en-v1.5", "BAAI/bge-small-en-v1.5"),
         # A colon *inside* the checkpoint, which is the whole reason this is
         # `partition` and not `rpartition`. Without this row the two spell
-        # the same thing for every id that has one colon, and the mutation
-        # survives -- measured.
+        # the same thing for every id that has one colon.
         ("fastembed:BAAI/bge-small-en-v1.5:quantised", "BAAI/bge-small-en-v1.5:quantised"),
         # A different runtime is not this one's to strip: leaving it whole
         # makes the load fail loudly rather than silently serving fastembed
@@ -161,13 +151,10 @@ async def test_a_model_that_fails_at_runtime_is_retryable() -> None:
 def test_the_runtime_prefix_splits_on_the_first_colon(configured: str, expected: str) -> None:
     """`partition`, not `rpartition`.
 
-    a checkpoint id contains `/` and may carry a `:` revision suffix, so it is the
-    *first* colon that separates the runtime.
-
-    The prefix exists because the same weights under two runtimes differ by
-    1.41e-03 max pairwise delta -- 6x the halfvec quantisation error -- so
-    `model_name` has to record both, and a swap then invalidates every stored
-    vector through the stale predicate rather than through a migration.
+    A checkpoint id contains `/` and may carry a `:` revision suffix, so it is the
+    *first* colon that separates the runtime. The prefix exists because the same
+    weights under two runtimes give different vectors, so `model_name` has to record
+    both and a swap invalidates every stored vector through the stale predicate.
     """
     assert checkpoint_of(configured) == expected
 
@@ -175,14 +162,10 @@ def test_the_runtime_prefix_splits_on_the_first_colon(configured: str, expected:
 def test_the_sibling_name_does_not_shadow_the_third_party_package() -> None:
     """A module named `fastembed` inside a package that imports `fastembed`.
 
-    Python 3 has no implicit relative imports, so this is correct -- and
-    "should be correct" is how a milestone acquires a self-import that fails
-    only on somebody else's machine, so it is checked rather than assumed.
-
-    Asserted on the resolved module's own identity: `usher.adapters.embedding
-    .fastembed` has a `FastEmbedEmbedder` and the third-party distribution
-    does not, so an accidental self-import is visible whether or not the
-    extra is installed.
+    Python 3 has no implicit relative imports, so this is correct, but a self-import
+    fails only on a machine without the extra installed and so is checked rather than
+    assumed. Asserted on the resolved module's own identity: the sibling has a
+    `FastEmbedEmbedder` and the third-party distribution does not.
     """
     module = importlib.import_module("usher.adapters.embedding.fastembed")
 

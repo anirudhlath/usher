@@ -1,4 +1,4 @@
-"""`usher schedule` and `usher schedule --once` (ADR-0046, M10's J4)."""
+"""`usher schedule` and `usher schedule --once`."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -12,11 +12,7 @@ from usher.services.scheduler import Scheduler
 
 
 def test_schedule_is_advertised_by_the_parser_in_both_forms() -> None:
-    """A subcommand `build_parser` does not declare is a command `test_cli_errors.py`'s boundary.
-
-    sweep never runs -- and `--once` is the half an operator's crontab calls, so it is
-    the half most worth having a parser assertion of its own.
-    """
+    """`build_parser` declares `schedule` in both forms; a subcommand it omits never runs."""
     daemon = build_parser().parse_args(["schedule"])
     assert daemon.command == "schedule"
     assert daemon.once is False
@@ -27,12 +23,7 @@ def test_schedule_is_advertised_by_the_parser_in_both_forms() -> None:
 
 
 def test_schedule_mirrors_works_argument_surface() -> None:
-    """`usher work` / `usher work --once` is the shape this deliberately copies.
-
-    so the two are asserted to carry the same argument rather than left to look similar.
-
-    A second flag added to one and not the other is what this fails on.
-    """
+    """`schedule` carries the same arguments as `work`, so a flag added to one fails here."""
     schedule = vars(build_parser().parse_args(["schedule"]))
     work = vars(build_parser().parse_args(["work"]))
     assert set(schedule) == set(work) == {"command", "traceback", "once"}
@@ -41,11 +32,7 @@ def test_schedule_mirrors_works_argument_surface() -> None:
 def test_schedule_dispatches_to_the_scheduler_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both forms.
-
-    because `--once` and the daemon reach the same arm through the same `args.once` and
-    a dispatch that ignored the flag would still record.
-    """
+    """Both forms reach `_schedule`, each carrying its own `args.once`."""
     configured(monkeypatch)
 
     once = dispatched(monkeypatch, arm="_schedule", argv=["schedule", "--once"])
@@ -57,18 +44,11 @@ def test_schedule_dispatches_to_the_scheduler_and_not_to_the_server(
 def test_one_tick_over_an_empty_registry_says_so_and_exits(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The real `_schedule`, end to end, against the state this commit ships.
+    """One tick over an empty registry prints both numbers and returns.
 
-    **Both numbers are printed and the second is the load-bearing one.** `ran`
-    alone cannot distinguish *"nothing was due"* from *"nothing is
-    registered"*, and the second was the shipped state for one commit -- so a
-    line carrying only the first would have read as a healthy night on a
-    deployment where the scheduler could never do anything at all. J5 moved
-    the denominator to 1 and J6 moves it to 2; an empty registry is still
-    reachable, and is what a process with no way to a database gets.
-
-    That this returns at all against an unreachable database is the other
-    half: `_schedule` builds an engine and opens no connection.
+    `ran` alone cannot distinguish *"nothing was due"* from *"nothing is
+    registered"*, and `_schedule` builds an engine without opening a
+    connection, so an unreachable database still reaches the line.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
@@ -77,10 +57,9 @@ def test_one_tick_over_an_empty_registry_says_so_and_exits(
         raise AssertionError("usher schedule --once started the HTTP server")
 
     monkeypatch.setattr("uvicorn.run", _served)
-    # The empty registry is substituted rather than shipped since J5. What this
-    # case is about is the *line* -- both numbers, and `0 of 0` being sayable
-    # at all -- which is a property of `_schedule` and not of what happens to
-    # be registered today.
+    # The registry is substituted rather than shipped: this case is about the
+    # *line* -- both numbers, and `0 of 0` being sayable at all -- which is a
+    # property of `_schedule`, not of what happens to be registered today.
     monkeypatch.setattr(
         "usher.cli.build_scheduler",
         lambda settings, *, sessions: Scheduler(tick_seconds=settings.scheduler_tick_seconds),
@@ -114,23 +93,11 @@ class _Recent(ScheduledJob):
 def test_one_tick_does_not_run_a_job_whose_period_has_not_elapsed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """🔴 **The decision ADR-0046 does not state, made here and pinned here.**.
+    """`--once` still gates on the job's period rather than running unconditionally.
 
-    That record sells `usher schedule --once` as the answer for a wall-clock
-    schedule -- an operator's 3am cron -- without saying whether the period
-    still gates the tick. **It does.** A `--once` that ignored it would turn a
-    crontab line into an unconditional *"start the three-and-a-half-hour
-    rebuild now"*, and would give one command two meanings depending on a flag.
-
-    The consequence, which is a real limit rather than a footnote:
-    *"every night at 3am"* only happens if the job's period is comfortably
-    under a day, and a period is a property of the **job**, not a setting.
-    `usher similar --rebuild` remains the command that runs a batch
-    unconditionally.
-
-    The reported line is the control: `1` registered and `0` run is what makes
-    this a statement about the period rather than about an empty registry,
-    which is the state every other case in this file runs against.
+    A `--once` that ignored the period would turn an operator's 3am crontab line
+    into *"start the rebuild now"*. The reported `0 of 1` is the control: one job
+    registered, none run.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)

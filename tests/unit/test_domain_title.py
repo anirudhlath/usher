@@ -17,13 +17,10 @@ def test_title_requires_only_kind_and_name() -> None:
 
 
 def test_sort_name_may_differ_from_name() -> None:
-    """Sort_name has no normalization contract (see the field's comment in title.py) but it is a.
+    """`sort_name` is a distinct field, not a mirror of name.
 
-    distinct field, not a mirror of name — e.g.
-
-    an article-first display name sorts under a different letter than it displays under.
-    The rest of this file's fixtures set sort_name equal to name for brevity; this test
-    exists so that never reads as a rule.
+    An article-first display name sorts under a different letter than it displays under;
+    the rest of this file sets the two equal for brevity, which is not a rule.
     """
     title = Title(kind=TitleKind.MOVIE, name="The Matrix", sort_name="Matrix, The")
     assert title.name == "The Matrix"
@@ -66,8 +63,8 @@ def test_title_is_immutable() -> None:
 def test_extra_fields_are_rejected() -> None:
     """Adapters hand-map dozens of provider fields onto Title by keyword.
 
-    a typo'd field name must fail loudly at construction instead of being silently
-    discarded — the same standard usher.config.Settings holds.
+    A typo'd field name must fail loudly at construction instead of being silently
+    discarded — the same standard `usher.config.Settings` holds.
     """
     with pytest.raises(ValidationError):
         Title(
@@ -90,11 +87,9 @@ def test_evolve_returns_a_changed_validated_copy() -> None:
 
 
 def test_evolve_rejects_what_model_copy_would_silently_accept() -> None:
-    """Model_copy(update=...) is the write path the whole system must avoid.
+    """`model_copy(update=...)` applies a change with no validation at all.
 
-    it applies a change with no validation at all.
-
-    evolve() is the replacement — same shape, but it re-validates.
+    `evolve()` is the replacement — same shape, but it re-validates.
     """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
 
@@ -145,12 +140,9 @@ def test_tuple_fields_are_immutable(field: str) -> None:
 
 
 def test_field_provenance_dict_is_still_mutable_despite_frozen() -> None:
-    """Frozen=True blocks rebinding `title.field_provenance = ...`.
+    """`frozen=True` blocks rebinding `title.field_provenance`, not mutating what is in it.
 
-    not mutating a mutable value already inside it.
-
-    This is exactly why Title, alone among the five domain models, is unhashable — see
-    below.
+    This is why Title, alone among the five domain models, is unhashable.
     """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     title.field_provenance["name"] = "tmdb"
@@ -158,11 +150,9 @@ def test_field_provenance_dict_is_still_mutable_despite_frozen() -> None:
 
 
 def test_title_is_not_hashable() -> None:
-    """Field_provenance is a dict.
+    """`field_provenance` is a dict, which poisons the generated `__hash__`.
 
-    which poisons the generated __hash__ even though the model is frozen.
-
-    Failure is a loud TypeError, not silent corruption. See DomainModel's docstring.
+    The failure is a loud TypeError, not silent corruption.
     """
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     with pytest.raises(TypeError):
@@ -192,13 +182,7 @@ def test_negative_values_are_rejected(field: str, value: object) -> None:
 
 @pytest.mark.parametrize("field", ["tmdb_vote_average", "imdb_average_rating"])
 def test_a_rating_rejects_values_outside_the_zero_to_ten_scale(field: str) -> None:
-    """Both sources use 0-10, which is why the dual write was silent.
-
-    ADR-0040: `community_rating` held IMDb's `averageRating` on a skeleton and
-    TMDb's `vote_average` on an enriched row, and no value was ever out of
-    range -- so the bound is a property of both columns and is asserted on
-    both rather than on whichever one the old name happened to mean.
-    """
+    """Both sources use the 0-10 scale, so the bound is asserted on both columns."""
     with pytest.raises(ValidationError):
         Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", **{field: 99.0})
 
@@ -245,21 +229,18 @@ def test_imdb_id_accepts_seven_and_eight_digit_forms() -> None:
 
 
 def test_production_status_includes_pilot_and_rumored() -> None:
-    """TMDb actually returns these.
-
-    a closed enum missing them would force an adapter to drop the field or raise.
-    """
+    """TMDb returns these; a closed enum missing one forces an adapter to drop or raise."""
     Title(kind=TitleKind.SERIES, name="X", sort_name="X", status=ProductionStatus.PILOT)
     Title(kind=TitleKind.MOVIE, name="X", sort_name="X", status=ProductionStatus.RUMORED)
 
 
-# --- enrichment_error (ADR-0008) ----------------------------------------
+# --- enrichment_error ---------------------------------------------------
 
 
 def test_enrichment_error_is_independent_of_enrichment_state() -> None:
     """Setting enrichment_error must not move enrichment_state.
 
-    a failed enrichment attempt on a skeleton Title stays a skeleton Title.
+    A failed enrichment attempt on a skeleton Title stays a skeleton Title.
     """
     title = Title(
         kind=TitleKind.MOVIE,
@@ -298,16 +279,11 @@ def test_title_serialization_round_trips() -> None:
 
 
 def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
-    """`ge=0` alone does not refuse `inf`.
+    """`ge=0` alone does not refuse `inf`, and neither does the column.
 
-    `float("inf") >= 0` is `True` — and neither does the column:
-    `titles.tmdb_popularity` is `double precision`, where IEEE `Infinity` is legal and
-    satisfies `ck_titles_tmdb_popularity_non_negative`.
-
-    `DomainModel`'s `allow_inf_nan=False` is the only layer that says no.
-
-    `1e400` is well-formed JSON and `json.loads` maps it onto `inf`, so this is
-    the value a TMDb payload actually delivers rather than a constructed one.
+    `titles.tmdb_popularity` is `double precision`, where IEEE `Infinity` is legal;
+    `DomainModel`'s `allow_inf_nan=False` is the only layer that says no. `1e400` is
+    well-formed JSON, so this is the value a TMDb payload actually delivers.
     """
     for value in (json.loads("1e400"), float("inf"), float("nan")):
         with pytest.raises(ValidationError):
@@ -315,9 +291,7 @@ def test_tmdb_popularity_refuses_a_non_finite_value() -> None:
 
 
 def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
-    """The control for the case above.
-
-    `allow_inf_nan=False` must refuse the two non-finite values and nothing else.
+    """The control: `allow_inf_nan=False` refuses the non-finite values and nothing else.
 
     Without this, "refuses infinity" is also satisfied by a field that refuses every
     float.
@@ -332,8 +306,7 @@ def test_a_finite_tmdb_popularity_is_still_accepted() -> None:
 def test_a_rating_refuses_a_non_finite_value(field: str) -> None:
     """`DomainModel`'s `allow_inf_nan=False` refuses these, not the `le=10`.
 
-    the ceiling is pinned by
-    `test_a_rating_rejects_values_outside_the_zero_to_ten_scale` instead.
+    The ceiling is pinned by `test_a_rating_rejects_values_outside_the_zero_to_ten_scale`.
     """
     for value in (json.loads("1e400"), float("nan")):
         with pytest.raises(ValidationError):
@@ -341,22 +314,12 @@ def test_a_rating_refuses_a_non_finite_value(field: str) -> None:
 
 
 def test_year_and_vote_counts_still_accept_a_value_their_column_cannot_hold() -> None:
-    """An **excluded** case, asserted rather than left unstated.
+    """An excluded case, asserted rather than left unstated.
 
-    `Field(ge=0)` against an `integer` column is what
-    `.claude/rules/db-and-sql.md` calls *"the common shape here"*, and
-    `titles.year`, `titles.tmdb_vote_count` and `titles.imdb_num_votes` are all
-    live examples: `2**31` constructs cleanly and the column cannot hold it.
-    M10's F9 deliberately does **not** close them, for the reason ADR-0044
-    gives in its question (5) — the writers that put values in those columns
-    are `bulk.py:upsert_titles` and `bulk.py:apply_ratings`, which take
-    `ports.bulk.ImdbTitle` and `ports.bulk.ImdbRating` and never construct a
-    `Title` at all, so a ceiling here would be invisible to the path that
-    actually overflows them. All are in ADR-0044's `exposed-copy` bucket, which
-    M9's boundary call 8 keeps out of M10 whole.
-
-    The case exists so the exclusion is a recorded state rather than an
-    oversight: whoever closes the COPY path will see it go red.
+    `Field(ge=0)` against an `integer` column lets `2**31` construct cleanly where the
+    column cannot hold it. The writers that fill these columns are `bulk.py`'s COPY
+    paths, which never construct a `Title`, so a ceiling here would be invisible to the
+    path that actually overflows them — and whoever closes that path sees this go red.
     """
     title = Title(
         kind=TitleKind.MOVIE,

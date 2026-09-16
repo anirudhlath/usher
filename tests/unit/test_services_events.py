@@ -70,12 +70,10 @@ async def test_two_subscribers_both_receive_it() -> None:
 
 
 async def test_a_subscriber_scoped_to_titles_is_not_woken_by_unrelated_churn() -> None:
-    """PRD 07.
+    """Subscriptions are scoped by query, so a detail screen is not woken by churn.
 
-    "Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
-    woken by unrelated churn." A nightly walk publishes a `sync.progress` per batch --
-    1,127 of them against the one measured library -- and a detail screen that re-
-    rendered on each is the reason this filter exists rather than being a nicety.
+    A nightly walk publishes a `sync.progress` per batch, and a detail screen that
+    re-rendered on each is the reason this filter exists rather than being a nicety.
     """
     wanted, other = uuid.uuid4(), uuid.uuid4()
     bus = InMemoryEventBus()
@@ -102,9 +100,9 @@ async def test_an_unfiltered_subscriber_receives_everything() -> None:
 
 
 async def test_an_episode_event_reaches_a_subscriber_scoped_to_its_series() -> None:
-    """A client watching a series has the series' title id and no episode ids until it fetches a.
+    """A client watching a series has the series' title id and no episode ids.
 
-    season, so the filter matches on `title_id` and an episode event carries both.
+    So the filter matches on `title_id`, and an episode event carries both.
     """
     series = uuid.uuid4()
     bus = InMemoryEventBus()
@@ -122,20 +120,17 @@ async def test_an_episode_event_reaches_a_subscriber_scoped_to_its_series() -> N
 
 
 async def test_publish_never_suspends_when_a_subscribers_queue_is_full() -> None:
-    """**The property this component exists for, decided rather than timed.**.
+    """`publish` is not a suspension point, decided rather than timed.
 
-    One `send(None)` into the raw coroutine: a `publish` that never awaits
-    finishes in that one step and raises `StopIteration`; a `publish` that
-    reaches `await queue.put(...)` on a full queue parks and hands back a
-    future. No scheduler, no wall clock, no timeout -- so this fails on its
-    own assertion in microseconds against the one-line mutation
-    (`put_nowait` -> `await put`) that would otherwise deadlock the suite,
-    and it cannot be satisfied by a serialised run because it never involves
-    two tasks at all.
+    One `send(None)` into the raw coroutine: a `publish` that never awaits finishes in
+    that one step and raises `StopIteration`; one that reaches `await queue.put(...)`
+    on a full queue parks and hands back a future. No scheduler, no wall clock, no
+    timeout, so this fails on its own assertion in microseconds against the one-line
+    `put_nowait` -> `await put` change that would otherwise deadlock the suite, and it
+    cannot be satisfied by a serialised run because it never involves two tasks.
 
-    The queue is filled first on purpose: `asyncio.Queue.put` on a queue with
-    room does not await either, so a case that skipped this step would pass
-    against the mutation.
+    The queue is filled first on purpose: `asyncio.Queue.put` on a queue with room
+    does not await either, so a case that skipped this step would pass anyway.
     """
     bus = InMemoryEventBus(queue_size=1)
     async with bus.subscribe():
@@ -148,20 +143,17 @@ async def test_publish_never_suspends_when_a_subscribers_queue_is_full() -> None
 
 
 async def test_publishing_does_not_block_on_a_subscriber_that_is_not_reading() -> None:
-    """The same property, measured on overlapping wall-clock intervals.
+    """The same property, read off overlapping wall-clock intervals.
 
-    "The publish completed" is also what a fully serialised run produces, so
-    this records the window during which a subscriber is parked and not
-    reading, records the publisher's own window, and asserts the second sits
-    inside the first -- reported as intersection-over-union, the shape
-    `JobQueueContract.overlapping()` established, because it is the only one
-    that tells concurrency from a count.
+    "The publish completed" is also what a fully serialised run produces, so this
+    records the window during which a subscriber is parked and not reading, records
+    the publisher's own window, and asserts the second sits inside the first --
+    reported as intersection-over-union, the shape `JobQueueContract.overlapping()`
+    established, because it is the only one that tells concurrency from a count.
 
-    Bounded *and* measured: `wait_for` is what turns the blocking mutation
-    into a failed case rather than a hung suite, and the IoU assertion is
-    what stops a publisher that finished inside the bound but *outside* the
-    subscriber's parked window from passing -- which is the "this case
-    proves nothing" shape.
+    `wait_for` is what turns a blocking publish into a failed case rather than a hung
+    suite, and the IoU assertion is what stops a publisher that finished inside the
+    bound but *outside* the subscriber's parked window from passing.
     """
     bus = InMemoryEventBus(queue_size=2)
     loop = asyncio.get_running_loop()
@@ -177,8 +169,7 @@ async def test_publishing_does_not_block_on_a_subscriber_that_is_not_reading() -
             # Before the first `anext`, and it is load-bearing: `create_task`
             # only schedules, so a publish issued before this fires reaches an
             # empty subscriber set and the reader parks on `queue.get()`
-            # forever. Measured -- the first draft of this case timed out on
-            # its own harness rather than on the bus.
+            # forever.
             subscribed.set()
             await anext(iterator)  # take the first, then stop reading entirely
             parked.append(loop.time())
@@ -213,11 +204,10 @@ async def test_publishing_does_not_block_on_a_subscriber_that_is_not_reading() -
 
 
 async def test_a_cancelled_subscriber_is_removed() -> None:
-    """An SSE client disconnecting is the common case, not the exception.
+    """An SSE client disconnecting is the common case: a tab closing, a phone locking.
 
-    a browser tab close, a phone locking, a proxy timing out.
-
-    A bus that kept the queue would grow one per connection for the life of the process.
+    A bus that kept the queue would grow one per connection for the life of the
+    process.
     """
     bus = InMemoryEventBus()
     async with bus.subscribe():
@@ -234,16 +224,13 @@ async def test_a_subscriber_removed_by_an_exception_is_still_removed() -> None:
 
 
 async def test_an_overflowed_subscriber_gets_exactly_one_resync() -> None:
-    """A queue that re-filled behind the resync would hand the client a second one the moment it.
-
-    read the first, forever.
-    """
+    """A queue that re-filled behind the resync would hand the client a second one forever."""
     bus = InMemoryEventBus(queue_size=2)
     async with bus.subscribe() as stream:
         # `publish_all`, never a bare loop: 50 publishes into a queue of two
         # that nobody is reading is precisely where the awaiting spelling
-        # deadlocks, and an unbounded burst here turns the milestone's
-        # headline mutation from KILLED into HUNG. It did, twice.
+        # deadlocks, and an unbounded burst here would hang the suite rather
+        # than fail it.
         await publish_all(bus, (_event(index) for index in range(50)))
         first = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
         with pytest.raises(TimeoutError):
@@ -273,10 +260,9 @@ async def test_an_unparseable_last_event_id_is_told_to_resync() -> None:
 
 
 async def test_a_last_event_id_at_the_head_replays_nothing_and_waits() -> None:
-    """Also the off-by-one case.
+    """The off-by-one case: `>= seen` replays the event the client said it already has.
 
-    `>= seen` in place of `> seen` replays the very event the client told us it already
-    has, which is a duplicate on every reconnect rather than a visible failure.
+    A duplicate on every reconnect rather than a visible failure.
     """
     bus = InMemoryEventBus()
     await bus.publish(_event(1))
@@ -286,9 +272,7 @@ async def test_a_last_event_id_at_the_head_replays_nothing_and_waits() -> None:
 
 
 async def test_replay_does_not_redeliver_what_the_queue_already_holds() -> None:
-    """**A subscriber's two sources are the same `publish` calls.
-
-    and the plan's shape overlapped them.**.
+    """A subscriber's replay and its queue must not both carry the same `publish` calls.
 
     A replay resolved lazily, at the first `__anext__`, re-reads a ring that
     has meanwhile grown -- and everything published since `subscribe`
@@ -311,7 +295,7 @@ async def test_replay_does_not_redeliver_what_the_queue_already_holds() -> None:
     assert [first.event.data["seen"], second.event.data["seen"]] == [1, 2]
 
 
-# -- the deferring publisher (ADR-0033) --------------------------------------
+# -- the deferring publisher -------------------------------------------------
 
 
 async def test_a_deferred_publish_reaches_the_inner_publisher_only_on_the_flush() -> None:
@@ -342,12 +326,11 @@ async def test_a_deferred_publish_reaches_the_inner_publisher_only_on_the_flush(
 
 
 async def test_a_flush_offers_what_was_held_in_the_order_it_was_raised() -> None:
-    """`title.updated` then `watchstate.updated` is a client patching a card and then its.
+    """`title.updated` then `watchstate.updated` patches a card and then its progress.
 
-    progress; the reverse is a progress bar on a card that has not been rewritten yet.
-
-    The port promises order *within* one subscriber's stream, and a buffer is a place to
-    lose it.
+    The reverse is a progress bar on a card that has not been rewritten yet. The port
+    promises order *within* one subscriber's stream, and a buffer is a place to lose
+    it.
     """
     bus = InMemoryEventBus()
     deferred = DeferredEventPublisher(bus)
@@ -364,11 +347,10 @@ async def test_a_flush_offers_what_was_held_in_the_order_it_was_raised() -> None
 
 
 async def test_a_discard_offers_nothing_and_a_later_flush_offers_nothing_either() -> None:
-    """Both halves.
+    """Both halves, because a `discard` that only marked the buffer would pass the first.
 
-    because a `discard` that only marked the buffer would pass the first and re-deliver
-    a rolled-back job's frames on the next job's commit -- which is the defect, one
-    caller up.
+    It would then re-deliver a rolled-back job's frames on the next job's commit,
+    which is the defect one caller up.
     """
     bus = InMemoryEventBus()
     deferred = DeferredEventPublisher(bus)
@@ -385,16 +367,13 @@ async def test_a_discard_offers_nothing_and_a_later_flush_offers_nothing_either(
 
 
 async def test_a_flush_that_meets_a_raising_publisher_still_empties_the_buffer() -> None:
-    """`publish` never raises is the port's contract.
+    """The port's contract is that `publish` never raises, whatever the subscriber does.
 
-    so this is a case about an implementation breaking it -- and the caller is
-    `JobWorker`, on a path where the job is already complete and committed and there is
-    nothing left to undo.
-
-    The second frame is what makes it more than "it did not raise": a flush
-    that abandoned the loop on the first failure would hold the rest until
-    the next job's commit, which is the same cross-job delivery `discard`
-    exists to prevent.
+    The caller is `JobWorker`, on a path where the job is already complete and
+    committed and there is nothing left to undo. The second frame is what makes this
+    more than "it did not raise": a flush that abandoned the loop on the first failure
+    would hold the rest until the next job's commit, which is the same cross-job
+    delivery `discard` exists to prevent.
     """
     offered: list[ClientEvent] = []
 
@@ -416,12 +395,11 @@ async def test_a_flush_that_meets_a_raising_publisher_still_empties_the_buffer()
 async def test_a_deferred_publish_is_not_a_suspension_point_either() -> None:
     """The whole reason `publish` is an `append`.
 
-    Driven one step by hand rather than timed, for the reason the module
-    docstring gives: the mutation this rules out -- delivering to the inner
-    publisher from `publish` -- would inherit whatever *that* publisher does,
-    and the named second implementation of the port is a `LISTEN/NOTIFY`
-    transport that genuinely awaits a connection. A buffer in front of it
-    that awaited too would put a database round trip inside an enrichment.
+    Driven one step by hand rather than timed: delivering to the inner publisher from
+    `publish` would inherit whatever *that* publisher does, and the second
+    implementation of the port is a `LISTEN/NOTIFY` transport that genuinely awaits a
+    connection. A buffer in front of it that awaited too would put a database round
+    trip inside an enrichment.
     """
     deferred = DeferredEventPublisher(_Suspending())
 
@@ -429,13 +407,11 @@ async def test_a_deferred_publish_is_not_a_suspension_point_either() -> None:
 
 
 async def test_a_flush_with_nothing_held_offers_nothing() -> None:
-    """`JobWorker` flushes after every completed job and most handlers publish nothing at all.
+    """`JobWorker` flushes after every completed job and most handlers publish nothing.
 
     `match`, `derive`, `index`, `curate` and `watch_writeback` are five of the seven
-    kinds.
-
-    A flush that offered a sentinel, or re-offered the last job's frames, would wake
-    every subscriber on the box once per claimed job.
+    kinds. A flush that offered a sentinel, or re-offered the last job's frames, would
+    wake every subscriber on the box once per claimed job.
     """
     offered: list[ClientEvent] = []
 
@@ -451,11 +427,7 @@ async def test_a_flush_with_nothing_held_offers_nothing() -> None:
 
 
 class _Suspending(NullEventPublisher):
-    """A publisher that parks.
-
-    standing in for the `LISTEN/NOTIFY` transport `ports/events.py` names as the second
-    implementation.
-    """
+    """A publisher that parks, standing in for the `LISTEN/NOTIFY` transport."""
 
     async def publish(self, event: ClientEvent) -> None:
         await asyncio.sleep(0)

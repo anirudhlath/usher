@@ -1,4 +1,4 @@
-"""`GET /titles/{id}` -- PRD 07's title detail, narrowed to what M4 fills."""
+"""`GET /titles/{id}` -- PRD 07's title detail, narrowed to what the catalog fills."""
 
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -229,7 +229,7 @@ async def _seed_search(
 ) -> uuid.UUID:
     """One answered search, exactly as `SearchService._record_search` writes it, and its id back.
 
-    which is what `GET /search` echoes as `search_id`.
+    That is what `GET /search` echoes as `search_id`.
 
     Written through the port rather than into the fake's dicts, so a row this
     file seeds is a row `record()` would produce: `clicked_title_id` `NULL`
@@ -276,9 +276,9 @@ class _RefusingSearchQueries(SearchQueryRepository):
     ) -> None:
         raise self._error
 
-    # The retention pair (M10's J5) raises too, on the same terms -- nothing
-    # at a route reaches either, and a stub that answered them would be
-    # claiming this double models something it is not asked about.
+    # The retention pair raises too, on the same terms -- nothing at a route
+    # reaches either, and a stub that answered them would be claiming this
+    # double models something it is not asked about.
     async def oldest(self) -> AwareDatetime | None:
         raise self._error
 
@@ -317,7 +317,7 @@ async def _seed_images(
 ) -> None:
     """One `replace_for_titles`, the way `usher derive` writes it.
 
-    scope and rows together, because a scope derived from the rows is the defect
+    Scope and rows together, because a scope derived from the rows is the defect
     `ImageRepository.replace_for_titles`' docstring names.
     """
     await images.replace_for_titles([title_id], entries)
@@ -409,25 +409,19 @@ async def test_a_title_renders_its_metadata_and_availability(
 async def test_the_three_fields_m9_answered_with_a_route_are_not_keys_here(
     client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
 ) -> None:
-    """This case was `..._still_unbuilt_are_absent` from M5 to M9 and asserted four names.
-
-    M9 answered all four and **only one of them became a key on this response**, so the
-    case is now about the other three and about the fact that answering a field is not
-    the same as inlining it.
+    """Answering a field with a route of its own is not the same as inlining it here.
 
     `credits` is two keys, `cast` and `crew`, because PRD 07's outstanding
     shape decision was answered that way and "credits" names no field.
     `similar` is `GET /titles/{title_id}/similar`: a neighbour list carries
     staleness signals this body has nowhere to put and is refreshed on its own
     schedule. The season hierarchy is `GET /series/{id}/seasons` and
-    `GET /seasons/{id}/episodes`, because one measured series holds 20,000
-    episodes and inlining the tree makes the length of a title response a
+    `GET /seasons/{id}/episodes`, because a series can hold tens of thousands
+    of episodes and inlining the tree makes the length of a title response a
     property of the show.
 
-    **Seeded *with* artwork on purpose.** The fourth name is a key now, and a
-    case asserting all four are absent would pass against a route that lost
-    `images` entirely -- which is exactly the regression the rest of this
-    file is about.
+    **Seeded *with* artwork on purpose**, because a case asserting artwork is
+    absent too would pass against a route that lost `images` entirely.
     """
     await _seed_images(images, seeded.title_id, [_image(seeded.title_id)])
     body = (await client.get(f"/titles/{seeded.title_id}")).json()
@@ -443,7 +437,7 @@ async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
 ) -> None:
     """PRD 07's outstanding shape decision, answered.
 
-    how many, in what order, cast and crew apart.
+    How many, in what order, cast and crew apart.
 
     **The order is `billing_order`, and the premise is what makes this an
     ordering test.** The bit-part actor is seeded *first*, so their UUIDv7
@@ -456,7 +450,7 @@ async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
 
     **And `crew` is its own key.** An implementation that ignored the `kind`
     filter answers a populated, correctly shaped list about the wrong people,
-    which is the failure mode this milestone is most exposed to.
+    which is the failure mode this route is most exposed to.
     """
     bit_player = await _seed_person(people, "Bit Player")
     lead = await _seed_person(people, "The Lead")
@@ -508,18 +502,17 @@ async def test_a_title_with_no_derived_credits_carries_neither_key(
 ) -> None:
     """Absent, never `[]`, and the assertion is on the **wire**.
 
-    a missing field and a field serialised as `null` or `[]` are three different bodies
-    and only two of them are distinguishable on the object.
+    A missing field and a field serialised as `null` or `[]` are three different
+    bodies and only two of them are distinguishable on the object.
 
     What this buys is that the response never *claims* a film has no cast. A
     client renders no cast section in both the underived and the genuinely
     uncredited case, which is correct in both -- and the residual is that the
     two stay indistinguishable, recorded in PRD 07 rather than papered over
-    with a `credits_derived` flag nothing writes. T6 makes that residual the
-    ordinary case rather than a corner: it fills `titles.credit_names` from
-    IMDb for ~93.8% of the catalog with no `people` or `credits` rows at all,
-    so a title can be searchable by a credited name and answer this route with
-    neither key.
+    with a `credits_derived` flag nothing writes. It is the ordinary case
+    rather than a corner: `titles.credit_names` is filled from IMDb for most of
+    the catalog with no `people` or `credits` rows at all, so a title can be
+    searchable by a credited name and answer this route with neither key.
     """
     body = (await client.get(f"/titles/{seeded.title_id}")).json()
     assert "cast" not in body
@@ -575,9 +568,8 @@ async def test_the_images_key_is_present_and_names_no_provider_url(
 
     **The positive control comes first, and it is why.** `CDN_HOST not in
     body` and `POSTER_PATH not in body` both pass against a route that
-    renders no `images` key at all, which is precisely the state this task
-    changes -- so the id assertion is what makes the two absence assertions
-    say anything.
+    renders no `images` key at all -- so the id assertion is what makes the
+    two absence assertions say anything.
     """
     poster = _image(seeded.title_id)
     await _seed_images(images, seeded.title_id, [poster])
@@ -596,13 +588,11 @@ async def test_the_images_key_is_present_and_names_no_provider_url(
 async def test_a_title_with_no_images_carries_no_key_for_the_reason_m5_chose_absence(
     client: httpx.AsyncClient, seeded: Seeded
 ) -> None:
-    """**The correction this task exists to carry.** M5's argument for absence rather than.
+    """Absence rather than `null` or `[]`, for the reason `cast`/`crew` use it.
 
-    `null` was that a client cannot tell "not derived yet" from "this film has no cast"
-    -- and **that argument does not expire on the day the table lands.** An earlier
-    draft of C7 shipped `"images": []` and it is wrong for the same reason `"credits":
-    []` was wrong in M5: an empty array is this API stating a fact about the title, and
-    the only fact it can honestly state is that it has nothing to say.
+    A client cannot tell "not derived yet" from "this film has no artwork", and
+    `"images": []` is this API stating a fact about the title when the only fact it
+    can honestly state is that it has nothing to say.
 
     So this is not a different rule from `cast`/`crew`'s -- it is the same
     rule, which is why the assertion is spelled the same way and against the
@@ -617,24 +607,18 @@ async def test_a_title_with_no_images_carries_no_key_for_the_reason_m5_chose_abs
 async def test_the_images_are_in_the_stored_order_and_not_id_order(
     client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
 ) -> None:
-    """`(is_primary DESC.
-
-    id)`, and the premise is what makes this an ordering test rather than a membership
-    one.
+    """`(is_primary DESC, id)`, and the premise is what makes this an ordering test.
 
     The **backdrop is seeded first**, so its UUIDv7 id is the smaller of the
     two and `ORDER BY id` alone would put it first -- which is the trap
-    `CLAUDE.md` names and which cost M7 five untested orderings. The guard
-    below states that, computed from the ids the fixture actually minted, so
-    a later fixture edit that re-aligns the two orders fails here rather than
-    silently ratifying a read with no sort key at all.
+    `CLAUDE.md` names. The guard below states that, computed from the ids the
+    fixture actually minted, so a later fixture edit that re-aligns the two
+    orders fails here rather than silently ratifying a read with no sort key
+    at all.
 
-    **`(is_primary DESC, sort_order, id)` is the plan's spelling and there is
-    no `sort_order` column.** ADR-0032's migration request deliberately left
-    it out and C2 did not smuggle it into a migration authorised for the key,
-    so `id` is first-sighting order and the one thing a re-ranking provider
-    can move in Usher's answer is which image is primary
-    (`usher.ports.repository.image` records the cost).
+    **There is no `sort_order` column**, so `id` is first-sighting order and the
+    one thing a re-ranking provider can move in Usher's answer is which image is
+    primary (`usher.ports.repository.image` records the cost).
     """
     backdrop = _image(
         seeded.title_id, kind=ImageKind.BACKDROP, path="/a-backdrop.jpg", is_primary=False
@@ -684,7 +668,7 @@ async def test_a_title_whose_only_artwork_is_unservable_is_the_absent_case_too(
 ) -> None:
     """The residual the filter creates, pinned so it is a decision rather than a discovery.
 
-    a title whose every image this proxy declines answers exactly like a title with no
+    A title whose every image this proxy declines answers exactly like a title with no
     artwork at all.
 
     That is the correct *body* -- there is nothing here a client can fetch --
@@ -713,21 +697,19 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
 ) -> None:
     """`person_id`, `name`, `character`, `job`.
 
-    and `null` rather than an absent key for the half of the pair a credit does not
+    And `null` rather than an absent key for the half of the pair a credit does not
     carry, because a cast entry with no `character` and a crew entry with no `job` are
     both real rows and a client renders the difference.
 
     **`billing_order` and `department` are on `CreditedPerson` and are
-    deliberately not on the wire**, which is a choice rather than a
-    consequence -- the plan's own acceptance said `CreditedPerson` had no
-    `department` field and it has one. `billing_order` *is* the list order,
+    deliberately not on the wire.** `billing_order` *is* the list order,
     already spent; handing it to a client invites a client-side re-sort, and
     the tempting `billing_order or 0` spelling of that puts an unbilled crew
     member above the lead. `department` is a coarser grouping than the shape
     decision PRD 07 records here uses.
 
-    `tmdb_id` is absent for ADR-0003's reason: identity in this contract is
-    Usher's own UUIDv7 and a provider id is an indexed attribute.
+    `tmdb_id` is absent because identity in this contract is Usher's own
+    UUIDv7 and a provider id is an indexed attribute.
     """
     lead = await _seed_person(people, "The Lead")
     director = await _seed_person(people, "The Director")
@@ -777,10 +759,7 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
 
 
 def test_every_wire_field_name_is_a_field_some_response_actually_carries() -> None:
-    """**The half of ADR-0040's boundary that `WIRE_FIELD_NAMES` itself does not check.
-
-    its *values*.**.
-    """
+    """The half `WIRE_FIELD_NAMES` does not check: its *values*."""
     carried = (
         set(TitleResponse.model_fields)
         | set(BrowseItemResponse.model_fields)
@@ -804,7 +783,7 @@ def test_every_wire_field_name_is_a_field_some_response_actually_carries() -> No
 async def test_the_rating_fields_keep_their_wire_names(
     client: httpx.AsyncClient, seeded: Seeded
 ) -> None:
-    """**ADR-0040 moved three columns and deliberately moved no wire field.**.
+    """Three columns moved and deliberately no wire field moved with them.
 
     `usher-web` is deployed against this body and generates its types from it,
     so `TitleResponse.community_rating` stayed put while the column behind it
@@ -880,17 +859,15 @@ async def test_the_absent_keys_are_still_described_in_the_schema_and_never_as_nu
 ) -> None:
     """A key that is absent on the wire is still part of the contract.
 
-    and the schema is where a generated client learns its shape.
-
-    **Measured, because the obvious mechanism destroys this.** A pydantic
-    `@model_serializer(mode="wrap")` that pops the key is the natural way to
-    spell "absent rather than null" and pydantic derives the *serialization*
-    schema from such a serializer's return annotation -- so with `-> dict[str,
-    Any]` the whole response becomes `{"type": "object",
+    The schema is where a generated client learns its shape, and the obvious
+    mechanism destroys it. A pydantic `@model_serializer(mode="wrap")` that pops
+    the key is the natural way to spell "absent rather than null", and pydantic
+    derives the *serialization* schema from such a serializer's return annotation
+    -- so with `-> dict[str, Any]` the whole response becomes `{"type": "object",
     "additionalProperties": true}` and `GET /titles/{id}` stops describing any
     field at all. FastAPI generates response schemas in serialization mode, so
-    the damage reaches `/openapi.json` in full. Confirmed directly before
-    `exclude_unset` was chosen instead.
+    the damage reaches `/openapi.json` in full. `exclude_unset` is what this
+    route uses instead.
 
     And the declared type is `array`, never `array | null`: absence is the
     only empty this route emits, so a schema admitting `null` would document a
@@ -908,8 +885,8 @@ async def test_the_absent_keys_are_still_described_in_the_schema_and_never_as_nu
 
     # And `kind` reaches a generated client as the enum rather than as a bare
     # string -- the difference between a client that can switch on a poster
-    # and one that compares spellings. `ImageKind` has five members and M9
-    # emits three, which is `m09a`'s call and not this schema's, so the
+    # and one that compares spellings. `ImageKind` has more members than the
+    # writer emits, which is the writer's call and not this schema's, so the
     # assertion is that the vocabulary is *there* rather than which members.
     image = app.openapi()["components"]["schemas"]["ImageResponse"]
     assert set(image["properties"]) == {"id", "kind"}
@@ -919,15 +896,7 @@ async def test_the_absent_keys_are_still_described_in_the_schema_and_never_as_nu
 async def test_an_unknown_title_is_a_404_in_prd_07s_envelope(
     client: httpx.AsyncClient,
 ) -> None:
-    """This case read `== {"detail".
-
-    "title not found"}` until M9 and was named `..._in_the_shape_m3_ships`: FastAPI's
-    default, which M5 shipped deliberately because there was no `code` vocabulary to
-    name and no 503 on this route to force one.
-
-    M9 lands the envelope's *shape* off the surface that already exists, so the 404 is
-    now a problem document while the 503 that would have forced it still does not exist
-    here.
+    """The 404 is PRD 07's problem document, not FastAPI's `{"detail": ...}`.
 
     Kept deliberately thin -- the whole envelope is asserted in
     `tests/unit/test_api_problem.py`, and duplicating it here would make two
@@ -946,22 +915,16 @@ async def test_a_malformed_id_is_a_422_that_does_not_echo_it_where_it_was_submit
 ) -> None:
     """`usher.api.errors` strips pydantic's `input` app-wide.
 
-    registered on the app rather than on a router precisely so a route added later
-    cannot forget to opt in.
+    Registered on the app rather than on a router precisely so a route added later
+    cannot forget to opt in. This is that guarantee, checked on the route that was
+    added later.
 
-    This is that guarantee, checked on the route that was added later.
-
-    **This case asserted `"not-a-uuid" not in response.text` until M9 and
-    that is no longer true, for a reason worth stating rather than
-    weakening.** RFC 9457's `instance` "identifies the specific occurrence of
-    the problem", which is the request path, so a rejected *path parameter*
-    is necessarily in the document -- there is no `instance` that identifies
-    the occurrence and omits the path. Nothing about the credential rule
-    moves: PRD 08's is about what a client *submitted as data*, which in this
-    API is a body or a query string, and both are still absent. The
-    assertion is therefore where the leak would be -- pydantic's `input`,
-    which is what carried a whole request body -- rather than over the whole
-    text.
+    The rejected *path parameter* is necessarily in the document: RFC 9457's
+    `instance` "identifies the specific occurrence of the problem", which is the
+    request path. PRD 08's rule is about what a client *submitted as data*, which
+    in this API is a body or a query string, and both are still absent -- so the
+    assertion is where the leak would be, pydantic's `input`, rather than over
+    the whole text.
     """
     response = await client.get("/titles/not-a-uuid")
     assert response.status_code == 422
@@ -1004,8 +967,8 @@ async def test_a_retracted_copy_is_rendered_rather_than_filtered(
 ) -> None:
     """PRD 02's soft-delete availability, at the boundary.
 
-    and the case the repository contract cannot stand in for, because a DTO is free to
-    filter what the repository faithfully returned.
+    The repository contract cannot stand in for this, because a DTO is free to filter
+    what the repository faithfully returned.
 
     A film on a temporarily unmounted drive renders as "on Living Room Emby, not
     currently reported", never as "on no source".
@@ -1033,11 +996,11 @@ def response_availability(body: dict[str, object]) -> list[tuple[str, bool]]:
 async def test_a_stub_renders_its_state_and_its_error(
     client: httpx.AsyncClient, parked_stub: Seeded
 ) -> None:
-    """PRD 07.
+    """PRD 07's two independent fields.
 
     `enrichment_state` on every title-bearing response so clients render skeleton
     shimmer deliberately, and `enrichment_error` as a *separate, independent* field
-    (ADR-0008) so a failed attempt is visible without inventing a `failed` tier.
+    so a failed attempt is visible without inventing a `failed` tier.
     """
     body = (await client.get(f"/titles/{parked_stub.title_id}")).json()
     assert body["enrichment_state"] == "stub"
@@ -1066,7 +1029,7 @@ async def test_opening_an_enriched_title_enqueues_nothing(
 ) -> None:
     """The other half, at the boundary.
 
-    a queue that grew a row per title view is permanently the size of the library.
+    A queue that grew a row per title view is permanently the size of the library.
     """
     await client.get(f"/titles/{seeded.title_id}")
     assert await queue.claim([JobKind.ENRICH], limit=10) == []
@@ -1075,11 +1038,11 @@ async def test_opening_an_enriched_title_enqueues_nothing(
 async def test_opening_a_result_from_a_search_records_the_click_against_that_row(
     client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
 ) -> None:
-    """**The click half of PRD 10's outcome attribution.
+    """The click half of PRD 10's outcome attribution, end to end through the route.
 
-    end to end through the route.** `GET /search` hands back a `search_id`; opening one
-    of its results with that id attached is the only thing that can say *which* result
-    the household opened, and `clicked_title_id` is the column that holds the answer.
+    `GET /search` hands back a `search_id`; opening one of its results with that id
+    attached is the only thing that can say *which* result the household opened, and
+    `clicked_title_id` is the column that holds the answer.
 
     The wrong implementation this kills: a route that declares `?search_id=`
     and never reads it -- which serves a byte-identical response and leaves
@@ -1102,12 +1065,11 @@ async def test_opening_a_result_from_a_search_records_the_click_against_that_row
 async def test_a_search_id_belonging_to_another_household_is_not_updated(
     client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
 ) -> None:
-    """**A security boundary.
+    """A security boundary, not tidiness.
 
-    not tidiness.** A `search_id` arrives in a query string and UUIDv7 is partially
-    time-ordered, so an `UPDATE` scoped only by `id` lets one household write
-    attribution onto another's row -- silently, with no error, no log line and no
-    metric.
+    A `search_id` arrives in a query string and UUIDv7 is partially time-ordered, so
+    an `UPDATE` scoped only by `id` lets one household write attribution onto
+    another's row -- silently, with no error, no log line and no metric.
 
     **The positive control is the byte-identical call from the owning
     household**, in this same case and against the same seeded row. Without
@@ -1191,9 +1153,10 @@ async def test_an_unknown_search_id_changes_nothing_and_still_serves_the_title(
 async def test_a_malformed_search_id_is_ignored_rather_than_refused(
     client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
 ) -> None:
-    """**The 422 this route must not answer**.
+    """The 422 this route must not answer.
 
-    and the reason `?search_id=` is typed `str` rather than `uuid.UUID` at the boundary.
+    It is the reason `?search_id=` is typed `str` rather than `uuid.UUID` at the
+    boundary.
 
     Annotated as a UUID, FastAPI refuses the whole request for a value that
     is not one -- so a client that truncated or re-encoded the id would be
@@ -1256,10 +1219,7 @@ async def test_a_search_id_on_a_title_that_does_not_exist_attributes_nothing(
 async def test_a_refused_outcome_write_still_serves_the_title(
     app: FastAPI, client: httpx.AsyncClient, seeded: Seeded, queries: FakeSearchQueryRepository
 ) -> None:
-    """PRD 08's *"a degraded subsystem narrows functionality.
-
-    it never fails a request local state can answer"*, at the narrowest subsystem there
-    is.
+    """PRD 08's degradation rule, at the narrowest subsystem there is.
 
     Whether Usher managed to note down where the household came from cannot
     decide whether it gets the title. **Neither shipped writer can reach the
@@ -1302,9 +1262,7 @@ async def test_a_bug_in_the_outcome_write_is_not_absorbed_into_a_log_line(
 
 
 async def test_the_search_id_parameter_is_described_in_the_schema(app: FastAPI) -> None:
-    """A parameter a client is asked to send back and that `/openapi.json` does not describe is.
-
-    a parameter no generated client will send.
+    """A parameter `/openapi.json` does not describe is one no generated client sends.
 
     It is `string` rather than `format: uuid` on purpose and the case says
     so: the route accepts a value that is not a UUID and ignores it, and a
@@ -1323,17 +1281,15 @@ async def test_the_search_id_parameter_is_described_in_the_schema(app: FastAPI) 
 async def test_the_response_carries_no_source_specific_concept(
     client: httpx.AsyncClient, seeded: Seeded
 ) -> None:
-    """PRD 07's first line: "Nothing in this surface mentions a media server.
+    """PRD 07's first line: nothing in this surface mentions a media server.
 
-    sources appear only as availability badges and playback targets.".
-
-    A source's own item id is both a source concept escaping its adapter and
-    a value no client has a use for -- every route a client calls takes a
-    `Title.id`. Asserted against the id itself rather than against the
-    substring "emby", which the plan's draft used and which fails on PRD 07's
-    own example: the badge carries the name an *operator* typed, and "Living
-    Room Emby" is a perfectly correct value for it. A rule that forbids the
-    word forbids the feature.
+    Sources appear only as availability badges and playback targets. A source's own
+    item id is both a source concept escaping its adapter and a value no client has a
+    use for -- every route a client calls takes a `Title.id`. Asserted against the id
+    itself rather than against the substring "emby", which fails on PRD 07's own
+    example: the badge carries the name an *operator* typed, and "Living Room Emby"
+    is a perfectly correct value for it. A rule that forbids the word forbids the
+    feature.
     """
     body = (await client.get(f"/titles/{seeded.title_id}")).text
     assert EXTERNAL_ID not in body
@@ -1343,10 +1299,9 @@ async def test_the_response_carries_no_source_specific_concept(
 async def test_the_response_carries_no_credential(
     client: httpx.AsyncClient, seeded: Seeded
 ) -> None:
-    """The rule with one documented exception in v1.
+    """The rule with one documented exception in v1, and this route is not it.
 
-    and this route is not it (ADR-0012's exception is a `direct` playback target's URL,
-    which is M9's `POST /titles/{id}/play`).
+    The exception is a `direct` playback target's URL, on `POST /titles/{id}/play`.
 
     `credentials_ref` is an opaque pointer rather than a secret and is still absent: PRD
     08's rule is about the whole credential surface, and `SourceResponse` omits it for
@@ -1360,9 +1315,9 @@ async def test_the_response_carries_no_credential(
 
 
 async def test_the_route_is_in_the_schema_under_its_own_tag(app: FastAPI) -> None:
-    """A route that answers correctly and is absent from `/openapi.json` is a route no generated.
+    """A route absent from `/openapi.json` is one no generated client can call.
 
-    client can call -- PRD 07 lists the schema as part of the surface.
+    PRD 07 lists the schema as part of the surface.
     """
     paths = app.openapi()["paths"]
     assert "/titles/{title_id}" in paths

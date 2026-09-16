@@ -33,13 +33,10 @@ def test_a_full_run_carries_no_cursor_and_a_delta_run_does() -> None:
 
 
 def test_a_naive_cursor_is_rejected() -> None:
-    """Every datetime in this project is a `pydantic.AwareDatetime` and every column is.
+    """Every datetime here is aware and every column is TIMESTAMPTZ.
 
-    TIMESTAMPTZ.
-
-    A naive `cursor_at` reaching the delta walk would be compared against an aware
-    `started_at` and raise at the comparison, or silently be read as UTC when the
-    operator meant local time.
+    A naive `cursor_at` reaching the delta walk would raise when compared against an
+    aware `started_at`, or be silently read as UTC when the operator meant local time.
     """
     with pytest.raises(ValidationError):
         SyncRun(
@@ -82,9 +79,8 @@ def test_a_run_is_frozen_and_evolves() -> None:
 def test_evolve_revalidates_a_counter() -> None:
     """`.evolve()`, never `model_copy(update=...)`.
 
-    the reconciler's own numbers are what PRD 10's dashboard 3 plots, and a negative one
-    written through an unvalidated copy would reach the column and fail there instead of
-    here.
+    A negative counter written through an unvalidated copy would reach the column and
+    fail there instead of here.
     """
     run = SyncRun(source_id=SOURCE_ID, kind=SyncRunKind.FULL)
     with pytest.raises(ValidationError):
@@ -101,22 +97,11 @@ def test_a_run_rejects_an_unknown_field() -> None:
 
 
 def test_a_run_starts_at_position_zero_and_refuses_a_negative_one() -> None:
-    """`position` is the StartIndex a resumed walk starts from.
+    """`position` is the StartIndex a resumed walk starts from, not `items_seen`.
 
-    and it is a separate field from `items_seen` on purpose.
-
-    ⚠️ **Not for the duplicate-yield reason this docstring gave until
-    2026-08-26**, which is not operative: `_walk` seeds its counter at the
-    resume point and `_flush` moves both columns by the same batch, so
-    `position - items_seen` is fixed for the life of a run and a duplicated
-    yield moves the two identically. The divergence that is real comes from
-    a **reclaimed row whose two columns already disagree**, which `m10b`'s
-    `NOT NULL DEFAULT 0` backfill guarantees on the rows #41 left `RUNNING`:
-    `position = 0` beside a six-figure `items_seen`. Resuming such a row from
-    its counter opens the stream six figures into pages the run never walked.
-    (The 51,000 below is a plausible mid-walk offset into a ~1.14M-record
-    stream, chosen rather than measured -- what this case pins is the floor
-    and the refusal, not that number.)
+    A reclaimed row can carry `position = 0` beside a six-figure `items_seen`, so a
+    resume driven off the counter would open the stream six figures into pages the run
+    never walked.
     """
     one = SyncRun(source_id=new_id(), kind=SyncRunKind.WATCH_STATE)
     assert one.position == 0

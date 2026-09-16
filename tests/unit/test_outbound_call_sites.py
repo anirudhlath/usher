@@ -1,6 +1,6 @@
-"""Every outbound HTTP call in `src/usher/adapters/` is enumerated.
+"""Every outbound HTTP call in `src/usher/adapters/` is enumerated here.
 
-and each one has a recorded decision about its rate limiter.
+Each one carries a recorded decision about its rate limiter.
 """
 
 import ast
@@ -11,9 +11,8 @@ from dataclasses import dataclass
 import usher
 import usher.adapters
 
-# : The httpx client methods that put bytes on a wire -- **all eleven of them**, : which
-# is `httpx.AsyncClient`'s own request-issuing surface and not a : shortlist of the ones
-# this tree happens to use today.
+#: The httpx client methods that put bytes on a wire: `httpx.AsyncClient`'s own
+#: request-issuing surface, not a shortlist of the ones this tree uses today.
 _OUTBOUND_METHODS = frozenset(
     {
         "build_request",
@@ -42,11 +41,11 @@ _ANCHOR = "usher.adapters.emby.session"
 _CLIENT = "client"
 _LIBRARY = "httpx"
 
-# : **The complement guard's exemption list, and the reason each one is on it.** : : The
-# call-site scan asks *what expression is called*; this asks *what module : imports the
-# library*, and the second question is the one a rename cannot : dodge -- **you cannot
-# make an httpx call without importing httpx.** Twelve : modules under `adapters/`
-# import it, seven of them hold a row in : `_DECISIONS`, and these five are the
+#: The complement guard's exemption list, and the reason each one is on it. The
+#: call-site scan asks *what expression is called*; this asks *what module imports the
+#: library*, and the second question is the one a rename cannot dodge -- you cannot make
+#: an httpx call without importing httpx. These are the modules under `adapters/` that
+#: import it and hold no row in `_DECISIONS`.
 _NO_CALL_OF_ITS_OWN: dict[str, str] = {
     "usher.adapters.bulk.imdb": (
         "takes `client: httpx.AsyncClient` and hands it to `CachedDatasetFile` "
@@ -89,14 +88,10 @@ _PACED_THROUGH_ANOTHER_MODULE: dict[str, str] = {
 class _Decision:
     """What one call site dials, what paces it, and where the code says so.
 
-    `recorded_in` is where the *code* says so -- a module docstring for five of
-    the six declines, and `composition.image_proxy`'s own docstring for the
-    sixth, which is where that decision was already written before S3 and which
-    S3 confirms rather than reverses.
-
-    `paced` is what `test_the_module_census_is_the_one_the_records_quote`
-    counts. It is a field rather than a string match on `limiter`, because
-    every decline's prose contains the word "limiter" too.
+    `recorded_in` is where the *code* says so -- a module docstring for five of the six
+    declines, and `composition.image_proxy`'s own docstring for the sixth. `paced` is a
+    field rather than a string match on `limiter`, because every decline's prose
+    contains the word "limiter" too.
     """
 
     upstream: str
@@ -137,7 +132,7 @@ _DATASETS = _Decision(
     paced=False,
 )
 
-# : The closed table.
+#: The closed table.
 _DECISIONS: dict[tuple[str, str], _Decision] = {
     ("usher.adapters.emby.session", "self._client.build_request"): _SOURCE,
     ("usher.adapters.emby.session", "self._client.send"): _SOURCE,
@@ -163,8 +158,7 @@ _DECISIONS: dict[tuple[str, str], _Decision] = {
         paced=False,
     ),
     ("usher.adapters.bulk.download", "self._client.stream"): _DATASETS,
-    # The `HEAD` half of the same decision, and **the row this table was missing
-    # entirely** until `_OUTBOUND_METHODS` grew the five verbs it had omitted.
+    # The `HEAD` half of the same decision.
     ("usher.adapters.bulk.download", "self._client.head"): _DATASETS,
     ("usher.adapters.bulk.wikidata", "self._client.get"): _Decision(
         upstream="query.wikidata.org (WDQS)",
@@ -265,10 +259,7 @@ def _names_an_httpx_client(spelling: str) -> bool:
 
 
 def _client_spellings(tree: ast.Module) -> set[str]:
-    """Every spelling in one module that refers to an httpx client.
-
-    beyond the ones whose own text says so.
-    """
+    """Every name in one module that refers to an httpx client, however it is spelled."""
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -314,24 +305,13 @@ def _client_spellings(tree: ast.Module) -> set[str]:
 
 
 def _call_sites() -> list[tuple[str, str, int]]:
-    """Every `<an httpx client>.<outbound method>(...)` under `src/usher/adapters/`.
+    """Every `<an httpx client>.<outbound method>(...)`, as `(module, expression, line)`.
 
-    as `(module, expression, line)`.
-
-    Resolved from the AST rather than by grep so a call spelled across a line
-    break is found -- `.claude/rules/api-telemetry-and-lanes.md` records a
-    line-oriented search that was structurally blind to exactly that -- and so
-    the *receiver* can be read rather than guessed at from the text before the
-    dot. The receiver test is what keeps `dict.get`, `Mapping.get` and
-    `httpx.Response.request` out: the client attribute on every adapter here is
-    named `_client`, and one that is named something else is reached through
-    `_client_spellings` above rather than through a silent pass.
-
-    **It over-matches, and that is the safe direction, kept deliberately.**
-    `self._client_config.get("x")` would resolve as a call site here. The
-    failure that causes is a **red** with the expression printed, which somebody
-    fixes in a minute; the failure a tighter test causes is an unlisted outbound
-    call passing in silence, which is what this whole file exists to prevent.
+    Resolved from the AST rather than by grep, so a call spelled across a line break is
+    found and the *receiver* can be read rather than guessed at from the text before the
+    dot -- which is what keeps `dict.get` and `httpx.Response.request` out. It
+    over-matches deliberately: a red with the expression printed is cheaper than an
+    unlisted outbound call passing in silence.
     """
     found: list[tuple[str, str, int]] = []
     for module, path in _adapter_modules():
@@ -351,16 +331,11 @@ def _call_sites() -> list[tuple[str, str, int]]:
 
 
 def test_no_outbound_http_call_escapes_a_recorded_decision() -> None:
-    """The acceptance.
+    """Every outbound call site is in the table above, and every row of it is a call site.
 
-    every outbound call site is in the table above, and every row of the table is a call
-    site.
-
-    The three guards before the assertion are the ones this repository requires
-    of a scan, and each fails for a different reason: a walk that found nothing
-    (`>= 9`), a walk that found *something else* (the anchor), and a walk whose
-    receiver filter has started matching the wrong shape (the anchor again,
-    which is the module the filter was written against).
+    The three guards before the assertion each fail for a different reason: a walk that
+    found nothing (`>= 9`), a walk that found something else (the anchor), and a walk
+    whose receiver filter has started matching the wrong shape (the anchor again).
     """
     found = _call_sites()
 
@@ -389,23 +364,12 @@ def test_no_outbound_http_call_escapes_a_recorded_decision() -> None:
 def test_the_push_channel_is_not_a_request_and_the_scan_confirms_it() -> None:
     """The ninth upstream, and the control on the table's completeness.
 
-    `emby/push.py` is the one module in `adapters/` that dials out and gets
-    nothing from this scan -- because it is a websocket rather than an httpx
-    call. That is a *reason* rather than an omission, and it is only a reason if
-    the scan really does find no httpx call there: a push channel that had
-    quietly grown an HTTP poll would be an unlimited request stream against a
-    household's server, hidden behind the very sentence that excuses the socket.
-
-    🔴 **Its two premises, because an absence assertion is exactly the shape a
-    broken scan satisfies.** This case shipped in S3 with neither, and measured:
-    with `_call_sites`' receiver filter broken so the walk returns `[]`, the
-    sibling case above failed on `assert 0 >= 9` and **this one passed** -- an
-    absence proved by a scan that found nothing, in a file whose own docstring
-    is about that failure mode. So the same `>= 9` guard runs here (a scan that
-    globs nothing cannot satisfy it), and so does the one this case needs and
-    its sibling does not: that the walk **parsed `emby/push.py` at all**. The
-    second is not implied by the first -- a module renamed or moved out of
-    `adapters/` produces a healthy scan and a vacuous absence.
+    `emby/push.py` dials out and gets nothing from this scan because it is a websocket
+    rather than an httpx call -- a reason only if the scan really does find no httpx
+    call there, since a push channel that had quietly grown an HTTP poll would be an
+    unlimited request stream hidden behind the sentence that excuses the socket. An
+    absence assertion is the shape a broken scan satisfies, so both premises are
+    asserted: the `>= 9` guard, and that the walk parsed `emby/push.py` at all.
     """
     walked = {module for module, _ in _adapter_modules()}
     assert _NOT_A_REQUEST in walked, (
@@ -427,19 +391,9 @@ def test_the_push_channel_is_not_a_request_and_the_scan_confirms_it() -> None:
 def test_every_recorded_decision_points_at_a_file_that_exists() -> None:
     """A `recorded_in` naming nothing is a table describing an older tree.
 
-    🔴 **This ran in both directions until M10 and now runs in one.** Each
-    named file also had to contain `tests/unit/test_outbound_call_sites.py`
-    exactly once, so deleting a decline paragraph from a docstring turned this
-    red. M10's docstring convention took those back-pointers out of `src/`
-    wholesale, and a reciprocity check whose other half the convention forbids
-    is an arm that can only fail on the convention.
-
-    What still fails here is a module renamed or moved out from under its row.
-    What no longer fails here is a decline paragraph deleted while its row
-    stands -- but the row is still held to the tree by
-    `test_no_outbound_http_call_escapes_a_recorded_decision`'s set *equality*
-    against the walk, where a row naming a call site that no longer exists is
-    red.
+    What fails here is a module renamed or moved out from under its row. A row naming a
+    call site that no longer exists is caught instead by
+    `test_no_outbound_http_call_escapes_a_recorded_decision`'s set equality.
     """
     repository = pathlib.Path(usher.adapters.__file__).parents[3]
     assert (repository / "src" / "usher" / "adapters").is_dir(), (
@@ -459,22 +413,11 @@ def test_every_recorded_decision_points_at_a_file_that_exists() -> None:
 
 
 def test_the_module_census_is_the_one_the_records_quote() -> None:
-    """The four numbers this file's docstring and PRD 01 both print.
+    """The four numbers this file and PRD 01 both print, taken off the table itself.
 
-    asserted off the table rather than counted by hand twice.
-
-    🔴 **Three countings were in circulation and none of them reconciled.**
-    PRD 01 said *"nine upstreams, fifteen call sites across eight modules"* over
-    a table of **eight** rows; this file said *"four are paced and five are
-    not"*, which only sums to nine if `emby/push.py` is counted as paced -- and
-    both the plan's row and PRD 01's own cell say its limiter is **none**. The
-    unit is the **module** (the docstring says why a host count is a different,
-    smaller number), and these are the four figures every other site must
-    agree with.
-
-    A count is asserted rather than a bound: `>= 9` is satisfied by a table
-    that grew a row nobody wrote a decline for, which is the drift the whole
-    file exists to make loud.
+    The unit is the module, not the host. Counts rather than bounds: `>= 9` is satisfied
+    by a table that grew a row nobody wrote a decline for, which is the drift this file
+    exists to make loud.
     """
     modules = _census()
     paced = {module for (module, _), record in _DECISIONS.items() if record.paced}
@@ -507,9 +450,9 @@ def _imports_httpx(tree: ast.Module) -> bool:
 
 
 def test_every_module_that_imports_httpx_is_recorded_or_exempt() -> None:
-    """The complement of the scan above.
+    """The complement of the scan above, closing structurally what spelling cannot.
 
-    and it closes structurally what the receiver test can only close by spelling.
+    You cannot make an httpx call without importing httpx.
     """
     importers = {
         module
@@ -586,7 +529,7 @@ def _census_table(document: str) -> list[str]:
 
 
 def test_prd_01_prints_the_census_this_table_computes() -> None:
-    """🔴 **The docstring above claimed this and no case did it.**."""
+    """PRD 01's table and prose name the same modules and counts as `_DECISIONS`."""
     document = _prd_01()
     rows = _census_table(document)
     assert len(rows) >= 5, f"the premise: the table walk found {len(rows)} rows"

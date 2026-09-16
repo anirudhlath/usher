@@ -1,6 +1,6 @@
-"""Two documentation status tables drift, and the drift has been measured twice.
+"""Two documentation status tables drift.
 
-so this milestone fixes it with a test rather than with attention.
+A test holds them together, rather than attention.
 """
 
 import pathlib
@@ -11,11 +11,9 @@ _PLANS = _ROOT / "docs" / "plans"
 _PROGRESS = _PLANS / "progress.md"
 _PRD_README = _ROOT / "docs" / "prd" / "README.md"
 
-# A floor rather than an equality, on this file's neighbour's precedent
-# (`test_decision_register.py` asserts `>= 23` against 35 ADRs that exist). Nine
-# plan files exist at M9's close, one per milestone M1..M9. A floor grows with
-# the project; an equality is a line the next milestone edits, which is how a
-# count stops being a measurement and becomes a number people bump until green.
+# A floor rather than an equality, on `test_decision_register.py`'s precedent. A
+# floor grows with the project; an equality is a line the next milestone edits,
+# which is how a count becomes a number people bump until green.
 PLAN_FILES_AT_M9_CLOSE = 9
 
 _MILESTONE_TABLE = "## Milestones (from"
@@ -24,9 +22,7 @@ _RATING_SPLIT_TABLE = "## Rating provenance (from"
 _WATCH_RESUME_TABLE = "## Resumable watch lane (from"
 _IMPLEMENTATION_PLAN_TABLE = "## Implementation plans"
 
-# `2026-08-06-m8-curation.md`, `2026-08-18-e1-eval-skeleton-and-suggest.md`,
-# `2026-08-19-rating-provenance-split.md`, `2026-08-21-issue-41-resumable-watch-
-# lane.md`.
+# A dated plan filename, excluding the `-design.md` specs that sit beside them.
 _PLAN_FILENAME = re.compile(r"20\d\d-\d\d-\d\d-(?![a-z0-9-]*-design\.md)[a-z0-9-]+\.md")
 
 
@@ -58,10 +54,7 @@ def _table_rows(document: str, heading: str) -> set[str]:
 
 
 def test_every_plan_file_is_named_by_every_status_table() -> None:
-    """Kills adding a milestone's plan and leaving either status table behind.
-
-    which has happened twice and was repaired by hand both times.
-    """
+    """Kills adding a milestone's plan and leaving either status table behind."""
     on_disk = {path.name for path in _PLANS.glob("*.md")} - {"progress.md"}
 
     assert len(on_disk) >= PLAN_FILES_AT_M9_CLOSE, (
@@ -100,11 +93,8 @@ def test_every_plan_file_is_named_by_every_status_table() -> None:
 def test_a_plan_named_only_in_prose_does_not_satisfy_the_table() -> None:
     """The scoping above, asserted rather than described.
 
-    because H2 measured a documentation check being satisfied by the prose that
-    explained its own repair, and a check that reads a whole document is the same defect
-    waiting.
-
-    The document below carries both spellings of the same plan file: a table row
+    A check that reads a whole document is satisfied by the prose explaining its own
+    repair. The document below carries both spellings of the same plan file: a table row
     for M1, and a prose heading plus a sentence for M9. A whole-document scan
     answers `{M1, M9}` and reports the table as complete; the scoped extraction
     answers `{M1}` and reports M9 missing, which is the truth.
@@ -162,8 +152,7 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
     }
 
     # All five, and the second is the one with teeth: `m9` is letters-then-digits, so
-    # the *old* pattern harvested that spec as a plan and the exclusion was never as
-    # complete as its comment claimed.
+    # a pattern anchored on a scope segment harvests that spec as a plan.
     specs = (
         "## Quality-eval phases (from docs/specs/2026-08-18-usher-quality-evals-design.md)\n"
         "| — | — | docs/specs/2026-07-28-usher-v1-design.md | — |\n"
@@ -177,11 +166,11 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
         "a spec is not a plan, and four of these five are named by a heading"
     )
 
-    # **The second widening, and the row that forced it.** The rating split
-    # carries no scope segment -- not `m9`, not `e1` -- so `[a-z]+\d+` was
-    # blind to it, and its own row names its spec in the same cell as the plan.
-    # A greedy `.*` in the exclusion would reach that spec and refuse the plan
-    # standing beside it, which is why the lookahead is bounded to the filename.
+    # The rating split carries no scope segment -- not `m9`, not `e1` -- so a
+    # `[a-z]+\d+` pattern is blind to it, and its own row names its spec in the same
+    # cell as the plan. A greedy `.*` in the exclusion would reach that spec and
+    # refuse the plan standing beside it, which is why the lookahead is bounded to
+    # the filename.
     unnumbered = (
         "## Rating provenance (from docs/specs/2026-08-19-rating-provenance-split-design.md)\n"
         "| Task | Plan file | Spec | Status |\n"
@@ -198,7 +187,7 @@ def test_the_filename_pattern_harvests_an_eval_phase_and_still_refuses_a_spec() 
 def test_the_progress_log_really_does_name_plan_files_outside_its_table() -> None:
     """The premise the case above is modelled on.
 
-    stated against the real document so the model is not a hypothetical.
+    Stated against the real document so the model is not a hypothetical.
     """
     text = _PROGRESS.read_text()
     tabled = (

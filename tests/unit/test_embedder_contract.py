@@ -1,7 +1,4 @@
-"""Every `Embedder` in this repository against the shared contract.
-
-plus the properties that belong to one implementation rather than to the port.
-"""
+"""Every `Embedder` here against the contract, plus per-implementation properties."""
 
 import json
 import math
@@ -40,24 +37,14 @@ class TestFakeEmbedder(EmbedderContract):
 
 
 def test_the_fake_is_deterministic_across_processes() -> None:
-    """**The one case that would catch `hash()` in place of `hashlib`.**.
+    """The one case that would catch `hash()` in place of `hashlib`.
 
-    The `np.random.default_rng(abs(hash(text)))` spelling passes every case
-    in `EmbedderContract` -- norms, width, batch order, same-text
-    determinism, empty batch -- and fails only here, because `str.__hash__`
-    is salted by `PYTHONHASHSEED`. A worker process and a test process would
-    then disagree about a title's vector while every in-process assertion
-    stayed green, which ratifies a `source_fingerprint` scheme that does not
-    hold.
-
-    Two interpreters, two different seeds, one expected answer.
-
-    The environment is the running one with `PYTHONHASHSEED` overridden,
-    not a hand-built minimal dict: under `uv run` the child needs the same
-    `VIRTUAL_ENV`/`PYTHONPATH` resolution the parent had, and a subprocess
-    that failed to import is DID-NOT-RUN rather than a pass. `check=True`
-    is what turns that into an error instead of an empty string compared
-    against an empty string.
+    `str.__hash__` is salted by `PYTHONHASHSEED`, so an
+    `np.random.default_rng(abs(hash(text)))` spelling passes every case in
+    `EmbedderContract` and fails only here: two interpreters, two seeds, one
+    expected answer. The environment is the running one with `PYTHONHASHSEED`
+    overridden, so the child resolves the same venv, and `check=True` keeps a
+    subprocess that failed to import from reading as a pass.
     """
     outputs = set()
     for seed in ("0", "1"):
@@ -81,11 +68,8 @@ def test_the_fake_is_deterministic_across_processes() -> None:
 def test_a_planted_angle_is_exact(theta: float) -> None:
     """A helper nothing checks is a helper that drifts.
 
-    and this one is the reason similarity tests in this milestone are allowed to state a
-    number.
-
-    Measured exact to 2.22e-16 -- one ulp -- so the tolerance below is generous by four
-    orders of magnitude and still fails anything that stopped being orthonormal.
+    `planted_pair` is what lets a similarity test state a number, so its angle
+    and its norm are both pinned here.
     """
     first, planted = planted_pair(theta)
     cosine = sum(one * other for one, other in zip(first, planted, strict=True))
@@ -97,11 +81,9 @@ def test_a_planted_angle_is_exact(theta: float) -> None:
 # --------------------------------------------------------------------------
 # The HTTP arm
 
-# : **Deliberately not `EMBEDDING_DIMENSIONS`, and the same 8 the sibling unit : file
-# uses.** `Embedder.dimension` is the *model's* width and : `composition.embedder`
-# narrows a deployment whose model disagrees with the : stored column, so an arm that
-# took its width from that constant would make : the comparison `x == x` and this class
-# would be what ratified it.
+#: Deliberately not `EMBEDDING_DIMENSIONS`. `Embedder.dimension` is the
+#: *model's* width, and an arm taking it from that constant would turn the
+#: comparison below into `x == x`.
 _DIMENSION = 8
 
 #: `.invalid` is reserved by RFC 6761 and can never resolve, so a case that
@@ -185,23 +167,14 @@ class TestOpenAICompatEmbedder(EmbedderContract):
     async def test_this_arm_drives_the_shipped_adapter_over_the_transport(
         self, embedder: Embedder
     ) -> None:
-        """**A contract arm that exercises nothing reads as coverage in the summary line**.
-
-        and two ways for this one to do so are cheap to close.
+        """A contract arm that exercises nothing still reads as coverage.
 
         The five cases above are inherited, so not one of them names
-        `OpenAICompatEmbedder`: a fixture handing back a `FakeEmbedder` would
-        make this class a slower copy of `TestFakeEmbedder`, and a fixture
-        whose transport nothing reaches would make it a copy that also proves
-        the transport is decorative. Both are asserted, the second on the
-        request the mock really received.
-
-        The last assertion is about the deployment rather than about this
-        file. `Embedder.dimension` is the model's own width and
-        `composition.embedder` declines to claim index jobs when it disagrees
-        with `EMBEDDING_DIMENSIONS`; an arm that took the adapter's width from
-        that constant would turn the comparison into `x == x`, and the port's
-        docstring names exactly that temptation.
+        `OpenAICompatEmbedder`: a fixture handing back a `FakeEmbedder`, or one
+        whose transport nothing reaches, would leave this class decorative.
+        Both are closed here, the second on the request the mock really
+        received. The last assertion keeps this arm's width distinct from
+        `EMBEDDING_DIMENSIONS`, which would otherwise make it `x == x`.
         """
         assert isinstance(embedder, OpenAICompatEmbedder)
         assert embedder.model_name == _MODEL_NAME
@@ -221,21 +194,14 @@ class TestOpenAICompatEmbedder(EmbedderContract):
     async def test_the_endpoint_answers_per_text_and_out_of_arrival_order(
         self, embedder: Embedder
     ) -> None:
-        """**The premises the five inherited cases rest on.
+        """The premises the inherited cases rest on, read off the served bytes.
 
-        read off the bytes the transport really served** rather than off the literal the
-        handler was built from.
-
-        Four claims, and without each of them some case above is satisfied by
-        an implementation doing something else: the response arrived in an
-        order that is not the input's, so `index` is what the answer was
-        rebuilt from; that order is not its own inverse, because the contract's
-        own batch carries one text at positions 0 and 2 and is therefore
-        invariant under a reversal -- the shape
-        `.claude/rules/testing-discipline.md` records as a permutation a
-        3-cycle is the smallest escape from; arrival order and the answer are
-        different lists; and the three vectors differ from one another, so
-        nothing above is being satisfied by a constant.
+        Four claims, each of which some case above would otherwise satisfy by
+        accident: the response arrived in an order that is not the input's, so
+        `index` is what the answer was rebuilt from; that order is not its own
+        inverse, which the contract's duplicate-carrying batch cannot tell from
+        no sort at all; arrival order and the answer are different lists; and
+        the three vectors differ, so nothing above is satisfied by a constant.
         """
         texts = ["a caretaker inventories a house", "harbour lights", "vane"]
 

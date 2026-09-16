@@ -61,10 +61,8 @@ def test_an_episode_event_carries_both_ids() -> None:
 def test_a_data_payload_never_spans_two_lines() -> None:
     """A newline inside `data:` is a second `data:` line to an SSE parser.
 
-    and an unescaped one silently truncates the frame.
-
-    `json.dumps` escapes them; this is the case that stops somebody replacing it with an
-    f-string.
+    An unescaped one silently truncates the frame. `json.dumps` escapes them;
+    this is the case that stops somebody replacing it with an f-string.
     """
     frame = encode_sse(
         _sent(ClientEvent(kind=ClientEventKind.SYNC_PROGRESS, data={"error": "line one\nline two"}))
@@ -76,12 +74,10 @@ def test_a_data_payload_never_spans_two_lines() -> None:
 
 
 def test_the_wire_vocabulary_is_its_own_enum() -> None:
-    """`api/dto/` types are distinct from domain models (PRD 07.
+    """`api/dto/` types are distinct from the domain models.
 
-    "Internal refactors don't break clients; wire changes are deliberate").
-
-    This is the assertion that makes renaming `ClientEventKind.TITLE_UPDATED` a compile-
-    time decision rather than a silent wire break.
+    This is what makes renaming `ClientEventKind.TITLE_UPDATED` a compile-time
+    decision rather than a silent wire break.
     """
     assert {kind.value for kind in SseEventKind} == {
         "title.updated",
@@ -107,9 +103,10 @@ def test_every_internal_kind_has_a_wire_name() -> None:
 
 
 def test_no_titles_filter_means_everything_rather_than_nothing() -> None:
-    """An absent `?titles=` is an admin UI wanting `sync.progress`, which belongs to no title.
+    """An absent `?titles=` means every event, not none.
 
-    `frozenset()` would be the opposite answer -- a stream that never fires.
+    An admin UI wants `sync.progress`, which belongs to no title; `frozenset()`
+    would be the opposite answer -- a stream that never fires.
     """
     assert parse_titles(None) is None
     assert parse_titles("") is None
@@ -121,44 +118,32 @@ def test_a_titles_filter_parses_a_comma_separated_list() -> None:
 
 
 def test_a_malformed_title_id_raises_rather_than_being_dropped() -> None:
-    """Silently dropping the unparseable half of `?titles=a,not-a-uuid` leaves a filter that is.
+    """A malformed id raises rather than being dropped from the filter.
 
-    *narrower* than the client asked for, so a detail screen quietly never updates.
-
-    The route turns this into a 422.
+    Silently dropping the unparseable half of `?titles=a,not-a-uuid` leaves a
+    filter narrower than the client asked for, so a detail screen quietly never
+    updates. The route turns this into a 422.
     """
     with pytest.raises(ValueError, match=r"badly formed|invalid"):
         parse_titles(f"{uuid.uuid4()},not-a-uuid")
 
 
 def test_the_wire_map_is_total_over_the_internal_enum_directly() -> None:
-    """**The direct spelling of the guard above it**.
+    """`_WIRE` covers the internal enum, compared directly.
 
-    and it is a *second* case rather than a replacement.
-
-    The plan for this milestone claimed `_WIRE` had no exhaustiveness guard at
-    all -- that adding a member to both enums and forgetting the mapping "passes
-    mypy and the whole suite, then raises `KeyError` inside a response that has
-    already answered `200 text/event-stream`". **That is refuted**: M5's
-    `test_every_internal_kind_has_a_wire_name` encodes every kind through
-    `encode_sse`, so a missing entry raises `KeyError` there and the case fails.
-    Measured, not reasoned about, by making exactly that mutation.
-
-    This one is kept anyway because it fails *differently*: on a set comparison
-    naming the missing member, rather than on a `KeyError` from inside a
-    formatter, which is the difference between a diagnosis and a symptom.
+    The case above catches a missing entry too, but only as a `KeyError` raised
+    from inside the formatter. This one fails on a set comparison naming the
+    member that is missing, which is a diagnosis rather than a symptom.
     """
     assert set(_WIRE) == set(ClientEventKind)
 
 
 def test_a_row_invalidation_carries_its_slug_on_the_data_line() -> None:
-    """PRD 07's payload is "Row slug" and its client action is "Refetch that row".
+    """The slug is the whole payload of a row invalidation.
 
-    so the slug is the whole payload, and a frame without it is an instruction with no
-    object.
-
-    Kills an event published with an empty `data`, which is a well-shaped frame that
-    tells a client nothing.
+    A client's action is to refetch that row, so a frame without the slug is an
+    instruction with no object. Kills an event published with an empty `data`,
+    which is a well-shaped frame that tells a client nothing.
     """
     frame = encode_sse(
         _sent(ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": "continue-watching"}))
@@ -184,19 +169,12 @@ def test_a_row_invalidation_carries_no_title_id() -> None:
 
 
 def test_a_bootstrap_progress_frame_carries_its_cursor_and_no_title_id() -> None:
-    """PRD 07's payload column for this row is corrected in M9's E7 from *"Phase.
+    """The frame carries what a `BulkCursor` can supply, and no `title_id`.
 
-    percent"* to what a `BulkCursor` can honestly supply, and this is that correction on
-    the wire.
-
-    **No `title_id` on the data line and none in the filter**, which is what
-    makes *"Admin UI only"* a property: the frame reaches unfiltered
-    subscribers and no others, exactly as `row.invalidated` does and for the
-    inverse reason -- a bulk import touches most of the catalog, so a title id
-    here would wake every detail screen in the household once per batch.
-
-    Kills a frame published with an empty `data`, which is a well-shaped SSE
-    event that tells a progress bar nothing.
+    No title id on the data line and none in the filter is what makes this
+    admin-UI-only: a bulk import touches most of the catalog, so a title id here
+    would wake every detail screen in the household once per batch. Kills a frame
+    published with an empty `data`, which tells a progress bar nothing.
     """
     frame = encode_sse(
         _sent(

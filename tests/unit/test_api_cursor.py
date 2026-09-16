@@ -225,10 +225,10 @@ async def test_a_page_that_exactly_exhausts_the_population_carries_no_next_curso
 
 
 def test_a_cursor_is_urlsafe_base64_with_no_padding() -> None:
-    """Unpadded `urlsafe` base64 so nothing needs percent-encoding.
+    """Unpadded `urlsafe` base64, so nothing needs percent-encoding.
 
-    a `+`, a `/` or an `=` in a query parameter is a value that survives one client's
-    encoder and not another's.
+    A `+`, a `/` or an `=` in a query parameter survives one client's encoder and not
+    another's.
     """
     token = encode_cursor((1980, _ID_A), spec=PROBE_SORT)
     alphabet = set(string.ascii_letters + string.digits + "-_")
@@ -242,10 +242,9 @@ def test_a_cursor_is_urlsafe_base64_with_no_padding() -> None:
 async def test_a_cursor_survives_the_query_string_it_travels_in(
     client: httpx.AsyncClient,
 ) -> None:
-    """Encode -> URL -> decode.
+    """Encode -> URL -> decode, through httpx and Starlette rather than a function call.
 
-    through httpx and Starlette's own parsing rather than through a function call,
-    because the claim is about the wire.
+    The claim is about the wire.
     """
     row = ORDERED[3]
     token = encode_cursor((row.year, row.id), spec=PROBE_SORT)
@@ -318,13 +317,10 @@ def test_a_round_trip_returns_the_same_typed_value(
 
 
 def test_an_integer_and_a_boolean_are_not_the_same_sort_position() -> None:
-    """`isinstance(True.
+    """A `bool` is refused where the cursor is minted, not tagged as an integer.
 
-    int)` is true, so an unguarded `int` branch tags a `bool` as an integer and round-
-    trips it as `1` -- a mint-side programming error that would reach a client as a
-    cursor naming a position no row is at.
-
-    Refused where it is made, and as a `ValueError` rather than a problem document:
+    `isinstance(True, int)` is true, so an unguarded `int` branch round-trips it as `1`,
+    naming a position no row is at. A `ValueError` rather than a problem document:
     nothing a client submitted is involved.
     """
     with pytest.raises(ValueError, match="bool"):
@@ -332,9 +328,9 @@ def test_an_integer_and_a_boolean_are_not_the_same_sort_position() -> None:
 
 
 def test_a_naive_datetime_is_refused_at_the_mint() -> None:
-    """An aware datetime and a naive one render to the same wire text minus an offset.
+    """A naive datetime is refused: it renders like an aware one minus its offset.
 
-    and the sort position they name then differs by whatever the reader's zone is.
+    The sort position the two name then differs by whatever the reader's zone is.
     """
     spec = CursorSpec(sort="added", types=(CursorType.DATETIME, CursorType.UUID))
     with pytest.raises(ValueError, match="aware"):
@@ -358,9 +354,9 @@ async def test_a_cursor_that_is_not_json_is_refused(client: httpx.AsyncClient) -
 
 
 async def test_a_cursor_from_another_version_is_refused(client: httpx.AsyncClient) -> None:
-    """The version is what lets the keyset's shape change without a `/v2`.
+    """The version lets the keyset's shape change without a `/v2`.
 
-    a cursor minted by yesterday's deployment is refused rather than decoded against
+    A cursor minted by an older deployment is refused rather than decoded against
     today's component order.
     """
     row = ORDERED[3]
@@ -373,10 +369,10 @@ async def test_a_cursor_from_another_version_is_refused(client: httpx.AsyncClien
 
 
 async def test_a_cursor_minted_for_another_query_is_refused(client: httpx.AsyncClient) -> None:
-    """The whole reason the digest is there.
+    """A cursor minted under another sort is refused, which is what the digest is for.
 
-    `OTHER_SORT` has the same arity and the same types as the probe's, so without the
-    digest this decodes cleanly and produces a plausible, wrong, silent page.
+    `OTHER_SORT` has the same arity and types as the probe's, so without the digest it
+    decodes cleanly and produces a plausible, wrong, silent page.
     """
     row = ORDERED[3]
     assert OTHER_SORT.types == PROBE_SORT.types, "the premise: only the sort name differs"
@@ -410,13 +406,10 @@ async def test_a_cursor_carrying_the_wrong_key_type_is_refused(client: httpx.Asy
 
 
 async def test_every_refusal_reason_has_its_own_sentence(client: httpx.AsyncClient) -> None:
-    """Six refusals that all read "invalid cursor" are one refusal with six causes.
+    """Six refusals that all read "invalid cursor" are one refusal nobody can diagnose.
 
-    and nobody reading a log can tell which.
-
-    Distinct `detail` sentences are the "assert the diagnostics, not that it failed"
-    rule applied to a wire contract -- and none of them may interpolate a submitted
-    value, which is what the cases above check.
+    Each carries a distinct `detail` sentence, and none of them may interpolate a
+    submitted value — which is what the cases above check.
     """
     row = ORDERED[3]
     good = _decoded_json(encode_cursor((row.year, row.id), spec=PROBE_SORT))
@@ -504,13 +497,11 @@ async def test_a_page_boundary_inside_a_tie_group_neither_repeats_nor_skips(
 
 
 def test_a_keyset_with_no_unique_tiebreaker_mints_nothing() -> None:
-    """`RawPayloadStore.iterate`'s docstring already records the damage.
+    """A non-unique last component is refused, because the keyset must be a total order.
 
-    one bootstrap transaction stamps every row with the same `transaction_timestamp()`,
+    One bootstrap transaction stamps every row with the same `transaction_timestamp()`,
     so a page boundary inside that group drops the rest of it with nothing to say so.
-
-    The codec is the only place that can refuse that once, rather than in each of the
-    three groups writing keyset SQL independently.
+    The codec is the only place that can refuse it once for every paged route.
     """
     with pytest.raises(ValueError, match="total"):
         CursorSpec(sort="fetched_at", types=(CursorType.DATETIME,))
@@ -519,17 +510,17 @@ def test_a_keyset_with_no_unique_tiebreaker_mints_nothing() -> None:
 def test_a_declared_key_type_cannot_be_null() -> None:
     """`NULL` is a value any component may take, not a component's type.
 
-    a position that is always null is not a sort position.
+    A position that is always null is not a sort position.
     """
     with pytest.raises(ValueError, match="NULL"):
         CursorSpec(sort="probe", types=(CursorType.NULL, CursorType.UUID))
 
 
 def test_two_filter_states_of_the_same_sort_are_two_queries() -> None:
-    """The digest covers the whole query and not only the sort name.
+    """The digest covers the whole query, not only the sort name.
 
-    a cursor minted over `genre=horror` applied to `genre=comedy` is the same silent,
-    plausible, wrong page a re-sorted cursor is.
+    A cursor minted over `genre=horror` and applied to `genre=comedy` is the same
+    silent, plausible, wrong page a re-sorted cursor is.
     """
     horror = CursorSpec(
         sort="year", types=(CursorType.INT, CursorType.UUID), filters={"genre": "horror"}
@@ -544,9 +535,9 @@ def test_two_filter_states_of_the_same_sort_are_two_queries() -> None:
 
 
 def test_the_same_filters_in_another_order_are_one_query() -> None:
-    """Otherwise `?a=1&b=2` and `?b=2&a=1` are two populations.
+    """The digest is order-independent, or `?a=1&b=2` and `?b=2&a=1` are two populations.
 
-    and a client that reorders its own query string on a retry loses its place.
+    A client that reorders its own query string on a retry would lose its place.
     """
     one = CursorSpec(
         sort="year", types=(CursorType.UUID,), filters={"genre": "horror", "decade": "1980"}
@@ -577,13 +568,11 @@ def test_a_specs_filters_cannot_be_mutated_after_it_is_built() -> None:
 
 
 def test_a_spec_holds_no_household_and_no_secret() -> None:
-    """The structural half of "the cursor is not signed and carries no user".
+    """The cursor carries no user, which is what lets it go unsigned.
 
-    An unsigned cursor is right only while it names nothing a client could not
-    already reach by paging. The day a `user_id` joins the keyset, a forged
-    cursor is a capability and the codec needs a MAC -- so the field list is
-    pinned here rather than left to a reviewer to notice, and ADR-0034 carries
-    the sentence a future reader will search for.
+    An unsigned cursor is right only while it names nothing a client could not already
+    reach by paging. The day a `user_id` joins the keyset, a forged cursor is a
+    capability and the codec needs a MAC, so the field list is pinned here.
     """
     import dataclasses
 
@@ -597,19 +586,18 @@ def test_a_spec_holds_no_household_and_no_secret() -> None:
 
 
 def test_a_page_carries_its_items_and_a_cursor_and_nothing_else() -> None:
-    """**No `total`.** A count over a filtered 1.3M-row catalog is a full scan per page.
+    """No `total`: a count over a filtered catalog is a full scan, paid on every page.
 
-    paid on every page, for a number a client renders once.
+    The number a client renders once would cost that scan every time.
     """
     assert set(Page.model_fields) == {"items", "next_cursor"}
 
 
 def test_next_cursor_is_present_and_null_rather_than_absent() -> None:
-    """`api/dto/`'s empty-value convention is that an empty list is an absent key.
+    """The deliberate exception to "an empty value is an absent key".
 
-    this is the deliberate exception, because a client takes both arms of `next_cursor`
-    on every listing and "the key is missing" and "there is no next page" would
-    otherwise be the same wire bytes.
+    A client takes both arms of `next_cursor` on every listing, so "the key is missing"
+    and "there is no next page" must not be the same wire bytes.
     """
     page = Page[ProbeItem](items=[], next_cursor=None)
     assert page.model_dump(mode="json") == {"items": [], "next_cursor": None}
@@ -618,10 +606,7 @@ def test_next_cursor_is_present_and_null_rather_than_absent() -> None:
 async def test_openapi_describes_the_item_type_rather_than_an_object(
     client: httpx.AsyncClient,
 ) -> None:
-    """`Page` is generic so a generated client gets `ProbeItem[]` instead of `object[]`.
-
-    the same argument `api/dto/health.py` made for typing the health responses.
-    """
+    """`Page` is generic, so a generated client gets `ProbeItem[]` instead of `object[]`."""
     document = (await client.get("/openapi.json")).json()
     schema = document["paths"]["/probe"]["get"]["responses"]["200"]["content"]["application/json"][
         "schema"
@@ -647,10 +632,10 @@ def _resolve(document: dict[str, Any], ref: str) -> dict[str, Any]:
 
 
 def test_the_over_fetch_asks_for_one_more_row_than_the_client_wanted() -> None:
-    """One row, not one page.
+    """The over-fetch is one row, not one page.
 
-    the extra row is the only thing distinguishing "the page is full" from "there is
-    more", and asking for a whole extra page would pay for rows nobody serves.
+    The extra row is the only thing distinguishing "the page is full" from "there is
+    more", and a whole extra page would pay for rows nobody serves.
     """
     assert over_fetch(5) == 6
     assert over_fetch(1) == 2
@@ -668,11 +653,10 @@ def test_the_over_fetch_asks_for_one_more_row_than_the_client_wanted() -> None:
 def test_paginate_reads_the_over_fetched_row_and_never_serves_it(
     fetched: int, limit: int, expected_items: int, expects_cursor: bool
 ) -> None:
-    """`5` fetched against `limit=5` is the arm that decides this.
+    """`5` fetched against `limit=5` means there is no next page.
 
-    it is what the repository returns when `over_fetch` asked for 6 and the population
-    held exactly 5 more, and reading it as "there is more" is the off-by-one the
-    headline case is about.
+    It is what the repository returns when `over_fetch` asked for 6 and the population
+    held exactly 5 more; reading it as "there is more" is the off-by-one.
     """
     rows: Sequence[ProbeItem] = ORDERED[:fetched]
     page = paginate(
@@ -687,10 +671,9 @@ def test_paginate_reads_the_over_fetched_row_and_never_serves_it(
 
 
 def test_a_cursor_names_the_last_row_served_and_not_the_one_over_fetched() -> None:
-    """Off by one in the other direction.
+    """Off by one in the other direction: minting from `fetched[-1]`.
 
-    minting from `fetched[-1]` skips a row at every page boundary, and only the
-    partition case would notice.
+    That skips a row at every page boundary, and only the partition case would notice.
     """
     rows = ORDERED[:6]
     page = paginate(
@@ -706,13 +689,11 @@ def test_a_cursor_names_the_last_row_served_and_not_the_one_over_fetched() -> No
 
 
 def test_the_item_mapper_never_runs_on_the_over_fetched_row() -> None:
-    """The sentinel row exists to answer "is there more".
+    """The sentinel row answers "is there more" and is never mapped into a DTO.
 
-    and mapping it into a DTO is work whose result is discarded -- on a route whose
-    mapper hydrates availability, once per page.
-
-    It is also why `keys` reads the *row* and `item` produces the DTO: a sort key is
-    very often a column the wire shape does not carry.
+    Mapping it is work whose result is discarded, once per page on a route whose mapper
+    hydrates availability. It is also why `keys` reads the row and `item` produces the
+    DTO: a sort key is often a column the wire shape does not carry.
     """
     mapped: list[uuid.UUID] = []
 

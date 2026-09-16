@@ -23,7 +23,7 @@ _TITLE = new_id()
 
 
 def test_a_provider_ref_is_hashable_and_kind_scoped() -> None:
-    """ADR-0011 in DTO form.
+    """A ref is scoped by provider kind as well as by value.
 
     `tmdb_id` 90000550 is a movie *and* a series, so a ref that carried only the number
     could not be a dict key without silently merging the two.
@@ -36,9 +36,9 @@ def test_a_provider_ref_is_hashable_and_kind_scoped() -> None:
 
 
 def test_a_provider_ref_may_be_kind_agnostic() -> None:
-    """`imdb_id` is one global namespace covering film and television alike (ADR-0011).
+    """`imdb_id` is one global namespace covering film and television alike.
 
-    so its refs carry `kind=None` and the lookup is a single-column one.
+    Its refs carry `kind=None` and the lookup is a single-column one.
     """
     assert ProviderRef(provider="imdb", value="tt99000020", kind=None).kind is None
 
@@ -66,7 +66,7 @@ def test_a_match_outcome_records_how_as_well_as_what() -> None:
 
 
 def test_a_watch_state_merge_defaults_play_history_to_absent() -> None:
-    """The repository-side half of ADR-0014.
+    """A merge that says nothing about play history leaves it absent, not zero.
 
     If this default were `0` the `COALESCE` downstream would be handed a number and
     would write it.
@@ -87,7 +87,7 @@ def test_a_watch_state_merge_defaults_play_history_to_absent() -> None:
 def test_a_media_item_upsert_carries_the_run_that_saw_it() -> None:
     """`last_seen_at` is the availability sweep's only input, so it is not optional on the way in.
 
-    an upsert that let it default to "now" per row would make the sweep's `< started_at`
+    An upsert that let it default to "now" per row would make the sweep's `< started_at`
     comparison race against its own batch.
     """
     fields = {field.name for field in dataclasses.fields(MediaItemUpsert)}
@@ -98,8 +98,8 @@ def test_a_media_item_upsert_carries_the_run_that_saw_it() -> None:
 def test_the_sweep_refusal_is_a_port_error() -> None:
     """It has to be catchable by a service that imports only `usher.ports.errors`.
 
-    and it has to carry the numbers an operator needs to decide whether the library
-    really did shrink.
+    It also carries the numbers an operator needs to decide whether the library really
+    did shrink.
     """
     exc = AvailabilitySweepRefused(would_retract=1_100_000, total=1_126_674, ceiling=0.25)
     assert isinstance(exc, UsherPortError)
@@ -108,14 +108,11 @@ def test_the_sweep_refusal_is_a_port_error() -> None:
 
 
 def test_the_sweep_refusal_survives_a_zero_denominator() -> None:
-    """The message computes a percentage.
+    """An empty source must not make the message's own percentage divide by zero.
 
-    and `would_retract / total` divides by zero on an empty source.
-
-    Unreachable through the one guard that raises this today (`stale > 0` implies `total
-    > 0`), and raising `ZeroDivisionError` from inside the constructor of the error that
-    exists to keep a sweep from destroying a library is not a failure mode worth leaving
-    reachable at all.
+    Unreachable through today's one guard (`stale > 0` implies `total > 0`), but a
+    `ZeroDivisionError` raised from the constructor of the error that keeps a sweep from
+    destroying a library is not worth leaving reachable.
     """
     exc = AvailabilitySweepRefused(would_retract=0, total=0, ceiling=0.25)
     assert isinstance(exc, UsherPortError)
@@ -125,7 +122,7 @@ def test_the_sweep_refusal_survives_a_zero_denominator() -> None:
 def test_a_sweep_result_reports_the_denominator_as_well_as_the_count() -> None:
     """A bare "3 retracted" is not actionable on its own.
 
-    "3 of 4" and "3 of 94,438" are different operational events, and the sweep
+    "3 of 4" and "3 of a whole library" are different operational events, and the sweep
     has already counted the denominator to evaluate its own guard.
     """
     result = SweepResult(retracted=3, total=94_438)

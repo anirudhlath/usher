@@ -40,44 +40,31 @@ def _report(
 
 
 def test_backup_takes_one_optional_output_path() -> None:
-    """`--output` and nothing else, and it is `None` by default rather than a computed name.
+    """`--output` and nothing else, `None` by default rather than a computed name.
 
-    The default filename embeds the run's own UTC instant, and that instant
-    has to be the one the header is stamped with -- so it is computed inside
-    `BackupService.write`, from the injected clock, rather than by `argparse`
-    at parse time, which is before `Settings` and the engine have been built.
+    The default filename embeds the run's own UTC instant, which has to be the instant
+    the header is stamped with -- so it is computed inside `BackupService.write`, from
+    the injected clock, rather than by `argparse` before `Settings` exists.
     """
     args = parse_args(["backup"])
     assert vars(args) == {"command": "backup", "traceback": False, "output": None}
 
 
 def test_the_output_argument_arrives_as_a_path() -> None:
-    """`type=Path` at the parser rather than a `Path(...)` in `_dispatch`.
-
-    so the surface is described in one place and there is no spelling of this argument
-    that is a `str` on one side and a `Path` on the other.
-    """
+    """`type=Path` at the parser rather than in `_dispatch`, so the argument has one type."""
     args = parse_args(["backup", "--output", "/srv/usher/backups/x.jsonl.gz"])
     assert args.output == Path("/srv/usher/backups/x.jsonl.gz")
 
 
 def test_backup_is_advertised_by_the_parser() -> None:
-    """A subcommand `build_parser` does not declare is a command `test_cli_errors.py`'s boundary.
-
-    sweep never runs.
-    """
+    """A subcommand `build_parser` does not declare is one the boundary sweep never runs."""
     assert build_parser().parse_args(["backup"]).command == "backup"
 
 
 def test_backup_dispatches_to_backup_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured for `usher curate` in M8.
-
-    deleting its arm left the whole boundary selection green.
-
-    `dispatched` carries the argument.
-    """
+    """`backup` reaches the `_backup` arm, carrying the argument the parser produced."""
     configured(monkeypatch)
 
     calls = dispatched(
@@ -127,16 +114,10 @@ def test_traceback_re_raises_rather_than_rendering(
 def test_the_report_prints_a_line_per_table_including_the_zero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Zeros included**, for `_print_curation_report`'s reason.
+    """Zeros included: a table absent from a report and a table nobody carries read alike.
 
-    a table absent from a report and a table nobody carries read the same, and at a
-    terminal there is no second export to compare against.
-
-    `llm_calls` is the one that matters. It is 0 rows on the deployment this
-    project runs against and it is the table PRD 08 calls *"the first thing
-    in this project that is not rebuildable from anything, at any price"* --
-    a spend ledger silently dropped from the carried set would be reported by
-    nothing else in the system.
+    `llm_calls` is the one that matters -- a spend ledger dropped from the carried set
+    would be reported by nothing else in the system.
     """
     _print_backup_report(_report())
 
@@ -151,14 +132,10 @@ def test_the_report_prints_a_line_per_table_including_the_zero(
 def test_the_summary_line_carries_the_total_the_size_and_the_revision(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The three facts an operator checks against `ls -l` and against the database they just.
+    """The three facts an operator checks against `ls -l` and against the database.
 
-    backed up.
-
-    The size is `stat()` on the written file rather than a sum of what was
-    encoded: gzip's ratio over JSON is the whole reason the format is
-    affordable, so a number only this command can produce would be the one
-    number nobody can verify.
+    The size is `stat()` on the written file rather than a sum of what was encoded, so
+    it is a number something other than this command can produce.
     """
     _print_backup_report(_report(rows={"users": 1, "watch_states": 3}, size=1_234))
 
@@ -171,15 +148,12 @@ def test_the_summary_line_carries_the_total_the_size_and_the_revision(
 def test_the_report_names_the_secret_key_dependency_on_every_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Every run, not only when a credential row was carried.**.
+    """Every run warns, not only the run that carried a credential row.
 
-    `source_credentials` travels as ciphertext and this command holds no key,
-    so an artifact restored into a deployment with a different
-    `USHER_SECRET_KEY` restores credentials nobody can decrypt. An operator
-    who learns that at restore time learns it too late -- and the run that
-    most needs the sentence is the one against a deployment that has not
-    added its source yet, which is exactly the run a `if rows` guard would
-    withhold it from.
+    `source_credentials` travels as ciphertext and this command holds no key, so an
+    artifact restored under a different `USHER_SECRET_KEY` restores credentials nobody
+    can decrypt -- and an `if rows` guard would withhold the sentence from the
+    deployment that has not added its source yet, which most needs it.
     """
     _print_backup_report(_report(rows={"users": 1}))
 

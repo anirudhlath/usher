@@ -100,7 +100,7 @@ def test_every_advertised_phase_parses(phase: str) -> None:
 def test_an_unknown_phase_is_rejected() -> None:
     """Argparse `choices`, not a runtime lookup.
 
-    a typo must fail before a multi-hour import starts, not silently import nothing.
+    A typo must fail before a multi-hour import starts, not silently import nothing.
     """
     with pytest.raises(SystemExit):
         build_parser().parse_args(["bootstrap", "--phase", "embeddings"])
@@ -109,12 +109,8 @@ def test_an_unknown_phase_is_rejected() -> None:
 def test_the_ratings_phase_is_offered_by_the_parser() -> None:
     """`PHASES` is derived from `BootstrapPhase`.
 
-    so a member with no arm in `run_bootstrap` is accepted by the parser and then
-    silently does nothing.
-
-    This case and `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else`
-    (`tests/unit/test_composition.py`) are the two halves; neither alone catches a half-
-    wired phase.
+    Otherwise a member with no arm in `run_bootstrap` is accepted by the parser and
+    then silently does nothing.
     """
     parser = build_parser()
     args = parser.parse_args(["bootstrap", "--phase", "ratings"])
@@ -137,10 +133,8 @@ def test_the_parser_knows_the_ingest_commands() -> None:
 def test_a_sync_with_no_source_means_every_enabled_source() -> None:
     """`--source` is optional on purpose.
 
-    a nightly cron runs one command for a household with two servers.
-
-    `None` is the "all of them" sentinel, and an empty string would be a source name
-    nothing matches.
+    A nightly cron runs one command for a household with two servers. `None` is the
+    "all of them" sentinel, and an empty string would be a source name nothing matches.
     """
     assert build_parser().parse_args(["sync"]).source is None
 
@@ -148,8 +142,8 @@ def test_a_sync_with_no_source_means_every_enabled_source() -> None:
 def test_sync_defaults_to_a_full_walk() -> None:
     """A delta walk has to be asked for.
 
-    It resumes from a cursor and never sweeps (ADR-0015), so defaulting to it would mean
-    an operator who typed `usher sync` never retracts anything and never notices.
+    It resumes from a cursor and never sweeps, so defaulting to it would mean an
+    operator who typed `usher sync` never retracts anything and never notices.
     """
     assert build_parser().parse_args(["sync"]).kind == "full"
     assert build_parser().parse_args(["sync", "--kind", "delta"]).kind == "delta"
@@ -163,22 +157,20 @@ def test_every_advertised_sync_kind_parses(kind: str) -> None:
 def test_an_unknown_sync_kind_is_rejected() -> None:
     """`watch_state` is a real `SyncRunKind` and is deliberately not offered.
 
-    it is a lane `sync` always runs after the item walk, not an alternative to it.
-
+    It is a lane `sync` always runs after the item walk, not an alternative to it, so
     argparse `choices` is what stops `--kind watch_state` reaching `ReconcileService`,
-    which would walk `list_items` and label the run something the sweep's own lane check
-    then declines to act on.
+    which would walk `list_items` and label the run something the sweep's own lane
+    check then declines to act on.
     """
     with pytest.raises(SystemExit):
         build_parser().parse_args(["sync", "--kind", "watch_state"])
 
 
 def test_sync_requires_a_confirmation_to_disable_the_retraction_guard() -> None:
-    """`--allow-full-retraction` is the one flag that can mark a whole library unavailable.
+    """`--allow-full-retraction` can mark a whole library unavailable.
 
-    so it is a flag rather than a config default (ADR-0015).
-
-    Absent, the configured ceiling applies.
+    That is why it is a flag rather than a config default; absent, the configured
+    ceiling applies.
     """
     assert build_parser().parse_args(["sync"]).allow_full_retraction is False
     assert build_parser().parse_args(["sync", "--allow-full-retraction"]).allow_full_retraction
@@ -303,7 +295,7 @@ async def _resolve_harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
 async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_the_stack_out_of_it(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**Issue #5, and the reason the fix is here rather than in `OPERATOR_ERRORS`.**."""
+    """A `--title` naming no row is refused with a sentence, not a traceback."""
     harness = await _resolve_harness(monkeypatch)
     unknown = new_id()
 
@@ -325,15 +317,11 @@ async def test_resolving_to_a_title_that_does_not_exist_names_the_id_and_keeps_t
 async def test_a_resolve_naming_no_media_item_still_says_so(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The third arm, pinned so the fix above cannot make one message serve two conditions.
+    """The third arm, pinned so one message cannot serve two conditions.
 
-    The title exists here and the media item does not, which is the *only*
-    fixture that can tell the two apart: a case naming neither is answered by
-    whichever check runs first. That is a case testing the arm above under
-    this arm's name -- **loudly**, not silently, since the two emit different
-    sentences and the integration twin measured its pre-F4 form going red
-    rather than quietly changing subject. The reason to seed both is that the
-    fixture should say which arm it means, not that a wrong one would hide.
+    The title exists here and the media item does not, which is the only fixture that
+    can tell the two apart: a case naming neither is answered by whichever check runs
+    first.
     """
     harness = await _resolve_harness(monkeypatch)
     title = Title(kind=TitleKind.MOVIE, name="A Held Title", sort_name="A Held Title")
@@ -355,14 +343,9 @@ async def test_two_malformed_ids_name_the_media_item_first(
 ) -> None:
     """`_as_uuid` runs on `--resolve` before `--title`.
 
-    and that order is a behaviour rather than an accident of how the arguments were
-    typed.
-
-    It survived F4's own sweep as an unpinned mutant: swapping the two
-    conversions changes which argument an operator is told about when both
-    are wrong, and nothing failed. Cheap to close, so closed -- the title
-    pre-check sits directly under these two lines and is exactly the sort of
-    edit that reorders them.
+    That order is a behaviour rather than an accident of how the arguments were typed:
+    swapping the two conversions changes which argument an operator is told about when
+    both are wrong.
     """
     harness = await _resolve_harness(monkeypatch)
 
@@ -376,21 +359,11 @@ async def test_two_malformed_ids_name_the_media_item_first(
 def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
     """One subcommand for one artefact, exactly as `usher index` has `--backfill`.
 
-    Two subcommands is how those two would have drifted, and argparse has no vocabulary
-    for "exactly one of these".
-
-    ⚠️ **This case asserted that no arguments was a refusal, and M10's J6
-    makes it the third form.** The old reasoning was that bare `usher similar`
-    is *"a read of nothing"* and is the spelling an operator reaches for when
-    they mean `--rebuild`, so falling through would recompute the table by
-    accident. The first half was true and is no longer -- issue #17 asks for
-    exactly *"a `usher similar` line that says how old the table is relative to
-    the embedding population"*, and this is where it goes. **The second half
-    still holds and is what the `is False` below pins**: the argumentless form
-    must reach a *report*, never the rebuild.
-
-    **Both together** is still refused -- a read and a write in one command,
-    where the read would answer from rows the write had just replaced.
+    Two subcommands is how those two would have drifted, and argparse has no
+    vocabulary for "exactly one of these". The argumentless form is the third one and
+    must reach a *report*, never the rebuild -- and both arguments together is refused,
+    a read and a write in one command where the read would answer from rows the write
+    had just replaced.
     """
     read = parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001"])
     assert read.title_id == "0198c6b1-0000-7000-8000-000000000001"
@@ -412,9 +385,8 @@ def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
 def test_the_rebuild_only_flags_are_refused_where_they_cannot_mean_anything() -> None:
     """`--resume` and `--max-seeds` are arguments to the walk.
 
-    and there is no walk in either read form.
-
-    Accepted-and-ignored is the failure this refuses: an operator who typed
+    There is no walk in either read form, and accepted-and-ignored is the failure this
+    refuses: an operator who typed
     `usher similar --max-seeds 100` and got the whole-table report would
     believe they had capped a run that never started. `--max-seeds 0` is
     refused for the neighbouring reason -- zero is not a smaller run, it is a
@@ -435,18 +407,16 @@ def test_the_rebuild_only_flags_are_refused_where_they_cannot_mean_anything() ->
 
 
 def test_work_runs_forever_unless_asked_for_one_pass() -> None:
-    """`--once` is what `docker compose exec usher python -m usher work --once` needs to exit.
+    """`--once` is what `docker compose exec usher python -m usher work --once` needs.
 
-    without it the command is a daemon.
+    Without it the command is a daemon.
     """
     assert build_parser().parse_args(["work"]).once is False
     assert build_parser().parse_args(["work", "--once"]).once is True
 
 
 def test_push_probes_or_runs_the_lanes() -> None:
-    """`usher push --probe` is ADR-0004's caveat as an operator command.
-
-    it reports what *arrived*, never that the handshake succeeded.
+    """`usher push --probe` reports what *arrived*, never that the handshake succeeded.
 
     Bare `usher push` runs the same lanes the server does, without the HTTP surface.
     """
@@ -459,13 +429,10 @@ def test_push_probes_or_runs_the_lanes() -> None:
 
 
 def test_push_is_not_the_default_command() -> None:
-    """`main` treats no arguments as `serve`.
+    """`main` treats no arguments as `serve`, which is what the container's CMD runs.
 
-    because that is exactly what the container's CMD runs.
-
-    A new subcommand must not change it -- the failure M4 found was `main` treating
-    `argv is None` as "no arguments at all", which made `usher sync-status` silently
-    start the server.
+    Kills a `main` that reads `argv is None` as "no arguments at all", making
+    `usher sync-status` silently start the server.
     """
     assert build_parser().parse_args([]).command is None
     assert build_parser().parse_args(["push"]).command == "push"
@@ -474,20 +441,14 @@ def test_push_is_not_the_default_command() -> None:
 async def test_running_the_lanes_in_the_foreground_stops_them_on_the_way_out() -> None:
     """`usher push` with no `--probe` is a daemon.
 
-    so the two things a test can assert about it are that it *stays up* and that it
-    *lets go*: Ctrl-C reaches `asyncio.run`, which cancels the task, and the `finally`
-    has to stop the lanes, close the TMDb client and dispose the engine on the way out.
+    So the two things to assert about it are that it *stays up* and that it *lets go*:
+    Ctrl-C reaches `asyncio.run`, which cancels the task, and the `finally` has to stop
+    the lanes, close the TMDb client and dispose the engine on the way out.
 
-    Both lanes **on**, against a database that is not there. `start()`
-    creates tasks and opens no connection, so this costs nothing and it is
-    the only arrangement in which "stopped them" is observable: with the
-    lanes off there is nothing to leave running, and the cleanup mutation
-    survives. Asserted on the loop's own task set rather than on the
-    supervisor, which `_run_lanes` deliberately does not expose.
-
-    Without this case `_run_lanes` is a composition root nothing calls,
-    which is what `tests/integration/test_pipeline_deps.py` exists to stop
-    happening to the other one.
+    Both lanes are **on** against a database that is not there, the only arrangement in
+    which "stopped them" is observable: with the lanes off there is nothing to leave
+    running and a broken cleanup survives. Asserted on the loop's own task set, since
+    `_run_lanes` deliberately does not expose the supervisor.
     """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
@@ -517,7 +478,7 @@ def _lane_tasks() -> list[str]:
 def test_index_parses_its_two_modes() -> None:
     """`--backfill` writes and the bare form only reads.
 
-    which is what makes `usher index` safe to run on a production box while diagnosing
+    That is what makes `usher index` safe to run on a production box while diagnosing
     something.
     """
     assert parse_args(["index"]).backfill is False
@@ -541,16 +502,11 @@ def _search_actions() -> list[argparse.Action]:
 
 
 def test_search_takes_the_modes_the_port_declares() -> None:
-    """The wrong implementation.
+    """The wrong implementation is `choices=["full_text", "semantic"]`.
 
-    `choices=["full_text", "semantic"]`, which is what you get by writing the flag
-    before `FUSED` existed and never revisiting it.
-
-    `usher search --mode fused` then exits 2 with "invalid choice" for the mode that is
-    the milestone's whole design (ADR-0002), and nothing else in the suite notices.
-
-    Taken from the enum rather than retyped, so a fourth mode is offered the
-    day it exists.
+    `usher search --mode fused` then exits 2 with "invalid choice" for a mode the
+    service supports, and nothing else in the suite notices. Taken from the enum rather
+    than retyped, so a fourth mode is offered the day it exists.
     """
     for mode in SearchMode:
         assert parse_args(["search", "q", "--mode", mode.value]).mode == mode.value
@@ -562,12 +518,10 @@ def test_search_takes_the_modes_the_port_declares() -> None:
 def test_search_refuses_an_empty_year_range() -> None:
     """A cross-argument rule argparse cannot express.
 
-    each bound is individually valid, so `--year-from 2020 --year-to 1990` parses
+    Each bound is individually valid, so `--year-from 2020 --year-to 1990` parses
     cleanly and returns nothing -- which reads as "the catalog does not have it" rather
-    than as a transposed pair.
-
-    `parser.error`, so it exits 2 with usage on stderr like every other
-    argument failure; a `raise` would exit 1 with a traceback.
+    than as a transposed pair. `parser.error`, so it exits 2 with usage on stderr like
+    every other argument failure; a `raise` would exit 1 with a traceback.
     """
     assert parse_args(["search", "q", "--year-from", "1990", "--year-to", "2020"]).year_to == 2020
     # A single-year window is a legitimate ask, so the rule is `>` and not `>=`.
@@ -579,8 +533,8 @@ def test_search_refuses_an_empty_year_range() -> None:
 def test_search_refuses_a_limit_of_zero() -> None:
     """Checked here rather than left to `SearchService`'s ceiling.
 
-    because the two failures differ: above `search_result_limit` the service clamps and
-    the answer says so, and at zero the operator asked for nothing and meant something.
+    The two failures differ: above `search_result_limit` the service clamps and the
+    answer says so, and at zero the operator asked for nothing and meant something.
     """
     assert parse_args(["search", "q", "--limit", "1"]).limit == 1
     with pytest.raises(SystemExit):
@@ -588,18 +542,12 @@ def test_search_refuses_a_limit_of_zero() -> None:
 
 
 def test_the_filter_flags_are_search_filters_whole_vocabulary() -> None:
-    """One flag per `SearchFilters` field.
+    """One flag per `SearchFilters` field, checked against the dataclass not a list.
 
-    checked against the dataclass rather than against a list.
-
-    The wrong implementation is a CLI offering the three filters somebody
-    needed on the day. A filter with no flag is a capability the port declares,
-    the backend implements, and no operator can reach -- and because
-    `SearchFilters` is frozen and slotted, adding a field later without a flag
-    is silent. The vocabulary being closed is 🔶 1's settlement: a
-    `dict[str, Any]` let two backends invent different keys, and a backend that
-    cannot express a filter must raise rather than ignore it, because an
-    ignored filter returns *more* results and reads as working.
+    The wrong implementation is a CLI offering the three filters somebody needed on the
+    day. A filter with no flag is a capability the port declares, the backend
+    implements, and no operator can reach -- and because `SearchFilters` is frozen and
+    slotted, adding a field later without a flag is silent.
     """
     declared = {field.name for field in dataclasses.fields(SearchFilters)}
     reachable = {action.dest for action in _search_actions()}
@@ -658,25 +606,16 @@ def test_suggest_takes_a_prefix_and_a_limit() -> None:
 
 
 def test_suggest_defaults_to_the_tier_that_tolerates_a_typo() -> None:
-    """**The route defaults to `prefix` and this command defaults to `fuzzy`.
+    """The route defaults to `prefix` and this command defaults to `fuzzy`.
 
-    and the disagreement is the decision** (ADR-0031): a route is driven per keystroke
-    and pays 2,707 ms p95 at one character, a command is typed once and can afford it.
+    A route is driven per keystroke and a command is typed once, so the command can
+    afford the typo-tolerant tier. Asserted through the enum rather than against the
+    string `"fuzzy"`, because what the default has to be is *the tier that tolerates a
+    typo*.
 
-    `usher suggest` has been the typo-tolerant one since M6 and CLAUDE.md's Commands
-    section documents it as such.
-
-    Asserted through the enum rather than against the string `"fuzzy"`,
-    because what the default has to be is *the tier that tolerates a typo* --
-    the same argument `SuggestTier`'s own docstring makes for being an enum
-    rather than a `typo_tolerant: bool`.
-
-    **Nothing else in this repository pins it**, measured rather than assumed:
-    flipping this default to `prefix` passed all 3,923 unit cases and the whole
-    of `tests/integration/test_cli_pipeline.py` before this case existed. The
-    damage is quiet -- `usher suggest "the quie"` answers `no match` for a
-    misspelt name instead of finding it, on a command whose documented purpose
-    is to find it.
+    Nothing else in this repository pins it: with the default flipped to `prefix`,
+    `usher suggest "the quie"` answers `no match` for a misspelt name, on a command
+    whose documented purpose is to find it.
     """
     assert SuggestTier(parse_args(["suggest", "quie"]).tier) is SuggestTier.FUZZY
     assert SuggestTier(parse_args(["suggest", "quie", "--tier", "prefix"]).tier) is (
@@ -685,10 +624,9 @@ def test_suggest_defaults_to_the_tier_that_tolerates_a_typo() -> None:
 
 
 def test_suggest_refuses_a_tier_that_is_not_one_of_the_two() -> None:
-    """`argparse`'s `choices`.
+    """`argparse`'s `choices`, derived from the enum rather than written out.
 
-    derived from the enum rather than written out, so a third member cannot be reachable
-    from the route and unreachable here.
+    A third member cannot then be reachable from the route and unreachable here.
     """
     with pytest.raises(SystemExit):
         parse_args(["suggest", "quie", "--tier", "fuzy"])
@@ -697,7 +635,7 @@ def test_suggest_refuses_a_tier_that_is_not_one_of_the_two() -> None:
 def test_suggest_refuses_a_limit_of_zero() -> None:
     """`usher search`'s rule, for the same reason.
 
-    a type-ahead box asking for nothing is an operator who meant something.
+    A type-ahead box asking for nothing is an operator who meant something.
     """
     with pytest.raises(SystemExit):
         parse_args(["suggest", "quie", "--limit", "0"])
@@ -706,11 +644,9 @@ def test_suggest_refuses_a_limit_of_zero() -> None:
 def test_similar_rejects_a_title_id_that_is_not_a_uuid() -> None:
     """`_as_uuid`, the treatment `--resolve`/`--title` already get.
 
-    a sentence naming the argument rather than a `ValueError` traceback out of
-    `uuid.UUID`.
-
-    Parsing succeeds -- argparse has no uuid type -- so the refusal has to happen where
-    `main` converts it.
+    A sentence naming the argument rather than a `ValueError` traceback out of
+    `uuid.UUID`. Parsing succeeds -- argparse has no uuid type -- so the refusal has to
+    happen where `main` converts it.
     """
     assert parse_args(["similar", "not-a-uuid"]).title_id == "not-a-uuid"
     with pytest.raises(SystemExit, match="title id is not a uuid"):
@@ -718,22 +654,16 @@ def test_similar_rejects_a_title_id_that_is_not_a_uuid() -> None:
 
 
 def test_movielens_is_the_last_phase_before_all_and_the_order_is_execution_order() -> None:
-    """`--phase all` runs the tuple in order.
+    """`--phase all` runs the tuple in order, so the tuple *is* the execution order.
 
-    so this tuple *is* the execution order an operator reads it as.
+    `movielens` must come after `imdb`: the genome joins to `titles` on `imdb_id`, and
+    against an empty catalog the join matches nothing. Kills a tidy-up that
+    alphabetises `PHASES`, which would put `crosswalk` and `movielens` before `imdb`
+    and produce a phase that downloads an archive, writes zero rows, and reports
+    success.
 
-    `movielens` must come after `imdb`: the genome joins to `titles` on
-    `imdb_id`, and against an empty catalog the join matches nothing. Kills a
-    tidy-up that alphabetises `PHASES`, which would put `crosswalk` and
-    `movielens` before `imdb` and produce a phase that downloads 335 MiB,
-    writes zero rows, and reports success.
-
-    Two edges rather than the whole tuple, because M9 added two phases between
-    `imdb` and `tmdb-ids` and pinning the literal in two places is how one of
-    them comes to be updated and the other merely made green.
-    `test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first`
-    is where the full tuple is asserted, with the measurement behind each new
-    edge.
+    Two edges rather than the whole tuple; pinning the literal in two places is how one
+    of them comes to be updated and the other merely made green.
     """
     assert PHASES[-2:] == ("movielens", "all")
     assert PHASES.index("imdb") < PHASES.index("movielens")
@@ -742,22 +672,17 @@ def test_movielens_is_the_last_phase_before_all_and_the_order_is_execution_order
 async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The worst outcome available in this milestone, refused.
+    """The genome phase refuses an empty catalog before it downloads anything.
 
-    Against an empty catalog the phase would otherwise download 350,896,731 B,
-    stream 18,472,128 rows, write 0, checkpoint COMPLETED, and show green in
-    `bootstrap-status` -- and every later `--phase all` would find a completed
-    checkpoint at the file's end and do nothing, so the failure would be
-    permanent and invisible.
+    Otherwise it streams the whole archive, writes nothing, checkpoints COMPLETED and
+    shows green in `bootstrap-status` -- and every later `--phase all` finds that
+    checkpoint and does nothing, so the failure is permanent and invisible.
 
-    Three assertions, one per property. **No request of any kind** -- the
-    transport fails the test if reached, so this also pins "before the
-    download" rather than merely "before the write". **No `ImportRun`** -- a
-    FAILED row would be a lie and a COMPLETED one would be worse, and the
-    absence of a row is what `bootstrap-status` already renders as "this
-    phase has not run". **A message that names the reason and the fix**,
-    because PRD 08's rule is that every operator command works against an
-    empty database, and "work" means saying why.
+    Three assertions, one per property. **No request of any kind**, which pins "before
+    the download" rather than merely "before the write". **No `ImportRun`** -- a FAILED
+    row would be a lie and a COMPLETED one worse, and an absent row is what
+    `bootstrap-status` renders as "this phase has not run". **A message that names the
+    reason and the fix.**
     """
 
     def refuse(request: httpx.Request) -> httpx.Response:
@@ -849,16 +774,12 @@ def _genome_settings(cache: Path) -> Settings:
 async def test_the_genome_phase_stores_the_tag_vocabulary_beside_the_vectors(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The loader half of Task 19.
+    """The vocabulary is loaded by the existing MovieLens phase, not by a new command.
 
-    driven through the phase rather than through the repository, because "loaded by the
-    existing MovieLens phase" is the requirement and a repository case cannot see it.
-
-    The vocabulary carries **the same revision the vectors carry**, which is
-    what makes the two comparable at all. Against this fixture the two agree
-    by luck as well as by construction -- one ETag, never moving -- so the
-    case below is the one with teeth about *which* token was used, and this
-    one is its control.
+    Driven through the phase rather than through the repository, which cannot see that.
+    The vocabulary carries **the same revision the vectors carry**, which is what makes
+    the two comparable at all; this fixture's ETag never moves, so it is the control
+    for the case below.
     """
     cache = _genome_archive(tmp_path)
     catalog = FakeBulkCatalogRepository()
@@ -892,19 +813,15 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
 ) -> None:
     """The reason `tag_vocabulary` takes a `revision` instead of resolving one.
 
-    arriving at the layer where the damage would be permanent.
-
-    An upstream that re-uploads between two `HEAD`s hands back two tokens for
-    one run. `BootstrapService.import_dataset` already takes the caller's own
-    resolved value for exactly that reason (its docstring calls out this
-    phase by name), and the vocabulary has to travel the same way -- otherwise
-    `genome_tags.genome_revision` says B while every vector beside it says A,
-    and `GenomeRepository.vocabulary` then refuses forever on a catalog where
-    nothing is actually wrong.
+    An upstream that re-uploads between two `HEAD`s hands back two tokens for one run.
+    `BootstrapService.import_dataset` already takes the caller's own resolved value for
+    that reason, and the vocabulary has to travel the same way -- otherwise
+    `genome_tags.genome_revision` says B while every vector beside it says A, and
+    `GenomeRepository.vocabulary` refuses forever on a catalog where nothing is wrong.
 
     The fixture is the only one in this file whose ETag **moves**: every other
-    transport here answers one token, which makes "resolved once" and
-    "resolved twice" indistinguishable. Kills
+    transport here answers one token, which makes "resolved once" and "resolved twice"
+    indistinguishable. Kills
     `replace_genome_tags(..., revision=await dataset.revision())`.
     """
     cache = _genome_archive(tmp_path)
@@ -930,11 +847,9 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
-        # The premise, asserted against the transport rather than against the
-        # run: one more resolution really does hand back a different token, so
-        # an implementation that resolved a second time would have stamped
-        # something else. Without this the fixture is indistinguishable from
-        # every other one in this file.
+        # The premise, asserted against the transport rather than against the run:
+        # one more resolution really does hand back a different token, so an
+        # implementation that resolved twice would have stamped something else.
         again = await MovieLensGenomeDataset(client, cache).revision()
 
     assert again != served[0]
@@ -946,11 +861,10 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
 async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary(
     tmp_path: Path,
 ) -> None:
-    """**The upgrade path.
+    """The upgrade path, and the one case that decides where this call goes.
 
-    and the one case that decides where this call goes.** A catalog bootstrapped under
-    M7 has a *completed* `movielens.genome` checkpoint and no vocabulary at all, because
-    `ffa` deliberately did not store one.
+    An older catalog has a *completed* `movielens.genome` checkpoint and no vocabulary
+    at all.
     """
     cache = _genome_archive(tmp_path)
     catalog = FakeBulkCatalogRepository()
@@ -964,11 +878,9 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
         await _movielens(settings, client, catalog, service, _no_commit, print)
         assert len(catalog.genome_tags()) == GENOME_TAG_COUNT
-        # An M7-era catalog has no vocabulary. Both stores are emptied rather
-        # than just the vocabulary, so the assertions below can distinguish
-        # "the second run wrote nothing" from "the second run rewrote
-        # everything" -- which the checkpoint alone cannot, since a run that
-        # replayed every batch reaches the same position.
+        # An older catalog has no vocabulary. Both stores are emptied so the
+        # assertions below can distinguish "the second run wrote nothing" from
+        # "the second run rewrote everything", which the checkpoint alone cannot.
         catalog._genome_tags.clear()
         catalog._genome.clear()
         await _movielens(settings, client, catalog, service, _no_commit, print)
@@ -1028,7 +940,7 @@ def _coverage(*revisions: tuple[str, int]) -> GenomeCoverage:
 async def test_the_status_report_says_when_the_vocabulary_names_the_stored_vectors() -> None:
     """The ordinary answer, and the control the three refusal branches below need.
 
-    without it, `return "genome vocabulary: not loaded"` unconditionally passes every
+    Without it, `return "genome vocabulary: not loaded"` unconditionally passes every
     one of them.
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a"), 2: ("atmospheric", "etag-a")})
@@ -1042,8 +954,8 @@ async def test_the_status_report_says_when_the_vocabulary_names_the_stored_vecto
 async def test_the_status_report_says_a_vocabulary_that_was_never_loaded_is_missing() -> None:
     """Every catalog bootstrapped before `m08b` is in this state.
 
-    so it has to read as a thing to do rather than as a fault -- and the line names the
-    command that fixes it, which is PRD 08's rule for an operator command.
+    So it has to read as a thing to do rather than as a fault, and the line names the
+    command that fixes it.
     """
     line = _vocabulary_line(
         await vocabulary_verdict(FakeGenomeRepository(), _coverage(("etag-a", 5)))
@@ -1056,13 +968,13 @@ async def test_the_status_report_says_a_vocabulary_that_was_never_loaded_is_miss
 async def test_the_status_report_renders_a_mismatched_vocabulary_rather_than_raising() -> None:
     """`PortDataMalformed` is deliberately not in `OPERATOR_ERRORS`.
 
-    the three `UsherPortError` subclasses ADR-0026's 2026-08-07 amendment added are the
-    transport ones, and this is a content one -- so letting it out of a status command
-    answers "what state is my genome in?" with a stack trace about the answer being bad.
+    The `UsherPortError` subclasses listed there are the transport ones and this is a
+    content one, so letting it out of a status command answers "what state is my genome
+    in?" with a stack trace about the answer being bad.
 
-    Both release tokens have to survive into the line: "the vocabulary is
-    wrong" without naming what is stored is not something an operator can act
-    on. Kills a handler that prints a fixed sentence.
+    Both release tokens have to survive into the line: "the vocabulary is wrong"
+    without naming what is stored is not something an operator can act on. Kills a
+    handler that prints a fixed sentence.
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-b")})
 
@@ -1075,12 +987,10 @@ async def test_the_status_report_renders_a_mismatched_vocabulary_rather_than_rai
 async def test_the_status_report_declines_to_judge_a_vocabulary_against_mixed_vectors() -> None:
     """With `genome_scores` holding two releases there is no single revision to ask for.
 
-    and asking for either would report the *vocabulary* as wrong when what is wrong is
-    the vectors -- which `_report_coverage`'s MIXED RELEASES line already says, in the
-    phase that produced them.
-
-    Kills `coverage.revisions[0][0]`, which is a perfectly good release token
-    and the wrong question.
+    Asking for either would report the *vocabulary* as wrong when what is wrong is the
+    vectors, which `_report_coverage`'s MIXED RELEASES line already says in the phase
+    that produced them. Kills `coverage.revisions[0][0]`, a perfectly good release
+    token and the wrong question.
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a")})
 
@@ -1092,9 +1002,7 @@ async def test_the_status_report_declines_to_judge_a_vocabulary_against_mixed_ve
 
 
 async def test_the_status_report_says_nothing_is_named_when_there_are_no_vectors() -> None:
-    """A fresh database has no genome at all.
-
-    and PRD 08 requires every operator command to work against one.
+    """A fresh database has no genome at all, and the command has to work against one.
 
     Kills an implementation that reports a missing vocabulary as a problem on a catalog
     that has nothing for it to explain.
@@ -1108,16 +1016,13 @@ async def test_the_status_report_says_nothing_is_named_when_there_are_no_vectors
 def test_every_vocabulary_state_the_report_can_carry_has_a_sentence_of_its_own(
     state: VocabularyState,
 ) -> None:
-    """A member added to `VocabularyState` and forgotten in the renderer falls through to the.
+    """Every `VocabularyState` member renders, and no two render alike.
 
-    `named` branch and prints `genome vocabulary: None tags` -- a sentence that is
-    grammatical, plausible and about a state that did not occur.
-
-    Parametrised over the enum rather than over the five branches, so the
-    coverage grows with the vocabulary and nobody has to remember. The
-    distinctness assertion is what has teeth: `len(set(...)) == len(...)` over
-    every member's rendering fails the moment two states render alike, which
-    is exactly what a fall-through produces.
+    A member forgotten in the renderer falls through to the `named` branch and prints
+    `genome vocabulary: None tags` -- grammatical, plausible, and about a state that did
+    not occur. Parametrised over the enum rather than over the branches, so coverage
+    grows with the vocabulary; `len(set(...)) == len(...)` is the assertion with teeth,
+    since a fall-through makes two states render alike.
     """
     verdict = VocabularyVerdict(state=state, tags=2, detail="a stored diagnosis")
     sentences = {
@@ -1133,14 +1038,10 @@ def test_every_vocabulary_state_the_report_can_carry_has_a_sentence_of_its_own(
 async def test_the_status_report_is_one_value_and_survives_an_untouched_database() -> None:
     """`bootstrap_report` against a database no import has run.
 
-    which is where a report assembled from four reads is most likely to raise -- PRD
-    08's rule that a diagnostic must work before the thing it diagnoses has.
-
-    This is the seam the whole report rests on: it takes **ports**, so the
-    five vocabulary branches and the empty case are unit-testable, while
-    `cli._status` opens its own engine and is not. A report that took a
-    session would have moved every one of the cases above into
-    `tests/integration/`.
+    A report assembled from four reads is most likely to raise there, and a diagnostic
+    has to work before the thing it diagnoses does. The report takes **ports**, which is
+    what keeps the vocabulary branches and the empty case unit-testable while
+    `cli._status` opens its own engine.
     """
     report = await bootstrap_report(
         FakeImportRunRepository(), FakeBulkCatalogRepository(), FakeGenomeRepository()
@@ -1159,20 +1060,14 @@ async def test_the_status_report_is_one_value_and_survives_an_untouched_database
 async def test_the_status_report_carries_every_run_the_repository_holds_in_its_order() -> None:
     """The report is a *carrier* for `list_runs()` and adds no policy of its own.
 
-    no truncation, no re-sort, no filter on status.
+    No truncation, no re-sort, no filter on status. Kills a report that slices to
+    `stored[:1]`: one listed dataset looks exactly like a catalog on which one dataset
+    has ever been imported, which on a `--phase all` run is six datasets short and says
+    nothing about it.
 
-    Found by planting rather than by design: with every other case reaching
-    the report through a database or a fake holding **one** run, slicing it to
-    `stored[:1]` survived all 112 cases in this task's sweep selection. The
-    damage is the quiet kind -- a report that lists one dataset looks exactly
-    like a catalog on which one dataset has ever been imported, which on a
-    `--phase all` run is six datasets short and says nothing about it.
-
-    Asserted as an equality against the repository's *own* answer rather than
-    against a literal, so it pins the order as well as the membership and
-    keeps saying something if `list_runs()`' ordering is ever changed. The
-    premise guard is what stops the equality being trivially true against a
-    one-element list -- the exact condition under which the plant survived.
+    Asserted as an equality against the repository's *own* answer rather than against a
+    literal, so it pins the order as well as the membership. The premise guard is what
+    stops the equality being trivially true against a one-element list.
     """
     runs = FakeImportRunRepository()
     await runs.save(ImportRun(dataset="imdb.title.basics", revision="an-invented-etag"))
@@ -1194,12 +1089,10 @@ async def test_the_status_report_carries_every_run_the_repository_holds_in_its_o
 def test_the_coverage_report_survives_an_enriched_tier_of_zero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A bootstrap-only catalog is all skeletons.
+    """A bootstrap-only catalog is all skeletons, and the command has to survive it.
 
-    which is exactly the state PRD 08 says every operator command must survive.
-
-    The enriched-tier fraction is the one that matters and it is the one whose
-    denominator is zero on a fresh database. Kills a report that divides.
+    The enriched-tier fraction is the one whose denominator is zero on a fresh
+    database. Kills a report that divides.
     """
     _report_coverage(
         GenomeCoverage(
@@ -1225,10 +1118,9 @@ def test_the_coverage_report_survives_an_enriched_tier_of_zero(
 def test_the_coverage_report_names_every_release_when_there_is_more_than_one(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Two releases in one table is a correctness problem `GenomeRepository.get_pair` is already.
+    """Two releases in one table is what `GenomeRepository.get_pair` refuses to blend.
 
-    refusing to blend across, and a killed re-import against a new upload is how it
-    happens.
+    A killed re-import against a new upload is how it happens.
 
     Kills a report that prints the breakdown unconditionally (noise on every normal run,
     which trains an operator to skip the line) and one that never prints it (the
@@ -1274,7 +1166,7 @@ def test_home_refuses_a_limit_below_one() -> None:
 def test_home_refuses_a_repeat_below_one() -> None:
     """A zero repeat times nothing and then reports a p95 over an empty list.
 
-    which is either a crash or a fabricated number depending on how the percentile is
+    That is either a crash or a fabricated number, depending on how the percentile is
     spelled.
     """
     with pytest.raises(SystemExit):
@@ -1282,17 +1174,12 @@ def test_home_refuses_a_repeat_below_one() -> None:
 
 
 def test_home_has_no_cross_argument_rule_and_that_is_deliberate() -> None:
-    """`usher similar` needs one (`bool(title_id) == bool(rebuild)`) because its two arguments.
+    """`usher home` deliberately has no cross-argument rule.
 
-    select between two *different operations*, one of which rewrites the whole neighbour
-    table.
-
-    `usher home` has one operation and two scalars, so every combination of them is
-    meaningful.
-
-    Written down as a case rather than as an absence, because a reader
-    comparing this command to its template will look for the rule and should
-    find the reason it is not there.
+    `usher similar` needs one (`bool(title_id) == bool(rebuild)`) because its two
+    arguments select between two *different operations*, one of which rewrites the
+    whole neighbour table. `usher home` has one operation and two scalars, so every
+    combination of them is meaningful.
     """
     both = parse_args(["home", "--limit", "3", "--repeat", "5"])
     assert (both.limit, both.repeat) == (3, 5)
@@ -1329,18 +1216,15 @@ def _answer(**changes: object) -> SearchAnswer:
 def test_an_expanded_query_is_printed_and_printed_before_the_results(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**"Reported.
+    """An expansion is reported, never silently substituted, at the surface a person reads.
 
-    never silently substituted", at the one surface a person reads.** A span attribute
-    is not a report and a `llm_calls` row is not either: both are for an operator with a
-    query console, and the person who typed the search has neither.
+    A span attribute is not a report and a `llm_calls` row is not either: both are for
+    an operator with a query console, and the person who typed the search has neither.
+    Without this line a viewer searches for one thing, gets results for another, and
+    has nothing to tell a good expansion from a bad one.
 
-    Without this line a viewer searches for one thing, gets results for another, and has
-    nothing to tell a good expansion from a bad one.
-
-    Before the results, because it is the question they are the answer to. The
-    ordering assertion is what fails if the line drifts below the summary,
-    where it reads as a footnote about a search already scrolled past.
+    Before the results, because it is the question they are the answer to; the ordering
+    assertion fails if the line drifts below the summary.
     """
     _print_search_answer(_answer(expanded_query="a crew alone in orbit"))
 
@@ -1354,9 +1238,9 @@ def test_a_search_that_bought_no_completion_prints_no_expansion_line(
 ) -> None:
     """The shipped default is `USHER_LLM_ENABLED=false`.
 
-    so `expanded_query` is `None` on every search of every default deployment -- and a
-    report that echoed the typed query there would print a line about a rewrite nobody
-    bought, on every run, forever.
+    So `expanded_query` is `None` on every search of a default deployment, and a report
+    that echoed the typed query there would print a line about a rewrite nobody bought,
+    on every run, forever.
 
     The rest of the report is asserted too, so "print nothing at all" is not a pass.
     """
@@ -1371,16 +1255,13 @@ def test_a_search_that_bought_no_completion_prints_no_expansion_line(
 async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**The wiring that decides whether the only user-facing search surface ever expands.
+    """The wiring that decides whether the search command ever expands anything.
 
-    anything.** `build_pipeline` builds the expander, and it can only do so from a
-    client -- so a `_search` that opened one and forgot to pass it would leak a
-    connection pool per run and expand nothing, with no error and a report that
-    correctly says no expansion happened.
-
-    The client is released on the way out, in the same `finally` as the
-    embedder: one `httpx.AsyncClient` per command, closed however the command
-    ends.
+    `build_pipeline` builds the expander and can only do so from a client, so a
+    `_search` that opened one and forgot to pass it would leak a connection pool per run
+    and expand nothing, with no error and a report that correctly says no expansion
+    happened. The client is released in the same `finally` as the embedder: one
+    `httpx.AsyncClient` per command, closed however the command ends.
 
     This is the **only** configuration that reaches a client -- a non-full-text
     mode, an embedder that loaded, and `USHER_QUERY_EXPANSION_ENABLED=true` --
@@ -1419,17 +1300,13 @@ async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
 async def test_a_search_with_no_embedding_model_opens_no_completion_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**The narrowed deployment.
+    """A deployment with no embedding extra buys no client for a fused search.
 
-    and it was paying for a pool until 2026-08-07.** `embedder(settings, report=False)`
-    answering `(None, nothing)` is the whole of ADR-0022's optionality at this layer:
-    `SearchService` then narrows a `fused` request to full-text before it ever reaches
-    an expander, so no completion is bought and none could be.
-
-    The client built for it was an `httpx.AsyncClient` and its connection pool opened
-    and closed for nothing -- verbatim the cost the `full_text` guard one case down
-    exists to avoid, on the configuration a deployment without the embedding extra uses
-    for every fused search it runs.
+    `embedder(settings, report=False)` answering `(None, nothing)` makes `SearchService`
+    narrow a `fused` request to full-text before it ever reaches an expander, so no
+    completion is bought and none could be. A client built anyway is an
+    `httpx.AsyncClient` whose connection pool opens and closes for nothing -- the same
+    cost the `full_text` guard one case down exists to avoid.
 
     The expansion switch is deliberately **on** here, so the case can only pass
     by reading the embedder's answer.
@@ -1456,10 +1333,9 @@ async def test_a_search_on_a_deployment_that_curates_but_does_not_expand_opens_n
 ) -> None:
     """The second switch, at the CLI.
 
-    `USHER_LLM_ENABLED=true` with `USHER_QUERY_EXPANSION_ENABLED=false` is the ordinary
-    M8 deployment after PRD 05's 2026-08-07 measurement, and on it `build_pipeline`
-    builds no expander -- so a client opened here is a pool bought for a service that
-    will not exist.
+    `USHER_LLM_ENABLED=true` with `USHER_QUERY_EXPANSION_ENABLED=false` is an ordinary
+    deployment, and on it `build_pipeline` builds no expander -- so a client opened here
+    is a pool bought for a service that will not exist.
 
     The embedder is present and the mode is `fused`, so the only thing between
     this and a client is the setting.
@@ -1488,13 +1364,10 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
 ) -> None:
     """The call sits in front of the embed, so a mode with no embed has nothing to expand for.
 
-    and a client built anyway is an `httpx.AsyncClient` and a connection pool opened
-    once per run of the mode a deployment with no embedding extra uses for *everything*.
-
-    Not a correctness claim about spend: `SearchService` would not call an
-    expander on this path either (`test_a_full_text_search_buys_no_completion`
-    is where that lives). This is the resource half, and it is the half only
-    the composition root can get wrong.
+    A client built anyway is a connection pool opened once per run of the mode a
+    deployment with no embedding extra uses for *everything*. Not a correctness claim
+    about spend -- `test_a_full_text_search_buys_no_completion` is where that lives --
+    but the resource half, which only the composition root can get wrong.
     """
     captured: dict[str, object] = {}
 
@@ -1615,7 +1488,7 @@ async def _no_household(_: object, **__: object) -> uuid.UUID:
 def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
     """A `build_pipeline` that records its keyword arguments.
 
-    and a `search` that records its own, answering a `SearchAnswer` with nothing in it.
+    And a `search` that records its own, answering a `SearchAnswer` with nothing in it.
     """
 
     class _Search:
@@ -1633,9 +1506,9 @@ def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
     return _build
 
 
-# --- the IMDb expansion phases ---------------------------------------- `credit-names`
-# and `aliases` are the two phases M9 adds, and both are joins against a catalog the
-# `imdb` phase has to have built first.
+# --- the IMDb expansion phases ------------------------------------------------
+# `credit-names` and `aliases` are joins against a catalog the `imdb` phase has to
+# have built first.
 
 _BULK_FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
 
@@ -1723,7 +1596,7 @@ async def _seeded_catalog() -> tuple[FakeBulkCatalogRepository, BootstrapService
 
 
 def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() -> None:
-    """Two edges, both measured, in a tuple `--phase all` executes in order."""
+    """Two edges in a tuple `--phase all` executes in order."""
     assert PHASES == (
         "imdb",
         "ratings",
@@ -1740,23 +1613,16 @@ def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() ->
 async def test_the_credit_names_phase_reads_name_basics_before_title_principals(
     tmp_path: Path,
 ) -> None:
-    """A credit names a person.
+    """A credit names a person, so the `nconst -> primaryName` index has to exist first.
 
-    so the `nconst -> primaryName` index has to exist before a principal is resolved
-    against it.
+    **The order is asserted as a sequence, not as two memberships**: "both files were
+    read" is satisfied by the wrong order, which would resolve every principal against
+    an empty index and yield no record at all -- a phase that completes, checkpoints,
+    and blanks nothing while filling nothing.
 
-    **The order is asserted as a sequence, not as two memberships**: "both
-    files were read" is satisfied by the wrong order, which would resolve
-    every principal against an empty index and yield no record at all -- a
-    phase that completes, checkpoints, and blanks nothing while filling
-    nothing.
-
-    **This is the plan's `test_bootstrap_phase_people_runs_name_basics_before_
-    title_principals` under a name that describes what shipped.** There is no
-    `people` phase: T3 measured the `people` + `credits` design at 2.702 GB
-    against a 2.0 GB ceiling and refused it, so the two files are one dataset
-    resolving the join in the adapter, and the ordering they need is inside
-    that dataset rather than between two phases.
+    There is no `people` phase: the two files are one dataset resolving the join in the
+    adapter, so the ordering they need is inside that dataset rather than between two
+    phases.
     """
     cache = _stage_slices(
         tmp_path,
@@ -1781,25 +1647,19 @@ async def test_the_credit_names_phase_reads_name_basics_before_title_principals(
 async def test_the_alias_phase_stores_every_alias_even_when_a_title_straddles_a_batch(
     tmp_path: Path,
 ) -> None:
-    """The phase is the writer's only caller.
+    """The phase is the writer's only caller, so the loss the port cannot detect shows here.
 
-    so this is where the loss the port cannot detect actually shows up.
+    `replace_aliases` deletes by scope before it inserts. With a title's rows split
+    across two batches, the second call's scope names that title again and its delete
+    takes the rows the first call wrote -- and **nothing raises**, because the port's
+    `ValueError` guard is about a row *outside* the scope and both halves are inside
+    their own. `batch_size=1` against a slice whose every title has two aliases is the
+    shape that does it.
 
-    `replace_aliases` deletes by scope before it inserts. With a title's rows
-    split across two batches, the second call's scope names that title again
-    and its delete takes the rows the first call wrote -- and **nothing
-    raises**, because the port's `ValueError` guard is about a row *outside*
-    the scope and both halves are inside their own. `batch_size=1` against a
-    slice whose every title has two aliases is the shape that does it: before
-    `IMDbAkaDataset.group_of`, this stored one alias per title instead of two.
-
-    **The premise is read off the fixture, not off the result.** Spelled as
-    *"some title in `stored` has more than one alias"* it is a claim about the
-    outcome, so the defect falsifies the guard instead of the assertion and
-    the case reports a fixture problem it does not have -- measured, by
-    planting `group_of -> None` and watching it fail on `assert 1 > 1`. Read
-    off `parse_akas_row` over the committed slice it is a fact about the file,
-    which only an edit to the file can change.
+    **The premise is read off the fixture, not off the result.** Spelled as *"some
+    title in `stored` has more than one alias"* it is a claim about the outcome, so the
+    defect would falsify the guard instead of the assertion; read off `parse_akas_row`
+    over the committed slice it is a fact about the file.
     """
     per_title = Counter(
         row.imdb_id
@@ -1833,11 +1693,10 @@ async def test_the_alias_phase_writes_region_and_language_and_leaves_person_rows
 ) -> None:
     """Two properties the phase's own wiring is responsible for.
 
-    `region` and `language` reach the table -- `m09a` added those two columns
-    for this dump and without them a French and a Brazilian alias of one film
-    are indistinguishable rows. And B1's `person` rows survive: the scope is
-    `kind = 'alias'` as well as `imdb_ids`, so a credited person's searchable
-    name is not collateral of an alias re-import.
+    `region` and `language` reach the table; without them a French and a Brazilian
+    alias of one film are indistinguishable rows. And `person` rows survive: the scope
+    is `kind = 'alias'` as well as `imdb_ids`, so a credited person's searchable name
+    is not collateral of an alias re-import.
     """
     cache = _stage_slices(tmp_path, ("title.akas.slice.tsv", "title.akas.tsv.gz"))
     catalog, service = await _seeded_catalog()
@@ -1856,15 +1715,12 @@ async def test_the_alias_phase_writes_region_and_language_and_leaves_person_rows
 async def test_the_credit_names_phase_refuses_an_empty_catalog_before_downloading(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`_movielens`' refusal.
+    """`_movielens`' refusal, applied to a much larger pair of files.
 
-    against a 1.09 GB pair of files instead of a 335 MiB archive, and with the same
-    three properties: no request of any kind, no `ImportRun`, and a message naming the
-    phase to run first.
-
-    The outcome it prevents is the same one and is worse here for the size:
-    every row would match nothing, the run would checkpoint `COMPLETED`, and
-    every later `--phase all` would find that checkpoint and do nothing.
+    The same three properties: no request of any kind, no `ImportRun`, and a message
+    naming the phase to run first. Otherwise every row matches nothing, the run
+    checkpoints `COMPLETED`, and every later `--phase all` finds that checkpoint and
+    does nothing.
     """
 
     def refuse(request: httpx.Request) -> httpx.Response:
@@ -1888,7 +1744,7 @@ async def test_the_credit_names_phase_refuses_an_empty_catalog_before_downloadin
 async def test_the_alias_phase_refuses_an_empty_catalog_before_downloading(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The same refusal, against 486 MiB.
+    """The same refusal, for the alias phase's own dump.
 
     Separate from the credit-names case rather than parametrised over both, because the
     two messages name different files and a parametrised case asserting only the shared
@@ -1918,20 +1774,13 @@ async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_order
 ) -> None:
     """A count with the population it is a count *of*.
 
-    and the one sentence an operator has to read before scheduling this phase.
+    The ordering line is the one sentence an operator has to read before scheduling
+    this phase, because getting it wrong is not recoverable by re-running anything: run
+    after a priority-tier crawl and every enriched title is deferred to TMDb on this
+    run and on every later one.
 
-    The ordering line is here rather than only in a PRD because getting it
-    wrong is not recoverable by re-running anything: run after a priority-tier
-    crawl and every enriched title is deferred to TMDb on this run and on
-    every later one, so 99.82% of that tier never gains IMDb names at all.
-
-    **This case is the proof of what the line must not say**, which is why it
-    now asserts the absence as well as the presence. `:1699`-equivalent below
-    reads back `()` for the *enriched* fixture title and the counter says
-    "1 deferred to TMDb" -- i.e. the case demonstrates the skip -- while the
-    printed sentence claimed until 2026-08-12 that an enriched tier gets
-    rewritten and staled. One case cannot both show a title being skipped and
-    assert that it is written.
+    The absence is asserted as well as the presence -- an enriched title is skipped, so
+    the report may not say its embedding was rewritten or staled.
     """
     cache = _stage_slices(
         tmp_path,
@@ -1976,14 +1825,11 @@ async def test_the_alias_report_says_where_the_rows_that_are_not_aliases_went(
 ) -> None:
     """`written` alone reads as a broken import.
 
-    three retained akas rows in four restate the title's own name (5,693,570 of
-    7,536,366, 75.5%), so a report printing only what was stored would show a quarter of
-    the file arriving and say nothing about the rest.
-
-    The fixture is built to exercise the counter rather than to be
-    representative -- one row per title restating the title's own name, which
-    the parser cannot drop because only a comparison against the stored
-    `Title` can see it.
+    Most retained akas rows restate the title's own name, so a report printing only
+    what was stored would show a fraction of the file arriving and say nothing about
+    the rest. The fixture is built to exercise the counter rather than to be
+    representative: the parser cannot drop such a row, because only a comparison
+    against the stored `Title` can see it.
     """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
@@ -2010,11 +1856,10 @@ async def test_the_alias_report_says_where_the_rows_that_are_not_aliases_went(
 
 
 def test_a_zero_denominator_is_a_sentence_naming_what_it_counted() -> None:
-    """`_percent` now serves two populations, and its zero branch prints the noun.
+    """`_percent` serves two populations, and its zero branch prints the noun.
 
     *"n/a (0 titles)"* under a line about rows read is a wrong sentence rather than a
-    missing one -- and a `0/0` percentage is what PRD 08's "every command works against
-    an empty database" rule is about.
+    missing one, and a `0/0` percentage is what an empty database produces.
     """
     assert _percent(0, 0) == "n/a (0 titles)"
     assert _percent(0, 0, noun="rows") == "n/a (0 rows)"
@@ -2024,19 +1869,14 @@ def test_a_zero_denominator_is_a_sentence_naming_what_it_counted() -> None:
 def test_every_subcommands_help_renders() -> None:
     """`--help` is the one code path in the parser that interpolates.
 
-    and nothing else in this suite runs it.
+    argparse formats each `help=` string against its own parameter dict, so a literal
+    `%` raises `TypeError: %o format: an integer is required, not dict` from
+    `usher bootstrap --help` and from nowhere else. Every other case builds the parser
+    without rendering it, so none of them can see that.
 
-    argparse formats each `help=` string against its own parameter dict, so a
-    literal `%` raises `TypeError: %o format: an integer is required, not
-    dict` from `usher bootstrap --help` and from nowhere else. Found by
-    running it: `ruff`, `ruff format --check`, `mypy` and all 67 cases in this
-    file passed against a `--phase` help string containing a bare `~100%`,
-    because every one of them builds the parser and none of them renders it.
-
-    Over every subcommand rather than over `bootstrap` alone -- the defect is
-    a property of writing a help string, not of this command -- and the list
-    is read off the parser's own rendered choices rather than typed out, so a
-    subcommand added later is covered without anyone remembering to add it.
+    Over every subcommand rather than over `bootstrap` alone -- the defect is a
+    property of writing a help string, not of this command -- and the list is read off
+    the parser's own rendered choices, so a subcommand added later is covered.
     """
     parser = build_parser()
     rendered = parser.format_help()
@@ -2072,7 +1912,7 @@ async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
 ) -> None:
     """`usher bootstrap` is `composition.run_bootstrap` plus an engine.
 
-    and both halves of that sentence are asserted.
+    Both halves of that sentence are asserted.
     """
     seen: list[tuple[object, ...]] = []
 
@@ -2108,14 +1948,10 @@ async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
 def test_the_phase_choices_are_the_vocabulary_and_not_a_second_copy_of_it() -> None:
     """`--phase`'s `choices` and `BootstrapPhase` are one set.
 
-    asserted as an equality between two derivations rather than as two spelled-out
-    lists.
-
-    Two lists would let `usher bootstrap --phase aliases` succeed against a
-    route that rejects it, or the reverse -- and a case that spelled both out
-    would go stale in exactly the same commit the drift arrived in. The
-    *order* is pinned separately, below, because a set says nothing about
-    execution order and the order is the measured part.
+    Asserted as an equality between two derivations rather than as two spelled-out
+    lists: two lists would let `usher bootstrap --phase aliases` succeed against a
+    route that rejects it, or the reverse. The *order* is pinned separately, below,
+    because a set says nothing about execution order.
     """
     assert set(PHASES) == {phase.value for phase in BootstrapPhase}
     assert set(build_parser().parse_args(["bootstrap"]).__dict__) >= {"phase"}

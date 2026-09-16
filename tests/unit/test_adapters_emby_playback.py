@@ -24,10 +24,10 @@ def _targets(fixture: str, base_url: str = BASE) -> list[StreamTarget]:
 
 
 def test_the_direct_target_is_ranked_first() -> None:
-    """A client that can play the container should.
+    """A client that can play the container should, so the direct target ranks first.
 
-    The deep link surrenders playback to another application, which is a fallback, not a
-    preference.
+    The deep link surrenders playback to another application, which is a fallback, not
+    a preference.
     """
     targets = _targets("movie_item")
     assert [target.kind for target in targets] == [
@@ -47,18 +47,12 @@ def test_the_direct_url_is_a_static_stream_with_everything_emby_needs() -> None:
 
 
 def test_the_direct_url_does_not_carry_ushers_device_id() -> None:
-    """Verified against the live Emby 4.9.5.0 server on 2026-07-31.
+    """`DeviceId` is not load-bearing on a stream URL, so it is not sent.
 
-    the same URL with `DeviceId` stripped still answers **206 Partial Content** with
-    real `video/x-matroska` bytes, so the parameter was never load-bearing.
-
-    Strip `api_key` instead and the route answers 401; strip `static` and it answers
-    400. Only the two that matter are sent.
-
-    ADR-0012 accepted, as an unverified risk, that a captured playback URL
-    is a drop-in for `/embywebsocket?api_key=…&deviceId=…` and is therefore
-    attributed to Usher's own registered device. Half of that is now simply
-    gone: a captured URL no longer hands over the device id.
+    The same URL without it answers 206 Partial Content with real bytes. Strip
+    `api_key` instead and the route answers 401; strip `static` and it answers 400.
+    Only the two that matter are sent, so a captured URL does not hand a reader Usher's
+    own device id.
     """
     query = parse_qs(urlparse(_targets("movie_item")[0].url).query)
     assert "DeviceId" not in query
@@ -81,18 +75,13 @@ def test_the_direct_target_carries_the_quality_facts() -> None:
 def test_the_deep_link_wraps_the_direct_url_intact() -> None:
     """Percent-encoded, and reversible.
 
-    a deep link that lost the query string would hand Infuse a URL Emby answers 401 to.
-
-    Read back the way a client reads it -- `parse_qs` on the deep link's
-    own query -- rather than by `unquote`-ing everything after the first
-    `url=`. That shortcut is what the plan's version of this test did, and
-    it passes against an *unencoded* wrapper too: `unquote` of a string
-    that was never quoted is that same string, so the assertion held while
-    testing nothing. Verified by mutation. It matters because the direct
-    URL's own `&` separators, left raw, terminate the `url` parameter --
-    a client would get `…/stream.mkv?static=true` and lose `MediaSourceId`
-    and `api_key`, which is exactly the 401 this docstring claims to rule
-    out.
+    A deep link that lost the query string would hand Infuse a URL Emby answers 401 to.
+    Read back the way a client reads it -- `parse_qs` on the deep link's own query --
+    rather than by `unquote`-ing everything after the first `url=`, which passes
+    against an *unencoded* wrapper too: `unquote` of a string that was never quoted is
+    that same string. The direct URL's own `&` separators, left raw, terminate the
+    `url` parameter, so a client gets `…/stream.mkv?static=true` and loses
+    `MediaSourceId` and `api_key`.
     """
     direct, deep = _targets("movie_item")
     assert deep.scheme == "infuse"
@@ -104,25 +93,21 @@ def test_the_deep_link_wraps_the_direct_url_intact() -> None:
 
 
 def test_the_deep_link_is_the_port_s_one_wrapper_applied_to_the_direct_url() -> None:
-    """(D2, part a).
+    """The deep-link wrapper lives in `usher.ports.source`, and this pins the call edge.
 
-    the deep-link wrapper moved to `usher.ports.source`, and this pins the *call edge*
-    rather than the string it produces -- `build_stream_targets` reimplementing the
-    identical format by hand would still pass every other case in this file and would
-    still satisfy a literal-string assertion.
-
-    Comparing against `wrap_deep_link` itself is what a re-spelling cannot survive.
+    `build_stream_targets` reimplementing the identical format by hand would pass every
+    other case in this file and satisfy a literal-string assertion. Comparing against
+    `wrap_deep_link` itself is what a re-spelling cannot survive.
     """
     direct, deep = _targets("movie_item")
     assert deep.url == wrap_deep_link(direct.url)
 
 
 def test_the_adapter_holds_no_scheme_literal_and_no_wrapper_of_its_own() -> None:
-    """The move's other half: a *behaviourally* identical re-spelling.
+    """The other half: a *behaviourally* identical re-spelling.
 
-    the same string, built by hand instead of through the import -- would pass the case
-    above and reintroduce the exact drift the move exists to prevent (an earlier draft
-    of this task's own plan used two names for the one constant).
+    The same string built by hand instead of through the import would pass the case
+    above and reintroduce the drift one wrapper exists to prevent.
 
     Asserted structurally, the shape
     `test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`
@@ -179,10 +164,10 @@ def _without_prose(tree: ast.Module) -> ast.Module:
 
 
 def test_the_deep_link_carries_no_quality_facts() -> None:
-    """Deliberate.
+    """Deliberate: the client is handing the URL to another application.
 
-    the client is not choosing a stream, it is handing the URL to another application,
-    and duplicating the facts would invite a client to render them twice.
+    It is not choosing a stream, and duplicating the facts would invite a client to
+    render them twice.
     """
     _, deep = _targets("movie_item")
     assert deep.container is None
@@ -221,17 +206,14 @@ def test_a_media_source_with_no_container_has_no_targets() -> None:
 def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
     """Emby lists one `MediaSources` entry per *version*.
 
-    and taking index `[0]` picks whichever the server happened to list first.
+    Taking index `[0]` picks whichever the server happened to list first, which fails
+    two ways on plausible payloads:
 
-    Two failures followed, both on plausible payloads:
-
-    - a 1080p entry listed before the 4K one made the 4K version
-      unreachable -- `/play` handed back `1920x1080` for a library that
-      holds both;
-    - a transcode-only first entry (no `Container`, `SupportsDirectPlay:
-      false`) followed by a perfectly good direct-play entry returned `[]`,
-      so PRD 07's `/play` reported "not playable here" for an item that
-      plays fine.
+    - a 1080p entry listed before the 4K one makes the 4K version unreachable --
+      `/play` hands back `1920x1080` for a library that holds both;
+    - a transcode-only first entry (no `Container`, `SupportsDirectPlay: false`)
+      followed by a good direct-play entry returns `[]`, so `/play` reports "not
+      playable here" for an item that plays fine.
 
     `multi_version_movie.json` orders its three entries transcode-only,
     2160p, 1080p on purpose: "first wins" returns `[]`, "last wins" returns
@@ -252,17 +234,12 @@ def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
 
 
 def test_a_capitalised_container_is_lowercased_in_both_places() -> None:
-    """The container is not just a reported fact here.
-
-    it is the URL's file extension, so it reaches the wire twice.
+    """The container is the URL's file extension, so it reaches the wire twice.
 
     Emby's own `Container` casing is not something this adapter should have to be right
     about, and the port's `container` field is compared against lowercase literals
-    everywhere above it (M4's matcher, the contract suite).
-
-    The fixtures are all already lowercase, so without this case the
-    `as_lower` call is untested -- confirmed by mutation: swapping it for
-    `as_text` failed nothing.
+    everywhere above it. The fixtures are all already lowercase, so without this case
+    swapping `as_lower` for `as_text` fails nothing.
     """
     payload = load_emby_fixture("movie_item")
     payload["MediaSources"][0]["Container"] = "MKV"
@@ -272,20 +249,14 @@ def test_a_capitalised_container_is_lowercased_in_both_places() -> None:
 
 
 def test_an_items_runtime_agrees_with_its_targets_runtime() -> None:
-    """`SourceItem.runtime_seconds` and `StreamTarget.runtime_seconds` describe the same file.
+    """The item's runtime and the target's describe the same file and must agree.
 
-    and used to be able to disagree about it: the item field alone on one side, the item
-    field *falling back to the media source's own* `RunTimeTicks` on the other.
-
-    An item carrying its runtime only on the media source -- which Emby does emit -- was
-    catalogued as `None` and played back as `9360`, from the same payload in the same
-    call.
-
-    `mapping`'s module docstring claims the two "cannot drift". That was
-    true of coercion (`as_int` has one definition) and not of derivation,
-    which is a different claim; one shared `runtime_seconds` makes it true
-    of both. Asserted as equality rather than against a literal, because
-    the property is agreement.
+    Two derivations -- the item field alone on one side, the item field *falling back
+    to the media source's own* `RunTimeTicks` on the other -- let an item that carries
+    its runtime only on the media source be catalogued as `None` and played back as a
+    number, from the same payload in the same call. One shared `runtime_seconds` is
+    what closes that; asserted as equality rather than against a literal, because the
+    property is agreement.
     """
     payload = load_emby_fixture("movie_item")
     del payload["RunTimeTicks"]
@@ -298,7 +269,7 @@ def test_an_items_runtime_agrees_with_its_targets_runtime() -> None:
 def test_a_base_url_with_a_trailing_slash_does_not_double_it() -> None:
     """`POST /admin/sources` takes whatever an operator pastes.
 
-    and pasting a URL with a trailing slash is the norm, not the exception.
+    Pasting a URL with a trailing slash is the norm, not the exception.
     """
     direct = _targets("movie_item", base_url="https://emby.invalid/")[0]
     assert "//Videos" not in direct.url
@@ -306,9 +277,7 @@ def test_a_base_url_with_a_trailing_slash_does_not_double_it() -> None:
 
 
 def test_a_negative_resume_position_is_clamped_on_the_read_side_too() -> None:
-    """The write side clamps and is tested (`EmbyAdapter.push_watch_state`).
-
-    this is the read, and it had nothing pinning it.
+    """The write side clamps; this is the read, and it needs the same clamp.
 
     Floor division rounds towards negative infinity, so an unclamped
     `-5_000_000 // 10_000_000` is `-1`, not `0` -- a stray negative tick
@@ -322,9 +291,7 @@ def test_a_negative_resume_position_is_clamped_on_the_read_side_too() -> None:
 
 
 def test_item_level_dimensions_are_the_fallback_for_a_target_too() -> None:
-    """Emby populates `Width`/`Height` on the item for some libraries and only on the video.
-
-    stream for others.
+    """Emby carries `Width`/`Height` on the item for some libraries, on the stream for others.
 
     `to_source_item` has this fallback and it is tested there; the target's `resolution`
     is built from the same two fields and nothing pinned it, so it could have been
@@ -341,11 +308,11 @@ def test_item_level_dimensions_are_the_fallback_for_a_target_too() -> None:
 
 
 def test_an_item_id_stays_inside_its_own_url_path_segment() -> None:
-    """The same property `EmbyAdapter` needs for its request paths.
+    """The same property `EmbyAdapter` needs for its request paths, for another reason.
 
-    needed here for a different reason: this URL is *handed to a client*, so an id that
-    broke out of its segment would send that client somewhere else on the source
-    entirely -- with a valid session token attached.
+    This URL is *handed to a client*, so an id that broke out of its segment would send
+    that client somewhere else on the source entirely -- with a valid session token
+    attached.
     """
     payload = load_emby_fixture("movie_item")
     payload["Id"] = "a/../b"
@@ -357,10 +324,8 @@ def test_an_item_id_stays_inside_its_own_url_path_segment() -> None:
 def test_an_item_with_no_id_has_no_targets() -> None:
     """`stream_targets` hands this whatever `_fetch` returned.
 
-    and `_fetch` only screens for an *absent* item -- an id it cannot read is a
-    different thing from a 404.
-
-    `to_source_item` raises `PortDataMalformed` for the same payload; here `[]` is
+    `_fetch` only screens for an *absent* item, and an id it cannot read is a different
+    thing from a 404. `to_source_item` raises `PortDataMalformed` for the same payload; here `[]` is
     right, because the port documents `[]` as "no way to play this" and a URL built
     around the missing id would be a link the client follows and Emby refuses.
     """
@@ -369,11 +334,11 @@ def test_an_item_with_no_id_has_no_targets() -> None:
     assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
 
 
-# --- ADR-0012's handling rules ---------------------------------------
+# --- access-token handling rules --------------------------------------
 
 
 def test_neither_target_renders_the_token_when_it_is_repr_d() -> None:
-    """ADR-0012: the token is never a log field.
+    """The access token is never a log field.
 
     `repr` is how it would become one by accident -- an f-string in a log line, a
     `logger.info( targets)`, a pytest assertion dump, or loguru's frame-locals renderer
@@ -398,29 +363,24 @@ def test_the_token_survives_repr_redaction_where_it_is_actually_needed() -> None
     """The other half: redacting `repr` must not redact the value.
 
     PRD 07's `/play` response is built from `.url`, and a target whose URL had been
-    scrubbed would be an unplayable link -- the exact failure ADR-0012's Context says is
-    worse than either honest option.
+    scrubbed would be an unplayable link, which is worse than either honest option.
     """
     direct = _targets("movie_item")[0]
     assert f"api_key={TOKEN}" in direct.url
 
 
 def test_the_token_is_not_logged_when_a_whole_target_list_is(caplog: LogCaptureFixture) -> None:
-    """The realistic accidental path.
+    """The realistic accidental path: a caller logs the targets it just built.
 
-    with a real Emby URL rather than the minimal one `tests/unit/test_ports_source.py`
-    uses: a caller logs the targets it just built.
+    With a real Emby URL rather than the minimal one `tests/unit/test_ports_source.py`
+    uses. `logging` renders the argument through `repr` (via `%s`/`str`, which a
+    dataclass routes to `__repr__`), so this is the same choke point reached from a
+    second direction.
 
-    `logging` renders the argument through `repr` (via `%s`/`str`, which a dataclass
-    routes to `__repr__`), so this is the same choke point reached from a second
-    direction.
-
-    Deliberately *not* also a loguru `diagnose=True` probe: loguru
-    truncates a rendered value at ~128 characters, and an Emby URL is long
-    enough that its `api_key` falls off the end regardless of whether the
-    redaction exists. Verified directly -- that probe passed against the
-    unredacted `repr`, which makes it evidence of nothing. The DTO-level
-    diagnose case with a short URL is the one that actually exercises it.
+    Deliberately *not* also a loguru `diagnose=True` probe: loguru truncates a rendered
+    value at ~128 characters, so an Emby URL's `api_key` falls off the end whether or
+    not the redaction exists. The DTO-level diagnose case with a short URL is the one
+    that exercises it.
     """
     logging.getLogger("usher.test").addHandler(logging.NullHandler())
     with caplog.at_level(logging.ERROR):

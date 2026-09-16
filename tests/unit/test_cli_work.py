@@ -22,12 +22,9 @@ def _settings() -> Settings:
 class _Worker:
     """A `JobWorker` reduced to the two calls `WorkerLoop.pass_once` makes.
 
-    `run_once` raises **every** time on purpose. A stub that raised once and
-    then succeeded would prove the daemon survived *and* would need the rest
-    of the pass -- `_refresh`, and so a `Pipeline` over a real session -- to
-    run. Raising every pass keeps the failure at the first `await` and still
-    separates the two outcomes this file is about: a daemon that died called
-    this once.
+    `run_once` raises **every** time on purpose: a stub that raised once and then
+    succeeded would need the rest of the pass -- `_refresh`, and so a `Pipeline` over a
+    real session -- to run. Raising every pass keeps the failure at the first `await`.
     """
 
     def __init__(self, failure: BaseException) -> None:
@@ -72,11 +69,7 @@ def _substituted(monkeypatch: pytest.MonkeyPatch, worker: _Worker) -> None:
 
 
 async def _until(predicate: Callable[[], bool], *, bound: float = 2.0) -> None:
-    """Poll rather than sleep a fixed interval.
-
-    a fixed sleep is either flaky or slow, and this loop's whole subject is how many
-    passes happened.
-    """
+    """Poll rather than sleep a fixed interval, which is either flaky or slow."""
     for _ in range(int(bound / 0.001)):
         if predicate():
             return
@@ -86,17 +79,12 @@ async def _until(predicate: Callable[[], bool], *, bound: float = 2.0) -> None:
 async def test_a_pass_that_crashes_costs_the_pass_rather_than_the_daemon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The arm `api/lanes.py` has had since M6 and `usher work` did not.
+    """A crashed pass costs the pass rather than the daemon, and leaves a record.
 
-    `MissingGreenlet` rather than a stand-in: it is the failure issue #8 is
-    about, it is not in `OPERATOR_ERRORS` (so nothing above this loop turns it
-    into a sentence), and it is a bug in this project -- exactly the class a
-    daemon has to survive *and* report, because the operator cannot act on it
-    and a dead worker is not evidence.
-
-    Two assertions and the second has the teeth. Survival alone is what
-    `except Exception: pass` delivers, and that is the shape ADR-0026 exists
-    to refuse.
+    `MissingGreenlet` rather than a stand-in: it is not in `OPERATOR_ERRORS`, so nothing
+    above this loop turns it into a sentence, and it is the class of bug a daemon has to
+    survive *and* report. Survival alone is what `except Exception: pass` delivers,
+    which is why the assertions on the logged record are the ones with teeth.
     """
     worker = _Worker(MissingGreenlet("greenlet_spawn has not been called"))
     _substituted(monkeypatch, worker)
@@ -137,19 +125,11 @@ async def test_a_pass_that_crashes_costs_the_pass_rather_than_the_daemon(
 async def test_one_pass_keeps_its_exit_code_rather_than_logging_and_returning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The positive control for the case above, and a decision in its own right.
+    """`--once` is not a daemon and must not inherit the daemon's arm.
 
-    `--once` is not a daemon and must not inherit the daemon's arm.
-
-    `usher work --once` is what a cron entry and `docker compose exec` run,
-    and what they read is the exit code. A guard around the whole command
-    would answer a crashed pass with `0`, so the crontab that exists to notice
-    would be the last thing to. The daemon has no exit code to report with and
-    its survival is the property; this form has no survival to protect and its
-    exit code is the property.
-
-    Without this case, one `except Exception: log; return 0` around the whole
-    of `_work` passes the case above.
+    A cron entry and `docker compose exec` read the exit code, so a guard around the
+    whole command would answer a crashed pass with `0`. Without this case, one
+    `except Exception: log; return 0` around `_work` passes the case above.
     """
     worker = _Worker(MissingGreenlet("greenlet_spawn has not been called"))
     _substituted(monkeypatch, worker)

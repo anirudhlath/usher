@@ -39,24 +39,16 @@ def test_trace_context_injected_inside_a_span() -> None:
 
 
 async def test_a_request_through_the_app_produces_a_valid_span() -> None:
-    """The whole point of Task 11 is trace-correlated logs.
+    """Trace-correlated logs need a real, valid span active during request handling.
 
-    which needs a real, valid span active during request handling.
-
-    Without FastAPI/ SQLAlchemy/httpx auto-instrumentation wired into create_app,
-    nothing ever starts one -- confirmed directly (a plain request against an
-    uninstrumented app leaves get_current_span().get_span_context(). is_valid False, so
-    inject_trace_context has nothing to inject, ever, in the running service). This
-    installs an in-memory exporter *before* create_app() runs, so configure_tracing's
-    idempotency guard (see its docstring) leaves this provider in place rather than
-    replacing it, and asserts the /health request actually produced a recorded, valid
-    span -- proof the wiring fires end-to-end, not just that the library calls don't
-    raise.
-
-    Uses /health, not /health/ready, specifically so this stays a unit
-    test with no real Postgres: create_app's lifespan builds an engine
-    from database_url but never connects until something executes a
-    query, and liveness never does.
+    Without FastAPI/SQLAlchemy/httpx auto-instrumentation wired into `create_app`
+    nothing ever starts one, so `inject_trace_context` has nothing to inject, ever, in
+    the running service. The in-memory exporter is installed *before* `create_app()`
+    runs, so `configure_tracing`'s idempotency guard leaves this provider in place, and
+    the assertion is that the request actually recorded a valid span rather than that
+    the library calls did not raise. Uses `/health` and not `/health/ready` so this
+    stays a unit test with no real Postgres: the lifespan builds an engine but never
+    connects until something executes a query, and liveness never does.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -68,8 +60,7 @@ async def test_a_request_through_the_app_produces_a_valid_span() -> None:
         secret_key="0" * 32,
         # No lanes: this app exists for the span its request produces, and a
         # push lane would build a real adapter while a worker lane polled a
-        # database that is not there. See `usher.api.lanes`' module
-        # docstring -- said per fixture rather than defaulted in
+        # database that is not there. Said per fixture rather than defaulted in
         # `conftest.py`, so it is greppable.
         push_enabled=False,
         worker_enabled=False,
@@ -97,9 +88,8 @@ def _settings_with_telemetry_disabled() -> Settings:
 def test_no_exporter_constructed_when_telemetry_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exporters must degrade to no-ops when unconfigured.
 
-    That was previously prose, not a test -- nothing caught a stray refactor
-    that hoisted the OTLPSpanExporter construction above configure_tracing's
-    early check. Monkeypatches OTLPSpanExporter to raise if constructed at
+    Rules out a refactor that hoists the `OTLPSpanExporter` construction above
+    `configure_tracing`'s early check. The patched constructor raises if reached at
     all, so this fails loudly rather than merely not asserting anything.
     """
 
@@ -114,22 +104,13 @@ def test_no_exporter_constructed_when_telemetry_disabled(monkeypatch: pytest.Mon
 
 
 def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Diagnose=True renders the *value* of any local variable referenced on a traceback frame's.
+    """`diagnose=True` renders the value of every local a failing traceback line names.
 
-    failing line.
-
-    Verified directly against a real connection failure (not a synthetic exception):
-    forcing build_engine to fail against an unreachable host with diagnose=True printed
-    the plaintext password four times over -- not because the DSN string itself appears
-    anywhere obvious (SQLAlchemy's own Engine.__repr__ correctly masks it as
-    `://user:***@host`), but because several of asyncpg's and SQLAlchemy's own internal
-    frames pass the parsed connection parameters as a dict (`cparams`, `kw`, ...) on
-    their failing line, e.g. `dialect.connect(*cargs_tup, **cparams)` -- and diagnose
-    renders whatever a failing line references, including a dict containing `password:
-    <plaintext>`, three frames deep in a third-party library this module doesn't
-    control. PRD 08's "credentials are never logged" rule depends on this staying False;
-    worth asserting directly rather than trusting it stays correct by eye in a file nine
-    milestones will edit.
+    That prints the plaintext password: SQLAlchemy's `Engine.__repr__` masks the DSN,
+    but asyncpg's and SQLAlchemy's own frames pass the parsed connection parameters as
+    a dict (`cparams`, `kw`, ...) on their failing line, three frames deep in a library
+    this module does not control. PRD 08's "credentials are never logged" rule depends
+    on this staying False, so it is asserted rather than trusted to the eye.
     """
     captured: dict[str, object] = {}
 
@@ -146,7 +127,7 @@ def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
-    """**A command's answer is stdout, and `httpx` was writing to it.**."""
+    """A command's answer is stdout, and `httpx` must not write its own line to it."""
     httpx_logger = logging.getLogger("httpx")
     before = httpx_logger.level
     configure_logging(_settings_with_telemetry_disabled())
@@ -166,9 +147,9 @@ def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
 
 
 def test_configure_logging_reclaims_a_logger_that_fileconfig_disabled() -> None:
-    """**`configure_logging` cleared handlers and levels and left `.disabled` standing.
+    """Rules out clearing handlers and levels while leaving `.disabled` standing.
 
-    so one `fileConfig` call muted a logger permanently.**.
+    One `fileConfig` call would otherwise mute a logger permanently.
     """
     httpx_logger = logging.getLogger("httpx")
     before_level, before_disabled = httpx_logger.level, httpx_logger.disabled
@@ -193,10 +174,9 @@ def test_configure_logging_reclaims_a_logger_that_fileconfig_disabled() -> None:
 def test_no_metric_exporter_constructed_when_telemetry_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same invariant as test_no_exporter_constructed_when_telemetry_disabled.
+    """The same invariant as the tracing case, for `configure_metrics`.
 
-    for configure_metrics's OTLPMetricExporter -- the two bootstraps mirror each other's
-    shape deliberately (see configure_metrics's docstring), so they get the same
+    The two bootstraps mirror each other's shape deliberately, so they get the same
     regression test.
     """
 
@@ -212,9 +192,9 @@ def test_no_metric_exporter_constructed_when_telemetry_disabled(
     configure_metrics(settings)
 
 
-# **A port nothing listens on, deliberately, and not the collector's 4317.** The two
-# cases below assert on what the exporter *constructs* — the channel's `_insecure` flag,
-# and whether a processor was attached — and never on whether anything answers.
+# A port nothing listens on, deliberately, and not the collector's 4317. The two cases
+# below assert on what the exporter *constructs* — the channel's `_insecure` flag, and
+# whether a processor was attached — and never on whether anything answers.
 _DEAD_OTLP_HOST_PORT = "127.0.0.1:1"
 
 
@@ -227,10 +207,10 @@ def _settings_with_endpoint(endpoint: str) -> Settings:
 
 
 def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel() -> None:
-    """The positive mirror of the two "nothing is constructed when disabled" cases above.
+    """The positive mirror of the two "nothing is constructed when disabled" cases.
 
-    which is the half nobody wrote -- and it asserts one *installation* rather than one
-    *construction*, because those are different failures.
+    Asserts one *installation* rather than one *construction*, because those are
+    different failures.
     """
     settings = _settings_with_endpoint(f"http://{_DEAD_OTLP_HOST_PORT}")
     assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"
@@ -266,26 +246,17 @@ def test_a_configured_endpoint_builds_one_real_exporter_over_an_insecure_channel
 def test_an_endpoint_without_a_scheme_builds_a_secure_channel_against_a_plaintext_collector() -> (
     None
 ):
-    """The scheme is load-bearing and the wrong spelling fails *silently*.
+    """A bare `host:port` endpoint silently builds a TLS channel.
 
-    which is why it gets a case rather than a sentence in a docstring.
-
-    Measured in the installed `opentelemetry-exporter-otlp-proto-grpc`
-    1.44.0, `exporter.py:316-323`: with no `insecure=` argument and
-    `OTEL_EXPORTER_OTLP_INSECURE` unset -- which is exactly how
-    `telemetry.py:195` and `:224` call it, passing `endpoint=` and nothing
-    else -- `insecure` defaults to `parsed_url.scheme == "http"`. So
-    a bare `host:port`, the spelling a person types, parses to an empty
-    scheme, builds a **TLS** channel against a plaintext collector, and
-    every export fails inside the SDK's own retry loop, which logs a
-    warning and does not raise. `:325-326` then discards the scheme and
-    keeps the netloc, so **both spellings store the identical endpoint**
-    and the only observable difference is this flag.
-
-    The assertion is that the flag *differs between the two spellings*
-    rather than that this one is `False`: a future normalisation that
-    prepends `http://` to a bare endpoint would make the two agree, which
-    is the change this case is here to notice.
+    With no `insecure=` argument and `OTEL_EXPORTER_OTLP_INSECURE` unset -- which is
+    how `telemetry.py` calls it, passing `endpoint=` and nothing else -- the exporter
+    defaults `insecure` to `scheme == "http"`. A bare `host:port`, the spelling a
+    person types, parses to an empty scheme, builds a TLS channel against a plaintext
+    collector, and every export fails inside the SDK's own retry loop, which logs a
+    warning and does not raise. The scheme is then discarded and the netloc kept, so
+    both spellings store the identical endpoint and this flag is the only observable
+    difference. The assertion compares the two spellings rather than pinning `False`,
+    so a normalisation that prepends `http://` is noticed.
     """
     settings = _settings_with_endpoint(_DEAD_OTLP_HOST_PORT)
     assert settings.telemetry_enabled is True, "the premise: this endpoint enables telemetry"

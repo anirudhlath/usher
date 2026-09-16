@@ -209,8 +209,8 @@ async def test_a_carried_state_is_merged_without_a_request(fixture: _Fixture) ->
 async def test_an_id_with_no_carried_state_is_fetched(fixture: _Fixture) -> None:
     """`watch_states` is a subset keyed by `external_id`.
 
-    so a source whose message shape this adapter could not parse -- or a second source
-    that sends ids only -- still works, at one authoritative request per id.
+    So a source whose message shape this adapter could not parse -- or a second
+    source that sends ids only -- still works, at one request per id.
     """
     await fixture.given_matched("i2")
     fixture.adapter.seed_state(
@@ -228,10 +228,8 @@ async def test_an_item_the_source_no_longer_has_is_skipped_not_raised(
 ) -> None:
     """`get_watch_state` answering `None` means the source deleted it.
 
-    which is the reconcile lane's problem.
-
-    Raising here would cost a reconnect and a gap-closing delta walk for an item that is
-    simply gone.
+    That is the reconcile lane's problem: raising here would cost a reconnect
+    and a gap-closing delta walk for an item that is simply gone.
     """
     await fixture.given_matched("gone")
     fixture.adapter.forget("gone")
@@ -243,13 +241,11 @@ async def test_an_item_the_source_no_longer_has_is_skipped_not_raised(
 
 
 async def test_a_carried_state_keeps_its_absent_play_history(fixture: _Fixture) -> None:
-    """ADR-0014 on the push path, which is where the plan says a third payload shape lives.
+    """An absent `play_count` stays absent rather than becoming a fabricated `0`.
 
-    a `UserDataChanged` entry is neither a listing nor an item route, nothing in this
-    repository has parsed a real one, and a fabricated `0` overwrites a household's
-    history permanently.
-
-    Absent stays absent, and the `WATCH_HISTORY` backfill recovers it.
+    A `UserDataChanged` entry is neither a listing nor an item route, nothing
+    here has parsed a real one, and a fabricated `0` overwrites a household's
+    history permanently. The `WATCH_HISTORY` backfill recovers it.
     """
     await fixture.given_matched("i1")
     await fixture.apply(
@@ -270,12 +266,10 @@ async def test_a_carried_state_keeps_its_absent_play_history(fixture: _Fixture) 
 
 
 async def test_a_watch_event_publishes_only_rows_that_changed(fixture: _Fixture) -> None:
-    """PRD 03's "latest `updated_at` wins" refuses a merge whose observation is older than what.
+    """PRD 03's "latest `updated_at` wins" refuses a merge older than what is stored.
 
-    a client already wrote.
-
-    Publishing anyway makes a detail screen re-render on every echo of a position it set
-    itself.
+    Publishing anyway makes a detail screen re-render on every echo of a
+    position a client set itself.
     """
     await fixture.given_matched("i1")
     fixture.watch_states.refuse_next_merge()
@@ -298,10 +292,10 @@ async def test_a_watch_event_that_changed_something_publishes_it(fixture: _Fixtu
             watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
         )
     )
-    # **Three events, and the sequence is asserted rather than filtered.** M7 added one
-    # `row.invalidated` per slug a watch state can move, published *before* the watch-
-    # state event so a client that refetches on the first one gets a screen composed
-    # after the cache was cleared.
+    # Three events, and the sequence is asserted rather than filtered: one
+    # `row.invalidated` per slug a watch state can move, published *before* the
+    # watch-state event, so a client that refetches on the first gets a screen
+    # composed after the cache was cleared.
     assert [event.kind for event in fixture.events.published] == [
         ClientEventKind.ROW_INVALIDATED,
         ClientEventKind.ROW_INVALIDATED,
@@ -318,15 +312,13 @@ async def test_a_watch_event_that_changed_something_publishes_it(fixture: _Fixtu
 async def test_an_unmatched_item_does_not_shift_what_the_others_publish(
     fixture: _Fixture,
 ) -> None:
-    """**The mis-pairing the M5 plan's own self-review found.** Its draft zipped the merged.
+    """The mis-pairing: merged targets zipped against the batch that was handed in.
 
-    targets against the batch it had handed in; the targets are the *matched subset*, so
-    one unmatched item at the front shifts every pair by one and a client renders item
-    A's resume position on item B's screen.
-
-    PRD 02 guarantees there will always be unmatched items, so this is the
-    ordinary case rather than an edge one. The positions are distinct so a
-    swap is visible; equal positions would pass against the bug.
+    The targets are the *matched subset*, so one unmatched item at the front
+    shifts every pair by one and a client renders item A's resume position on
+    item B's screen. PRD 02 guarantees there will always be unmatched items, so
+    this is the ordinary case. The positions are distinct so a swap is visible;
+    equal positions would pass against the bug.
     """
     first = await fixture.given_matched("i1")
     second = await fixture.given_matched("i2")
@@ -354,9 +346,9 @@ async def test_an_unmatched_item_does_not_shift_what_the_others_publish(
 async def test_a_large_watch_event_with_no_payload_defers_to_a_delta(fixture: _Fixture) -> None:
     """The same cap, on the path that actually costs a request per item.
 
-    An adapter that cannot parse a message's payload still names the ids, and at
-    1,126,789 items a request per changed item on a lane budgeted at one connection per
-    source is a design defect rather than a slow path.
+    An adapter that cannot parse a message's payload still names the ids, and a
+    request per changed item on a lane budgeted at one connection per source is
+    a design defect rather than a slow path.
     """
     many = tuple(f"item-{index}" for index in range(60))
     outcome = await fixture.apply(
@@ -412,10 +404,9 @@ async def test_a_large_event_defers_to_a_delta_instead_of_a_request_per_item(
 ) -> None:
     """Emby emits `LibraryChanged` during a library scan and it can name thousands.
 
-    At 1,126,789 items a request per changed item on a lane budgeted at one connection
-    per source is not slow, it is a design defect -- and a delta walk is one paged
-    request per 200 items under `MinDateLastSaved`, which is the mechanism M4 built for
-    this shape.
+    A request per changed item on a lane budgeted at one connection per source
+    is not slow, it is a design defect -- and a delta walk is one paged request
+    per 200 items under `MinDateLastSaved`.
     """
     many = tuple(f"item-{index}" for index in range(60))
     outcome = await fixture.apply(SourceEvent(kind=SourceEventKind.ITEM_ADDED, external_ids=many))
@@ -426,9 +417,10 @@ async def test_a_large_event_defers_to_a_delta_instead_of_a_request_per_item(
 
 
 async def test_an_item_the_source_forgot_is_skipped(fixture: _Fixture) -> None:
-    """`get_item` answers `None` for an item that is gone, and an event naming one is ordinary.
+    """`get_item` answering `None` for an item that is gone is ordinary.
 
-    an `ItemsUpdated` and an `ItemsRemoved` for the same id can arrive in either order.
+    An `ItemsUpdated` and an `ItemsRemoved` for the same id can arrive in
+    either order.
     """
     outcome = await fixture.apply(
         SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("never-existed",))
@@ -438,12 +430,12 @@ async def test_an_item_the_source_forgot_is_skipped(fixture: _Fixture) -> None:
 
 
 async def test_a_removed_item_retracts_nothing(fixture: _Fixture) -> None:
-    """ADR-0015: availability is retracted only by a walk that provably finished.
+    """Availability is retracted only by a walk that provably finished.
 
-    An Emby library refresh emits `ItemsRemoved` for items that have not gone anywhere,
-    and Usher cannot tell that from a deletion -- one of which is irreversible. PRD 08
-    prices the delay: availability goes stale, not wrong. Counted and logged so it is
-    visible rather than invisible.
+    An Emby library refresh emits `ItemsRemoved` for items that have not gone
+    anywhere, and Usher cannot tell that from a deletion -- one of which is
+    irreversible. PRD 08 prices the delay: availability goes stale, not wrong.
+    Counted and logged so it is visible.
     """
     await fixture.given_matched("gone-1")
     await fixture.given_matched("gone-2")
@@ -462,11 +454,11 @@ async def test_a_removed_item_retracts_nothing(fixture: _Fixture) -> None:
 
 
 async def test_applying_an_event_commits_once(fixture: _Fixture) -> None:
-    """A push lane holding an open transaction between events is an idle-in-transaction.
+    """One event, one unit of work.
 
-    connection holding a snapshot for as long as the library is quiet.
-
-    One event, one unit of work.
+    A push lane holding an open transaction between events is an
+    idle-in-transaction connection holding a snapshot for as long as the
+    library is quiet.
     """
     await fixture.given_matched("i1")
     await fixture.apply(
@@ -714,7 +706,7 @@ def _overlap(first: tuple[float, float], second: tuple[float, float]) -> float:
 
     The shape `JobQueueContract.overlapping()` established and for the same
     reason: a count, an ordering or a completion is also what a *serialised*
-    run produces, and only measured intersection distinguishes them.
+    run produces, and only an observed intersection distinguishes them.
     """
     intersection = max(0.0, min(first[1], second[1]) - max(first[0], second[0]))
     union = max(first[1], second[1]) - min(first[0], second[0])
@@ -736,20 +728,14 @@ def lane() -> _Lane:
 
 
 async def test_the_gap_is_closed_after_connecting_not_before(lane: _Lane) -> None:
-    """PRD 03: "run a delta reconcile on reconnect".
+    """PRD 03's "run a delta reconcile on reconnect", *after* the socket is up.
 
-    **After** the socket is up, so events arriving during the walk are buffered rather
-    than lost -- the reverse order leaves the window between the walk and the handshake
-    silently uncovered.
-
-    **Asserted on a measured overlap, because the order alone is not the
-    property.** `order == ["connected", "gap"]` is satisfied by a
-    connect-then-immediately-close-then-walk implementation, and by any run
-    the event loop happened to serialise. What is actually claimed is that
-    the source produced events *while the walk was running* and that none of
-    them was lost, so the case forces a real 40 ms walk against a producer
-    emitting for ~30 ms on the open socket and measures how much of the
-    union of the two windows they share.
+    Events arriving during the walk are then buffered rather than lost; the
+    reverse order leaves the window between the walk and the handshake
+    uncovered. The order alone is not the property -- `order == ["connected",
+    "gap"]` is satisfied by a connect-close-then-walk implementation and by any
+    run the event loop serialised -- so the case forces a real walk against a
+    producer emitting on the open socket and asserts the two windows intersect.
     """
     adapter = _ScriptedAdapter(
         SUPERVISED_SOURCE,
@@ -804,16 +790,14 @@ async def test_a_dropped_channel_is_reconnected_and_the_gap_closed_again(lane: _
 
 
 async def test_the_failure_counter_is_reset_by_delivery_not_by_connection(lane: _Lane) -> None:
-    """**The milestone's rule, one layer up.**.
+    """The counter is reset by delivery, not by connecting.
 
     A proxy that upgrades and then buffers connects perfectly every time. If
     connecting reset the counter, that source would reconnect forever,
-    silently, reporting a healthy lane -- and PRD 08's "after N failures
-    mark `supports_push = false`" would never fire, so the reconciler would
-    go on skipping the one source it is the only cover for.
-
-    Three connections that open cleanly and deliver nothing is exactly that
-    proxy. The ceiling has to be reached anyway.
+    silently, reporting a healthy lane -- and PRD 08's "after N failures mark
+    `supports_push = false`" would never fire, so the reconciler would go on
+    skipping the one source it is the only cover for. Three connections that
+    open cleanly and deliver nothing is exactly that proxy.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [], unbounded=True)
     sleeps: list[float] = []
@@ -827,14 +811,11 @@ async def test_the_failure_counter_is_reset_by_delivery_not_by_connection(lane: 
 
 
 async def test_a_delivering_channel_resets_the_counter(lane: _Lane) -> None:
-    """The other direction.
-
-    a lane that drops three times and keeps working must not park itself on the next
-    ordinary blip an hour later.
+    """The other direction: a working lane must not park itself on an ordinary blip.
 
     Three connections that each deliver one event and then drop, followed by
-    one that delivers nothing. With the reset the ceiling of two is reached
-    on the fourth connection; without it, on the second.
+    one that delivers nothing. With the reset the ceiling of two is reached on
+    the fourth connection; without it, on the second.
     """
     adapter = _ScriptedAdapter(
         SUPERVISED_SOURCE,
@@ -913,12 +894,10 @@ def test_the_backoff_draws_from_the_upper_half_of_the_interval() -> None:
 
 
 def test_the_backoff_defaults_to_a_real_uniform_draw() -> None:
-    """Every case above injects the jitter.
+    """Every case above injects the jitter, so the default is asserted directly.
 
-    so all of them pass against a default of `lambda low, high: low` -- which is not
+    All of them pass against a default of `lambda low, high: low`, which is not
     jitter at all and puts every source in a household on the same schedule.
-
-    The default is asserted directly.
     """
     lane = _Lane()
     supervisor = PushSupervisor(lane.apply, lane.close_gap, lane.set_push_available)
@@ -928,11 +907,9 @@ def test_the_backoff_defaults_to_a_real_uniform_draw() -> None:
 
 
 async def test_a_deferred_event_triggers_a_gap_close(lane: _Lane) -> None:
-    """`PushOutcome.deferred_to_delta` is the applier saying "this event named more items than I.
+    """`deferred_to_delta` is the applier declining to resolve items one at a time.
 
-    will resolve one at a time".
-
-    The supervisor is what turns that into the paged walk M4 already built.
+    The supervisor is what turns that into a paged walk.
     """
     lane.outcome = PushOutcome(deferred_to_delta=True)
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
@@ -942,12 +919,10 @@ async def test_a_deferred_event_triggers_a_gap_close(lane: _Lane) -> None:
 
 
 async def test_gap_closing_is_rate_limited(lane: _Lane) -> None:
-    """A flapping socket plus a delta per reconnect is a paged walk of everything changed since.
+    """A flapping socket plus a delta per reconnect is a paged walk every few seconds.
 
-    the cursor, every few seconds.
-
-    The first delta after a real outage is the expensive one and is not skipped; the
-    tenth in a minute is.
+    The first delta after a real outage is the expensive one and is not
+    skipped; the tenth in a minute is.
     """
     lane.outcome = PushOutcome(deferred_to_delta=True)
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event(f"i{index}") for index in range(5)]])
@@ -965,23 +940,14 @@ async def test_gap_closing_is_rate_limited(lane: _Lane) -> None:
 
 
 async def test_the_first_gap_after_an_outage_is_never_skipped(lane: _Lane) -> None:
-    """The other half of the rate limit, and the half a lone counter assertion cannot see.
+    """The other half of the rate limit, which a counter assertion cannot see.
 
-    `gate.at` is `None` until one has run, so the expensive walk after a real outage
-    happens however recently the clock says something did.
-
-    **Which is also the half that makes `push_gap_min_interval_seconds` a
-    correct guard against the wrong hazard**, and this case is where a
-    reader will look for the other one. It bounds *cadence* -- how often a
-    flapping socket may trigger a delta -- and says nothing about how large
-    any one delta is. The first gap after a fresh deployment is never
-    skipped by construction, and against a source with no cursor that first
-    gap is a walk of the entire library. Bounding the *size* is not
-    expressible here at all: this supervisor has no repository and cannot
-    know whether a cursor exists. `LaneSupervisor._close_gap` is where that
-    is refused, and `tests/unit/test_api_lanes.py::
-    test_a_source_with_no_completed_run_is_not_gap_closed_and_the_operator_is_told`
-    is the case.
+    `gate.at` is `None` until one has run, so the expensive walk after a real
+    outage happens however recently the clock says something did. The interval
+    bounds *cadence* -- how often a flapping socket may trigger a delta -- and
+    says nothing about how large any one delta is; the size is refused in
+    `LaneSupervisor._close_gap`, since this supervisor has no repository and
+    cannot know whether a cursor exists.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
     supervisor = _supervisor(
@@ -994,17 +960,12 @@ async def test_the_first_gap_after_an_outage_is_never_skipped(lane: _Lane) -> No
 async def test_a_source_with_no_push_channel_is_marked_and_left_alone(lane: _Lane) -> None:
     """The port's `SourceNotSupported` contract.
 
-    Not a failure to retry: an adapter saying it has no channel will say the same thing
-    on every reconnect, and PRD 03's reconciler is the cover.
-
-    **`attempts` is the assertion with teeth, and the other three are not.**
-    Measured: a loop that dropped this arm entirely and let
-    `SourceNotSupported` fall through to `except UsherPortError` still ends
-    with `push_available == [False]`, `push_connections == 0` and
-    `gaps == 0` -- it reaches the ceiling instead of returning, so every
-    visible end state is identical and only the five wasted attempts and
-    four backoff sleeps in between differ. The plan's own draft of this case
-    asserted exactly those three things and the mutation survived it.
+    Not a failure to retry: an adapter saying it has no channel will say the
+    same thing on every reconnect, and PRD 03's reconciler is the cover.
+    `attempts` is the assertion with teeth and the other three are not -- a loop
+    letting `SourceNotSupported` fall through to `except UsherPortError` reaches
+    the ceiling instead of returning, so every visible end state is identical
+    and only the wasted attempts and backoff sleeps differ.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
     adapter.disable_push()
@@ -1019,13 +980,11 @@ async def test_a_source_with_no_push_channel_is_marked_and_left_alone(lane: _Lan
 
 
 async def test_a_channel_that_ends_quietly_counts_as_a_failure(lane: _Lane) -> None:
-    """The port forbids an iterator that ends rather than raising.
-
-    and an adapter can still do it.
+    """The port forbids an iterator that ends rather than raising, and one still can.
 
     Counted as a failure rather than treated as a clean shutdown, because the
-    alternative is a lane that returns silently and a source that stops pushing until
-    somebody notices by hand.
+    alternative is a lane that returns silently and a source that stops pushing
+    until somebody notices by hand.
     """
     adapter = _QuietAdapter(SUPERVISED_SOURCE, [], unbounded=True)
     supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
@@ -1057,9 +1016,9 @@ async def test_cancellation_stops_the_lane_without_marking_the_source(lane: _Lan
 async def test_a_bug_in_the_lane_is_not_swallowed_as_a_push_failure(lane: _Lane) -> None:
     """`JobWorker`'s rule, one lane over.
 
-    a `ZeroDivisionError` is a bug in this process, and a loop that counted it as a push
-    failure would spend a backoff schedule and then park a healthy source with an error
-    message that describes nothing an operator can act on.
+    A `ZeroDivisionError` is a bug in this process, and a loop that counted it
+    as a push failure would spend a backoff schedule and then park a healthy
+    source with an error message describing nothing an operator can act on.
     """
 
     async def explode(source: Source, adapter: SourceAdapter, event: SourceEvent) -> PushOutcome:
@@ -1076,13 +1035,11 @@ async def test_a_bug_in_the_lane_is_not_swallowed_as_a_push_failure(lane: _Lane)
 async def test_a_pushed_watch_state_invalidates_that_users_rows(fixture: _Fixture) -> None:
     """The push lane invalidates, because a push event *is* a change.
 
-    the same sentence PRD 07 uses to explain why the push lane publishes
-    `watchstate.updated` and the nightly walk does not.
-
-    Asserted on a *cached screen going away* rather than on a call being made:
-    the slug set and the household are both part of being right, and a spy
-    asserting `invalidate` was called is satisfied by a call that dropped
-    somebody else's screen.
+    The same sentence PRD 07 uses for `watchstate.updated`. Asserted on a
+    *cached screen going away* rather than on a call being made: the slug set
+    and the household are both part of being right, and a spy asserting
+    `invalidate` was called is satisfied by a call that dropped somebody else's
+    screen.
     """
     await fixture.given_matched("i1")
     other = new_id()
@@ -1128,22 +1085,14 @@ async def test_a_refused_merge_leaves_the_cached_screen_alone(fixture: _Fixture)
 
 
 async def test_the_nightly_walk_invalidates_nothing(fixture: _Fixture) -> None:
-    """**Trap 5.** A walk merges up to 1,126,789 states.
-
-    one invalidation per merged row is a fan-out per row per night, and with
-    `row.invalidated` attached it is that fan-out reaching every connected client *and*
-    telling each one to refetch -- the exact thing M5 refused for `watchstate.updated`,
-    and strictly worse because this one instructs the client to come back.
+    """A nightly walk merges the whole library, so it must not invalidate per row.
 
     The walk's changes reach the screen through the 30 s screen TTL and a
-    demand read: a walk that finished at 04:00 is on the screen by 04:00:30.
-
-    Kills an `invalidate` call added to `WatchStateSyncService`'s merge loop,
-    which is where it is most natural to write it and where nothing else would
-    notice: the cache is correct, the screens are fresh, and the only symptom
-    is a million-message night. `WatchStateSyncService` is handed no cache at
-    all, so the mutation has to *add a constructor argument* to be written --
-    which is the strongest form this guarantee can take.
+    demand read instead. Kills an `invalidate` call added to
+    `WatchStateSyncService`'s merge loop, which is where it is most natural to
+    write it and where nothing else would notice: the cache is correct and the
+    screens are fresh. The service is handed no cache at all, so the mutation
+    has to *add a constructor argument* to be written.
     """
     await fixture.given_matched("i1")
     fixture.adapter.seed_state(
@@ -1173,14 +1122,10 @@ async def test_a_pushed_watch_state_publishes_row_invalidated_for_the_rows_it_mo
 ) -> None:
     """The push lane publishes because a push event *is* a change.
 
-    the same sentence PRD 07 uses for `watchstate.updated`.
-
-    One event per invalidated slug, and the slug set is small and fixed, so the fan-out
-    is per *event* rather than per merged row.
-
-    The payload is the slug and nothing else: PRD 07's client action is "refetch
-    that row", and a frame with an empty `data` is a well-shaped instruction
-    with no object.
+    One event per invalidated slug, and the slug set is small and fixed, so the
+    fan-out is per *event* rather than per merged row. The payload is the slug
+    and nothing else: PRD 07's client action is "refetch that row", and a frame
+    with an empty `data` is a well-shaped instruction with no object.
     """
     await fixture.given_matched("i1")
 
@@ -1205,18 +1150,14 @@ async def test_a_pushed_watch_state_publishes_row_invalidated_for_the_rows_it_mo
 
 
 async def test_the_nightly_walk_publishes_no_row_invalidated(fixture: _Fixture) -> None:
-    """**Trap 5.** A walk merges up to 1,126,789 states.
+    """A nightly walk merges the whole library, so it must not publish per row.
 
     One `row.invalidated` per merged row is a fan-out per row per night to every
-    connected client *and* a thundering herd of refetches at 04:00 -- strictly worse
-    than the `watchstate.updated` fan-out M5 already refused, because this one instructs
-    the client to come back.
-
-    Kills a publish added to `WatchStateSyncService`'s merge loop, which is the
-    most natural place to write it and the place nothing else would notice: the
-    screens are fresh and the cache is correct. `WatchStateSyncService` is
-    handed no `EventPublisher` at all, so the mutation has to add a constructor
-    argument to be written.
+    connected client *and* a thundering herd of refetches at 04:00. Kills a
+    publish added to `WatchStateSyncService`'s merge loop, the most natural
+    place to write it and the place nothing else would notice: the screens are
+    fresh and the cache is correct. The service is handed no `EventPublisher` at
+    all, so the mutation has to add a constructor argument to be written.
     """
     await fixture.given_matched("i1")
     fixture.adapter.seed_state(

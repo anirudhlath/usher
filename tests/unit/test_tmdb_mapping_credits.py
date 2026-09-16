@@ -48,11 +48,9 @@ def _crew(person_id: int, name: str, *, job: str, department: str = "Directing")
 
 
 def _creator(person_id: int, name: str) -> dict[str, Any]:
-    """A `created_by[]` entry.
+    """A `created_by[]` entry, with no `job`, no `order`, and no `known_for_department`.
 
-    and note what it does *not* carry: no `job`, no `order`, and **no
-    `known_for_department`**, which is why `Person` declares that column nullable and
-    the upsert COALESCEs it.
+    That is why `Person` declares that column nullable and the upsert COALESCEs it.
     """
     return {
         "id": person_id,
@@ -83,16 +81,11 @@ def _series(**overrides: Any) -> dict[str, Any]:
 
 
 def test_a_series_creator_is_read_from_created_by_and_not_from_the_crew() -> None:
-    """The ninth row of `mapping.py`'s per-kind divergence table.
+    """`series.json` carries `created_by` and its `credits.crew` is `[]`.
 
-    read out of the recorded fixtures rather than assumed.
-
-    `series.json` carries `created_by` and its `credits.crew` is `[]`. So a
-    mapper that looked for creators in `credits.crew` -- the obvious place,
-    since that is where a *movie's* director lives -- returns **nothing for
-    every series in the catalog**, with no error and no empty-result signal.
-    That is precisely the failure that divergence table exists to prevent,
-    and it is the shape this milestone opens by describing: a populated,
+    A mapper that looked for creators in `credits.crew` -- the obvious place, since
+    that is where a *movie's* director lives -- returns **nothing for every series in
+    the catalog**, with no error and no empty-result signal: a populated,
     correctly-typed, entirely absent answer.
     """
     title_id = new_id()
@@ -126,15 +119,12 @@ def test_a_movie_has_no_creators_and_that_is_not_an_error() -> None:
 
 
 def test_crew_carries_no_billing_order() -> None:
-    """`crew[i]` has no `order` field -- read out of the fixtures, not assumed.
+    """`crew[i]` has no `order` field, so `billing_order` is `None` for crew.
 
-    So `billing_order` is meaningful for cast and `None` for crew.
-
-    The wrong implementation is `billing_order=0` for crew (the natural
-    default for a schema that made the column `NOT NULL DEFAULT 0`), which
-    puts every gaffer and every director *above* the star of the film in
-    every "top billed" read, because `list_for_title` orders by
-    `billing_order` nulls last.
+    The wrong implementation is `billing_order=0` for crew -- the natural default for
+    a schema that made the column `NOT NULL DEFAULT 0` -- which puts every gaffer and
+    every director *above* the star of the film in every "top billed" read, because
+    `list_for_title` orders by `billing_order` nulls last.
     """
     _, credits = people_and_credits(
         _movie(
@@ -181,17 +171,12 @@ def test_cast_billing_order_is_tmdbs_order_field_not_the_arrays_index() -> None:
 
 
 def test_crew_outside_the_named_job_set_is_dropped() -> None:
-    """Unfiltered crew is every gaffer.
+    """Unfiltered crew is every gaffer, best boy and assistant art director.
 
-    best boy and assistant art director, and *both* consumers of this table --
-    `PeopleProvider`'s "more from this director" and weight class B -- want the people a
-    viewer could name.
-
-    Below the line, crews repeat because studios repeat, so an unfiltered set makes
-    "recurring" mean "worked at the same studio".
-
-    A job absent from the set maps to nothing rather than raising, exactly as
-    `_STATUS` handles a status TMDb invents.
+    Both consumers of this table -- `PeopleProvider`'s "more from this director" and
+    weight class B -- want the people a viewer could name; below the line crews repeat
+    because studios repeat, so an unfiltered set makes "recurring" mean "worked at the
+    same studio". A job absent from the set maps to nothing rather than raising.
     """
     _, credits = people_and_credits(
         _movie(
@@ -214,17 +199,12 @@ def test_crew_outside_the_named_job_set_is_dropped() -> None:
 def test_cast_beyond_the_billing_cutoff_is_dropped() -> None:
     """The row bound.
 
-    A large film's `credits.cast` runs into the low hundreds; at the enriched tier
-    boundary call 4 targets (2k-10k titles) an unbounded cast is roughly 10k x 150 ~
-    1.5M credit rows against a database PRD 08 budgets at 8-12 GB *total*. At 50 it is
-    ~500k.
-
-    **50 is chosen, not measured**, on the same bargain
-    `services/search.py` states for `_POPULARITY_MIDPOINT`: a wrong cutoff
-    drops the 51st-billed actor from a filmography and changes nothing else.
-
-    The cutoff is on `order`, not on array position, for the reason the case
-    above gives -- so this fixture puts the out-of-range entry *first*.
+    A large film's `credits.cast` runs into the low hundreds, and across an enriched
+    catalog an unbounded cast multiplies out past the database size PRD 08 budgets
+    for. **50 is chosen rather than derived**, on the same bargain `services/search.py`
+    states for `_POPULARITY_MIDPOINT`: a wrong cutoff drops the 51st-billed actor from
+    a filmography and changes nothing else. The cutoff is on `order`, not on array
+    position, so this fixture puts the out-of-range entry *first*.
     """
     _, credits = people_and_credits(
         _movie(
@@ -244,12 +224,10 @@ def test_cast_beyond_the_billing_cutoff_is_dropped() -> None:
 
 
 def test_a_payload_with_no_credits_key_yields_no_people_and_no_credits() -> None:
-    """A payload cached before `credits` joined `*_APPEND_TO_RESPONSE`.
+    """A payload with no `credits` key at all, or an entity TMDb has none for.
 
-    or an entity TMDb has none for.
-
-    Zero people, zero credits, and **no error**: this is what most of the catalog looks
-    like, not a fault.
+    Zero people, zero credits, and **no error**: this is what most of the catalog
+    looks like, not a fault.
     """
     people, credits = people_and_credits(_movie(), new_id())
     assert people == []
@@ -257,14 +235,11 @@ def test_a_payload_with_no_credits_key_yields_no_people_and_no_credits() -> None
 
 
 def test_belongs_to_collection_null_and_absent_are_the_same_outcome() -> None:
-    """`null` is the ordinary case for a standalone film.
-
-    the existing `RawPayloadStoreContract.PAYLOAD` fixture literally carries it -- and
-    the key is **absent entirely** on every series, verified against `series.json`'s
-    top-level key set.
+    """`null` is the ordinary case for a standalone film; a series has no key at all.
 
     Both reach the same `payload.get(...)` and both mean "no collection", so a mapper
-    that distinguished them would be inventing a state neither TMDb nor this schema has.
+    that distinguished them would be inventing a state neither TMDb nor this schema
+    has.
     """
     assert collection_from_payload(_movie(belongs_to_collection=None)) is None
     assert collection_from_payload(_series()) is None
@@ -273,7 +248,7 @@ def test_belongs_to_collection_null_and_absent_are_the_same_outcome() -> None:
 def test_a_movie_in_a_collection_yields_one_with_its_provider_id() -> None:
     """`tmdb_id` is what makes a re-derivation an update rather than a duplicate.
 
-    the derivation mints a fresh UUIDv7 per sighting, exactly as ingest does for
+    The derivation mints a fresh UUIDv7 per sighting, exactly as ingest does for
     seasons, and a batch names one franchise once per member film.
     """
     collection = collection_from_payload(
@@ -291,28 +266,23 @@ def test_a_movie_in_a_collection_yields_one_with_its_provider_id() -> None:
 
 
 def test_a_collection_with_no_usable_name_is_dropped_rather_than_raising() -> None:
-    """`Collection.name` is `min_length=1` and a `pydantic.ValidationError` is **not** a.
+    """`Collection.name` is `min_length=1`, and a `ValidationError` is not a port error.
 
-    `UsherPortError`, so it would escape `JobWorker`'s except arms and take the process
-    down rather than parking one job.
-
-    Same standing rule `mapping.py` already states for `Title`.
+    It would escape `JobWorker`'s except arms and take the process down rather than
+    parking one job -- the standing rule `mapping.py` already states for `Title`.
     """
     assert collection_from_payload(_movie(belongs_to_collection={"id": 98000002})) is None
     assert collection_from_payload(_movie(belongs_to_collection={"name": "No Id At All"})) is None
 
 
 def test_a_cast_entry_with_no_id_is_dropped_rather_than_raising() -> None:
-    """`mapping.py`'s standing rule.
+    """`mapping.py`'s standing rule: nothing TMDb can put in a payload may raise.
 
-    *nothing TMDb can put in a payload may raise*, because a `pydantic.ValidationError`
-    is not a `UsherPortError` and would kill the worker instead of parking one job.
-
-    An entry with no usable `id` is also unresolvable by construction --
-    `PersonRepository.resolve_tmdb_ids` is how a credit learns its
-    `person_id`, and a person with a NULL `tmdb_id` is inserted rather than
-    merged, so its id can never be read back. Dropping it is the only answer
-    that does not silently orphan a credit.
+    A `pydantic.ValidationError` is not a `UsherPortError` and would kill the worker
+    instead of parking one job. An entry with no usable `id` is also unresolvable by
+    construction -- `PersonRepository.resolve_tmdb_ids` is how a credit learns its
+    `person_id`, and a person with a NULL `tmdb_id` is inserted rather than merged --
+    so dropping it is the only answer that does not silently orphan a credit.
     """
     people, credits = people_and_credits(
         _movie(
@@ -350,12 +320,10 @@ def test_every_derived_person_carries_a_sort_name() -> None:
 def test_one_person_credited_twice_on_one_film_is_two_credits() -> None:
     """A person who wrote *and* directed one film is two crew credits.
 
-    and `(title_id, person_id, kind, job)` is the natural key precisely so they do not
-    collapse.
-
-    A mapper that deduplicated on `(title_id, person_id)` keeps whichever it saw second
-    and loses the other -- and `RecurringPerson` then reports a count that is right for
-    the wrong reason.
+    `(title_id, person_id, kind, job)` is the natural key precisely so they do not
+    collapse. A mapper that deduplicated on `(title_id, person_id)` keeps whichever it
+    saw second and loses the other, and `RecurringPerson` then reports a count that is
+    right for the wrong reason.
     """
     people, credits = people_and_credits(
         _movie(
@@ -378,12 +346,11 @@ def test_one_person_credited_twice_on_one_film_is_two_credits() -> None:
 def test_a_person_on_both_the_cast_and_the_created_by_list_is_one_person() -> None:
     """The exact case `PersonRepository.upsert_many`'s COALESCE rule exists for.
 
-    a `created_by[]` entry carries no `known_for_department` and a `credits.cast[]`
+    A `created_by[]` entry carries no `known_for_department` and a `credits.cast[]`
     entry does, so the same person arrives with it and without it **inside one
-    derivation pass**.
-
-    One `Person`, and the populated department wins -- an unconditional assignment
-    blanks an actor's department the moment they also create a series.
+    derivation pass**. One `Person`, and the populated department wins -- an
+    unconditional assignment blanks an actor's department the moment they also
+    create a series.
     """
     people, credits = people_and_credits(
         _series(
@@ -401,8 +368,8 @@ def test_a_person_on_both_the_cast_and_the_created_by_list_is_one_person() -> No
 def test_credits_name_the_title_they_were_derived_for() -> None:
     """`title_id` is passed in and never inferred from the payload.
 
-    ADR-0003 identity, and the reverse lookup is the caller's because `raw_payloads` has
-    no `title_id` at all.
+    The reverse lookup is the caller's, because `raw_payloads` has no `title_id` at
+    all.
     """
     title_id = uuid.UUID("01900000-0000-7000-8000-000000000001")
     _, credits = people_and_credits(

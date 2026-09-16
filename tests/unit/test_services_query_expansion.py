@@ -39,7 +39,7 @@ NOW = datetime(2026, 8, 7, 4, 0, tzinfo=UTC)
 #: response came back to read one from.
 ASKED = "test/asked-1"
 
-# : Where the injected monotonic clock starts.
+#: Where the injected monotonic clock starts.
 _T0 = 1_000.0
 
 _ELAPSED = 0.25
@@ -50,7 +50,7 @@ _TYPED = "films about a quiet vacuum"
 class _RecordingLedger(FakeLLMCallRepository):
     """`FakeLLMCallRepository` that says *when* it was written.
 
-    plus the one affordance the shared fake deliberately lacks: a `record()` that
+    Plus the one affordance the shared fake deliberately lacks: a `record()` that
     refuses.
 
     The shared fake only refuses a duplicate id and the id is minted inside the
@@ -84,9 +84,9 @@ class _Harness:
         """The one ledger row.
 
         Indexing straight into `calls[0]` is satisfied by any number of rows
-        >= 1, and *one attempted completion is one ledger row* is half of this
-        milestone's cost claim -- so the count is asserted here, once, for every
-        case that reads a row.
+        >= 1, and *one attempted completion is one ledger row* is half of the
+        cost claim -- so the count is asserted here, once, for every case that
+        reads a row.
         """
         assert len(self.ledger.calls) == 1, "one attempted completion is one ledger row"
         return self.ledger.calls[0]
@@ -123,9 +123,9 @@ def _harness(
 def test_the_prompt_asks_for_the_key_the_reader_will_look_under() -> None:
     """`read_expansion` reads exactly one key.
 
-    and a prompt naming a different one loses 100% of a correct answer silently -- the
-    completion parses, the key is absent, and every search is billed for an expansion it
-    never got.
+    A prompt naming a different one loses a correct answer silently -- the completion
+    parses, the key is absent, and every search is billed for an expansion it never
+    got.
 
     The same defect `curation._schema`'s docstring names (`ids` against `item_ids`), one
     module over.
@@ -136,7 +136,7 @@ def test_the_prompt_asks_for_the_key_the_reader_will_look_under() -> None:
 def test_the_prompt_states_the_bound_the_reader_refuses_a_completion_over() -> None:
     """`read_expansion` **discards a rewrite whole** rather than truncating it.
 
-    so an unstated bound is a model that answers in three paragraphs, a refused
+    An unstated bound is a model that answers in three paragraphs, a refused
     completion, and a call billed for nothing.
 
     The number is rendered from the constant rather than typed, because a second copy is
@@ -149,7 +149,7 @@ def test_the_prompt_states_the_bound_the_reader_refuses_a_completion_over() -> N
 def test_the_prompt_asks_for_json_and_nothing_else() -> None:
     """`OpenAICompatibleClient` strips a code fence and refuses a non-object body.
 
-    so a model answering in prose is a `PortDataMalformed` -- a billed call with no
+    A model answering in prose is a `PortDataMalformed` -- a billed call with no
     expansion.
 
     Cheaper to ask than to pay for the refusal.
@@ -160,7 +160,7 @@ def test_the_prompt_asks_for_json_and_nothing_else() -> None:
 def test_every_declared_rule_reaches_the_prompt_in_order() -> None:
     """Structure rather than prose.
 
-    a builder that dropped a rule, or emitted them in an order the tuple does not
+    A builder that dropped a rule, or emitted them in an order the tuple does not
     declare, is caught without pinning a sentence anybody may legitimately tune.
 
     What this case cannot see -- a rule deleted from `EXPANSION_RULES` itself -- is the
@@ -191,9 +191,9 @@ def test_the_typed_query_is_rendered_as_one_line_whatever_whitespace_it_holds(
     A newline in it forges a line of instructions the model reads as ours.
 
     The assertion is the **whole rendered line**, identical across all six
-    arms, rather than the negative *"no line starts with `Rule:`"*: measured in
-    `.claude/rules/testing-discipline.md`, `replace("\n", " ")` satisfies the
-    negative even on a `\r\n` input, because `str.splitlines()` splits on the
+    arms, rather than the negative *"no line starts with `Rule:`"*:
+    `replace("\n", " ")` satisfies the negative even on a `\r\n` input,
+    because `str.splitlines()` splits on the
     surviving `\r` and the forged line merely gains a leading space. Only
     `" ".join(value.split())` collapses all six; every narrower spelling
     collapses a proper subset, which is why the arms include `\r`, `\t`, a
@@ -207,20 +207,19 @@ def test_the_typed_query_is_rendered_as_one_line_whatever_whitespace_it_holds(
 def test_the_instructions_are_rendered_before_the_query_they_are_about() -> None:
     """Ordering, which no substring assertion can see.
 
-    A prompt putting the viewer's text first lets a long query push the rules out of a
-    small model's attention -- the finding curation's own prompt sweep recorded when its
-    instruction block moved behind 200 candidate lines.
+    A prompt putting the viewer's text first lets a long query push the rules out of
+    a small model's attention.
     """
     prompt = build_expansion_prompt(_TYPED)
     assert prompt.index(str(MAX_QUERY_CHARS)) < prompt.index(_TYPED)
 
 
 def test_the_prompt_builder_can_be_handed_nothing_but_the_query() -> None:
-    """**The one privacy difference from curation.
+    """The one privacy difference from curation, and it is worth a case.
 
-    and it is worth a case.** `build_prompt` sends a household's watch history and 200
-    owned titles to whatever `USHER_LLM_BASE_URL` names; this sends one typed string,
-    which is why query expansion needs no ADR-0028 handle scheme at all.
+    `build_prompt` sends a household's watch history and 200 owned titles to whatever
+    `USHER_LLM_BASE_URL` names; this sends one typed string, which is why query
+    expansion needs no handle scheme at all.
 
     Fails: a builder that grew a `titles=` or `history=` parameter and put a library on
     the wire for a search box.
@@ -234,7 +233,7 @@ def test_the_prompt_builder_can_be_handed_nothing_but_the_query() -> None:
 def test_a_usable_rewrite_comes_back_collapsed_to_one_line() -> None:
     """The reader sanitises for the reason the builder does.
 
-    what comes back is handed to an embedder, and a multi-line rewrite is a document
+    What comes back is handed to an embedder, and a multi-line rewrite is a document
     rather than a query.
     """
     assert read_expansion({QUERY_KEY: " a crew\n alone\tin orbit "}) == "a crew alone in orbit"
@@ -289,16 +288,14 @@ def test_the_character_bound_is_a_ceiling_and_is_measured_at_it(length: int) -> 
 
 
 async def test_exactly_one_completion_is_bought_per_expansion() -> None:
-    """**PRD 06's cost claim.
+    """PRD 06's cost claim, on the surface that could break it worst.
 
-    on the surface that could break it worst.** Curation buys one completion per
-    household per night; this buys one per search, so a second discarded call here
-    doubles the bill on the most frequent path in the product.
+    Curation buys one completion per household per night; this buys one per search, so
+    a second discarded call here doubles the bill on the most frequent path in the
+    product.
 
-    `FakeLLMClient` repeats its last scripted response forever, so `client.calls[0]` is
-    satisfied by any number of calls >= 1 -- the count needs its own assertion, which is
-    exactly the gap `.claude/rules/testing-discipline.md` records from curation's own
-    sweep.
+    `FakeLLMClient` repeats its last scripted response forever, so `client.calls[0]`
+    is satisfied by any number of calls >= 1 -- the count needs its own assertion.
     """
     harness = _harness({QUERY_KEY: "a crew alone in orbit"})
     await harness.service.expand(_TYPED)
@@ -308,9 +305,8 @@ async def test_exactly_one_completion_is_bought_per_expansion() -> None:
 async def test_the_call_is_labelled_query_expansion_on_the_wire() -> None:
     """`usher.llm.purpose` is PRD 10's group-by and the adapter puts it on the span.
 
-    `CURATION` here would attribute every search to the nightly job -- the mutation
-    curation's own sweep found alive on this exact field, where the *ledger* row stayed
-    correct and the wire did not.
+    `CURATION` here would attribute every search to the nightly job, with the
+    *ledger* row staying correct while the wire did not.
     """
     harness = _harness({QUERY_KEY: "a crew alone in orbit"})
     await harness.service.expand(_TYPED)
@@ -318,13 +314,12 @@ async def test_the_call_is_labelled_query_expansion_on_the_wire() -> None:
 
 
 async def test_the_schema_asks_for_a_string_under_the_key_the_reader_reads() -> None:
-    """The optimisation half of ADR-0028's split.
+    """The optimisation half: `response_format` on top of the reader's own check.
 
-    a provider honouring `response_format` makes the shape harder to get wrong, and the
-    reader checks it whatever the provider did.
+    A provider honouring `response_format` makes the shape harder to get wrong, and
+    the reader checks it whatever the provider did.
 
-    A schema naming a different key from `read_expansion` drops 100% of a correct
-    answer.
+    A schema naming a different key from `read_expansion` drops a correct answer.
     """
     harness = _harness({QUERY_KEY: "a crew alone in orbit"})
     await harness.service.expand(_TYPED)
@@ -337,7 +332,7 @@ async def test_the_schema_asks_for_a_string_under_the_key_the_reader_reads() -> 
 async def test_the_prompt_on_the_wire_is_the_one_the_pure_builder_renders() -> None:
     """The seam between the artefact and the orchestrator.
 
-    asserted so the prompt cases above are cases about what was *sent*.
+    Asserted so the prompt cases above are cases about what was *sent*.
 
     Fails: a service that sends the raw query, which is a completion bought to rewrite
     nothing.
@@ -353,7 +348,7 @@ async def test_the_prompt_on_the_wire_is_the_one_the_pure_builder_renders() -> N
 async def test_a_usable_expansion_is_returned_and_billed_in_full() -> None:
     """The success path.
 
-    field by field, because `llm_calls` is the cost ledger and a row that understates
+    Field by field, because `llm_calls` is the cost ledger and a row that understates
     one field understates a month.
 
     `model` is what **answered**, never what was asked: PRD 10 groups spend by
@@ -385,12 +380,12 @@ async def test_a_usable_expansion_is_returned_and_billed_in_full() -> None:
 
 
 async def test_the_row_names_no_generation_because_there_is_nothing_to_join_to() -> None:
-    """**`LLMCall.generation_id` is nullable and this is the case its own comment names.** A.
+    """`LLMCall.generation_id` is nullable, and a search has nothing to join to.
 
-    generation id minted here is a join key pointing at nothing, so PRD 10's dashboard 5
-    (`llm_calls JOIN curated_rows USING (generation_id)`) would silently attribute a
-    search's spend to no screen at all, or -- outer-joined -- to a screen nobody
-    generated.
+    A generation id minted here is a join key pointing at nothing, so PRD 10's
+    dashboard 5 (`llm_calls JOIN curated_rows USING (generation_id)`) would silently
+    attribute a search's spend to no screen at all, or -- outer-joined -- to a screen
+    nobody generated.
 
     Fails: `generation_id=new_id()`, which is the tidy-looking version.
     """
@@ -403,10 +398,9 @@ async def test_the_row_is_recorded_and_then_committed() -> None:
     """Both halves, and their order.
 
     An uncommitted ledger row is rolled back with the session the search read through,
-    so the *only* record the money was spent disappears exactly when nothing else did --
-    curation's `_settle` finding, arriving on a read-only path where there is no other
-    write to carry the transaction. `events.count("ledger") == 1` alone is satisfied by
-    a service that never commits.
+    so the *only* record the money was spent disappears exactly when nothing else did
+    -- a read-only path has no other write to carry the transaction.
+    `events.count("ledger") == 1` alone is satisfied by a service that never commits.
     """
     harness = _harness({QUERY_KEY: "a crew alone in orbit"})
     await harness.service.expand(_TYPED)
@@ -424,16 +418,15 @@ async def test_the_row_is_recorded_and_then_committed() -> None:
 async def test_an_upstream_failure_is_billed_and_the_search_goes_on_as_typed(
     failure: BaseException,
 ) -> None:
-    """**The whole degradation decision.
+    """The whole degradation decision, in one case.
 
-    in one case.** PRD 08 says a degraded subsystem narrows rather than fails, and a
-    search is answerable without an expansion -- so this returns `None` instead of re-
-    raising, which is the opposite of `CurationService`, where the generation *is* the
-    job and the exception is the only thing `JobWorker` has to classify with.
+    PRD 08 says a degraded subsystem narrows rather than fails, and a search is
+    answerable without an expansion -- so this returns `None` instead of re-raising,
+    which is the opposite of `CurationService`, where the generation *is* the job and
+    the exception is the only thing `JobWorker` has to classify with.
 
     Billed anyway: a ledger holding only the successes understates spend by
-    exactly the failures, and a 120-second timeout is the most expensive thing
-    this service can do. Tokens are zero because there was no answer to bill,
+    exactly the failures. Tokens are zero because there was no answer to bill,
     and the model is the one this deployment **asked** for -- the only honest
     value when nothing came back to read one from.
     """
@@ -449,16 +442,15 @@ async def test_an_upstream_failure_is_billed_and_the_search_goes_on_as_typed(
 
 
 async def test_an_exception_raised_with_no_arguments_still_says_what_went_wrong() -> None:
-    """`str(exc)` is `""` for an exception raised with no arguments and.
+    """`str(exc)` is `""` for an exception raised with no arguments.
 
-    `LLMCall._ok_and_error_must_agree` refuses a failed call with a blank error -- so a
-    bare `str(exc)` raises a `ValidationError` from inside the handler and loses the one
-    row this ledger exists for.
+    `LLMCall._ok_and_error_must_agree` refuses a failed call with a blank error -- so
+    a bare `str(exc)` raises a `ValidationError` from inside the handler and loses the
+    one row this ledger exists for.
 
     Asserted on the **value**, never as `assert row.error`: once `ok is False`
     is pinned, a truthy check on `error` cannot fail, because the model
-    validator already excludes every falsy value. Half of an `or` is not the
-    expression, and this is the half three docstrings argue about.
+    validator already excludes every falsy value.
     """
     harness = _harness(PortUnavailable())
     assert await harness.service.expand(_TYPED) is None
@@ -466,11 +458,10 @@ async def test_an_exception_raised_with_no_arguments_still_says_what_went_wrong(
 
 
 async def test_a_call_that_answered_and_carried_nothing_usable_is_billed_as_a_failure() -> None:
-    """**Curation's 108/108 case.
+    """The call worked, the money is spent, and the expansion produced nothing.
 
-    on the search path.** The call worked, the money is spent, and the expansion
-    produced nothing -- so `ok` is false with a reason while the tokens and the cost are
-    recorded **in full**.
+    `ok` is false with a reason while the tokens and the cost are recorded **in
+    full**.
 
     Zeroed tokens here would be indistinguishable from a call that never reached the
     endpoint, and those two have opposite fixes (the prompt against the network).
@@ -494,7 +485,7 @@ async def test_a_call_that_answered_and_carried_nothing_usable_is_billed_as_a_fa
 def test_the_refusal_sentence_echoes_nothing_the_model_wrote() -> None:
     """The constant itself.
 
-    so the case above cannot be satisfied by a sentence that interpolates the
+    The case above therefore cannot be satisfied by a sentence that interpolates the
     completion.
 
     It names the key and the bound; both are ours.
@@ -506,7 +497,7 @@ def test_the_refusal_sentence_echoes_nothing_the_model_wrote() -> None:
 async def test_two_expansions_are_two_ledger_rows_with_two_ids() -> None:
     """One completion is one row.
 
-    and a row id minted once per *service* rather than once per attempt makes the second
+    A row id minted once per *service* rather than once per attempt makes the second
     `record()` a `pk_llm_calls` conflict -- which `_record` swallows by design, so the
     second search would be free in the one table that exists to say it was not.
     """
@@ -519,7 +510,7 @@ async def test_two_expansions_are_two_ledger_rows_with_two_ids() -> None:
 async def test_a_ledger_that_refuses_the_row_does_not_take_the_search_down() -> None:
     """The money is already spent.
 
-    the cause is a misconfigured price rather than anything a retry fixes, and raising
+    The cause is a misconfigured price rather than anything a retry fixes, and raising
     here would cost the viewer a search over a bookkeeping failure.
 
     Swallowed and logged loudly -- the call `CurationService._record` makes, with the
@@ -549,22 +540,14 @@ async def test_a_bug_in_the_ledger_is_not_swallowed_as_an_upstream_failure() -> 
 
 
 async def test_a_bug_in_the_client_is_not_absorbed_as_an_upstream_failure() -> None:
-    """The same distinction one method **up**, and it was unpinned until 2026-08-07.
+    """The same distinction one method **up**, visible only in the ledger.
 
-    widening `expand`'s `except UsherPortError` to `except Exception` survived the whole
-    unit suite (2,882 cases when review found it) and passes ruff, `ruff format
-    --check`, mypy and `lint-imports` unchanged -- measured, all four, not reasoned
-    about.
-
-    With this case present the same plant fails **this case alone**, out of 2,893.
-
-    It is not an equivalent mutant, and the difference is visible in the one
-    table that exists to make spend legible. Shipped, a `RuntimeError` from the
-    client is a **bug**: it leaves `expand` with no ledger row, because nothing
-    was billed and nothing upstream failed. Widened, the same bug is absorbed
-    into `error`, billed as an upstream failure with zero tokens, and every
-    search goes on succeeding -- so an operator reading `llm_calls` sees an
-    outage where there is a defect, and the two have opposite fixes.
+    Shipped, a `RuntimeError` from the client is a **bug**: it leaves `expand` with no
+    ledger row, because nothing was billed and nothing upstream failed. Widened to
+    `except Exception`, the same bug is absorbed into `error`, billed as an upstream
+    failure with zero tokens, and every search goes on succeeding -- so an operator
+    reading `llm_calls` sees an outage where there is a defect, and the two have
+    opposite fixes.
 
     Asserted on the **absence of a row** as well as on the raise: a service
     that re-raised *after* settling would pass the first half alone while still
@@ -590,7 +573,7 @@ async def test_a_bug_in_the_client_is_not_absorbed_as_an_upstream_failure() -> N
 async def test_an_attempt_that_produced_nothing_says_so_while_it_is_happening(
     body: dict[str, Any] | BaseException, expected: str
 ) -> None:
-    """**The `expanded:` line's absence is not a signal, so this is.**.
+    """The `expanded:` line's absence is not a signal, so this warning is.
 
     Every failure here is absorbed, which means the viewer gets results and
     `usher search` prints nothing at all -- `SearchAnswer.expanded_query` is
@@ -599,12 +582,10 @@ async def test_an_attempt_that_produced_nothing_says_so_while_it_is_happening(
     the only two records that money was spent are the `llm_calls` row (durable,
     and nobody is looking at it yet) and this line (immediate).
 
-    Asserted on the **error text** rather than on the sentence around it, and
-    that is the assertion with teeth rather than a change-detector: an upstream
-    failure and `NO_USABLE_QUERY` have opposite fixes (the network against the
-    prompt), so a warning that fired without saying which one happened would
-    send an operator to the wrong half. Deleting the whole `logger.warning`
-    survived the suite until this case landed.
+    Asserted on the **error text** rather than on the sentence around it: an
+    upstream failure and `NO_USABLE_QUERY` have opposite fixes (the network
+    against the prompt), so a warning that fired without saying which one
+    happened would send an operator to the wrong half.
     """
     sink: list[str] = []
     handler = logger.add(sink.append, level="WARNING")
@@ -642,7 +623,7 @@ async def test_an_expansion_that_worked_warns_about_nothing() -> None:
 async def test_the_measured_latency_is_a_delta_and_not_an_absolute_reading() -> None:
     """The injected clock's whole job, on the one path that needs it.
 
-    an upstream failure has no `LLMUsage` to read a latency from, and a 120-second
+    An upstream failure has no `LLMUsage` to read a latency from, and a 120-second
     timeout is the most expensive thing this service can do.
 
     `_T0` is a thousand seconds rather than zero on purpose -- with a fixture
@@ -671,7 +652,7 @@ async def test_the_adapters_own_latency_wins_whenever_there_is_one() -> None:
 
 
 async def test_a_clock_that_went_backwards_does_not_turn_a_search_into_a_crash() -> None:
-    """`_ms`' clamp, which the sweep found alive before this case existed.
+    """`_ms`' clamp, which only an injected clock can reach.
 
     `latency_ms` is `ge=0` on the model and `>= 0` in the column, so a negative
     delta is a `ValidationError` raised from inside `_ledger_row` -- on the
@@ -691,8 +672,8 @@ async def test_a_clock_that_went_backwards_does_not_turn_a_search_into_a_crash()
 def test_the_clock_default_is_monotonic_rather_than_wall_clock() -> None:
     """Pinned on the signature rather than on a recorded number.
 
-    and that is measured rather than stylistic: `time.monotonic` drifting to `time.time`
-    is a genuine equivalent mutant behaviourally -- both reads come from the same
+    The distinction is behavioural rather than stylistic: `time.monotonic` drifting to
+    `time.time` is a genuine equivalent mutant -- both reads come from the same
     callable and the delta is identical -- so the two differ only across a wall-clock
     adjustment, which cannot be induced against a builtin used as a default.
 
@@ -707,16 +688,15 @@ def test_the_clock_default_is_monotonic_rather_than_wall_clock() -> None:
 
 
 def test_the_client_is_required_and_every_collaborator_is_keyword_only() -> None:
-    """**The shape decision, pinned where a later `= None` would land.** `client.
+    """The shape decision, pinned where a later `= None` would land.
 
-    LLMClient`, never `LLMClient | None` -- `composition.llm_client` answers `(None, no-
-    op)` for `USHER_LLM_ENABLED=false`, so the composition root does not build *this*
-    service at all and "no client, no expansion" is a `mypy` fact one layer up rather
-    than a branch nothing in `src/` reaches.
+    `client: LLMClient`, never `LLMClient | None` -- `composition.llm_client` answers
+    `(None, no-op)` for `USHER_LLM_ENABLED=false`, so the composition root does not
+    build *this* service at all and "no client, no expansion" is a `mypy` fact one
+    layer up rather than a branch nothing in `src/` reaches.
 
     The optionality a search genuinely needs lives on `SearchService`, which is
-    always built; this service is not. That split is the whole argument, and on
-    this side it is only observable as an absence -- hence the case.
+    always built; this service is not.
     """
     parameters = inspect.signature(QueryExpansionService.__init__).parameters
     assert parameters["client"].default is inspect.Parameter.empty

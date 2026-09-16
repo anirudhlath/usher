@@ -10,17 +10,12 @@ from usher.services.rows.continue_watching import ContinueWatchingProvider
 
 
 async def test_a_title_finished_last_night_is_absent_from_continue_watching() -> None:
-    """**The headline distractor, corrected.**.
+    """The distractor: a finished title that still carries its resume position.
 
-    The finished title carries the most recent `last_played_at` in the
-    household *and keeps its resume position*, so it varies exactly one thing:
-    `played`. It sorts first under any recency ordering that forgets the
-    predicate, and a membership assertion on the genuinely in-progress title
-    passes with it sitting at position 0.
-
-    The plan's own seeding sets `played` **and** `position_seconds = 0`
-    together, which isolates neither half of `NOT played AND position_seconds >
-    0` -- Group E measured that survival and this is the correction.
+    It holds the most recent `last_played_at` in the household and varies exactly one
+    thing, `played`, so it sorts first under any recency ordering that forgets the
+    predicate -- and a membership assertion on the genuinely in-progress title passes
+    with it sitting at position 0.
     """
     library = Library()
     resuming = await library.title("Resuming")
@@ -57,13 +52,11 @@ async def test_a_title_never_started_is_absent_from_continue_watching() -> None:
 
 
 async def test_continue_watching_is_ordered_by_recency_and_not_by_insertion() -> None:
-    """Seeded so that insertion order is a *permutation* of watch order in both directions.
+    """Seeded so insertion order is a *permutation* of watch order in both directions.
 
-    because `watch_states.id` is a UUIDv7 and a fixture seeded newest-first is satisfied
-    by `ORDER BY id` forever.
-
-    Asserts the whole sequence rather than the head: an implementation that got
-    only the first card right by luck passes a `cards[0]` assertion.
+    `watch_states.id` is a UUIDv7, so a fixture seeded newest-first is satisfied by
+    `ORDER BY id` forever. The whole sequence is asserted rather than the head: an
+    implementation that got only the first card right by luck passes a `cards[0]` check.
     """
     library = Library()
     middle = await library.title("Middle")
@@ -80,13 +73,11 @@ async def test_continue_watching_is_ordered_by_recency_and_not_by_insertion() ->
 
 
 async def test_a_household_that_has_watched_nothing_gets_no_row_at_all() -> None:
-    """**The popular-titles fallback is the bug, not a nicety.**.
+    """A fresh install has a full library and no history, and this row must be absent.
 
-    A fresh install has a full library and no history. The correct contribution
-    from this provider is *nothing at all* -- an absent row, not an empty one
-    and certainly not a generic one. A provider that filled the gap with
-    popular titles produces a home screen that looks personalised and is not,
-    on precisely the household that cannot tell.
+    Not an empty row and certainly not a generic one: a provider that filled the gap
+    with popular titles produces a home screen that looks personalised and is not, on
+    precisely the household that cannot tell.
     """
     library = Library()
     for index in range(30):
@@ -123,7 +114,7 @@ async def test_the_card_carries_the_progress_pair_rather_than_a_fraction() -> No
 
 
 async def test_a_state_whose_runtime_the_source_never_reported_carries_none() -> None:
-    """ADR-0014 on the card.
+    """A runtime the source never reported is `None`, never zero.
 
     Zero is not "no runtime" -- it is a divisor that renders every partially-watched
     title as finished.
@@ -141,10 +132,7 @@ async def test_a_state_whose_runtime_the_source_never_reported_carries_none() ->
 
 
 async def test_a_title_deleted_between_the_read_and_the_hydrate_is_dropped() -> None:
-    """`SimilarityService.neighbors_of`'s precedent.
-
-    a `KeyError` here is a 500 on a home screen because one film went away between two
-    statements of one request.
+    """A film that went away between two statements of one request is not a 500.
 
     The card is dropped; the row still builds.
     """
@@ -162,11 +150,9 @@ async def test_a_title_deleted_between_the_read_and_the_hydrate_is_dropped() -> 
 
 
 async def test_a_row_whose_every_card_vanished_builds_empty_rather_than_raising() -> None:
-    """`BuiltRow` is constructible with no cards on purpose, and this is the state it exists for.
+    """`BuiltRow` is constructible with no cards, and this is the state it exists for.
 
-    a proposal that was true when it was made and has nothing left to show.
-
-    `HomeService` drops it (PRD 06: *"drops any that build empty"*), and "built and had
+    `HomeService` drops it (PRD 06: *"drops any that build empty"*), so "built and had
     nothing" stays distinguishable from "never proposed".
     """
     library = Library()
@@ -182,15 +168,11 @@ async def test_a_row_whose_every_card_vanished_builds_empty_rather_than_raising(
 
 
 async def test_continue_watching_proposes_exactly_one_pinned_row() -> None:
-    """**PRD 06's "1 row, always ranked first" is `pinned`, not a score.**.
+    """PRD 06's "1 row, always ranked first" is `pinned`, not a score.
 
-    Group A settled it: "always first" is a *positional* guarantee, and a
-    guarantee expressed as "a score high enough to win" is one another
-    provider's arithmetic can silently take away, on a screen that still looks
-    fine. Task 24's own text says the opposite and is wrong on this point.
-
-    The score is still the highest any provider returns, so the two orderings
-    agree today -- but only one of them is the guarantee.
+    "Always first" is a positional guarantee, and a guarantee expressed as "a score high
+    enough to win" is one another provider's arithmetic can silently take away, on a
+    screen that still looks fine.
     """
     library = Library()
     resuming = await library.title("Resuming")
@@ -203,14 +185,11 @@ async def test_continue_watching_proposes_exactly_one_pinned_row() -> None:
 
 
 async def test_the_row_describes_itself_for_a_client_and_for_alfred() -> None:
-    """The reason is *spoken aloud* rather than merely displayed (PRD 06's Alfred section states.
+    """The reason is spoken aloud rather than merely displayed, so it is a sentence.
 
-    that as a constraint on the field), so it is a sentence rather than a scoring
-    expression.
-
-    `display_hint` is landscape because this is the only family where the
-    card's **progress** is the point, and a poster hint loses the bar. The TTL
-    is 60 s: the one row that must not survive the user pressing stop.
+    `display_hint` is landscape because this is the only family where the card's
+    progress is the point, and a poster hint loses the bar. The TTL is 60 s: this is the
+    one row that must not survive the user pressing stop.
     """
     library = Library()
     resuming = await library.title("Resuming")
@@ -248,7 +227,7 @@ async def test_the_row_is_bounded_so_one_household_cannot_claim_the_screen(
 ) -> None:
     """A household mid-way through two hundred titles is a real state.
 
-    and an unbounded row is a response whose size is the household's own history.
+    An unbounded row is a response whose size is the household's own history.
     """
     library = Library()
     for index in range(30):
@@ -262,19 +241,12 @@ async def test_the_row_is_bounded_so_one_household_cannot_claim_the_screen(
 
 
 async def test_an_episode_left_half_watched_appears_as_its_series() -> None:
-    """**Trap 7, and a film-only suite ratifies the bug.**.
+    """An episode's `watch_states` row carries `episode_id` and a NULL `title_id`.
 
-    An episode's `watch_states` row carries `episode_id` and a **NULL**
-    `title_id` -- and `list_in_progress` is the one M7 read that deliberately
-    does *not* `COALESCE` its way to a title, because *"the card resumes a
-    file"*. So the roll-up is this provider's, and a provider that skipped it
-    drops every episode resume: on a library where 999,827 of 1,126,674 items
-    are episodes, that is nearly the whole row, and it renders as a household
-    that simply is not watching anything.
-
-    Group B priced the identical trap one port over -- a film-only read passes
-    **11 of 13** contract cases and dies only on the two seeding an episode.
-    This case and the one below it are those two.
+    `list_in_progress` deliberately does not `COALESCE` its way to a title, because the
+    card resumes a file, so the roll-up to a series is this provider's. A provider that
+    skipped it drops every episode resume -- nearly the whole row on an episode-heavy
+    library, which renders as a household that is not watching anything.
     """
     library = Library()
     series = await library.series("A Show")

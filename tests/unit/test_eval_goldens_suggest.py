@@ -1,4 +1,4 @@
-"""The frame's 2,991 typo cases, regenerated rather than restored."""
+"""The frame's typo cases, regenerated rather than restored."""
 
 import os
 import subprocess
@@ -93,17 +93,13 @@ def test_a_substitution_lands_where_the_rng_drew_it_and_not_always_at_one_place(
 
 
 def test_a_deletion_declines_on_a_two_character_name_and_otherwise_drops_one() -> None:
-    """A two-character name deleted is a one-character name.
+    """A two-character name deleted is a one-character name, which is not a typo case.
 
-    which is not a case about typo tolerance.
-
-    This decline is the entire reason the gate counted 2,993 and not 3,000 -- seven two-
-    character names.
-
-    The length assertion is the second half and it is not decoration: an arm
-    deleting *two* characters still declines on `"Up"` and still answers
-    non-`None` on `"Alien"`, so "is not None" alone ratifies a two-character
-    edit as a single-edit typo.
+    That decline is the whole of the shortfall against five bands of 150 names times
+    four classes. The length assertion is the second half and it is not decoration:
+    an arm deleting *two* characters still declines on `"Up"` and still answers
+    non-`None` on `"Alien"`, so "is not None" alone ratifies a two-character edit as
+    a single-edit typo.
     """
     import random
 
@@ -114,15 +110,13 @@ def test_a_deletion_declines_on_a_two_character_name_and_otherwise_drops_one() -
 
 
 def test_a_transposition_draws_only_from_positions_that_transpose() -> None:
-    """Drawing uniformly and declining on a doubled letter produces 2,964 cases against the.
+    """Drawing uniformly and declining on a doubled letter comes up short of the gate.
 
-    gate's 2,993 -- 29 short.
-
-    Emitting the unmutated name instead is worse: it is a guaranteed hit for any index,
-    which would make the 2-4 band's measured 0.0% arithmetically impossible. Drawing
-    from the valid positions is the simplest reading that produces both numbers --
-    rejection sampling reaches 2,993 too and emits nothing unmutated, so "simplest"
-    rather than "only".
+    Emitting the unmutated name instead is worse: it is a guaranteed hit for any
+    index, which would make the 2-4 band's recorded 0.0% arithmetically impossible.
+    Drawing from the valid positions is the simplest reading that produces both
+    numbers -- rejection sampling reaches the same total and emits nothing
+    unmutated, so "simplest" rather than "only".
     """
     import random
 
@@ -141,10 +135,8 @@ def test_a_transposition_declines_when_every_character_is_the_same() -> None:
 def test_a_doubled_letter_repeats_a_character_of_the_name() -> None:
     """`len(probe) == len(name) + 1` is satisfied by inserting a *random* letter.
 
-    which is a materially different edit: `doubled` measured 95.5% in ADR-0002 and an
-    arbitrary insertion is not what that number is about.
-
-    The four spellings below are every position `"Heat"` admits.
+    That is a materially different edit, and not what the recorded `doubled` recall
+    is about. The four spellings below are every position `"Heat"` admits.
     """
     import random
 
@@ -166,7 +158,7 @@ def test_the_same_seed_and_pool_produce_a_byte_identical_case_set() -> None:
 
 
 def test_the_case_set_is_identical_in_two_processes_with_different_hash_seeds() -> None:
-    """**The property the whole design rests on, and it was pinned in prose.**."""
+    """The property the whole design rests on."""
     digests = set()
     for seed in ("0", "1"):
         # S603: a fixed argv built from `sys.executable` and a module-level
@@ -186,20 +178,15 @@ def test_the_case_set_is_identical_in_two_processes_with_different_hash_seeds() 
 
 
 def test_the_bands_and_classes_come_out_in_the_order_the_rng_was_consumed() -> None:
-    """**Nothing else in this file asserts `case.band` at all.**.
+    """Nothing else in this file asserts `case.band` at all.
 
-    A generator stamping every case `"2-4"` passed the whole file, and band is
-    the axis the gate is scored on -- 0.75 on 2-4 against 0.90 on 8+ -- riding
-    into the scorer's strata through `TypoCase.query_id`. The case below it
-    cannot see band either, because its pools give all five bands identical
-    names and identical ids, so its `by_name` lookup is satisfied by fixture
-    construction.
-
-    Order rather than membership, because `GATE_BANDS` order and
-    `TYPO_CLASSES` order are both draw order: one `random.Random(seed)` spans
-    the whole run, so reversing either produces a different 750 names from
-    the same seed with in-process determinism entirely intact. Kills the
-    constant-band, reversed-band and reversed-class spellings.
+    A generator stamping every case `"2-4"` passes the whole file, and band is the
+    axis the gate is scored on, riding into the scorer's strata through
+    `TypoCase.query_id`. The case below cannot see band either, because its pools
+    give all five bands identical names and identical ids. Order rather than
+    membership, because `GATE_BANDS` order and `TYPO_CLASSES` order are both draw
+    order: one `random.Random(seed)` spans the whole run, so reversing either draws a
+    different set of names from the same seed with in-process determinism intact.
     """
     pools = {band: _pool([f"{band}-name-{n}" for n in range(20)]) for band, _l, _h in GATE_BANDS}
     cases = build_typo_cases(pools, seed=GATE_SEED)
@@ -212,21 +199,15 @@ def test_the_bands_and_classes_come_out_in_the_order_the_rng_was_consumed() -> N
 
 
 def test_one_generator_spans_every_band_rather_than_restarting() -> None:
-    """**The reproducibility case cannot see this and no reproducibility case can.** It compares.
+    """No reproducibility case can see this, because both sides move together.
 
-    two calls into the same function, so a `random.Random( seed)` built freshly *per
-    band* moves both sides together and stays green -- while drawing the identical
-    positions in all five bands, i.e.
-
-    a different 750 names from the gate's with in-process determinism fully intact. What
-    gives it away is that the five bands then agree about which row positions were
-    drawn.
-
-    Note the 200-row pools: every other pool in this file is at most 150, so
-    `chooser.sample(rows, min(150, len(rows)))` clamps and no other case has
-    ever exercised an actual sample. Here it draws 150 of 200, which is both
-    the shape the real catalog has and the first time the sample is
-    load-bearing.
+    A `random.Random(seed)` built freshly *per band* compares two calls into the same
+    function and stays green, while drawing the identical positions in all five bands
+    -- a different set of names from the gate's, with in-process determinism fully
+    intact. What gives it away is that the five bands then agree about which row
+    positions were drawn. Note the 200-row pools: every other pool in this file is at
+    most 150, so `chooser.sample(rows, min(150, len(rows)))` clamps and no other case
+    has ever exercised an actual sample.
     """
     pools = {
         band: _pool([f"{band}-name-{n:03d}" for n in range(200)]) for band, _l, _h in GATE_BANDS
@@ -266,12 +247,10 @@ def test_every_case_carries_the_title_its_probe_must_still_find() -> None:
 def test_the_query_id_carries_the_band_and_class_the_strata_are_scored_on() -> None:
     """`query_id` is what reaches the IR run.
 
-    and a scorer that has to re-join to the case list to learn a query's band is a
-    scorer that can get the join wrong.
-
-    Uniqueness is the other half: `EvalRefused` covers "two rankings sharing a query id"
-    as a harness bug, which is only detectable if the generator does not mint duplicates
-    itself.
+    A scorer that has to re-join to the case list to learn a query's band is a
+    scorer that can get the join wrong. Uniqueness is the other half: `EvalRefused`
+    covers "two rankings sharing a query id" as a harness bug, which is only
+    detectable if the generator does not mint duplicates itself.
     """
     pools = {band: _pool([f"{band} Solaris", f"{band} Stalker"]) for band, _l, _h in GATE_BANDS}
     cases = build_typo_cases(pools, seed=GATE_SEED)
@@ -282,10 +261,10 @@ def test_the_query_id_carries_the_band_and_class_the_strata_are_scored_on() -> N
 
 
 def test_the_case_count_arithmetic_reproduces_the_pinned_total() -> None:
-    """**The strongest evidence the port is faithful.
+    """The strongest evidence the port is faithful.
 
-    re-pinned 2026-08-19.** Five bands x 150 names x four classes is 3,000, and the
-    shortfall is two-character names, which admit no deletion.
+    Five bands x 150 names x four classes is 3,000, and the shortfall is
+    two-character names, which admit no deletion.
     """
     undeletable = 4 * GATE_DRAW_PER_BAND * len(GATE_BANDS) - GATE_CASES
     assert undeletable == 9, "the premise: the pinned total implies nine two-character names"
@@ -308,11 +287,10 @@ def test_the_case_count_arithmetic_reproduces_the_pinned_total() -> None:
 def test_any_one_of_the_six_frame_numbers_one_row_out_is_refused(moved: str) -> None:
     """Six numbers and all six have to land, so all six get an arm.
 
-    The single case this replaced moved **all six at once** -- and 431 rows
-    out on the 2-4 pool, not one -- so a `check_frame` ignoring
-    `shared_lower_names`, or ignoring the pools entirely, or comparing only
-    the 2-4 pool, all still refused it and survived. The docstring's claim is
-    *a pool one row out*; only a frame that is one row out states it.
+    A fixture that moved all six at once -- and by hundreds of rows rather than one
+    -- is still refused by a `check_frame` that ignores `shared_lower_names`, or
+    ignores the pools entirely, or compares only the 2-4 pool. The claim is *a pool
+    one row out*, and only a frame that is one row out states it.
     """
     with pytest.raises(EvalRefused, match="sampling frame"):
         check_frame(_gate_frame(**{moved: 1}))
@@ -345,12 +323,10 @@ def test_a_band_missing_from_the_frame_is_named_rather_than_only_unequal() -> No
 
 
 def test_a_band_the_gate_never_had_is_refused() -> None:
-    """The equality this check replaced compared two whole dicts.
+    """A band the gate never had is a difference, not an extra to ignore.
 
-    so a sixth band was a difference.
-
-    Reporting per-expected-number would have dropped that silently -- a rewrite that
-    quietly narrows a check is how a check stops existing.
+    Reporting per-expected-number would drop it silently, and a check that quietly
+    narrows is how a check stops existing.
     """
     pools = {**GATE_POOLS, "40+": 12}
     with pytest.raises(EvalRefused, match="sampling frame"):
@@ -358,14 +334,12 @@ def test_a_band_the_gate_never_had_is_refused() -> None:
 
 
 def test_the_gates_recorded_pool_sizes_cannot_be_edited_in_place() -> None:
-    """`Mapping[str.
+    """`Mapping[str, int]` on a plain dict is documentation, not protection.
 
-    int]` on a plain dict is documentation, not protection, and this is the constant the
-    whole comparability story rests on: `GATE_POOLS["2-4"] = 433` is one line, silent
-    and process-wide, and it moves the number `check_frame` refuses against.
-
-    Immutability only -- `Frame` still is not hashable, because `mappingproxy` delegates
-    `__hash__` to the dict it wraps and that is `None`.
+    This is the constant the whole comparability story rests on: `GATE_POOLS["2-4"] =
+    433` is one line, silent and process-wide, and it moves the number `check_frame`
+    refuses against. Immutability only -- `Frame` still is not hashable, because
+    `mappingproxy` delegates `__hash__` to the dict it wraps and that is `None`.
     """
     with pytest.raises(TypeError):
         GATE_POOLS["2-4"] = 433  # type: ignore[index]
@@ -381,26 +355,15 @@ def test_the_gates_own_frame_is_accepted() -> None:
 
 
 def test_the_band_order_is_pinned_because_it_is_what_the_rng_consumes() -> None:
-    """**Found 2026-08-20 by Task 15's sweep.
+    """The band order is what the one `Random(seed)` walks, so it is part of the draw.
 
-    hiding behind a correct prediction.** The plan planted `8-11` and `12-19` swapped
-    and expected it to survive "because a `sample` per band is independent of band
-    order".
-
-    It did survive -- and the reasoning is wrong. That argument is about `GATE_POOLS`,
-    which is keyed by band *name*; it is not about the generator, which walks this tuple
-    in order against one `Random(seed)`.
-
-    Measured directly rather than argued: with the two entries swapped, the
-    drawn set shares only **1,266 of 3,000** cases with the shipped order --
-    58% of the measurement changes. `build_typo_cases`' own docstring says so
-    ("Any other order draws a different set from the same seed"), and nothing
-    checked it, so the order could be edited silently and every subsequent
-    run would be incomparable with the recorded baseline while still
-    reproducing `check_frame` perfectly -- the pools are unchanged, only the
-    draw moves.
-
-    Pinned as the literal sequence because here the ordering *is* the
+    `GATE_POOLS` is keyed by band *name* and is indifferent to it, but the generator
+    walks this tuple in order against a single RNG, so swapping two entries draws a
+    largely different set from the same seed while `check_frame` passes perfectly --
+    the pools are unchanged, only the draw moves. `build_typo_cases`' own docstring
+    says as much ("Any other order draws a different set from the same seed"), and
+    nothing checked it. Pinned as the literal sequence, because here the ordering is
+    the claim.
     """
     assert [band for band, _low, _high in GATE_BANDS] == ["2-4", "5-7", "8-11", "12-19", "20+"]
 
@@ -408,14 +371,12 @@ def test_the_band_order_is_pinned_because_it_is_what_the_rng_consumes() -> None:
 def test_a_different_band_order_draws_a_different_set_from_the_same_seed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reason the order above is pinned, as a measurement rather than a claim.
+    """The reason the order above is pinned, and the control for it.
 
-    and the control for it, since "the sets differ" is also what a generator ignoring
-    the seed entirely would produce.
-
-    Same seed, same pools, same case *count*; only the tuple's order moves.
-    So a difference in the drawn set is attributable to the order and to
-    nothing else, which is exactly what the shipped order buys.
+    "The sets differ" is also what a generator ignoring the seed entirely would
+    produce. Same seed, same pools, same case *count*; only the tuple's order moves,
+    so a difference in the drawn set is attributable to the order and to nothing
+    else.
     """
     from usher.eval.goldens import suggest as module
 

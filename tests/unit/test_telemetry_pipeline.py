@@ -1,4 +1,4 @@
-"""PRD 10's metric catalogue and span tree, for the pipeline M4 built."""
+"""PRD 10's metric catalogue and span tree."""
 
 import sys
 from collections.abc import Iterator, Sequence
@@ -51,7 +51,7 @@ from usher.telemetry import (
     register_queue_gauges,
 )
 
-# Every metric M4 owes, from PRD 10's table. Named here rather than
+# Every metric the pipeline owes, from PRD 10's table. Named here rather than
 # discovered from the code, so a rename in `src/` fails this file instead of
 # quietly moving the dashboard's target.
 PRD_10_M4_METRICS = frozenset(
@@ -132,9 +132,7 @@ def _ingest_service() -> IngestService:
 async def test_a_walk_records_ingest_items_and_match_result(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """PRD 10's `usher.ingest.items` (source.
-
-    result) and `usher.match.result` (method, confident).
+    """`usher.ingest.items` (source, result) and `usher.match.result` (method, confident).
 
     Both are counters a dashboard integrates, so a `pass` in place of either leaves
     "library growth per week" (dashboard 1) a flat line at zero.
@@ -179,10 +177,10 @@ async def test_a_job_records_its_duration_by_kind(meter_reader: InMemoryMetricRe
 async def test_enrichment_records_prd_10s_latency_metric(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """`usher.enrichment.latency`, PRD 10's own name.
+    """The histogram is named `usher.enrichment.latency`, exactly.
 
-    This was emitted as `usher.enrich.duration` until M4 Task 24 -- a near-miss name is
-    a permanently empty panel, and nothing tells it apart from a healthy zero.
+    A near-miss name is a permanently empty panel, and nothing tells it apart from a
+    healthy zero.
     """
     titles = FakeTitleRepository()
     title = Title(
@@ -212,7 +210,7 @@ async def test_enrichment_records_prd_10s_latency_metric(
 async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_latency_histogram(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 D12's headline: `usher.enrichment.latency` has to carry `trigger`."""
+    """`usher.enrichment.latency` has to carry a `trigger` label."""
     titles = FakeTitleRepository()
     provider = FakeMetadataProvider()
     made: list[Title] = []
@@ -267,10 +265,7 @@ async def test_a_demand_enrichment_and_a_background_one_are_two_series_on_the_la
 async def test_the_rung_the_visible_lane_promotes_at_is_recorded_as_a_demand_enrichment(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """🔴 The boundary the `trigger` label is drawn on.
-
-    exercised at the rung the largest population actually arrives at.
-    """
+    """The boundary the `trigger` label is drawn on, at the rung most titles arrive at."""
     queue = FakeJobQueue()
     titles = FakeTitleRepository()
     title = Title(
@@ -279,8 +274,7 @@ async def test_the_rung_the_visible_lane_promotes_at_is_recorded_as_a_demand_enr
         sort_name="Zodiac",
         year=2007,
         tmdb_id=90001949,
-        # A skeleton, which is what a browse page is mostly made of: 1,139,982
-        # of 1,273,313 titles when `services/visibility.py` was written.
+        # A skeleton, which is what a browse page is mostly made of.
         enrichment_state=EnrichmentState.SKELETON,
     )
     await titles.add(title)
@@ -370,9 +364,7 @@ async def test_a_provider_request_that_never_answered_is_still_counted(
 
 
 def test_the_provider_metric_names_this_provider() -> None:
-    """The counter's `provider` label is a literal in `client.py` because `provider.py` imports.
-
-    that module and reaching back would be a cycle.
+    """The counter's `provider` label is a literal in `client.py` to avoid an import cycle.
 
     That makes it a string that can drift from `PROVIDER_NAME` with nothing to notice,
     so the two are pinned together here.
@@ -404,19 +396,16 @@ def test_the_queue_gauges_report_what_the_last_read_found(
 def test_the_queue_gauges_report_nothing_before_anything_has_read_the_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fabricated zero is the one value that makes PRD 10's "ingest stalled" alert quietly.
+    """A fabricated zero makes the "ingest stalled" alert quietly wrong.
 
-    wrong: it fires on depth *rising*, and a gauge that reported 0 from process start
+    The alert fires on depth *rising*, and a gauge that reported 0 from process start
     until the first read would show a step up that no queue actually took.
 
-    Pinned by calling the callback directly with the reader unset, not
-    through a collection, and for the same reason `_links_for`'s validity
-    guard is pinned directly: the branch is unreachable through
-    `register_queue_gauges`, which assigns the reader *before* it creates
-    the instruments, so no collection can ever observe the `None`. Mutation
-    showed the indirect version -- registering a reader that answers with an
-    empty `QueueSnapshot` -- passes against a guard that fabricates a zero,
-    because an empty snapshot reports nothing either way.
+    Pinned by calling the callback directly with the reader unset rather than through
+    a collection: the branch is unreachable through `register_queue_gauges`, which
+    assigns the reader *before* it creates the instruments, so no collection can ever
+    observe the `None` and an indirect version passes against a guard that fabricates
+    a zero.
     """
     monkeypatch.setattr("usher.telemetry._queue._read", None)
     assert list(_observe_queued(CallbackOptions())) == []
@@ -426,11 +415,9 @@ def test_the_queue_gauges_report_nothing_before_anything_has_read_the_table(
 def test_re_registering_the_gauges_replaces_the_reader(
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """The SDK keeps only the *first* observable gauge registered under a name and silently.
+    """The SDK keeps only the *first* observable gauge registered under a name.
 
-    discards the rest -- verified directly.
-
-    So a second `register_queue_gauges` that created a second instrument would leave the
+    A second `register_queue_gauges` that created a second instrument would leave the
     first, dead reader reporting forever. The reader is swapped instead.
     """
     register_queue_gauges(lambda: QueueSnapshot(queued={"enrich": 1}))
@@ -458,10 +445,9 @@ async def test_the_pipeline_span_names_match_prd_10s_tree(
 async def test_match_title_is_a_child_of_ingest_item(
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """PRD 10 draws them nested.
+    """The two spans are nested rather than siblings.
 
-    and a flat pair of siblings answers "why was this batch slow" with two unrelated
-    durations.
+    A flat pair answers "why was this batch slow" with two unrelated durations.
     """
     await _ingest_service().ingest_batch(
         new_id(), [_movie("m1", "90000550")], observed_at=datetime.now(UTC)
@@ -475,8 +461,8 @@ async def test_match_title_is_a_child_of_ingest_item(
 def test_a_worker_span_links_rather_than_parents(span_exporter: InMemorySpanExporter) -> None:
     """A job's span is a root with a `Link`, never a child.
 
-    the request that enqueued it has usually already returned, and growing a branch on a
-    finished trace misstates causality.
+    The request that enqueued it has usually already returned, and growing a branch on
+    a finished trace misstates causality.
     """
     job = Job(
         kind=JobKind.ENRICH,
@@ -490,14 +476,11 @@ def test_a_worker_span_links_rather_than_parents(span_exporter: InMemorySpanExpo
 
 
 def test_an_invalid_traceparent_produces_no_link_at_all() -> None:
-    """Pinned directly rather than through a span.
+    """An invalid link is refused, pinned directly rather than through a span.
 
-    because the OTel SDK *also* silently drops an invalid `Link` on the way in -- so a
-    worker that built one records the same empty `links` tuple a worker that refused to
-    would.
-
-    The guard is unobservable through the span it guards and survives every indirect
-    assertion.
+    The OTel SDK *also* silently drops an invalid `Link` on the way in, so a worker
+    that built one records the same empty `links` tuple as a worker that refused to;
+    the guard is unobservable through the span it guards.
     """
     job = Job(
         kind=JobKind.ENRICH,

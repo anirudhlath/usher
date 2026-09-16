@@ -187,12 +187,9 @@ def _watch_state_row(
 def _counts(rows: Sequence[tuple[str, Mapping[str, Any]]]) -> dict[str, int]:
     """The header's per-table counts, computed from the body.
 
-    🔴 **This helper wrote `"rows": {}` until 2026-08-25**, which every case in
-    this file was happy with because nothing read the key. Since
-    `_refuse_a_short_body` exists it is a truncation claim, and a fixture
-    asserting *"this artifact holds no rows"* over a body holding two is
-    exactly the damaged file the check is for -- so the helper computes it, and
-    a case wanting a mismatch passes `header=` and says so.
+    `rows` is a truncation claim, so a fixture stating *"this artifact holds no rows"*
+    over a body holding two is exactly the damaged file the check is for. A case
+    wanting a mismatch passes `header=` and says so.
     """
     counted: dict[str, int] = {}
     for table, _ in rows:
@@ -248,19 +245,16 @@ def test_the_fake_declares_the_columns_the_real_repository_does() -> None:
 
 
 async def test_a_decoded_reference_holds_the_values_the_line_carried(tmp_path: Path) -> None:
-    """🔴 **The case K3's equivalent did not have.
+    """The case three corruptions of the natural key would otherwise survive.
 
-    and the one three corruptions of the natural key survived.**.
+    Decoding is this module's construction step: the artifact carries four JSON keys
+    and a `TitleReference` comes out. Every other assertion in this file is about
+    *shape* -- something was applied, a refusal was collected -- and a decoder that
+    stamped every reference `MOVIE`, transposed the two episode numbers, or read the
+    user's id where its name belongs satisfies all of them.
 
-    Decoding is this module's construction step: the artifact carries four
-    JSON keys and a `TitleReference` comes out. Every other assertion in this
-    file is about *shape* -- something was applied, a refusal was collected --
-    and a decoder that stamped every reference `MOVIE`, transposed the two
-    episode numbers, or read the user's id where its name belongs satisfies
-    all of them.
-
-    The premises are the case. An equality is a statement about the field it
-    names only if a wrong field would answer differently.
+    The premises are the case. An equality is a statement about the field it names only
+    if a wrong field would answer differently.
     """
     assert MOVIE_IMDB_ID != SERIES_IMDB_ID
     assert SEASON_NUMBER != EPISODE_NUMBER, (
@@ -309,20 +303,18 @@ async def test_a_decoded_reference_holds_the_values_the_line_carried(tmp_path: P
         episode_number=EPISODE_NUMBER,
     )
     # The household travels as its name and not as an id, which is one of the
-    # three corruptions that survived K3's whole suite.
+    # three corruptions a shape-only assertion cannot see.
     assert by_title["user"] == HOUSEHOLD_NAME
 
 
 async def test_the_ciphertext_survives_the_round_trip_as_bytes(tmp_path: Path) -> None:
     """`source_credentials.ciphertext` is `bytea` and JSON has no byte string.
 
-    so `_encode` base64s it and this reads it back.
-
-    The value asserted is the *bytes*, against the literal they were encoded
-    from -- a decoder that handed the base64 string through would satisfy
-    "something arrived" and would store `b'gAAAA...'` with the quotes in it,
-    which is the exact shape `_encode`'s own docstring refuses in the other
-    direction.
+    So `_encode` base64s it and this reads it back. The value asserted is the *bytes*,
+    against the literal they were encoded from -- a decoder that handed the base64
+    string through would satisfy "something arrived" and would store `b'gAAAA...'` with
+    the quotes in it, which is the exact shape `_encode`'s own docstring refuses in the
+    other direction.
     """
     ciphertext = b"\x00\x01\x02cipher"
     repository = FakeRestoreRepository()
@@ -353,14 +345,13 @@ async def test_the_ciphertext_survives_the_round_trip_as_bytes(tmp_path: Path) -
 async def test_the_schema_mismatch_names_both_revisions_and_follows_the_database(
     tmp_path: Path,
 ) -> None:
-    """🔴 **The refusal, and the half that makes it falsifiable.**.
+    """The refusal, and the half that makes it falsifiable.
 
-    A case asserting the header's revision against the same function that
-    produced it is satisfied by any implementation -- K3 shipped exactly that
-    and a review found it. So the fake answers a revision that is *not* the
-    code's head and not the artifact's, and the message has to name what the
-    fake said. An implementation reading `code_head_revision()` instead names
-    a third value and fails here.
+    A case asserting the header's revision against the same function that produced it
+    is satisfied by any implementation. So the fake answers a revision that is *not*
+    the code's head and not the artifact's, and the message has to name what the fake
+    said. An implementation reading `code_head_revision()` instead names a third value
+    and fails here.
 
     Both revisions in the message, the shape
     `api/routers/health.py::_check_migrations` logs, because *"the schema does
@@ -384,14 +375,12 @@ async def test_the_schema_mismatch_names_both_revisions_and_follows_the_database
 async def test_an_unknown_table_is_refused_before_the_first_row_is_applied(
     tmp_path: Path,
 ) -> None:
-    """A `table` key the manifest does not classify is what an artifact from a later schema.
+    """A `table` key the manifest does not classify is an artifact from a later schema.
 
-    looks like, and continuing would mean writing rows this code has no merge rule for.
-
-    The refusal is over the *whole* file rather than as each table comes up:
-    the unknown table here is named by the **last** line and the known one by
-    the first, so a check that ran per table as it was reached would have
-    applied `users` before noticing.
+    Continuing would mean writing rows this code has no merge rule for. The refusal is
+    over the *whole* file rather than as each table comes up: the unknown table here is
+    named by the **last** line and the known one by the first, so a check that ran per
+    table as it was reached would have applied `users` before noticing.
     """
     repository = FakeRestoreRepository()
     service, _ = _service(repository)
@@ -434,15 +423,12 @@ async def test_a_damaged_line_is_one_refusal_rather_than_a_stack(
 
 
 async def test_the_damaged_line_is_named_by_its_position_in_the_file(tmp_path: Path) -> None:
-    """⚠️ **`JSONDecodeError.lineno` is 1 for every line in this file**.
+    """**`JSONDecodeError.lineno` is 1 for every line in this file**, which is the trap.
 
-    which is the trap the message avoids.
-
-    Each line is decompressed and parsed on its own, so that attribute counts
-    lines *inside the one-line string* handed to `json.loads` and is always 1.
-    A message saying *"line 1"* about the fourth row sends an operator to the
-    header, which for a 14,259-row artifact is the difference between finding
-    the damage and not.
+    Each line is decompressed and parsed on its own, so that attribute counts lines
+    *inside the one-line string* handed to `json.loads` and is always 1. A message
+    saying *"line 1"* about the fourth row sends an operator to the header, which on a
+    large artifact is the difference between finding the damage and not.
 
     The premise is asserted -- the parser really does report 1 -- so this is a
     statement about the repair rather than about a number that happened to
@@ -476,7 +462,7 @@ async def test_a_gzip_member_that_ends_early_is_refused_rather_than_crashing(
     backup interrupted by a full disk or a `SIGKILL` actually has.
 
     Provoked by truncating real gzip bytes rather than by asserting the class
-    hierarchy -- the mistake `SQLAlchemyError` in `OPERATOR_ERRORS` was.
+    hierarchy, which only restates what the interpreter already says.
     """
     whole = _artifact(tmp_path / "x.jsonl.gz", [("users", _user_row())]).read_bytes()
     cut = tmp_path / "cut.jsonl.gz"
@@ -671,18 +657,13 @@ async def test_a_value_the_column_will_not_take_is_a_refusal_and_not_a_stack(
 
 
 async def test_the_report_separates_every_bucket_per_table(tmp_path: Path) -> None:
-    """Five counts.
+    """Five counts, because a short restore reported as a clean one is invisible.
 
-    because *"restored 9 rows"* over an artifact holding 50 is the failure this whole
-    command exists to make visible.
-
-    All five are asserted as different numbers over one run: a report that
-    summed any bucket into another, or dropped refused from the total, answers
-    the same single figure and this is what tells them apart. **`present` and
-    `absent` were one number called `skipped` until 2026-08-25** -- K5's drill
-    printed *"10,515 already present"* against a table holding zero rows -- so
-    the two are given different values here on purpose, and a merge of them
-    fails on both.
+    *"restored 9 rows"* over an artifact holding 50 is the failure this command exists
+    to make visible. All five are asserted as different numbers over one run: a report
+    that summed any bucket into another, or dropped refused from the total, answers the
+    same single figure and this is what tells them apart. `present` and `absent` are given
+    different values on purpose, so a report that merged them fails on both.
     """
     repository = FakeRestoreRepository(
         written={"users": 1, "watch_states": 2},
@@ -728,7 +709,7 @@ async def test_an_empty_file_is_refused_rather_than_reported_as_a_clean_run(
 ) -> None:
     """A zero-byte gzip member decompresses to nothing at all.
 
-    and *"0 written, 0 skipped, 0 refused, committed"* is the most misleading answer
+    And *"0 written, 0 skipped, 0 refused, committed"* is the most misleading answer
     available: it is exactly what a successful restore of an artifact holding nothing
     looks like.
     """
@@ -744,9 +725,9 @@ async def test_an_empty_file_is_refused_rather_than_reported_as_a_clean_run(
 
 
 async def test_a_first_line_that_is_not_a_header_is_refused(tmp_path: Path) -> None:
-    """A file whose first object carries no `schema_revision` is not an artifact `usher backup`.
+    """A first object with no `schema_revision` is not something `usher backup` wrote.
 
-    wrote, and reading its second line as a row would silently drop the first one.
+    Reading its second line as a row would silently drop the first one.
     """
     service, _ = _service(FakeRestoreRepository())
     path = _artifact(
@@ -758,26 +739,19 @@ async def test_a_first_line_that_is_not_a_header_is_refused(tmp_path: Path) -> N
 
 
 async def test_a_body_shorter_than_its_header_is_refused(tmp_path: Path) -> None:
-    """🔴 **The check two files in `src/` described in the present tense for a milestone before.
+    """The header's per-table counts are a truncation check, and this is where it runs.
 
-    it existed.**.
+    Without it an artifact whose header claims more rows than its body holds restores
+    with no refusals and exit 0 -- a subset applied and reported as success, the one
+    outcome this whole command is built to prevent.
 
-    `services/backup.py` said the counts are what *"lets K4 read a short table
-    as a truncated file rather than as a race"*, and
-    `ports/repository/backup.py` said a disagreeing count is *"worse than no
-    count at all, because K4 reads it as a truncation check"*. K4 read exactly
-    one header key. K5's drill measured the gap on 2026-08-25: an artifact
-    whose header claimed `media_items: 10819` over a body holding **10,515**
-    restored with **0 refusals and exit 0** -- a subset applied and reported as
-    success, which is the one outcome this whole command is built to prevent.
+    The format is what makes the failure easy rather than exotic: the artifact is
+    gzip'd JSON Lines *so an operator can read and edit it*, and every hand-edit that
+    drops a line leaves the header saying how many there should have been. A truncated
+    download and a `head -n` do the same.
 
-    The format is what makes the failure easy rather than exotic: the artifact
-    is gzip'd JSON Lines *so an operator can read and edit it*, and every
-    hand-edit that drops a line leaves the header saying how many there should
-    have been. A truncated download and a `head -n` do the same.
-
-    The message names both numbers per table, because *"this file is
-    truncated"* without them cannot tell a lost line from a lost table.
+    The message names both numbers per table, because *"this file is truncated"*
+    without them cannot tell a lost line from a lost table.
     """
     rows = [("users", _user_row()), ("users", _user_row())]
     path = _artifact(
@@ -835,9 +809,8 @@ async def test_a_header_with_no_counts_at_all_is_refused_rather_than_skipped(
     `manifest_version` 1 has always written `rows`, so its absence is a damaged
     header rather than an older artifact -- and treating it as *"nothing to
     compare"* would give anyone editing an artifact a one-key way to switch the
-    truncation check off. Same family as *"a guard that globs nothing passes
-    exactly like a guard that passes"*, which this repository has now paid for
-    five times.
+    truncation check off. Same family as *"a guard that globs nothing passes exactly
+    like a guard that passes"*.
     """
     service, _ = _service(FakeRestoreRepository())
     path = _artifact(
@@ -860,15 +833,12 @@ async def test_the_skip_flag_reaches_the_repository_and_is_off_by_default(
 ) -> None:
     """The default is the guarantee.
 
-    so it is asserted as the value the repository was *handed* rather than as a
-    behaviour the fake could fake.
-
-    A service that accepted `skip_unresolvable` and never forwarded it would
-    pass every report assertion in this file -- the fake's answer is scripted
-    either way -- and would leave an operator who typed the flag with the
-    refusal they were trying to get past. Both values, over one artifact, so
-    the assertion is about the forwarding rather than about a constructor
-    default.
+    So it is asserted as the value the repository was *handed* rather than as a
+    behaviour the fake could fake. A service that accepted `skip_unresolvable` and
+    never forwarded it would pass every report assertion in this file -- the fake's
+    answer is scripted either way -- and would leave an operator who typed the flag
+    with the refusal they were trying to get past. Both values, over one artifact, so
+    the assertion is about the forwarding rather than about a constructor default.
     """
     rows = [("users", _user_row())]
 
@@ -888,9 +858,8 @@ async def test_rows_skipped_as_unresolvable_do_not_hold_back_the_commit(
 ) -> None:
     """A row the operator asked to drop is not a refusal.
 
-    and treating it as one would make the flag a slower way of doing nothing.
-
-    The distinction is the whole design: `refused` withholds the commit and
+    Treating it as one would make the flag a slower way of doing nothing. The
+    distinction is the whole design: `refused` withholds the commit and
     `unresolved` does not, so a run with 304 dropped links and no refusals
     commits the 3,347 watch states that were the point. Asserted together --
     the count is reported *and* the transaction committed -- because either

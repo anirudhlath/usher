@@ -108,8 +108,8 @@ from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RowCache
 from usher.services.taste import TasteService
 
-# : The size of the pool `_pipeline_over_fakes` puts on the pipeline, and it is :
-# deliberately neither 200 nor the number of candidates any case seeds.
+#: The size of the pool `_pipeline_over_fakes` puts on the pipeline, deliberately
+#: neither 200 nor the number of candidates any case seeds.
 POOL_SIZE = 6
 
 
@@ -130,14 +130,11 @@ def _pipeline_over_fakes(
     unused on this path, and filling twelve of them would make the case read
     as a test of `build_pipeline` rather than of one wiring decision.
 
-    **Nothing on the curation path is `unused`, unlike the four fields above
-    it.** `build_worker` constructs `CurationService` eagerly whenever a
-    client exists, and a `None` there constructs perfectly well and fails an
-    `AttributeError` deep inside the first generation -- which is exactly the
-    shape a `curated=None` on `RowContext` took when it survived 2,743 cases
-    one task ago. The four optional arguments exist so a case can hold the
-    same objects the pipeline does and read back what the service wrote into
-    *them*.
+    Nothing on the curation path is `unused`, unlike the four fields above it:
+    `build_worker` constructs `CurationService` eagerly whenever a client exists, and a
+    `None` there constructs perfectly well and fails an `AttributeError` deep inside the
+    first generation. The four optional arguments exist so a case can hold the same
+    objects the pipeline does and read back what the service wrote into *them*.
     """
     settled = _Recording() if commit is None else commit
 
@@ -205,9 +202,9 @@ def _pipeline_over_fakes(
 #: subscript chain.
 _PROPERTIES = "properties"
 
-# : One shelf of five handles -- `DEFAULT_MIN_CARDS` exactly, so a validator : floor
-# moving up is a failure here rather than a silently shorter screen -- : every one of
-# them inside `POOL_SIZE`.
+#: One shelf of five handles -- `DEFAULT_MIN_CARDS` exactly, so a validator floor
+#: moving up is a failure here rather than a silently shorter screen -- and every one
+#: of them inside `POOL_SIZE`.
 _ROWS = {
     ROWS_KEY: [
         {
@@ -222,12 +219,10 @@ _ROWS = {
 async def _candidates(titles: FakeTitleRepository, *, count: int) -> list[Title]:
     """`count` unwatched, enriched films, seeded **worst first**.
 
-    The pool ranks on `vote_count` descending, so an ascending seed makes pool
-    order the reverse of the order `new_id()` minted these in -- the UUIDv7
-    trap that cost M7 five untested orderings, avoided here for the same
-    reason `tests/unit/test_services_curation.py` avoids it: with a best-first
-    fixture a 1-based handle map, a 0-based one and "insertion order" all
-    agree, and ADR-0028's whole scheme rests on which one was sent.
+    The pool ranks on `vote_count` descending, so an ascending seed makes pool order
+    the reverse of the order `new_id()` minted these in -- the UUIDv7 trap. With a
+    best-first fixture a 1-based handle map, a 0-based one and "insertion order" all
+    agree, and the handle scheme rests on which one was sent.
     """
     seeded = []
     for index in range(count):
@@ -284,13 +279,11 @@ def warnings() -> Iterator[io.StringIO]:
 async def test_a_missing_tmdb_key_is_reported_where_the_decision_is_made(
     warnings: io.StringIO,
 ) -> None:
-    """PRD 08's "TMDb key missing" degradation is a *narrowed* deployment, not a silent one.
+    """A missing TMDb key is a *narrowed* deployment, not a silent one.
 
-    an operator whose enrich queue never drains has to be able to see why.
-
-    Once per process is where that belongs -- this function is called exactly once by
-    each of the three composition roots (`usher work`, `usher push`, and `create_app`'s
-    lifespan).
+    An operator whose enrich queue never drains has to be able to see why. Once per
+    process is where that belongs -- this function is called exactly once by each of the
+    three composition roots (`usher work`, `usher push`, and `create_app`'s lifespan).
     """
     settings = _settings()
     assert settings.tmdb_api_key is None
@@ -305,7 +298,7 @@ async def test_a_missing_tmdb_key_is_reported_where_the_decision_is_made(
 
 
 async def test_a_configured_tmdb_key_says_nothing(warnings: io.StringIO) -> None:
-    """The other half.
+    """The other half: a configured provider says nothing.
 
     A warning every correctly-configured deployment sees is a warning nobody reads --
     the same rule `EmbyAdapter.verify` follows for its administrator probe.
@@ -485,8 +478,8 @@ async def test_a_worker_built_without_a_row_cache_still_enriches() -> None:
     """`usher work`'s arm.
 
     `rows` defaults to `None` all the way down, and a root that composes no screens must
-    not acquire a required collaborator -- `build_push_applier`'s recorded terms, and
-    the reason the parameter is optional rather than positional.
+    not acquire a required collaborator, which is why the parameter is optional rather
+    than positional.
     """
     titles = FakeTitleRepository()
     title = Title(
@@ -522,7 +515,7 @@ async def test_a_worker_built_without_a_row_cache_still_enriches() -> None:
 def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> None:
     """The push and reconcile lanes publish as they go.
 
-    and that is a decision rather than an omission.
+    That is a decision rather than an omission.
     """
     root = pathlib.Path(usher.__file__).parent
     sites = sorted(
@@ -543,14 +536,11 @@ async def test_no_embedder_configured_degrades_rather_than_raising(
 ) -> None:
     """The same shape `metadata_provider` has, for the same reason.
 
-    a worker refusing to start without a model would take three working lanes down with
-    the fourth.
-
-    PRD 05's catalog-lookup tier -- full-text plus trigram over 1.27M titles -- needs no
-    model at all, so "no embedder" is a *narrowed* deployment rather than a broken one.
-
-    Reported here, once per process, and not in `build_worker`, which runs
-    once per worker *pass* at a 5 s floor -- the ~17,280-lines-a-day shape.
+    A worker refusing to start without a model would take three working lanes down with
+    the fourth. PRD 05's catalog-lookup tier -- full-text plus trigram -- needs no model
+    at all, so "no embedder" is a *narrowed* deployment rather than a broken one.
+    Reported here, once per process, and not in `build_worker`, which runs once per
+    worker *pass* at a 5 s floor.
     """
     built, aclose = await embedder(_settings(embedding_enabled=False))
     await aclose()  # the no-op half of the pair, callable unconditionally
@@ -561,25 +551,17 @@ async def test_no_embedder_configured_degrades_rather_than_raising(
 
 
 def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
-    """`run_once` claims `list(self._handlers)`, and its docstring says why.
+    """`run_once` claims `list(self._handlers)`, so an unrunnable kind must stay out.
 
-    claiming a kind you cannot run either crashes on the lookup or parks work whose only
-    problem is that it was offered to the wrong process -- and a job parked that way
-    needs a human to release it.
-
-    Fails: registering `INDEX` unconditionally and letting `IndexService`
-    hold `None`. Nothing raises until a job arrives, at which point it parks,
-    and the review list fills with work that is perfectly runnable elsewhere.
-
-    The `ENRICH` and `CURATE` halves are asserted alongside it, so the three
-    guards cannot drift into "two guarded, one not", and `MATCH` is asserted
-    so an implementation registering *nothing* cannot pass. This is the
-    default deployment -- no key, no extra, no model -- and its five
-    claimable kinds (`match`, `watch_history`, `watch_writeback`, `sync`,
-    `bootstrap`) are the whole of what it can do. `bootstrap` joined them in
-    M9's E5 for `sync`'s reason: a bulk import needs a writable data
-    directory and an outbound client, neither of which is a process resource
-    a deployment can lack at build time.
+    Claiming a kind you cannot run either crashes on the lookup or parks work whose only
+    problem is that it was offered to the wrong process, and a job parked that way needs
+    a human to release it. Rules out registering `INDEX` unconditionally and letting
+    `IndexService` hold `None`. The `ENRICH` and `CURATE` halves are asserted alongside
+    it so the three guards cannot drift into "two guarded, one not", and `MATCH` is
+    asserted so an implementation registering *nothing* cannot pass. This is the default
+    deployment -- no key, no extra, no model -- and its five claimable kinds are the
+    whole of what it can do. `bootstrap` is among them for `sync`'s reason: a bulk
+    import needs only a writable data directory and an outbound client.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -605,20 +587,14 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
 def test_a_write_back_handler_is_registered_in_every_build() -> None:
     """The kind a client's own press enqueues, so no deployment may lack it.
 
-    M4's rule -- *"a job kind whose handler is a stub is a queue that grows
-    forever"* -- and this is the shape it takes when the handler exists but
-    the registration is guarded: `run_once` claims `list(self._handlers)`, so
-    a `WATCH_WRITEBACK` behind any condition leaves the shipped default
-    deployment enqueueing a job on every `PUT /watch/...` that nothing ever
-    claims. That is not the benign "leave it for a worker that can run it"
-    bargain `INDEX` makes, because there is no such worker: the handler needs
-    a TMDb key, an embedder and an LLM endpoint exactly as much as `match`
-    does, which is not at all.
-
-    Asserted against the **bare** build -- no provider, no embedder, no
-    client -- because that is the configuration every guard would exclude it
-    from, with the fully-equipped build beside it as the control that stops
-    the case passing against a registration nothing reaches.
+    A job kind whose registration is guarded is a queue that grows forever: `run_once`
+    claims `list(self._handlers)`, so a `WATCH_WRITEBACK` behind any condition leaves
+    the shipped default deployment enqueueing a job on every `PUT /watch/...` that
+    nothing ever claims. That is not the benign "leave it for a worker that can run it"
+    bargain `INDEX` makes, because there is no such worker: the handler needs a TMDb
+    key, an embedder and an LLM endpoint exactly as much as `match` does, which is not
+    at all. Asserted against the **bare** build, with the fully-equipped build beside it
+    as the control that stops the case passing against a registration nothing reaches.
     """
     bare = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -644,9 +620,7 @@ def test_a_write_back_handler_is_registered_in_every_build() -> None:
 
 
 async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_repositories() -> None:
-    """The registration end to end.
-
-    a real job, claimed by a real worker, arriving at a real adapter.
+    """The registration end to end: a real job, a real worker, a real adapter.
 
     Two things only this shape can say. `mypy` holds the *types* of the two
     repositories `build_worker` hands the handler and says nothing about them
@@ -738,15 +712,11 @@ async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_rep
 def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_them() -> None:
     """`JobWorker.registered_kinds`' docstring names which kinds are in every build.
 
-    and that sentence was written deliberately to be falsified here -- M8's trap 2 in a
-    new location, where updating it silently is the failure it exists to prevent.
-
-    Derived from the bare build rather than from a literal list, so a sixth
-    unconditional kind cannot be added without the prose moving with it. The
-    claim is pinned rather than the prose: a verbatim assertion on the
-    sentence would fail every future copy-edit that left the claim intact,
-    which is the change-detector this repository has already been bitten by
-    once.
+    That sentence is written to be falsifiable here, because updating it silently is the
+    failure it exists to prevent. Derived from the bare build rather than from a literal
+    list, so a sixth unconditional kind cannot be added without the prose moving with
+    it. The claim is pinned rather than the prose: a verbatim assertion on the sentence
+    would fail every copy-edit that left the claim intact.
     """
     doc = inspect.getdoc(JobWorker.registered_kinds)
     assert doc is not None
@@ -768,7 +738,7 @@ def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_
 def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
     """The control that makes the case above evidence rather than a tautology.
 
-    without it, an implementation registering *nothing* passes.
+    Without it, an implementation registering *nothing* passes.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -784,17 +754,15 @@ def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
 
 
 def test_a_worker_without_a_provider_registers_no_derive_handler() -> None:
-    """`DERIVE` is guarded on the **provider**.
+    """`DERIVE` is guarded on the **provider**, not on the embedder.
 
-    the `ENRICH` arm rather than the `INDEX` one, and the guard is correct rather than
-    merely consistent: `DeriveService` holds a `MetadataProvider` for `to_derivation`,
-    and a deployment with no key has no TMDb payloads in `raw_payloads` to derive from
-    at all -- they exist only because a key once did.
-
-    Fails: the unguarded registration. Its symptom is a parked job on a
-    keyless deployment, and a parked job needs a human to release work whose
-    only problem was the process it was offered to. Leaving it pending for a
-    worker that has a key is `INDEX`'s bargain, one lane over.
+    The guard is correct rather than merely consistent: `DeriveService` holds a
+    `MetadataProvider` for `to_derivation`, and a deployment with no key has no TMDb
+    payloads in `raw_payloads` to derive from at all -- they exist only because a key
+    once did. Rules out the unguarded registration, whose symptom is a parked job on a
+    keyless deployment, needing a human to release work whose only problem was the
+    process it was offered to. Leaving it pending for a worker that has a key is
+    `INDEX`'s bargain, one lane over.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -816,7 +784,7 @@ def test_a_worker_without_a_provider_registers_no_derive_handler() -> None:
 def test_a_worker_with_a_provider_registers_the_derive_handler() -> None:
     """The control that makes the case above evidence rather than a tautology.
 
-    without it, an implementation registering *nothing* passes.
+    Without it, an implementation registering *nothing* passes.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -838,20 +806,14 @@ def test_a_worker_with_a_provider_registers_the_derive_handler() -> None:
 async def test_no_llm_configured_degrades_rather_than_raising(
     warnings: io.StringIO,
 ) -> None:
-    """The shipped default, and the shape `metadata_provider` and `embedder` already have.
+    """The shipped default: `(None, no-op)` rather than a raise.
 
-    `(None, no-op)` rather than a raise.
-
-    Off by default is the honest default twice over here. Nine of the ten row
-    providers need no model, so `GET /home` is a shorter screen rather than a
-    broken one -- that is `embedding_enabled`'s argument. The second is this
-    project's only one of its kind: turning it on sends the household's watch
-    history to whatever `USHER_LLM_BASE_URL` names, which may be a machine
-    the household does not own.
-
-    Reported here, once per process, and **not** in `build_worker`, which
-    runs once per worker *pass* at a 5 s floor -- the ~17,280-lines-a-day
-    shape this project has already measured for a string.
+    The same shape `metadata_provider` and `embedder` already have. Off by default is
+    the honest default twice over: nine of the ten row providers need no model, so
+    `GET /home` is a shorter screen rather than a broken one, and turning it on sends
+    the household's watch history to whatever `USHER_LLM_BASE_URL` names, which may be
+    a machine the household does not own. Reported here, once per process, and **not**
+    in `build_worker`, which runs once per worker *pass* at a 5 s floor.
     """
     settings = _settings()
     assert settings.llm_enabled is False, "the premise: off is the shipped default"
@@ -867,12 +829,10 @@ async def test_no_llm_configured_degrades_rather_than_raising(
 async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO) -> None:
     """The other half, and the control that makes the case above evidence.
 
-    without it, a factory that answered `(None, warning)` for *every* deployment passes.
-
-    A warning every correctly-configured deployment sees is a warning nobody
-    reads -- the rule `metadata_provider`'s pair already follows. Nothing here
-    opens a socket: the client is an `httpx.AsyncClient` that has not been
-    asked for anything.
+    Without it, a factory that answered `(None, warning)` for *every* deployment passes.
+    A warning every correctly-configured deployment sees is a warning nobody reads --
+    the rule `metadata_provider`'s pair already follows. Nothing here opens a socket:
+    the client is an `httpx.AsyncClient` that has not been asked for anything.
     """
     built, aclose = await llm_client(_settings(llm_enabled=True))
     try:
@@ -886,19 +846,15 @@ async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO)
 async def test_a_credentialled_endpoint_with_no_prices_says_the_ledger_will_read_zero(
     warnings: io.StringIO,
 ) -> None:
-    """`llm_price_*_per_mtok` both default to `Decimal(0)`.
+    """`llm_price_*_per_mtok` both default to `Decimal(0)` and no provider reports one.
 
-    and no provider reports a cost, so `cost_usd` is computed from those two numbers
-    alone -- an operator who never set them gets `0.00000000` on every row, which looks
-    like a measurement and is an absence.
-
-    **The credential is the gate, and it is what keeps this off the shipped
-    deployment.** Zero is the *honest* value for the self-hosted vLLM this
-    milestone was verified against, so warning on price alone would be the
-    thing `test_a_configured_llm_is_built_and_says_nothing` above exists to
-    forbid -- a warning every correctly-configured deployment sees. A hosted
-    provider requires an `llm_api_key` and the local endpoint needs none, so
-    the credential separates the two populations.
+    So `cost_usd` is computed from those two numbers alone, and an operator who never
+    set them gets `0.00000000` on every row -- a figure that reads as a number and is an
+    absence. The credential is the gate, and it is what keeps this off the shipped
+    deployment: zero is the honest value for a self-hosted endpoint, so warning on price
+    alone would be the warning every correctly-configured deployment sees. A hosted
+    provider requires an `llm_api_key` and a local one needs none, so the credential
+    separates the two populations.
     """
     built, aclose = await llm_client(
         _settings(llm_enabled=True, llm_api_key=SecretStr("sk-" + "0" * 44)),
@@ -920,7 +876,7 @@ async def test_a_credentialled_endpoint_with_prices_set_says_nothing(
 ) -> None:
     """The control that makes the case above evidence.
 
-    without it, a warning fired for every credentialled deployment would pass just as
+    Without it, a warning fired for every credentialled deployment would pass just as
     well.
     """
     built, aclose = await llm_client(
@@ -940,25 +896,16 @@ async def test_a_credentialled_endpoint_with_prices_set_says_nothing(
 
 
 def test_a_worker_without_an_llm_client_registers_no_curate_handler() -> None:
-    """`CURATE` is guarded on the **client**.
+    """`CURATE` is guarded on the **client**, exactly as `INDEX` is on the embedder.
 
-    exactly as `INDEX` is guarded on the embedder, and for the identical reason:
     `run_once` claims `list(self._handlers)`, so a worker with no model must not ask for
-    work it cannot do.
-
-    Claiming it either crashes on the lookup or parks a job whose only problem is the
-    process it was offered to, and a job parked that way needs a human to release it.
-
-    Fails: registering `CURATE` unconditionally. It cannot even be spelled
-    without weakening `CurationService`'s `client: LLMClient` to
-    `LLMClient | None`, which is the point of that annotation -- "no client,
-    no curation" is a `mypy` fact at the one layer that can know it, rather
-    than an `if self._client is None` branch unreachable from `src/`.
-
-    The embedder is present, so this is a guard on the client rather than on
-    "anything optional": without the `INDEX` line the case passes against a
-    `CURATE` registered under `embedder is not None`, and without the `MATCH`
-    line it passes against an implementation registering *nothing*.
+    work it cannot do: claiming it either crashes on the lookup or parks a job whose
+    only problem is the process it was offered to. Rules out registering `CURATE`
+    unconditionally, which cannot even be spelled without weakening
+    `CurationService`'s `client: LLMClient` to `LLMClient | None` -- "no client, no
+    curation" is a `mypy` fact at the one layer that can know it. The embedder is
+    present, so this is a guard on the client rather than on "anything optional", and
+    the `MATCH` line stops it passing against an implementation registering *nothing*.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -978,7 +925,7 @@ def test_a_worker_without_an_llm_client_registers_no_curate_handler() -> None:
 def test_a_worker_with_an_llm_client_registers_the_curate_handler() -> None:
     """The control that makes the case above evidence rather than a tautology.
 
-    `INDEX` is asserted absent alongside it so the two guards cannot drift into "one
+    `INDEX` is asserted absent alongside it, so the two guards cannot drift into "one
     client turns both on".
     """
     worker = build_worker(
@@ -996,25 +943,17 @@ def test_a_worker_with_an_llm_client_registers_the_curate_handler() -> None:
 
 
 async def test_the_worker_runs_a_curate_job_into_the_pipelines_own_curated_rows() -> None:
-    """**Behavioural.
+    """Behavioural, never an identity check on a private attribute.
 
-    never an identity check on a private attribute**, and driven through `run_once`
-    rather than through a handler this file reached for -- so registration, claiming,
-    the key conversion and the write are one assertion instead of four hopeful ones.
-
-    A `CurationService` wired to repositories of its own passes every case in
-    `tests/unit/test_services_curation.py` -- the screen is written, the
-    ledger row is written, nothing raises -- and a running deployment then
-    generates a household's shelves into an object nothing serves from. That
-    is `test_the_enrich_service_enqueues_into_the_pipelines_own_queue`'s
-    defect one milestone over, and `RowContext.curated = None`'s one task
-    over, where a `mypy` annotation was the only thing holding it. The only
-    way to see it is to read the **pipeline's** repositories back.
-
-    The household is the job's key and nothing else, which is the other half:
-    `build_worker` is handed a `user_id` for `watch_history`'s handler, and a
-    curate handler that took *that* would dedup correctly, park correctly, and
-    write household B's generation onto household A's screen.
+    Driven through `run_once` rather than through a handler this file reached for, so
+    registration, claiming, the key conversion and the write are one assertion instead
+    of four hopeful ones. A `CurationService` wired to repositories of its own passes
+    every case in `tests/unit/test_services_curation.py` -- the screen is written, the
+    ledger row is written, nothing raises -- while a running deployment generates a
+    household's shelves into an object nothing serves from. The household is the job's
+    key and nothing else, which is the other half: `build_worker` is handed a `user_id`
+    for `watch_history`'s handler, and a curate handler that took *that* would write
+    household B's generation onto household A's screen.
     """
     titles = FakeTitleRepository()
     await _candidates(titles, count=POOL_SIZE + 2)
@@ -1046,8 +985,7 @@ async def test_the_worker_runs_a_curate_job_into_the_pipelines_own_curated_rows(
 async def test_the_curation_service_is_built_over_the_pipelines_pool_and_commits_once() -> None:
     """The two collaborators a second copy would be invisible against.
 
-    and the one call that has to cover both writes.
-
+    And the one call that has to cover both writes.
     `build_curation_service` must take `pipeline.pool` rather than construct a
     `CandidatePoolService` over the same repositories: a second one would be
     built at `settings.curation_pool_size`, which is 200, and would answer
@@ -1085,10 +1023,7 @@ async def test_the_curation_service_is_built_over_the_pipelines_pool_and_commits
 
 
 async def test_a_curate_job_for_an_empty_catalog_parks_and_buys_nothing() -> None:
-    """PRD 08's operator rule.
-
-    every command works against an empty database -- and the milestone's cost argument,
-    at the layer that spends the money.
+    """Every command works against an empty database, including the one that spends.
 
     A generation for a household with nothing to recommend is a charge with a
     guaranteed empty answer, so `CurationService` raises **before** the client
@@ -1125,12 +1060,11 @@ async def test_a_curate_job_for_an_empty_catalog_parks_and_buys_nothing() -> Non
 
 
 async def test_a_curate_job_that_could_not_reach_the_model_backs_off_and_still_bills() -> None:
-    """The other side of the classification.
+    """The other side of the classification, and the control for the case above.
 
-    and the control that makes the case above about `PortDataMalformed` rather than
-    about "curation fails".
-
-    An endpoint that refused the connection is `PortUnavailable`, which
+    Without it that case is about "curation fails" rather than about
+    `PortDataMalformed`. An endpoint that refused the connection is `PortUnavailable`,
+    which
     `JobWorker` backs off rather than parks -- it may well answer on the next
     attempt, unlike an empty catalog. And the ledger still gets its row:
     `llm_calls` is one row per *attempt*, so a call that never got an answer
@@ -1165,19 +1099,14 @@ async def test_a_curate_job_that_could_not_reach_the_model_backs_off_and_still_b
 
 
 async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:
-    """**The measured failure this factory exists to prevent.**.
+    """The model is loaded once per process, never once per worker pass.
 
-    `build_worker` runs once per worker *pass* -- `lanes._run_worker` rebuilds
-    it every turn of a loop whose floor is 5.0 s. A per-pass `logger.warning`
-    there was measured at ~17,280 lines a day; a per-pass *model load* is
-    4.84 s cold / 0.13 s warm and 65 MB of ONNX, so the lane would spend more
-    time loading than working, forever, with nothing in the logs saying so.
-
-    Three passes, not one: a single pass cannot tell "once" from "per pass"
-    -- the same shape
-    `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
-    needed. Counted through a *loading* embedder rather than read off the
-    source, so the case fails against any spelling that builds one here.
+    `build_worker` runs once per worker *pass* -- `lanes._run_worker` rebuilds it every
+    turn of a loop whose floor is 5.0 s -- so a per-pass model load would have the lane
+    spending more time loading than working, forever, with nothing in the logs saying
+    so. Three passes, not one: a single pass cannot tell "once" from "per pass".
+    Counted through a *loading* embedder rather than read off the source, so the case
+    fails against any spelling that builds one here.
     """
     loads: list[int] = []
 
@@ -1205,19 +1134,14 @@ async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:
 async def test_the_factory_sets_hf_hub_offline_before_importing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured.
+    """A warm cache with no network and the flag unset raises a bare `RuntimeError`.
 
-    warm cache, no network, flag unset -> `RuntimeError: Cannot send a request, as the
-    client has been closed`, from huggingface_hub reusing a closed client on the retry
-    path.
-
-    The message names neither the network nor the cache. Reproduced two independent
-    ways, and it is also the only setting under which a genuine cache miss produces a
-    comprehensible `OSError`.
-
-    `_load_embedder` is replaced rather than left to import a real model:
-    this case is about the environment variable, and no test in this
-    repository downloads 65 MB or makes a network request.
+    "Cannot send a request, as the client has been closed", from huggingface_hub
+    reusing a closed client on the retry path -- a message naming neither the network
+    nor the cache. The flag is also the only setting under which a genuine cache miss
+    produces a comprehensible `OSError`. `_load_embedder` is replaced rather than left
+    to import a real model: this case is about the environment variable, and nothing
+    here downloads a checkpoint or makes a network request.
     """
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setattr("usher.composition._load_embedder", lambda _: FakeEmbedder())
@@ -1236,10 +1160,8 @@ async def test_an_operators_own_hf_hub_offline_value_wins(
     """`setdefault`, not assignment.
 
     An operator warming the cache for the first time runs one command with
-    `HF_HUB_OFFLINE=0`, and a container may set its own; either must survive.
-    Written as its own case because the mutation to `os.environ[...] = "1"`
-    survives the case above -- the plan predicted that and said to add this
-    rather than record it as untested.
+    `HF_HUB_OFFLINE=0`, and a container may set its own; either must survive. Its own
+    case because `os.environ[...] = "1"` passes the case above.
     """
     monkeypatch.setenv("HF_HUB_OFFLINE", "0")
     monkeypatch.setattr("usher.composition._load_embedder", lambda _: FakeEmbedder())
@@ -1253,12 +1175,11 @@ async def test_an_operators_own_hf_hub_offline_value_wins(
 async def test_an_embedder_that_cannot_load_degrades_rather_than_crashing(
     monkeypatch: pytest.MonkeyPatch, warnings: io.StringIO
 ) -> None:
-    """A missing extra, a missing model file, a cache miss under `HF_HUB_OFFLINE=1`.
+    """A missing extra, a missing model file, or a cache miss under `HF_HUB_OFFLINE=1`.
 
-    all three are `ImportError`/`OSError` at *build* time in a process whose other three
-    lanes are fine.
-
-    Fails: letting it propagate out of `create_app`'s lifespan, which turns
+    All three are `ImportError`/`OSError` at *build* time in a process whose other three
+    lanes are fine. Rules out letting it propagate out of `create_app`'s lifespan, which
+    turns
     "the embedding extra is not installed" into a server that will not boot
     -- the degradation-into-outage trade PRD 08 forbids.
 
@@ -1290,13 +1211,12 @@ async def _never_resolves(_: str) -> SourceBinding | None:
 def _work_for(pipeline: Pipeline) -> UnitOfWork:
     """A `UnitOfWork` handing back one already-built pipeline.
 
-    `build_worker` opens a scope per claim and per job since M9's W1, so it
-    takes a factory rather than a pipeline. Against fakes there is no session
-    to open and no `AsyncSession` to keep two coroutines off, so every scope
-    here is the same object -- which is exactly what
-    `tests/integration/test_services_jobs.py` must **not** do, and does not:
-    the property that concurrent jobs get *different sessions* is only
-    expressible against a real engine, and it is asserted there.
+    `build_worker` opens a scope per claim and per job, so it takes a factory rather
+    than a pipeline. Against fakes there is no session to open and no `AsyncSession` to
+    keep two coroutines off, so every scope here is the same object -- which is exactly
+    what `tests/integration/test_services_jobs.py` must **not** do, and does not: the
+    property that concurrent jobs get *different sessions* is only expressible against a
+    real engine, and it is asserted there.
     """
 
     @asynccontextmanager
@@ -1332,9 +1252,7 @@ def _no_sources() -> SourceRegistry:
 
 
 async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
-    """`build_pipeline` wires `Pipeline.taste` and `Pipeline.pool.taste` to the **same object**.
-
-    and until now that was a comment rather than a check.
+    """`Pipeline.taste` and `Pipeline.pool.taste` are wired to the **same object**.
 
     Two `TasteService` instances over one session are not merely wasteful.
     `centroid()` *writes*: it reads `user_taste`, and on a miss recomputes and
@@ -1359,19 +1277,14 @@ async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
 
 
 async def test_a_pipeline_with_no_llm_client_gives_search_nothing_to_expand_with() -> None:
-    """**The shipped default.
+    """The shipped default, at the wiring layer.
 
-    at the wiring layer.** `USHER_LLM_ENABLED` is `false`, so `llm_client` answers
-    `(None, no-op)` and no caller has one to pass -- and a `build_pipeline` that built
-    an expander anyway would need a client it does not have.
-
-    What this pins is that the *absence* survives: with no `llm=`, `SearchService` holds
-    no expander and every search on every default deployment embeds the query exactly as
-    typed.
-
-    Reaching `_expander` is deliberate. A wiring assertion has nothing else to
-    look at -- the behavioural half needs a real `PostgresSearchIndex` -- and
-    this is the same shape as `pipeline.pool.taste is pipeline.taste` above.
+    `USHER_LLM_ENABLED` is `false`, so `llm_client` answers `(None, no-op)` and no
+    caller has one to pass. What this pins is that the *absence* survives: with no
+    `llm=`, `SearchService` holds no expander and every search on every default
+    deployment embeds the query exactly as typed. Reaching `_expander` is deliberate --
+    a wiring assertion has nothing else to look at, since the behavioural half needs a
+    real `PostgresSearchIndex`.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     try:
@@ -1403,10 +1316,9 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
         expander = pipeline.search._expander
         assert expander is not None
         assert expander._client is client
-        # Through `_spend`, which is where the three of them live since the
-        # ledger rule became `services/llm_ledger.py`'s rather than each
-        # spender's. The assertion is the same one -- these are still the
-        # objects `build_pipeline` is on the hook for wiring.
+        # Through `_spend`, which is where the three of them live now that the ledger
+        # rule is `services/llm_ledger.py`'s rather than each spender's. These are
+        # still the objects `build_pipeline` is on the hook for wiring.
         assert expander._spend._ledger is pipeline.llm_calls
         assert expander._spend._commit == session.commit
         assert expander._spend._model == "wired/asked-1"
@@ -1416,19 +1328,15 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
 
 
 async def test_a_client_is_necessary_and_not_sufficient_for_an_expander() -> None:
-    """**The second switch.
+    """The second switch, at the wiring layer, for an ordinary deployment.
 
-    at the wiring layer, and the state it is for is the ordinary M8 deployment.**
     `USHER_LLM_ENABLED=true` with `USHER_QUERY_EXPANSION_ENABLED=false` is a household
-    that wants curated rows and does not want its searches rewritten -- which is what
-    PRD 05's 2026-08-07 measurement (MRR 0.733 -> 0.373) makes the default rather than
-    an eccentric choice.
-
-    The distinction this case exists for is that the client is **present**
-    here. `test_a_pipeline_with_no_llm_client_gives_search_nothing_to_expand_with`
-    above reaches the same `None` through the `llm is None` arm, so it is
-    satisfied by a `build_pipeline` that ignores the setting entirely; only a
-    fixture holding a real client can tell the two arms apart.
+    that wants curated rows and does not want its searches rewritten -- the default
+    rather than an eccentric choice, because expansion degrades retrieval here. The
+    distinction this case exists for is that the client is **present**: the case above
+    reaches the same `None` through the `llm is None` arm, so it is satisfied by a
+    `build_pipeline` that ignores the setting entirely, and only a fixture holding a
+    real client can tell the two arms apart.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     settings = _settings(llm_enabled=True)
@@ -1442,24 +1350,16 @@ async def test_a_client_is_necessary_and_not_sufficient_for_an_expander() -> Non
 
 
 async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> None:
-    """The mirror of the case above.
+    """The mirror of the case above, over an ordinary configuration.
 
-    and the configuration it is about is ordinary rather than contrived.
-
-    `unit_of_work` -- what `usher.api.lanes` and `usher work` build every unit
-    of work through -- calls `build_pipeline` with **no `llm`**, because a lane
-    has no use for a completion client. On a deployment with both switches on,
-    that is `query_expansion_enabled=True` arriving beside `llm is None`, which
-    is exactly the state a `build_pipeline` that consulted only the setting
-    would construct a `QueryExpansionService(client=None)` for: a service whose
-    first `complete_json` is an `AttributeError` inside a search.
-
-    Found 2026-08-07 by this task's sweep. Dropping the `llm is None` disjunct
-    survived all 2,892 unit cases -- because the only case reaching that arm
-    had the setting off, so the mutant answered `None` for the other reason.
-    It is caught by `mypy` (`client` narrows to `LLMClient` only through the
-    `is None` test), so the *gate* was never open; the **suite** was, and
-    "mypy holds it" is a claim about one tool rather than about the wiring.
+    `unit_of_work` -- what `usher.api.lanes` and `usher work` build every unit of work
+    through -- calls `build_pipeline` with **no `llm`**, because a lane has no use for a
+    completion client. On a deployment with both switches on, that is
+    `query_expansion_enabled=True` arriving beside `llm is None`, which is exactly the
+    state a `build_pipeline` consulting only the setting would construct a
+    `QueryExpansionService(client=None)` for: a service whose first `complete_json` is
+    an `AttributeError` inside a search. `mypy` narrows `client` only through the
+    `is None` test, so "mypy holds it" is a claim about one tool rather than the wiring.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     settings = _expanding()
@@ -1473,11 +1373,9 @@ async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> 
 
 
 async def test_only_the_root_with_no_commit_boundary_commits_the_analytics_row() -> None:
-    """PRD 10's `search_queries`.
+    """PRD 10's `search_queries`, on the three roots that build a `SearchService`.
 
-    wired on the three roots that build a `SearchService`, and the *commit* is the half
-    that decides the shape.
-
+    The *commit* is the half that decides the shape.
     Three ways for the row to go missing and every one of them is silent: no
     analytics at all, a repository over another session, or a commit belonging
     to some other session -- a search writes nothing else, so nothing carries
@@ -1528,18 +1426,16 @@ def _expanding(**rest: object) -> Settings:
 
 
 # ---------------------------------------------------------------------------
-# `run_bootstrap` -- one dispatch, two roots (M9's E5).
+# `run_bootstrap` -- one dispatch, two roots.
 # ---------------------------------------------------------------------------
 
 
 class _JournallingCatalog(FakeBulkCatalogRepository):
-    """`FakeBulkCatalogRepository` that writes down when the load window opens and closes and.
+    """Records when the load window opens and closes, and when the crosswalk is linked.
 
-    when the crosswalk is linked.
-
-    The window's two edges are recorded separately rather than as one entry,
-    because *"the window wraps both IMDb passes"* and *"the window wraps each
-    pass"* differ only in where the closes fall.
+    The window's two edges are recorded separately rather than as one entry, because
+    "the window wraps both IMDb passes" and "the window wraps each pass" differ only in
+    where the closes fall.
     """
 
     def __init__(self, journal: list[str]) -> None:
@@ -1623,7 +1519,7 @@ async def _journal_of_a_full_bootstrap(
 ) -> list[str]:
     """One bootstrap run's datasets and window edges.
 
-    driven either the way `usher bootstrap` drives it or the way the `bootstrap` job
+    Driven either the way `usher bootstrap` drives it or the way the `bootstrap` job
     handler does, over the same fakes.
     """
     journal: list[str] = []
@@ -1688,11 +1584,11 @@ _PHASE_OF = (
 
 
 def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
-    """The journal's entries collapsed to the phase each belongs to.
+    """The journal's entries collapsed to the phase each belongs to, in first order.
 
-    in first -sighting order, with an entry nothing claims raising rather than being
-    silently dropped -- a mapping that fell through would turn a reordered phase into a
-    missing one, which reads as a shorter list rather than as a wrong one.
+    An entry nothing claims raises rather than being silently dropped: a mapping that
+    fell through would turn a reordered phase into a missing one, which reads as a
+    shorter list rather than as a wrong one.
     """
     seen: list[BootstrapPhase] = []
     for entry in journal:
@@ -1709,9 +1605,9 @@ def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
 async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The proof that the extraction landed is **behavioural, not structural**.
+    """The proof is behavioural, not structural.
 
-    the same phases, in the same order, whichever root drove them.
+    The same phases, in the same order, whichever root drove them.
     """
     through_cli = await _journal_of_a_full_bootstrap(
         monkeypatch, tmp_path, through_the_worker=False
@@ -1728,40 +1624,32 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     assert inside == ["imdb.title.basics", "imdb.title.ratings"]
     assert through_cli.count("window-open") == 1
     assert through_cli.count("window-close") == 1
-    # **"the ratings file is imported once" is deliberately *not* asserted here**, and
-    # the reason is this case's own fixture.
+    # "The ratings file is imported once" is deliberately not asserted here; the
+    # reason is this case's own fixture.
 
     assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
     assert _phases_in(through_cli) == list(FULL_SEQUENCE)
 
 
 def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> None:
-    """**The partition, asserted rather than maintained.**.
+    """The partition, asserted rather than maintained.
 
-    `BootstrapPhase` holds steps and aliases, and the dispatch case above can
-    only assert the steps. A member added to neither collection is exactly the
-    defect that reads as working: the CLI offers it (`cli.PHASES` is derived
-    from the enum), the parser accepts it, `run_bootstrap` has no arm for it,
-    and it silently does nothing.  Spelling the two collections as a partition
-    is what makes that a red instead.
-
-    ⚠️ **What this cannot see: a member added to `PHASE_ALIASES` with no arm
-    in `run_bootstrap`.** An alias legitimately has no place in the sequence,
-    so the partition holds either way.  That half is covered for `RATINGS`
-    specifically by
-    `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else` below,
-    and it is stated here rather than left as an implied guarantee.
+    `BootstrapPhase` holds steps and aliases, and the dispatch case above can only
+    assert the steps. A member added to neither collection is the defect that reads as
+    working: the CLI offers it, the parser accepts it, `run_bootstrap` has no arm for
+    it, and it silently does nothing. What this cannot see is a member added to
+    `PHASE_ALIASES` with no arm in `run_bootstrap`, since an alias legitimately has no
+    place in the sequence; that half is covered for `RATINGS` by
+    `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else` below.
     """
     assert set(FULL_SEQUENCE) | PHASE_ALIASES == set(BootstrapPhase)
     assert set(FULL_SEQUENCE).isdisjoint(PHASE_ALIASES)
     # The premise: both halves are non-empty, so the equality above is not
     # satisfied by an empty set on either side.
     assert FULL_SEQUENCE and PHASE_ALIASES
-    # **And the two orders are one order.** The three assertions above are about
+    # And the two orders are one order. The three assertions above are about
     # *membership* and cannot see a permutation, so the enum's declaration order and
-    # `FULL_SEQUENCE`'s could drift apart in green: measured 2026-08-19 by swapping
-    # `CROSSWALK` and `TMDB_IDS` in the enum *and* in `test_cli`'s `PHASES` literal -- a
-    # coherent-looking edit -- and leaving `FULL_SEQUENCE` and the dispatch alone: 4,237
+    # `FULL_SEQUENCE`'s could otherwise drift apart while every case stayed green.
     assert tuple(one for one in BootstrapPhase if one not in PHASE_ALIASES) == FULL_SEQUENCE
 
 
@@ -1769,7 +1657,7 @@ def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> N
 async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, through_the_worker: bool
 ) -> None:
-    """**The point of the phase, asserted rather than described.**."""
+    """The point of the phase, asserted rather than described."""
     journal = await _journal_of_a_full_bootstrap(
         monkeypatch,
         tmp_path,
@@ -1783,7 +1671,7 @@ async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
 async def test_a_full_run_imports_the_ratings_file_exactly_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """**The forbidden edit, over the only fixture that can see it.**."""
+    """The forbidden edit, over the only fixture that can see it."""
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
@@ -1808,9 +1696,9 @@ async def test_a_full_run_imports_the_ratings_file_exactly_once(
 async def test_the_ratings_phase_refuses_an_empty_catalog_before_downloading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """**The damage lands on a phase other than the one mis-run.
+    """The damage lands on a phase other than the one mis-run.
 
-    which is what makes this the worst outcome available here.**.
+    Which is what makes this the worst outcome available here.
     """
 
     def refuse(request: httpx.Request) -> httpx.Response:
@@ -1898,10 +1786,9 @@ async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
     tmp_path: pathlib.Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`run_bootstrap` takes a report sink because the two roots want the same sentences in.
+    """The two roots want the same sentences in different places, so the sink is passed.
 
-    different places, and this is the half a default argument would have got wrong.
-
+    This is the half a default argument would have got wrong.
     `usher bootstrap` prints; a worker inside the server process must not,
     because its stdout is a log stream and a bare line in it has no level, no
     timestamp and no trace id. The refusal sentence is the one that always
@@ -1949,9 +1836,9 @@ async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
 async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers_buffer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The one registration in `build_worker` that is handed `pipeline.events` rather than.
+    """The one registration handed `pipeline.events` rather than `worker.events`.
 
-    `worker.events`, pinned from **both** sides.
+    Pinned from **both** sides.
     """
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
     seen: list[EventPublisher] = []
@@ -1991,7 +1878,7 @@ async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers
 
 
 class _Recorder(NullEventPublisher):
-    """Distinguishable from every other publisher by identity, which is all the case above needs.
+    """Distinguishable from every other publisher by identity, which is all that is needed.
 
     `NullEventPublisher()` instances compare equal to nothing but themselves, and an
     assertion spelled against the *class* would pass against the scope buffer's inner
@@ -2000,26 +1887,17 @@ class _Recorder(NullEventPublisher):
 
 
 def test_every_configuration_registers_exactly_the_kinds_it_claims() -> None:
-    """`worker_kinds` and `_worker_handlers` are the one pair of lists in `src/` that have to.
+    """`worker_kinds` and `_worker_handlers` must agree, and both failures are quiet.
 
-    agree, and **both failure directions are quiet.**.
-
-    `JobWorker` claims `list(self._concurrency)`, whose keys come from
-    `worker_kinds`; the callables come from `_worker_handlers`. They cannot be
-    one expression, because the handler map needs a `Pipeline` -- i.e. a
-    session -- and the claimable kinds have to be known before any session is
-    opened. So:
-
-    - a kind in `worker_kinds` with no handler is a `KeyError` **inside a
-      claimed job**, which parks nothing and crashes the worker; and
-    - a handler with no entry in `worker_kinds` is work nothing ever claims,
-      which is M4's *"a job kind whose handler is a stub is a queue that grows
-      forever"* arriving through the registration instead.
-
-    Neither is visible from the outside, which is why this walks all **eight**
-    provider/embedder/client configurations rather than the two a case would
-    naturally reach for: three independent guards make eight states, and the
-    interesting ones are the mixed builds nothing else constructs.
+    `JobWorker` claims `list(self._concurrency)`, whose keys come from `worker_kinds`;
+    the callables come from `_worker_handlers`. They cannot be one expression, because
+    the handler map needs a `Pipeline` -- i.e. a session -- and the claimable kinds have
+    to be known before any session is opened. So a kind in `worker_kinds` with no
+    handler is a `KeyError` inside a claimed job, which parks nothing and crashes the
+    worker, and a handler with no entry in `worker_kinds` is work nothing ever claims.
+    Neither is visible from the outside, which is why this walks all eight
+    provider/embedder/client configurations: three independent guards make eight states,
+    and the interesting ones are the mixed builds nothing else constructs.
     """
     checked = 0
     for provider in (None, FakeMetadataProvider()):
@@ -2050,7 +1928,7 @@ def test_every_configuration_registers_exactly_the_kinds_it_claims() -> None:
 def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None:
     """The third list in the same rule, one layer down.
 
-    `worker_concurrency` resolves `KIND_CONCURRENCY` against the deployment's
+    `worker_concurrency` resolves `KIND_CONCURRENCY` against the deployment's own
     global, and a kind missing from it would be a `KeyError` at *build* time
     rather than inside a job -- loud, but only for the configuration that
     registers it, which for `curate` is the one nobody runs by default.
@@ -2076,7 +1954,7 @@ def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None
 
 
 # ---------------------------------------------------------------------------
-# The outbound gate's owner (M10 S3; ADR-0043 §4)
+# The outbound gate's owner
 
 
 _GATED = Source(
@@ -2103,7 +1981,7 @@ def _emby_gate(adapter: SourceAdapter) -> object:
     return adapter._session._limiter
 
 
-# : Where each `SourceKind`'s adapter keeps the gate it was handed.
+#: Where each `SourceKind`'s adapter keeps the gate it was handed.
 _GATE_READERS: dict[SourceKind, Callable[[SourceAdapter], object]] = {
     SourceKind.EMBY: _emby_gate,
 }
@@ -2136,8 +2014,7 @@ def _source_of(kind: SourceKind, name: str, ref: str) -> Source:
 def test_every_source_kind_has_a_gate_reader() -> None:
     """The premise the parametrisation below rests on.
 
-    asserted rather than left to `list(SourceKind)` quietly covering one member.
-
+    Asserted rather than left to `list(SourceKind)` quietly covering one member.
     A `SourceKind` with no row in `_GATE_READERS` is a kind whose adapter
     nobody has checked shares a gate -- and since `SourceKind` is the seam
     `factory.py` says a Jellyfin adapter arrives at, that is precisely the
@@ -2157,7 +2034,7 @@ def _kind_id(kind: object) -> str:
 async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not(
     kind: SourceKind,
 ) -> None:
-    """🔴 **The finding S3 exists for: the obvious placement is per request.**."""
+    """The gate is a process resource; the obvious placement is per request."""
     gated = _source_of(kind, "Living Room", "ref-1")
     second_server = _source_of(kind, "Bedroom", "ref-2")
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
@@ -2195,7 +2072,7 @@ async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not
 async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The four roots, driven rather than argued (M10 S3's acceptance)."""
+    """The four roots, driven rather than argued."""
     settings = _settings(
         push_enabled=False,
         worker_enabled=False,
@@ -2296,8 +2173,7 @@ async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_s
 #: The three composition roots in `usher.cli`, and the call each one builds its
 #: registry with. **Keyed by function rather than by command**, because that is
 #: what the assertion below can see: `usher push` with no `--probe` reaches
-#: `_run_lanes`, which is a root an operator cannot name (ADR-0043 §4 records
-#: the correction).
+#: `_run_lanes`, which is a root an operator cannot name.
 _CLI_ROOTS: dict[str, str] = {
     "_work": "unit_of_work",  # `usher work`
     "_run_lanes": "unit_of_work",  # bare `usher push`
@@ -2319,7 +2195,7 @@ def _cli_function(module: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncF
 def _calls_of(root: ast.AST, callee: str) -> tuple[int, int]:
     """`(in the function's own body, inside a nested definition)`.
 
-    The split *is* the assertion. A builder called from the function's own body
+    The split *is* the assertion: a builder called from the function's own body
     runs once when the command starts; the identical call moved inside a
     `def`, an `async def` or a `lambda` runs once per invocation of that
     closure -- which for a `@asynccontextmanager`-wrapped `work()` is once per
@@ -2346,9 +2222,9 @@ def _calls_of(root: ast.AST, callee: str) -> tuple[int, int]:
 
 
 def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
-    """🔴 **Rows 4 and 5 of the table above are re-derivations.
+    """Rows 4 and 5 of the table above are re-derivations.
 
-    and the defect they miss is the one row 3 already shipped with.**.
+    The defect they miss is the one row 3 already shipped with.
     """
     source = pathlib.Path(usher.__file__).parent / "cli.py"
     module = ast.parse(source.read_text(encoding="utf-8"), str(source))
@@ -2401,12 +2277,10 @@ async def test_a_request_without_the_lifespan_is_refused_rather_than_quietly_ung
 def test_get_source_gates_is_the_only_reader_of_app_state_source_gates() -> None:
     """The registry reaches a request through the dependency and no other way.
 
-    A second reader — a router doing `request.app.state.source_gates` inline —
-    would resolve, pass mypy and behave identically today, and it is exactly
-    how the `RuntimeError` above stops being the only answer to a missing
-    lifespan. Asserted as a source scan rather than argued, in the shape
-    `test_no_outbound_http_call_escapes_a_recorded_decision` uses one package
-    over.
+    A second reader — a router doing `request.app.state.source_gates` inline — would
+    resolve, pass mypy and behave identically today, and it is exactly how the
+    `RuntimeError` above stops being the only answer to a missing lifespan. Asserted as
+    a source scan rather than argued.
     """
     api = pathlib.Path(usher.__file__).parent / "api"
     readers = sorted(

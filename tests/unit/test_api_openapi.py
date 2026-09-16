@@ -1,4 +1,4 @@
-"""The milestone's conformance check: `/openapi.json` against PRD 07, both ways."""
+"""`/openapi.json` against PRD 07, checked in both directions."""
 
 import ast
 import importlib
@@ -15,9 +15,9 @@ from fastapi import FastAPI
 from fastapi import status as http_status
 from fastapi.routing import APIRoute
 
-# A2's descent through `_IncludedRouter`, imported rather than copied: this
-# would otherwise be the third transcription of it in `tests/unit`, and the
-# whole reason it exists is that the obvious walk is silently wrong.
+# The descent through `_IncludedRouter`, imported rather than copied: this
+# would otherwise be a third transcription of it in `tests/unit`, and the whole
+# reason it exists is that the obvious walk is silently wrong.
 from tests.unit.test_api_problem import _api_routes as api_routes
 from usher.api.app import create_app
 from usher.api.dto.problem import PROBLEM_EXEMPTIONS, PROBLEM_MEDIA_TYPE, ProblemCode
@@ -53,28 +53,25 @@ _PARAMETER: Final = re.compile(r"\{[^}]*\}")
 #: instead, because "we skipped it" and "it works" are different claims.
 _SCHEMA_PATH: Final = "/openapi.json"
 
-#: The lower bound the plan pre-registered for the extraction. It is a floor,
-#: not the count: the tables have grown since the plan was written and a check
-#: pinned to the exact number would fail on a documented endpoint being added.
+#: A floor under the extraction rather than the count: a check pinned to the
+#: exact number would fail on a documented endpoint being added.
 _ENDPOINTS_IN_THE_TABLES: Final = 29
 
 #: The anchor every non-2xx in `/openapi.json` has to point at.
 _PROBLEM_SCHEMA: Final = "ProblemResponse"
 
-# : A floor under the media-type walk, for the reason `_ENDPOINTS_IN_THE_TABLES` : is
-# one: **56** responses across 35 operations carried a `ProblemResponse` : when issue #6
-# was measured, and a route added later only raises that.
+#: A floor under the media-type walk, for the reason `_ENDPOINTS_IN_THE_TABLES`
+#: is one: a route added later only raises the number of problem responses.
 _PROBLEM_RESPONSES: Final = 50
 
-#: The non-problem bodies, and this one is an exact count rather than a floor
-#: on purpose: it is the arm that fails when a rewrite of the document moves a
-#: **200** as well as a problem, and a floor cannot see a body that left the
-#: set. Re-measure it when the surface grows -- 36 as of Group F, over 35
-#: operations and 92 response bodies.
+#: The non-problem bodies, an exact count rather than a floor on purpose: it is
+#: the arm that fails when a rewrite of the document moves a **200** as well as
+#: a problem, and a floor cannot see a body that left the set. Update it when
+#: the surface grows.
 _NON_PROBLEM_BODIES: Final = 36
 
-# : Non-2xx responses that are deliberately **not** problem documents, each with : the
-# shape it keeps instead and the reason it keeps it.
+#: Non-2xx responses that are deliberately **not** problem documents, each with
+#: the shape it keeps instead and the reason it keeps it.
 _NOT_A_PROBLEM_DOCUMENT: Final[tuple[tuple[str, str, str | None, str], ...]] = (
     (
         "/health/ready",
@@ -104,7 +101,7 @@ _NOT_A_PROBLEM_DOCUMENT: Final[tuple[tuple[str, str, str | None, str], ...]] = (
 def _settings() -> Settings:
     """`tests/unit/test_api_health.py`'s DSN.
 
-    nothing listens on port 1, so the app builds and never reaches Postgres.
+    Nothing listens on port 1, so the app builds and never reaches Postgres.
     """
     return Settings(
         database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
@@ -291,23 +288,16 @@ def test_every_endpoint_prd_07_promises_is_in_the_schema(
 ) -> None:
     """Direction 1, and the positive controls come first.
 
-    An extraction that found nothing and an app that published nothing both
-    make `set() <= set()` true, so neither the PRD parse nor the app is
-    believed until it has been shown to have found something. The
-    normalisation carries its own control too: `("GET", "/titles/{}")` is only
-    in the extraction if `{id}` was emptied, which is the whole difference
-    between checking coverage and checking spelling.
-
-    **The comparison is over `(method, path)` pairs and that is a measurement
-    rather than a preference.** Spelled over paths alone it is too weak, and
-    the sweep found the case: PRD 07's Admin table compressed three methods
-    onto `/admin/sources` while the delete has always been
-    `DELETE /admin/sources/{id}`, and replanting that cell **survived both
-    directions** -- direction 1 because `/admin/sources` is served by *some*
-    method, direction 2 because the blockquote under that table now spells the
-    real path in prose and direction 2 reads prose by design. A method is half
-    of what a table cell promises, and comparing pairs is not comparing
-    spellings: the parameter names are still emptied on both sides.
+    An extraction that found nothing and an app that published nothing both make
+    `set() <= set()` true, so neither the PRD parse nor the app is believed until
+    it has been shown to have found something. The normalisation carries its own
+    control too: `("GET", "/titles/{}")` is only in the extraction if `{id}` was
+    emptied, which is the whole difference between checking coverage and checking
+    spelling. The comparison is over `(method, path)` pairs because over paths
+    alone it is too weak: a table cell compressing three methods onto one path
+    hides a delete served at a different path from both directions. A method is
+    half of what a table cell promises, and comparing pairs is still not
+    comparing spellings -- the parameter names are emptied on both sides.
     """
     tabled = _tabled()
     assert len(tabled) >= _ENDPOINTS_IN_THE_TABLES, (
@@ -372,8 +362,7 @@ async def test_the_schema_route_answers_rather_than_being_exempted_silently(
 ) -> None:
     """`GET /openapi.json` is in PRD 07's Meta table and is not an `APIRoute`.
 
-    so it cannot be in `app.openapi()["paths"]` and direction 1 drops it.
-
+    So it cannot be in `app.openapi()["paths"]` and direction 1 drops it.
     Dropping it is only honest if it answers, and only meaningful if it was
     really in the set being dropped from -- both are asserted here rather than
     left as a comment beside the subtraction.
@@ -395,13 +384,11 @@ async def test_the_schema_route_answers_rather_than_being_exempted_silently(
 def test_every_status_a_route_can_raise_is_described_as_a_problem_document(
     app: FastAPI, document: Mapping[str, Any]
 ) -> None:
-    """A route that can fail and documents only its 200 is a client writing its error handling.
+    """A route documenting only its 200 makes a client parse the wrong body.
 
-    against the wrong body.
-
-    The expected set is harvested from each handler's own call graph rather
-    than listed here, so it cannot go stale: a route that grows a failure and
-    forgets the declaration fails without anything in this file being edited.
+    The expected set is harvested from each handler's own call graph rather than
+    listed here, so it cannot go stale: a route that grows a failure and forgets
+    the declaration fails without anything in this file being edited.
     """
     routes = api_routes(app)
     assert len(routes) >= _ENDPOINTS_IN_THE_TABLES, "the route walk found nothing"
@@ -471,21 +458,15 @@ def test_the_rewrite_registers_its_component_and_leaves_every_other_body_alone(
 ) -> None:
     """The two arms the media-type case below cannot state.
 
-    both of them positive controls over `UsherAPI.openapi`'s rewrite.
-
-    **`ProblemResponse` has to still be a *component*.** The spelling a reader
-    reaches for is `{"content": {PROBLEM_MEDIA_TYPE: {"schema": {"$ref":
-    "#/components/schemas/ProblemResponse"}}}}` in place of `model=`, which
+    Both are positive controls over `UsherAPI.openapi`'s rewrite.
+    `ProblemResponse` has to still be a *component*: the spelling a reader
+    reaches for is an inline `$ref` under `content` in place of `model=`, which
     renders the right key with the right `$ref` and, with no route naming the
-    model, never registers it -- measured on a two-route probe against FastAPI
-    0.140.13, where an app carrying only that spelling publishes
-    `components.schemas == ["Ok"]`. Every media-type assertion in this file
-    passes against that document while every `$ref` in it dangles.
-
-    **And the count of non-problem bodies is exact rather than a floor**,
-    because that is the arm a rewrite which moved a **200** dies on: a floor
-    cannot see a body that left the set. `moved == []` is the same claim from
-    the other side.
+    model, never registers it -- so every media-type assertion in this file
+    passes while every `$ref` in the document dangles. And the count of
+    non-problem bodies is exact rather than a floor, because that is the arm a
+    rewrite which moved a **200** dies on: a floor cannot see a body that left
+    the set. `moved == []` is the same claim from the other side.
     """
     assert _PROBLEM_SCHEMA in document["components"]["schemas"], (
         f"`{_PROBLEM_SCHEMA}` is not a component, so every `$ref` naming it dangles -- which is "
@@ -495,8 +476,8 @@ def test_the_rewrite_registers_its_component_and_leaves_every_other_body_alone(
 
     # A list of pairs and never a mapping keyed by the response: one response
     # can carry several bodies, and `GET /images/{id}`'s 200 really carries
-    # three. Collapsing them would take the non-problem count from 36 to 34 and
-    # the arm below would then be pinned to an artefact of the collapse.
+    # three. Collapsing them would pin the arm below to an artefact of that
+    # collapse.
     problem: list[tuple[str, str]] = []
     other: list[tuple[str, str]] = []
     for path, method, status, media, reference in _bodies(document):
@@ -657,7 +638,7 @@ def test_every_exemption_names_a_real_response_and_the_shape_it_keeps(
 def test_the_code_enum_in_the_schema_is_the_vocabulary_as_a_set(
     document: Mapping[str, Any],
 ) -> None:
-    """V1's vocabulary reaches a generated client or it reaches nobody.
+    """The vocabulary reaches a generated client or it reaches nobody.
 
     Compared as a set rather than as a list: the enum's declaration order is
     not a contract, and a member added to `ProblemCode` without the schema
@@ -677,22 +658,13 @@ def test_the_code_enum_in_the_schema_is_the_vocabulary_as_a_set(
 
 
 def test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it(app: FastAPI) -> None:
-    """ADR-0030's Consequences hand this task the inversion V1 opened.
+    """No member of the vocabulary may sit with no route that can emit it.
 
-    and the measurement settles it: **nothing is deleted.**.
-
-    V1 closed the vocabulary before the read-route fan-out landed, so a member
-    was allowed to sit with no emitting route for the length of M9, and
-    `invalid_cursor` was named as the one case -- `api/cursor.py` emitted it
-    and no route called the codec. Three routes call it now (`GET /browse`,
-    `GET /admin/unmatched`, `GET /seasons/{id}/episodes`, all through
-    `decode_cursor`), which is what this case measures rather than asserts.
-
-    Two sources, because a code reaches a client two ways. A route names its
-    own through `ProblemException`; `_CODE_FOR_STATUS` names the ones raised
-    by machinery Usher does not control -- Starlette's 404 for an unrouted
-    path and 405 for a method a route does not have -- and `method_not_allowed`
-    has no other emitter and never will.
+    Two sources, because a code reaches a client two ways. A route names its own
+    through `ProblemException`; `_CODE_FOR_STATUS` names the ones raised by
+    machinery Usher does not control -- Starlette's 404 for an unrouted path and
+    405 for a method a route does not have -- and `method_not_allowed` has no
+    other emitter and never will.
     """
     by_route: dict[str, set[str]] = {}
     for route in api_routes(app):
@@ -720,21 +692,15 @@ def test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it(app: FastAP
 def test_no_route_declares_a_security_scheme_and_the_readme_states_the_count(
     document: Mapping[str, Any],
 ) -> None:
-    """Two halves, and only one of them was a discovery.
+    """Two halves: no route declares a scheme, and the README states the count.
 
-    **The security half is a guard, verified true before it was written** --
-    there is no auth module in this tree, so it passes at HEAD and says
-    nothing new. It is here because it is the case that goes red the day #18
-    ships, which is exactly when the README sentence has to change.
-
-    **The README half pins the number, not the prose.** A green here does not
-    mean the README explains the posture well; it means the count it states is
-    the count this app serves. That is H6's finding -- a static contract
-    configured by an enumeration needs a test that the enumeration is complete
-    -- arriving at a README sentence instead of a `pyproject.toml` list.
-
-    The control is the `>= 10` floor: an operation walk that globbed nothing
-    would agree with any number the README happened to state.
+    The security half is a guard. There is no auth module in this tree, so it
+    says nothing new today and goes red the day auth ships, which is exactly when
+    the README sentence has to change. The README half pins the number, not the
+    prose: a green does not mean the README explains the posture well, only that
+    the count it states is the count this app serves. The control is the `>= 10`
+    floor -- an operation walk that globbed nothing would agree with any number
+    the README happened to state.
     """
     assert "securitySchemes" not in document.get("components", {})
     for path, item in document["paths"].items():

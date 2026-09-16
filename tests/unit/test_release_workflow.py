@@ -20,11 +20,7 @@ def _workflow(name: str) -> dict[Any, Any]:
 
 
 def test_the_release_workflow_triggers_only_on_a_version_tag() -> None:
-    """Separate from `ci.yml` on purpose.
-
-    a `tags:` entry there would run the whole suite on the tag *and* on the merge that
-    preceded it.
-    """
+    """Only `release.yml` carries the tag trigger, so a tag does not run the suite twice."""
     release = _workflow("release.yml")
 
     assert release[_ON] == {"push": {"tags": ["v*"]}}
@@ -34,10 +30,7 @@ def test_the_release_workflow_triggers_only_on_a_version_tag() -> None:
 
 
 def test_the_release_job_can_write_a_package_and_an_attestation() -> None:
-    """Three of these four are not granted by default.
-
-    so omitting one fails at push or at attestation rather than at parse time.
-    """
+    """A release job missing one of these write permissions fails only at push time."""
     permissions = _workflow("release.yml")["permissions"]
 
     assert permissions["packages"] == "write"
@@ -46,19 +39,10 @@ def test_the_release_job_can_write_a_package_and_an_attestation() -> None:
 
 
 def test_no_action_is_pinned_to_a_floating_major_that_does_not_exist() -> None:
-    """🔴 **`astral-sh/setup-uv`'s floating major tags stop at `v7`** while its releases have.
+    """`astral-sh/setup-uv` has no floating major above `v7`, so `@v8` resolves to nothing.
 
-    reached v10, so `@v8`, `@v9` and `@v10` all resolve to nothing.
-
-    `ci.yml` pins an exact release tag, which is why it works.
-
-    This case is offline: it pins the *rule* rather than re-querying GitHub,
-    because a unit suite that needs the network is one that fails on a train.
-    The floating-tag inventory was measured with
-    `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` on 2026-09-07.
-
-    The control is the `uses` count -- a scan that found no action references
-    would satisfy every assertion below.
+    The `uses` count is the control: a scan that found no action references would
+    satisfy every assertion below.
     """
     uses = [
         step["uses"]

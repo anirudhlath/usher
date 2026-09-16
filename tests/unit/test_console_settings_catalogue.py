@@ -87,7 +87,7 @@ def test_every_setting_is_on_the_configuration_screen(catalogued: set[str]) -> N
 
 
 def test_the_configuration_screen_invents_no_settings(catalogued: set[str]) -> None:
-    """And the other direction, which is worse when it happens.
+    """A catalogued row for a variable Usher does not read fails here.
 
     A row for a variable Usher does not read is a screen telling an operator to
     set something that will be refused at startup -- `Settings` is
@@ -155,9 +155,9 @@ def _printed_default(field: FieldInfo) -> str:
 def test_every_catalogued_default_is_the_default_usher_actually_ships(
     catalogued: set[str],
 ) -> None:
-    """🔴 **`def:` was an unverified copy of the Python default until 2026-09-07**.
+    """The catalogue's `def:` must be the default `Settings` actually ships.
 
-    and it is the field on this screen an operator acts on.
+    It is the field on this screen an operator acts on.
     """
     paired = dict(_ROW_DEFAULT.findall(_CATALOGUE.read_text()))
     assert set(paired) == catalogued, (

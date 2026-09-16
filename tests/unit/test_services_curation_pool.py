@@ -39,7 +39,7 @@ _DIMENSION = 384
 # engaged, embedded titles and a case that wants none must stay under it.
 _MIN_TITLES = 5
 
-# : The `size` every case that is not about the cap is built with.
+#: The `size` every case that is not about the cap is built with.
 _UNCAPPED = 50
 
 
@@ -104,7 +104,7 @@ class _Household:
             sort_name=name.lower(),
             genres=tuple(genres),
             # The builder's own keyword names are test-local vocabulary and
-            # stay; only the `Title` field they feed moved. ADR-0040.
+            # stay; only the `Title` field they feed moved.
             tmdb_vote_count=vote_count,
             enrichment_state=EnrichmentState.ENRICHED,
         )
@@ -183,11 +183,11 @@ class _Household:
 
 
 async def test_with_no_embedder_the_pool_is_the_base_order() -> None:
-    """**The configuration curation actually runs in**.
+    """The configuration curation actually runs in, and the hardest failure to see.
 
-    and the one whose failure is hardest to see: no embedder, therefore no centroid,
-    therefore nothing to re-rank with -- and the pool must still be built, still be
-    ordered by something defensible, and still be full.
+    No embedder, therefore no centroid, therefore nothing to re-rank with -- and the
+    pool must still be built, still be ordered by something defensible, and still be
+    full.
     """
     household = await _household_with_a_centroid()
     far = await household.title(
@@ -209,15 +209,12 @@ async def test_with_no_embedder_the_pool_is_the_base_order() -> None:
 async def test_with_no_embedder_the_embedding_table_is_never_read() -> None:
     """The structural half of the case above.
 
-    because "it returned the base order" is also what a re-rank against an absent
-    centroid produces when the centroid is quietly treated as the origin.
-
-    A zero centroid is the uniquely awful value `TasteService.centroid`'s
-    docstring refuses: `<=>` against it is undefined in pgvector and `NaN` in
-    Python, so it either raises deep inside a background job or -- under a
-    `coalesce` -- ranks every candidate identically, which is the base order
-    again. Asserting that no vector was ever fetched is what tells the two
-    apart.
+    "It returned the base order" is also what a re-rank against an absent centroid
+    produces when the centroid is quietly treated as the origin. A zero centroid is the
+    uniquely awful value `TasteService.centroid`'s docstring refuses: `<=>` against it
+    is undefined in pgvector and `NaN` in Python, so it either raises deep inside a
+    background job or -- under a `coalesce` -- ranks every candidate identically, which
+    is the base order again. Asserting that no vector was ever fetched tells them apart.
     """
     household = _Household()
     await household.title("A Quiet Film", vote_count=5, owned=True, vector=_pole(0))
@@ -248,13 +245,10 @@ async def test_with_no_embedder_the_embedding_table_is_never_read() -> None:
 async def test_with_no_embedder_the_genre_affinity_still_ranks() -> None:
     """The half of the degradation that is easy to lose.
 
-    with no model the pool is *narrowed*, not un-personalised.
-
-    `genre_affinity` needs no embedder -- that is the whole reason Task 23
-    declined PRD 06's centroid formulation -- so a household with history
-    still gets its genres to the front. The distractor is a title of another
-    genre with five orders of magnitude more votes, which is `[0]` under an
-    implementation that only asks the taste service for a centroid.
+    With no model the pool is *narrowed*, not un-personalised. `genre_affinity` needs
+    no embedder, so a household with history still gets its genres to the front. The
+    distractor is a title of another genre with five orders of magnitude more votes,
+    which is `[0]` under an implementation that only asks for a centroid.
     """
     household = _Household()
     stranger = await household.title(
@@ -286,12 +280,11 @@ async def test_with_no_embedder_the_genre_affinity_still_ranks() -> None:
 async def test_a_new_household_gets_a_full_pool_in_the_base_order() -> None:
     """An embedder is configured and the household has watched nothing.
 
-    so `TasteService.centroid` answers `None` -- the honest value, and the state every
-    deployment is in on its first evening.
-
-    The wrong implementation this kills treats a missing centroid as a reason
-    to return nothing, or as a zero vector to rank against. Both produce a
-    household that never gets a curated shelf and never finds out why.
+    `TasteService.centroid` answers `None` -- the honest value, and the state every
+    deployment is in on its first evening. The wrong implementation this kills treats
+    a missing centroid as a reason to return nothing, or as a zero vector to rank
+    against. Both produce a household that never gets a curated shelf and never finds
+    out why.
     """
     household = _Household()
     quiet = await household.title("A Quiet Film", vote_count=5, owned=True, vector=_pole(0))
@@ -308,11 +301,9 @@ async def test_a_new_household_gets_a_full_pool_in_the_base_order() -> None:
 async def test_a_household_below_the_centroid_floor_is_the_same_case() -> None:
     """`TasteService` refuses a centroid over fewer than five embedded titles.
 
-    *"your taste is precisely Paddington 2"* -- and that refusal is written as a stored
-    row with a NULL vector rather than as a skipped write.
-
-    A household four evenings into a new install is therefore in configuration
-    2 with a real history, which the case above cannot express.
+    That refusal is written as a stored row with a NULL vector rather than as a skipped
+    write, so a household four evenings into a new install is in configuration 2 with a
+    real history, which the case above cannot express.
     """
     household = _Household()
     for index in range(_MIN_TITLES - 1):
@@ -334,10 +325,7 @@ async def test_a_household_below_the_centroid_floor_is_the_same_case() -> None:
 
 
 async def test_a_candidate_with_no_vector_keeps_its_index() -> None:
-    """**The configuration that decides whether the pool is a function of the household or of.
-
-    the embedder's backfill.**.
-    """
+    """Whether the pool is a function of the household or of the embedder's backfill."""
     household = await _household_with_a_centroid()
     top = await household.title(
         "Top Of The Base Order", vote_count=900, owned=True, vector=_pole(2)
@@ -361,14 +349,12 @@ async def test_a_candidate_with_no_vector_keeps_its_index() -> None:
 
 
 async def test_the_re_rank_returns_every_candidate_it_was_given() -> None:
-    """The set.
+    """The set, asserted separately from the order.
 
-    asserted separately from the order, because a re-rank that dropped a candidate and a
-    re-rank that merely reordered one produce the same first element.
-
-    A pool one short is an index map one short, and ADR-0028's whole
-    bounds-check is that `pool[i]` for `i` outside `0..n-1` cannot name a
-    title. It can, if `n` moved after the map was built.
+    A re-rank that dropped a candidate and one that merely reordered produce the same
+    first element. A pool one short is an index map one short, and the bounds check is
+    that `pool[i]` for `i` outside `0..n-1` cannot name a title -- which it can, if `n`
+    moved after the map was built.
     """
     household = await _household_with_a_centroid()
     embedded = {
@@ -384,24 +370,14 @@ async def test_the_re_rank_returns_every_candidate_it_was_given() -> None:
 
 
 async def test_the_pool_reads_vectors_unscoped_by_model_and_keeps_its_no_opinion_path() -> None:
-    """`TitleEmbeddingRepository.list_for_titles` grew a keyword-only.
+    """`TitleEmbeddingRepository.list_for_titles` takes an optional `model_name`.
 
-    **optional** `model_name` in M9 (F5), and this service keeps the call it has.
-
-    That is the half a widening can break silently.
-
-    The module docstring argues for the unscoped read explicitly: a candidate
-    whose vector this centroid cannot be compared against is *no opinion*, and
-    the width mismatch that produces is the documented reason `_cosine` answers
-    `None` rather than letting `zip(strict=True)` fail a nightly generation.
-    Narrowing this call would repair that by construction and quietly delete
-    the behaviour the case below asserts -- so the argument is pinned here,
-    and the behaviour one case down.
-
-    Fails: `list_for_titles(ids, model_name=centroid.model_name)`, which is the
-    obvious "improvement" and which makes the whole of
-    `test_a_vector_of_another_width_leaves_its_candidate_where_it_was`
-    unreachable.
+    This service keeps the unscoped call, which is the half a widening can break
+    silently: a candidate whose vector this centroid cannot be compared against is *no
+    opinion*, and the width mismatch that produces is the documented reason `_cosine`
+    answers `None` rather than letting `zip(strict=True)` fail a nightly generation.
+    Narrowing the call would repair that by construction and quietly delete the
+    behaviour the case below asserts.
     """
     household = await _household_with_a_centroid()
     await household.title("A Candidate", vote_count=500, owned=True, vector=_pole(0))
@@ -424,25 +400,18 @@ async def test_the_pool_reads_vectors_unscoped_by_model_and_keeps_its_no_opinion
 
 
 async def test_a_vector_of_another_width_leaves_its_candidate_where_it_was() -> None:
-    """`list_for_titles` is not scoped to a `model_name`.
+    """`list_for_titles` is not scoped to a `model_name`, and the port says so.
 
-    the port says so -- so during a model swap the table holds vectors of two widths at
-    once, and a cosine across them is a `ValueError` from `zip(strict=True)` inside a
-    background job.
+    During a model swap the table holds vectors of two widths at once, and a cosine
+    across them is a `ValueError` from `zip(strict=True)` inside a background job.
+    Treated as "no vector" rather than as a failure, which is the same answer the port
+    already gives for a NULL one: a candidate the centroid cannot speak about keeps the
+    position the signals that need no model gave it.
 
-    Treated as "no vector" rather than as a failure, which is the same answer
-    the port already gives for a NULL one: a candidate the centroid cannot
-    speak about keeps the position the signals that need no model gave it.
-
-    **Two premises, and this case had neither.** Its answer is a *swap* of the
-    two embedded members, so it rests on the centroid disagreeing with the
-    base order exactly as `test_a_candidate_with_no_vector_keeps_its_index`
-    does -- seed `bottom` on the centroid's own pole and the expected list is
-    the re-rank's answer; seed it anywhere else and the expected list is
-    unreachable, with nothing saying which. And the width itself is a fact
-    about the fake rather than about the literal three floats above: a later
-    `_DIMENSION` of 3 would make `narrow` an ordinary embedded candidate and
-    the case would quietly become a second copy of the re-rank case.
+    Two premises. The answer is a *swap* of the two embedded members, so it rests on
+    the centroid disagreeing with the base order; and the width is a fact about the
+    fake rather than about the three literal floats, because a `_DIMENSION` of 3 would
+    make `narrow` an ordinary embedded candidate.
     """
     household = await _household_with_a_centroid()
     narrow = await household.title("A Vector From Another Model", vote_count=500, owned=True)
@@ -467,26 +436,19 @@ async def test_a_vector_of_another_width_leaves_its_candidate_where_it_was() -> 
 
 
 async def test_a_vector_of_no_direction_leaves_its_candidate_where_it_was() -> None:
-    """The third way `_cosine` can decline.
+    """The third way `_cosine` can decline, and the only one whose defect is a raise.
 
-    and the only one whose defect is a **raise** rather than a wrong number: a stored
-    vector of all zeros divides by zero, inside a nightly job, and takes the generation
-    with it.
+    A stored vector of all zeros divides by zero, inside a nightly job, and takes the
+    generation with it. `TitleEmbeddingRepository.list_for_titles` promises never to
+    hand back a zero vector -- a NULL row and a missing row are both simply absent --
+    so the guard exists against a promise rather than against a caller, which is why
+    nothing exercised it: without this case, deleting `if norms == 0.0: return None`
+    leaves the whole unit suite green.
 
-    `TitleEmbeddingRepository.list_for_titles` promises never to hand back a
-    zero vector -- a NULL row and a missing row are both simply absent -- so
-    the guard exists against a promise rather than against a caller, which is
-    exactly why nothing exercised it: **deleting `if norms == 0.0: return
-    None` left the whole 2,587-case unit suite green**, found in review. It is
-    not an equivalent mutant, it is an untested one, and the same three
-    sentences of docstring on `_cosine` claim it is load-bearing.
-
-    Seeded through the fake's `given`, which takes an arbitrary
-    `Sequence[float]` and asks no questions -- the affordance that makes a
-    port's promise breakable on purpose. Same `[bottom, zero, top]` shape as
-    the case above, because the answer is the same one: a candidate the
-    centroid cannot be compared against keeps the index the model-free signals
-    gave it.
+    Seeded through the fake's `given`, which takes an arbitrary `Sequence[float]` and
+    asks no questions. Same `[bottom, zero, top]` shape as the case above, because the
+    answer is the same: a candidate the centroid cannot be compared against keeps the
+    index the model-free signals gave it.
     """
     household = await _household_with_a_centroid()
     origin = await household.title("A Vector Pointing Nowhere", vote_count=500, owned=True)
@@ -519,16 +481,14 @@ async def test_a_vector_of_no_direction_leaves_its_candidate_where_it_was() -> N
 
 
 async def test_a_centroid_re_ranks_the_pool_it_is_given() -> None:
-    """**With an embedder the ordering changes**.
+    """With an embedder the ordering changes.
 
-    which is what kills a centroid that is read and then discarded --
-    `RowContext.taste`'s failure exactly, where a field was fetched on every request and
-    looked at by nobody.
-
-    The premise is asserted rather than assumed: the same fixture is composed
-    twice, once with an embedder and once without, and the two orders must
-    disagree. Without that, a case that merely asserts an order is satisfied
-    by an implementation that never re-ranks at all.
+    That kills a centroid which is read and then discarded -- `RowContext.taste`'s
+    failure exactly, where a field was fetched on every request and looked at by
+    nobody. The premise is asserted rather than assumed: the same fixture is composed
+    twice, once with an embedder and once without, and the two orders must disagree.
+    Without that, a case that merely asserts an order is satisfied by an implementation
+    that never re-ranks at all.
     """
     household = await _household_with_a_centroid()
     # Base order puts `far` first: more votes, and both are owned.
@@ -553,11 +513,10 @@ async def test_a_centroid_re_ranks_the_pool_it_is_given() -> None:
 async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> None:
     """Three embedded candidates at three known angles.
 
-    so the answer is a full ordering rather than "the best one moved to the front".
-
-    A re-rank that partitioned into near and far -- everything above some
-    cosine, then everything else, each half in base order -- passes a
-    two-candidate case and is wrong the moment a third arrives.
+    The answer is a full ordering rather than "the best one moved to the front". A
+    re-rank that partitioned into near and far -- everything above some cosine, then
+    everything else, each half in base order -- passes a two-candidate case and is
+    wrong the moment a third arrives.
     """
     household = await _household_with_a_centroid()
     _, quarter = planted_pair(math.pi / 4, dimension=_DIMENSION)
@@ -580,11 +539,9 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
     assert similarities[0] > similarities[1] > similarities[2], (
         "the premise: the three poles must be strictly ordered by proximity"
     )
-    # **`assert similarities[0] < 1.0` was here and is deleted.** It read as a premise
-    # ("none of the three is the centroid itself") and protected nothing: a candidate
-    # sitting exactly on the centroid is still strictly nearer than the other two, so
-    # the guard above already carries everything this case depends on and no plant that
-    # falsifies this one breaks it.
+    # No `similarities[0] < 1.0` premise: a candidate sitting exactly on the
+    # centroid is still strictly nearer than the other two, so the guard above
+    # already carries everything this case depends on.
 
     pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
     candidates = [one.id for one in pool if one.id in {farthest.id, middle.id, nearest.id}]
@@ -593,9 +550,9 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
 
 
 async def test_the_re_rank_writes_the_ranked_members_into_the_positions_it_read_them_from() -> None:
-    """**Every other re-rank case in this file asserts a permutation that is its own inverse.
+    """The one re-rank case whose permutation is not its own inverse.
 
-    and that makes the two halves of the write unobservable.**.
+    Under a self-inverse permutation the two halves of the write are unobservable.
     """
     household = await _household_with_a_centroid()
     _, quarter = planted_pair(math.pi / 4, dimension=_DIMENSION)
@@ -636,12 +593,10 @@ async def test_the_re_rank_writes_the_ranked_members_into_the_positions_it_read_
 async def test_the_pool_is_capped_at_the_configured_size() -> None:
     """The cap is `USHER_CURATION_POOL_SIZE`, and it is the whole of the prompt's token budget.
 
-    the shipped candidate line costs ~20.4 prompt tokens, re-measured against the real
-    prompt on 2026-08-07, so a cap that stopped applying turns a 4,300-token prompt into
-    whatever the catalog is.
-
-    Asserted as an exact length *and* as which titles survive, because a cap
-    applied before the ordering keeps the wrong ones.
+    Each candidate line costs prompt tokens, so a cap that stopped applying turns a
+    bounded prompt into whatever the catalog is. Asserted as an exact length *and* as
+    which titles survive, because a cap applied before the ordering keeps the wrong
+    ones.
     """
     household = _Household()
     seeded = [await household.title(f"Candidate {index}", vote_count=index) for index in range(6)]
@@ -654,15 +609,14 @@ async def test_the_pool_is_capped_at_the_configured_size() -> None:
 async def test_the_cap_survives_the_re_rank() -> None:
     """The same cap, in the configuration where the re-rank could undo it.
 
-    a re-rank that re-read the catalog, or that appended the embedded members to the
+    A re-rank that re-read the catalog, or that appended the embedded members to the
     pool it was handed, produces a longer pool than the prompt was budgeted for.
 
-    **Positional as well as long**, because a length is satisfied by any three
-    rows. The three the cap must keep are the three most-voted, and they are
-    seeded at three *distinct* angles so the answer also shows the re-rank
-    running inside the cap; the three it must drop all sit on the centroid's
-    own pole, so a re-rank that re-**selected** on proximity rather than
-    re-ordering within the cap would pull them in and still answer with three.
+    **Positional as well as long**, because a length is satisfied by any three rows.
+    The three the cap must keep are the three most-voted, seeded at three *distinct*
+    angles so the answer also shows the re-rank running inside the cap; the three it
+    must drop all sit on the centroid's own pole, so a re-rank that re-**selected** on
+    proximity would pull them in and still answer with three.
     """
     household = await _household_with_a_centroid()
     _, quarter = planted_pair(math.pi / 4, dimension=_DIMENSION)
@@ -677,9 +631,8 @@ async def test_the_cap_survives_the_re_rank() -> None:
     nearest = await household.title("Kept, Nearest", vote_count=3, vector=_pole(0))
     centroid = await _centroid_of(household)
     assert centroid is not None, "the premise: this household has a centroid"
-    # **Two premises, and the weaker one was the only one here.** `assert dropped`
-    # guards a literal `range(3)` -- a fact about the line above it, which is the shape
-    # M8 Task 9's dead guard had.
+    # Two premises: `assert dropped` alone only guards a literal `range(3)`, which
+    # is a fact about the line above it rather than about the cap.
     kept = [
         _cos(centroid.vector, v)
         for v in await _stored_vectors(household, nearest, middle, farthest)
@@ -717,11 +670,10 @@ async def test_the_household_affinities_are_what_the_read_is_asked_for() -> None
     asked: list[tuple[str, ...]] = []
     original = household.titles.list_unwatched_candidates
 
-    # **`limit` carries no default here either, and that is the point of the spelling.**
-    # A stand-in for a port method is a seventh copy of that method's signature, so a
-    # `limit: int = 200` left behind on it is a copy of the very number
-    # `test_the_measured_two_hundred_is_declared_once_and_ read_once` deleted from the
-    # other three -- sitting in the pinning file, where nothing would ever look for it.
+    # `limit` carries no default here either, and that is the point of the spelling:
+    # a stand-in for a port method is another copy of that method's signature, so a
+    # `limit: int = 200` left behind on it is a second spelling of a number that is
+    # declared once -- sitting in the pinning file, where nothing would look for it.
     async def _recorded(
         user_id: uuid.UUID, *, genres: Sequence[str] = (), limit: int
     ) -> list[Title]:
@@ -769,7 +721,7 @@ async def test_an_empty_catalog_is_an_empty_pool() -> None:
 
 
 async def test_an_empty_pool_writes_no_taste_row_for_the_household_it_has_nothing_for() -> None:
-    """**The empty-pool guard's real subject, which is a write and not a return value.**."""
+    """The empty-pool guard's real subject is a write, not a return value."""
     household = _Household()
     service = household.service(embedder=FakeEmbedder())
 
@@ -807,11 +759,9 @@ async def test_the_pool_is_this_households_and_not_the_deployments() -> None:
 async def _household_with_a_centroid() -> _Household:
     """A household five engaged, embedded titles deep.
 
-    the smallest one `TasteService` will build a centroid for.
-
-    All five sit on `_pole(0)`, so the centroid is that pole exactly and every
-    case's planted angles are measured against a known direction rather than
-    against a weighted mean of a hash.
+    The smallest one `TasteService` will build a centroid for. All five sit on
+    `_pole(0)`, so the centroid is that pole exactly and every case's planted angles
+    are against a known direction rather than against a weighted mean of a hash.
     """
     household = _Household()
     for index in range(_MIN_TITLES):
@@ -827,13 +777,11 @@ async def _stored_vectors(household: _Household, *titles: Title) -> list[tuple[f
 
 
 async def _centroid_of(household: _Household) -> Centroid | None:
-    """The centroid `CandidatePoolService` would see.
+    """The centroid `CandidatePoolService` would see, read through the same service.
 
-    read through the same service it reads it through.
-
-    A case asserting its own premise must not compute the centroid a second
-    way: a helper that averaged the fixture's vectors itself would agree with
-    a broken `TasteService` exactly as often as with a working one.
+    A case asserting its own premise must not compute the centroid a second way: a
+    helper that averaged the fixture's vectors itself would agree with a broken
+    `TasteService` exactly as often as with a working one.
     """
     return await household.service(embedder=FakeEmbedder()).taste.centroid(USER)
 
@@ -842,11 +790,10 @@ async def _centroid_of(household: _Household) -> Centroid | None:
 async def test_the_size_is_honoured_whatever_it_is(size: int) -> None:
     """Two sizes rather than one.
 
-    because a cap hard-coded to the default is a cap that passes every case written
-    against the default.
-
-    Positional as well, and seeded worst-first: a length alone is satisfied by
-    any `size` rows, which is what a cap applied before the ordering returns.
+    A cap hard-coded to the default is a cap that passes every case written against
+    the default. Positional as well, and seeded worst-first: a length alone is
+    satisfied by any `size` rows, which is what a cap applied before the ordering
+    returns.
     """
     household = _Household()
     seeded = [await household.title(f"Candidate {index}", vote_count=index) for index in range(6)]
@@ -857,7 +804,7 @@ async def test_the_size_is_honoured_whatever_it_is(size: int) -> None:
 
 
 def test_the_measured_two_hundred_is_declared_once_and_read_once() -> None:
-    """`200` used to appear **six** times and this case pinned three of them."""
+    """A second spelling of the pool size is one that can drift from the declared one."""
     limit = inspect.signature(TitleRepository.list_unwatched_candidates).parameters["limit"]
     size = inspect.signature(CandidatePoolService).parameters["size"]
 

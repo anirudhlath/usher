@@ -10,15 +10,13 @@ from usher.services.rows.recently_added import RecentlyAddedProvider
 
 
 async def test_the_most_recently_seen_item_is_not_the_most_recently_added_one() -> None:
-    """**The front matter's distractor.**.
+    """Ordering by `last_seen_at` instead of `added_at` is the defect this rules out.
 
-    The distractor carries the newest `last_seen_at` in the library and an
-    `added_at` two years old. Under the wrong column it is `cards[0]`; under the
-    right one it is outside the window entirely.
-
-    Unassertable by membership: both implementations return a populated row of
-    real, owned, correctly-hydrated titles. This asserts `cards[0]` **and**
-    that the distractor's id is in no card at all.
+    The distractor carries the newest `last_seen_at` and an `added_at` two years
+    old, so the wrong column makes it `cards[0]` while the right one puts it
+    outside the window. Both implementations return a populated row of real,
+    owned titles, so this asserts `cards[0]` **and** that the distractor's id is
+    in no card at all.
     """
     library = Library()
     scanned_last_night = await library.title(
@@ -72,16 +70,11 @@ async def test_an_item_exactly_at_the_window_edge_is_inside_it() -> None:
 
 
 async def test_a_stale_import_scores_below_a_fresh_one() -> None:
-    """**The score decays where every other single-row provider's is constant**.
+    """The score decays with age where every other single-row provider's is constant.
 
-    because "new" is the one relevance claim that genuinely is a function of time.
-
-    A constant pins this row at a fixed screen position whether the household
-    imported four hundred films this morning or one three weeks ago -- and a
-    home screen that does not visibly react to an import and then stop is a
-    configured screen wearing a composed one's clothes (ADR-0006's premise).
-
-    Both numbers are closed forms of `0.75 * m/(m + days)` at `m = 3.0`.
+    A constant would pin this row at a fixed screen position whether the household
+    imported four hundred films this morning or one three weeks ago. Both numbers
+    are closed forms of `0.75 * m/(m + days)` at `m = 3.0`.
     """
     fresh = Library()
     await fresh.title("This Morning", added=days_ago(0))
@@ -97,10 +90,7 @@ async def test_a_stale_import_scores_below_a_fresh_one() -> None:
 
 
 async def test_the_score_is_measured_from_the_newest_arrival_not_the_mean() -> None:
-    """The row's claim is "something arrived".
-
-    so one film this morning makes it a fresh row even beside twenty from a fortnight
-    ago.
+    """The row's claim is "something arrived", so the newest arrival sets the score.
 
     A mean would let a large old import bury a small new one, which is the opposite of
     what the row is for.
@@ -116,13 +106,11 @@ async def test_the_score_is_measured_from_the_newest_arrival_not_the_mean() -> N
 
 
 async def test_recently_added_fires_on_a_household_that_has_watched_nothing() -> None:
-    """**The only provider that does, and deliberately.**.
+    """The only provider that fires with no watch history, and deliberately.
 
-    It is the honest answer to "what does a fresh install's home screen show?"
-    -- and it is *not* a personalisation fallback: it makes a claim about the
-    **library** (these arrived) rather than about the person, and that claim is
-    true. A generic row pretending to be personalised is the one that survives
-    review; a row openly about the library is simply not about taste.
+    It makes a claim about the **library** (these arrived) rather than about the
+    person, so it is an honest answer for a fresh install rather than a generic
+    row pretending to be personalised.
     """
     library = Library()
     arrived = await library.title("Just Arrived", added=days_ago(1))
@@ -140,13 +128,11 @@ async def test_an_empty_catalog_gets_no_row_rather_than_raising() -> None:
 
 
 async def test_an_item_that_cannot_say_when_it_arrived_is_excluded() -> None:
-    """`media_items.added_at` is nullable.
-
-    and an undated item is excluded by three-valued logic rather than by a predicate.
+    """An undated item is excluded by three-valued logic rather than by a predicate.
 
     Reading a missing `added_at` as "now" would put every undated row at the
     top of this row forever; reading it as the epoch would be a claim the
-    source never made. ADR-0014, on a timestamp.
+    source never made.
     """
     library = Library()
     undated = await library.title("Undated", added=None)

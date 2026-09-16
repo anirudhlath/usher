@@ -57,8 +57,8 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
 def test_the_row_port_declares_behaviour_and_implements_none() -> None:
     """`ports/` has zero concrete behaviour today.
 
-    every method in `ports/search.py`, `ports/source.py` and `ports/repository.py` is
-    abstract -- and `Row` is the first port with an obvious reason to break that,
+    Every method in `ports/search.py`, `ports/source.py` and `ports/repository.py` is
+    abstract, and `Row` is the first port with an obvious reason to break that,
     because PRD 06's sketch puts `hydrate()` and `empty()` on it.
     """
     defined = {
@@ -72,7 +72,7 @@ def test_the_row_port_declares_behaviour_and_implements_none() -> None:
 
 
 def test_a_row_context_cannot_reach_a_session() -> None:
-    """**Trap 4 and contract three, as a structural property.**."""
+    """No `RowContext` field can reach a database session."""
     tree = ast.parse(pathlib.Path(inspect.getfile(RowContext)).read_text())
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -91,17 +91,14 @@ def test_a_row_context_cannot_reach_a_session() -> None:
 
 
 def test_a_row_context_is_frozen_so_a_provider_cannot_stash_state_between_the_two_phases() -> None:
-    """Composition is two phases.
+    """Rules out a mutable context a provider could stash state in.
 
-    and the composer is explicitly allowed to build a row it did not just propose -- out
-    of cache, or after a diversity constraint reordered the set.
-
-    Kills dropping `frozen=True`. A mutable context invites a provider to
-    compute in `propose` and read in `build`, which makes every `build`
-    silently dependent on its own `propose` having run in the same request.
-    That dependency is invisible at the call site and fails as an
-    AttributeError on the *cache hit*, which is the path least covered by
-    any test.
+    Composition is two phases, and the composer is explicitly allowed to build a row
+    it did not just propose -- out of cache, or after a diversity constraint
+    reordered the set. A mutable context invites a provider to compute in `propose`
+    and read in `build`, making every `build` silently dependent on its own `propose`
+    having run in the same request, which fails as an AttributeError on the cache
+    hit: the path least covered by any test.
     """
     ctx = _context()
     assert dataclasses.is_dataclass(ctx)
@@ -110,10 +107,7 @@ def test_a_row_context_is_frozen_so_a_provider_cannot_stash_state_between_the_tw
 
 
 def test_a_row_context_carries_no_centroid_at_all() -> None:
-    """**A field was removed from an ADR-0014 site list.
-
-    which had not happened before, and this is the pin that records it.**.
-    """
+    """`RowContext` carries genre affinities and no centroid at all."""
     annotations = inspect.get_annotations(RowContext, eval_str=True)
     assert annotations, "the annotation scan found nothing, so it proves nothing"
     assert "taste" not in annotations
@@ -123,23 +117,15 @@ def test_a_row_context_carries_no_centroid_at_all() -> None:
 
 
 def test_the_context_carries_the_image_repository_and_never_the_proxys_two_ports() -> None:
-    """**A row names artwork; it does not fetch it.**.
+    """A row names artwork; it does not fetch it.
 
-    M9 ships three image ports and only one of them belongs here.
-    `ImageRepository` answers *which* image, out of this deployment's own
-    database; `ImageFetcher` and `ImageBlobStore` are the proxy's, and they
-    open a socket to a CDN and write bytes to disk respectively. A row holding
-    either would put a network round trip and a filesystem write inside
-    `GET /home`, ten times a screen, behind a thirty-second cache -- the exact
-    shape `services/rows/curated.py` spends a paragraph refusing for
-    `LLMClient`, one port family over.
-
-    Structural rather than behavioural, for that module's reason: a fetcher a
-    row holds and never calls is a fetcher the next change calls. Read as
-    **text**, because a string annotation needs no import and `__name__` is
-    absent on one -- the mutation
-    `test_reading_a_title_never_touches_a_source` measured surviving the
-    obvious spelling.
+    `ImageRepository` answers *which* image, out of this deployment's own database;
+    `ImageFetcher` and `ImageBlobStore` are the proxy's, and they open a socket to a
+    CDN and write bytes to disk respectively. A row holding either would put a network
+    round trip and a filesystem write inside `GET /home`, ten times a screen, behind a
+    thirty-second cache. Structural rather than behavioural -- a fetcher a row holds
+    and never calls is a fetcher the next change calls -- and read as **text**, because
+    a string annotation needs no import and `__name__` is absent on one.
     """
     annotations = inspect.get_annotations(RowContext)
     assert annotations, "the annotation scan found nothing, so it proves nothing"
@@ -150,55 +136,46 @@ def test_the_context_carries_the_image_repository_and_never_the_proxys_two_ports
 
 
 async def test_a_provider_with_nothing_to_say_proposes_nothing() -> None:
-    """PRD 06: "A provider returns nothing when it has nothing to say.".
+    """A provider returns nothing when it has nothing to say.
 
-    Kills a base `propose` that raises on an empty signal, and kills one
-    that substitutes a default row. The failure this shape exists to refuse
-    is the popular-titles fallback: a provider that, finding no signal,
-    returns something generic, producing a screen that looks personalised on
-    a household that has watched nothing.
-
-    **This case is deliberately weak and Group H must not treat it as
-    cover.** It asserts that empty is a legal, non-exceptional return
-    through a fake. The real guarantee is nine per-provider cases, each
-    seeding the distractor a broken build would rank first.
+    Rules out a base `propose` that raises on an empty signal, and one that
+    substitutes a default row -- the popular-titles fallback, which produces a screen
+    that looks personalised on a household that has watched nothing. This case only
+    establishes that empty is a legal, non-exceptional return through a fake; the real
+    guarantee is the per-provider cases, each seeding the distractor a broken build
+    would rank first.
     """
     provider = FakeRowProvider(proposals=())
     assert await provider.propose(_context()) == ()
 
 
 def test_propose_has_no_parameter_that_assumes_a_fallback() -> None:
-    """The port cannot prevent a popular-titles fallback.
+    """The port cannot prevent a popular-titles fallback, only refuse to ask for one.
 
-    It can refuse to ask for one.
-
-    Kills adding `min_results`, `limit` or `fallback` to `propose`. A
-    signature carrying `min_results` has already decided that a provider
-    with nothing to say should return something anyway, and every
-    implementer then reads that as the requirement it looks like.
+    Rules out adding `min_results`, `limit` or `fallback` to `propose`. A signature
+    carrying `min_results` has already decided that a provider with nothing to say
+    should return something anyway, and every implementer reads that as the
+    requirement it looks like.
     """
     parameters = set(inspect.signature(RowProvider.propose).parameters)
     assert parameters == {"self", "ctx"}
 
 
 def test_a_scored_row_carries_the_row_it_scores() -> None:
-    """Kills `ScoredRow(row_slug: str, score: float)`.
+    """Rules out `ScoredRow(row_slug: str, score: float)`.
 
-    A slug plus a `dict[str, Row]` on the composer is a lookup table, a
-    second source of truth, and a KeyError waiting for the first provider
-    that proposes two rows under one slug -- which FranchiseProvider, at one
-    row per franchise, is well placed to do.
-
-    This is also why ScoredRow is in `ports/` and not in `domain/rows.py`
-    where this plan's file structure put it: it carries a Row, Row is a
-    port, and usher.domain may not import usher.ports.
+    A slug plus a `dict[str, Row]` on the composer is a lookup table, a second source
+    of truth, and a KeyError waiting for the first provider that proposes two rows
+    under one slug -- which FranchiseProvider, at one row per franchise, is well
+    placed to do. It lives in `ports/` rather than `domain/rows.py` because it carries
+    a Row, Row is a port, and usher.domain may not import usher.ports.
     """
     assert "row" in {field.name for field in dataclasses.fields(ScoredRow)}
     assert ScoredRow.__dataclass_fields__["row"].type in (Row, "Row")
 
 
 def test_the_always_first_pin_is_a_typed_flag_on_the_proposal() -> None:
-    """**The spelling Group A owes Group I**, and the one it may not be."""
+    """Pinning is a typed flag on the proposal, not a slug the composer knows."""
     fields = {field.name: field for field in dataclasses.fields(ScoredRow)}
     assert fields["pinned"].type in (bool, "bool")
     assert fields["pinned"].default is False
@@ -210,11 +187,10 @@ def test_the_always_first_pin_is_a_typed_flag_on_the_proposal() -> None:
 async def test_a_row_builds_a_row_that_names_its_own_slug_and_family() -> None:
     """The proposal and the built row must agree about what they are.
 
-    or the composer's per-family cap counts one thing and the screen shows another.
-
-    Kills a `BuiltRow` assembled from constants inside `build` rather than
-    from the row's own properties -- which is invisible on a single-row
-    screen and misattributes the cap on a full one.
+    Otherwise the composer's per-family cap counts one thing and the screen shows
+    another. Rules out a `BuiltRow` assembled from constants inside `build` rather
+    than from the row's own properties -- invisible on a single-row screen, and it
+    misattributes the cap on a full one.
     """
     row = FakeRow("because-you-watched-dune")
     built = await row.build(_context())
@@ -224,10 +200,7 @@ async def test_a_row_builds_a_row_that_names_its_own_slug_and_family() -> None:
 
 
 def test_every_row_context_field_is_read_by_at_least_one_provider() -> None:
-    """**A field with no consumer is what this project deletes.
-
-    and until this case existed nothing noticed one.**.
-    """
+    """A `RowContext` field no provider reads is a field to delete."""
     provider_dir = pathlib.Path(inspect.getfile(RowContext)).parents[1] / "services" / "rows"
     sources = sorted(provider_dir.glob("*.py"))
     assert len(sources) >= 9, (

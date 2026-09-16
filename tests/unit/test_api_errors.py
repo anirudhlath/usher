@@ -66,10 +66,8 @@ async def test_a_missing_field_does_not_echo_its_siblings(client: AsyncClient) -
 async def test_the_field_name_and_reason_survive(client: AsyncClient) -> None:
     """Stripping `input` must not turn a 422 into an unactionable one.
 
-    a client still has to learn *which* field was wrong and why.
-
-    They ride in RFC 9457's `errors` extension member now; this read `["detail"][0]`
-    until M9.
+    A client still has to learn *which* field was wrong and why, and both ride in RFC
+    9457's `errors` extension member.
     """
     response = await client.post("/probe", json={"password": PASSWORD})
     error: dict[str, Any] = response.json()["errors"][0]
@@ -82,12 +80,10 @@ async def test_the_field_name_and_reason_survive(client: AsyncClient) -> None:
 async def test_the_fixed_detail_sentence_interpolates_nothing_submitted(
     client: AsyncClient,
 ) -> None:
-    """`detail` is where a well-meaning "field `password` must be a string.
+    """`detail` is a constant, and the same constant whatever was submitted.
 
-    got `hunter2`" would land, and the envelope is the first thing in this project with
-    an obvious place to put one.
-
-    It is a constant, and the same constant whatever was submitted.
+    It is where a well-meaning "field `password` must be a string, got `hunter2`" would
+    land.
     """
     first = await client.post("/probe", json={"password": PASSWORD})
     second = await client.post("/probe", json={"name": "n", "password": [PASSWORD]})
@@ -96,10 +92,9 @@ async def test_the_fixed_detail_sentence_interpolates_nothing_submitted(
 
 
 async def test_a_wrong_typed_field_does_not_echo_its_own_value(client: AsyncClient) -> None:
-    """The other shape.
+    """The other shape, where `input` is the offending value rather than the parent dict.
 
-    here `input` is the offending value itself rather than the parent dict, which is
-    just as much a credential when the offending field *is* the credential.
+    That value is just as much a credential when the offending field *is* the credential.
     """
     submitted = {"name": "n", "password": [PASSWORD]}
     response = await client.post("/probe", json=submitted)
@@ -113,14 +108,11 @@ async def test_a_wrong_typed_field_does_not_echo_its_own_value(client: AsyncClie
 async def test_create_app_registers_the_handler_on_the_real_admin_route() -> None:
     """The handler being correct and the handler being *installed* are two facts.
 
-    and only the second one is a wiring mistake anyone can make.
-
-    Verified by mutation: deleting the `add_exception_handler` line from
-    `create_app` used to be caught only by the integration suite, so a
-    Docker-free run reported green on an app that echoed credentials. This
-    needs no database -- body validation fails before the session
-    dependency is ever used, so an unreachable DSN is fine and keeps the
-    test in `tests/unit/`.
+    Only the second is a wiring mistake anyone can make: without this case, deleting the
+    `add_exception_handler` line from `create_app` leaves a Docker-free run green on an
+    app that echoes credentials. It needs no database -- body validation fails before
+    the session dependency is ever used, so an unreachable DSN keeps the case in
+    `tests/unit/`.
     """
     app = create_app(
         Settings(
@@ -148,11 +140,9 @@ async def test_an_unexpected_exception_type_degrades_to_an_empty_422() -> None:
     A mis-registration must not raise a second exception from inside the error path --
     that turns a 422 into a 500 and loses the original failure.
 
-    Driven with a real `Request` rather than `None` since M9: `instance` is
-    read off it, so `None` would now raise the `AttributeError` this case
-    exists to forbid *from the case itself* and prove nothing about the
-    handler. The scope is the minimum ASGI one -- there is no app, no route
-    and no client here on purpose.
+    Driven with a real `Request` rather than `None`, because `instance` is read off it
+    and `None` would raise the `AttributeError` this case exists to forbid *from the
+    case itself*. The scope is the minimum ASGI one: no app, no route, no client.
     """
     request = Request(
         {
@@ -207,13 +197,11 @@ async def test_an_unexpected_exception_type_is_not_an_http_exception_either() ->
 
 
 async def test_a_status_with_no_code_in_the_vocabulary_is_left_alone() -> None:
-    """A 403 has no `ProblemCode` today and inventing one here is exactly what the two-pass.
-
-    split exists to prevent -- the vocabulary is group V's ADR-0030.
+    """A 403 has no `ProblemCode`, and inventing one here is what the two-pass split forbids.
 
     So it degrades to FastAPI's own shape rather than to a guessed member, and this case
-    is what will fail, loudly and by name, on the day ADR-0030 gives 403 a code and
-    nobody wires it up.
+    is what will fail, loudly and by name, on the day 403 gains a code and nobody wires
+    it up.
     """
     app = FastAPI()
     app.add_exception_handler(StarletteHTTPException, http_error_as_a_problem_document)
@@ -231,21 +219,17 @@ async def test_a_status_with_no_code_in_the_vocabulary_is_left_alone() -> None:
 
 
 async def test_the_port_error_handler_is_on_the_app_rather_than_on_one_route() -> None:
-    """Every route gets it, which is the whole of the repair.
+    """Every route gets it, so it is asserted on the registration.
 
-    So it is asserted on the registration rather than through the one route
-    that happens to raise.
-
-    `tests/unit/test_api_images.py` drives the behaviour end to end; what that
-    cannot see is a handler re-implemented as a fourth `except` in
-    `get_image`, which answers those cases identically and leaves the next
-    route's 429 outside the envelope exactly as before.
+    Not through the one route that happens to raise: `tests/unit/test_api_images.py`
+    drives the behaviour end to end, and what that cannot see is a handler
+    re-implemented as a fourth `except` in `get_image`, which answers those cases
+    identically and leaves the next route's 429 outside the envelope.
 
     **`PortUnavailable` is deliberately absent and is the control.** A handler
-    registered on `UsherPortError` would sweep it up too, and
-    `api/routers/rows.py` records why that is wrong: the thing that route
-    cannot reach is Postgres, so a 503 there claims one endpoint is degraded
-    in a deployment where every one is.
+    registered on `UsherPortError` would sweep it up too, and `api/routers/rows.py`
+    records why that is wrong: the thing that route cannot reach is Postgres, so a 503
+    there claims one endpoint is degraded in a deployment where every one is.
     """
     app = create_app(
         Settings(
@@ -265,7 +249,7 @@ async def test_the_port_error_handler_is_on_the_app_rather_than_on_one_route() -
 async def test_the_port_error_handler_degrades_rather_than_raising_a_second_time() -> None:
     """The degeneracy every handler in this module carries.
 
-    registered for something it does not branch on, it answers a plain 500 rather than
+    Registered for something it does not branch on, it answers a plain 500 rather than
     falling off the end and returning `None`, which ASGI reports as a lost response
     rather than as the original failure.
     """

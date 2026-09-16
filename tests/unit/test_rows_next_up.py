@@ -1,4 +1,4 @@
-"""`NextUpProvider`, and the row the milestone opens by describing."""
+"""`NextUpProvider`, and the row it fills."""
 
 import uuid
 from datetime import timedelta
@@ -24,12 +24,12 @@ async def _mid_season_two(library: Library) -> uuid.UUID:
 
 
 async def test_next_up_returns_the_episode_after_the_last_played_one() -> None:
-    """**The milestone's opening example.**.
+    """Rules out a "first unplayed episode" implementation.
 
     S02E04 was the last played, so the card is S02E05. The first-episode
-    implementation returns S01E01: unplayed, plausible, correctly hydrated, and
-    the same series -- so `assert series_id in {c.title_id for c in cards}`
-    passes against it, forever, for every series in the library.
+    implementation returns S01E01: unplayed, plausible, correctly hydrated, and the
+    same series -- so an assertion on `title_id` alone passes against it forever, for
+    every series in the library.
     """
     library = Library()
     series = await _mid_season_two(library)
@@ -42,13 +42,11 @@ async def test_next_up_returns_the_episode_after_the_last_played_one() -> None:
 
 
 async def test_the_next_episode_after_a_season_finale_is_the_next_seasons_premiere() -> None:
-    """S01E10 played, season one complete, S02E01 exists.
+    """S01E10 played and season one complete, so the card is S02E01.
 
-    The card is S02E01.
-
-    Here rather than in Task 15 because a provider that re-derived "next" from
-    what the repository returned can get this right for one series and wrong
-    for the one whose season numbering has a gap -- and the row still renders.
+    A provider that re-derived "next" from what the repository returned can get this
+    right for one series and wrong for the one whose season numbering has a gap --
+    and the row still renders.
     """
     library = Library()
     series = await library.series("A Show Between Seasons")
@@ -79,13 +77,11 @@ async def test_a_fully_watched_series_never_wraps_back_to_its_first_episode() ->
 
 
 async def test_a_series_the_household_has_never_started_offers_no_next_episode() -> None:
-    """*"S01E01 of everything unstarted" is the whole unwatched library wearing a personalised.
+    """A series never started has a *first* episode, not a next one.
 
-    row's title.*.
-
-    A series never started has a *first* episode, not a next one. Seeded with
-    twenty untouched series against one real one, so the wrong implementation
-    returns twenty-one cards of which one is right.
+    "S01E01 of everything unstarted" is the whole unwatched library wearing a
+    personalised row's title. Seeded with twenty untouched series against one real
+    one, so the wrong implementation returns twenty-one cards of which one is right.
     """
     library = Library()
     watching = await _mid_season_two(library)
@@ -100,12 +96,12 @@ async def test_a_series_the_household_has_never_started_offers_no_next_episode()
 
 
 async def test_an_unowned_next_episode_is_omitted_rather_than_shown_unplayable() -> None:
-    """**The one filter this provider owns rather than the repository.**.
+    """The one filter this provider owns rather than the repository.
 
-    "Next up" that cannot be played is worse than absent. Seeded so the
-    unowned series is the *more recently watched* of two, which is where a
-    correct ordering puts it first -- so an implementation missing the filter
-    opens the row with a card nothing can play.
+    "Next up" that cannot be played is worse than absent. Seeded so the unowned
+    series is the *more recently watched* of two, which is where a correct ordering
+    puts it first -- so an implementation missing the filter opens the row with a
+    card nothing can play.
     """
     library = Library()
     playable = await library.series("Playable")
@@ -122,13 +118,11 @@ async def test_an_unowned_next_episode_is_omitted_rather_than_shown_unplayable()
 
 
 async def test_next_up_costs_the_same_calls_against_three_series_and_thirty() -> None:
-    """Held fixed the way M4's ingest cases hold it.
+    """Rules out one repository round trip per series.
 
-    Fails the per-series loop -- which returns the **correct row**, which is
-    exactly why no assertion about contents can see it, and which is one round
-    trip per series on a screen PRD 08 budgets as a single request.
-    `list_for_title` is 20,001 rows / 22.901 ms for one card on the measured
-    pathological series.
+    The per-series loop returns the **correct row**, which is exactly why no
+    assertion about contents can see it, on a screen PRD 08 budgets as a single
+    request.
     """
 
     async def _calls(series_count: int) -> int:
@@ -145,13 +139,11 @@ async def test_next_up_costs_the_same_calls_against_three_series_and_thirty() ->
 
 
 async def test_the_row_is_ordered_by_what_the_household_watched_most_recently() -> None:
-    """A `dict` from a batch read is in whatever order the statement produced.
-
-    and this row's order is the answer -- the show watched last night belongs first.
+    """The show watched last night belongs first, not whatever order the batch read gave.
 
     Seeded so insertion order is the reverse of watch order, because
-    `watch_states.id` is a UUIDv7 and a fixture seeded newest-first is
-    satisfied by `ORDER BY id` forever.
+    `watch_states.id` is a UUIDv7 and a fixture seeded newest-first is satisfied by
+    `ORDER BY id` forever.
     """
     library = Library()
     oldest = await library.series("Watched Long Ago")
@@ -198,14 +190,11 @@ async def test_an_empty_catalog_gets_no_row_rather_than_raising() -> None:
 
 
 async def test_the_card_names_the_series_and_carries_the_episode_it_can_play() -> None:
-    """`title_id` is the **series**.
+    """`title_id` is the **series**, and the episode rides alongside.
 
-    every other field on the card describes the series -- and the chapter rides
-    alongside.
-
-    `episode_id` is what makes the card playable: without it a Next Up card can
-    only navigate to the series page, which is one more click than this row
-    exists to remove.
+    `episode_id` is what makes the card playable: without it a Next Up card can only
+    navigate to the series page, which is one more click than this row exists to
+    remove.
     """
     library = Library()
     series = await _mid_season_two(library)

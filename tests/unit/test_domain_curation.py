@@ -13,7 +13,7 @@ from usher.domain.curation import CuratedRow, LLMCall, LLMPurpose
 # asserts that premise before asserting the ordering. Minting these with
 # `new_id()` would defeat the point: UUIDv7 is monotonic, so three ids minted in
 # a row arrive already sorted and a validator that sorted the tuple would
-# survive its own test -- the trap that cost M7 five untested orderings.
+# survive its own test.
 _CARD_A = uuid.UUID("f0000000-0000-7000-8000-00000000000a")
 _CARD_B = uuid.UUID("10000000-0000-7000-8000-00000000000b")
 _CARD_C = uuid.UUID("90000000-0000-7000-8000-00000000000c")
@@ -84,21 +84,17 @@ def test_a_curated_row_carries_every_field_it_was_given() -> None:
 
 
 def test_a_curated_row_with_no_cards_is_not_constructible() -> None:
-    """**The one place this project's usual rule reverses**.
-
-    so it is the one place a reader will assume `BuiltRow`'s answer applies and it does
-    not.
+    """The one place the usual rule reverses, so `BuiltRow`'s answer does not apply.
 
     Kills `card_title_ids: tuple[uuid.UUID, ...] = ()` -- which is exactly what
-    `BuiltRow.cards` is, one module over, with a docstring arguing for it: an
-    empty *source* row is a true state ("the household owns nothing in this
-    genre") and `Row.empty()` is a real method because of it.
+    `BuiltRow.cards` is, one module over, with a docstring arguing for it: an empty
+    *source* row is a true state ("the household owns nothing in this genre") and
+    `Row.empty()` is a real method because of it.
 
-    A stored curated row with no cards is not a state. It is a validator that
-    ran and kept nothing (ADR-0028: a generation that validates to zero rows is
-    a failure), and persisting one puts a heading with no shelf under it on the
-    screen. The row is discarded whole instead -- never padded from the pool,
-    which would be a fabricated recommendation wearing a model's reason string.
+    A stored curated row with no cards is not a state. It is a validator that ran and
+    kept nothing, and persisting one puts a heading with no shelf under it on the
+    screen. The row is discarded whole instead -- never padded from the pool, which
+    would be a fabricated recommendation wearing a model's reason string.
     """
     with pytest.raises(ValidationError):
         _row(card_title_ids=())
@@ -120,7 +116,7 @@ def test_card_ids_are_a_tuple_even_when_a_list_is_handed_in() -> None:
 
 
 def test_a_positional_slug_survives_two_rows_that_chose_the_same_title() -> None:
-    """**Kills minting `slug` from the model's prose title.**.
+    """Kills minting `slug` from the model's prose title.
 
     Three separate failures sit behind that one-liner, and the case can only
     exhibit the second: a title is arbitrary text that would need escaping to be
@@ -161,8 +157,8 @@ def test_position_starts_at_zero_and_refuses_a_negative() -> None:
 def test_a_row_with_nothing_to_explain_carries_none_and_not_an_empty_string() -> None:
     """Kills a validator that normalises `""` to `None`, and kills `reason: str = ""`.
 
-    `None` is reachable here and is not reachable from any of M7's nine
-    providers -- all nine return a sentence -- so this is the first plausible row
+    `None` is reachable here and is not reachable from any shipped row
+    provider -- all of them return a sentence -- so this is the first plausible row
     with nothing to say, and PRD 06's reason is *spoken aloud* by Alfred rather
     than only displayed. The two values render differently and must stay
     distinguishable: `None` is "this row needs no subtitle", `""` is "the model
@@ -184,13 +180,11 @@ def test_an_empty_text_column_is_rejected_on_either_model() -> None:
     real shelf, and an empty `model_name` is what makes "these rows were written
     by a model we no longer run" unanswerable.
 
-    **`LLMCall.model` is the fourth and it is covered here rather than left to
-    its twin**, which is how it went uncovered: this case looped over
-    `CuratedRow`'s three, so deleting the identical constraint on the ledger
-    passed the whole file. The argument lands harder there. `model_name` on a
-    row answers a question an operator asks occasionally; `GROUP BY model` on
-    `llm_calls` **is** PRD 10's cost panel, so an empty one puts real spend in
-    an unlabelled bucket that no per-model price can ever be applied to.
+    **`LLMCall.model` is the fourth and is covered here rather than left to its
+    twin**, and the argument lands harder there: `model_name` on a row answers a
+    question an operator asks occasionally, while `GROUP BY model` on `llm_calls`
+    **is** PRD 10's cost panel, so an empty one puts real spend in an unlabelled
+    bucket that no per-model price can ever be applied to.
     """
     for blank in ("slug", "title", "model_name"):
         with pytest.raises(ValidationError):
@@ -281,8 +275,8 @@ def test_an_llm_call_carries_prd_10s_columns() -> None:
 def test_the_two_legal_states_of_the_ledger_are_both_constructible() -> None:
     """The control for the two refusals below.
 
-    Without it, `_ok_and_error_must_agree` raising unconditionally passes both of
-    a guard that refuses everything is indistinguishable from a guard that
+    Without it, an `_ok_and_error_must_agree` that raised unconditionally would pass
+    both: a guard that refuses everything is indistinguishable from a guard that
     refuses the right things, judged only by what it rejects.
     """
     assert _call(ok=True, error=None).error is None
@@ -301,16 +295,14 @@ def test_a_successful_call_carries_no_error() -> None:
 
 
 def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -> None:
-    """Kills deleting the second `_ok_and_error_must_agree` clause.
+    """Kills deleting the second `_ok_and_error_must_agree` clause, or weakening it.
 
-    and kills weakening it from `not self.error` to `self.error is None`.
-
-    The second mutation is the one that survives a carelessly written case. A
-    failed call whose error is `""` is a row an operator cannot act on in
-    exactly the way a `None` is -- it renders as an empty cell rather than as a
-    missing one -- and `""` is what a service reaches for when it has an
-    exception it could not turn into a sentence. So both spellings of "no
-    reason" are refused, and the case asserts both.
+    Weakening `not self.error` to `self.error is None` is what survives a carelessly
+    written case. A failed call whose error is `""` is a row an operator cannot act on
+    in exactly the way a `None` is -- it renders as an empty cell rather than as a
+    missing one -- and `""` is what a service reaches for when it has an exception it
+    could not turn into a sentence. So both spellings of "no reason" are refused, and
+    the case asserts both.
     """
     with pytest.raises(ValidationError):
         _call(ok=False, error=None)
@@ -319,11 +311,7 @@ def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -
 
 
 def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None:
-    """**The escape hatch is deliberate.
-
-    and it is why this invariant is a `model_validator(mode="after")` rather than a
-    `model_post_init`.**.
-    """
+    """The escape hatch is why this invariant is a `model_validator(mode="after")`."""
     smuggled = LLMCall.model_construct(
         id=uuid.uuid4(),
         at=datetime.now(UTC),
@@ -345,7 +333,7 @@ def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None
 
 
 def test_a_call_that_answered_perfectly_and_kept_nothing_is_a_failure() -> None:
-    """**ADR-0028 rule 3, which is why `ok` is not "the HTTP call returned 200".**."""
+    """`ok` is a judgement about the answer, not "the HTTP call returned 200"."""
     call = _call(ok=False, error="validated to zero rows", tokens_out=316)
     assert (call.ok, call.error) == (False, "validated to zero rows")
     assert (call.tokens_in, call.tokens_out) == (2924, 316)
@@ -372,21 +360,17 @@ def test_evolve_re_runs_the_ok_error_agreement() -> None:
 def test_cost_is_a_decimal_because_a_month_of_these_is_summed() -> None:
     """Kills `cost_usd: float`.
 
-    $3/Mtok on 1,200 tokens is exactly 0.0036, which binary floating point
-    cannot represent -- so the assertion is the *sum*, and there is deliberately
-    no `isinstance` above it. There was, and it shadowed this: under
-    `cost_usd: float` the case died on the type check and the line that makes
-    the argument never ran. A thousand calls at that price is exactly $3.60 and
-    `float` answers 3.60000000000004 -- measured, not asserted -- which is a
-    cost dashboard that disagrees with itself depending on how the rows were
-    grouped, and a total that never equals the sum of its own monthly subtotals.
-    Standing alone, the sum kills the mutation on
-    `TypeError: unsupported operand type(s)`, which is the failure that names
-    the wrong implementation.
+    $3/Mtok on 1,200 tokens is exactly 0.0036, which binary floating point cannot
+    represent -- so the assertion is the *sum*, and there is deliberately no
+    `isinstance` above it, which would shadow the line that makes the argument. A
+    thousand calls at that price is exactly $3.60 and `float` answers
+    3.60000000000004, which is a cost dashboard that disagrees with itself depending
+    on how the rows were grouped, and a total that never equals the sum of its own
+    monthly subtotals. Standing alone, the sum kills the wrong type on
+    `TypeError: unsupported operand type(s)`.
 
-    `Decimal` is pinned on the port too (`test_llm_usage_cost_is_decimal_not_
-    float`), and this is the end of that chain: `LLMUsage.cost_usd` is what gets
-    written here.
+    `Decimal` is pinned on the port too, and this is the end of that chain:
+    `LLMUsage.cost_usd` is what gets written here.
     """
     call = _call(cost_usd=Decimal("0.0036"))
     assert sum((call.cost_usd for _ in range(1000)), Decimal(0)) == Decimal("3.60")
@@ -395,13 +379,12 @@ def test_cost_is_a_decimal_because_a_month_of_these_is_summed() -> None:
 def test_negative_tokens_latency_or_cost_are_all_rejected() -> None:
     """Kills dropping `ge=0` from any one of the four numeric columns.
 
-    which is why each is asserted separately rather than through one representative.
-
-    None of the four has a negative reading. A negative token count or latency
-    is a subtraction done in the wrong order against a clock or a counter, and a
-    negative cost is a credit -- which would make `SUM(cost_usd)` under-report
-    spend by however much of it was recorded backwards, on the one table whose
-    entire purpose is to total correctly.
+    Each is asserted separately rather than through one representative. None of the
+    four has a negative reading: a negative token count or latency is a subtraction
+    done in the wrong order against a clock or a counter, and a negative cost is a
+    credit -- which would make `SUM(cost_usd)` under-report spend by however much of
+    it was recorded backwards, on the one table whose entire purpose is to total
+    correctly.
     """
     with pytest.raises(ValidationError):
         _call(tokens_in=-1)
@@ -414,7 +397,7 @@ def test_negative_tokens_latency_or_cost_are_all_rejected() -> None:
 
 
 def test_an_llm_call_has_no_user_id() -> None:
-    """**Deliberate, and specified: PRD 10's column list has none.**.
+    """There is no `user_id` on a cost row, and PRD 10's column list has none.
 
     Kills adding `user_id: uuid.UUID | None = None`, which is the five-line diff
     somebody writes after being asked "which user did this cost belong to". The
@@ -486,22 +469,15 @@ def test_the_purpose_vocabulary_is_closed_at_the_two_that_have_call_sites() -> N
     spelling. An exact set rather than a membership check, so a third member
     cannot arrive without this list moving and someone reading that rule.
 
-    **Both members have a call site as of 2026-08-07** and the name of this
-    case has stopped being aspirational: `CurationService` emits `CURATION`
-    and `QueryExpansionService` emits `QUERY_EXPANSION`. It was declared in M1
-    because PRD 10 names it as a column value and went four milestones with no
-    emitter -- which is why the exception used to be written down here, and why
-    it is worth recording that it closed rather than deleting the sentence.
+    **Both members have a call site**: `CurationService` emits `CURATION` and
+    `QueryExpansionService` emits `QUERY_EXPANSION`.
     """
     assert set(LLMPurpose) == {LLMPurpose.CURATION, LLMPurpose.QUERY_EXPANSION}
     assert {p.value for p in LLMPurpose} == {"curation", "query_expansion"}
 
 
 def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> None:
-    """**What makes the move to `usher.domain` invisible to every caller.
-
-    and exactly the property a tidy-up would break.**.
-    """
+    """What makes the move to `usher.domain` invisible to every caller."""
     import usher.domain.curation as domain_module
     import usher.ports.llm as port_module
     from usher.ports.llm import LLMPurpose as PortLLMPurpose

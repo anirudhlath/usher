@@ -10,7 +10,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _SCANNED_ROOTS = ("src", "tests")
-# `.csv` joined for MovieLens (M7).
+# `.csv` joined for MovieLens.
 _SCANNED_SUFFIXES = frozenset({".py", ".json", ".jsonl", ".tsv", ".md", ".sql", ".txt", ".csv"})
 _FIXTURES = _REPO / "tests" / "fixtures"
 
@@ -259,8 +259,7 @@ def test_every_imdb_id_is_in_the_reserved_synthetic_band() -> None:
 
     Real tconsts and nconsts sit far below the `tt99`/`nm99` band, so this
     catches a pasted row, a pasted payload and a hand-typed "recognisable"
-    id alike -- the last being how the rule was broken before: an id typed
-    by hand is exactly as real as one that was copied.
+    id alike -- one typed by hand is exactly as real as one that was copied.
     """
     offenders = _offending_imdb_ids()
     assert offenders == [], (
@@ -270,14 +269,11 @@ def test_every_imdb_id_is_in_the_reserved_synthetic_band() -> None:
 
 
 def test_every_id_in_a_fixture_is_synthetic() -> None:
-    """Every entity id in a committed fixture is above the synthetic floor (or zero-filled.
+    """Every entity id in a committed fixture is synthetic.
 
-    for the two opaque id shapes).
-
-    A TMDb/TVDb id has no shape to validate, so the floor is the check: at
-    `_SYNTHETIC_ID_FLOOR` it is two orders of magnitude clear of every live
-    id space this project has measured, and a real payload pasted in fails
-    on its very first `"id"`.
+    A TMDb/TVDb id has no shape to validate, so `_SYNTHETIC_ID_FLOOR` is the
+    check -- it sits clear of every live id space, and a real payload pasted
+    in fails on its very first `"id"`.
     """
     values = _fixture_id_values()
     offenders = [f"{where} = {value!r}" for where, value in values if not _is_synthetic_id(value)]
@@ -293,9 +289,8 @@ def test_no_identifier_this_repository_once_committed_has_come_back() -> None:
     Scoped to a keyword argument, a JSON provider key or a `ProviderRef`
     value, so a listed id appearing as a byte count or a line number is not
     a finding while the same number in an `imdb_id=`/`tmdb_id=` position is.
-    TMDb's own reference pages illustrate `/movie` and `/tv` with two real
-    ids, which is precisely how transcribing from documentation put real
-    ids here in the first place -- the root cause this list exists for.
+    Provider documentation illustrates its endpoints with real ids, and
+    transcribing from it is what this list exists to catch.
     """
     offenders: list[str] = []
     for path in _scanned_files():
@@ -356,7 +351,7 @@ def test_the_guard_reads_what_it_claims_to_read(relative: str) -> None:
 
     Without this, deleting a root from `_SCANNED_ROOTS`, narrowing
     `_SCANNED_SUFFIXES`, or moving a fixture out of `tests/fixtures/` leaves
-    a green run that measured nothing -- the same failure shape as a
+    a green run that checked nothing -- the same failure shape as a
     `sitecustomize.py` that is not on `PYTHONPATH`. Parametrized rather than
     a set comparison so a new fixture does not fail this test; the point is
     that nothing already covered silently stops being covered.

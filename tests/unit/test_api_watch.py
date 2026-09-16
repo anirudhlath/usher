@@ -242,14 +242,12 @@ async def test_post_played_marks_played_and_keeps_the_stored_position(
 async def test_delete_played_does_not_zero_the_position(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """M3's destructive-route finding.
+    """`DELETE /played` clears the played flag and leaves the position alone.
 
-    asserted on the **stored row** rather than on the response body -- a route that
+    Asserted on the **stored row** rather than on the response body -- a route that
     rendered the old position while writing a zero would pass the weaker assertion.
-
-    Emby's `DELETE /Users/{u}/PlayedItems/{item}` resets `PlayCount`, clears
-    `LastPlayedDate` *and* clears a non-zero resume position, measured against
-    4.9.5.0. Usher's local write does none of the three.
+    Emby's own `DELETE /Users/{u}/PlayedItems/{item}` clears a non-zero resume position
+    as well; Usher's local write does not.
     """
     await client.put(
         f"/watch/titles/{household.title_id}",
@@ -277,7 +275,7 @@ async def test_a_write_enqueues_the_write_back_through_the_shipped_graph(
 ) -> None:
     """The route's own composition root, resolved by FastAPI rather than called.
 
-    an unresolvable `Depends` graph is a startup error a direct call to the service
+    An unresolvable `Depends` graph is a startup error a direct call to the service
     cannot produce.
     """
     await client.put(
@@ -291,7 +289,7 @@ async def test_a_write_enqueues_the_write_back_through_the_shipped_graph(
 async def test_the_request_commits_before_it_publishes(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """ADR-0033 through a real request.
+    """The write is durable before the frame goes out, through a real request.
 
     The commit the service makes is the request's own session's, so the frames a client
     receives describe state a second connection could already read.
@@ -318,7 +316,7 @@ async def test_the_screen_cache_the_app_holds_is_the_one_that_is_dropped(
 ) -> None:
     """The app's one `RowCache`, never a request-scoped one.
 
-    a request-scoped cache caches nothing, and invalidating one would leave the
+    A request-scoped cache caches nothing, and invalidating one would leave the
     household's real screen warm and stale, which is the half of the bug that has no
     visible symptom.
     """
@@ -398,7 +396,7 @@ async def test_marking_an_unknown_title_played_is_a_404_problem_document(
 async def test_a_malformed_id_is_a_422_whose_errors_carry_no_input(
     client: httpx.AsyncClient,
 ) -> None:
-    """A2's envelope, and the `input` strip that is the reason it exists.
+    """The error envelope, and the `input` strip that is the reason it exists.
 
     `instance` is the request path and therefore does echo the rejected path
     parameter -- there is no spelling that avoids it, and it is not the leak
@@ -422,10 +420,9 @@ async def test_a_malformed_id_is_a_422_whose_errors_carry_no_input(
 async def test_a_negative_position_is_a_422_naming_the_field(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """`Field(ge=0)` on the request model rather than a `CheckViolation` from.
+    """`Field(ge=0)` on the request model, not a `CheckViolation` from the constraint.
 
-    `ck_watch_states_position_non_negative` -- the same value, rejected where a client
-    can be told which field it was.
+    The same value, rejected where a client can be told which field it was.
     """
     response = await client.put(
         f"/watch/titles/{household.title_id}",
@@ -444,9 +441,9 @@ async def test_a_negative_position_is_a_422_naming_the_field(
 async def test_a_put_with_no_body_is_a_422_rather_than_a_partial_write(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """Both fields are required, for the reason M3 measured at the source.
+    """Both fields are required.
 
-    a body that names only one of them is what flips a played item to unplayed when the
+    A body that names only one of them is what flips a played item to unplayed when the
     other side fills in a default.
     """
     response = await client.put(
@@ -463,9 +460,7 @@ async def test_a_put_with_no_body_is_a_422_rather_than_a_partial_write(
 async def test_all_four_routes_are_in_the_openapi_document_with_real_shapes(
     client: httpx.AsyncClient,
 ) -> None:
-    """A client generating against `/openapi.json` gets the failure shape as well as the success.
-
-    one.
+    """A client generating against `/openapi.json` gets the failure shapes too.
 
     A route that can fail and documents only its 200 is a client writing its error
     handling against the wrong body.
@@ -526,11 +521,10 @@ def test_the_watch_router_and_its_service_hold_no_source_adapter() -> None:
     call is absent rather than caught -- "it did not raise" is what a route
     that swallowed everything would also produce.
 
-    Two misses this repository has measured, both handled: an
-    `ast.ImportFrom`-only scan does not see `import usher.ports.source`, and a
-    signature check does not see a **string** annotation, which is the one
-    form needing no import at all. So both node types are walked and the
-    annotation is read as text.
+    Two ways such a scan misses, both handled: an `ast.ImportFrom`-only scan does not
+    see `import usher.ports.source`, and a signature check does not see a **string**
+    annotation, which is the one form needing no import at all. So both node types are
+    walked and the annotation is read as text.
 
     Docstrings are deliberately outside the text half: this file's own subject
     is that absence, and a scan that forbade the *word* would forbid saying

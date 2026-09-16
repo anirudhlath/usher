@@ -137,9 +137,8 @@ async def test_a_base_url_composes_the_same_way_with_or_without_its_trailing_sla
 ) -> None:
     """An operator's `.env` is where this value comes from.
 
-    and a trailing slash is exactly the character that gets dropped by hand.
-
-    Without the normalisation the two spellings differ by a `//` the CDN 404s.
+    A trailing slash is exactly the character that gets dropped by hand, and
+    without the normalisation the two spellings differ by a `//` the CDN 404s.
     """
     seen: list[str] = []
 
@@ -153,10 +152,10 @@ async def test_a_base_url_composes_the_same_way_with_or_without_its_trailing_sla
 
 
 async def test_a_path_without_its_leading_slash_still_composes_a_rung_and_a_file() -> None:
-    """Every path the provider publishes carries one.
+    """Every path the provider publishes carries a leading slash.
 
-    a base and a path that both lack it would compose `w154quiet-vacuum.jpg`, which is
-    one token and a 404 rather than a visible error.
+    A base and a path that both lack it would compose `w154quiet-vacuum.jpg`,
+    which is one token and a 404 rather than a visible error.
     """
     seen: list[str] = []
 
@@ -172,13 +171,9 @@ async def test_a_path_without_its_leading_slash_still_composes_a_rung_and_a_file
 def test_the_fetcher_carries_no_base_url_of_its_own() -> None:
     """`base_url` is required.
 
-    so the measured host has exactly one definition and it is
-    `Settings.image_cdn_base_url` — where an operator can see it and where
-    `.env.example` documents it.
-
-    An adapter-side default would be a second value that silently disagrees
-    with the setting, which is the shape `build_curation_service`'s docstring
-    already refuses for `model`.
+    So the host has exactly one definition, `Settings.image_cdn_base_url`, where
+    an operator can see it and where `.env.example` documents it. An adapter-side
+    default would be a second value that silently disagrees with the setting.
     """
     assert (
         inspect.signature(ProviderCdnImageFetcher.__init__).parameters["base_url"].default
@@ -206,13 +201,12 @@ def test_the_fetcher_carries_no_base_url_of_its_own() -> None:
 async def test_the_status_ladder_is_the_shared_one(
     status: int, expected: type[UsherPortError]
 ) -> None:
-    """M4's TMDb split and M8's LLM split, unchanged, because it is literally the same function.
+    """The shared ladder, unchanged, because it is literally the same function.
 
-    **400 is the interesting row here and it is not hypothetical.** The CDN
-    enforces a closed fifteen-rung allowlist and answers 400 to every other
-    width — so the one 4xx this proxy can provoke by its own mistake is the one
-    that must park rather than back off, since sending it again produces the
-    identical 400 five more times.
+    400 is the interesting row and it is not hypothetical: the CDN enforces a
+    closed rung allowlist and answers 400 to every other width, so the one 4xx
+    this proxy can provoke by its own mistake is the one that must park rather
+    than back off, since sending it again produces the identical 400.
     """
     handler = lambda _request: httpx.Response(status)  # noqa: E731
 
@@ -236,8 +230,8 @@ async def test_a_rate_limit_carries_the_hint_when_the_cdn_sends_one() -> None:
 async def test_a_transport_failure_is_an_outage_and_not_malformed_data() -> None:
     """A connect error, a DNS failure and a read timeout are all "ask again later".
 
-    translating one to `PortDataMalformed` would park the request's whole failure mode
-    on a network blip.
+    Translating one to `PortDataMalformed` would park the request's whole failure
+    mode on a network blip.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -250,9 +244,9 @@ async def test_a_transport_failure_is_an_outage_and_not_malformed_data() -> None
 async def test_a_body_that_stops_arriving_mid_stream_is_an_outage() -> None:
     """The failure the byte counter must not swallow.
 
-    a read error *after* the headers is still an outage, and it reaches the caller
-    through the same arm as a connect failure rather than as a short body silently
-    stored.
+    A read error *after* the headers is still an outage, and it reaches the
+    caller through the same arm as a connect failure rather than as a short body
+    silently stored.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -318,10 +312,9 @@ async def test_a_body_exactly_at_the_ceiling_is_served() -> None:
 async def test_a_refused_oversize_body_leaves_no_entry_behind(tmp_path: Path) -> None:
     """The two halves together.
 
-    the fetcher refuses mid-stream and the store's scratch file goes with it.
-
-    Asserted over the directory tree rather than through `get`, because a `None` from
-    `get` is also what an entry written under a different extension would produce.
+    The fetcher refuses mid-stream and the store's scratch file goes with it.
+    Asserted over the directory tree rather than through `get`, because a `None`
+    from `get` is also what an entry written under a different extension gives.
     """
     root = tmp_path / "images"
     store = DiskImageBlobStore(root)
@@ -339,13 +332,12 @@ async def test_a_refused_oversize_body_leaves_no_entry_behind(tmp_path: Path) ->
 
 
 async def test_the_outbound_request_carries_no_credential() -> None:
-    """The CDN needs none, so sending one would be leaking a secret to buy nothing.
+    """The CDN needs none, so sending one would leak a secret to buy nothing.
 
-    and `HTTPXClientInstrumentor` records a full URL as a span attribute, so a key in a
-    query parameter is a key in telemetry.
-
-    Both forms are asserted: a header, and the `api_key=` query parameter TMDb
-    v3 accepts and which `TmdbClient` still has to send for a classic key.
+    `HTTPXClientInstrumentor` records a full URL as a span attribute, so a key in
+    a query parameter is a key in telemetry. Both forms are asserted: a header,
+    and the `api_key=` query parameter TMDb v3 accepts and which `TmdbClient`
+    still has to send for a classic key.
     """
     seen: list[httpx.Request] = []
 
@@ -365,8 +357,8 @@ async def test_the_outbound_request_carries_no_credential() -> None:
 def test_the_fetcher_cannot_be_given_a_credential_at_all() -> None:
     """A structural claim rather than a behavioural one.
 
-    there is no parameter through which a `SecretStr` could arrive, so the case above
-    cannot be falsified by a later constructor argument nobody re-reads.
+    There is no parameter through which a `SecretStr` could arrive, so the case
+    above cannot be falsified by a later constructor argument nobody re-reads.
     """
     parameters = set(inspect.signature(ProviderCdnImageFetcher.__init__).parameters)
 
@@ -415,7 +407,8 @@ async def test_no_failure_message_names_the_url_the_path_or_the_host(
 async def test_a_transport_failures_message_names_the_type_and_not_the_exception() -> None:
     """Httpx interpolates the URL into its own message text.
 
-    so reporting `str(exc)` is the careless spelling of the leak the case above forbids.
+    So reporting `str(exc)` is the careless spelling of the leak the case above
+    forbids.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -457,25 +450,18 @@ _BLOCKING_FILESYSTEM_CALLS = frozenset(
 
 
 def test_no_filesystem_call_in_the_disk_store_blocks_the_event_loop() -> None:
-    """A structural case.
+    """A structural case, because no behavioural assertion can tell the two apart.
 
-    and it is here because **no behavioural assertion in this repository can tell the
-    two spellings apart.**.
-
-    Measured: replacing `await asyncio.to_thread(path.read_bytes)` with
-    `path.read_bytes()` survives every case in this file and every case in
-    `test_services_images.py` — the value returned is identical and the only
-    difference is which thread was blocked while it was produced. It is not an
-    equivalent mutant: this store is read from an ASGI request handler, so a
-    synchronous read of up to `USHER_IMAGE_MAX_BYTES` stalls the whole event
-    loop, and one slow disk becomes everybody's slow disk. Telling them apart
-    behaviourally would need a loop-latency harness this project does not have
-    and should not grow for one module.
-
-    So the claim is made over the shape instead: in the AST every blocking
-    operation is an attribute **reference** handed to `asyncio.to_thread`, and
-    a call to one is the defect. `handle.fileno()` is deliberately outside the
-    set — it reads an integer off an already-open file and blocks on nothing.
+    Replacing `await asyncio.to_thread(path.read_bytes)` with `path.read_bytes()`
+    returns an identical value; the only difference is which thread was blocked
+    while it was produced. It is not an equivalent mutant: this store is read
+    from an ASGI request handler, so a synchronous read of up to
+    `USHER_IMAGE_MAX_BYTES` stalls the whole event loop, and one slow disk
+    becomes everybody's slow disk. So the claim is made over the shape instead:
+    in the AST every blocking operation is an attribute *reference* handed to
+    `asyncio.to_thread`, and a call to one is the defect. `handle.fileno()` is
+    deliberately outside the set -- it reads an integer off an already-open file
+    and blocks on nothing.
     """
     tree = ast.parse(inspect.getsource(disk_module))
     called = sorted(
@@ -537,7 +523,7 @@ def test_nothing_in_the_package_logs(module: object) -> None:
 async def test_an_answer_with_no_content_type_is_refused() -> None:
     """A store names a file from its media type.
 
-    so an answer without one is an answer this proxy cannot record — and a default of
+    An answer without one is an answer this proxy cannot record, and a default of
     `image/jpeg` would put whatever arrived behind a `.jpg`.
     """
     handler = lambda _request: httpx.Response(200, content=b"x")  # noqa: E731
@@ -547,9 +533,10 @@ async def test_an_answer_with_no_content_type_is_refused() -> None:
 
 
 async def test_a_media_type_the_cache_cannot_name_is_refused_before_the_body_is_read() -> None:
-    """A captive portal answering an HTML login page with status 200 is the realistic way this.
+    """Refused at the header, so the page is never downloaded.
 
-    happens, and refusing at the header means the page is never downloaded.
+    A captive portal answering an HTML login page with status 200 is the
+    realistic way this arrives.
     """
     delivered: list[int] = []
 
@@ -565,10 +552,7 @@ async def test_a_media_type_the_cache_cannot_name_is_refused_before_the_body_is_
 
 
 async def test_an_svg_logo_is_declined_quietly_rather_than_reported_as_a_fault() -> None:
-    """The refusal is the decision.
-
-    and 🔴 **the reason this case gave until 2026-08-11 was measurably wrong.**.
-    """
+    """An SVG is declined rather than reported as a fault, body unread."""
     delivered: list[int] = []
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -590,11 +574,11 @@ async def test_an_svg_logo_is_declined_quietly_rather_than_reported_as_a_fault()
 async def test_an_answer_that_is_not_artwork_is_not_demoted_to_a_declined_type() -> None:
     """The premise the case above rests on, asserted where it can fail.
 
-    `MediaTypeNotServable` means "the provider served real artwork and this
-    proxy will not carry it". A `text/html` login page is not that, and a
-    fetcher that answered both the same way would let C5 report a captive portal
-    as an ordinary missing logo — silence on the one failure an operator has to
-    act on, at the rate the *other* one occurs.
+    `MediaTypeNotServable` means "the provider served real artwork and this proxy
+    will not carry it". A `text/html` login page is not that, and a fetcher that
+    answered both the same way would report a captive portal as an ordinary
+    missing logo -- silence on the one failure an operator has to act on, at the
+    rate the *other* one occurs.
     """
     handler = lambda _r: httpx.Response(  # noqa: E731
         200, content=b"<html>", headers={"content-type": "text/html"}
@@ -607,9 +591,8 @@ async def test_an_answer_that_is_not_artwork_is_not_demoted_to_a_declined_type()
 
 
 #: `(the provider path suffix, the media type the CDN answers for it)`, written
-#: out so the two module-level sets cannot drift apart silently. Measured
-#: 2026-08-11 against three real `.svg` logos: every rung answers
-#: `image/svg+xml`.
+#: out so the two module-level sets cannot drift apart silently. Every rung
+#: answers `image/svg+xml` for an `.svg` path.
 _PREDICTED_MEDIA_TYPES = [(".svg", "image/svg+xml")]
 
 
@@ -633,7 +616,7 @@ _PREDICTED_MEDIA_TYPES = [(".svg", "image/svg+xml")]
 def test_whether_the_proxy_can_ever_serve_a_row_is_readable_from_the_row(
     provider_path: str, servable: bool
 ) -> None:
-    """C7's filter, and the one definition of it.
+    """The servability filter, and the one definition of it.
 
     An entry in `GET /titles/{id}`'s `images` whose fetch will always fail is
     not a reference — it is a broken link this API mints deliberately, and the
@@ -646,18 +629,16 @@ def test_whether_the_proxy_can_ever_serve_a_row_is_readable_from_the_row(
 def test_an_unservable_suffix_really_is_a_type_the_fetcher_declines(
     suffix: str, media_type: str
 ) -> None:
-    """The bridge between the two sets.
+    """The bridge between the two sets, asserted through the *refusal*.
 
-    asserted through the *refusal* rather than through a second list.
-
-    `is_servable_path` predicts from a filename what `extension_for` decides
-    from a `Content-Type`, and nothing in the type system connects them. So each
-    pair is walked both ways: the suffix is unservable, and the media type it
-    predicts is one the proxy declines as `MediaTypeNotServable` rather than as
-    a fault. A suffix added to one set and not the other fails here instead of
-    filtering an image the proxy would happily have served — which is the quiet
-    direction of that mistake, because a title whose logo was dropped looks
-    exactly like a title that never had one.
+    `is_servable_path` predicts from a filename what `extension_for` decides from
+    a `Content-Type`, and nothing in the type system connects them. So each pair
+    is walked both ways: the suffix is unservable, and the media type it predicts
+    is one the proxy declines as `MediaTypeNotServable` rather than as a fault. A
+    suffix added to one set and not the other fails here instead of filtering an
+    image the proxy would happily have served -- the quiet direction of that
+    mistake, because a title whose logo was dropped looks like one that never had
+    one.
     """
     assert not is_servable_path(f"/anything{suffix}")
 
@@ -666,11 +647,11 @@ def test_an_unservable_suffix_really_is_a_type_the_fetcher_declines(
 
 
 def test_the_two_sets_the_prediction_spans_are_the_same_size() -> None:
-    """A pair table with an entry missing proves nothing about the set it was meant to cover.
+    """A pair table with an entry missing proves nothing about the set it covers.
 
-    so the coverage is asserted rather than assumed — the same guard
-    `test_every_port_abc_is_registered_in_all_ports` exists for, over two frozensets
-    instead of a package.
+    So the coverage is asserted rather than assumed -- the same guard
+    `test_every_port_abc_is_registered_in_all_ports` exists for, over two
+    frozensets instead of a package.
     """
     assert {suffix for suffix, _ in _PREDICTED_MEDIA_TYPES} == UNSERVABLE_PATH_SUFFIXES
     assert {media_type for _, media_type in _PREDICTED_MEDIA_TYPES} == DECLINED_MEDIA_TYPES
@@ -679,12 +660,9 @@ def test_the_two_sets_the_prediction_spans_are_the_same_size() -> None:
 def test_every_declined_media_type_is_one_the_supported_map_does_not_hold() -> None:
     """The two sets cannot overlap.
 
-    or `extension_for` would name a file for a type it also declines and which arm ran
-    would depend on dict order.
-
-    Asserted over the sets rather than over today's one member, so a second
-    declined type — an `image/avif` the ladder turns out not to bound, say —
-    cannot be added to both.
+    Otherwise `extension_for` would name a file for a type it also declines, and
+    which arm ran would depend on dict order. Asserted over the sets rather than
+    over today's one member, so a second declined type cannot be added to both.
     """
     assert DECLINED_MEDIA_TYPES
     assert DECLINED_MEDIA_TYPES.isdisjoint(SUPPORTED_MEDIA_TYPES)
@@ -694,9 +672,9 @@ def test_every_declined_media_type_is_one_the_supported_map_does_not_hold() -> N
 
 
 def test_the_cache_path_is_a_hash_and_two_levels_deep(tmp_path: Path) -> None:
-    """1.27M titles times four rungs is not a directory.
+    """A catalog times four rungs is not one directory, so the tree is two deep.
 
-    and the name is a digest so nothing a client sent can be in it.
+    The name is a digest, so nothing a client sent can be in it.
     """
     root = tmp_path / "images"
     path = DiskImageBlobStore(root)._path(_KEY, "jpg")
@@ -760,7 +738,7 @@ def test_a_hostile_path_cannot_escape_the_cache_root(
 async def test_the_bytes_land_under_the_cache_root_and_nowhere_else(tmp_path: Path) -> None:
     """The same claim through the write path.
 
-    because `_path` is private and a case that only reads it proves nothing about what
+    `_path` is private, and a case that only reads it proves nothing about what
     `put` does with it.
     """
     root = tmp_path / "images"
@@ -778,8 +756,8 @@ async def test_the_bytes_land_under_the_cache_root_and_nowhere_else(tmp_path: Pa
 async def test_a_write_is_a_rename_and_never_an_in_place_append(tmp_path: Path) -> None:
     """The scratch file lives beside the final one.
 
-    so the move is a rename within one filesystem — and nothing with a `.partial` suffix
-    survives a completed write.
+    So the move is a rename within one filesystem, and nothing with a `.partial`
+    suffix survives a completed write.
     """
     root = tmp_path / "images"
     store = DiskImageBlobStore(root)
@@ -795,8 +773,8 @@ async def test_a_write_is_a_rename_and_never_an_in_place_append(tmp_path: Path) 
 async def test_a_failed_write_leaves_no_scratch_file(tmp_path: Path) -> None:
     """A `.partial` left behind is not merely litter.
 
-    nothing ever cleans it up, so a flapping upstream fills the mount with fragments no
-    request will ever read.
+    Nothing ever cleans it up, so a flapping upstream fills the mount with
+    fragments no request will ever read.
     """
     root = tmp_path / "images"
     store = DiskImageBlobStore(root)
@@ -814,8 +792,8 @@ async def test_a_failed_write_leaves_no_scratch_file(tmp_path: Path) -> None:
 async def test_a_cancelled_write_leaves_no_scratch_file(tmp_path: Path) -> None:
     """The ordinary way a request is interrupted is the client hanging up.
 
-    which arrives as a `CancelledError` — a `BaseException`, so an `except Exception`
-    cleanup arm would miss exactly the common case.
+    That arrives as a `CancelledError` -- a `BaseException`, so an
+    `except Exception` cleanup arm would miss exactly the common case.
     """
     import asyncio
 
@@ -833,21 +811,15 @@ async def test_a_cancelled_write_leaves_no_scratch_file(tmp_path: Path) -> None:
 
 
 async def test_two_concurrent_writers_do_not_share_a_scratch_file(tmp_path: Path) -> None:
-    """Two misses for one rung are expected and accepted (ADR-0032).
+    """Two misses for one rung are accepted; two writers sharing a scratch file are not.
 
-    the bytes are identical and the second rename wins.
-
-    What is *not* acceptable is the two interleaving into one scratch file, so the name
-    carries a random suffix.
-
-    **Observed overlap, not a count.** Both writers are held at their first
-    chunk until the other has arrived, so the directory listing each of them
-    takes is a listing taken while the other is genuinely mid-write — "two
-    scratch files existed" is otherwise also what two serialised writes
-    reusing one name would report if the listing happened to fall between
-    them. Each writer additionally records the *names* it saw, and the union
-    being two is what says they are distinct files rather than one file
-    counted twice.
+    The bytes are identical and the second rename wins, so the name carries a
+    random suffix. Observed overlap, not a count: both writers are held at their
+    first chunk until the other has arrived, so each directory listing is taken
+    while the other is genuinely mid-write -- "two scratch files existed" is
+    otherwise also what two serialised writes reusing one name would report if
+    the listing fell between them. Each writer also records the *names* it saw,
+    and the union being two is what says they are distinct files.
     """
     import asyncio
 
@@ -887,8 +859,8 @@ async def test_a_media_type_change_upstream_does_not_leave_the_old_entry_winning
 ) -> None:
     """`get` answers the first extension that exists.
 
-    so an entry written as JPEG and re-fetched as PNG would serve the stale JPEG forever
-    — there is no TTL here that would ever notice.
+    So an entry written as JPEG and re-fetched as PNG would serve the stale JPEG
+    forever -- there is no TTL here that would ever notice.
     """
     store = DiskImageBlobStore(tmp_path / "images")
 
@@ -903,12 +875,10 @@ async def test_a_media_type_change_upstream_does_not_leave_the_old_entry_winning
 async def test_the_bytes_are_flushed_before_the_rename(tmp_path: Path) -> None:
     """A rename is atomic against other processes and not against a power cut.
 
-    which can leave a correctly-named file whose contents were never written.
-
-    Under `immutable` that is a corrupt image cached for a year.
-
-    Asserted by watching the calls rather than by pulling the plug: `os.fsync`
-    is what makes the claim, and a spy is the only thing that can see it.
+    A cut can leave a correctly-named file whose contents were never written, and
+    under `immutable` that is a corrupt image cached for a year. Asserted by
+    watching the calls rather than by pulling the plug: `os.fsync` is what makes
+    the claim, and a spy is the only thing that can see it.
     """
     fsynced: list[int] = []
     real = os.fsync
@@ -928,8 +898,7 @@ async def test_the_bytes_are_flushed_before_the_rename(tmp_path: Path) -> None:
 async def test_every_rung_is_its_own_entry_on_disk(tmp_path: Path) -> None:
     """Four rungs, four files.
 
-    the bound ADR-0032 claims the cache has, read off the filesystem rather than off the
-    tuple.
+    The bound the cache claims, read off the filesystem rather than off the tuple.
     """
     root = tmp_path / "images"
     store = DiskImageBlobStore(root)

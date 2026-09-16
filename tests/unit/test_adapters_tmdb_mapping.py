@@ -32,7 +32,7 @@ def _movie() -> dict[str, Any]:
 def _series() -> dict[str, Any]:
     """The series detail with its seasons' own responses merged in.
 
-    exactly as `TmdbMetadataProvider.fetch` composes them.
+    Composed exactly as `TmdbMetadataProvider.fetch` composes them.
     """
     payload = load_tmdb_fixture("series")
     season = load_tmdb_fixture("season")
@@ -71,10 +71,7 @@ def test_the_movie_name_and_date_come_from_title_and_release_date() -> None:
 
 
 def test_the_series_name_and_date_come_from_name_and_first_air_date() -> None:
-    """`payload["title"]` unconditionally is a `KeyError` on every one of the 32,409 series this.
-
-    deployment holds.
-    """
+    """A series payload has `name`, not `title`, so reading `title` is a `KeyError`."""
     series = _title(_series())
     assert series.release_date == date(2004, 9, 22)
     assert series.year == 2004
@@ -86,9 +83,9 @@ def test_movie_keywords_are_nested_under_keywords_keywords() -> None:
 
 
 def test_series_keywords_are_nested_under_keywords_results() -> None:
-    """A real divergence.
+    """Movies and series nest keywords differently.
 
-    and a mapper that handled only the movie spelling produces empty keywords for every
+    A mapper that handled only the movie spelling produces empty keywords for every
     series in the catalog.
     """
     assert _title(_series()).keywords == (
@@ -100,27 +97,23 @@ def test_series_keywords_are_nested_under_keywords_results() -> None:
 def test_a_movie_content_rating_comes_from_release_dates_for_the_region() -> None:
     """`release_dates.results[iso_3166_1].release_dates[].certification`.
 
-    skipping the empty certifications TMDb attaches to festival entries.
+    The empty certifications TMDb attaches to festival entries are skipped.
     """
     assert _title(_movie()).content_rating == "R"
     assert _title(_movie(), region="GB").content_rating == "18"
 
 
 def test_a_series_content_rating_comes_from_content_ratings_for_the_region() -> None:
-    """Different endpoint, different nesting, different field name.
+    """A series rating is a different endpoint, nesting and field name.
 
-    and `release_dates` is not even a valid `append_to_response` namespace for a TV
-    series.
+    `release_dates` is not even a valid `append_to_response` namespace for a series.
     """
     assert _title(_series()).content_rating == "TV-MA"
     assert _title(_series(), region="GB").content_rating == "18"
 
 
 def test_an_unconfigured_region_yields_no_content_rating_rather_than_another_country() -> None:
-    """A household in a country TMDb has no certification for must not be shown someone else's.
-
-    PRD 02 renders this string to clients.
-    """
+    """A household in a country TMDb has no certification for is shown none at all."""
     assert _title(_movie(), region="JP").content_rating is None
 
 
@@ -131,8 +124,8 @@ def test_a_movie_imdb_id_comes_from_the_top_level_field() -> None:
 def test_a_series_imdb_id_comes_from_external_ids() -> None:
     """The series payload has no top-level `imdb_id` at all.
 
-    it is under `external_ids`, alongside the `tvdb_id` that is the *only* provider id
-    most of this library's television carries.
+    It is under `external_ids`, alongside the `tvdb_id` that is the only provider id
+    most television carries.
     """
     series = _title(_series())
     assert series.imdb_id == "tt99000030"
@@ -140,25 +133,21 @@ def test_a_series_imdb_id_comes_from_external_ids() -> None:
 
 
 def test_a_movie_runtime_is_minutes_and_a_series_runtime_is_its_episode_length() -> None:
-    """TMDb has no series-level runtime.
+    """TMDb has no series-level runtime: `runtime` is a movie field.
 
-    `runtime` is a movie field and `episode_run_time` is a TV array.
-
-    Reading `runtime` for both leaves every series with none.
+    `episode_run_time` is the TV array, and reading `runtime` for both leaves every
+    series with none.
     """
     assert _title(_movie()).runtime_minutes == 111
     assert _title(_series()).runtime_minutes == 44
 
 
 def test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure() -> None:
-    """And it is the *majority* case, which is why it needs its own case.
+    """An empty `episode_run_time` is the majority shape, so it gets its own case.
 
-    Measured live 2026-08-01: `episode_run_time` is `[]` on **26 of 30**
-    series detail responses (86.7%), including A Synthetic Series. So the
-    fixture above, which carries a value, is the 13% — a suite that only
-    exercised it would be asserting on the exception. `Title.runtime_minutes`
-    is simply not a fact TMDb still has about most television, and `None` is
-    the honest answer rather than a mapping gap to go looking for.
+    The fixture above carries a value and is the minority; a suite that exercised only
+    it would be asserting on the exception. `Title.runtime_minutes` is not a fact TMDb
+    still has about most television, and `None` is the honest answer.
     """
     payload = _series()
     payload["episode_run_time"] = []
@@ -170,9 +159,9 @@ def test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure() -> 
 
 
 def test_a_series_end_year_is_set_only_once_it_has_stopped() -> None:
-    """`last_air_date` on a returning series is its most recent episode.
+    """`last_air_date` on a returning series is its most recent episode, not an end.
 
-    not an end year, so `end_year` would render "2011-2026" for a show still on the air.
+    Read as `end_year` it would render a closed range for a show still on the air.
     """
     ended = _title(_series())
     assert ended.end_year == 2009
@@ -199,9 +188,7 @@ def test_a_series_produces_its_seasons_and_episodes() -> None:
 
 
 def test_a_specials_season_is_kept() -> None:
-    """TMDb numbers specials season 0 and `Season.season_number` is `ge=0` for exactly that.
-
-    reason.
+    """TMDb numbers specials season 0, which is why `Season.season_number` is `ge=0`.
 
     Dropping them loses a whole shelf of a library.
     """
@@ -211,7 +198,7 @@ def test_a_specials_season_is_kept() -> None:
 
 
 def test_every_episode_points_at_its_own_season_row() -> None:
-    """`episodes.season_id` is a real FK.
+    """`episodes.season_id` is a real foreign key.
 
     An episode carrying another season's id, or a fresh UUID naming no row, fails on
     `fk_episodes_season_id_seasons` at the second walk.
@@ -230,10 +217,10 @@ def test_a_payload_carrying_neither_title_nor_name_is_malformed() -> None:
 
 
 def test_a_payload_carrying_both_title_and_name_is_malformed_rather_than_guessed() -> None:
-    """TMDb sends one or the other and never both.
+    """TMDb sends `title` or `name` and never both, so the kind is inferred.
 
-    Guessing between them picks an id space, and the two overlap on 26,968 measured ids
-    (ADR-0011) -- so a guess here attaches a series' metadata to a film.
+    Movie and series ids are separate spaces that overlap heavily, so a guess here
+    attaches a series' metadata to a film.
     """
     with pytest.raises(PortDataMalformed):
         kind_of_payload({"id": 90000550, "title": "A Film", "name": "A Series"})
@@ -247,9 +234,9 @@ def test_a_payload_with_no_id_is_malformed() -> None:
 
 
 def test_a_payload_with_no_usable_name_is_malformed() -> None:
-    """`Title.name` is `min_length=1`, and a `ValidationError` is not a `UsherPortError`.
+    """`Title.name` is `min_length=1` and a `ValidationError` is not a `UsherPortError`.
 
-    it would escape `EnrichService`'s own except clause and crash the worker instead of
+    It would escape `EnrichService`'s except clause and crash the worker instead of
     parking the job.
     """
     payload = _movie()
@@ -262,10 +249,7 @@ def test_a_payload_with_no_usable_name_is_malformed() -> None:
 
 
 def test_an_empty_release_date_is_absent_rather_than_a_parse_error() -> None:
-    """TMDb really does send `"release_date": ""` for an unreleased film.
-
-    the second entry of the committed search fixture carries one.
-    """
+    """TMDb really does send `"release_date": ""` for an unreleased film."""
     payload = _movie()
     payload["release_date"] = ""
     title = _title(payload)
@@ -281,10 +265,9 @@ def test_an_unparseable_release_date_is_absent_rather_than_a_parse_error(bad: st
 
 
 def test_an_out_of_range_vote_average_is_dropped() -> None:
-    """`Title.tmdb_vote_average` is `ge=0, le=10`.
+    """`Title.tmdb_vote_average` is `ge=0, le=10`, matching TMDb's own scale.
 
-    TMDb's scale is 0-10, so this is a defence against a value the mapper has no
-    business trusting rather than an observed shape.
+    A defence against a value the mapper has no business trusting.
     """
     payload = _movie()
     payload["vote_average"] = 11.5
@@ -300,7 +283,7 @@ def test_a_negative_popularity_is_dropped() -> None:
 def test_an_imdb_id_that_is_not_one_is_dropped() -> None:
     """`Title.imdb_id` is pattern-validated.
 
-    TMDb has served `""` and `"0"` in this field for entries nobody has filled in.
+    TMDb serves `""` and `"0"` in this field for entries nobody has filled in.
     """
     for bad in ("", "0", "nm99000002", None):
         payload = _movie()
@@ -344,9 +327,9 @@ def test_field_provenance_names_the_provider_for_what_it_supplied() -> None:
 
 
 def test_field_provenance_omits_what_the_payload_did_not_carry() -> None:
-    """A provenance entry claiming this provider supplied a field it left empty is what makes a.
+    """Provenance names only the fields this provider actually supplied.
 
-    second provider's merge ambiguous.
+    Claiming one it left empty is what makes a second provider's merge ambiguous.
     """
     payload = _movie()
     payload["tagline"] = ""
@@ -354,18 +337,18 @@ def test_field_provenance_omits_what_the_payload_did_not_carry() -> None:
 
 
 def test_the_mapper_never_decides_the_enrichment_tier() -> None:
-    """`EnrichService` raises the tier, and only through `ENRICHMENT_RANK` (ADR-0008).
+    """`EnrichService` raises the tier, and only through `ENRICHMENT_RANK`.
 
-    A mapper that stamped `ENRICHED` would promote a title on a payload carrying nothing
-    but an id.
+    A mapper that stamped `ENRICHED` would promote a title on a payload carrying
+    nothing but an id.
     """
     assert _title(_movie()).enrichment_state.value == "skeleton"
 
 
 def test_the_mapper_never_invents_an_identity() -> None:
-    """Identity is Usher's own UUIDv7 (ADR-0003).
+    """Identity is Usher's own UUIDv7, carried through rather than minted.
 
-    a fresh one here creates a duplicate canonical row on every re-enrichment.
+    A fresh one here creates a duplicate canonical row on every re-enrichment.
     """
     assert _title(_movie()).id == _TITLE_ID
 
@@ -384,8 +367,8 @@ def test_movie_search_results_carry_the_movie_kind_and_its_own_date_field() -> N
 def test_series_search_results_carry_the_series_kind_and_first_air_date() -> None:
     """`release_date` is absent from every `/search/tv` result.
 
-    so a shared reader keyed on it dates all of television `None` -- and the name+year
-    rule the caller then applies rejects every candidate.
+    A shared reader keyed on it dates all of television `None`, and the name+year rule
+    the caller applies then rejects every candidate.
     """
     candidates = search_candidates(load_tmdb_fixture("search_tv"), TitleKind.SERIES)
     assert candidates[0].kind is TitleKind.SERIES
@@ -394,9 +377,9 @@ def test_series_search_results_carry_the_series_kind_and_first_air_date() -> Non
 
 
 def test_a_search_result_with_an_empty_date_still_becomes_a_candidate() -> None:
-    """Dropping it would silently narrow the last tier of the match ladder to titles TMDb.
+    """A dateless result is still a candidate.
 
-    happens to have a date for.
+    Dropping it narrows the last tier of the match ladder to titles TMDb has a date for.
     """
     candidates = search_candidates(load_tmdb_fixture("search_movie"), TitleKind.MOVIE)
     assert candidates[1].year is None
@@ -416,12 +399,11 @@ def _images(payload: dict[str, Any]) -> list[Image]:
 
 
 def test_each_image_array_carries_the_kind_it_was_found_in() -> None:
-    """**The array is the only thing that says what an entry is.** A TMDb image entry carries.
+    """The array an entry came from is the only thing that says what it is.
 
-    `file_path`, `width`, `height`, `iso_639_1` and two vote fields, and no field naming
-    its kind -- so a mapper that read one array, or labelled all three the same, is not
-    an error anywhere: it paints a 16:9 backdrop into a 2:3 poster slot, at full
-    resolution, on a screen.
+    A TMDb image entry carries no field naming its kind, so a mapper that read one
+    array, or labelled all three the same, errors nowhere: it paints a 16:9 backdrop
+    into a 2:3 poster slot, on a screen.
     """
     by_path = {one.provider_path: one for one in _images(_movie())}
 
@@ -429,23 +411,20 @@ def test_each_image_array_carries_the_kind_it_was_found_in() -> None:
     assert by_path["/synthetic-backdrop.jpg"].kind is ImageKind.BACKDROP
     assert by_path["/synthetic-logo.png"].kind is ImageKind.LOGO
     # Every row is owned by the title it was derived for, and by nothing else
-    # -- `ck_images_exactly_one_owner` is `num_nonnulls(...) = 1`, and M9 has
-    # no writer for the other two owner kinds.
+    # -- `ck_images_exactly_one_owner` is `num_nonnulls(...) = 1`, and nothing
+    # yet writes the other two owner kinds.
     assert all(one.title_id == _TITLE_ID for one in by_path.values())
     assert all(one.episode_id is None and one.person_id is None for one in by_path.values())
     assert all(one.provider == "tmdb" for one in by_path.values())
 
 
 def test_the_dimensions_and_the_language_travel_with_the_entry() -> None:
-    """A poster's `iso_639_1` is what a language-aware consumer would filter on and its.
+    """Language and dimensions are carried, not just the path.
 
-    `width`/`height` are what a layout engine reserves space with, so a mapper that kept
-    only the path leaves both unrecoverable without the second network call this whole
-    stage exists to avoid.
-
-    `None` for a language rather than `"en"`: the recorded backdrop's
-    `iso_639_1` is `null`, which means *no* language and is a different fact
-    from English.
+    `iso_639_1` is what a language-aware consumer filters on and `width`/`height` are
+    what a layout engine reserves space with, so keeping only the path leaves both
+    unrecoverable without a second network call. `None` is *no* language, which is a
+    different fact from English.
     """
     by_path = {one.provider_path: one for one in _images(_movie())}
 
@@ -460,18 +439,13 @@ def test_the_dimensions_and_the_language_travel_with_the_entry() -> None:
 def test_the_top_level_pair_is_the_only_thing_that_marks_an_image_primary() -> None:
     """TMDb publishes no primary flag inside `images`.
 
-    so `poster_path` and `backdrop_path` are the only signal a payload carries about
-    which of a hundred posters is *the* one.
+    `poster_path` and `backdrop_path` are the only signal a payload carries about which
+    of a hundred posters is *the* one. Ignoring them leaves `is_primary` false on every
+    row, and the repository then falls back to read order, so every card renders
+    whichever language variant TMDb listed first.
 
-    A derivation that ignored them leaves `is_primary` false on every row, and
-    `ImageRepository.primary_for_titles` then falls back to first-in-read-order
-    -- which is id order, which is the order the arrays happened to arrive in.
-    Every card in the catalog would render whichever language variant TMDb
-    listed first.
-
-    **There is no top-level logo path**, so `logo` is asserted here as the
-    control: the flag comes from those two keys and is not something the mapper
-    invents per kind.
+    There is no top-level logo path, so `logo` is the control: the flag comes from
+    those two keys and is not invented per kind.
     """
     by_path = {one.provider_path: one for one in _images(_movie())}
 
@@ -481,21 +455,13 @@ def test_the_top_level_pair_is_the_only_thing_that_marks_an_image_primary() -> N
 
 
 def test_a_path_named_by_both_the_pair_and_an_array_is_one_row_that_keeps_its_size() -> None:
-    """The dedupe, and the fixture is the case.
+    """The top-level path is folded into the array entry that already carries it.
 
-    `uq_images_owner_provider_path` holds `(title_id, episode_id, person_id,
-    provider, provider_path)`, and this call fixes the first four -- so the
-    path is the whole of what can collide, and in a real detail payload it
-    collides on every title: the top-level `poster_path` **is** one of the
-    entries in `images.posters`.
-
-    Two rows for one path do not fail the write -- `replace_for_titles`
-    deduplicates last-wins on the same key, which is measured. What they do is
-    let *emission order* decide `is_primary`, silently, and the array's
-    unflagged copy is the one emitted second. So the primary is folded into the
-    row already built for its path, which is also what keeps the entry's
-    `width`/`height`: a row promoted from the top-level key alone has no
-    dimensions at all.
+    `uq_images_owner_provider_path` leaves the path as the whole of what can collide,
+    and in a real detail payload the top-level `poster_path` *is* one of the entries in
+    `images.posters`. Two rows for one path do not fail the write; what they do is let
+    emission order decide `is_primary`, silently. Folding also keeps the entry's
+    `width`/`height`, which a row promoted from the top-level key alone has not got.
     """
     payload = _movie()
     # The premise, asserted rather than assumed: this case is about a
@@ -510,19 +476,12 @@ def test_a_path_named_by_both_the_pair_and_an_array_is_one_row_that_keeps_its_si
 
 
 def test_one_path_listed_twice_in_a_payload_is_one_row_and_keeps_its_first_kind() -> None:
-    """The dedupe's *other* half, found by mutation.
+    """The other half of the dedupe: a path named twice inside the arrays themselves.
 
-    the fold above covers a path named by both the top-level pair and an array, and this
-    covers a path named twice inside the arrays themselves.
-
-    `ImageRepository.replace_for_titles`' own docstring records that *"one
-    derivation pass really does see a payload list a poster twice"* -- so the
-    duplicate is a real shape rather than a hypothetical, and without the guard
-    the **later** sighting wins. Two consequences, and the second is the one
-    that reaches a screen: a path listed in two arrays takes the second array's
-    `kind`, so a logo also filed under `posters` renders in a 2:3 slot; and a
-    duplicate inside one array consumes a slot of the per-kind cap, silently
-    costing the title a poster it does have.
+    A payload really does list a poster twice, and without the guard the later sighting
+    wins. A path listed in two arrays takes the second array's `kind`, so a logo also
+    filed under `posters` renders in a 2:3 slot; and a duplicate inside one array
+    consumes a slot of the per-kind cap, costing the title a poster it does have.
     """
     payload = _movie()
     payload["poster_path"] = None
@@ -547,17 +506,11 @@ def test_one_path_listed_twice_in_a_payload_is_one_row_and_keeps_its_first_kind(
 
 
 def test_an_empty_images_block_is_the_common_case_and_is_not_a_failure() -> None:
-    """`series.json`'s real shape.
+    """Empty `posters`, `backdrops` and `logos` arrays are the ordinary shape.
 
-    `posters`, `backdrops` and `logos` all `[]` -- and it needs its own named case for
-    the reason `test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure`
-    needs one two fields over: the fixture that carries values is the interesting
-    minority, and a suite that only exercised it would be asserting on the exception.
-
-    It is emphatically **not** an empty answer. `poster_path` and
-    `backdrop_path` are top-level detail fields rather than part of the
-    appended `images` namespace, so a title whose arrays are empty still has
-    the two references every consumer in M9 actually renders.
+    And not an empty answer: `poster_path` and `backdrop_path` are top-level detail
+    fields rather than part of the appended `images` namespace, so a title whose arrays
+    are empty still has the two references every consumer renders.
     """
     payload = _series()
     assert payload["images"] == {"backdrops": [], "logos": [], "posters": []}
@@ -571,16 +524,12 @@ def test_an_empty_images_block_is_the_common_case_and_is_not_a_failure() -> None
 
 
 def test_a_payload_cached_before_images_joined_the_append_list_still_has_its_primaries() -> None:
-    """**The majority shape of any real catalog**.
+    """A payload with no `images` key at all is the majority shape of a real catalog.
 
-    and the reason a live re-derivation writes far fewer images than these fixtures
-    suggest.
-
-    `images` is an `append_to_response` namespace; a payload fetched before it
-    was in the list has no such key at all. The two top-level paths are not in
-    that namespace, so the row an operator's `RowCard.artwork` needs is derived
-    from a payload that predates the appending entirely -- which is the whole
-    of why this stage needs no crawl.
+    `images` is an `append_to_response` namespace, so a payload fetched before it was
+    in the list has no such key. The two top-level paths are not in that namespace, so
+    the row a card needs is still derived from such a payload, which is why this stage
+    needs no crawl.
     """
     payload = _movie()
     del payload["images"]
@@ -595,11 +544,7 @@ def test_a_payload_cached_before_images_joined_the_append_list_still_has_its_pri
 
 
 def test_a_payload_with_no_artwork_at_all_yields_no_images_and_no_error() -> None:
-    """`to_derivation`'s "a payload this provider cannot read yields an empty result.
-
-    never an error", at the one field where an empty answer is ordinary rather than a
-    sign of anything.
-    """
+    """A payload this provider cannot read yields an empty result, never an error."""
     payload = _movie()
     del payload["images"]
     payload["poster_path"] = None
@@ -609,14 +554,12 @@ def test_a_payload_with_no_artwork_at_all_yields_no_images_and_no_error() -> Non
 
 
 def test_only_ten_of_a_kind_are_kept_and_the_primary_is_never_the_one_dropped() -> None:
-    """The per-kind cap, and the ordering between it and the primary fold.
+    """The per-kind cap runs first and the primary is folded in after.
 
-    A popular film's `posters[]` runs to hundreds of language variants of one
-    artwork, which is a distinction no consumer in M9 draws -- so the arrays
-    are capped. The cap runs **first** and the top-level pair is folded in
-    **after**, so TMDb's own pick survives however far down its array it sits:
-    the other order silently drops the one row every card renders, and leaves
-    ten variants nothing points at.
+    A popular film's `posters[]` runs to hundreds of language variants of one artwork,
+    a distinction no consumer draws, so the arrays are capped. Capping first lets
+    TMDb's own pick survive however far down its array it sits; the other order drops
+    the one row every card renders and leaves variants nothing points at.
     """
     payload = _movie()
     payload["images"]["posters"] = [
@@ -635,15 +578,12 @@ def test_only_ten_of_a_kind_are_kept_and_the_primary_is_never_the_one_dropped() 
 
 
 def test_nothing_tmdb_can_put_in_an_image_entry_raises() -> None:
-    """`Image` bounds four fields.
+    """`Image` bounds four fields, and an odd entry is dropped rather than raised.
 
-    `provider` and `provider_path` are `min_length=1`, `width` and `height` are `gt=0`
-    -- and a `pydantic.ValidationError` is **not** a `UsherPortError`, so one odd entry
-    would kill the worker rather than park the job.
-
-    `0` is the value worth naming: it is what a provider sends for "unknown"
-    and it is the one a `ge=0` filter would let through, into a column a
-    layout engine divides by.
+    A `pydantic.ValidationError` is not a `UsherPortError`, so one bad entry would kill
+    the worker rather than park the job. `0` is the value worth naming: it is what a
+    provider sends for "unknown" and what a `ge=0` filter would let through, into a
+    column a layout engine divides by.
     """
     payload = _movie()
     payload["images"]["posters"] = [
@@ -665,18 +605,13 @@ def test_nothing_tmdb_can_put_in_an_image_entry_raises() -> None:
 
 
 def test_an_infinite_popularity_is_dropped_rather_than_raising() -> None:
-    """`1e400` is well-formed JSON.
+    """`1e400` is well-formed JSON and `json.loads` maps it onto `inf`.
 
-    `json.loads` maps it onto `inf`, and this module's contract is that **nothing TMDb
-    can put in a payload may raise**.
-
-    Both halves matter and only together. `DomainModel` carries
-    `allow_inf_nan=False`, so an unfiltered `inf` would leave
-    the constructor below as a `pydantic.ValidationError` — which is not a
-    `UsherPortError`, so it would escape `EnrichService`'s `except` and kill
-    the worker rather than parking the job. The payload is built by parsing
-    real JSON text rather than by writing `float("inf")`, because the claim is
-    about what an upstream body can carry.
+    `DomainModel` carries `allow_inf_nan=False`, so an unfiltered `inf` would leave the
+    constructor as a `pydantic.ValidationError` — not a `UsherPortError`, so it would
+    escape `EnrichService`'s `except` and kill the worker. The payload is parsed from
+    real JSON text rather than written as `float("inf")`, because the claim is about
+    what an upstream body can carry.
     """
     payload = _movie()
     payload.update(json.loads('{"popularity": 1e400}'))

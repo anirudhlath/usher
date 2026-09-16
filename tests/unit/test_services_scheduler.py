@@ -1,6 +1,6 @@
-"""The scheduler loop over fake jobs, and `SearchQueryRetention` over a fake store.
+"""The scheduler loop over fake jobs and `SearchQueryRetention` over a fake store.
 
-both with an injected clock and no database anywhere.
+An injected clock, no database, and a `_NOW` no arithmetic error can land on.
 """
 
 import asyncio
@@ -53,10 +53,9 @@ class _Clock:
 class _Fake(ScheduledJob):
     """A job that records what was asked of it.
 
-    `name` and `period` are properties because the port declares them
-    abstract, which is the half of ADR-0001 a bare annotation would give up:
-    an implementation that forgets one must fail at instantiation rather than
-    at the first metric label.
+    `name` and `period` are properties because the port declares them abstract, so an
+    implementation that forgets one fails at instantiation rather than at the first
+    metric label.
     """
 
     def __init__(
@@ -136,16 +135,11 @@ def _no_sessions() -> async_sessionmaker[AsyncSession]:
 
 
 class _RecordingScope:
-    """A `SearchQueryScope` over one repository.
+    """A `SearchQueryScope` over one repository, counting opens and clean exits.
 
-    counting how many times it was opened and how many of those exits were clean.
-
-    **`opened` is the assertion "a commit per chunk" is made through on this
-    arm.** The fake has no transaction, so a commit is not observable as a
-    stored effect -- what *is* observable is that `run()` opens a fresh scope
-    per chunk rather than one for the whole drain, which is the structure the
-    commit hangs off. The Postgres arm asserts the commit itself, on a
-    connection that never saw the writing session.
+    The fake has no transaction, so a commit is not observable as a stored effect;
+    what is observable is that `run()` opens a fresh scope per chunk rather than one
+    for the whole drain. The Postgres arm asserts the commit itself.
     """
 
     def __init__(self, repository: SearchQueryRepository) -> None:
@@ -230,7 +224,7 @@ def lines() -> Iterator[list[str]]:
 #: half of `tests/integration/test_search_query_retention.py::DRAIN_DEADLINE`,
 #: and it only works because `FakeSearchQueryRepository.prune` awaits.
 #: A drain whose terminator is broken has to reach pytest as a failure rather
-#: than as a hang; J5 shipped exactly that bug.
+#: than as a hang.
 DRAIN_DEADLINE = 5.0
 
 
@@ -245,26 +239,19 @@ async def _drain(job: SearchQueryRetention) -> None:
 async def _tick(scheduler: Scheduler) -> int:
     """`scheduler.tick()`, bounded.
 
-    See `DRAIN_DEADLINE`.
-
-    🔴 **`Scheduler.tick()` awaits `job.run()` with no deadline of its own**,
-    so bounding the direct `run()` call sites was not enough: a job that never
-    returns wedges the tick, and the suite reported a hang rather than a
-    failure. That is a property of the shipped component and not of these
-    tests -- issue #83 -- and this helper only makes the suite able to *say*
-    so.
+    See `DRAIN_DEADLINE`. `Scheduler.tick()` awaits `job.run()` with no deadline of
+    its own, so a job that never returns wedges the tick; this helper is what lets
+    the suite report that as a failure rather than as a hang.
     """
     return await asyncio.wait_for(scheduler.tick(), DRAIN_DEADLINE)
 
 
 async def test_a_job_whose_period_has_not_elapsed_is_not_run() -> None:
-    """**The failing test this task was written against**.
+    """A due job runs and a not-due one does not, in the same tick.
 
-    and its positive control is the first arm.
-
-    A scheduler that ran nothing at all also satisfies *"the not-due job did
-    not run"*, so the case asserts the due job **did**, and both assertions
-    carry their own message. One tick, two jobs on one registry, one clock.
+    A scheduler that ran nothing at all also satisfies *"the not-due job did not
+    run"*, so the case asserts the due job **did**, and both assertions carry their
+    own message. One tick, two jobs on one registry, one clock.
     """
     clock = _Clock()
     due = _Fake("due", period=_HOUR, last=clock.now - timedelta(hours=2))
@@ -279,13 +266,11 @@ async def test_a_job_whose_period_has_not_elapsed_is_not_run() -> None:
 
 
 async def test_a_job_at_exactly_its_period_is_due() -> None:
-    """The boundary.
+    """The boundary, because `>=` and `>` are the two spellings.
 
-    because `>=` and `>` are the two spellings and a fixture an hour either side of it
-    cannot tell them apart.
-
-    A period is *"at least this long since the last completion"*, so the
-    instant it has been exactly that long the job is due.
+    A period is *"at least this long since the last completion"*, so the instant it
+    has been exactly that long the job is due -- and a fixture an hour either side of
+    the boundary cannot tell the two spellings apart.
     """
     clock = _Clock()
     job = _Fake("exact", period=_HOUR, last=clock.now - _HOUR)
@@ -294,13 +279,11 @@ async def test_a_job_at_exactly_its_period_is_due() -> None:
 
 
 async def test_a_job_that_has_never_run_is_due() -> None:
-    """*"Never built"* and *"not due"* are the two states a naive `now - last_done > period`.
+    """*"Never built"* and *"not due"* are two states a naive `now - last_done` collapses.
 
-    collapses -- with a `TypeError`, not a wrong answer, because `datetime - None` does
-    not subtract.
-
-    The neighbour rebuild on a fresh deployment is exactly this state, so it
-    is the first one a registration will meet.
+    With a `TypeError` rather than a wrong answer, because `datetime - None` does not
+    subtract. The neighbour rebuild on a fresh deployment is exactly this state, so
+    it is the first one a registration will meet.
     """
     job = _Fake("never", last=None)
     assert await _tick(_scheduler(job)) == 1
@@ -319,10 +302,9 @@ def _settings(**overrides: object) -> Settings:
 
 
 def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> None:
-    """**J4 shipped the loop with no registrations.
+    """Both registrations are present, and in registration order.
 
-    J5 added the first and J6 the second**, and a registry nothing asserts is
-    indistinguishable from one somebody forgot to fill.
+    A registry nothing asserts is indistinguishable from one somebody forgot to fill.
     """
     scheduler = build_scheduler(_settings(), sessions=_no_sessions())
 
@@ -336,13 +318,10 @@ def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> No
 def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None:
     """`sessions=None` is an explicit *"this process cannot reach a database"*.
 
-    and an empty registry is still a legal state.
-
-    The wrong implementation this kills: a `build_scheduler` that registered
-    the retention job anyway and left it to fail on its first `last_done()` --
-    which the loop would absorb, count, back off on and repeat forever, with
-    the only symptom a log line every few minutes. Every `LaneSupervisor` in
-    `tests/unit/test_api_lanes.py` is in this state.
+    An empty registry is still a legal state. The wrong implementation this kills
+    registers the retention job anyway and leaves it to fail on its first
+    `last_done()` -- which the loop absorbs, counts, backs off on and repeats
+    forever, with the only symptom a log line every few minutes.
     """
     scheduler = build_scheduler(_settings(), sessions=None)
 
@@ -389,22 +368,14 @@ async def test_the_retention_registration_carries_the_window_and_the_batch_an_op
 def test_the_rebuild_registration_carries_the_period_an_operator_set() -> None:
     """The one setting reaches the job, as a `timedelta` of **hours**.
 
-    The wrong implementations this kills: a registration hard-coding 24 h
-    beside a setting an operator can change; one passing the *hours* where a
-    `timedelta` is wanted, which is a factor of 3,600 and reads as correct at a
-    glance; and one wiring `timedelta(days=...)` from the retention setting
-    next to it, which is the adjacent-keyword swap that made
-    `SearchQueryRetention`'s own case necessary.
-
-    **A non-default value, and one that is not a whole number of days**, so a
-    registration ignoring the setting and a registration reading it through the
-    wrong unit both fail rather than one of them.
-
-    ⚠️ **A period here is a setting where retention's is a constant**, and this
-    is the case that pins the asymmetry: what this number has to clear is the
-    walk's own duration, which is a function of catalog size -- 3.58 h over
-    132,442 seeds on this project's own artefact, 2026-08-19 -- and nothing in
-    `src/` can know a deployment's.
+    The wrong implementations this kills: a registration hard-coding 24 h beside a
+    setting an operator can change; one passing the *hours* where a `timedelta` is
+    wanted, a factor of 3,600 that reads as correct at a glance; and one wiring
+    `timedelta(days=...)` from the retention setting next to it. The fixture value is
+    non-default and not a whole number of days, so both failures show rather than
+    one. A period here is a setting where retention's is a constant, because what it
+    has to clear is the walk's own duration -- a function of catalog size, which
+    nothing in `src/` can know.
     """
     scheduler = build_scheduler(
         _settings(similar_rebuild_period_hours=5.5), sessions=_no_sessions()
@@ -415,25 +386,18 @@ def test_the_rebuild_registration_carries_the_period_an_operator_set() -> None:
     assert job.name == "similar.rebuild"
 
 
-# -- the retention registration (M10 J5) -----------------------------------
+# -- the retention registration --------------------------------------------
 
 
 async def test_an_empty_table_is_not_due_rather_than_never_built() -> None:
-    """🔴 **The defect ADR-0046's own reading had.
+    """An empty table is not due, rather than never built.
 
-    arriving from the one state it handled correctly.**.
-
-    `ScheduledJob.last_done` says `None` means *"never built, therefore
-    due"*, which is right for an artefact that has to be constructed and wrong
-    for an **invariant**: an empty `search_queries` holds nothing past its
-    cutoff, so the retention rule is satisfied vacuously. A `last_done()`
-    answering `None` there would make an idle deployment run a no-op prune on
-    every tick, forever -- the same "due on every tick" this job was
-    redesigned to escape.
-
-    Both halves are asserted, because *"the reading is not `None`"* is also
-    what a job answering `datetime.min` would produce: the reading is `now`,
-    and a tick over it runs nothing.
+    `ScheduledJob.last_done` says `None` means *"never built, therefore due"*, which
+    is right for an artefact and wrong for an **invariant**: an empty
+    `search_queries` holds nothing past its cutoff, so the rule is satisfied
+    vacuously and a `None` here would run a no-op prune on every tick forever. Both
+    halves are asserted, because *"the reading is not `None`"* is also what a job
+    answering `datetime.min` would produce.
     """
     clock = _Clock()
     job = SearchQueryRetention(
@@ -450,18 +414,14 @@ async def test_an_empty_table_is_not_due_rather_than_never_built() -> None:
 
 
 async def test_a_table_whose_oldest_row_is_inside_the_window_is_not_due() -> None:
-    """The state this deployment is in today, and the state a healthy one is in almost always.
+    """The state a healthy deployment is in almost always.
 
-    The wrong implementation this kills is the one ADR-0046 tabulated:
-    `last_done()` spelled as `min(at)` itself. A row 14 days old against a
-    90-day window reads as *"last done 14 days ago"* under that spelling, i.e.
-    due against any period under a fortnight -- and after a prune it would sit
-    at the window's age and stay there, due forever. Here the same row reads
-    as *"the invariant holds now"*.
-
-    The control is the second arm: the same job, the same window, one row
-    moved past the cutoff, must be due -- otherwise a `last_done()` that
-    always answered `now` would pass the first half.
+    The wrong implementation this kills spells `last_done()` as `min(at)` itself: a
+    row 14 days old against a 90-day window reads as *"last done 14 days ago"*, due
+    against any period under a fortnight, and after a prune it would sit at the
+    window's age and stay due forever. The control is the second arm -- one row moved
+    past the cutoff must be due, or a `last_done()` that always answered `now` would
+    pass the first half.
     """
     clock = _Clock()
     user_id = new_id()
@@ -489,15 +449,11 @@ async def test_a_table_whose_oldest_row_is_inside_the_window_is_not_due() -> Non
 async def test_the_period_is_how_much_expired_data_may_accumulate() -> None:
     """The arithmetic the reading buys, stated as a boundary.
 
-    A job is due once the oldest surviving row is `window + period` old, so a
-    row exactly `window + period` past is due and one a moment short of it is
-    not. That is the whole difference between a period that decides something
-    and ADR-0046's original reading, under which any period shorter than the
-    window decided nothing at all.
-
-    Two arms one microsecond apart, because a fixture a day either side of the
-    boundary cannot tell `>=` from `>` -- and the not-due arm is what stops a
-    job that is simply always due from passing.
+    A job is due once the oldest surviving row is `window + period` old, so a row
+    exactly that old is due and one a moment short of it is not -- which is the whole
+    difference between a period that decides something and one that decides nothing.
+    Two arms one microsecond apart, because a fixture a day either side cannot tell
+    `>=` from `>`, and the not-due arm is what stops a job that is simply always due.
     """
     clock = _Clock()
     window = timedelta(days=90)
@@ -521,24 +477,14 @@ async def test_the_period_is_how_much_expired_data_may_accumulate() -> None:
 
 
 async def test_a_run_moves_the_reading_its_own_period_is_compared_against() -> None:
-    """🔴 **The contract `ScheduledJob.last_done` states.
+    """A reading this job's own runs move, which is what `min(search_queries.at)` is not.
 
-    asserted for the first registration that owes it.**.
-
-    *"A reading this job's own runs move"* is the whole of why
-    `min(search_queries.at)` was rejected. Here it is measured rather than
-    argued: the job is due, it runs, and the same reading is `now` afterwards
-    -- so the next tick does nothing.
-
-    The premise guard is the first assertion: a job that was never due could
-    not demonstrate anything by not running afterwards.
-
-    The second half is the other direction, and it is what the rejected
-    reading fails: a **new search** cannot move the reading. A row written
-    at `now` is the newest one, so it changes neither `min(at)` nor the
-    invariant, and the job stays not-due -- where under `min(at)`-as-a-
-    completion-time a table that keeps being searched keeps ageing into
-    permanent dueness.
+    The job is due, it runs, and the same reading is `now` afterwards, so the next
+    tick does nothing. The premise guard is the first assertion: a job that was never
+    due could not demonstrate anything by not running. The second half is the other
+    direction -- a new search is the newest row, so it moves neither `min(at)` nor
+    the invariant, where under `min(at)`-as-a-completion-time a table that keeps
+    being searched ages into permanent dueness.
     """
     clock = _Clock()
     user_id = new_id()
@@ -692,17 +638,13 @@ def _overlap(one: tuple[float, float], other: tuple[float, float]) -> float:
 
 
 async def test_two_due_jobs_run_one_at_a_time() -> None:
-    """**Asserted by observed non-overlap.
+    """Asserted by observed non-overlap, never by a count.
 
-    never by a count.** Two completions is exactly what a concurrent pair produces, so
-    the fakes record the wall-clock interval each occupied and the case asserts the two
-    do not intersect.
-
-    ADR-0037's argument for `asyncio.wait` over a `TaskGroup` applies here
-    unchanged and one abstraction lower: a group cancels its siblings on the
-    first escape, which turns one poisoned job into a three-hour rebuild
-    abandoned mid-page. And one task per job is what makes *"two hours-long
-    jobs contending for the same pool"* reachable without a bound.
+    Two completions is exactly what a concurrent pair produces, so the fakes record
+    the wall-clock interval each occupied and the case asserts the two do not
+    intersect. One task per job rather than a group: a group cancels its siblings on
+    the first escape, which turns one poisoned job into a three-hour rebuild
+    abandoned mid-page.
     """
     clock = _Clock()
     first = _Fake("first", last=clock.now - timedelta(hours=2))
@@ -722,15 +664,12 @@ async def test_two_due_jobs_run_one_at_a_time() -> None:
 
 
 async def test_a_failing_job_does_not_stop_its_siblings(lines: list[str]) -> None:
-    """Without the named `except Exception` the tick's first raise takes the rest of the.
+    """Without the named `except Exception` the first raise takes the rest of the registry.
 
-    registry with it, and the loop task dies -- at which point CPython reports the
-    unretrieved exception at GC time, to stderr, with no job name in it.
-
-    That is the shape `LaneSupervisor._guard` exists for.
-
-    The log line has to name the job, or an operator has an exception and no
-    idea which of two batches raised it.
+    The loop task dies, and CPython reports the unretrieved exception at GC time, to
+    stderr, with no job name in it -- the shape `LaneSupervisor._guard` exists for.
+    The log line has to name the job, or an operator has an exception and no idea
+    which of two batches raised it.
     """
     clock = _Clock()
     poison = _Fake("poison", last=None, fails=True)
@@ -749,9 +688,7 @@ async def test_a_failing_job_does_not_stop_its_siblings(lines: list[str]) -> Non
 async def test_a_last_done_that_raises_neither_runs_the_job_nor_stops_the_tick(
     lines: list[str],
 ) -> None:
-    """`last_done()` reads an artefact.
-
-    so it is a database call and fails the way every database call fails.
+    """`last_done()` reads an artefact, so it fails the way every database call fails.
 
     Running the job anyway would start a multi-hour rebuild on the strength of a read
     that did not answer.
@@ -790,26 +727,15 @@ class _NaiveLastDone(ScheduledJob):
 async def test_a_job_whose_last_done_is_naive_is_a_failure_and_not_a_dead_tick(
     lines: list[str],
 ) -> None:
-    """🔴 **The due comparison was outside the guard for one commit.
+    """A naive `last_done()` is that job's failure and not a dead tick.
 
-    and this is what that cost.**.
-
-    `Scheduler._due_now` wrapped `await job.last_done()` and nothing else, so
-    `now - last` on a naive answer raised `TypeError: can't subtract
-    offset-naive and offset-aware datetimes` and escaped `tick()` entirely.
-    Every job registered *after* the offender was skipped, on every tick,
-    forever; `run()` logged it as *"the scheduler's tick failed"* with **no
-    job name in it** -- the shape `LaneSupervisor._guard` exists to prevent --
-    and under `usher schedule --once` it escaped the command altogether.
-
-    Three assertions, and the sibling is the one that makes this about
-    isolation rather than about a `TypeError`. It is registered **after** the
-    offender deliberately: registration order is run order, so a sibling
-    registered first would still run under the broken code and the case would
-    pass against it.
-
-    Found by J4's own review, relayed mid-task to J5 because J5's is the
-    project's first real `last_done()`.
+    With the due comparison outside the guard, `now - last` raises `TypeError: can't
+    subtract offset-naive and offset-aware datetimes` and escapes `tick()` entirely:
+    every job registered after the offender is skipped on every tick, the log line
+    carries no job name, and under `usher schedule --once` it escapes the command.
+    The sibling is registered **after** the offender deliberately -- registration
+    order is run order, so one registered first would still run under the broken
+    code and the case would pass against it.
     """
     clock = _Clock()
     offender = _NaiveLastDone()
@@ -828,15 +754,12 @@ async def test_a_job_whose_last_done_is_naive_is_a_failure_and_not_a_dead_tick(
 async def test_a_job_whose_last_done_is_naive_backs_off_rather_than_retrying_every_tick(
     lines: list[str],
 ) -> None:
-    """The other half.
+    """An unusable reading is a failure of that job, so it is counted and spaced like one.
 
-    an unusable reading is a failure of that job, so it is counted and spaced like one.
-
-    The wrong implementation this kills is a `_due_now` that caught the
-    `TypeError`, returned `False` and recorded nothing -- the loop would then
-    ask a permanently broken job on every tick forever, which is the same hot
-    loop `_back_off` exists to stop, arriving through the read instead of
-    through the run.
+    The wrong implementation this kills is a `_due_now` that caught the `TypeError`,
+    returned `False` and recorded nothing: the loop would then ask a permanently
+    broken job on every tick forever, the same hot loop `_back_off` exists to stop,
+    arriving through the read instead of through the run.
     """
     clock = _Clock()
     offender = _NaiveLastDone()
@@ -853,17 +776,13 @@ async def test_a_job_whose_last_done_is_naive_backs_off_rather_than_retrying_eve
 
 
 async def test_a_failing_job_is_not_offered_again_on_the_very_next_tick() -> None:
-    """🔴 **The hole the acceptance criterion above cannot see.**.
+    """*"A failing job does not stop the loop"* is satisfied by a loop that never progresses.
 
-    *"A failing job does not stop the loop"* is satisfied by a loop that also
-    never progresses. With no stored state a **failed** run is
-    indistinguishable from one never run, so a job that raises leaves
-    `last_done()` exactly where it was, is due again on the next tick, and
-    retries at the tick rate forever -- 288 attempts a day at the 300 s
-    default, against a database that is by hypothesis already unhappy.
-
-    So a failed run backs the job off, and the second tick is the assertion:
-    a scheduler with no backoff runs it twice.
+    With no stored state a **failed** run is indistinguishable from one never run, so
+    a job that raises is due again on the next tick and retries at the tick rate
+    forever -- 288 attempts a day at the 300 s default, against a database that is by
+    hypothesis already unhappy. The second tick is the assertion: a scheduler with no
+    backoff runs it twice.
     """
     clock = _Clock()
     job = _Fake("poison", period=_HOUR, last=None, fails=True)
@@ -915,10 +834,8 @@ async def test_the_backoff_expires_and_never_exceeds_the_period() -> None:
 async def test_a_run_that_succeeds_clears_the_backoff() -> None:
     """Otherwise a job that failed once carries the penalty forever.
 
-    and the doubling would go on doubling across successes.
-
-    The premise is the first arm: without a failure to clear there is nothing
-    for this case to be about.
+    The doubling would go on doubling across successes. The premise is the first arm:
+    without a failure to clear there is nothing for this case to be about.
     """
     clock = _Clock()
     job = _Fake("flaky", period=_HOUR, last=None, fails=True)
@@ -975,11 +892,9 @@ async def test_a_declined_run_is_not_work_and_is_spaced_out_like_a_failure(
 async def test_a_backed_off_job_is_not_asked_when_it_was_last_done() -> None:
     """The backoff is checked **before** the artefact read.
 
-    so a job this process has already decided not to offer costs no query at all.
-
-    That is the whole point of spacing the retries: a scheduler that still
-    issued `last_done()` every tick would have moved the hot loop from the run
-    to the read.
+    A job this process has already decided not to offer costs no query at all. A
+    scheduler that still issued `last_done()` every tick would have moved the hot
+    loop from the run to the read.
     """
     clock = _Clock()
     job = _Fake("poison", period=_HOUR, last=None, fails=True)
@@ -995,7 +910,7 @@ async def test_a_backed_off_job_is_not_asked_when_it_was_last_done() -> None:
 async def test_a_cancelled_job_is_re_raised_rather_than_swallowed() -> None:
     """`stop()` works by cancelling.
 
-    so an `except Exception` that also caught `asyncio.CancelledError` would turn a
+    An `except Exception` that also caught `asyncio.CancelledError` would turn a
     shutdown into a logged failure and a loop that carried on.
     """
     started = asyncio.Event()
@@ -1020,11 +935,9 @@ async def test_a_cancelled_job_is_re_raised_rather_than_swallowed() -> None:
 async def test_a_tick_that_raises_does_not_end_the_loop(lines: list[str]) -> None:
     """The loop's own boundary, one layer above the per-job one.
 
-    a tick that failed for a reason no job owns must slow the scheduler down, never end
-    it.
-
-    A loop that returned would leave the deployment with no scheduler and nothing saying
-    so until the next restart.
+    A tick that failed for a reason no job owns must slow the scheduler down, never
+    end it. A loop that returned would leave the deployment with no scheduler and
+    nothing saying so until the next restart.
     """
     ticks = 0
 
@@ -1052,18 +965,14 @@ async def test_a_tick_that_raises_does_not_end_the_loop(lines: list[str]) -> Non
 
 
 async def test_start_creates_the_task_and_awaits_nothing() -> None:
-    """The M5 supervisor's own draft got this wrong in exactly this way.
+    """`start()` reads nothing, which is what keeps `/health` answering 200 with Postgres down.
 
-    and it is what keeps `/health` answering 200 with Postgres down: a `start()` that
-    read anything would turn a database outage into a failure to boot.
-
-    Driven one step by hand -- `coro.send(None)` must raise `StopIteration`
-    for a coroutine that never suspended, and hands back a future for one that
-    parked. No polling, no clock, no timeout, and it cannot be satisfied by a
-    slow-but-eventually-fine implementation.
-
-    The second assertion is what stops this passing because `start()` did
-    nothing at all.
+    A `start()` that read anything would turn a database outage into a failure to
+    boot. Driven one step by hand -- `coro.send(None)` must raise `StopIteration` for
+    a coroutine that never suspended, and hands back a future for one that parked --
+    so there is no polling, no clock, and no slow-but-eventually-fine implementation
+    that passes. The second assertion is what stops this passing because `start()`
+    did nothing at all.
     """
     scheduler = _scheduler(_Fake("first", last=None))
     coro = scheduler.start()
@@ -1077,12 +986,10 @@ async def test_start_creates_the_task_and_awaits_nothing() -> None:
 
 
 async def test_the_first_last_done_happens_inside_the_loop_task() -> None:
-    """The other half of the promise above.
+    """The other half: `start()` asking nothing is only useful if the loop then asks.
 
-    `start()` asking nothing is only useful if the loop then asks.
-
-    Without this, a scheduler that started a task doing nothing would satisfy the case
-    above perfectly.
+    Without this, a scheduler that started a task doing nothing would satisfy the
+    case above perfectly.
     """
     job = _Fake("first", last=None)
     scheduler = Scheduler(tick_seconds=0.001)
@@ -1099,15 +1006,12 @@ async def test_the_first_last_done_happens_inside_the_loop_task() -> None:
 
 
 async def test_stop_cancels_an_in_flight_job_and_awaits_its_task() -> None:
-    """An in-flight three-and-a-half-hour rebuild is cancelled at its next `await`.
+    """An in-flight rebuild is cancelled at its next `await`, which is inside a page.
 
-    which is inside a page, and that page's transaction rolls back -- safe because each
-    page deletes and re-inserts its own seeds' rows in one transaction
-    (`services/similar.py`).
-
-    **The task object is asserted `done()`, not `running()` reported false.** A
-    `stop()` that merely dropped its reference reports exactly the same thing
-    and leaks the task.
+    That page's transaction rolls back, which is safe because each page deletes and
+    re-inserts its own seeds' rows in one transaction (`services/similar.py`). The
+    task object is asserted `done()`, not `running()` reported false: a `stop()` that
+    merely dropped its reference reports exactly the same thing and leaks the task.
     """
     blocked = asyncio.Event()
     job = _Fake("blocked", last=None, blocks=blocked)
@@ -1132,7 +1036,7 @@ async def test_stop_cancels_an_in_flight_job_and_awaits_its_task() -> None:
 async def test_stop_before_start_is_not_an_error() -> None:
     """`LaneSupervisor.stop()` runs on every shutdown.
 
-    including one whose `start()` was gated off by the setting.
+    Including one whose `start()` was gated off by the setting.
     """
     await _scheduler().stop()
 
@@ -1166,13 +1070,12 @@ async def test_the_due_gauge_reads_a_snapshot_the_tick_refreshes() -> None:
 
 
 async def test_a_job_that_has_never_run_reports_no_due_point_at_all() -> None:
-    """*"Seconds since `last_done()` minus period"* has no value when there is no `last_done()`.
+    """*"Seconds since `last_done()` minus period"* has no value when there is none.
 
-    and a fabricated zero would read as *"exactly due"* -- the same rule `_observations`
-    states as *"no reader means no observation, never a zero"*.
-
-    The absence is bounded rather than open-ended: a never-run job is due, so
-    the tick runs it and the next tick has a reading.
+    A fabricated zero would read as *"exactly due"* -- the same rule `_observations`
+    states as *"no reader means no observation, never a zero"*. The absence is
+    bounded rather than open-ended: a never-run job is due, so the tick runs it and
+    the next tick has a reading.
     """
     job = _Fake("never", last=None)
     scheduler = _scheduler(job)
@@ -1185,7 +1088,7 @@ async def test_a_job_that_has_never_run_reports_no_due_point_at_all() -> None:
 async def test_a_job_whose_last_done_raises_reports_no_due_point() -> None:
     """And the previous reading is dropped rather than left standing.
 
-    a gauge still reporting a number for a job whose artefact cannot be read is the
+    A gauge still reporting a number for a job whose artefact cannot be read is the
     stale-but-wrong case the snapshot design exists to avoid.
     """
     clock = _Clock()
@@ -1203,19 +1106,14 @@ async def test_a_job_whose_last_done_raises_reports_no_due_point() -> None:
 async def test_the_job_span_is_a_root_even_when_the_tick_runs_inside_a_span(
     spans: InMemorySpanExporter,
 ) -> None:
-    """**A root span with a `Link`.
+    """A root span with a `Link`, never a child.
 
-    never a child**, and `context=Context()` is what makes "root" structural rather than
-    a property of where the task happened to be created.
-
-    `asyncio.create_task` copies the ambient context, so a lifespan or a test
-    that started the scheduler inside a span would otherwise make every
-    scheduled run a child of one request forever. The link is what keeps the
-    causality readable without the parentage.
-
-    The enclosing span is the control: without it a scheduler that dropped
-    `Context()` would still produce a parentless span and this case could not
-    fail.
+    `context=Context()` is what makes "root" structural rather than a property of
+    where the task happened to be created: `asyncio.create_task` copies the ambient
+    context, so a lifespan that started the scheduler inside a span would otherwise
+    make every scheduled run a child of one request forever. The enclosing span is
+    the control -- without it a scheduler that dropped `Context()` would still
+    produce a parentless span and this case could not fail.
     """
     job = _Fake("linked", last=None)
     scheduler = _scheduler(job)
@@ -1238,7 +1136,7 @@ def test_the_scheduler_is_off_by_default() -> None:
     """A settings default is a claim like any other.
 
     Off, because a fresh deployment has no embeddings and nothing excludes a second
-    runner -- ADR-0046's decision 3, and both halves of it are measured there.
+    runner.
     """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher", secret_key="0" * 32
@@ -1248,21 +1146,10 @@ def test_the_scheduler_is_off_by_default() -> None:
 
 
 def test_the_tick_period_has_a_measured_floor() -> None:
-    """`ge=60.0`, and the floor is measured rather than stylistic.
+    """`ge=60.0`, and the floor is a bound on cost rather than a style preference.
 
-    a tick is **~71 ms** of database work for the one job that will exist -- one
-    `last_done()` per registered job and nothing else, which is the whole of
-    `ScheduledJob`'s contract -- so 0.12% of a minute at the floor and 7% of a second at
-    one.
-
-    ⚠️ **This docstring said ~144 ms, and that was ADR-0046's arithmetic over
-    the wrong pair.** It added `count_stale()` to `computed_at()`; the first is
-    the rebuild's own guard *inside* `run()` and not a read the loop performs,
-    so it is a cost of the job rather than of the period. Corrected in the ADR
-    and in `config.py`'s own table; recorded here because a test docstring that
-    restates a figure is one of the places it goes stale. **The floor survives
-    either figure** -- which is why this is an arithmetic correction and not a
-    change to the bound the case asserts.
+    A tick is one `last_done()` per registered job and nothing else, which is the
+    whole of `ScheduledJob`'s contract.
     """
     for refused in (0.0, 1.0, 59.9):
         with pytest.raises(ValueError, match="scheduler_tick_seconds"):

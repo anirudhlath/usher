@@ -12,7 +12,7 @@ def test_enrichment_rank_orders_the_ladder() -> None:
 
 
 def test_enrichment_state_str_ordering_is_not_the_ladder() -> None:
-    """Pin the footgun ADR-0008 records.
+    """Pin the footgun StrEnum ordering creates.
 
     StrEnum compares lexicographically ("enriched" < "skeleton"), not by ladder
     position.
@@ -26,19 +26,19 @@ def test_enrichment_state_str_ordering_is_not_the_ladder() -> None:
 
 
 def test_failed_is_not_a_tier() -> None:
-    """FAILED was removed from the ladder by ADR-0008.
+    """FAILED is not a tier on the ladder.
 
-    failure is tracked on Title.enrichment_error instead, orthogonal to the enrichment
-    tier.
+    Failure is tracked on `Title.enrichment_error` instead, orthogonal to the
+    enrichment tier.
     """
     assert not hasattr(EnrichmentState, "FAILED")
     assert {s.value for s in EnrichmentState} == {"skeleton", "stub", "enriched"}
 
 
 def test_match_method_names_every_tier_including_failure() -> None:
-    """PRD 10's `usher.match.result` counter is labelled `method` and `confident`.
+    """Every match tier, including failure, has a `method` name.
 
-    a vocabulary missing `UNMATCHED` would make the review queue's depth invisible to
+    A vocabulary missing `UNMATCHED` would make the review queue's depth invisible to
     the metric that is supposed to report it.
     """
     assert set(MatchMethod) == {
@@ -60,7 +60,7 @@ def test_match_method_names_every_tier_including_failure() -> None:
 
 
 def test_match_method_values_are_the_wire_identifiers() -> None:
-    """`enums.py`'s own docstring: values are stable wire and storage identifiers.
+    """Values are stable wire and storage identifiers.
 
     These reach a metric label, so a member whose value drifted from its spelling would
     split one counter series into two with no error anywhere.

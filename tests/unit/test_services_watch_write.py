@@ -146,20 +146,12 @@ def _frames(household: _Household, kind: ClientEventKind) -> list[ClientEvent]:
 async def test_a_title_write_enqueues_one_job_per_source_copy_and_not_one_per_episode_file(
     household: _Household,
 ) -> None:
-    """The headline case, and the 20,001-row read it is about.
+    """A title write enqueues one job per source copy, not one per episode file.
 
-    An episode's `media_items` row carries its series' `title_id` **and** its
-    own `episode_id`, so a title write that read `media_items` on `title_id`
-    alone would answer a 20,000-episode series with one row per episode file
-    and put 20,000 jobs on the queue for one press.
-    `MediaItemRepository.list_for_title` is the read that carries
-    `AND episode_id IS NULL` -- measured at 1 row in 0.251 ms against 20,001
-    rows and 22.901 ms without it (`.claude/rules/db-and-sql.md`) -- and this
-    case is what pins that the title path uses it.
-
-    **The premise is asserted rather than assumed**: twenty episode rows are
-    seeded and the case checks they are there, because a fixture that seeded
-    none would satisfy `len(keys) == 1` while measuring nothing.
+    An episode's `media_items` row carries its series' `title_id` as well as its own
+    `episode_id`, so a read on `title_id` alone answers a 20,000-episode series with one
+    row per episode file. `MediaItemRepository.list_for_title` carries
+    `AND episode_id IS NULL`, and this case pins that the title path uses it.
     """
     series_id = uuid.uuid4()
     source_id = uuid.uuid4()
@@ -232,13 +224,10 @@ async def test_one_job_per_source_when_two_sources_hold_the_same_title(
 async def test_a_title_the_household_owns_no_copy_of_still_writes_locally(
     household: _Household,
 ) -> None:
-    """`domain/watch.py`'s first sentence.
+    """Watch state attaches to the canonical `Title`, not to a `MediaItem`.
 
-    watch state attaches to the canonical `Title`, not to a `MediaItem`, so it survives
-    adding, changing or losing a source.
-
-    Nothing is enqueued, and that is correct rather than a gap -- there is no source to
-    tell.
+    It survives adding, changing or losing a source, and nothing is enqueued because
+    there is no source to tell.
     """
     title_id = uuid.uuid4()
 
@@ -276,20 +265,12 @@ async def test_the_write_back_is_enqueued_at_visible_priority(household: _Househ
 async def test_the_four_effects_happen_in_the_order_the_service_promises(
     household: _Household,
 ) -> None:
-    """Write locally, invalidate, publish, enqueue.
+    """Write locally, invalidate, publish, enqueue -- the commit between the first two.
 
-    with the commit between the first and the second.
-
-    **This is ADR-0033 as an executable statement.** An event is a claim about
-    *committed* state, which is an ordering rule and not a durability one: a
-    subscriber told a position landed and then reading it back through a
-    second connection must find it. Publishing before the commit is the defect
-    the ADR names, and against this journal it is a swap of two entries.
-
-    The enqueue is deliberately last, and it rides the request's own commit
-    boundary (`api/deps.get_session`) rather than this service's. See
-    `WatchWriteService`'s module docstring for what a crash in that window
-    costs and why it is not the outbox this project has twice refused.
+    An event is a claim about *committed* state: a subscriber told a position landed and
+    then reading it back through a second connection must find it, so publishing before
+    the commit is the defect. The enqueue is last and rides the request's own commit
+    boundary (`api/deps.get_session`) rather than this service's.
     """
     title_id = uuid.uuid4()
     await household.add_copy(title_id=title_id, external_id="living-room-42")
@@ -315,9 +296,9 @@ async def test_the_four_effects_happen_in_the_order_the_service_promises(
 async def test_a_changed_write_invalidates_the_rows_and_publishes_both_kinds_of_frame(
     household: _Household,
 ) -> None:
-    """The push lane's pair, on the push lane's terms (`services/push.py:176-211`).
+    """The push lane's pair, on the push lane's terms.
 
-    the cache drop and one `row.invalidated` per slug are two calls rather than one,
+    The cache drop and one `row.invalidated` per slug are two calls rather than one,
     because the cache is a dict and a dict that published events would be a second
     publisher nobody could see.
     """
@@ -338,13 +319,11 @@ async def test_a_changed_write_invalidates_the_rows_and_publishes_both_kinds_of_
 async def test_the_watchstate_frame_carries_the_target_and_the_new_state(
     household: _Household,
 ) -> None:
-    """PRD 07's payload, and the same three keys `PushApplyService._publish_watch_states` builds.
+    """PRD 07's payload: the three keys `PushApplyService._publish_watch_states` builds.
 
-    so a client handling the source's echo and a client handling its own write parse one
-    shape.
-
-    The frame carries the title id, which is what lets a client ignore its own
-    echo instead of re-rendering on every second of playback it caused.
+    A client handling the source's echo and a client handling its own write parse one
+    shape, and the title id is what lets a client ignore its own echo instead of
+    re-rendering on every second of playback it caused.
     """
     title_id = uuid.uuid4()
 
@@ -361,17 +340,12 @@ async def test_the_watchstate_frame_carries_the_target_and_the_new_state(
 
 
 async def test_an_episode_frame_carries_both_ids(household: _Household) -> None:
-    """`ClientEvent.title_id` is the **filter key** and an episode event carries its series'.
+    """An episode with no series row publishes the episode id and no title id.
 
-    title alongside its own episode id -- a client watching a series subscribes with the
-    series' title id, because that is the only id it has before it fetches a season.
-
-    Here the episode has no series row to reach, so the frame carries the
-    episode id and no title id: the service publishes what the stored row
-    names, and `watch_states` holds exactly one of the two by CHECK. Recorded
-    rather than papered over -- resolving the series would be a second read
-    per press for a filter key `GET /events` can already be given by a client
-    that fetched the season.
+    `ClientEvent.title_id` is the filter key, and `watch_states` holds exactly one of
+    the two by CHECK, so the service publishes what the stored row names. Resolving the
+    series would be a second read per press for a key a client that fetched the season
+    already has.
     """
     episode_id = uuid.uuid4()
 
@@ -387,13 +361,11 @@ async def test_an_episode_frame_carries_both_ids(household: _Household) -> None:
 async def test_a_repeat_write_of_identical_state_publishes_nothing(
     household: _Household,
 ) -> None:
-    """The guard `PushApplyService` states and this service inherits.
+    """A write that changed nothing would otherwise be a recompose per second of playback.
 
-    a write that changed nothing is a full recompose per second of playback.
-
-    Both directions in one file -- the case above is the changed one, and its
-    positive assertions are what stop this one passing against a service that
-    never publishes at all.
+    Both directions live in one file: the case above is the changed one, and its
+    positive assertions are what stop this one passing against a service that never
+    publishes at all.
     """
     title_id = uuid.uuid4()
     service = household.service()
@@ -440,15 +412,11 @@ async def test_a_repeat_mark_played_publishes_nothing_even_though_last_played_at
 
 
 async def test_a_repeat_write_still_enqueues_the_write_back(household: _Household) -> None:
-    """The enqueue is **not** guarded on the local row having changed.
+    """The enqueue is not guarded on the local row having changed, and that is deliberate.
 
-    and the asymmetry is deliberate.
-
-    The guard above measures Usher's own row before and after; it says nothing
-    about the source, which may be out of step because an earlier write-back
-    failed. `(kind, key)` coalesces, so an unchanged repeat costs one statement
-    that usually writes zero rows -- against a household whose write silently
-    never reaches its server.
+    The guard above compares Usher's own row before and after; it says nothing about the
+    source, which may be out of step because an earlier write-back failed. `(kind, key)`
+    coalesces, so an unchanged repeat costs one statement that usually writes no rows.
     """
     title_id = uuid.uuid4()
     await household.add_copy(title_id=title_id, external_id="living-room-42")
@@ -469,7 +437,7 @@ async def test_a_repeat_write_still_enqueues_the_write_back(household: _Househol
 async def test_a_deployment_with_no_row_cache_still_publishes(household: _Household) -> None:
     """`cache=None` is a real deployment rather than a test affordance.
 
-    the CLI's own roots compose no screen -- and it must not silence the frames a
+    The CLI's own roots compose no screen, and that must not silence the frames a
     connected client is waiting on.
     """
     service = WatchWriteService(
@@ -531,13 +499,12 @@ async def test_marking_played_keeps_the_stored_position(household: _Household) -
 
 
 async def test_unmarking_played_does_not_clear_the_position(household: _Household) -> None:
-    """The local half of M3's destructive-route finding, asserted on the stored row.
+    """Unmarking played keeps the stored position, asserted on the stored row.
 
-    `DELETE /Users/{u}/PlayedItems/{item}` is destructive well beyond its
-    name -- measured against Emby 4.9.5.0, it resets `PlayCount`, clears
-    `LastPlayedDate` *and* clears a non-zero resume position -- and
-    `EmbyAdapter.push_watch_state` already refuses to use it. This route must
-    not do at the database what the adapter declines to do at the source.
+    `DELETE /Users/{u}/PlayedItems/{item}` is destructive well beyond its name -- it
+    resets `PlayCount`, clears `LastPlayedDate` and clears a non-zero resume position --
+    and `EmbyAdapter.push_watch_state` already refuses to use it. This route must not do
+    at the database what the adapter declines to do at the source.
     """
     title_id = uuid.uuid4()
     service = household.service()
@@ -560,10 +527,7 @@ async def test_unmarking_played_does_not_clear_the_position(household: _Househol
 async def test_marking_played_on_a_title_never_touched_starts_at_zero(
     household: _Household,
 ) -> None:
-    """There is no stored position to keep.
-
-    and `WatchStateWrite` has no "leave it alone" spelling -- `position_seconds` is
-    always written.
+    """There is no stored position to keep, and `WatchStateWrite` always writes one.
 
     Zero is the only honest answer for a title the household has never opened.
     """
@@ -580,10 +544,9 @@ async def test_marking_played_on_a_title_never_touched_starts_at_zero(
 async def test_a_write_naming_both_targets_is_refused(household: _Household) -> None:
     """Unreachable through the two public methods and pinned anyway.
 
-    on the terms M4's two unreachable service guards were: the reads this service makes
-    *before* `set_from_client` each need to know which target it is, so the port's own
-    `num_nonnulls(title_id, episode_id) = 1` answer is restated one layer up rather than
-    waited for.
+    The reads this service makes *before* `set_from_client` each need to know which
+    target it is, so the port's own `num_nonnulls(title_id, episode_id) = 1` answer is
+    restated one layer up rather than waited for.
     """
     with pytest.raises(PortDataMalformed):
         await household.service()._write(
@@ -598,13 +561,10 @@ async def test_a_write_naming_both_targets_is_refused(household: _Household) -> 
 async def test_the_service_makes_no_second_read_for_the_state_it_answers_with(
     household: _Household,
 ) -> None:
-    """`set_from_client` returns the stored row.
+    """`set_from_client` returns the stored row, so the route need not re-read it.
 
-    so the route answers with the row the write produced rather than with a re-read of
-    it.
-
-    A re-read would be a second statement that can disagree -- and on Postgres it would
-    be the trigger-stamped `updated_at` of a *later* instant.
+    A re-read would be a second statement that can disagree -- on Postgres, the
+    trigger-stamped `updated_at` of a *later* instant.
     """
     title_id = uuid.uuid4()
 
@@ -623,15 +583,9 @@ async def test_two_copies_sharing_an_external_id_become_one_write_back(
     """Two sources addressing the same item by the same string collapse to one job.
 
     `Job.key` is unique across sources, which `domain/jobs.py` records as a deliberate
-    trade with a known cost rather than as a property anyone wanted.
-
-    **This pins the outcome and cannot pin who produced it**, which is the
-    honest version of a case that was first written as *"the service
-    deduplicates"*: the sweep measured `dict.fromkeys` deleted from
-    `_enqueue_write_back` and it **survived all 47 cases**, because both arms
-    of `JobQueue.enqueue` deduplicate already. The `dict.fromkeys` is kept for
-    the order it preserves and is documented there as equivalent; the answer
-    below is a statement about the pair.
+    trade with a known cost. This pins the outcome and cannot pin who produced it: both
+    arms of `JobQueue.enqueue` deduplicate already, and `_enqueue_write_back`'s
+    `dict.fromkeys` is kept for the order it preserves.
     """
     title_id = uuid.uuid4()
     await household.add_copy(title_id=title_id, external_id="shared-id")
@@ -645,16 +599,11 @@ async def test_two_copies_sharing_an_external_id_become_one_write_back(
 
 
 async def test_an_unavailable_copy_is_still_told(household: _Household) -> None:
-    """`list_for_title` returns retracted copies with `available = false` rather than dropping.
+    """A retracted copy is `available = false` rather than dropped, and is enqueued too.
 
-    them (PRD 02: soft-delete availability), and the write-back is enqueued for them
-    too.
-
-    The common cause of a retraction is a temporarily unmounted drive, and
-    D8's handler completes rather than parks for an item a source no longer
-    has -- so including it costs one job that completes, and excluding it
-    costs a household whose write never reaches a server that was merely
-    offline when they pressed play.
+    The common cause of a retraction is a temporarily unmounted drive, so including it
+    costs one job that completes, and excluding it costs a household whose write never
+    reaches a server that was merely offline when they pressed play.
     """
     title_id = uuid.uuid4()
     source_id = uuid.uuid4()
