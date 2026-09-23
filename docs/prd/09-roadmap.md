@@ -20,10 +20,10 @@ compatibility promise.
 | **M3 — Emby adapter** ✅ | Durable-client auth, item listing, watch-state read/write, stream targets; adapter contract tests run against both a fake and the real adapter, plus a live-server verification pass |
 | **M4 — Ingest pipeline** ✅ | Ingest → match → enrich; priority queue; stub-on-sight; unmatched review; the availability sweep and its refusal |
 | **M5 — Push and read-through** ✅ | WebSocket events with health grounded in a message ledger, supervised reconnect with a gap-closing delta, demand promotion, `GET /titles/{id}`, SSE to clients over an `EventPublisher` port, and two supervised lanes in the server process |
-| **M6 — Search** ✅ | The `index` stage of [03](03-sources-and-sync.md)'s pipeline; a weighted full-text document as a generated column, a typo-tolerant autocomplete path on its own port, optional embeddings with a fingerprint that makes staleness a query, RRF fusion reporting its own coverage, similarity, and a precomputed neighbour table. **The Meilisearch gate ran against a real catalog and failed for short names and for latency**; the follow-up is the two-tier suggest |
+| **M6 — Search** ✅ | The `index` stage of [03](03-sources-and-sync.md)'s pipeline; a weighted full-text document as a generated column, a typo-tolerant autocomplete path on its own port, optional embeddings with a fingerprint that makes staleness a query, RRF fusion reporting its own coverage, similarity, and a precomputed neighbour table. Meilisearch was not adopted; the two-tier suggest (M9) took its place |
 | **M7 — Rows** ✅ | `Row`/`RowProvider` as ports and nine registered providers, `HomeService`'s propose→score→diversify→build, in-process row and screen caches, the taste centroid and genre affinity, `GET /home` and `usher home`, `row.invalidated`, the MovieLens tag-genome importer, and `Person`/`Credit`/`Collection` re-derived from `raw_payloads` with no second network call |
-| **M8 — Curation** ✅ | LLM row generation, validation, persistence and regeneration — `OpenAICompatibleClient` over httpx, `curated_rows` + `llm_calls`, `CandidatePoolService`, `CurationService`, `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate` and `usher curate`. Plus query expansion (shipped off, having measured worse) and the genome's tag vocabulary |
-| **M9 — API surface** ✅ | Full HTTP surface, image proxy, playback resolution and the playback ticket, outbound watch state, [07](07-client-api.md)'s RFC 9457 error envelope, `GET /titles/{id}/similar`, the `search_queries` analytics table, the two-tier suggest, attribution. Also the three ranking terms M7 built data for — taste-centroid proximity, watch state and recency — and the removal of the tag-genome similarity term on a measured coverage floor |
+| **M8 — Curation** ✅ | LLM row generation, validation, persistence and regeneration — `OpenAICompatibleClient` over httpx, `curated_rows` + `llm_calls`, `CandidatePoolService`, `CurationService`, `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate` and `usher curate`. Plus query expansion (shipped off) and the genome's tag vocabulary |
+| **M9 — API surface** ✅ | Full HTTP surface, image proxy, playback resolution and the playback ticket, outbound watch state, [07](07-client-api.md)'s RFC 9457 error envelope, `GET /titles/{id}/similar`, the `search_queries` analytics table, the two-tier suggest, attribution. Also the three ranking terms M7 built data for — taste-centroid proximity, watch state and recency — and the removal of the tag-genome similarity term |
 | **M10 — Hardening** ✅ | Observability, failure modes, backup/restore, docs, public release. Plus the scheduler: a small set of named jobs with a period rather than a general cron, **no scheduler table** — each job reads *when was I last done* off the artefact it maintains — and `USHER_SCHEDULER_ENABLED=false`, because there is no mutual exclusion without a row and the job it would start is hours long. `usher schedule --once` keeps the operator's-own-cron path supported |
 
 TV is in scope throughout, not deferred — series/season/episode modelling, Next
@@ -31,31 +31,21 @@ Up, and episode-level watch state land with the milestones that own them.
 
 ## Carried debt — found by a milestone, owned by none
 
-Each of these was **measured** during a milestone that did not own it and left
-without one. Every entry names its evidence; none is a suspicion.
+Known open issues that no milestone owns.
 
 - **Columns that leak a raw driver exception across the port boundary.** Almost
-  all of them are the staged `COPY` path, which no milestone has scoped. The
-  bounding rule and the per-column ledger are in
-  `scripts/audit_bounded_columns.py`, which derives the ledger from the
-  SQLAlchemy metadata and cross-checks it against an independent replay.
-- **Query expansion ships off after measuring worse**, on one model, one small
-  corpus and five queries. **Post-v1 unless `search_queries` supplies a real
-  evaluation set** — which is the thing that would settle it, and the reason
-  not to re-litigate it on five queries ([05](05-search-and-similarity.md)).
-- **A covering index for `GET /admin/unmatched` is measured, requested and
-  declined.** `ix_media_items_unmatched` carries neither sort key, so every
-  page top-N sorts the whole unmatched population; a covering
-  `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` removes the
-  sort. The keyset cursor fixed the *depth* and not the page, which is worth
-  knowing before anyone reads the cursor design as having fixed both.
+  all of them are the staged `COPY` path. The per-column ledger is in
+  `scripts/audit_bounded_columns.py`.
+- **Query expansion ships off.** Post-v1 unless `search_queries` supplies a
+  real evaluation set ([05](05-search-and-similarity.md)).
+- **`GET /admin/unmatched` sorts the whole unmatched population for every
+  page.** A covering index on `(added_at DESC NULLS LAST, id DESC) WHERE
+  title_id IS NULL` would remove the sort; none exists.
 - **The `MissingGreenlet` crash that ended a worker is still unexplained.**
-  Both worker roots now record a crashed pass with its frames, which is the
-  instrumentation half; the diagnosis half is owed, and the crash itself has no
-  ticket.
+  Both worker roots record a crashed pass with its frames; the diagnosis is
+  owed, and the crash itself has no ticket.
 - **The suggest evaluation's three `fuzzy recall_at_5` bars stay pending**,
-  blocked on the ordering defect in [05](05-search-and-similarity.md): filling
-  them from an unrepaired system would pin a value its fix fails.
+  blocked on the ordering defect in [05](05-search-and-similarity.md).
 - **The watch-state walk has never been run to completion.** The lane is
   resumable, nothing schedules one, and the first full walk is the operator's
   step ([03](03-sources-and-sync.md)).
@@ -72,21 +62,14 @@ Not committed; recorded so the design keeps room for them.
   alternate episode orderings, resolved through `field_provenance`.
 - **Alfred integration** — media intents, spoken row reasons, voice-driven
   playback.
-- **Meilisearch** — a justified candidate rather than a hypothetical one, since
-  the typo-tolerance gate failed. Still not taken in v1: the cheaper answer the
-  same run measured is the two-tier suggest, and no head-to-head on *this*
-  catalog exists. Cost if taken: one `SuggestIndex` implementation **plus a
-  write path**, and that write path is the dual write the Postgres-first
-  decision refused — which is why the port has no write method today.
+- **Meilisearch** — behind the `SuggestIndex` port. Adopting it needs one
+  `SuggestIndex` implementation **plus a write path**, which the port does not
+  have today.
 - **Request/wanted list** — titles in the catalog but on no source.
 
 **The reference client is done, and not as a separate repository.** Usher
 Console lives in `web/`, in this repository and in the same container, served
-at `/console`. A client in another repository cannot be versioned with the API
-it generates from, and the proxy a second origin needs is where a real defect
-lived: a rewrite layer made `POST /play`'s ticket URL — minted from the
-incoming `Host` header — point at the wrong port for an external player. The
-behavioural authority is `web/docs/patterns.md`.
+at `/console`. The behavioural authority is `web/docs/patterns.md`.
 
 ## Explicitly out of scope
 
