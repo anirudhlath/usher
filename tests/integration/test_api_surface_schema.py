@@ -154,8 +154,8 @@ async def test_search_queries_carries_prd_tens_columns_and_no_others(
     nobody filled -- and the other half of "whole" is that nothing is added to it
     speculatively either.
 
-    The eleven stay closed rather than becoming a floor: `m10c` takes PRD 10's amendment
-    2 -- `surface` and `tier`, both named in that document -- and nothing else. No
+    The eleven stay closed rather than becoming a floor: `m10c` takes the two suggest
+    columns -- `surface` and `tier`, both named in PRD 10 -- and nothing else. No
     `keystroke_index`, no `session_id`, no `debounced` flag; a twelfth column is a red
     here.
     """

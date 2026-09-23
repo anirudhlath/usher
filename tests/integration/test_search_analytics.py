@@ -198,9 +198,9 @@ async def test_a_suggest_records_its_surface_and_the_tier_that_answered(
     keystrokes: SearchQueryBuffer,
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """PRD 10's amendment 2.
+    """A suggest row names its surface and the tier that answered; a search row no tier.
 
-    through the shipped routes and read back from a session no request touched.
+    Driven through the shipped routes and read back from a session no request touched.
     """
     search = await client.get("/search", params={"q": "marrowlight"})
     assert search.status_code == 200, search.text

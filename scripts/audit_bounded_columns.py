@@ -36,7 +36,7 @@ def _written_sources() -> list[pathlib.Path]:
     return sorted(path for path in _PACKAGE.rglob("*.py") if "migrations" not in path.parts)
 
 
-# The rendered `type_.compile()` prefixes that the rule above admits. Matched
+# The rendered `type_.compile()` prefixes that `_is_bounded` admits. Matched
 # on the prefix rather than on the SQLAlchemy class, so `VARCHAR(16)` and
 # `NUMERIC(12, 8)` carry their width into the ledger and a reader can check the
 # classification against the DDL without holding the type hierarchy in mind.
@@ -48,7 +48,7 @@ _BOUNDED_PREFIXES = (
     "BIGINT",
     "NUMERIC(",
     "HALFVEC(",
-    # `VECTOR(` for the reason Rule B admits `HALFVEC(` -- a `list[float]` has
+    # `VECTOR(` for the reason the rule admits `HALFVEC(` -- a `list[float]` has
     # no fixed length either. It was missing from both this tuple and
     # `_literal_type`, so a `vector(N)` column added tomorrow would have
     # vanished from the metadata side *and* the replay side and `--check`
@@ -160,7 +160,7 @@ def _rendered_type(column: Column[Any]) -> str:
 
 
 class UnknownTypeFamily(RuntimeError):
-    """A column type Rule B has never been applied to.
+    """A column type the bounding rule has never been applied to.
 
     Loud rather than silent, on both sides of the cross-check: an unrecognised
     family sorted into "not bounded" is invisible to `--check`, because the
@@ -170,13 +170,15 @@ class UnknownTypeFamily(RuntimeError):
 
 
 def _is_bounded(rendered: str) -> bool:
+    """Whether a declared type refuses a value the Python object feeding it can hold."""
     if rendered.startswith(_BOUNDED_PREFIXES):
         return True
     if rendered.startswith(_UNBOUNDED_PREFIXES) or rendered.endswith("[]"):
         return False
     raise UnknownTypeFamily(
         f"{rendered!r} is neither in _BOUNDED_PREFIXES nor in _UNBOUNDED_PREFIXES. "
-        "Apply Rule B to it and add it to one of them; do not let it default."
+        "Decide whether it refuses a value its Python field can hold, and add it to "
+        "one of them; do not let it default."
     )
 
 
@@ -2201,8 +2203,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="audit_bounded_columns",
         description=(
             "The per-column bounded-column ledger behind issue #10. "
-            "Offline: no database, no socket, nothing written. See the module "
-            "docstring for the bounding rule and the three readings of it."
+            "Offline: no database, no socket, nothing written. `_is_bounded` states "
+            "the bounding rule; `READINGS` and `_bound_for` state its three readings."
         ),
     )
     parser.add_argument("--summary", action="store_true", help="print the counts only")

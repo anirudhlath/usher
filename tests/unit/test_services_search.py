@@ -2071,7 +2071,7 @@ def test_the_interval_clock_is_monotone_and_the_wall_clock_is_not_the_same_calla
 async def test_type_ahead_records_the_surface_and_the_tier_that_answered(
     tier: SuggestTier,
 ) -> None:
-    """PRD 10's amendment 2 at the service, one row per answered keystroke.
+    """One `search_queries` row per answered keystroke, at the service.
 
     `search_queries.mode` is a `SearchMode` and a tier is a disjoint
     vocabulary, so the two are in two columns rather than one: `surface` says

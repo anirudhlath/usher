@@ -192,7 +192,7 @@ class SearchQueryRepositoryContract:
     async def test_a_suggest_row_stores_the_surface_and_the_tier_that_answered(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """`m10c`'s two columns, round-tripped -- PRD 10's amendment 2.
+        """`m10c`'s two columns, `surface` and `tier`, round-tripped.
 
         **Both tiers, in one case, because a write that hard-coded either
         member passes a case that only ever stores the other.** The pairing is

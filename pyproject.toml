@@ -48,8 +48,6 @@ embedding = ["fastembed>=0.8"]
 
 # The quality-eval harness's IR metrics. An extra for the same reason
 # `embedding` is one, and measured the same two ways as that one, above.
-# Re-measured 2026-08-18, because the figure that stood here first
-# ("~30 packages", no size at all) was neither.
 #
 #   packages -- resolve the closure from `uv.lock`, dropping Windows-only
 #   markers: `ranx` 0.3.21 is **37**, against `embedding`'s accepted 28.

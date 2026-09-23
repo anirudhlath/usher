@@ -71,7 +71,7 @@ in this project's history, 12 `LibraryChanged`**. Four guesses were
 | `UnplayedItemCount` on an entry | **not observed** | Absent from all five, all of them movies. Removed; a *series* entry is where it would plausibly appear and none was captured. |
 | `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | **confirmed** | Twelve real messages, all seven keys present on each, every array a list of id strings. One carried all six arrays non-empty at once (including a real `ItemsRemoved` on a library nothing was deleted from — why a removal event retracts nothing, observed) and one carried **42** `ItemsUpdated` ids against `push_max_items_per_event`'s default of 50. The shipped `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1 `ITEM_REMOVED`: one event per non-empty array, live. |
 | `Sessions.Data` is a list of session DTOs | **confirmed** | A list; entry keys are a superset of this fixture's, and the fixture now carries all of them (`AdditionalUsers`, `ApplicationVersion`, `DeviceId`, `InternalDeviceId`, `LastActivityDate`, `PlayableMediaTypes`, `PlaylistIndex`, `PlaylistLength`, `Protocol`, `RemoteEndPoint`, `ServerId`, `SupportedCommands`, `UserName`, and five more on `PlayState`) so the next diff is empty. |
-| **A `UserDataChanged` entry is *correct* about `PlaybackPositionTicks` and `Played`** | **confirmed — and about `PlayCount` and `LastPlayedDate` too** | Compared against `GET /Users/{u}/Items/{item}` in the same second, across three transitions of one item: 613 s written → `PlaybackPositionTicks: 6130000000` with `Played: false`; marked played → `PlayCount: 1`, `Played: true`, and the *same* `LastPlayedDate` string the item route returned; restored → all zero. So this third shape is **not** the partly-honest one the listing route is, and the failure this row was written to catch — a zeroed position behind a green contract case — does not occur. The adapter still reports `play_count`/`last_played_at` as `None`; `usher.adapters.emby.mapping.user_data_states` says why. |
+| **A `UserDataChanged` entry is *correct* about `PlaybackPositionTicks` and `Played`** | **confirmed — and about `PlayCount` and `LastPlayedDate` too** | Compared against `GET /Users/{u}/Items/{item}` in the same second, across three transitions of one item: 613 s written → `PlaybackPositionTicks: 6130000000` with `Played: false`; marked played → `PlayCount: 1`, `Played: true`, and the *same* `LastPlayedDate` string the item route returned; restored → all zero. So this third shape is **not** the partly-honest one the listing route is, and the failure this row was written to catch — a zeroed position behind a green contract case — does not occur. The adapter still reports `play_count`/`last_played_at` as `None`, for the reason given below the table. |
 | `LibraryUpdateInfo.IsEmpty` means "no array carries anything" | **still unverified** | `false` on all twelve, every one of which carried something. Consistent with the guess and not discriminating. Nothing reads it. |
 | **`Sessions` arrives at least every 90 seconds on an idle library** | **confirmed for this deployment, and the mechanism is not what it looked like** | Median **38.7 s**, mean 32.8 s, p90 46.5 s, **max 72.9 s** over 182 intervals in 100 minutes, so `DEFAULT_STALE_AFTER_SECONDS = 90.0` holds with only **1.23x** headroom. **The worst gap grew monotonically with the window** — 52.6 s at 26 minutes, 60.1 s at 70, 72.9 s at 96 — so a longer hold would plausibly have crossed 90. It is **change-driven, not periodic** (next row), and a 75-second probe earlier the same evening saw exactly one frame, so read it as a bound that has not been falsified rather than one shown to be safe. `push_stale_after_seconds` stays a setting. |
 | **`"0,1000"` in `SessionsStart` is `initialDelayMs,intervalMs`, i.e. a one-second cadence** | **confirmed, and it does not apply to an authenticated socket** | An *unauthenticated* connection receives `Sessions` at ~1 Hz (53 and 55 frames in 45 s) carrying the whole server's 83 sessions; the authenticated one received **one** in the same 45 s, carrying a 5-session row-filtered view. The timer is real; the filtered stream is sent when the filtered view changes. |
@@ -96,12 +96,11 @@ end-to-end session sent before anything started arriving. It lives in
 **and the adapter deliberately ignores both**. Their
 presence is now a record of what this server really sends — both were
 measured truthful on 2026-08-02 — and they are in the fixture precisely so
-that a mapper which started reading them fails a test. The reason the
-adapter still does not is in
-`usher.adapters.emby.mapping.user_data_states`: one movie, three
-transitions, every one of them a write Usher itself made, is not a
-measurement that a real entry never under-reports a history it did not
-create, and writing a zero over one is permanent.
+that a mapper which started reading them fails a test. The adapter still
+does not, because one movie, three transitions, every one of them a write
+Usher itself made, is not a measurement that a real entry never
+under-reports a history it did not create, and writing a zero over one is
+permanent.
 
 **What is still unmeasured, named rather than implied:** a `LibraryChanged`
 with `IsEmpty: true`, and a `UserDataChanged` for a **series** entry — which
