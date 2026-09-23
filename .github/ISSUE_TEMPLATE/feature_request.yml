@@ -30,8 +30,9 @@ body:
     attributes:
       label: Anything in the docs that already covers it
       description: >
-        `docs/prd/00-overview.md` lists what Usher deliberately is not. If one
-        of those non-goals already refuses this, say so — reopening a settled
-        call with new evidence is welcome, and re-deriving it is not.
+        `docs/prd/00-overview.md` lists what Usher deliberately is not, and
+        `docs/prd/09-roadmap.md`'s "Explicitly out of scope" section what it
+        will not build. If either already refuses this, say so — reopening a
+        settled call with new evidence is welcome, and re-deriving it is not.
     validations:
       required: false

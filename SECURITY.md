@@ -41,11 +41,11 @@ records. Reporting one costs you time and tells the maintainer nothing new.
   unbuilt feature, not a deferral with a date. Usher is designed to sit behind
   something that authenticates, on a network you control. See the README's
   posture section.
-- **A `direct` playback target's URL carries the source's session token.**
+- **A playback ticket redeems to a URL carrying the source's session token.**
   Neither a `<video>` element nor a deep link can send Emby a header, so the
-  token rides in the URL. The M9 playback ticket made the *artifact* opaque; it
-  did not narrow the grant. That URL is a secret: Usher never logs it and never
-  renders it.
+  token rides in the URL. The short-lived ticket keeps that URL out of what a
+  client stores or renders, but the player that follows the ticket's `302`
+  holds it. That URL is a secret: Usher never logs it and never renders it.
 - **`USHER_SECRET_KEY` is the whole of the credential encryption.** Rotating
   it invalidates every stored source credential until the next write, and
   every outstanding playback ticket at once — which is the coarse revocation

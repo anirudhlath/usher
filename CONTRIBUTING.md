@@ -16,7 +16,7 @@ there is one copy of each and it is the one that gets corrected.
 | You want | Read |
 |---|---|
 | How to build and test, the commands, the conventions that get a PR sent back | [`CLAUDE.md`](CLAUDE.md) |
-| What Usher does, feature by feature | [`docs/prd/README.md`](docs/prd/README.md) |
+| What Usher does, one subsystem per document | [`docs/prd/README.md`](docs/prd/README.md) |
 | Hard-won findings per subsystem | [`.claude/rules/`](.claude/rules/) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
 

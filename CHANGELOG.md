@@ -68,9 +68,10 @@ none was ever published.
   unbuilt feature. Do not expose this to the internet without putting
   something in front of it.
 - **Playback is a `302` to a URL carrying a grant**, not a proxied byte
-  stream, because neither a `<video>` element nor a deep link can send Emby a
-  header. The playback ticket narrows the artifact, not the grant. That URL is
-  a secret: it is never logged and never rendered.
+  stream. The token rides in the URL because neither a `<video>` element nor a
+  deep link can send Emby a header; the short-lived ticket Usher hands out
+  redeems to that same URL. That URL is a secret: it is never logged and never
+  rendered.
 
 [Unreleased]: https://github.com/anirudhlath/usher/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/anirudhlath/usher/releases/tag/v0.1.0
