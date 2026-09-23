@@ -6,11 +6,11 @@ paths:
 
 # What each milestone delivered, verified, and did not build
 
-A decisions register, loaded when planning or reading a milestone. **The value
-here is the refusals** — each was stated with its reason in that milestone's plan
-and in [PRD 09](../../docs/prd/09-roadmap.md), and is repeated here so a later
-reader does not re-open a settled call. Live-verification *evidence* goes in the
-subsystem rules file, not here.
+An index of milestone calls, loaded when planning or reading a milestone. **The
+value here is the refusals** — each was stated with its reason in that
+milestone's plan and in [PRD 09](../../docs/prd/09-roadmap.md), and is repeated
+here so a later reader does not re-open a settled call. Live-verification
+*evidence* goes in the subsystem rules file, not here.
 
 ## Delivered, and live-verified against
 

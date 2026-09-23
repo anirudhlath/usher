@@ -515,7 +515,7 @@ def test_the_panel_sql_carries_all_three_numbers_and_the_threshold() -> None:
     )
 
 
-def test_the_panel_sql_never_names_the_column_or_the_table_adr_0016_refused() -> None:
+def test_the_panel_sql_never_names_the_wrong_column_or_the_missing_table() -> None:
     """`titles.enriched_at` and `provider_cache_meta` are both live spellings elsewhere.
 
     The prose above has to mention both in order to correct them, so this arm is on the

@@ -423,7 +423,7 @@ async def test_the_response_carries_no_cursor(client: httpx.AsyncClient) -> None
     assert set(body) == {"rows"}
 
 
-async def test_every_display_hint_is_one_of_adr_0006s_four_names(
+async def test_every_display_hint_is_one_of_the_four_names(
     client: httpx.AsyncClient,
 ) -> None:
     """The display hints are a closed vocabulary.

@@ -155,7 +155,7 @@ def _rendered_type(column: Column[Any]) -> str:
     # an untyped `__init__`, so constructing it is a `no-untyped-call`. Ignored
     # narrowly rather than left standing: `scripts/` is outside `mypy src
     # tests`, and a file nothing type-checks that would *also* fail if it were
-    # checked is the kind of quiet debt this record argues against.
+    # checked is debt nobody would see accrue.
     return str(column.type.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
 
 

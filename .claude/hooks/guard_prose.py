@@ -59,7 +59,7 @@ def _prose(source: str) -> list[str]:
     Matching the token rather than its line is what makes a raw docstring
     visible; comparing `line.lstrip()[:3]` left every one of them unguarded.
     Every triple-quoted string counts, not only docstrings, because a SQL
-    statement's own `--` comments are prose and carried the register too.
+    statement's own `--` comments are prose too.
     """
     out: list[str] = []
     try:

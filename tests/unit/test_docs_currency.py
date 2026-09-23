@@ -11,9 +11,9 @@ _PLANS = _ROOT / "docs" / "plans"
 _PROGRESS = _PLANS / "progress.md"
 _PRD_README = _ROOT / "docs" / "prd" / "README.md"
 
-# A floor rather than an equality, on `test_decision_register.py`'s precedent. A
-# floor grows with the project; an equality is a line the next milestone edits,
-# which is how a count becomes a number people bump until green.
+# A floor rather than an equality. A floor grows with the project; an equality is
+# a line the next milestone edits, which is how a count becomes a number people
+# bump until green.
 PLAN_FILES_AT_M9_CLOSE = 9
 
 _MILESTONE_TABLE = "## Milestones (from"

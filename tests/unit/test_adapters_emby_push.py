@@ -454,7 +454,7 @@ def _channel(
     )
 
 
-async def test_the_channel_subscribes_with_adr_0004s_own_frame() -> None:
+async def test_the_channel_subscribes_with_the_frame_the_live_session_sent() -> None:
     """The frame the end-to-end session actually sent, verbatim.
 
     Without it Emby holds the socket and sends nothing -- the exact upgraded-but-

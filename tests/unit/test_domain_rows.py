@@ -68,7 +68,7 @@ def test_an_unknown_runtime_stays_unknown_on_a_card() -> None:
     assert card.position_seconds == 1800
 
 
-def test_the_display_hint_vocabulary_is_adr_0006s_four_and_no_others() -> None:
+def test_the_display_hint_vocabulary_is_four_names_and_no_others() -> None:
     """The only concrete client vocabulary: a display *hint*, never a layout.
 
     Kills a fifth member. The realistic fifth is `HERO` or `GRID_3_COLUMN`, and
