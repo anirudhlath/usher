@@ -352,17 +352,26 @@ def _owed_markers(text: str) -> list[tuple[int, str]]:
     ]
 
 
+def _stale_owed_markers(status: dict[str, str], document: str, name: str) -> list[str]:
+    """Every `⏳ M<n>` in `document` naming a milestone whose status cell reads shipped."""
+    shipped = {milestone for milestone, cell in status.items() if cell.startswith("✅")}
+    return [
+        f"{name}:{number} — ⏳ {milestone}, but {milestone} is {status[milestone][:40]!r}"
+        for number, milestone in _owed_markers(document)
+        if milestone in shipped
+    ]
+
+
 def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> None:
     """A ⏳ against a milestone that has shipped is a panel whose blocker is gone.
 
     Both parses can return nothing, and both are controlled: an empty shipped set makes
     every marker read as legitimately owed, and an `_OWED_MARKER` that stopped matching
     makes a document full of stale markers read as clean. The status parse is controlled
-    here on the real table, where every milestone has shipped, and in the unshipped
-    polarity on the synthetic table below; the marker parse is controlled on a
-    synthetic document below, because the real file has no `⏳ M<n>` left to find. The
-    scan is over the whole document, since `⏳ M<n>` means the same thing wherever PRD
-    10 writes it.
+    here on the real table, and in the unshipped polarity on the synthetic table below;
+    the marker parse and the shipped filter are each controlled on a synthetic document
+    below, because the real file has no `⏳ M<n>` left to find. The scan is over the
+    whole document, since `⏳ M<n>` means the same thing wherever PRD 10 writes it.
     """
     status = _milestone_status(_PROGRESS.read_text(encoding="utf-8"))
 
@@ -378,17 +387,11 @@ def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> 
         name: cell[:40] for name, cell in status.items() if not cell.startswith(_STATUS_MARKERS)
     }
     assert not_a_status == {}, (
-        "the milestone-table parse is reading a cell that is not the status column, so the "
-        f"shipped set below is built from something else: {not_a_status}"
+        "a status cell does not open with a status marker, or the parse is reading another "
+        f"column: {not_a_status}"
     )
 
-    shipped = {name for name, cell in status.items() if cell.startswith("✅")}
-
-    stale = [
-        f"{_PRD.name}:{number} — ⏳ {milestone}, but {milestone} is {status[milestone][:40]!r}"
-        for number, milestone in _owed_markers(_PRD.read_text(encoding="utf-8"))
-        if milestone in shipped
-    ]
+    stale = _stale_owed_markers(status, _PRD.read_text(encoding="utf-8"), _PRD.name)
 
     assert stale == [], (
         "a dashboard panel is marked ⏳ against a milestone that has already shipped, so "
@@ -400,9 +403,9 @@ def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None
     """The marker parse's own control, on a synthetic document.
 
     The real one carries no `⏳ M<n>`, so the case above cannot prove its scan still
-    matches anything. Three lines, three distinct claims: a marker naming a shipped
-    milestone is a finding, a marker naming an unshipped one is not, and the bare `⏳`
-    PRD 10 uses in prose to name the vocabulary is neither.
+    matches anything. Three lines: two markers, each read with its own line and
+    milestone, and the bare `⏳` PRD 10 uses in prose to name the vocabulary, which is
+    not a marker at all.
     """
     planted = (
         "Cost per play attributed to an LLM row stays ⏳ M9: it needs a client.\n"
@@ -415,8 +418,22 @@ def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None
     assert found == [(1, "M9"), (2, "M11")], (
         f"the ⏳ scan did not read the planted markers as written: {found}"
     )
-    assert [number for number, milestone in found if milestone == "M9"] == [1], (
-        "the shipped filter did not select the stale marker alone"
+
+
+def test_only_a_marker_naming_a_shipped_milestone_is_reported() -> None:
+    """The shipped filter's own control, in both polarities.
+
+    Every milestone in the real table has shipped, so a filter that treated every row as
+    shipped, or inverted the test, passes there. One shipped and one unshipped milestone,
+    each named by a marker, tells all three apart.
+    """
+    status = {"M9": "✅ complete", "M10": "🚧 in progress"}
+    document = "Cost per play stays ⏳ M9: it needs a client.\nA play-event log stays ⏳ M10.\n"
+
+    stale = _stale_owed_markers(status, document, "doc.md")
+
+    assert stale == ["doc.md:1 — ⏳ M9, but M9 is '✅ complete'"], (
+        f"the shipped filter did not report the shipped milestone's marker alone: {stale}"
     )
 
 
