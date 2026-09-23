@@ -623,9 +623,9 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
         "baseline these rules quote -- the single figure most likely to be promoted from "
         "a measurement into a threshold"
     )
-    assert 2_147_483_648 in figures and 2_000_000_000 in figures, (
-        "the parse no longer reads the withdrawn 2.0 GB ceiling in either reading, which is "
-        "the exact number a threshold must not be allowed to harden into"
+    assert 5_368_709_120 in figures and 5_000_000_000 in figures, (
+        "the parse no longer reads the table's headline `~5 GB` in either reading, which is "
+        "the sizing figure a disk threshold is likeliest to harden into"
     )
 
     disk = [rule for rule in committed_rules() if str(rule["alert"]) == "Disk projection"]
@@ -660,7 +660,7 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
 
     planted_threshold = [
         ("Disk projection", "system_filesystem_usage_bytes < 5025650355"),
-        ("Disk projection", "SELECT pg_database_size(current_database()) > 2147483648"),
+        ("Disk projection", "SELECT pg_database_size(current_database()) > 5368709120"),
     ]
     assert len(_byte_thresholds(planted_threshold, figures)) == 2, (
         "the threshold scan cannot see a literal lifted out of the resource table in both "
