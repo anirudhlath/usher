@@ -119,7 +119,7 @@ predates it. Re-derive with
   serving the pre-enrichment card until TTL. PRD 06 amended; `rows-and-genome.md`.
 
 **Still not built** (re-verify against the tree, not this list): no auth module
-and no `current_user`; no scheduler; `query_expansion_enabled` is `False`; no
+and no `current_user`; the M10 scheduler is off unless `USHER_SCHEDULER_ENABLED`; `query_expansion_enabled` is `False`; no
 GiST trigram index; `curation_pool_size` defaults to 200, capped at 1000; no
 `usher.llm.*` metric (those names are span attributes); `copy_records_to_table`
 is still on the raw driver.

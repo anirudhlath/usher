@@ -316,6 +316,9 @@ _OWED_MARKER = re.compile(r"⏳\s*(?P<milestone>M\d+)")
 # moves the status into the wrong position rather than failing.
 _UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
+# The markers a status cell opens with; any other opening is a different column.
+_STATUS_MARKERS = ("✅", "🚧", "🔨", "📋", "⏳")
+
 
 def _milestone_status(progress: str) -> dict[str, str]:
     """`{"M<n>": "✅ complete on …", …}` from progress.md's milestone table."""
@@ -355,7 +358,8 @@ def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> 
     Both parses can return nothing, and both are controlled: an empty shipped set makes
     every marker read as legitimately owed, and an `_OWED_MARKER` that stopped matching
     makes a document full of stale markers read as clean. The status parse is controlled
-    here on the real table in both polarities; the marker parse is controlled on a
+    here on the real table, where every milestone has shipped, and in the unshipped
+    polarity on the synthetic table below; the marker parse is controlled on a
     synthetic document below, because the real file has no `⏳ M<n>` left to find. The
     scan is over the whole document, since `⏳ M<n>` means the same thing wherever PRD
     10 writes it.
@@ -370,9 +374,12 @@ def test_no_dashboard_panel_is_marked_owed_by_a_milestone_that_has_shipped() -> 
     assert status.get("M9", "").startswith("✅"), (
         f"M9 does not read as shipped in progress.md's milestone table: {status.get('M9')!r}"
     )
-    assert not status.get("M10", "").startswith("✅"), (
-        "M10 reads as shipped, so the status cell is being matched by something other than "
-        f"its own marker: {status.get('M10')!r}"
+    not_a_status = {
+        name: cell[:40] for name, cell in status.items() if not cell.startswith(_STATUS_MARKERS)
+    }
+    assert not_a_status == {}, (
+        "the milestone-table parse is reading a cell that is not the status column, so the "
+        f"shipped set below is built from something else: {not_a_status}"
     )
 
     shipped = {name for name, cell in status.items() if cell.startswith("✅")}

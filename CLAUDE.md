@@ -7,9 +7,9 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL, with a React 19 console in `web/` served at `/console`.
 
-`main` is past M9. Since that gate closed it has taken the console, the
-demand-enrichment lane (`VisibilityService`), migrations `m10a`/`m10b`, and a
-wider embedding column. Task breakdowns are in `docs/plans/`;
+`main` is past M10 (Hardening): telemetry export, outbound rate limiting,
+backup/restore and secret rotation, the scheduler, dashboards and alerts, and
+the release workflow. Task breakdowns are in `docs/plans/`;
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
 tooling that does not exist** — check Commands below.
 
