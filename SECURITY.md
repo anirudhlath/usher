@@ -24,7 +24,7 @@ commitment.
 
 **Only the most recent release is supported, and there are no backports.**
 Because Usher is `0.x`
-([ADR-0047](docs/prd/decisions/0047-the-release-is-v0-1-0.md)), a fix may
+([README's Versioning section](README.md#versioning) says why), a fix may
 arrive in a minor version rather than a patch — upgrade to the newest release
 rather than waiting for a backport to an older line.
 
@@ -42,10 +42,10 @@ records. Reporting one costs you time and tells the maintainer nothing new.
   something that authenticates, on a network you control. See the README's
   posture section.
 - **A `direct` playback target's URL carries the source's session token.**
-  The M9 playback ticket made the *artifact* opaque; it did not narrow the
-  grant ([ADR-0012](docs/prd/decisions/0012-playback-urls-carry-a-source-token.md),
-  [ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)).
-  That URL is a secret: Usher never logs it and never renders it.
+  Neither a `<video>` element nor a deep link can send Emby a header, so the
+  token rides in the URL. The M9 playback ticket made the *artifact* opaque; it
+  did not narrow the grant. That URL is a secret: Usher never logs it and never
+  renders it.
 - **`USHER_SECRET_KEY` is the whole of the credential encryption.** Rotating
   it invalidates every stored source credential until the next write, and
   every outstanding playback ticket at once — which is the coarse revocation

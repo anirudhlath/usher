@@ -6,7 +6,7 @@ Thanks for looking. Before anything else, two facts that set expectations:
   but there is no rota and no response-time commitment. A guide that implied a
   team would be a promise nobody made.
 - **Usher is `0.x` and the wire contract may still move**
-  ([ADR-0047](docs/prd/decisions/0047-the-release-is-v0-1-0.md)).
+  ([README's Versioning section](README.md#versioning) says why).
 
 ## Where the documentation actually lives
 
@@ -16,8 +16,7 @@ there is one copy of each and it is the one that gets corrected.
 | You want | Read |
 |---|---|
 | How to build and test, the commands, the conventions that get a PR sent back | [`CLAUDE.md`](CLAUDE.md) |
-| What Usher is and why it is shaped this way | [`docs/prd/README.md`](docs/prd/README.md) |
-| Why a contested call went the way it did | [`docs/prd/decisions/`](docs/prd/decisions/) |
+| What Usher does, feature by feature | [`docs/prd/README.md`](docs/prd/README.md) |
 | Hard-won findings per subsystem | [`.claude/rules/`](.claude/rules/) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
 

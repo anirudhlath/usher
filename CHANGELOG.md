@@ -4,8 +4,7 @@ All notable changes to Usher are documented here.
 
 The format is [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 Versioning is `0.x` while the wire contract may still move —
-[ADR-0047](docs/prd/decisions/0047-the-release-is-v0-1-0.md) says why, and
-[README's Versioning section](README.md#versioning) says what to pin.
+[README's Versioning section](README.md#versioning) says why, and what to pin.
 
 ## [Unreleased]
 
@@ -35,9 +34,7 @@ none was ever published.
   ⚠️ **Typo tolerance was gated and the gate failed** — measured 2026-08-03
   against a real 1,271,138-title catalog. Short names are the weak band and no
   configuration came close to an as-you-type latency budget. The two-tier
-  suggest that obligation produced shipped instead
-  ([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md),
-  [ADR-0031](docs/prd/decisions/0031-the-two-tier-suggest.md)).
+  suggest that obligation produced shipped instead.
 - **A composed home screen** — nine row providers, a taste centroid derived
   from watch history, and a `GET /home` that paints a screen in one request.
 - **LLM-curated rows**, against any OpenAI-compatible endpoint, with a cost
@@ -71,10 +68,9 @@ none was ever published.
   unbuilt feature. Do not expose this to the internet without putting
   something in front of it.
 - **Playback is a `302` to a URL carrying a grant**, not a proxied byte
-  stream ([ADR-0012](docs/prd/decisions/0012-playback-urls-carry-a-source-token.md);
-  [ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)
-  narrowed the artifact and not the grant). That URL is a secret: it is never
-  logged and never rendered.
+  stream, because neither a `<video>` element nor a deep link can send Emby a
+  header. The playback ticket narrows the artifact, not the grant. That URL is
+  a secret: it is never logged and never rendered.
 
 [Unreleased]: https://github.com/anirudhlath/usher/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/anirudhlath/usher/releases/tag/v0.1.0

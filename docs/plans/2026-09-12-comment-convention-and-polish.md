@@ -15,7 +15,7 @@ stage reads rationale that the next one deletes.
 |---|---|
 | 1 — the `/simplify` findings | ✅ 34 of 35 fixed; item 26 refused with its reason |
 | 2 — code prose | ✅ `src/usher` 62.4% -> 38.2%, `tests` 41.8% -> 29.6%, `scripts` -> 23.2% |
-| 3 — `docs/prd/decisions/` | ✅ 48 records and the register deleted, every pointer stripped |
+| 3 — `docs/prd/decisions/` | ✅ 48 records and the register deleted; pointers in files it never listed survived it until `m10/adr-pointers`, and `tests/unit/test_docs_pointers.py` now refuses them |
 | 4 — the PRD | ✅ 13,236 -> 4,909 lines; the link check prints `OK` |
 
 The hook and ruff's `D` selection are both in place, so the convention is

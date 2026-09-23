@@ -106,7 +106,7 @@ services:
       # rather than a named volume so an operator can see it, measure it and
       # delete it -- there is no eviction and none is wanted: the ladder
       # bounds the cache at four entries an image and reclaiming space costs a
-      # re-fetch (ADR-0032). **Docker creates the host directory as root if it
+      # re-fetch. **Docker creates the host directory as root if it
       # does not exist**, and the container runs as uid 1000, so a first
       # `docker compose up` on a fresh checkout needs
       # `mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images

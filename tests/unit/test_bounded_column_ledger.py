@@ -12,8 +12,8 @@ def test_the_published_census_still_describes_the_repository() -> None:
     assert complaints == [], (
         "the bounded-column ledger has moved away from what `PUBLISHED` records. "
         "Regenerate with `uv run python scripts/audit_bounded_columns.py --summary`, "
-        "then update PUBLISHED / PUBLISHED_AT_M08B *and* the record, in the same "
-        "commit as the change that moved them:\n  " + "\n  ".join(complaints)
+        "then update PUBLISHED / PUBLISHED_AT_M08B in the same commit as the change "
+        "that moved them:\n  " + "\n  ".join(complaints)
     )
 
 

@@ -1607,7 +1607,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "let this run mark the whole source unavailable "
-            "(ADR-0015; only for a library the operator really did remove)"
+            "(only for a library the operator really did remove)"
         ),
     )
     sub.add_parser("sync-status", help="report recent sync runs, queue depth, and parked jobs")
@@ -1722,7 +1722,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed",
         type=int,
         default=GATE_SEED,
-        help=f"the golden-set seed (default {GATE_SEED}, ADR-0002's own)",
+        help=f"the golden-set seed (default {GATE_SEED}, the typo-tolerance gate's own)",
     )
     evaluate.add_argument(
         "--sample",

@@ -43,7 +43,7 @@ def _adopt_links_orphaned_by_an_earlier_downgrade() -> None:
             "fk_watch_states_episode_id_episodes cannot be added. This happens only after a "
             "downgrade past e5b8f2c40d17, which drops the episodes table and leaves these "
             "links dangling. They are watch history and this migration will not delete them "
-            "or blank them (ADR-0010); re-create the episodes they refer to, or repoint them, "
+            "or blank them; re-create the episodes they refer to, or repoint them, "
             f"then re-run. First offending watch_states.id values: {[str(i) for i in orphans]}"
         )
 

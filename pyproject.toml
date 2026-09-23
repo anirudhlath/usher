@@ -47,20 +47,20 @@ dependencies = [
 embedding = ["fastembed>=0.8"]
 
 # The quality-eval harness's IR metrics. An extra for the same reason
-# `embedding` is one, and measured the same two ways ADR-0022 measured that
-# one. Re-measured 2026-08-18, because the figure that stood here first
+# `embedding` is one, and measured the same two ways as that one, above.
+# Re-measured 2026-08-18, because the figure that stood here first
 # ("~30 packages", no size at all) was neither.
 #
 #   packages -- resolve the closure from `uv.lock`, dropping Windows-only
 #   markers: `ranx` 0.3.21 is **37**, against `embedding`'s accepted 28.
 #   size -- `uv pip install ranx==0.3.21` into a bare 3.13 venv, then
-#   `du -sm .../site-packages`: **520 MiB**, against the 167 MiB ADR-0022
-#   accepted for `fastembed`.
+#   `du -sm .../site-packages`: **520 MiB**, against the 167 MiB accepted
+#   for `fastembed` above.
 #
 # Both numbers are checkable rather than asserted, and the method is what
 # makes them so: run the same two commands against `fastembed` and they
-# answer 28 packages and 175 MiB -- ADR-0022's own 28, and its 167 MiB plus
-# the version drift since 2026-08-02. The `du` figure and the closure agree
+# answer 28 packages and 175 MiB -- the 28 above, and the 167 MiB above plus
+# version drift. The `du` figure and the closure agree
 # independently, the venv holding exactly 37 `.dist-info` directories.
 #
 # **So the argument is not that this is small. It is 3x the embedding extra,
@@ -270,7 +270,7 @@ plugins = ["pydantic.mypy"]
 # `usher.db.staging.raw_connection` unwraps to it as `Any` on purpose -- and
 # the one consumer is `tests/integration/test_staging.py`, which names
 # `asyncpg.exceptions.StringDataRightTruncationError` to observe the COPY
-# path's `22001` refusal that ADR-0044 could only assert from the protocol.
+# path's `22001` refusal.
 # asyncpg ships no `py.typed`; a stub package bought for one `pytest.raises`
 # is more surface than the `Any` it removes, and the alternative -- matching
 # the exception by class *name* -- is a weaker assertion than the type.
@@ -404,9 +404,8 @@ allow_indirect_imports = true
 # The same criterion as the contract above, for the two implementations most
 # likely to be swapped. Until M6 nothing stopped `usher/services/search.py`
 # naming `PostgresSearchIndex` directly -- which would type-check, pass every
-# test, and quietly make the port decorative. `PostgresSearchIndex` is exactly
-# the class ADR-0002 says may one day be a Meilisearch class and
-# `FastEmbedEmbedder` is exactly the class ADR-0022 says is one of two
+# test, and quietly make the port decorative. `PostgresSearchIndex` may one
+# day be a Meilisearch class and `FastEmbedEmbedder` is one of two
 # interchangeable runtimes, so the two most swap-prone implementations in the
 # project were the two constrained by nothing.
 #
@@ -440,10 +439,8 @@ source_modules = [
 forbidden_modules = [
     "usher.adapters.search",
     "usher.adapters.embedding",
-    # M8. `OpenAICompatibleClient` is exactly the class ADR-0027 says may one
-    # day be joined by a `LiteLLMClient` -- the ADR closes with "cheap to
-    # reverse", and this contract is what makes that true of the code rather
-    # than only of the argument.
+    # M8. `OpenAICompatibleClient` may one day be joined by a `LiteLLMClient`,
+    # and this contract is what keeps that swap cheap in the code.
     "usher.adapters.llm",
 ]
 allow_indirect_imports = true
@@ -509,8 +506,8 @@ allow_indirect_imports = true
 # the status-code ladder were each written two or three times, once per adapter.
 # That review consolidated them here, so this module now owns the **error
 # taxonomy translation for the whole project**: `bulk`, `emby`, `llm` and `tmdb`
-# all import it, and `ADR-0027`'s "the error taxonomy is ours" is a property of
-# this one file.
+# all import it, so the error taxonomy being ours is a property of this one
+# file.
 #
 # Which makes the direction of the edge load-bearing for the first time. A
 # shared module that imports one of its own consumers is a cycle, and the
@@ -548,9 +545,8 @@ source_modules = ["usher.adapters.http"]
 # and `port_error_for`), so it is exactly the shape this edge exists for.
 #
 # It deliberately does **not** join the contract above. That one's name is
-# about search, embedding and LLM implementations — the two classes ADR-0002
-# and ADR-0022 name as swappable and the one ADR-0027 does — and adding an
-# image adapter to it would make the name false. Contract 2 (*adapters are
+# about the swappable search, embedding and LLM implementations, and adding
+# an image adapter to it would make the name false. Contract 2 (*adapters are
 # driven, not driving*) covers the new package for free. So M9 adds a
 # forbidden module, not a tenth contract.
 forbidden_modules = [

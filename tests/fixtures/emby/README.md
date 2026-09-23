@@ -46,11 +46,10 @@ inside the reserved bands above.
 **These three had a far weaker provenance than the item fixtures beside
 them until 2026-08-02.** An item fixture was diffed field by field against a
 live 4.9.5.0 response on 2026-07-31; these had never met a real message, and
-what
-[ADR-0004](../../../docs/prd/decisions/0004-push-over-polling.md)'s live run
-of 2026-07-29 actually recorded is *which message types arrived* — `Sessions`
-periodically, `UserDataChanged` twice on a played/unplayed toggle — and **not
-one byte of any payload**. Everything below the `MessageType` line was
+what the push lane's first live run actually recorded is *which message types
+arrived* — `Sessions` periodically, `UserDataChanged` twice on a
+played/unplayed toggle — and **not one byte of any payload**. Everything
+below the `MessageType` line was
 transcribed from Emby's own `UserItemDataDto`, `LibraryUpdateInfo` and
 `SessionInfoDto` and from the decompilation of `SessionWebSocketListener`.
 
@@ -70,7 +69,7 @@ in this project's history, 12 `LibraryChanged`**. Four guesses were
 | A `UserDataList` entry is a `UserItemDataDto` (`ItemId`, `PlaybackPositionTicks`, `Played`, …) | **confirmed, with two corrections** | Observed keys: `ItemId`, `PlaybackPositionTicks`, `Played`, `PlayCount`, `IsFavorite`, plus `PlayedPercentage` (a float, when the position is non-zero) and `LastPlayedDate` (when played). |
 | `Key` equals the item id | **refuted — there is no `Key`** | Absent from every entry. Removed from the fixture, from `user_data_changed_frame`, and from the case that asserted it. |
 | `UnplayedItemCount` on an entry | **not observed** | Absent from all five, all of them movies. Removed; a *series* entry is where it would plausibly appear and none was captured. |
-| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | **confirmed** | Twelve real messages, all seven keys present on each, every array a list of id strings. One carried all six arrays non-empty at once (including a real `ItemsRemoved` on a library nothing was deleted from — ADR-0015's argument, observed) and one carried **42** `ItemsUpdated` ids against `push_max_items_per_event`'s default of 50. The shipped `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1 `ITEM_REMOVED`: one event per non-empty array, live. |
+| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | **confirmed** | Twelve real messages, all seven keys present on each, every array a list of id strings. One carried all six arrays non-empty at once (including a real `ItemsRemoved` on a library nothing was deleted from — why a removal event retracts nothing, observed) and one carried **42** `ItemsUpdated` ids against `push_max_items_per_event`'s default of 50. The shipped `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1 `ITEM_REMOVED`: one event per non-empty array, live. |
 | `Sessions.Data` is a list of session DTOs | **confirmed** | A list; entry keys are a superset of this fixture's, and the fixture now carries all of them (`AdditionalUsers`, `ApplicationVersion`, `DeviceId`, `InternalDeviceId`, `LastActivityDate`, `PlayableMediaTypes`, `PlaylistIndex`, `PlaylistLength`, `Protocol`, `RemoteEndPoint`, `ServerId`, `SupportedCommands`, `UserName`, and five more on `PlayState`) so the next diff is empty. |
 | **A `UserDataChanged` entry is *correct* about `PlaybackPositionTicks` and `Played`** | **confirmed — and about `PlayCount` and `LastPlayedDate` too** | Compared against `GET /Users/{u}/Items/{item}` in the same second, across three transitions of one item: 613 s written → `PlaybackPositionTicks: 6130000000` with `Played: false`; marked played → `PlayCount: 1`, `Played: true`, and the *same* `LastPlayedDate` string the item route returned; restored → all zero. So this third shape is **not** the partly-honest one the listing route is, and the failure this row was written to catch — a zeroed position behind a green contract case — does not occur. The adapter still reports `play_count`/`last_played_at` as `None`; `usher.adapters.emby.mapping.user_data_states` says why. |
 | `LibraryUpdateInfo.IsEmpty` means "no array carries anything" | **still unverified** | `false` on all twelve, every one of which carried something. Consistent with the guess and not discriminating. Nothing reads it. |
@@ -89,13 +88,12 @@ still inside the reserved band (≥ 90,000,000), so
 other id here.
 
 **The one thing that is verified live is the subscription frame**,
-`{"MessageType":"SessionsStart","Data":"0,1000"}`, which ADR-0004's
+`{"MessageType":"SessionsStart","Data":"0,1000"}`, which the push lane's
 end-to-end session sent before anything started arriving. It lives in
 `usher.adapters.emby.push.SUBSCRIBE_FRAME`, not here.
 
 `PlayCount` and `LastPlayedDate` appear on `push_user_data_changed.json`
-**and the adapter deliberately ignores both**
-([ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md)). Their
+**and the adapter deliberately ignores both**. Their
 presence is now a record of what this server really sends — both were
 measured truthful on 2026-08-02 — and they are in the fixture precisely so
 that a mapper which started reading them fails a test. The reason the

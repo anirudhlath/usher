@@ -127,7 +127,7 @@ class RefusalPoint:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class LedgerRow:
-    """One bounded destination column, with everything the ADR quotes.
+    """One bounded destination column, with everything the ledger prints about it.
 
     `writers` carries `WriteSite.destinations`' per-table attribution -- see
     that class. It answers "which methods write this column's table", not
@@ -196,8 +196,8 @@ def check_bounded_columns() -> dict[tuple[str, str], str]:
 
     Deliberately conservative: a CHECK naming a comparison or a `BETWEEN` over
     the column bounds its value; one naming `<> ''` or `IS NOT NULL` does not.
-    The point of printing these is that the ADR's "CHECK-only bounds are out"
-    is a decision with a number attached rather than an omission.
+    The point of printing these is that leaving CHECK-only bounds out is a
+    decision with a number attached rather than an omission.
     """
     comparison = re.compile(r"(BETWEEN|>=|<=|>|<)")
     bounded: dict[tuple[str, str], str] = {}
@@ -907,8 +907,8 @@ def write_sites() -> list[WriteSite]:
                     f"read is the only thing keeping it from reading {otherwise!r}. It can "
                     "leak a caller's value as a raw driver exception on class 22, and "
                     "wrapping it would report a statement fault as a refused row -- "
-                    "ADR-0044 records the question as open rather than answered, and this "
-                    "is where it has to be settled"
+                    "the question is open rather than answered, and this is where it has "
+                    "to be settled"
                 )
             sites.append(
                 WriteSite(
@@ -987,7 +987,7 @@ def _load(reference: str) -> type[BaseModel]:
 
 
 def _bound_of(annotation: Any, metadata: Sequence[Any]) -> str:
-    """How the domain field is bounded, in the vocabulary the ADR uses."""
+    """How the domain field is bounded, in the ledger's vocabulary."""
     if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
         # The **longest member**, not a bare "enum".
         longest = max((len(str(member.value)) for member in annotation), default=0)
@@ -1967,7 +1967,7 @@ def render(rows: Sequence[LedgerRow]) -> str:
 
 
 def staging_shape() -> tuple[list[str], list[str]]:
-    """Two lists the ADR's decisions (2) and (4) each need a number for.
+    """The two staging-column lists the destination ledger cannot count.
 
     The first is every staging column declared **wider** than the destination
     column it feeds -- the shape `id_crosswalk.imdb_id` is the roadmap's own
@@ -2054,7 +2054,7 @@ def readings_table() -> str:
                 f"{marker}{reading:<10} {label}  {got['safe']:>4}  {got['translated']:>6}  "
                 f"{got['exposed-copy']:>4}  {got['exposed-sqlalchemy']:>4}  {exposed:>7}"
             )
-    lines.append(f"  (* = the reading ADR-0044 adopts: {DEFAULT_READING})")
+    lines.append(f"  (* = the adopted reading: {DEFAULT_READING})")
     return "\n".join(lines)
 
 
@@ -2089,7 +2089,7 @@ def summary(
     safe_narrow = narrow_staged - counted["exposed-copy"]
 
     lines = [
-        f"bounded columns (ADR-0044's rule, reading={reading}): {len(rows)}",
+        f"bounded columns (reading={reading}): {len(rows)}",
         "  by type family: " + ", ".join(f"{k} {v}" for k, v in sorted(families.items())),
         "  by bucket:      " + ", ".join(f"{k} {v}" for k, v in sorted(counted.items())),
         f"  narrow-staged bounded destination columns: {narrow_staged}"
@@ -2188,7 +2188,7 @@ def _drift(reading: str) -> list[str]:
             if {k: got[k] for k in want} != want:
                 complaints.append(
                     f"bucket drift at {label} under reading={name}: "
-                    f"ADR-0044 publishes {want}, the ledger says "
+                    f"pinned at {want}, the ledger says "
                     f"{ {k: got[k] for k in want} }"
                 )
     if reading not in READINGS:  # pragma: no cover - argparse constrains this
@@ -2200,7 +2200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="audit_bounded_columns",
         description=(
-            "The per-column bounded-column ledger behind ADR-0044 and issue #10. "
+            "The per-column bounded-column ledger behind issue #10. "
             "Offline: no database, no socket, nothing written. See the module "
             "docstring for the bounding rule and the three readings of it."
         ),
@@ -2209,7 +2209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 on any drift from the figures ADR-0044 publishes, at both heads",
+        help="exit 1 on any drift from the pinned figures, at both heads",
     )
     parser.add_argument(
         "--at",

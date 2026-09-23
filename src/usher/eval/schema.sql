@@ -4,7 +4,6 @@
 -- must never carry it, `alembic heads` must stay at one head, and a migration
 -- would create these tables in every deployment for a harness those
 -- deployments cannot run. Applied idempotently by `ledger.ensure_schema`.
--- ADR-0041.
 --
 -- Every statement is `IF NOT EXISTS` or `OR REPLACE`, because this runs at the
 -- start of every eval run rather than once. **`DROP ... CASCADE` is the other
@@ -41,7 +40,7 @@ CREATE INDEX IF NOT EXISTS ix_eval_runs_surface_started
     ON eval.runs (surface, started_at DESC);
 
 -- One row per metric per stratum. Strata are never averaged together by the
--- harness: ADR-0031 ships two tiers with very different latency profiles and a
+-- harness: suggest has two tiers with very different latency profiles, and a
 -- mean over them describes neither.
 CREATE TABLE IF NOT EXISTS eval.scores (
     run_id       uuid    NOT NULL REFERENCES eval.runs(id) ON DELETE CASCADE,
