@@ -17,11 +17,8 @@ dependencies = [
     "uuid6>=2024.7.10",
     "loguru>=0.7",
     "httpx[http2]>=0.27",
-    # The push channel's transport. Already resolved at 16.1.1 transitively
-    # through `uvicorn[standard]`, and declared here anyway: a transitive
-    # dependency is not a contract, and `uvicorn`'s extras are free to drop
-    # it. `usher.adapters.emby.push` imports it lazily, inside the connector,
-    # so a deployment that runs no push lane never pays for it.
+    # Already a transitive of `uvicorn[standard]`, declared because a transitive is
+    # not a contract. Imported lazily, so a deployment with no push lane never loads it.
     "websockets>=15",
     "opentelemetry-api>=1.28",
     "opentelemetry-sdk>=1.28",
@@ -33,89 +30,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The semantic tier's model runtime, deliberately an extra rather than a
-# dependency. Measured 2026-08-02: `fastembed` is 28 packages and 167 MiB
-# against `sentence-transformers`' 59 and 4.8 GiB, ~4.5 GiB of which is GPU
-# runtime pulled unconditionally on a host that may never have a GPU -- and
-# the current `usher` image is 332 MB. Behind an extra because full-text and
-# trigram serve all 1.27M titles with no model at all, so a deployment
-# without this is narrowed rather than broken: `composition.embedder`
-# degrades to `(None, no-op)` and the worker simply never registers
-# `JobKind.INDEX`. Declared here even though the import is lazy, for the
-# reason `websockets` is declared above: a lazily-imported undeclared
-# dependency is a dependency nobody can install on purpose.
+# The semantic tier's runtime, an extra because full-text and trigram serve every
+# title without a model: a deployment without it is narrowed, not broken. Declared
+# although the import is lazy, so it can be installed on purpose. No image installs
+# an extra.
 embedding = ["fastembed>=0.8"]
 
-# The quality-eval harness's IR metrics. An extra for the same reason
-# `embedding` is one, and measured the same two ways as that one, above.
-#
-#   packages -- resolve the closure from `uv.lock`, dropping Windows-only
-#   markers: `ranx` 0.3.21 is **37**, against `embedding`'s accepted 28.
-#   size -- `uv pip install ranx==0.3.21` into a bare 3.13 venv, then
-#   `du -sm .../site-packages`: **520 MiB**, against the 167 MiB accepted
-#   for `fastembed` above.
-#
-# Both numbers are checkable rather than asserted, and the method is what
-# makes them so: run the same two commands against `fastembed` and they
-# answer 28 packages and 175 MiB -- the 28 above, and the 167 MiB above plus
-# version drift. The `du` figure and the closure agree
-# independently, the venv holding exactly 37 `.dist-info` directories.
-#
-# **So the argument is not that this is small. It is 3x the embedding extra,
-# and since `706f207` something does pay for it every run.** That commit
-# changed CI's Install step to `uv sync --frozen --extra eval`
-# (`.github/workflows/ci.yml`), which falsified the sentence that stood here --
-# *"CI installs with a bare `uv sync --frozen` and never passes `--extra eval`,
-# so the production image and the five-step gate each pay zero"*. That
-# paragraph was the whole argument for accepting this extra, so both halves are
-# re-measured rather than reworded (2026-08-19, `UV_PROJECT_ENVIRONMENT`
-# pointed at a venv out of tree, `du -sm .../site-packages`):
-#
-#   **the production image still pays zero, by construction rather than by
-#   care.** `Dockerfile` syncs twice -- `uv sync --frozen --no-install-project
-#   --no-dev` (l.31) and `uv sync --frozen --no-dev` (l.42) -- and neither
-#   passes `--extra` anything, so `ranx` reaches neither stage; the runtime
-#   stage then copies that finished venv wholesale (`COPY --from=builder ...
-#   /app/.venv`, l.58) and installs nothing of its own. Note what this is *not*
-#   a claim about: `COPY src/ ./src/` (l.40) copies `src/usher/eval/` into the
-#   image along with everything else, so "`usher.eval` ships in no image" is
-#   false. What is true is that **no shipped code path imports it** -- the
-#   eleventh contract below enforces that -- and that no image installs the
-#   library it would need.
-#
-#   **CI now pays ~26 packages and ~507 MiB per run**: `uv sync --frozen` gives
-#   84 distributions / 180 MiB, `uv sync --frozen --extra eval` gives 110 / 687
-#   MiB -- counting `.dist-info` directories in `site-packages`, `usher`'s own
-#   editable install included on both sides so the delta is unaffected by it.
-#   It is bought deliberately, for the standing rule that a run that did
-#   not run is not a pass: `tests/unit/test_eval_metrics_ir.py` has to
-#   *execute*, and without the extra it does not even skip -- its own
-#   third-party `import ranx` errors the whole file out at collection.
-#   `ci.yml`'s comment on that step carries the measured traceback and names
-#   the failing line, because the mechanism is not the one an obvious repair
-#   would target.
-#
-# **26 of the 37 are new, not 31**, and the already-present list was short by
-# five. Corrected 2026-08-19, measured by normalised distribution name against
-# a plain `uv sync --frozen` -- the dev environment, which is what CI and a
-# developer machine both have. The **eleven** already there are `requests` with
-# its four transitives (`certifi`, `charset-normalizer`, `idna`, `urllib3`),
-# `packaging`, `rich` with `markdown-it-py`, `mdurl` and `pygments`, and
-# `pyyaml`. The five it missed were all pre-existing rather than introduced by
-# this task, but this is the number `ci.yml` now leans on, so it is the one
-# that has to be right.
-#
-# `ranx` is confined to `usher/eval/metrics/ir.py`. `ir_measures` (4 packages)
-# is the one-file swap if numba ever blocks a CPython upgrade, which is the
-# named residual risk.
+# An extra for `embedding`'s reason, at about three times its size. CI syncs it
+# anyway: `tests/unit/test_eval_metrics_ir.py` imports `ranx` and errors at
+# collection without it. `ranx` stays confined to `usher/eval/metrics/ir.py`, so
+# `ir_measures` remains a one-file swap if numba ever blocks a CPython upgrade.
 eval = ["ranx>=0.3.21"]
 
 [project.scripts]
-# `usher <command>` as well as `python -m usher <command>`; both land on
-# `usher.cli.main`, which reads `sys.argv` when handed no argv. The
-# container's CMD stays `alembic upgrade head && exec python -m usher` --
-# the two are the same code path, and the module form is the one whose
-# `exec`/SIGTERM behaviour has been verified against a running container.
+# The same code path as `python -m usher`, the form the container's CMD uses.
 usher = "usher.cli:main"
 
 [dependency-groups]
@@ -126,13 +54,9 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "import-linter>=2.1",
-    # import-linter's own graph engine, and already installed as its transitive
-    # -- declared anyway, because `tests/unit/test_eval_contract.py` imports it
-    # directly to pin the reachability fact the eleventh contract's
-    # `allow_indirect_imports` rests on. An undeclared transitive is a
-    # dependency nobody can install on purpose and one that a repackaging of
-    # import-linter can remove without warning, which would turn a
-    # gate-blocking test into a collection error.
+    # Already import-linter's transitive, declared because
+    # `tests/unit/test_eval_contract.py` imports it directly: a repackaged
+    # import-linter would otherwise turn that test into a collection error.
     "grimp>=3.15",
     "testcontainers[postgres]>=4.9",
     "asgi-lifespan>=2.1.0",
@@ -144,53 +68,23 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# **`packages` already ships the non-Python files inside it, and E1 Task 7
-# measured that rather than assuming it.** `usher/eval/schema.sql` is read at
-# runtime by `ledger.ensure_schema`, so a file that exists in the tree and not
-# in the wheel is a harness that works from a checkout and fails from an
-# installed copy. Built with `uv build --wheel` on 2026-08-19, the wheel's
-# non-`.py` entries are exactly:
-#
-#     usher/db/migrations/README
-#     usher/db/migrations/script.py.mako
-#     usher/eval/schema.sql
-#
-# so hatchling's default file selection for a package directory takes every
-# file in it, and the two migration files have been shipping that way since M1.
-# The plan for this task called for a
-# `[tool.hatch.build.targets.wheel.force-include]` entry mapping
-# `src/usher/eval/schema.sql` to `usher/eval/schema.sql`; it is **not** added,
-# because the measurement above says it would restate what `packages` already
-# does, and a directive whose stated reason is false is the thing this
-# repository keeps having to correct. What holds the claim instead is
-# `tests/unit/test_eval_contract.py::test_the_schema_sql_ships_beside_the_module`,
-# which resolves the path from `usher.eval.__file__` -- the installed copy --
-# rather than from the repository root.
+# `packages` ships every file in the package, `.py` or not, so
+# `usher/eval/schema.sql` needs no `force-include`.
+# `test_the_schema_sql_ships_beside_the_module` holds that.
 packages = ["src/usher"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q --strict-markers --strict-config"
-# Applied automatically to every test under tests/integration/ by that
-# directory's conftest.py (pytest_collection_modifyitems) -- not hand-applied
-# per test. Registered here because --strict-markers rejects unknown markers.
-# Directory placement (tests/unit vs tests/integration) is still the primary
-# way Docker-dependence is organised; this marker is the secondary, explicit
-# selector for tooling that would rather filter by -m than by path, e.g.
-# `pytest -m "not integration"` / `pytest -m integration`. Deliberately not
-# wired into addopts as a default `-m "not integration"` -- that would make
-# `pytest tests/integration/...` (which Task 10's own TDD steps invoke
-# directly, no `-m` override) silently collect zero tests instead of running
-# them, since addopts marker expressions apply even to an explicit path.
+# `integration` is applied by tests/integration/conftest.py, not by hand. It is
+# deliberately not excluded in addopts: an addopts `-m` applies even to an
+# explicit path, so `pytest tests/integration/...` would collect zero tests.
 markers = [
     "integration: needs a live PostgreSQL via Docker (testcontainers); see tests/integration/conftest.py",
-    # Args are table names. `session`'s teardown asserts that `pg_class` still
-    # describes the database, because the catalog update is in place and one
-    # test's statistics are every later test's planner (issues #26/#43/#79).
-    # Bare, it means "known side effect, repair it quietly"; with
-    # `restored_by="<fixture>"` it means the leak has to survive until that
-    # fixture runs, which is load-bearing in exactly one file --
+    # Args are table names. `session`'s teardown asserts `pg_class` still describes
+    # the database, because one test's statistics are every later test's planner.
+    # `restored_by="<fixture>"` means the leak must survive until that fixture runs;
     # see `restores_the_statistics_this_seed_leaks`.
     "leaks_statistics: this test leaves pg_class describing rows it rolled back",
 ]
@@ -199,34 +93,11 @@ markers = [
 line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
-# docs/ holds planning and PRD markdown with embedded Python code fences that
-# other groups transcribe verbatim; ruff 0.16+ formats/lints Markdown-embedded
-# code by default, so without this exclude `ruff format .` silently rewrites
-# plan prose out from under whoever runs it.
-#
-# `.claude/` is here for the same reason and was missing until M9 measured it:
-# every file under `.claude/rules/` is prose carrying code fences, and one of
-# them had its fence rewritten by `ruff format --check` the first time it ran.
-# The rules files are evidence — a fence reshaped to satisfy a formatter is a
-# quotation that no longer matches what was measured.
-#
-# `web/` is the console, and it is excluded for a different reason from the two
-# above: ruff has nothing to say about TypeScript, but `ruff check .` and
-# `ruff format --check .` both walk `web/node_modules/` — tens of thousands of
-# files, some of them Markdown carrying Python fences from unrelated projects —
-# and would lint a dependency tree this repository does not own. `oxlint` and
-# `prettier` are that directory's gate; `npm run verify` runs them.
-#
-# `dashboards/README.md` is the fourth, and it is here **prophylactically** —
-# stated as such because the alternative is a comment that implies a break
-# nobody saw. Measured 2026-09-07 with the file unexcluded: `ruff format
-# --check dashboards/README.md` reports *1 file already formatted*, because
-# every fence in it is ```sql and ruff has nothing to say about SQL. What it
-# would have to say about a ```python fence is the same thing it says about
-# `docs/` and `.claude/`, and that file is a record of eleven measured panel
-# observations — a fence reshaped by a formatter is a quotation that no longer
-# matches what was measured. The entry is a path rather than the directory so
-# that a real `.py` landing under `dashboards/` is still linted.
+# Ruff formats Python fences inside Markdown, so `docs`, `.claude` and
+# `dashboards/README.md` are excluded to keep quoted code as written, and `web` so
+# ruff never walks `web/node_modules/`. An explicit path argument bypasses all of
+# it. `dashboards/README.md` is a path, not the directory, so a `.py` landing under
+# `dashboards/` is still linted.
 extend-exclude = ["docs", ".claude", "web", "dashboards/README.md"]
 
 [tool.ruff.lint]
@@ -237,13 +108,8 @@ ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-# assert is how pytest tests assert; not a bandit finding here.
-# S105/S106/S107: M3's fixtures and fakes are built around literal
-# usernames, passwords, and session tokens -- a test for "a rejected
-# credential does not produce a request storm" has to name a wrong password
-# somewhere -- and a `# noqa` on every one of them is noise that would
-# eventually get copied into `src/`, where these rules still apply and
-# still matter.
+# `assert` is how pytest asserts. S105-S107: fixtures name literal credentials, and
+# a `# noqa` on each would get copied into `src/`, where these rules still matter.
 "tests/**" = ["S101", "S105", "S106", "S107"]
 
 [tool.mypy]
@@ -254,71 +120,22 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-# `yaml` is here rather than as a `types-PyYAML` dev dependency: the one
-# consumer is tests/unit/test_deployment_config.py, which reads compose.yml
-# to check it against `Settings` and `.env.example`, and a stub package
-# bought only for a test file is more surface than the `Any` it removes.
-# `fastembed` ships no type information and lives behind an extra, so it
-# is not installed in the environment mypy runs in -- the annotation on
-# `FastEmbedEmbedder._model` is `Any` for exactly that reason, stated
-# there rather than implied here.
-#
-# `asyncpg.*` is here for the same reason as `yaml`: nothing in `src/` imports
-# it -- the driver is reached through SQLAlchemy's dialect, and
-# `usher.db.staging.raw_connection` unwraps to it as `Any` on purpose -- and
-# the one consumer is `tests/integration/test_staging.py`, which names
-# `asyncpg.exceptions.StringDataRightTruncationError` to observe the COPY
-# path's `22001` refusal.
-# asyncpg ships no `py.typed`; a stub package bought for one `pytest.raises`
-# is more surface than the `Any` it removes, and the alternative -- matching
-# the exception by class *name* -- is a weaker assertion than the type.
-#
-# `ranx` is here for exactly `fastembed`'s reason and the entry is load-bearing
-# in *both* environments: measured 2026-08-18 against a CI-identical venv
-# (`UV_PROJECT_ENVIRONMENT=... uv sync --frozen`, no `--extra eval`), the two
-# states raise two different error codes over the same line --
-# `import-untyped` when the extra is synced and the package is installed
-# without `py.typed`, `import-not-found` when it is not. So a
-# `# type: ignore[import-untyped]` is green locally and **red in CI on two
-# counts**, the unmatched code plus `unused-ignore` under `strict`, and
-# `# type: ignore[import-not-found]` is red the other way round.
-#
-# **That argument was overstated until 2026-08-19 and the correction is
-# narrower on two axes.** The claim was that *no* ignore comment is green in
-# both; measured, a **bare** `# type: ignore` is clean in both, and ruff would
-# not object either -- `PGH003` is not in `[tool.ruff.lint] select`. What is
-# true is that no **code-scoped** per-line ignore can be green in both, because
-# the code differs between the two environments; and that a bare ignore on
-# `ir.py`'s import alone still leaves `tests/unit/test_eval_metrics_ir.py`'s own
-# `import ranx` red in **both** environments (`import-untyped` installed,
-# `import-not-found` absent), so the blanket form would have to be repeated at
-# every import site and would silently swallow the next, unrelated error on
-# each of those lines. One override entry covers both sites, is checked by
-# neither environment's accident, and is the shipped choice for that reason
-# rather than for the one written here before.
-#
-# Nothing outside `usher/eval/metrics/` may import `ranx` -- **the twelfth
-# contract below** is what makes that true rather than conventional, and the
-# eleventh, which this comment used to name, does not: it forbids importing
-# `usher.eval`, which is a different claim about a different module. Measured,
-# with the correction recorded on the twelfth contract itself.
+# Packages with no type information. `yaml` and `asyncpg.*` are test-only, where a
+# stub package is more surface than the `Any` it removes. `ranx` needs this rather
+# than a per-line ignore: installed it is `import-untyped`, absent it is
+# `import-not-found`, and no code-scoped ignore is green in both environments.
 module = ["uuid6", "testcontainers.*", "yaml", "fastembed", "ranx", "asyncpg.*"]
 ignore_missing_imports = true
 
 [tool.importlinter]
 root_packages = ["usher"]
-# Without this, `ranx` is not a node in the graph at all and the twelfth
-# contract below cannot be stated -- see its comment for the measurement that
-# forced it, and for what the wider graph costs. It is a top-level setting
-# rather than a per-contract one, so all twelve contracts are checked against
-# the wider graph; import-linter refuses to start without it when any contract
-# names an external module, which is a loud failure rather than a quiet pass.
+# Makes `ranx` a node in the graph, so the last contract can name it. Top-level,
+# so every contract is checked against the wider graph.
 include_external_packages = true
 
 # An allowlist, not a denylist: every top-level package's place is defined by
 # where it sits (or that it's named at all), so a new package can't silently
-# escape every contract the way usher.config and usher.api once did under
-# three hand-maintained forbidden_modules lists.
+# escape every contract.
 
 [[tool.importlinter.contracts]]
 name = "hexagonal layering"
@@ -344,9 +161,7 @@ source_modules = ["usher.domain", "usher.ports"]
 forbidden_modules = ["usher.config"]
 
 # usher.cli is the second composition root, alongside usher.api. It may import
-# anything; nothing may import it. Without this contract it would sit outside
-# every existing one -- exactly the "silently escape every contract" failure
-# the allowlist comment above exists to prevent.
+# anything; nothing may import it.
 [[tool.importlinter.contracts]]
 name = "cli is a composition root, nothing depends on it"
 type = "forbidden"
@@ -360,32 +175,11 @@ source_modules = [
 ]
 forbidden_modules = ["usher.cli"]
 
-# The spec's "zero source-specific concepts outside adapters/emby/"
-# acceptance criterion, enforced rather than asserted. With
-# usher.adapters.factory now the single place in src/ that names EmbyAdapter,
-# that criterion is finally expressible as a contract rather than a hope:
-# without this, `api/routers/sources.py` importing EmbyAdapter directly would
-# type-check, pass every test, and quietly make the abstraction decorative.
-# Verified by planting exactly that import -- all five contracts above
-# reported KEPT, because none of them constrains usher.api or usher.db
-# against usher.adapters at all.
-#
-# `allow_indirect_imports` is load-bearing, not a loosening. Without it this
-# contract breaks on the one import the factory exists for: usher.api.deps ->
-# usher.adapters.factory -> usher.adapters.emby.adapter is an indirect chain,
-# and a forbidden contract reports those by default. Verified both ways --
-# with it, that chain is KEPT and a direct `from usher.adapters.emby.adapter
-# import EmbyAdapter` in usher.api or usher.db is still BROKEN, which is
-# exactly the line the criterion draws: nothing outside the registry may
-# *name* a concrete adapter, and everything is free to reach one through the
-# port.
-#
-# usher.cli and usher.adapters are absent from the source list deliberately:
-# the former is a composition root (the contract above isolates it), and the
-# latter contains the registry itself. Like every contract here this one
-# enumerates its sources, so a new top-level package added later is outside
-# it until someone adds it -- the same weakness the allowlist comment at the
-# top of this section names, unfixable in a `forbidden` contract.
+# Nothing outside the registry may *name* a concrete source adapter.
+# `allow_indirect_imports` is not a loosening: `usher.api.deps -> adapters.factory
+# -> adapters.emby` is the chain the factory exists for, and a direct import is
+# still BROKEN. `usher.cli` (a composition root) and `usher.adapters` (the registry)
+# are exempt, and a new top-level package is outside this until it is listed.
 [[tool.importlinter.contracts]]
 name = "no concrete source adapter escapes its package"
 type = "forbidden"
@@ -399,31 +193,10 @@ source_modules = [
 forbidden_modules = ["usher.adapters.emby"]
 allow_indirect_imports = true
 
-# The same criterion as the contract above, for the two implementations most
-# likely to be swapped. Until M6 nothing stopped `usher/services/search.py`
-# naming `PostgresSearchIndex` directly -- which would type-check, pass every
-# test, and quietly make the port decorative. `PostgresSearchIndex` may one
-# day be a Meilisearch class and `FastEmbedEmbedder` is one of two
-# interchangeable runtimes, so the two most swap-prone implementations in the
-# project were the two constrained by nothing.
-#
-# `allow_indirect_imports` for the previous contract's reason and not as a
-# loosening: the composition root reaches these through `usher.composition`,
-# and `usher.api.deps -> usher.composition -> usher.adapters.search.postgres`
-# is an indirect chain a forbidden contract reports by default. Verified both
-# ways -- with the flag that chain is KEPT and a direct import in
-# `usher.services` is still BROKEN, which is the line the criterion draws.
-#
-# `usher.composition` is absent from the source list for the reason recorded
-# in CLAUDE.md: it is the wiring both roots share, and the hole is closed by
-# what it *imports* -- a core module reaching it breaks contracts two and
-# three, which report indirect chains.
-#
-# Verified by planting exactly the import it forbids, in both `usher.services`
-# (where contract two also fires, so it proves nothing on its own) and
-# `usher.api` (which contract two does not cover, so this one fires alone).
-# The last time that step was skipped, five contracts reported KEPT against a
-# violation none of them constrained.
+# The same rule for the implementations most likely to be swapped. The flag for the
+# previous contract's reason: the roots reach these through `usher.composition`.
+# That module is absent from every source list; a core module reaching it still
+# breaks contracts two and three, which report indirect chains.
 [[tool.importlinter.contracts]]
 name = "no concrete search, embedding or LLM implementation escapes its package"
 type = "forbidden"
@@ -437,54 +210,15 @@ source_modules = [
 forbidden_modules = [
     "usher.adapters.search",
     "usher.adapters.embedding",
-    # M8. `OpenAICompatibleClient` may one day be joined by a `LiteLLMClient`,
-    # and this contract is what keeps that swap cheap in the code.
     "usher.adapters.llm",
 ]
 allow_indirect_imports = true
 
-# M8. PRD 06's *"Generation happens in a background job -- never in the request
-# path"*, as a property of the import graph rather than of a name list.
-#
-# `tests/unit/test_api_rows.py` and `tests/unit/test_rows_curated.py` already
-# scan their own module for `LLMClient`, `CurationService` and friends, and a
-# name scan is the right shape there -- behaviour cannot distinguish "never
-# reached an LLM" from "reached one and swallowed the failure". But a name scan
-# is only ever as complete as its list, and the list had a reachable hole:
-# `composition.build_curation_service` is the one public factory in `src/`
-# whose entire job is to return a `CurationService` holding an `LLMClient`
-# (`composition.py` calls it exactly that way when it registers the `curate`
-# handler), and it is spelled with none of the forbidden words. A router doing
-#
-#     from usher.composition import build_curation_service
-#
-# was planted and passed every gate step -- ruff, mypy, all seven contracts
-# above, and both suites. `api/deps.py` already imports from
-# `usher.composition`, so that is the door somebody adding in-request
-# generation reaches for, not a hypothetical one. The same hole swallows a
-# rename: the scan catches `CurationServiceDep` only because the string
-# `CurationService` is inside it, and `CuratorDep` would be silent.
-#
-# `usher.composition` is deliberately absent from every contract above (see the
-# comment on the previous one), so nothing constrained this at all. Naming it
-# here closes that for the one package where an in-request completion would
-# actually be bought.
-#
-# `allow_indirect_imports` is load-bearing for the reason it is on the two
-# contracts above, and this contract does not hold without it: every router
-# imports `usher.api.deps`, which is the API's composition root and imports
-# `usher.composition` on purpose, so `usher.api.routers.health ->
-# usher.api.deps -> usher.composition` is an indirect chain a forbidden
-# contract reports by default. Measured: without the flag this contract is
-# BROKEN at HEAD on three chains through `api/deps.py` and `api/lanes.py`,
-# which is the reverse of what it is for. With it, the line drawn is the one
-# that matters -- a router may reach a service through a dependency, and may
-# not *name* the wiring, the curation service or the LLM port itself.
-#
-# Verified in both directions: KEPT at HEAD, and BROKEN on each of the three
-# forbidden modules planted directly (`usher.composition` in
-# `routers/rows.py`; `usher.services.curation` and `usher.ports.llm` in
-# `routers/home.py`, which no name scan in the suite covers at all).
+# Generation happens in a background job, never in the request path, as a graph
+# property: a name scan missed `composition.build_curation_service`, which returns
+# a `CurationService` under none of the scanned names. The flag because every router
+# reaches `usher.composition` through `usher.api.deps`: a router may reach a service
+# through a dependency, never *name* the wiring.
 [[tool.importlinter.contracts]]
 name = "no router names the wiring, the curation service or the LLM port"
 type = "forbidden"
@@ -496,57 +230,16 @@ forbidden_modules = [
 ]
 allow_indirect_imports = true
 
-# **`adapters/http.py` is now shared by four adapter packages, and nothing kept
-# it a leaf.** Until 2026-08-10 it held one function (`retry_after_seconds`) and
-# its module docstring's claim to be the home for "HTTP helpers shared by every
-# adapter that talks to an upstream over httpx... instead of each reimplementing
-# it" was mostly aspiration -- `decode_json`, the untranslated-failure tuple and
-# the status-code ladder were each written two or three times, once per adapter.
-# That review consolidated them here, so this module now owns the **error
-# taxonomy translation for the whole project**: `bulk`, `emby`, `llm` and `tmdb`
-# all import it, so the error taxonomy being ours is a property of this one
-# file.
-#
-# Which makes the direction of the edge load-bearing for the first time. A
-# shared module that imports one of its own consumers is a cycle, and the
-# failure is quiet rather than loud: the import resolves, the tests pass, and
-# the next adapter to need a helper finds a "shared" module that drags an Emby
-# session or an httpx-mocked TMDb client in behind it. The generalisation
-# argument is the one the previous contract records -- *prefer a graph property
-# wherever one is expressible* -- and the alternative here is a convention in a
-# docstring, which is what the three duplicate copies grew out of.
-#
-# **No `allow_indirect_imports`, deliberately, and it is the opposite call from
-# the three contracts above.** They carry the flag because their sources
-# legitimately reach the forbidden module through a composition root. This one
-# has no such path: `usher.adapters.http` imports `httpx` and the standard
-# library and nothing else in this project, so an *indirect* chain into an
-# adapter is exactly as much a cycle as a direct one and there is no honest
-# reason for either.
-#
-# Verified in both directions rather than asserted: KEPT at HEAD (9 kept, 0
-# broken), and BROKEN on a plant -- `from usher.adapters.emby.session import
-# EmbySession` added to `adapters/http.py` **in its isort position**, so the
-# careful spelling of the defect is what was measured and not the careless one
-# `ruff check` would have caught first.
+# `adapters/http.py` is the error-taxonomy translation every adapter imports, so an
+# edge back into an adapter is a cycle that resolves quietly. No
+# `allow_indirect_imports`: it imports only httpx and the standard library, so an
+# indirect chain into an adapter is as much a cycle as a direct one.
 [[tool.importlinter.contracts]]
 name = "the shared http helpers import no concrete adapter"
 type = "forbidden"
 source_modules = ["usher.adapters.http"]
-#
-# **`usher.adapters.images` joined this list in M9 and the list is the whole
-# contract**, which is why adding a package here is not bookkeeping: this is a
-# `forbidden` contract, so a seventh adapter package left out is a package the
-# contract silently stops covering — the gate still reports 9 kept, 0 broken
-# and the newest adapter is the one thing nothing constrains. The image fetcher
-# is a fifth consumer of `adapters/http.py` (it takes `UNTRANSLATED_FAILURES`
-# and `port_error_for`), so it is exactly the shape this edge exists for.
-#
-# It deliberately does **not** join the contract above. That one's name is
-# about the swappable search, embedding and LLM implementations, and adding
-# an image adapter to it would make the name false. Contract 2 (*adapters are
-# driven, not driving*) covers the new package for free. So M9 adds a
-# forbidden module, not a tenth contract.
+# Every adapter package must be listed: a `forbidden` contract covers only what it
+# names, so an omitted package is silently unconstrained.
 forbidden_modules = [
     "usher.adapters.bulk",
     "usher.adapters.embedding",
@@ -557,32 +250,11 @@ forbidden_modules = [
     "usher.adapters.tmdb",
 ]
 
-# **The tenth contract, and the invariant it holds is the only one in this
-# project that no top-level contract can see.** The nine above are stated at
-# `usher.api`, `usher.services`, `usher.ports`, `usher.domain`, `usher.adapters`,
-# `usher.db`, `usher.config` and `usher.cli` -- top-level packages -- so an
-# import between two *submodules* of `usher.ports.repository` is invisible to
-# every one of them. Measured by A1's own sweep: inverting `_results.py` into
-# `bulk.py` and importing it back the other way passes `ruff check`,
-# `ruff format --check`, `mypy` and all nine contracts, and is caught only by
-# `tests/unit/test_ports_repository_package.py::test_no_aggregate_module_imports_
-# another_aggregate_module`, one bespoke AST scan in one file.
-#
-# `testing-discipline.md`'s own rule from M8 Task 17 is what settles it --
-# *prefer a graph property wherever one is expressible* -- and here one is:
-# `independence` forbids an import in **either** direction between any pair of
-# the listed modules, including indirect chains, which a `forbidden` contract
-# cannot express without twenty source/forbidden pairs. The two checks do not
-# subsume each other and both are kept: the AST scan sees a module the list has
-# forgotten, and the contract sees an indirect chain the scan's single-hop
-# `ImportFrom` walk does not.
-#
-# **The list is the contract, exactly as the one above says of its own**, so
-# `test_the_independence_contract_names_every_aggregate_port_module` derives the
-# expected membership from the package and fails if a new port module lands
-# unlisted. `usher.ports.repository._results` is deliberately absent: it is the
-# shared private module every aggregate is allowed to import, and listing it
-# would forbid the thing this design is for.
+# An import between two submodules of `usher.ports.repository` is invisible to every
+# top-level contract. `independence` forbids either direction between any pair,
+# indirect chains included. `_results` is absent: every aggregate may import it.
+# `test_the_independence_contract_names_every_aggregate_port_module` keeps the list
+# complete.
 [[tool.importlinter.contracts]]
 name = "no aggregate port module imports another"
 type = "independence"
@@ -609,105 +281,11 @@ modules = [
     "usher.ports.repository.watch_state",
 ]
 
-# **The eleventh contract.** `usher.eval` may import anything -- it drives the
-# real services through the real composition root, which is the whole design --
-# and **nothing may import it**. Without this it would sit outside all ten
-# contracts above, which is precisely the "a new package can't silently escape
-# every contract" failure the allowlist note at the top of this section names,
-# and it would let a shipped code path pick up a dev-only extra.
-#
-# **`source_modules` is every top-level importable name under `src/usher/`
-# except one, and `usher.cli` is that one.** It is exempt deliberately --
-# `usher eval` is a subcommand, so the CLI is this package's composition root,
-# the same exemption `usher.composition` holds in three contracts above -- and
-# it is safe for the same reason: the contract "cli is a composition root,
-# nothing depends on it" already stops anything reaching `usher.eval` back
-# through `usher.cli`. Exempt is the claim; absent is not, and this comment
-# said "the only absence" until 2026-08-18 while a second name was missing.
-#
-# **That exemption did not work, and it failed for the one case it exists
-# for.** Measured 2026-08-19 with the future state planted -- a *used*,
-# ruff-clean `from usher.eval.metrics import ir` in `usher/cli.py`, in its
-# isort position, which is what the `usher eval` subcommand will be -- this
-# contract reported **11 kept, 1 broken**:
-#
-#     the eval harness is a leaf, nothing depends on it BROKEN
-#     usher.__main__ is not allowed to import usher.eval:
-#     -   usher.__main__ -> usher.cli (l.16)
-#         usher.cli -> usher.eval.metrics.ir (l.59)
-#
-# A `forbidden` contract reports **indirect chains by default**, and
-# `usher.__main__` is a source that imports `usher.cli` -- which is the
-# container entrypoint's entire job. So the exemption held only while nothing
-# in `usher.cli` reached `usher.eval`, i.e. only before the subcommand it was
-# written for. `allow_indirect_imports = true` is the repair, the same flag
-# the sixth, seventh, eighth and twelfth contracts carry; with it and the same
-# plant, **12 kept, 0 broken**.
-#
-# **It is a real narrowing and not only a repair, which is the difference from
-# those four.** A module that reaches `usher.eval` *through* `usher.cli` is no
-# longer reported here. What still reports it is the fifth contract, which has
-# no such flag: planting a used `from usher.cli import main` in
-# `usher/telemetry.py` on top of the `cli.py` plant leaves this contract KEPT
-# and turns **four others** red (`8 kept, 4 broken`) -- *cli is a composition
-# root* on `usher.services.images -> usher.telemetry -> usher.cli`, plus both
-# layering contracts and *hexagonal layering* on the same chain. Every source
-# listed below except one is imported by something in that contract's six, so
-# the loop is closed for all of them. **The exception is `usher.__main__`,
-# which nothing imports** -- and that is precisely the intended path, since it
-# exists to run the CLI.
-#
-# **That last paragraph is a graph fact, and as of 2026-08-19 a test holds it
-# rather than this comment.** Measured direct importers inside the fifth
-# contract's six: `usher.config` 3, `usher.composition` 3 (all six of those in
-# `usher.api`), `usher.telemetry` 12, `usher.__main__` **0**. Nothing checked
-# it, while `test_eval_contract.py` already pinned the flag, the forbidden
-# module, the `usher.cli` exemption and the full source list -- so a refactor
-# unhooking one of the three would have opened a real hole with the gate still
-# green. Verified by planting exactly that (the three `from usher.composition
-# import` statements in `usher/api/` rewritten away, out of tree): the gate
-# reported **12 kept, 0 broken** with `usher.composition` silently exempt from
-# both contracts, and `test_the_eval_package_is_named_by_an_import_contract`
-# failed on its own line naming it. Restored, green.
-#
-# **Every *direct* import of `usher.eval` is still caught in every listed
-# source, with the flag on**, which is the claim this contract is really
-# making. Re-measured with the careful spelling, one plant at a time:
-# `from usher.eval import goldens` used in `src/usher/__main__.py` reports
-# `usher.__main__ -> usher.eval.goldens (l.17)`, and the same import in
-# `src/usher/services/search.py` reports
-# `usher.services.search -> usher.eval.goldens (l.75)` -- **11 kept, 1 broken**
-# each.
-#
-# The flag's presence is asserted by `tests/unit/test_eval_contract.py`, and
-# the reason is a trap rather than symmetry with the twelfth: deleting it
-# turns this contract red the day Task 11 lands, and the obvious repair for
-# that red is to delete `usher.__main__` from the list below -- which unpicks
-# the measured fix recorded in the next paragraph, and which the same test
-# then fails on, sending the reader further wrong.
-#
-# That name was `usher.__main__`, the container entrypoint
-# (`CMD alembic upgrade head && exec python -m usher`), and it was the one
-# genuinely open surface. Measured, not reasoned: a *used*, ruff-clean
-# `from usher.eval import goldens` planted in `src/usher/__main__.py` reported
-# **11 kept, 0 broken**. It is listed now and must stay listed. The same plant
-# in `src/usher/__init__.py` is caught even unlisted, because `usher` is
-# reached from `usher.composition` through the adapters -- `__main__` is
-# reached from nothing, which is exactly what made it invisible.
-#
-# `tests/unit/test_eval_contract.py` derives this list from a `pkgutil` walk of
-# `src/usher/` and asserts set equality, so the next top-level package to land
-# fails there by name rather than sitting outside a contract that still reports
-# 11 kept.
-#
-# Verified in both directions, with the careful spelling. A plant that dies on
-# ruff `F401` proves only that ruff works, so the plant is *used*:
-#     `from usher.eval import goldens` in `usher/__main__.py`, in its isort
-#     position, with `_PLANT = goldens.__name__` beside it.
-# With the module listed: **10 kept, 1 broken**, naming
-# `usher.__main__ -> usher.eval.goldens (l.17)`. Reverted from a `cp` backup
-# and re-verified at 11 kept, 0 broken -- never with `git checkout <path>`,
-# which discards uncommitted work along with the plant.
+# Nothing may import `usher.eval`, so no shipped path reaches a dev-only extra;
+# `usher.cli` is exempt as the harness's composition root. Keep both the flag and
+# `usher.__main__`: without the flag `__main__ -> cli -> eval` breaks this, and
+# dropping `__main__` to silence that leaves a direct import there unseen.
+# `tests/unit/test_eval_contract.py` derives this list and pins the flag.
 [[tool.importlinter.contracts]]
 name = "the eval harness is a leaf, nothing depends on it"
 type = "forbidden"
@@ -727,84 +305,11 @@ source_modules = [
 forbidden_modules = ["usher.eval"]
 allow_indirect_imports = true
 
-# **The twelfth contract, which turns `metrics/__init__.py`'s sentence into a
-# check.** That docstring says `ir.py` is the only module in this project that
-# imports `ranx`, and the mypy override above claimed the *eleventh* contract
-# was what made that true rather than conventional. It was not, and the
-# correction is measured rather than argued (2026-08-19): `ranx` was not a node
-# in the graph at all -- `root_packages = ["usher"]` with no
-# `include_external_packages`, so `'ranx' in graph.modules` is `False` -- and
-# the eleventh contract's `forbidden_modules` is `["usher.eval"]`, a statement
-# about who may reach the *harness*, not about who may reach the *library*.
-# A **used**, ruff-clean `import ranx` planted in its isort position with a
-# `_PLANT = ranx.__name__` beside it, in **both** `usher/adapters/http.py` and
-# `usher/eval/errors.py` at once, reported **11 kept, 0 broken**; the positive
-# control on the same out-of-tree copy (`from usher.eval import errors` in
-# `usher/__main__.py`) reported **10 kept, 1 broken**, which is what proves the
-# probe was reading that copy rather than something else.
-#
-# The confinement is not housekeeping. It is the whole mitigation for the risk
-# `metrics/__init__.py` records: `numba`/`llvmlite` pin an LLVM ABI and have
-# historically lagged new CPython, so a 3.14 move could block the `eval` extra,
-# and the escape -- swapping to `ir_measures`, 4 packages and no numba -- is
-# only "one file" for as long as it is genuinely one file. An unenforced
-# boundary is one import away from not existing.
-#
-# **What `include_external_packages` costs**, measured on this host rather than
-# guessed, because a wider graph is a real trade and belongs in the open. The
-# graph goes from *228 files, 906 dependencies* to *279 files, 1,741
-# dependencies*. Ten interleaved A/B pairs of `uv run lint-imports`, medians:
-# **206 ms -> 219 ms** warm, **250 ms -> 269 ms** with `.import_linter_cache`
-# removed before each run. That is +13 ms and +19 ms, i.e. not material, and it
-# is stated here so nobody re-derives it.
-#
-# **`allow_indirect_imports` is load-bearing and is not a loosening**, the same
-# call the sixth, seventh and eighth contracts make and for the same reason.
-# The claim being enforced is *nothing outside `usher.eval.metrics` may **name**
-# `ranx`*; reaching `score()` through the module that does name it is the design,
-# not a violation. Measured with the future state planted -- a ruff-clean
-# `from usher.eval.metrics import ir` in `usher/cli.py`, which is what the
-# `usher eval` subcommand will be: **without** the flag this contract is BROKEN
-# on `usher.cli -> usher.eval.metrics.ir -> ranx`, the reverse of what it is
-# for; **with** it, KEPT, while a direct `import ranx` anywhere in the source
-# list is still BROKEN. Nothing else can reach `ranx` indirectly either, because
-# the only usher module that imports it is inside `usher.eval.metrics` and the
-# eleventh contract governs who may reach `usher.eval` at all.
-#
-# **The exemption is the package `usher.eval.metrics`, not the module `ir`**,
-# and that is a limit of the contract type rather than a choice: a `forbidden`
-# contract's `source_modules` cover a module *and all its descendants*, so
-# `usher.eval.metrics` cannot be a source with `ir` carved out of it. A second
-# `metrics` module importing `ranx` would therefore be KEPT here. That last
-# inch is held by a scan --
-# `test_eval_contract.py::test_only_the_ir_module_inside_the_metrics_package_names_ranx`
-# -- for the reason M8 Task 17 recorded: a graph property covers every module
-# rather than the one a scan is pointed at, and a scan sees what a list has
-# forgotten, so neither check subsumes the other and both are kept.
-#
-# **The list is the contract**, exactly as the eleventh and tenth say of their
-# own, so `test_eval_contract.py::test_the_ranx_contract_names_every_module_that_
-# may_not_import_it` derives it from two `pkgutil` walks -- top level minus
-# `usher.eval`, plus `usher.eval`'s children minus `metrics` -- and carries a
-# premise guard, because a walk that globs nothing passes exactly like a walk
-# that passes. `usher.cli` is a source here and is *not* exempt as it is in the
-# eleventh: it is the eval harness's composition root, which is a reason to let
-# it import `usher.eval`, and no reason at all to let it import `ranx`.
-#
-# Two more measurements a future reader will want and should not have to take.
-# **The contract does not need the extra installed**: grimp reads the name out
-# of the source, so a venv synced without `--extra eval` (where `import ranx`
-# fails at runtime) still reports 12 kept, 0 broken. And **it goes vacuous
-# rather than loud** the day the swap happens: with `ir.py` no longer importing
-# `ranx`, `ranx` leaves the graph and this contract reports KEPT with nothing
-# to check, so whoever moves to `ir_measures` has to re-point it here rather
-# than being told to by a red gate.
-#
-# Verified in both directions with the careful spelling, out of tree, restored
-# from `cp` backups and read back -- never `git checkout <path>`. Both plants
-# together: **11 kept, 1 broken**, naming
-# `usher.adapters.http -> ranx (l.29)` and `usher.eval.errors -> ranx (l.8)`.
-# Restored: **12 kept, 0 broken**.
+# Only `usher.eval.metrics` may name `ranx`, keeping an `ir_measures` swap to one
+# file; the flag lets callers reach it through `ir.py`. A contract cannot carve `ir`
+# out of its package, so `test_eval_contract.py` pins `ranx` to that module and
+# derives this list. `usher.cli` is a source here, unlike above. If `ir.py` stops
+# importing `ranx`, this goes vacuous rather than red: re-point it.
 [[tool.importlinter.contracts]]
 name = "only the IR metrics package imports ranx"
 type = "forbidden"
