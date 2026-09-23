@@ -34,9 +34,8 @@ independently testable and swappable.
 `adapters/` subdirectories are named for the upstream service when a port's
 implementation talks to one nameable external service (`emby/` →
 `SourceAdapter`, `tmdb/` → `MetadataProvider`) and for the capability otherwise
-(`bulk/`, `search/`, `embedding/`, `llm/`, `images/`). **`adapters/postgres/`
-does not exist and must not be created** — it would put a `SearchIndex` and a
-repository in one directory.
+(`bulk/`, `search/`, `embedding/`, `llm/`, `images/`). There is no
+`adapters/postgres/`.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
 **There is no `meilisearch` service.** What exists is a feature gate behind the
@@ -76,8 +75,8 @@ over `websockets`. Three of the nine are paced; six deliberately are not.
 | the configured media source (`emby/session.py`) | the per-source minimum-interval gate, `USHER_SOURCE_REQUESTS_PER_SECOND` |
 | `api.themoviedb.org` (`tmdb/client.py`) | `_TokenBucket` at `USHER_TMDB_REQUESTS_PER_SECOND` |
 | `api.themoviedb.org` (`tmdb/provider.py`, six call sites) | the bucket above — this module holds no client of its own |
-| `/embywebsocket` (`emby/push.py`) | **none** — a socket held open is not a request; the reconnect *backoff* is its limiter |
-| `image.tmdb.org` (`images/provider.py`) | **none** — the CDN publishes no limit and the cache is the bound |
+| `/embywebsocket` (`emby/push.py`) | **none** — one socket held open; reconnects back off |
+| `image.tmdb.org` (`images/provider.py`) | **none** — each image is fetched once, then served from the cache |
 | the IMDb/TMDb/MovieLens dataset hosts (`bulk/download.py`, two call sites) | **none** — one streamed file per dataset plus one `HEAD` for its revision |
 | `query.wikidata.org` (`bulk/wikidata.py`) | **none** — a bootstrap phase run by hand, chunked and sequential |
 | `USHER_LLM_BASE_URL` (`llm/openai_compatible.py`) | **none** — `curate` is capped at 1 in flight |
@@ -129,8 +128,6 @@ There is no `jobs/` package: the priority queue is `ports/jobs.py` +
 `db/repositories/jobs.py`, the worker is `services/jobs.py`, and scheduling is
 `services/scheduler.py` plus `api/lanes.py`'s supervised lanes.
 
-Files stay small and single-purpose.
-
 ## Stack
 
 | | |
@@ -158,9 +155,9 @@ own bound, so a slow upstream cannot starve the API.
 | Source event stream | 1 per source | push connection |
 | **Job worker, globally** | **`USHER_JOB_CONCURRENCY`, default 12** | the connection pool; `Settings` refuses a value it cannot serve |
 | — `enrich` | the global (12) | TMDb, at `USHER_TMDB_REQUESTS_PER_SECOND` |
-| — `match`, `watch_history`, `watch_writeback` | 4 | measured throughput knee |
-| — `derive` | 4 | measured throughput knee |
-| — `index` | 1 | embedding is CPU-bound |
+| — `match`, `watch_history`, `watch_writeback` | 4 | a fixed per-kind cap |
+| — `derive` | 4 | a fixed per-kind cap |
+| — `index` | 1 | the embedder |
 | — `curate` | 1 | one completion at a time |
 | — `sync`, `bootstrap` | 1 | a walk of the whole library |
 | Embedding | the `index` row above; `USHER_EMBEDDING_BATCH_SIZE` is its batch | CPU/GPU |
@@ -168,10 +165,10 @@ own bound, so a slow upstream cannot starve the API.
 | **Screen refresh** | **1 lane, 1 refresh in flight, ≤ 32 keys queued** | `REFRESH_QUEUE_SIZE`; full means dropped |
 
 A concurrency entry is a slot count, not a request rate: the per-source gate
-`USHER_SOURCE_REQUESTS_PER_SECOND` (default 0.4) bounds the wire. Every job in
-flight holds an `AsyncSession`, so `Settings` refuses a `job_concurrency` the
-`USHER_DB_POOL_SIZE` pool cannot serve. `curate` is capped at one completion at
-a time, up to `USHER_LLM_TIMEOUT_SECONDS` (120 s).
+`USHER_SOURCE_REQUESTS_PER_SECOND` (default 0.4) bounds the wire. `Settings`
+refuses a `job_concurrency` the `USHER_DB_POOL_SIZE` pool cannot serve. `curate`
+is capped at one completion at a time, up to `USHER_LLM_TIMEOUT_SECONDS`
+(120 s).
 
 Screen refresh drops rather than blocks when its queue is full, costing one
 cache miss. `index` jobs run at `BACKFILL` priority, or at the rung their
