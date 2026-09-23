@@ -609,17 +609,17 @@ def test_the_committed_compliance_scan_is_falsifiable() -> None:
     assert _INTERVAL.search("SELECT count(*) FROM raw_payloads") is None
 
 
-def test_the_single_number_version_is_recorded_as_a_rejected_design() -> None:
+def test_the_panel_is_specified_as_three_numbers_and_not_one() -> None:
     """Stated in the panel's own description rather than in a plan.
 
     A plan is not read by whoever trims a dashboard for time, and three numbers cost
-    more than one, so the reason has to travel with them.
+    more than one, so the specification has to say "not one" in the panel's own words.
     """
     body = normalised(section_body(5))
 
-    assert "rejected design" in body, (
-        "nothing marks the single-number version as rejected, so the panel can be "
-        "'simplified' back to min(fetched_at) by someone who reads it as an accident"
+    assert "three numbers and a threshold line, not one number" in body, (
+        "the panel's description no longer says it is three numbers rather than one, so it "
+        "can be 'simplified' back to min(fetched_at) by someone who reads it as an accident"
     )
 
 
