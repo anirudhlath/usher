@@ -210,7 +210,7 @@ functions entirely** — see `.claude/rules/db-and-sql.md` before trusting it.
 
 ### The CLI
 
-`usher` is a console script; `python -m usher` is the same code path. 17
+`usher` is a console script; `python -m usher` is the same code path. 21
 subcommands — `uv run usher --help` is authoritative.
 
 ```bash
@@ -224,6 +224,10 @@ uv run usher search "..." | suggest "..." --limit 5
 uv run usher eval [suggest --full]              # --full enforces bars, writes the ledger
 uv run usher similar [<id>] [--rebuild [--resume] [--max-seeds N]]
 uv run usher derive | genres [--backfill] | home | curate
+uv run usher schedule [--once]                  # scheduled batches whose period has elapsed
+uv run usher backup [--output OUTPUT]           # everything nothing else can rebuild, one file
+uv run usher restore [--dry-run] [--skip-unresolvable] <artifact>
+uv run usher rotate-secret --new-key-env VAR    # the variable's NAME, never the key
 uv sync --extra embedding                       # optional: fastembed, 167 MiB, no torch
 ```
 
