@@ -2,172 +2,62 @@ services:
   usher:
     build: .
     restart: unless-stopped
-    # `env_file:`, not a hand-maintained `environment:` list -- and the two
-    # are different mechanisms rather than two spellings of one. An
-    # `environment:` entry names one variable and compose substitutes its
-    # value from `.env`; `env_file:` hands the whole file to the container.
-    #
-    # This started as the second form and forwarded five of the thirty
-    # documented keys, so the other 24 -- twelve of them M5's own, including
-    # USHER_WORKER_ENABLED -- were documented in `.env.example` and README.md
-    # and reached nothing. A setting an operator can set and the container
-    # never sees is dead config that looks like a control, and this one has
-    # teeth: an operator who sets USHER_WORKER_ENABLED=false and then runs
-    # `usher work` in a second container gets two workers, and
-    # `JobWorker.startup()` requeues everything `running`, so each steals the
-    # other's live claims.
-    #
-    # `required: false` so a checkout with no `.env` yet still parses, and
-    # fails on USHER_SECRET_KEY below with a sentence instead of on a missing
-    # file. `tests/unit/test_deployment_config.py` pins both this and the
-    # `environment:` list below.
+    # `env_file:` hands the container the whole `.env`; an `environment:` list
+    # forwards only the keys somebody remembered, and a setting that never arrives
+    # is dead config that looks like a control. `required: false`, so a checkout
+    # with no `.env` fails on USHER_SECRET_KEY's guard instead of a missing file.
     env_file:
       - path: .env
         required: false
     environment:
-      # Only what the compose *topology* owns. `environment:` wins over
-      # `env_file:`, so every line here is a setting an operator cannot
-      # change from `.env` -- which is why there are six of them and each
-      # says why.
+      # Only what the compose topology owns: these win over `env_file:`, so an
+      # operator cannot change them from `.env`. Each says why.
       #
-      # The service's hostname on the compose network. `.env` ships
-      # `localhost`, which is right for a dev shell and for `alembic`, and
-      # wrong inside the container.
+      # The database's hostname on the compose network, not `localhost`.
       USHER_DATABASE_URL: postgresql+asyncpg://usher:usher@postgres:5432/usher
       # Bind-all, or the published port below reaches nothing.
       USHER_HOST: 0.0.0.0
-      # Settings.port's own default (src/usher/config.py), and what the
-      # `ports:` mapping, the Dockerfile's EXPOSE and the healthcheck below
-      # all assume. The knob an operator actually wants is the *host* side,
-      # which is USHER_COMPOSE_HOST_PORT.
+      # What `ports:`, the Dockerfile's EXPOSE and the healthcheck assume. The host
+      # side is USHER_COMPOSE_HOST_PORT.
       USHER_PORT: "8000"
-      # Substituted rather than inherited from `env_file:` purely for the
-      # `:?` guard: a missing or blank key fails at `docker compose up` with
-      # this sentence, instead of as a container that starts and dies on a
-      # validation error the operator has to go and read the logs for.
+      # Substituted for the `:?` guard, so a blank key fails `docker compose up`
+      # with this sentence rather than in the container's log.
       USHER_SECRET_KEY: ${USHER_SECRET_KEY:?set USHER_SECRET_KEY in .env, e.g. openssl rand -hex 32}
-      # The image cache, and the fifth entry this list has ever had. A
-      # bind-mount path is a topology fact in exactly the way the four above
-      # are: `volumes:` below mounts the host's ./data/images at
-      # /data/images, and `.env`'s `data/images` is right for a dev shell and
-      # wrong inside a container whose WORKDIR is /app -- there it would put
-      # the cache in the image's own writable layer, where it survives no
-      # `docker compose up --build` and appears in no `du` an operator runs
-      # against the mount. The other three USHER_IMAGE_* settings are the
-      # operator's and are deliberately absent from this block.
+      # The container side of the two bind mounts below. `.env`'s relative paths
+      # would resolve under /app, which is root-owned, so uid 1000 cannot create them.
       USHER_IMAGE_CACHE_DIR: /data/images
-      # The bulk-dataset download cache, and the sixth entry -- the same
-      # topology fact as the fifth, arrived at the hard way. `.env` ships
-      # `data/bulk`, which is right for a dev shell and inside the container
-      # resolves against WORKDIR /app to `/app/data/bulk` -- a directory the
-      # image does not create and `usher` (uid 1000) cannot create, because
-      # /app is root-owned. So `bootstrap` did not put the dumps somewhere
-      # awkward, it died on `mkdir`: **PermissionError(13) at
-      # adapters/bulk/download.py's `ensure_local`, observed in production on
-      # 2026-08-26** on both a `--phase all` and a `--phase imdb` job. Worse
-      # than a plain failure, because a job that raises rather than returning
-      # never reaches `JobQueue.fail`, so `attempts` stays 0 and
-      # `job_max_attempts` can never park it -- the two jobs recovered on
-      # lease expiry and crashed again indefinitely.
-      #
-      # Untested for five milestones because nothing in the container had
-      # ever run a bootstrap: every phase this deployment ran was
-      # `uv run usher bootstrap` from a dev shell, where the relative path is
-      # correct and the 682 MB under ./data/bulk is what it wrote. The bug
-      # needed the *worker* switched on to appear at all.
-      #
-      # The other two USHER_BULK_* settings (the batch size and the user
-      # agent) are the operator's and are deliberately absent from this block.
       USHER_BULK_DATA_DIR: /data/bulk
-      # **`HF_HUB_OFFLINE` is deliberately not a seventh entry**, though M6's
-      # plan asked for one as a topology fact. `environment:` beats
-      # `env_file:` absolutely, and `usher.composition.embedder` reaches the
-      # library through `os.environ.setdefault` -- so hard-setting it here
-      # would make `USHER_EMBEDDING_OFFLINE=false`, the documented way to
-      # warm a model cache once, dead config inside the container. That is
-      # the exact shape `USHER_COMPOSE_` exists to prevent, one layer over.
-      # The setting covers every entry point instead, including the ones
-      # compose cannot reach at all (`uv run usher work`, a dev shell), and
-      # this image installs no embedding extra and ships no model cache, so
-      # the variable would be inert here regardless.
+      # Not HF_HUB_OFFLINE: `environment:` beats `env_file:`, so setting it here
+      # would make USHER_EMBEDDING_OFFLINE=false, the documented way to warm a
+      # model cache, dead config inside the container.
     ports:
-      # Host-side port is overridable (USHER_COMPOSE_HOST_PORT in .env)
-      # rather than a bare "8000:8000" -- this host already has another
-      # container publishing 8000, and a hardcoded collision is exactly the
-      # kind of thing an override exists to avoid. `USHER_COMPOSE_` is the
-      # namespace `Settings` deliberately ignores (src/usher/config.py):
-      # `.env` is read both by compose and by pydantic-settings, and this
-      # variable is meaningful only to the first. Named `USHER_HOST_PORT`
-      # until M5, which made `cp .env.example .env` -- the README's own
-      # first step -- fail every entry point with `extra_forbidden`.
+      # USHER_COMPOSE_HOST_PORT, not a bare "8000:8000", so a host already using
+      # 8000 needs no edit. `Settings` drops USHER_COMPOSE_* before validating:
+      # pydantic-settings reads the same `.env` and refuses unknown USHER_* keys.
       - "${USHER_COMPOSE_HOST_PORT:-8100}:8000"
     volumes:
-      # The image proxy's cache (PRD 07's GET /images/{id}, M9). Bind-mounted
-      # rather than a named volume so an operator can see it, measure it and
-      # delete it -- there is no eviction and none is wanted: the ladder
-      # bounds the cache at four entries an image and reclaiming space costs a
-      # re-fetch. **Docker creates the host directory as root if it
-      # does not exist**, and the container runs as uid 1000, so a first
-      # `docker compose up` on a fresh checkout needs
-      # `mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images
-      # data/bulk` -- the Dockerfile's `chown` reaches the image's own /data
-      # and a bind mount's host-side ownership wins once mounted. README.md
-      # carries the line.
+      # Docker creates a missing bind-mount source as root, and the host side's
+      # ownership wins over the Dockerfile's `chown` once mounted, so uid 1000
+      # cannot write. A fresh checkout needs, once:
+      #   mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
+      # Bind mounts, not named volumes, so an operator can see and delete them.
       - ./data/images:/data/images
-      # The bulk-dataset cache, mounted for the reason the image cache is:
-      # `USHER_BULK_DATA_DIR` above points the container at /data/bulk, and
-      # without a mount that is the image's own writable layer -- where the
-      # IMDb dumps (214.4 MiB for `title.basics` alone) and MovieLens'
-      # 350 MB `ml-latest.zip` would be re-downloaded on every
-      # `docker compose up --build` and appear in no `du` against the host.
-      # `DownloadCache`'s whole design is that a dump survives to be re-read,
-      # which a layer that a rebuild discards cannot do.
-      #
-      # This is the mount that lets a *container* bootstrap reuse what a dev
-      # shell already fetched: both now read the same directory, so the
-      # 682 MB already on this host is not downloaded twice.
+      # So downloaded dumps survive `docker compose up --build`, and a dev shell
+      # and the container share one download.
       - ./data/bulk:/data/bulk
     networks:
-      # Two networks, and the second is why this key exists at all. `default`
-      # is what compose would have given implicitly -- it has to be named
-      # once anything else is. `observability` is the external stack at
-      # ~/code/observability, and joining it is the only route to the OTel
-      # collector: that stack publishes every port on 127.0.0.1 deliberately
-      # (this box is internet-facing), so there is no host-side address a
-      # container can reach 4317 on. `usher-postgres-1` is already joined to
-      # it for Grafana's datasource, by the same reasoning.
-      #
-      # `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` is the reader. It stays in
-      # `.env` rather than the `environment:` block below because the
-      # endpoint is an operator's choice -- a deployment with no collector
-      # leaves it empty and the exporter is never built.
+      # `observability` is the only route to the OTel collector, whose stack
+      # publishes ports on 127.0.0.1 alone. `default` must be named once another
+      # network is.
       - default
       - observability
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      # /health/ready, not /health: for `depends_on: condition:
-      # service_healthy` and `docker compose ps` to mean anything useful,
-      # "healthy" has to mean "can actually serve a request", which is
-      # what readiness (database + migration state) reports and liveness
-      # deliberately does not. This does not carry the restart-loop risk
-      # a Kubernetes liveness probe would: plain `docker compose` (no
-      # Swarm) never restarts a container because its healthcheck failed
-      # -- it only ever restarts on the container *process* exiting, which
-      # `restart: unless-stopped` governs independently. An "unhealthy"
-      # status here is purely informational plus a startup-order gate for
-      # any future service that depends on usher, not a trigger for
-      # anything to kill and restart this one -- so a Postgres blip
-      # degrading readiness cannot start a restart loop the way it could
-      # under a liveness-probe-driven orchestrator.
-      #
-      # No curl/wget in python:3.13-slim (and adding either would cut
-      # against keeping the image small), so this shells out to the
-      # interpreter that's already there: urlopen raises on any non-2xx
-      # status or connection failure, which is already a nonzero exit --
-      # no explicit try/except needed for a healthcheck, where any
-      # exception already means "unhealthy".
+      # /health/ready, not /health, so "healthy" means it can serve. Plain compose
+      # never restarts a container for a failed healthcheck, so this cannot
+      # restart-loop. python:3.13-slim has no curl or wget; urlopen raises on non-2xx.
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health/ready', timeout=3)"]
       interval: 5s
       timeout: 5s
@@ -184,24 +74,10 @@ services:
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      # -h 127.0.0.1 forces a TCP connection instead of pg_isready's
-      # default Unix-socket lookup -- load-bearing, not cosmetic. On a
-      # fresh (empty) volume this image's entrypoint runs initdb, then
-      # brings up a *temporary* bootstrap server to run init scripts
-      # before starting the real one -- and that bootstrap server is
-      # started with listen_addresses='' (Unix socket only, verified
-      # against the image's own entrypoint script), while the real server
-      # listens on TCP. Verified directly against this exact image on
-      # this host: plain `pg_isready -U usher -d usher` (Unix socket)
-      # reports "accepting connections" at t+1.8s -- the bootstrap
-      # server -- then "rejecting connections" from t+2.0s to t+2.9s
-      # while it shuts down and the real one starts, before settling
-      # "accepting" again at t+3.0s. `-h 127.0.0.1` never once
-      # false-positives in the same run: "no response" solidly until
-      # t+2.9s, the same moment the real server actually starts
-      # accepting TCP connections. Without -h, `depends_on: condition:
-      # service_healthy` can let `usher` start against a server that is
-      # about to be torn down and restarted.
+      # -h 127.0.0.1 forces TCP, and is load-bearing. On a fresh volume initdb runs
+      # a temporary socket-only server, which a socket pg_isready reports as
+      # accepting; `service_healthy` gates on that first success and would start
+      # `usher` against a server about to restart.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U usher -d usher"]
       interval: 2s
       timeout: 5s
@@ -209,21 +85,12 @@ services:
       start_period: 15s
 
 networks:
-  # Pinned so the name is a contract rather than a consequence of the
-  # directory this file happens to sit in -- compose derives an unnamed
-  # default network from the project name, so a rename or a worktree would
-  # move it.
-  #
-  # It was named for `usher-web`, a client in a sibling repository that joined
-  # this as an external network to reach `usher:8000`. **That client is gone
-  # and the name still matters**: it is what any future sidecar joins by, and
-  # renaming it now would be a silent breaking change for anything already
-  # holding it.
+  # Pinned, so the name is a contract rather than a function of this directory's
+  # name, which a rename or a worktree would move. Anything joining the stack joins
+  # by it; renaming it is a silent breaking change.
   default:
     name: usher_default
-  # The shared telemetry stack, created by ~/code/observability. `external`
-  # because this compose project must not own its lifecycle: a
-  # `docker compose down` here would otherwise try to remove a network
-  # Grafana, Prometheus, Loki, Tempo and the collector are all on.
+  # The shared telemetry stack's network. External, because a `docker compose down`
+  # here must not try to remove a network that stack is on.
   observability:
     external: true
