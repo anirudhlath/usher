@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
+import userEvent from '@testing-library/user-event'
 import { ToastProvider } from '@/patterns'
 import { ToastStack } from '@/features/shared/ToastStack'
 import { renderApp, screen, waitFor, within } from '@/test/render'
@@ -35,8 +36,8 @@ function render() {
  * The shipped fixture's `heartbeat_at` is a fixed timestamp and is therefore
  * always older than the 120 s threshold by the time a test runs. The stall
  * boundary is a fact about *age*, so it is dated against the same clock the
- * screen reads — no fake timers, and the assertion is exercisable at 119 and
- * 121 exactly as `CursorProgress` was designed to be.
+ * screen reads, and the assertion is exercisable at 119 and 121 exactly as
+ * `CursorProgress` was designed to be.
  */
 function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
   return {
@@ -55,15 +56,24 @@ function heartbeatHandler(agoSeconds: number) {
   return http.get('/admin/bootstrap/status', () => HttpResponse.json(statusWithHeartbeat(agoSeconds)))
 }
 
+/** An arbitrary instant for the pinned clock. */
+const T0 = Date.parse('2026-08-18T03:10:00Z')
+
 /**
- * `Date.now()` moved `ms` ahead of the real clock, which keeps running. Only
- * `Date.now` is replaced — not timers — so MSW, React Query's scheduling and
- * `findBy*` behave as they do everywhere else.
+ * `Date` pinned at `at`, and nothing else faked, so MSW, React Query's
+ * scheduling and `findBy*` behave as they do everywhere else. The clock stands
+ * still until the test moves it with `vi.setSystemTime`: a clock that merely
+ * shifts keeps running, and a rate over two polls then carries whatever real
+ * time passed between them — 1,000 rows over 10.08 s is 99 a second.
  */
-function shiftClock(ms: number) {
-  const now = Date.now.bind(Date)
-  return vi.spyOn(Date, 'now').mockImplementation(() => now() + ms)
+function pinClock(at: number): void {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(at)
 }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 /** A phase row, found by its label: the row is the label's nearest `div`. */
 function phaseRow(label: string): HTMLElement {
@@ -133,6 +143,8 @@ describe('Bootstrap', () => {
   })
 
   it('does not call a heartbeat 119 s old stalled', async () => {
+    // Pinned, because 1.5 s between the response and the poll landing would make it 121.
+    pinClock(T0)
     server.use(heartbeatHandler(119))
     render()
 
@@ -153,6 +165,7 @@ describe('Bootstrap', () => {
   })
 
   it('re-reads the heartbeat age on every poll, so a run that dies while the page is open turns "Stalled?"', async () => {
+    pinClock(T0)
     // One body for every poll: the importer has died, so nothing on the wire changes.
     const body = statusWithHeartbeat(100)
     let polls = 0
@@ -167,17 +180,14 @@ describe('Bootstrap', () => {
     await screen.findByText('No completion estimate — the server reports a cursor, not a percentage.')
     expect(screen.queryByText('Stalled?')).toBeNull()
 
-    const clock = shiftClock(30_000)
-    try {
-      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
-      expect(polls).toBe(2)
-      expect(await screen.findByText('Stalled?')).toBeInTheDocument()
-    } finally {
-      clock.mockRestore()
-    }
+    vi.setSystemTime(T0 + 30_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(polls).toBe(2)
+    expect(await screen.findByText('Stalled?')).toBeInTheDocument()
   })
 
   it('derives rows/sec from every poll, so a run that stops writing reads 0 rather than its last rate', async () => {
+    pinClock(T0)
     const first = statusWithHeartbeat(4)
     const [run] = first.runs
     if (!run) throw new Error('the fixture has no run')
@@ -190,22 +200,14 @@ describe('Bootstrap', () => {
     const label = await screen.findByText('rows / sec')
     expect(label.nextElementSibling?.textContent).toBe('—')
 
-    const later = shiftClock(10_000)
-    try {
-      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
-      await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
-    } finally {
-      later.mockRestore()
-    }
+    vi.setSystemTime(T0 + 10_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
 
-    const latest = shiftClock(20_000)
-    try {
-      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
-      expect(bodies).toHaveLength(0)
-      await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
-    } finally {
-      latest.mockRestore()
-    }
+    vi.setSystemTime(T0 + 20_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(bodies).toHaveLength(0)
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
   })
 
   it('polls only while something is running, and says so when nothing is', async () => {
@@ -224,6 +226,66 @@ describe('Bootstrap', () => {
     )
     render()
     expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
+  })
+
+  it('keeps polling for 20 min after a 202 though no run reads running, then stops and says so', async () => {
+    // A refresh of a completed import reads `completed` through its download,
+    // so "poll while something runs" alone would stop at the press of "Run
+    // again". Timers are faked, and advance with real time too so MSW and
+    // `findBy*` still settle.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+      shouldAdvanceTime: true,
+    })
+    const idle = {
+      ...bootstrapStatus,
+      runs: bootstrapStatus.runs.filter((run) => run.status === 'completed'),
+    }
+    let polls = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        polls += 1
+        return HttpResponse.json(idle)
+      }),
+    )
+    const user = userEvent.setup({ advanceTimers: (ms) => void vi.advanceTimersByTime(ms) })
+    const { queryClient } = render()
+    const settled = () =>
+      waitFor(() => expect(queryClient.isFetching({ queryKey: ['bootstrap-status'] })).toBe(0))
+
+    expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is being polled/)).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(polls).toBe(1)
+
+    await user.click(within(phaseRow('MovieLens genome')).getByRole('button', { name: 'Run again' }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start import' }))
+    expect(await screen.findByText('polling every 10 s for 20 min after queueing')).toBeInTheDocument()
+    expect(screen.getByText(/No run reads running yet\. A refresh of a completed import/)).toBeInTheDocument()
+    // The 202's own refetch.
+    await waitFor(() => expect(polls).toBe(2))
+    await settled()
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await waitFor(() => expect(polls).toBe(3))
+    await settled()
+
+    // Still asking at 19 min 20 s.
+    await vi.advanceTimersByTimeAsync(19 * 60_000)
+    await settled()
+    const late = polls
+    await vi.advanceTimersByTimeAsync(10_000)
+    await waitFor(() => expect(polls).toBe(late + 1))
+    await settled()
+
+    // Past 20 min it stops, and says so.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is being polled/)).toBeInTheDocument()
+    await settled()
+    const last = polls
+    await vi.advanceTimersByTimeAsync(60 * 60_000)
+    expect(polls).toBe(last)
   })
 
   it('treats a failed run as a normal state: bad tone, the error verbatim, the position kept, and "Resume"', async () => {
@@ -246,6 +308,31 @@ describe('Bootstrap', () => {
     expect(errorLine(row, importFailed.error ?? '')).toHaveStyle({ color: 'var(--bad-text)' })
   })
 
+  it('never draws a running run that carries an error as a failure, in the live card or its row', async () => {
+    const error = 'left over from another attempt'
+    const [run] = statusWithHeartbeat(4).runs
+    if (!run) throw new Error('the fixture has no run')
+    server.use(
+      http.get('/admin/bootstrap/status', () =>
+        HttpResponse.json({ ...bootstrapStatus, runs: [{ ...run, error }] }),
+      ),
+    )
+    const { container } = render()
+
+    const note = await screen.findByText(error, { selector: '.u-cursor__note' })
+    expect(note).toHaveClass('u-cursor__note--warn')
+    expect(note).not.toHaveClass('u-cursor__note--bad')
+    const card = note.closest('.u-cursor')
+    if (!(card instanceof HTMLElement)) throw new Error('the running run has no cursor card')
+    expect(card.querySelector('.u-cursor__status')).toHaveClass('u-cursor__status--running')
+    expect(container.querySelector('.u-cursor__status--failed')).toBeNull()
+
+    const row = phaseRow('IMDb basics')
+    expect(row.querySelector('.u-badge')).not.toHaveClass('u-badge--bad')
+    expect(errorLine(row, error)).toHaveStyle({ color: 'var(--warn-text)' })
+    expect(within(row).queryByRole('button', { name: 'Resume' })).toBeNull()
+  })
+
   it('keeps a completed run with no error green, and gives it no error line', async () => {
     render()
 
@@ -254,10 +341,10 @@ describe('Bootstrap', () => {
     const badge = row.querySelector('.u-badge')
     expect(badge?.textContent).toBe('completed')
     expect(badge).toHaveClass('u-badge--good')
-    expect(within(row).queryByText(/could not start/)).toBeNull()
+    expect(within(row).queryByText(/landed no batch/)).toBeNull()
   })
 
-  describe('a completed run carrying an error — a rerun that could not start', () => {
+  describe('a completed run carrying an error — a refresh that landed no batch', () => {
     const error = importCompletedWithError.error ?? ''
 
     function renderCompletedWithError() {
@@ -287,7 +374,7 @@ describe('Bootstrap', () => {
       const line = errorLine(row, error)
       expect(line).toHaveStyle({ color: 'var(--warn-text)' })
       expect(line.textContent).toBe(
-        `The last attempt could not start, so the completed import stands: ${error}`,
+        `The last attempt landed no batch, so the completed import stands: ${error}`,
       )
     })
 
