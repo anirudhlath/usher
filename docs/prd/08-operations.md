@@ -484,20 +484,21 @@ typed and what it then played, and nothing re-derives it.
 
 ### Resource envelope
 
-**These are sizing estimates for an operator provisioning a disk**, taken on a
-1.27M-title catalog with ~10% enriched. Nothing reads them, no host enforces
-them, and no threshold or policy is derived from them.
+**These are sizing estimates for an operator provisioning a disk**, read on
+2026-09-24 from a 1,277,145-title catalog with 137,467 titles (11%) enriched, at
+migration `m10b`. Nothing reads them, no host enforces them, and no threshold or
+policy is derived from them.
 
 | | |
 |---|---|
-| Postgres, catalog + indexes | **~5 GB** (`pg_database_size` 5,025,650,355 B) at 1.27M titles with 10% enriched, and the enriched fraction is what moves it: `raw_payloads` is 995 MB of that, `title_embeddings` 298 MB, `title_neighbors` 572 MB. A fully-enriched catalog is several times larger |
+| Postgres, catalog + indexes | **~8.6 GB** (`pg_database_size` 8,648,103,603 B), and the enriched fraction is what moves it: `raw_payloads` is 1,226 MB of that, `title_embeddings` 772 MB, `title_neighbors` 793 MB. A fully-enriched catalog is several times larger |
 | Postgres, + `titles.credit_names` | **+624 MB settled, +1,368 MB transient** before a vacuum — the peak is what an operator's disk sees |
 | A migration that rewrites a large column | Budget the **peak**: a rewrite leaves a dead tuple per live row until a vacuum, and a migration runs no `VACUUM`. `m09d`'s rewrite of `credits` took it from **794 MB to 1,431 MB** (+637 MB transient), settling at **740 MB** only after a `VACUUM FULL` |
-| HNSW (`halfvec`) | 🔶 At 1024 lanes, **340 MB** of index inside a **707 MB** `title_embeddings` relation over ~131k embeddings; **~3.5 GB** extrapolated to full catalog coverage |
+| HNSW (`halfvec`) | 🔶 At 1024 lanes, **376 MB** of index inside the 772 MB `title_embeddings` relation over 137,375 embeddings; **~3.5 GB** extrapolated to full catalog coverage |
 | Image cache | **Bounded per image and unbounded over time.** At most four entries an image; **nothing evicts**, so the size is `images browsed × up to four rungs × their bytes` and **the growth driver is browse coverage, not catalog size**. ⚠️ There is no LRU ceiling to configure and no eviction method to call: the four real settings are `image_cache_dir` (where), `image_max_bytes` (a **per-image** 5 MiB refusal, never a cache cap), `image_fetch_timeout_seconds` and `image_cdn_base_url`. Extrapolated: **~225 GB** at one image per title, **~668 GB** at all four rungs. This directory is half of [10](10-telemetry-and-dashboards.md)'s *Disk projection* alert |
-| Postgres, largest relations | `title_neighbors` **1140 MB**, `titles` **1050 MB**, `raw_payloads` **995 MB** at the reading above |
-| Usher process | **~500 MB–1 GB**, plus **~200 MB** for the embedding model — the model half applies to the `fastembed:` runtime only. Under `openai:` no model is loaded in this process at all |
-| Embedding model | 🔶 **~1.2 GB** on disk for the shipped default checkpoint; **0 on the `openai:` runtime** |
+| Postgres, largest relations | `titles` **2,278 MB**, `credits` **1,237 MB**, `raw_payloads` **1,226 MB**, `title_neighbors` **793 MB** — `pg_total_relation_size` at the reading above |
+| Usher process | **~500 MB–1 GB**, plus the loaded model under the `fastembed:` runtime — 🔶 unmeasured, and no smaller than the checkpoint below. Under `openai:` no model is loaded in this process at all |
+| Embedding model | 🔶 **~1.2 GB** on disk for the shipped default, `fastembed:BAAI/bge-large-en-v1.5` — fastembed's declared size, not a measured download; **0 on the `openai:` runtime** |
 
 **A full `usher similar --rebuild` is an overnight job, not a follow-on step** —
 it is an exact scan, not an index walk.

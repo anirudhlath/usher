@@ -618,14 +618,14 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
         f"the resource-table parse found only {len(figures)} figures, so the prohibition "
         "below is graded against a table it has stopped reading"
     )
-    assert 5_025_650_355 in figures, (
-        "the parse no longer reads `pg_database_size` 5,025,650,355 B, the measured "
-        "baseline these rules quote -- the single figure most likely to be promoted from "
-        "a measurement into a threshold"
+    assert 8_648_103_603 in figures, (
+        "the parse no longer reads `pg_database_size` 8,648,103,603 B, the table's measured "
+        "database size -- the single figure most likely to be promoted from a measurement "
+        "into a threshold"
     )
-    assert 5_368_709_120 in figures and 5_000_000_000 in figures, (
-        "the parse no longer reads the table's headline `~5 GB` in either reading, which is "
-        "the sizing figure a disk threshold is likeliest to harden into"
+    assert 9_234_179_686 in figures and 8_600_000_000 in figures, (
+        "the parse no longer reads the table's headline `~8.6 GB` in either reading, which "
+        "is the sizing figure a disk threshold is likeliest to harden into"
     )
 
     disk = [rule for rule in committed_rules() if str(rule["alert"]) == "Disk projection"]
@@ -659,8 +659,8 @@ def test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_
     )
 
     planted_threshold = [
-        ("Disk projection", "system_filesystem_usage_bytes < 5025650355"),
-        ("Disk projection", "SELECT pg_database_size(current_database()) > 5368709120"),
+        ("Disk projection", "system_filesystem_usage_bytes < 8648103603"),
+        ("Disk projection", "SELECT pg_database_size(current_database()) > 9234179686"),
     ]
     assert len(_byte_thresholds(planted_threshold, figures)) == 2, (
         "the threshold scan cannot see a literal lifted out of the resource table in both "
@@ -968,7 +968,7 @@ def test_the_cost_anomaly_description_names_its_floor_the_two_price_settings_and
     rule = _grafana_rule("Cost anomaly")
     description = " ".join(str(rule["annotations"]["description"]).split())
 
-    assert rule.get("for"), "PRD 10's conditions are all durations; this rule has no `for:`"
+    assert rule.get("for"), "this rule has no `for:`, so a single evaluation pages"
     assert rule["labels"]["severity"], "no severity"
     assert rule["annotations"]["summary"], "no summary"
     assert rule["noDataState"] == "OK", (
@@ -1232,7 +1232,7 @@ def test_every_rule_carries_a_window_a_severity_and_a_description_naming_its_ser
         alert = str(rule["alert"])
         annotations = " ".join(str(rule["annotations"]).split())
         description = " ".join(str(rule["annotations"]["description"]).split())
-        assert rule.get("for"), f"{alert}: PRD 10's conditions are all durations; no `for:`"
+        assert rule.get("for"), f"{alert}: no `for:`, so a single evaluation pages"
         assert rule["labels"]["severity"], f"{alert}: no severity"
         assert rule["annotations"]["summary"], f"{alert}: no summary"
 
@@ -1446,12 +1446,12 @@ def test_every_quantile_rule_collapses_the_labels_it_is_not_a_quantile_of() -> N
 def test_the_provider_degraded_ratio_counts_transport_failures_on_both_sides() -> None:
     """`error` in the denominator only makes the ratio *fall* during an outage.
 
-    PRD 10 states one half of this and not the other: *"a denominator that
-    omitted the failures would read low exactly during an outage."* The
-    numerator half follows and is nowhere written down -- a transport failure
-    never reached a status line, so `status="error"` is what
-    `adapters/tmdb/client.py` records for it, and a numerator matching only
-    `429|5..` counts it nowhere. In the limit that is silent: when *every*
+    A denominator that omitted the failures would read low exactly during an
+    outage, and the numerator half is the same mistake on the other side of the
+    fraction -- a transport failure never reached a status line, so
+    `status="error"` is what `adapters/tmdb/client.py` records for it, and a
+    numerator matching only `429|5..` counts it nowhere. In the limit that is
+    silent: when *every*
     request fails in the transport, the numerator is 0, the denominator is the
     error count, and the rule reads a healthy **0%** during a total outage.
     `promtool` drives exactly that case in `dashboards/README.md`; this case is
