@@ -21,8 +21,8 @@ _DASHBOARD_FIVE = _ROOT / "dashboards" / "05-cost-and-compliance.json"
 
 _DASHBOARD_HEADING = re.compile(r"^### (?P<number>\d+) — (?P<title>.+)$", re.MULTILINE)
 
-# The status markers PRD 10 opens annotated paragraphs with. 🔴 and ⏳ are here
-# because the vocabulary permits them, not because a dashboard uses them today.
+# The status markers PRD 10 opens annotated paragraphs with. The red circle and ⏳
+# are here because the vocabulary permits them, not because a dashboard uses them.
 _STATUS_MARKER = "[✅⚠️\U0001f534⏳]"
 
 # A backing statement opens its paragraph: optional status marker, then a bold

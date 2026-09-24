@@ -130,11 +130,13 @@ without `paths:` loads *unconditionally* and a split into one is a promotion.
 A finding that genuinely applies everywhere goes in "Five rules about evidence"
 above — five entries in nine milestones, so the bar is high.
 
-**`.claude/settings.json` carries three hooks, and all three are mechanisms.**
+**`.claude/settings.json` carries four hooks, and all four are mechanisms.**
 `session-start.sh` warns if this worktree's `.venv` lacks the `eval` extra;
 `guard-generated.sh` refuses a hand edit to `web/src/api/schema.d.ts`;
-`guard-bash.sh` refuses working-tree discards, `ruff format` on prose, and venv
-activation. **A hook is the right shape when the mistake has more spellings than
+`guard-prose.sh` refuses an edit that adds Python prose past the comment
+convention (`guard_prose.py` holds the caps, and a breach already in the file
+is tolerated); `guard-bash.sh` refuses working-tree discards, `ruff format` on
+prose, and venv activation. **A hook is the right shape when the mistake has more spellings than
 you can list** — `deny` is prefix matching, so it caught `uv run ruff format
 docs/` and missed `python -m ruff format docs/`. Add one only for a mistake a
 session has made, and prove both directions: the new spellings blocked, the

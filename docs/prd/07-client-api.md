@@ -431,9 +431,8 @@ does not re-encode.
 
 **`Cache-Control: public, max-age=31536000, immutable`** plus a strong `sha256`
 `ETag` over the exact bytes served; a conditional request gets a `304` carrying
-both. `public`, unlike every other cached route here: the bytes are identical
-for every household, so a shared proxy may cache them. An image id survives a
-re-derivation.
+both. `public`, unlike every other cached route here, so a shared proxy may
+cache them. An image id survives a re-derivation.
 
 **The response names the rung it served** in `Content-Location`
 (`/images/{id}?w=780`), built from the *clamped* rung, never from the request's
@@ -510,8 +509,8 @@ all — the playable targets are returned.
 **The ticket** is an encrypted token under a subkey of `USHER_SECRET_KEY`, with
 the source URL as its plaintext.
 
-- **Encrypted rather than merely signed**: the plaintext URL carries the
-  source's `api_key`.
+- **Encrypted**, so the source's `api_key` in the plaintext URL cannot be read
+  off the ticket.
 - **Stateless** — no revocation before expiry; rotating `USHER_SECRET_KEY` is
   the coarse revocation that exists.
 - **What it changes is the artifact, not the grant.** The `302`'s `Location` is

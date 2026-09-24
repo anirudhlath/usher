@@ -116,8 +116,7 @@ it opens until the first message arrives.
 
 ## Reconciliation is not optional
 
-Push is the fast path, never the only path. Sockets drop, events are missed,
-and `LibraryChanged` carries no guarantee of delivery.
+Push is the fast path, never the only path.
 
 | Lane | Trigger | Work |
 |---|---|---|
@@ -278,10 +277,10 @@ verbatim. `Person`, `Credit`, `Collection` and `Image` are derived from that
 cached payload by stage 5, with no second network call. Nothing above the TMDb
 adapter reads a TMDb field name.
 
-Re-enrichment is driven by TMDb's `/movie/changes` feed rather than blind TTL
-sweeps, with a hard re-fetch ceiling under 6 months to respect TMDb's caching
-term. The feed reaches back at most **14 days**, so a change older than that is
-picked up only by the 6-month re-fetch.
+Re-enrichment is driven by TMDb's `/movie/changes` feed, with a hard re-fetch
+ceiling under 6 months, TMDb's caching term. The feed reaches back at most
+**14 days**, so a change older than that is picked up only by the 6-month
+re-fetch.
 
 Enrichment only ever raises a title's tier. A failed enrichment records
 `Title.enrichment_error` and leaves the tier where it was.
@@ -363,11 +362,9 @@ instead, with no API call, filling [05](05-search-and-similarity.md)'s
   `WatchState` with `origin = source`. Progress made in Infuse or Emby's own
   apps flows in.
 
-  **`play_count` and `last_played_at` are unknown after a walk, not zero.** An
-  Emby listing reports `PlayCount: 0` and no `LastPlayedDate` even for a
-  watched item, so a walk records both as unknown and never writes zero over
-  real history; `0` from a single-item read stays a positive claim, so a reset
-  still propagates. The pair is
+  **`play_count` and `last_played_at` are unknown after a walk, not zero.** A
+  walk never writes zero over real history; `0` from a single-item read stays a
+  positive claim, so a reset still propagates. The pair is
   recovered by a queued backfill over `played = true AND play_count = 0`, one
   single-item read per watched item — bounded by the household's watched items
   rather than by the library.
@@ -385,8 +382,7 @@ instead, with no API call, filling [05](05-search-and-similarity.md)'s
     `POST /Users/{userId}/PlayedItems/{itemId}`, and it goes **last**: it
     advances `PlayCount`, stamps `LastPlayedDate` and clears the resume
     position.
-  - Reporting an item unplayed does **not** use `DELETE .../PlayedItems`, which
-    would also reset `PlayCount`, `LastPlayedDate` and the resume position.
+  - Reporting an item unplayed is the first call alone, with `Played` false.
 
   Both writes are idempotent, so the retry after a partial failure is safe.
 - **Conflicts:** latest `updated_at` wins.

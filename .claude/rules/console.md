@@ -34,8 +34,7 @@ lines are separate CI jobs and neither is reachable from `verify`.
 exactly and for skipping `playwright install --with-deps`, **not** because the
 host is untrustworthy: the screenshot baselines are portable, and a bare host
 and that image agree to the byte. If the pixels disagree, that is evidence about
-the product, not about the runner — see the comment above `console-visual` in
-`.github/workflows/ci.yml` for the two wrong diagnoses that cost.
+the product, not about the runner.
 
 ## Three things nothing checks for you
 

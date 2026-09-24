@@ -11,9 +11,11 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 
 Beta. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
 adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search),
-M7 (rows and recommendations), M8 (LLM curation) and M9 (the API surface) are
-complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
-[`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
+M7 (rows and recommendations), M8 (LLM curation), M9 (the API surface) and
+M10 (hardening) are complete, and the first release is `v0.1.0`
+([`CHANGELOG.md`](CHANGELOG.md)) — see [`docs/plans/`](docs/plans/) for the
+task breakdowns and [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for
+what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
 half against the live TMDb API. M5's run is the first in this repository to
@@ -151,16 +153,17 @@ cp .env.example .env
 openssl rand -hex 32          # paste into USHER_SECRET_KEY= in .env
 ```
 
-⚠️ **Put your TMDb key in `.env` now, before `docker compose up`, as
-`USHER_TMDB_API_KEY=`.** Compose reads `.env` when it creates the container, so
-a key added after `up` never reaches it — re-run `docker compose up -d` if you
-add or change it later. It is listed under [Requirements](#requirements) and it
-is easy to skip, because nothing fails without it. The server logs
+⚠️ **Put your TMDb key in `.env` now, before `docker compose up`, on the
+`USHER_TMDB_API_KEY=` line it already has.** Compose reads `.env` when it
+creates the container, so a key added after `up` never reaches it — re-run
+`docker compose up -d` if you add or change it later. It is listed under
+[Requirements](#requirements) and it is easy to skip, because nothing fails
+without it. The server logs
 `no TMDb API key configured; enrich and derive jobs will not be claimed` once at
 startup, and step 6's `enrich` queue then never moves.
 
 ⚠️ **Already running Usher on this host? Separate the second stack before its
-first `up`.** Put these three lines in the second checkout's `.env`, with names
+first `up`.** In the second checkout's `.env`, set these three keys, with names
 of your own:
 
 ```dotenv
@@ -169,8 +172,13 @@ USHER_COMPOSE_NETWORK=usher-scratch_default
 USHER_COMPOSE_HOST_PORT=8101
 ```
 
-and read `8100` below as `8101`. All three matter. **The project name is the
-one that destroys things**: compose names a project after its directory, a
+`.env` already has the last two, copied from `.env.example`: **change those
+lines where they are, and add only the project name.** When a key appears twice,
+the later line wins, so a copy pasted above the originals is silently ignored.
+Read `8100` below as `8101`.
+
+All three matter. **The project name is the one that destroys things**:
+compose names a project after its directory, a
 clone left at `git clone`'s default is called `usher`, and an `up` from a
 second checkout with the same project name recreates the first stack's
 containers with the second one's config. The network name is pinned
@@ -226,9 +234,27 @@ afterwards, the enrichment jobs that already parked for want of an id stay
 parked, because nothing un-parks a job yet
 ([#87](https://github.com/anirudhlath/usher/issues/87)).
 
-This still skips the IMDb expansion phases and MovieLens — see
-[Command line](#command-line) for `--phase all`, which is **3–5 hours**, mostly
-the TMDb crawl.
+This still skips `credit-names`, `aliases` and `movielens`. `--phase all` runs
+all six phases in order, those three included, and they cost two more IMDb
+downloads and the MovieLens archive — sized under [Command line](#command-line).
+**No phase crawls TMDb, `--phase all` included.**
+
+The TMDb crawl — overviews, credits and artwork for the catalog's movies with
+at least 100 IMDb votes, owned or not — is a separate step that nothing starts
+for you. `scripts/enqueue_tier_enrichment.py` writes one `enrich` job per title
+in that tier at background priority, below your library's own, and the
+server's worker lane (step 6) spends the TMDb budget on them. The script is not
+in the image, so feed it to the container:
+
+```
+docker compose exec -T usher python - < scripts/enqueue_tier_enrichment.py
+```
+
+It stops at 200,000 jobs; pass `--limit N` after the `-` to change that. It is
+paced by `USHER_TMDB_REQUESTS_PER_SECOND`, and
+[PRD 04](docs/prd/04-catalog-bootstrap.md)'s Phase 3 sizes it. Run
+`credit-names` first if you want it at all — see [Command line](#command-line)
+for why the order matters.
 
 **4. Register a source.** There is no CLI subcommand for this — it is the admin
 API, and the credentials are encrypted at rest with `USHER_SECRET_KEY`.
@@ -454,12 +480,16 @@ up`.
 A collector in another compose stack that publishes on `127.0.0.1` alone is
 unreachable from inside this container except over a shared docker network.
 `compose.observability.yml` joins the `usher` service to an existing network
-called `observability`. Opt in from `.env`:
+called `observability`. Opt in by setting two keys in `.env`:
 
 ```
 COMPOSE_FILE=compose.yml:compose.observability.yml
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 ```
+
+`COMPOSE_FILE` is a new line. **`OTEL_EXPORTER_OTLP_ENDPOINT` is already
+there, blank, from `.env.example`: fill in that line.** A second copy added
+above it loses to the blank one, and telemetry stays off without a word.
 
 The endpoint's host is the collector's service name on that network, and the
 network must already exist (`docker network create observability`, or the

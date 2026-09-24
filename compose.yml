@@ -79,14 +79,10 @@ services:
       start_period: 15s
 
 networks:
-  # Pinned, so the name is a contract rather than a function of this directory's
-  # name, which a rename or a worktree would move. Anything joining the stack joins
-  # by it; renaming it is a silent breaking change. A second stack on the same host
-  # sets USHER_COMPOSE_NETWORK *and* its own COMPOSE_PROJECT_NAME: a shared name
-  # puts two `postgres` aliases on one network, a shared project recreates the
-  # first stack's containers.
-  #
-  # No external network here: `external: true` fails `up` on any host that lacks
-  # it. The telemetry stack's network is joined by compose.observability.yml.
+  # Pinned: anything joining the stack joins by this name, so it must not follow the
+  # directory's. A second stack on one host sets USHER_COMPOSE_NETWORK *and* its own
+  # COMPOSE_PROJECT_NAME, or it puts two `postgres` aliases on one network or
+  # recreates the first stack's containers. Never `external: true`, which fails `up`
+  # on a host without the network; compose.observability.yml joins the telemetry one.
   default:
     name: ${USHER_COMPOSE_NETWORK:-usher_default}

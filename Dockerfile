@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # The console, built here and served by the app at /console. One process serving
-# both needs no proxy rewriting paths, which is what pointed playback-ticket URLs
-# minted from the Host header at the wrong port. Only `web/dist` leaves this stage.
+# both needs no proxy in front, and a proxy would have to forward the Host header
+# that playback-ticket URLs are minted from. Only `web/dist` leaves this stage.
 FROM node:26-alpine AS console
 
 WORKDIR /web
