@@ -81,9 +81,15 @@ function problemOf(error: unknown): ProblemDocument {
   return { status: 0, detail: String(error) }
 }
 
-function secondsSince(iso: string): number | null {
+/**
+ * Seconds from `iso` to `asOf`, the moment the poll that reported it landed —
+ * never `Date.now()`. A poll that returns the same bytes keeps the same `data`
+ * and re-renders nothing, so an age read off the render clock stops where the
+ * data last moved and a dead importer never turns "Stalled?".
+ */
+function secondsSince(iso: string, asOf: number): number | null {
   const at = Date.parse(iso)
-  return Number.isNaN(at) ? null : Math.max(0, Math.round((Date.now() - at) / 1000))
+  return Number.isNaN(at) ? null : Math.max(0, Math.round((asOf - at) / 1000))
 }
 
 function formatDuration(ms: number): string {
@@ -96,10 +102,10 @@ function formatDuration(ms: number): string {
   return `${s} s`
 }
 
-function elapsedOf(run: ImportRun): string | undefined {
+function elapsedOf(run: ImportRun, asOf: number): string | undefined {
   const started = Date.parse(run.started_at)
   if (Number.isNaN(started)) return undefined
-  const end = run.finished_at === null ? Date.now() : Date.parse(run.finished_at)
+  const end = run.finished_at === null ? asOf : Date.parse(run.finished_at)
   return Number.isNaN(end) ? undefined : formatDuration(end - started)
 }
 
@@ -108,18 +114,17 @@ function elapsedOf(run: ImportRun): string | undefined {
  * (patterns.md §8). The server reports a cursor and no rate, so a number here
  * before the second poll would be invented.
  */
-function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, number | null> {
+function useThroughput(runs: readonly ImportRun[] | undefined, asOf: number): Map<string, number | null> {
   const previous = useRef<{ at: number; seen: Map<string, number> } | null>(null)
   const [rates, setRates] = useState<Map<string, number | null>>(new Map())
 
   useEffect(() => {
     if (!runs) return
-    const now = Date.now()
     const seen = new Map(runs.map((run) => [run.dataset, run.rows_seen]))
     const last = previous.current
-    previous.current = { at: now, seen }
+    previous.current = { at: asOf, seen }
     if (!last) return
-    const seconds = (now - last.at) / 1000
+    const seconds = (asOf - last.at) / 1000
     if (seconds <= 0) return
     const next = new Map<string, number | null>()
     for (const [dataset, rows] of seen) {
@@ -127,7 +132,7 @@ function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, numb
       next.set(dataset, before === undefined ? null : Math.max(0, Math.round((rows - before) / seconds)))
     }
     setRates(next)
-  }, [runs])
+  }, [runs, asOf])
 
   return rates
 }
@@ -247,6 +252,41 @@ interface Attention {
   to: string
 }
 
+/**
+ * What an import checkpoint asks of a person, if anything.
+ *
+ * `error` is the test, not `status`: a rerun that fails before it starts leaves
+ * a `completed` checkpoint `completed` with the error beside it (PRD 04), and
+ * that is the only trace of a press of "Run again" that did nothing. It is warn,
+ * not bad — the import it would have refreshed still stands. A `failed` run
+ * with no error recorded is still a failure, and says so.
+ */
+function importAttention(run: ImportRun): Attention | null {
+  const base: Pick<Attention, 'id' | 'icon' | 'to'> = {
+    id: `import-${run.dataset}`,
+    icon: 'database',
+    to: ROUTES.bootstrap,
+  }
+  if (run.status === 'failed') {
+    return {
+      ...base,
+      tone: 'bad',
+      text: `The ${run.dataset} import failed`,
+      meta: run.error ?? 'no error was recorded',
+    }
+  }
+  if (run.error === null) return null
+  return {
+    ...base,
+    tone: 'warn',
+    text:
+      run.status === 'completed'
+        ? `The last ${run.dataset} import could not start; the completed one stands`
+        : `The ${run.dataset} import recorded an error`,
+    meta: run.error,
+  }
+}
+
 /* ------------------------------------------------------------------ screen */
 
 export default function Overview() {
@@ -266,7 +306,9 @@ export default function Overview() {
   const unmatched = useUnmatched()
 
   const runs = bootstrap.data?.runs
-  const throughput = useThroughput(runs)
+  // Read on every render, so every poll re-renders even when its body is unchanged.
+  const asOf = bootstrap.dataUpdatedAt
+  const throughput = useThroughput(runs, asOf)
 
   // A 503 carries the same readiness document as a 200. Only a body that is not
   // a readiness document is a genuine failure.
@@ -275,7 +317,6 @@ export default function Overview() {
   const readinessStatus = readiness.data ? 200 : 503
 
   const running = (runs ?? []).filter((run) => run.status === 'running')
-  const failed = (runs ?? []).filter((run) => run.status === 'failed')
   const unmatchedLoaded = (unmatched.data?.pages ?? []).reduce((total, page) => total + page.items.length, 0)
 
   const attention: Attention[] = []
@@ -290,15 +331,9 @@ export default function Overview() {
       to: ROUTES.review,
     })
   }
-  for (const run of failed) {
-    attention.push({
-      id: `import-${run.dataset}`,
-      icon: 'database',
-      tone: 'bad',
-      text: `The ${run.dataset} import failed`,
-      meta: run.error ?? 'no error was recorded',
-      to: ROUTES.bootstrap,
-    })
+  for (const run of runs ?? []) {
+    const item = importAttention(run)
+    if (item) attention.push(item)
   }
 
   const sourceColumns: Column<SourceResponse>[] = [
@@ -394,7 +429,7 @@ export default function Overview() {
           {bootstrap.data && running.length > 0 && (
             <div className="flex flex-col gap-2">
               {running.map((run) => {
-                const elapsed = elapsedOf(run)
+                const elapsed = elapsedOf(run, asOf)
                 return (
                   <CursorProgress
                     key={run.dataset}
@@ -406,7 +441,7 @@ export default function Overview() {
                     rowsPerSecond={throughput.get(run.dataset) ?? null}
                     position={String(run.position)}
                     revision={run.revision}
-                    heartbeatAgoSeconds={secondsSince(run.heartbeat_at)}
+                    heartbeatAgoSeconds={secondsSince(run.heartbeat_at, asOf)}
                     {...(elapsed === undefined ? {} : { elapsed })}
                   />
                 )
@@ -507,15 +542,19 @@ export default function Overview() {
                   ))}
                 </div>
               ) : (
+                // A claim about both lists, so it waits for both: before the runs
+                // arrive, "no import has failed" would be a guess.
+                unmatched.data !== undefined &&
+                bootstrap.data !== undefined &&
                 !unmatched.isError &&
                 !bootstrap.isError && (
                   <StateBlock
                     kind="empty"
                     title="Nothing is waiting on a person"
-                    meta="unmatched: 0 loaded · runs: none failed"
+                    meta="unmatched: 0 loaded · runs: none failed, every error null"
                   >
-                    The review queue is empty and no import has failed. This list is built from those two
-                    facts and from nothing else.
+                    The review queue is empty and no import has failed or recorded an error. This list is
+                    built from those two facts and from nothing else.
                   </StateBlock>
                 )
               )}

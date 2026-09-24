@@ -198,6 +198,20 @@ export const importCompleted: Schemas['ImportRunResponse'] = {
 }
 
 /**
+ * `completed` with an `error` beside it: a rerun that could not start, over an
+ * import that stands (PRD 04). The revision `HEAD` failed before `start()`, so
+ * the server kept the checkpoint `completed` rather than downgrading it and
+ * blocking every phase that reads it — and refreshed `heartbeat_at` as it
+ * recorded why. Everything else is the import that finished.
+ */
+export const importCompletedWithError: Schemas['ImportRunResponse'] = {
+  ...importCompleted,
+  error:
+    'HEAD https://files.grouplens.org/datasets/movielens/ml-latest.zip failed: ConnectTimeout (gave up after 5 attempts over 241s)',
+  heartbeat_at: '2026-08-18T04:12:55Z',
+}
+
+/**
  * A `failed` run is a **normal, designed state** (patterns.md §8): the status
  * word gets bad tone, `error` is shown verbatim, the position is retained and
  * the trigger is relabelled "Resume".
@@ -236,6 +250,12 @@ export const bootstrapStatus: BootstrapStatusResponse = {
     tags: 1_128,
     detail: null,
   },
+}
+
+/** The shipped status with `movielens`' rerun unable to start over its completed import. */
+export const bootstrapStatusCompletedWithError: BootstrapStatusResponse = {
+  ...bootstrapStatus,
+  runs: [importRunning, importCompletedWithError, importFailed],
 }
 
 /** Nothing has ever been imported. Not an error — a fact about the database. */
