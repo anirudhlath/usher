@@ -122,10 +122,10 @@ USHER_EMBEDDING_BASE_URL=http://embeddings.lan:8001/v1
 USHER_EMBEDDING_API_KEY=
 ```
 
-- **The model must return 1024-dimensional, unit-length vectors.** An `openai:`
-  model is checked only on the first batch after startup, and the wrong model
-  parks that index job. After the first backfill, look for parked jobs in
-  `usher sync-status`.
+- **The model must return 1024-dimensional, unit-length vectors.** A vector of
+  another width parks its index job. Length is checked only on the first batch
+  after startup, which parks that one job. After the first backfill, look for
+  parked jobs in `usher sync-status`.
 - **The base URL is resolved inside the container**, so `localhost` means the
   container itself.
 - **Changing the model marks every stored vector stale.**

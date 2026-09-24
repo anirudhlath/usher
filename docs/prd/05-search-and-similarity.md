@@ -108,8 +108,8 @@ checkpoint reports its width at startup, where it is compared against the
 column's; on a mismatch Usher logs once and builds no embedder — so `INDEX`
 jobs go unclaimed and the catalog-lookup tier is untouched, exactly as a
 deployment with no model behaves. An `openai:` endpoint cannot be asked its
-width, so the first batch the process embeds is checked instead: a vector of
-the wrong width, or one that is not unit-length, parks that `INDEX` job.
+width, so every vector's width is checked before it is stored, and a wrong one
+parks the `INDEX` job.
 
 **The in-process runtime is `fastembed`**, with no torch. The dependency lives
 behind an extra and `USHER_EMBEDDING_ENABLED` is off by default: full-text and
