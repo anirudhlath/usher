@@ -17,7 +17,7 @@ from usher.ports.errors import RepositoryConflict
 
 
 class _Releasing(PostgresImportRunRepository):
-    """Remembers every dataset it held, so the fixture can give each hold back.
+    """Remembers every dataset it held, so the fixture can give each hold and read back.
 
     A hold is a checked-out connection holding an advisory lock, and one left behind
     would refuse the next case's `start()` of the same dataset.
@@ -34,6 +34,7 @@ class _Releasing(PostgresImportRunRepository):
     async def release_all(self) -> None:
         for dataset in self.started:
             await self.release(dataset)
+        await self.release_reads()
 
 
 class TestPostgresImportRunRepositoryContract(ImportRunRepositoryContract):
@@ -171,14 +172,16 @@ class _Interrupted(BaseException):
     """What a cancellation or a Ctrl-C delivers into an `await`: not an `Exception`."""
 
 
+@pytest.mark.parametrize("take", ["start", "hold_for_reading"])
 async def test_a_hold_interrupted_after_its_lock_was_granted_leaves_no_lock_in_the_pool(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, take: str
 ) -> None:
     """`close()` hands the connection back to the pool with the advisory lock still on it.
 
     The next checkout of that connection -- by anything at all -- then holds the dataset
     for as long as the pool keeps it, and every `start()` elsewhere is refused. The hold
     invalidates it instead, as `release()` does, so its backend ends and the lock with it.
+    A read's shared lock refuses every `start()` the same way.
     """
     engine = build_engine(postgres_url, pool_size=1, max_overflow=0)
     factory = build_session_factory(engine)
@@ -201,7 +204,10 @@ async def test_a_hold_interrupted_after_its_lock_was_granted_leaves_no_lock_in_t
             monkeypatch.setattr(AsyncConnection, "scalar", granted_then_interrupted)
             try:
                 with pytest.raises(_Interrupted):
-                    await runs.start(_PROBE, "etag-1")
+                    if take == "start":
+                        await runs.start(_PROBE, "etag-1")
+                    else:
+                        await runs.hold_for_reading(_PROBE)
             finally:
                 monkeypatch.undo()
         assert granted == [True], "the premise: the lock was granted before the interruption"
@@ -214,11 +220,14 @@ async def test_a_hold_interrupted_after_its_lock_was_granted_leaves_no_lock_in_t
 _PROBE = "movielens.genome"
 
 
-async def test_held_elsewhere_reads_a_lock_whose_key_hashes_negative(session: AsyncSession) -> None:
+async def test_touch_confirms_a_hold_and_a_read_whose_keys_hash_negative(
+    session: AsyncSession,
+) -> None:
     """`pg_locks` shows each key as an unsigned `oid`; `hashtext` is a signed `int4`.
 
     Read with the wrong sign, every dataset whose name hashes negative -- `movielens.genome`
-    among them -- is never seen held, and nothing waits for its import.
+    among them -- is never seen held, and `touch` would stop a live import as lost. A read
+    takes the very key a hold does, of either sign, so each refuses the other.
     """
     runs, rival = _Releasing(session), _Releasing(session)
     try:
@@ -227,11 +236,19 @@ async def test_held_elsewhere_reads_a_lock_whose_key_hashes_negative(session: As
             {"negative": _PROBE, "positive": "imdb.title.basics"},
         )
         assert signs == [True, True], "the premise: one key of each sign"
-        for dataset in (_PROBE, "imdb.title.basics"):
-            await runs.hold(dataset)
-            assert await rival.held_elsewhere(dataset) is True, dataset
+        await runs.hold(_PROBE)
+        assert await rival.hold_for_reading(_PROBE) is False
+        await runs.touch(_PROBE)
+        await rival.hold("imdb.title.basics")
+        assert await rival.hold_for_reading("tmdb.ids.movie") is True
+        await runs.release(_PROBE)
+        assert await rival.hold_for_reading(_PROBE) is True
+        await rival.touch("imdb.title.basics")
+        with pytest.raises(RepositoryConflict):
+            await runs.hold(_PROBE)
     finally:
         await runs.release_all()
+        await rival.release_all()
 
 
 async def _end_the_backend_holding(engine: AsyncEngine, dataset: str) -> int:
@@ -268,7 +285,7 @@ async def test_a_hold_whose_backend_ended_is_refused_by_touch_and_taken_again_by
             await runs.touch(_PROBE)
         assert await _free(engine, _PROBE), "the dataset is anybody's"
         await runs.hold(_PROBE)
-        assert await PostgresImportRunRepository(session).held_elsewhere(_PROBE) is True
+        assert not await _free(engine, _PROBE, within=0), "taken again"
     finally:
         await runs.release_all()
         await engine.dispose()
@@ -290,7 +307,37 @@ async def test_a_hold_that_ended_unnoticed_is_taken_again_by_the_next_hold(
         assert ended == 1, "the premise: exactly one backend held the lock, and it ended"
         await runs.hold(_PROBE)
         await runs.touch(_PROBE)
-        assert await PostgresImportRunRepository(session).held_elsewhere(_PROBE) is True
+        assert not await _free(engine, _PROBE, within=0), "taken again"
+    finally:
+        await runs.release_all()
+        await engine.dispose()
+
+
+async def test_a_read_whose_backend_ended_is_refused_by_touch_and_every_read_dropped(
+    session: AsyncSession, postgres_url: str
+) -> None:
+    """The reads' connection ends the way a hold's does, and a phase went on joining.
+
+    Against a dataset any process could by then be importing. `touch` confirms the reads
+    beside the hold, and a lost one drops them all -- they were on the one connection.
+    """
+    runs = _Releasing(session)
+    engine = build_engine(postgres_url)
+    try:
+        await runs.start("imdb.credit_names", "etag-1")
+        assert await runs.hold_for_reading(_PROBE) is True
+        assert await runs.hold_for_reading("imdb.title.basics") is True
+        await runs.touch("imdb.credit_names")
+        ended = await _end_the_backend_holding(engine, _PROBE)
+        assert ended == 1, "the premise: exactly one backend read the dataset, and it ended"
+        with pytest.raises(RepositoryConflict) as lost:
+            await runs.touch("imdb.credit_names")
+        assert str(lost.value) == (
+            "lost the shared hold on imdb.title.basics, which this reads: its connection ended"
+        ), "the first read confirmed, on the one connection both were on"
+        assert await _free(engine, _PROBE), "the dataset is anybody's"
+        assert await _free(engine, "imdb.title.basics"), "and so is every other read"
+        await runs.touch("imdb.credit_names")
     finally:
         await runs.release_all()
         await engine.dispose()

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
@@ -179,3 +179,34 @@ def test_every_catalogued_default_is_the_default_usher_actually_ships(
         "the console's Configuration screen prints a default Usher does not ship "
         f"(key: printed vs actual): {wrong}"
     )
+
+
+#: `Config.settings.ts`'s pool arithmetic, which the pool row's sentence is built from.
+_POOL_RULE = re.compile(
+    r"^const POOL_RULE = \{ jobs: (\d+), worker: (\d+), bootstrap: (\d+), pool: (\d+) \} as const$",
+    re.MULTILINE,
+)
+
+
+def test_the_pool_sentence_is_built_from_the_rule_settings_refuses_a_pool_by(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Written out, it said 12 jobs plus a claim and a heartbeat made 14.
+
+    It went on saying so after a bootstrap import took connections of its own. The
+    console now builds it from `POOL_RULE`, held here to the defaults it restates and
+    to the connection count `Settings` refuses a pool with.
+    """
+    match = _POOL_RULE.search(_CATALOGUE.read_text())
+    assert match is not None, "Config.settings.ts no longer spells POOL_RULE on one line"
+    jobs, worker, bootstrap, pool = (int(one) for one in match.groups())
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    defaults = Settings()
+    assert (jobs, pool) == (defaults.job_concurrency, defaults.db_pool_size)
+
+    monkeypatch.setenv("USHER_DB_POOL_SIZE", "1")
+    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", "0")
+    with pytest.raises(ValidationError) as refused:
+        Settings()
+    assert f"needs {jobs + worker + bootstrap} connections" in str(refused.value)

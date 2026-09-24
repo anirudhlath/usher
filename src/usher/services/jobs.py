@@ -14,7 +14,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.trace import Link
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from usher.domain.jobs import Job, JobKind
+from usher.domain.jobs import BOOTSTRAP_CONCURRENCY, Job, JobKind
 from usher.ports.errors import PortDataMalformed, PortRateLimited, UsherPortError
 from usher.ports.jobs import JobQueue
 from usher.services.events import DeferredEventPublisher
@@ -42,7 +42,7 @@ KIND_CONCURRENCY: Final[Mapping[JobKind, int | None]] = MappingProxyType(
         JobKind.INDEX: 1,
         JobKind.CURATE: 1,
         JobKind.SYNC: 1,
-        JobKind.BOOTSTRAP: 1,
+        JobKind.BOOTSTRAP: BOOTSTRAP_CONCURRENCY,
     }
 )
 

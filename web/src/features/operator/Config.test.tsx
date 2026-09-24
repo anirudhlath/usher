@@ -223,6 +223,23 @@ describe('Config', () => {
     ).toBeVisible()
   })
 
+  it('explains the pool default with the arithmetic at the catalogue’s own defaults', () => {
+    // Written out, the sentence said 12 jobs plus a claim and a heartbeat made 14
+    // long after a bootstrap import took connections of its own. The two defaults it
+    // restates are read from their rows; the Python case holds the arithmetic to
+    // `Settings`' validator.
+    const defaultOf = (key: string): number => Number(CONFIG.find((row) => row.key === key)?.def)
+    const pool = CONFIG.find((row) => row.key === 'USHER_DB_POOL_SIZE')?.about ?? ''
+    const shape =
+      /^Connections per process\. (\d+) because .*: (\d+) jobs in flight .* together (\d+), leaving (\d+) for the API\.$/
+    expect(pool).toMatch(shape)
+    const [size, jobs, needed, left] = (shape.exec(pool) ?? []).slice(1).map(Number)
+    expect(size).toBe(defaultOf('USHER_DB_POOL_SIZE'))
+    expect(jobs).toBe(defaultOf('USHER_JOB_CONCURRENCY'))
+    expect((needed ?? 0) + (left ?? 0)).toBe(size)
+    expect(needed).toBeGreaterThan(jobs ?? Infinity)
+  })
+
   it('searches by name and by what a setting controls', async () => {
     const { user } = renderConfig()
     await screen.findByRole('heading', { level: 1, name: 'Configuration' })

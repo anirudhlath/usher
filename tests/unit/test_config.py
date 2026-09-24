@@ -1,9 +1,12 @@
 import inspect
+import pkgutil
+import tomllib
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+import usher
 from usher.adapters.emby.push import DEFAULT_POLL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine
@@ -299,8 +302,9 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
     """The failure this refuses does not look like a configuration mistake.
 
     Every job in flight holds a session, plus one for the claim and one for the
-    heartbeat, and each bootstrap job in flight one more: the connection its dataset's
-    hold lives on. Over the pool's capacity SQLAlchemy's `QueuePool` **waits**
+    heartbeat, and each bootstrap job in flight two more: the connection its dataset's
+    hold lives on and the one what it reads is held on. Over the pool's capacity
+    SQLAlchemy's `QueuePool` **waits**
     `pool_timeout` -- 30 s, the default this project does not change -- and
     only then raises, so the symptom is a worker lane getting slower and slower
     and finally parking jobs with a message about a pool. Refused at startup
@@ -312,9 +316,9 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
-    holds = KIND_CONCURRENCY[JobKind.BOOTSTRAP]
-    assert holds == 1, "the premise: one bootstrap job, so one hold, at a time"
-    needed = 12 + 2 + holds
+    imports = KIND_CONCURRENCY[JobKind.BOOTSTRAP]
+    assert imports == 1, "the premise: one bootstrap job, so one hold and one read, at a time"
+    needed = 12 + 2 + 2 * imports
     monkeypatch.setenv("USHER_JOB_CONCURRENCY", "12")
     monkeypatch.setenv("USHER_DB_POOL_SIZE", "10")
     monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", str(needed - 10 - 1))
@@ -324,8 +328,8 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
     assert "USHER_JOB_CONCURRENCY" in message and "USHER_DB_POOL_SIZE" in message, message
     assert f"needs {needed} connections" in message, message
 
-    # The boundary, so the case is about the arithmetic rather than about any
-    # pair of numbers: 12 jobs, the claim, the heartbeat and one hold need exactly 15.
+    # The boundary, so the case is about the arithmetic rather than about any pair
+    # of numbers: 12 jobs, the claim, the heartbeat, a hold and a read need exactly 16.
     monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", str(needed - 10))
     assert Settings().job_concurrency == 12
 
@@ -904,3 +908,28 @@ def test_the_image_ladder_is_not_a_setting() -> None:
 _IMAGE_SETTINGS = frozenset(
     {"image_cache_dir", "image_max_bytes", "image_fetch_timeout_seconds", "image_cdn_base_url"}
 )
+
+
+def test_the_config_contract_forbids_every_top_level_package_but_the_domain() -> None:
+    """`usher.config` imported `usher.services.jobs` to size the pool, and nothing said no.
+
+    The contracts that now do cover only the packages they name, so a new top-level
+    package would be one the configuration could import unseen. Its own contract and the
+    eval leaf's forbid it one each; together they must name every package the tree has.
+    """
+    with (Path(__file__).parents[2] / "pyproject.toml").open("rb") as handle:
+        contracts = tomllib.load(handle)["tool"]["importlinter"]["contracts"]
+    (own,) = [one for one in contracts if one.get("source_modules") == ["usher.config"]]
+    over_config = [
+        one
+        for one in contracts
+        if one["type"] == "forbidden" and "usher.config" in one.get("source_modules", [])
+    ]
+    top_level = {f"usher.{module.name}" for module in pkgutil.iter_modules(usher.__path__)}
+    assert {"usher.domain", "usher.config", "usher.services"} <= top_level, (
+        f"the walk found no usher.domain, so it walked something else: {sorted(top_level)}"
+    )
+    assert own["type"] == "forbidden"
+    named = {module for one in over_config for module in one["forbidden_modules"]}
+    forbidden = {module for module in named if module.startswith("usher.")}  # not ranx
+    assert forbidden == top_level - {"usher.domain", "usher.config"}

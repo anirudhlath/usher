@@ -198,14 +198,15 @@ export const importCompleted: Schemas['ImportRunResponse'] = {
 }
 
 /**
- * `completed` with an `error` beside it: a refresh that landed no batch, over
- * an import that stands (PRD 04). A refresh can fail at the revision lookup,
- * the download or the first fetch — after it has started, and downloaded — and
- * until a batch of the new revision lands the server keeps the checkpoint
- * `completed` at its revision and position rather than blocking every phase
- * that reads it. This one's revision `HEAD` gave up; `heartbeat_at` is the
- * refresh's, later than `finished_at`. Everything else is the import that
- * finished.
+ * `completed` with an `error` beside it: the completed import stands, and the
+ * last attempt recorded an error (PRD 04). Two things leave one. A refresh can
+ * fail at the revision lookup, the download or the first fetch — after it has
+ * started, and downloaded — and until a batch of the new revision lands the
+ * server keeps the checkpoint `completed` at its revision and position rather
+ * than blocking every phase that reads it. And a MovieLens vocabulary can fail
+ * to load after the vectors completed. This one is the first kind: its
+ * revision `HEAD` gave up; `heartbeat_at` is the refresh's, later than
+ * `finished_at`. Everything else is the import that finished.
  */
 export const importCompletedWithError: Schemas['ImportRunResponse'] = {
   ...importCompleted,

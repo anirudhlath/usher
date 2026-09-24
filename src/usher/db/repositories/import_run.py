@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text, update
+from sqlalchemy import TextClause, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
@@ -14,23 +14,22 @@ from usher.ports.repository import ImportRunRepository
 
 #: The first key of every checkpoint's advisory lock, so it shares no lock with anything
 #: else in the database; the second is `hashtext(dataset)`. Two datasets hashing alike
-#: would serialise each other's imports, never let two processes into one.
+#: would serialise each other's imports, never let two processes into one. A hold takes
+#: the key exclusive and a read takes the same key shared, which is what excludes them.
 _LOCK_NAMESPACE = 0x75736872
 _TRY_LOCK = text("SELECT pg_try_advisory_lock(:namespace, hashtext(:dataset))")
 _UNLOCK = text("SELECT pg_advisory_unlock(:namespace, hashtext(:dataset))")
+_TRY_READ = text("SELECT pg_try_advisory_lock_shared(:namespace, hashtext(:dataset))")
+_UNREAD = text("SELECT pg_advisory_unlock_shared(:namespace, hashtext(:dataset))")
 # The lock's row in `pg_locks`, which shows each key as an unsigned `oid`. `hashtext` is a
 # signed `int4`, and the cast keeps its bits, so a name hashing negative matches too.
-_STILL_HELD = text(
+_STILL_LOCKED = (
     "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
     " AND classid = CAST(:namespace AS oid) AND objid = CAST(hashtext(:dataset) AS oid)"
-    " AND objsubid = 2 AND pid = pg_backend_pid())"
+    " AND objsubid = 2 AND pid = pg_backend_pid() AND mode = '{mode}')"
 )
-_HELD_HERE = text(
-    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
-    " AND classid = CAST(:namespace AS oid) AND objid = CAST(hashtext(:dataset) AS oid)"
-    " AND objsubid = 2"
-    " AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))"
-)
+_STILL_HELD = text(_STILL_LOCKED.format(mode="ExclusiveLock"))
+_STILL_READ = text(_STILL_LOCKED.format(mode="ShareLock"))
 
 
 def _to_domain(row: ImportRunRow) -> ImportRun:
@@ -52,15 +51,22 @@ class PostgresImportRunRepository(ImportRunRepository):
     it; a lock that dies with its connection is what lets a killed importer's `RUNNING`
     row be taken over. So an importer holds two connections, and `Settings` counts both.
 
+    **Reads live on one more connection**, all of a repository's reads together, checked
+    out by the first `hold_for_reading()` and returned by `release_reads()`. Being
+    another backend is what makes a repository's read refuse its own hold. A phase that
+    reads holds three connections at once: its session, its reads, its own hold.
+
     **The same property ends a live hold silently**: `idle_session_timeout`, a proxy's
     idle cut or a server restart closes the connection and frees the lock with nothing
-    said. `touch` confirms the hold on that connection -- which also keeps it from idling
-    -- and a hold found gone is dropped with a `RepositoryConflict`.
+    said. `touch` confirms the hold and the reads on theirs -- which also keeps them from
+    idling -- and one found gone is dropped with a `RepositoryConflict`.
     """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._holds: dict[str, AsyncConnection] = {}
+        self._reader: AsyncConnection | None = None
+        self._reads: set[str] = set()
 
     async def start(self, dataset: str, revision: str) -> ImportRun:
         took = dataset not in self._holds
@@ -80,11 +86,8 @@ class PostgresImportRunRepository(ImportRunRepository):
                 pass  # Dropped as lost: taken again below, or refused.
             else:
                 return
-        connection = await self._engine().connect()
+        connection = await self._lock_connection()
         try:
-            # Autocommit, so the connection holds the lock and never a transaction:
-            # idle, it is killed by no `idle_in_transaction_session_timeout`.
-            await connection.execution_options(isolation_level="AUTOCOMMIT")
             granted = await connection.scalar(
                 _TRY_LOCK, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
             )
@@ -95,29 +98,87 @@ class PostgresImportRunRepository(ImportRunRepository):
             raise
         if not granted:
             await connection.close()
-            raise RepositoryConflict(f"another process holds the import of {dataset}")
+            raise RepositoryConflict(
+                f"another process is importing {dataset} or running a phase that reads it"
+            )
         self._holds[dataset] = connection
+
+    async def hold_for_reading(self, dataset: str) -> bool:
+        if dataset in self._reads:
+            return True
+        if self._reader is None:
+            self._reader = await self._lock_connection()
+        try:
+            granted = await self._reader.scalar(
+                _TRY_READ, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
+            )
+        except BaseException:
+            # As in `hold`: granted or not, only ending the backend is sure to free it,
+            # and every read on it goes too.
+            await self._drop_reads()
+            raise
+        if granted:
+            self._reads.add(dataset)
+        elif not self._reads:
+            await self.release_reads()  # Nothing on it: back to the pool.
+        return bool(granted)
+
+    async def release_reads(self) -> None:
+        connection, reads = self._reader, sorted(self._reads)
+        self._reader, self._reads = None, set()
+        if connection is None:
+            return
+        try:
+            for dataset in reads:
+                await connection.execute(
+                    _UNREAD, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
+                )
+        except BaseException:
+            await connection.invalidate()
+            raise
+        finally:
+            await connection.close()
+
+    async def _drop_reads(self) -> None:
+        """Forget every read, ending the backend they were on so none outlives it."""
+        connection, self._reader, self._reads = self._reader, None, set()
+        if connection is not None:
+            await _discard(connection)
+
+    async def _lock_connection(self) -> AsyncConnection:
+        """A connection of the session's engine to hold locks on, and nothing else."""
+        connection = await self._engine().connect()
+        try:
+            # Autocommit, so the connection holds the lock and never a transaction:
+            # idle, it is killed by no `idle_in_transaction_session_timeout`.
+            await connection.execution_options(isolation_level="AUTOCOMMIT")
+        except BaseException:
+            await _discard(connection)
+            raise
+        return connection
 
     async def _confirm(self, dataset: str) -> None:
         """`RepositoryConflict` unless this repository's hold on `dataset` is alive."""
         connection = self._holds.get(dataset)
         if connection is None:
             raise RepositoryConflict(f"this process does not hold the import of {dataset}")
-        try:
-            held = await connection.scalar(
-                _STILL_HELD, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
-            )
-            why = "its lock is gone"
-        except DBAPIError as exc:
-            # A disconnect on the hold's own connection *is* the hold lost; anything
-            # else is not this method's to name.
-            if not exc.connection_invalidated:
-                raise
-            held, why = False, "its connection ended"
-        if not held:
+        why = await _why_lost(connection, _STILL_HELD, dataset)
+        if why is not None:
             del self._holds[dataset]
             await _discard(connection)
             raise RepositoryConflict(f"lost the hold on the import of {dataset}: {why}")
+
+    async def _confirm_reads(self) -> None:
+        """`RepositoryConflict`, and every read dropped, unless each read is alive."""
+        if self._reader is None:
+            return
+        for dataset in sorted(self._reads):
+            why = await _why_lost(self._reader, _STILL_READ, dataset)
+            if why is not None:
+                await self._drop_reads()
+                raise RepositoryConflict(
+                    f"lost the shared hold on {dataset}, which this reads: {why}"
+                )
 
     def _engine(self) -> AsyncEngine:
         bind = self._session.bind
@@ -171,16 +232,9 @@ class PostgresImportRunRepository(ImportRunRepository):
         finally:
             await connection.close()
 
-    async def held_elsewhere(self, dataset: str) -> bool:
-        if dataset in self._holds:
-            return False
-        held = await self._session.scalar(
-            _HELD_HERE, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
-        )
-        return bool(held)
-
     async def touch(self, dataset: str) -> None:
         await self._confirm(dataset)
+        await self._confirm_reads()
         async with refusals_as_conflict(self._session, f"the heartbeat of {dataset}"):
             await self._session.execute(
                 update(ImportRunRow)
@@ -241,6 +295,19 @@ class PostgresImportRunRepository(ImportRunRepository):
                 .execution_options(populate_existing=True)
             )
         return [_to_domain(row) for row in result.scalars()]
+
+
+async def _why_lost(connection: AsyncConnection, still: TextClause, dataset: str) -> str | None:
+    """Why `connection` no longer has `dataset`'s lock as `still` reads it, or `None`."""
+    try:
+        held = await connection.scalar(still, {"namespace": _LOCK_NAMESPACE, "dataset": dataset})
+    except DBAPIError as exc:
+        # A disconnect on the lock's own connection *is* the lock lost; anything else is
+        # not this function's to name.
+        if not exc.connection_invalidated:
+            raise
+        return "its connection ended"
+    return None if held else "its lock is gone"
 
 
 async def _discard(connection: AsyncConnection) -> None:

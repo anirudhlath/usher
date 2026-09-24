@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
+from typing import Final
 
 from pydantic import AwareDatetime, Field
 
@@ -22,6 +23,12 @@ class JobKind(StrEnum):
     WATCH_WRITEBACK = "watch_writeback"
     SYNC = "sync"
     BOOTSTRAP = "bootstrap"
+
+
+#: How many `bootstrap` jobs one worker runs at once: `bulk_load_window` commits the
+#: caller's session. Here rather than only in `KIND_CONCURRENCY`, which reads it, because
+#: `Settings` sizes the connection pool from it and imports nothing above the domain.
+BOOTSTRAP_CONCURRENCY: Final = 1
 
 
 class JobStatus(StrEnum):

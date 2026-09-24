@@ -54,10 +54,10 @@ implementation talks to one nameable external service (`emby/` →
 5. **`api/` maps domain models to response DTOs.** Wire format is versioned
    independently of internal models.
 
-Import discipline is enforced in CI by `import-linter`: **Twelve contracts**.
+Import discipline is enforced in CI by `import-linter`: **Thirteen contracts**.
 `usher.api.routers` may not name `usher.composition`,
 `usher.services.curation` or `usher.ports.llm`; it reaches the wiring through
-`usher.api.deps`.
+`usher.api.deps`. `usher.config` imports nothing above `usher.domain`.
 
 ## Ports are ABCs, not Protocols
 
@@ -167,8 +167,8 @@ own bound, so a slow upstream cannot starve the API.
 A concurrency entry is a slot count, not a request rate: the per-source gate
 `USHER_SOURCE_REQUESTS_PER_SECOND` (default 0.4) bounds the wire. `Settings`
 refuses a `job_concurrency` the `USHER_DB_POOL_SIZE` pool cannot serve: each job
-in flight, the claim, the heartbeat and the running bootstrap's hold take a
-connection. `curate`
+in flight, the claim and the heartbeat take a connection, and the running
+bootstrap two more — its hold and its reads. `curate`
 is capped at one completion at a time, up to `USHER_LLM_TIMEOUT_SECONDS`
 (120 s).
 

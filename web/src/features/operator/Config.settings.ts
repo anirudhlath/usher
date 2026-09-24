@@ -45,6 +45,16 @@ export type SettingRow = {
   observed?: { value: string; proof: string }
 }
 
+/**
+ * The arithmetic `Settings` refuses a pool by, at the defaults of the two rows it
+ * explains: a session per job in flight, the worker's claim and heartbeat, and a
+ * bootstrap import's hold and its reads — one import at a time. The pool row's
+ * sentence is built from it, and `tests/unit/test_console_settings_catalogue.py`
+ * holds it to the validator, reading this line as text: keep it on one line.
+ */
+const POOL_RULE = { jobs: 12, worker: 2, bootstrap: 2, pool: 20 } as const
+const POOL_NEEDED = POOL_RULE.jobs + POOL_RULE.worker + POOL_RULE.bootstrap
+
 export const CONFIG: readonly SettingRow[] = [
   /* ------------------------------------------------------------- database */
   {
@@ -59,8 +69,7 @@ export const CONFIG: readonly SettingRow[] = [
     key: 'USHER_DB_POOL_SIZE',
     group: 'database',
     def: '20',
-    about:
-      'Connections per process. 20 because the worker lane runs in the same process and holds one session per job in flight: 12 jobs plus a claim and a heartbeat is 14, leaving 6 for the API.',
+    about: `Connections per process. ${POOL_RULE.pool} because the worker lane runs in the same process: ${POOL_RULE.jobs} jobs in flight hold a session each, the worker a claim and a heartbeat, and a bootstrap import the hold on its dataset and the reads of what it joins against — together ${POOL_NEEDED}, leaving ${POOL_RULE.pool - POOL_NEEDED} for the API.`,
     secret: false,
     measured: true,
   },

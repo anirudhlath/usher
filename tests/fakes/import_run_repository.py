@@ -8,11 +8,13 @@ from usher.ports.repository import ImportRunRepository
 
 
 class FakeImportRunRepository(ImportRunRepository):
-    """`shares` builds a second repository over the first's store and holds.
+    """`shares` builds a second repository over the first's store, holds and reads.
 
     Two instances sharing one store stand in for two processes over one database: each
     is a holder, so the second's `start()` is refused while the first holds a dataset.
-    `lose_hold` is the one affordance the port lacks: the hold's connection ending.
+    A repository's own reads refuse its own holds, as the Postgres arm's two connections
+    do. `lose_hold` and `lose_reads` are the affordances the port lacks: a connection
+    ending under a hold or under the reads.
     """
 
     def __init__(self, *, shares: "FakeImportRunRepository | None" = None) -> None:
@@ -20,11 +22,25 @@ class FakeImportRunRepository(ImportRunRepository):
         self._holders: dict[str, FakeImportRunRepository] = (
             shares._holders if shares is not None else {}
         )
+        self._readers: dict[str, set[FakeImportRunRepository]] = (
+            shares._readers if shares is not None else {}
+        )
+        self._reading: set[str] = set()
+
+    @property
+    def reading(self) -> frozenset[str]:
+        """The datasets this repository holds for reading, lost or not."""
+        return frozenset(self._reading)
 
     def lose_hold(self, dataset: str) -> None:
         """What `idle_session_timeout` does to a hold: gone, and its holder not told."""
         if self._holders.get(dataset) is self:
             del self._holders[dataset]
+
+    def lose_reads(self) -> None:
+        """The same, to the connection every read of this repository lives on."""
+        for dataset in self._reading:
+            self._readers.get(dataset, set()).discard(self)
 
     async def start(self, dataset: str, revision: str) -> ImportRun:
         await self.hold(dataset)
@@ -58,21 +74,40 @@ class FakeImportRunRepository(ImportRunRepository):
 
     async def hold(self, dataset: str) -> None:
         holder = self._holders.get(dataset)
-        if holder is not None and holder is not self:
-            raise RepositoryConflict(f"another process holds the import of {dataset}")
+        if (holder is not None and holder is not self) or self._readers.get(dataset):
+            raise RepositoryConflict(
+                f"another process is importing {dataset} or running a phase that reads it"
+            )
         self._holders[dataset] = self
 
     async def release(self, dataset: str) -> None:
         if self._holders.get(dataset) is self:
             del self._holders[dataset]
 
-    async def held_elsewhere(self, dataset: str) -> bool:
-        holder = self._holders.get(dataset)
-        return holder is not None and holder is not self
+    async def hold_for_reading(self, dataset: str) -> bool:
+        if dataset in self._reading:
+            return True
+        if dataset in self._holders:
+            return False
+        self._readers.setdefault(dataset, set()).add(self)
+        self._reading.add(dataset)
+        return True
+
+    async def release_reads(self) -> None:
+        for dataset in self._reading:
+            readers = self._readers.get(dataset, set())
+            readers.discard(self)
+            if not readers:
+                self._readers.pop(dataset, None)
+        self._reading.clear()
 
     async def touch(self, dataset: str) -> None:
         if self._holders.get(dataset) is not self:
             raise RepositoryConflict(f"lost the hold on the import of {dataset}")
+        for read in sorted(self._reading):
+            if self not in self._readers.get(read, set()):
+                await self.release_reads()
+                raise RepositoryConflict(f"lost the shared hold on {read}, which this reads")
         stored = self._runs.get(dataset)
         if stored is not None and stored.status is ImportRunStatus.RUNNING:
             self._runs[dataset] = stored.evolve(heartbeat_at=datetime.now(UTC))

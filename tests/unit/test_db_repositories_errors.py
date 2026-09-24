@@ -235,7 +235,7 @@ WIDENED_SITES = frozenset(
     {
         ("_errors.py", "refusals_as_conflict"),
         ("collection.py", "attach_titles"),
-        ("import_run.py", "_confirm"),
+        ("import_run.py", "_why_lost"),
         ("import_run.py", "save"),
         ("jobs.py", "enqueue"),
         ("people.py", "replace_for_titles"),
@@ -251,7 +251,7 @@ WIDENED_SITES = frozenset(
 
 # Sites that catch a disconnect rather than a refusal: on the hold's own connection, a
 # connection that ended is the answer being asked for. Each re-raises everything else.
-DISCONNECT_SITES = frozenset({("import_run.py", "_confirm")})
+DISCONNECT_SITES = frozenset({("import_run.py", "_why_lost")})
 
 
 def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
@@ -348,3 +348,39 @@ async def test_the_hold_check_calls_only_a_disconnect_a_lost_hold(invalidated: b
     assert connection.events == ["invalidated", "closed"]
     with pytest.raises(RepositoryConflict, match="does not hold the import of scripted"):
         await runs.touch("scripted")
+
+
+class _AliveConnection:
+    """A hold's connection whose lock is still there."""
+
+    async def scalar(self, statement: object, parameters: object = None) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
+async def test_the_read_check_calls_only_a_disconnect_a_lost_read(invalidated: bool) -> None:
+    """The same rule on the connection a repository's reads live on, through `touch`.
+
+    A disconnect there is every read lost, and all of them are dropped at once.
+    """
+    connection = _HoldConnection(invalidated=invalidated)
+    runs = PostgresImportRunRepository(_session()[1])
+    runs._holds["own"] = cast(AsyncConnection, _AliveConnection())
+    runs._reader = cast(AsyncConnection, connection)
+    runs._reads = {"scripted", "other"}
+    if not invalidated:
+        with pytest.raises(DBAPIError):
+            await runs.touch("own")
+        assert connection.events == []
+        assert runs._reads == {"scripted", "other"}
+        return
+    with pytest.raises(
+        RepositoryConflict, match="lost the shared hold on other, which this reads: its"
+    ):
+        await runs.touch("own")
+    assert connection.events == ["invalidated", "closed"]
+    assert _reads_of(runs) == (None, set())
+
+
+def _reads_of(runs: PostgresImportRunRepository) -> tuple[AsyncConnection | None, set[str]]:
+    return runs._reader, runs._reads

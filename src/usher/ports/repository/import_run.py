@@ -22,6 +22,11 @@ class ImportRunRepository(ABC):
     is taken by `start()` or `hold()` and given up by `release()` or by the holder's
     connection ending, so a dead holder's checkpoint can be taken over. A holder is
     another process, or another repository of this one.
+
+    **A phase reading a dataset holds it too, shared** (`hold_for_reading()`): readers
+    share it with each other and exclude every holder, so no import of it starts while
+    a phase joins against it, and no phase starts reading it mid-import. A repository's
+    reads exclude its own holds as well -- the two are held on different connections.
     """
 
     @abstractmethod
@@ -42,8 +47,9 @@ class ImportRunRepository(ABC):
     async def hold(self, dataset: str) -> None:
         """Hold `dataset`, or raise `RepositoryConflict` and touch nothing.
 
-        Refused while another holder has it. A hold this repository already has is
-        confirmed, and one found lost is taken again.
+        Refused while another holder has it, or any reader, this repository's own reads
+        included. A hold this repository already has is confirmed, and one found lost is
+        taken again.
         """
 
     @abstractmethod
@@ -51,17 +57,26 @@ class ImportRunRepository(ABC):
         """Give up this repository's hold on `dataset`; a no-op when there is none."""
 
     @abstractmethod
-    async def held_elsewhere(self, dataset: str) -> bool:
-        """Whether a holder other than this repository has `dataset` now."""
+    async def hold_for_reading(self, dataset: str) -> bool:
+        """Hold `dataset` shared, for a phase that reads it; `False` while it is held.
+
+        Granted beside other readers and refused while any holder has it, this
+        repository's own included; a refused read takes nothing. Reading a dataset this
+        repository already reads is the one read. Kept until `release_reads()`.
+        """
+
+    @abstractmethod
+    async def release_reads(self) -> None:
+        """Give up every read this repository holds; a no-op when there are none."""
 
     @abstractmethod
     async def touch(self, dataset: str) -> None:
-        """Confirm this repository still holds `dataset`, then move a `RUNNING` heartbeat.
+        """Confirm this repository still holds `dataset` and its reads, then move a heartbeat.
 
-        A hold that is gone -- its connection ended, by `idle_session_timeout`, a proxy's
-        idle cut or a server restart -- raises `RepositoryConflict` and is dropped, so
-        the next `hold()` takes a fresh one. Nothing but `heartbeat_at` is written.
-        Flushes, never commits.
+        A hold or a read that is gone -- its connection ended, by `idle_session_timeout`,
+        a proxy's idle cut or a server restart -- raises `RepositoryConflict` and is
+        dropped, so the next `hold()` takes a fresh one; a read lost drops every read.
+        Only a `RUNNING` row's `heartbeat_at` is written. Flushes, never commits.
         """
 
     @abstractmethod

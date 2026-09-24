@@ -1214,9 +1214,8 @@ async def test_a_revision_that_fails_over_an_unfinished_import_nobody_holds_reco
     assert run.heartbeat_at > unfinished.heartbeat_at, "a heartbeat the writing holder did not move"
     assert await runs.get("scripted") == run, "what is returned is what is stored"
     assert service.conceded == frozenset()
-    assert await FakeImportRunRepository(shares=runs).held_elsewhere("scripted") is False, (
-        "the hold taken to write the failure is given back"
-    )
+    # The hold taken to write the failure is given back, or this refuses.
+    await FakeImportRunRepository(shares=runs).hold("scripted")
 
 
 class _RivalFailsMidway(ScriptedDataset):
@@ -1365,7 +1364,7 @@ async def test_a_hold_lost_during_a_fetch_fails_the_import_at_the_next_beat(
         assert service.conceded == frozenset()
         assert run == stored
         assert run.error == "lost the hold on the import of scripted"
-        assert await rival.held_elsewhere("scripted") is False
+        await rival.hold("scripted")  # Given back, or this refuses.
 
 
 async def test_a_hold_lost_between_batches_stops_the_import_before_its_next_write(
