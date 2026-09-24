@@ -326,8 +326,9 @@ written by a model this deployment is not configured with**, logs both names at
 `usher similar --rebuild` is not refused.
 
 **`USHER_SCHEDULER_ENABLED` defaults to `false`.** It turns the scheduler on
-in the server; `usher schedule` runs it whatever the setting says. Nothing
-stops two processes starting the same job at once.
+in the server and in bare `usher push`, which runs the server's lanes; `usher
+schedule` runs it whatever the setting says. Nothing stops two processes
+starting the same job at once.
 
 **A period is a minimum interval since last completion, not a wall-clock
 schedule.** For a wall-clock time, or for the jobs without a long-lived

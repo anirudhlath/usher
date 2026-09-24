@@ -1567,6 +1567,7 @@ async def _run_lanes(settings: Settings) -> None:
         user_id=DefaultUserId(sessions),
         provider=provider,
         embedder=model,
+        sessions=sessions,
     )
     await lanes.start()
     try:

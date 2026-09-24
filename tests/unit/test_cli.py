@@ -18,11 +18,13 @@ from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
 import usher
+import usher.api.lanes
 import usher.cli
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
@@ -466,6 +468,43 @@ async def test_running_the_lanes_in_the_foreground_stops_them_on_the_way_out() -
     with pytest.raises(asyncio.CancelledError):
         await task
     assert _lane_tasks() == [], "usher push left its lanes running"
+
+
+async def test_bare_usher_push_schedules_the_jobs_the_server_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the scheduler on, bare `usher push` registers `create_app`'s jobs.
+
+    `build_scheduler` registers nothing without a session factory, so a supervisor
+    built without one runs a scheduler lane with no jobs in it.
+    """
+    built: list[tuple[str, ...]] = []
+    real = usher.api.lanes.build_scheduler
+
+    def spy(settings: Settings, *, sessions: Any) -> Any:
+        scheduler = real(settings, sessions=sessions)
+        built.append(tuple(job.name for job in scheduler.jobs))
+        return scheduler
+
+    monkeypatch.setattr(usher.api.lanes, "build_scheduler", spy)
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        push_enabled=False,
+        worker_enabled=False,
+        scheduler_enabled=True,
+    )
+    expected = tuple(job.name for job in real(settings, sessions=lambda: None).jobs)  # type: ignore[arg-type]
+    assert expected, "the premise: the server's scheduler registers jobs"
+
+    task = asyncio.create_task(_run_lanes(settings))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert built == [expected]
 
 
 def _lane_tasks() -> list[str]:
