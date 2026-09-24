@@ -134,7 +134,7 @@ _UNBACKED = re.compile(r'\*\*"(?P<panel>[^"]+)" has no backing series\*\* \(#(?P
 
 # A sentence end: a full stop, optionally swallowing the `**` that closes a bold
 # span opened mid-sentence, followed by whitespace or the end of the bullet. A
-# naive `\. ` split cuts `...expected to have.** The prediction...` in the wrong
+# naive `\. ` split cuts `...expected to have.** A rewatch...` in the wrong
 # place and hands back a sentence that begins with a stray bold marker.
 _SENTENCE_END = re.compile(r"\.(?:\*\*)?(?=\s|$)")
 
@@ -812,7 +812,7 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     """The failure this closes renders perfectly and answers a different question.
 
     One panel titled *"queue depth by priority"* whose target is `usher.jobs.queued`, a
-    gauge labelled `kind`: `telemetry.py`'s `_observations` emits
+    gauge labelled `kind`: `telemetry.py`'s `_by_kind` emits
     `Observation(count, {"kind": kind})` and nothing else, so the series counts pending
     rows per kind — which is what *"which lane is backed up"* asks, not which band is
     waiting.
@@ -829,7 +829,10 @@ def test_the_queue_depth_panels_are_two_panels_over_two_datasources() -> None:
     assert "Parked jobs by kind" in titles, (
         f"the known-title anchor is gone, so this scan is reading something else: {titles}"
     )
-    assert len(panels) == 10, f"PRD 10's dashboard 3 is ten panels, not {len(panels)}: {titles}"
+    assert len(panels) == 10, (
+        "dashboard 3 is ten panels -- PRD 10's nine items, with queue depth drawn twice -- "
+        f"not {len(panels)}: {titles}"
+    )
 
     depth = [panel for panel in panels if "queue depth" in str(panel["title"]).lower()]
     assert len(depth) == 2, (
@@ -878,7 +881,8 @@ def test_the_prometheus_normaliser_strips_the_exporters_unit_suffix() -> None:
     Every gauge Usher registers carries `unit="1"` and every histogram `unit="s"`, and
     the OTel Prometheus exporter puts that unit into the name ahead of the aggregation
     suffix. So the name a panel must be written in is `usher_jobs_queued_ratio`, never
-    `usher_jobs_queued`, and the latter grades as a metric PRD 10 does not document.
+    `usher_jobs_queued`, and a normaliser that strips only the aggregation suffix reads
+    the former as a metric PRD 10 does not document.
     """
     catalogue = metric_catalogue()
     assert catalogue, "no metric rows parsed out of PRD 10"
@@ -921,7 +925,7 @@ def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_ser
     `{self._names[source_id]: PushSnapshot(...)}` over `self._open_adapters`,
     so the `source` label is **the operator-typed source name** and never a
     UUID, and a source with no open adapter is simply not in the
-    comprehension. `telemetry.py`'s `_push_observations` then returns `[]`
+    comprehension. `telemetry.py`'s `_ReaderSlot` then observes nothing
     with no reader at all. Both halves mean the same thing for an alert: a
     disabled source, or one that does not support push, produces **no
     observation** rather than a zero — so the condition is `== 0` and
@@ -951,12 +955,13 @@ def test_the_push_panels_say_what_their_source_label_is_and_when_there_is_no_ser
         )
 
 
-def test_the_enrichment_panel_says_its_label_is_outcome_and_carries_no_demand_split() -> None:
-    """The enrichment histogram is labelled `outcome`, and the panel splits on it.
+def test_the_enrichment_panel_splits_on_outcome_and_says_where_the_trigger_split_is() -> None:
+    """The enrichment histogram carries `outcome` and `trigger`; the panel splits on `outcome`.
 
-    Nothing enriches on demand, so the demand-versus-background split a reader expects
-    here does not exist on this series at all; a failure's latency and a success's are
-    genuinely different populations.
+    A failure's latency and a success's are genuinely different populations, so that is
+    the legend. The demand-versus-background split a reader of the title expects is
+    `trigger`, which *Enrichment SLA missed* selects on and this panel sums over -- so
+    the description has to say where it went.
     """
     panels = _live_panels(_PIPELINE)
     enrichment = [panel for panel in panels if "enrichment" in str(panel["title"]).lower()]
@@ -969,12 +974,12 @@ def test_the_enrichment_panel_says_its_label_is_outcome_and_carries_no_demand_sp
 
     assert "outcome" in description, "the enrichment panel does not name its label"
     assert "enrich.py" in description, (
-        "the enrichment panel does not cite the module that made the correction"
+        "the enrichment panel does not cite the module that derives `trigger`"
     )
     for phrase in ("demand", "background"):
         assert phrase in description.lower(), (
-            f"the enrichment panel does not say the {phrase} split is absent from this "
-            f"series, which is the thing a reader of the title assumes: {description!r}"
+            f"the enrichment panel does not say where the {phrase} split went, which is "
+            f"the thing a reader of the title assumes: {description!r}"
         )
 
     labels = {str(target.get("legendFormat", "")) for target in panel.get("targets") or []}
@@ -1033,7 +1038,10 @@ def test_the_dashboard_3_prose_claims_are_falsifiable() -> None:
 
     with pytest.raises(AssertionError, match="ten panels"):
         titles = ["only", "nine", "of", "them", "here", "and", "no", "more", "sadly"]
-        assert len(titles) == 10, f"PRD 10's dashboard 3 is ten panels, not {len(titles)}"
+        assert len(titles) == 10, (
+            "dashboard 3 is ten panels -- PRD 10's nine items, with queue depth drawn "
+            f"twice -- not {len(titles)}"
+        )
 
 
 # --------------------------------------------------------------------------------

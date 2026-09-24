@@ -219,7 +219,7 @@ answered no result; `played = false` means no play was reported *through this
 id*. ⚠️ **So the denominator is answered searches, never plays.** A play
 carrying no `search_id` is not in this table at all, so the conversion rate is
 *"of searches, how many led to a play Usher was told about"* and never *"of
-plays, how many came from a search"*. The column is joined to a **search**, not
+plays, how many came from a search"*. This column is joined to a **search**, not
 to a row: `search_queries` has no row slug, no `generation_id` and no provider,
 and a play launched from a home shelf carries no `search_id` at all.
 
@@ -334,8 +334,8 @@ Queue depth by priority · enrichment throughput and p50/p99 · **promotion
 latency against the 5 s read-through target** · parked jobs · sync run outcomes
 and duration · **push connection uptime and reconnect count** · **push events
 applied, by kind**, which separates "the lane is up" from "the lane is doing
-anything" · Emby request latency · TMDb requests/sec against the ~40 ceiling
-with 429 count.
+anything" · Emby request latency · TMDb requests/sec against the
+`USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count.
 
 ✅ **Every panel here is backed by real data as of M9.** ⚠️ A panel that drains
 the whole unmatched queue should page with the keyset cursor; the `OFFSET` form

@@ -447,12 +447,13 @@ ORDER BY count(*) DESC
 **Returned** 1 row in 5.7 ms: `Shared Emby` → **5,500**. That is the depth.
 
 **The depth and the wall time at that depth, against PRD 10's `OFFSET` caveat.**
-Dashboard 3's section says `list_unmatched` pages by `OFFSET`, *"measured at
-43.7 ms at offset 0 against 388.9 ms at offset 1,126,574"*. That figure does not
-describe this deployment and cannot: offset 1,126,574 is two hundred times the
-whole unmatched queue, so a page taken there returns nothing. Re-measured
-2026-09-07 at the real depth, `EXPLAIN (ANALYZE, BUFFERS)` on
-`pgvector/pgvector:pg17`, `LIMIT 50`:
+Dashboard 3's section says a panel draining the whole unmatched queue should
+page with the keyset cursor, because *"the `OFFSET` form is quadratic in queue
+depth"*. When this panel was built the caveat carried a figure — 43.7 ms at
+offset 0 against 388.9 ms at offset 1,126,574 — that could not describe this
+deployment: offset 1,126,574 is two hundred times the whole unmatched queue, so
+a page taken there returns nothing. Re-measured 2026-09-07 at the real depth,
+`EXPLAIN (ANALYZE, BUFFERS)` on `pgvector/pgvector:pg17`, `LIMIT 50`:
 
 | query | plan | execution |
 |---|---|---|
@@ -757,9 +758,8 @@ It carries **three sentences quoted from PRD 10's Dashboard 2 paragraph, byte
 for byte**, one per absence, each naming the panel, its reason and its issue
 number: watch time by day and user (#84), taste drift as genre affinity over
 months (#84), and row effectiveness per `RowProvider` (#85). Duplication was
-chosen over a link deliberately, on PRD 10's own rule for label vocabularies —
-the reader of the artefact must not have to hold the document — and the cost of
-that choice is
+chosen over a link deliberately — the reader of the artefact must not have to
+hold the document — and the cost of that choice is
 `test_the_absence_panels_three_sentences_are_byte_identical_to_prd_tens`, which
 goes red the day either copy is corrected without the other.
 
@@ -797,16 +797,14 @@ because half of what a pipeline does leaves no row behind — a completed job is
 Two of these are the deliverable and the third was found while measuring.
 
 **1. "Queue depth by priority" is Postgres, and the gauge beside it is a
-different panel.** PRD 10 says twice that `usher.jobs.queued` is labelled
-`kind`: *"`JobQueue.depth()` counts pending rows per kind, which is what 'which
-lane is backed up' asks"*, and then *"M5 introduces demand promotion and the
-label stays `kind`: a priority band needs a second `GROUP BY` on `JobQueue`…
-The panel reads `jobs` directly."* Verified at this HEAD rather than inherited:
-`telemetry.py`'s `_observations` emits `Observation(count, {"kind": kind})` and
-nothing else, and `QueueSnapshot` holds two `Mapping[str, int]`s keyed by
-`JobKind.value`. **So the pair is two panels, two datasources, two titles.** A
-single panel titled *"by priority"* over that gauge renders perfectly and
-answers a different question, which is the failure
+different panel.** PRD 10's metric table labels `usher.jobs.queued` with `kind`
+and nothing else, while its Dashboard 3 asks for *"Queue depth by priority"* — a
+band the gauge does not carry, so the band count reads `jobs` directly. Verified
+at this HEAD rather than inherited: `telemetry.py`'s `_by_kind` emits
+`Observation(count, {"kind": kind})` and nothing else, and `QueueSnapshot` holds
+two `Mapping[str, int]`s keyed by `JobKind.value`. **So the pair is two panels,
+two datasources, two titles.** A single panel titled *"by priority"* over that
+gauge renders perfectly and answers a different question, which is the failure
 `test_the_queue_depth_panels_are_two_panels_over_two_datasources` closes.
 
 **2. "Push connection uptime" plots delivery, and its `source` label is an
@@ -818,7 +816,7 @@ half nobody had written down is the label: `api/lanes.py`'s
 the label is `"Shared Emby"` and never a UUID — **observed as exactly that
 string on the live series**, not read off the source. And a source with no
 open adapter is simply absent from that comprehension, while
-`telemetry.py`'s `_push_observations` returns `[]` with no reader at all:
+`telemetry.py`'s `_ReaderSlot` observes nothing with no reader at all:
 **a disabled source, or one that does not support push, produces no
 observation rather than a zero.** That is the sentence D11's *"Push down"*
 alert is written against, and it decides the condition:
@@ -1012,14 +1010,13 @@ histogram's bucket widths a success and a failure land in the same two buckets,
 so the panel separates the two populations' *rates* far better than their
 *latencies*.
 
-⚠️ **The label is `outcome` and there is no demand/background split on this
-series.** `enrich.py`: *"Labelled `outcome` rather than PRD 10's original
-`trigger`: nothing in M4 enriches on demand… while a failure's latency and a
-success's are genuinely different populations."* M5 shipped demand promotion
-and the label did not move — every sample above came from a `JobPriority.DEMAND`
-read-through, and the series still says only `enriched` or `failed`. Splitting
-this panel the way D12 wants needs a second label on the histogram, not a
-different query.
+⚠️ **The panel splits on `outcome`, and when it was observed that was the
+series' only label.** Every sample above came from a `JobPriority.DEMAND`
+read-through and still said only `enriched` or `failed`. D12 later gave the
+histogram a second label, `trigger` (`demand` or `background`, from
+`enrich.py`'s `_trigger_for`), which is what *Enrichment SLA missed* selects on;
+this panel still splits on `outcome`, because a failure's latency and a
+success's are genuinely different populations.
 
 ### 5 — Promotion latency against the 5 s read-through target
 
@@ -1149,7 +1146,7 @@ source name, from `self._names[source_id]`, exactly as
 `api/lanes.py::push_snapshots` builds it. There is **one** series and the
 `sources` table holds **one** row, so this observation does not on its own
 demonstrate the absence half; what does is the code path
-(`_push_observations` returns `[]` with no reader, and the comprehension omits
+(`_ReaderSlot` observes nothing with no reader, and the comprehension omits
 any source with no open adapter) plus the live shape below.
 
 🔴 **A second fact, observed rather than looked for: this series should not
@@ -1203,11 +1200,11 @@ observation produced; **429 count 0**; lifetime totals `status="200"` **255**
 and `status="404"` **3**, with no `status="error"` row — this deployment has
 not had a TMDb transport failure.
 
-⚠️ **PRD 10's "~40 ceiling" is not a figure this deployment has at any
-spelling.** `Settings.tmdb_requests_per_second` defaults to **30.0**,
-`.env.example` sets `USHER_TMDB_REQUESTS_PER_SECOND=30`, and the running
-container sets the variable at all. The ceiling series is 30 and PRD 10's
-sentence has been corrected in the same commit.
+⚠️ **The ceiling drawn is Usher's own limiter, not TMDb's.** TMDb's guidance,
+per [PRD 04](../docs/prd/04-catalog-bootstrap.md), is *"somewhere in the 40
+requests per second range"*. `Settings.tmdb_requests_per_second` defaults to
+**30.0** and `.env.example` sets `USHER_TMDB_REQUESTS_PER_SECOND=30`, so the
+ceiling series is 30 and PRD 10's Dashboard 3 names that setting.
 
 **Two spellings here are load-bearing.** The rate target selects on `provider`
 only: `status` is the HTTP status code as a string
@@ -1234,23 +1231,24 @@ were written as `histogram_quantile` panels and were changed at integration,
 because `test_no_committed_panel_takes_a_quantile_over_a_histogram_still_on_the_sdk_defaults`
 (D9's) caught them.
 
-`usher.enrichment.latency` and `usher.source.request.duration` both still take
-the OTel SDK's **default second-scale boundaries** — `configure_metrics`
-installs no `View` and neither declares an
-`explicit_bucket_boundaries_advisory`. D1 measured what that does: over a real
-export, `histogram_quantile(0.5)` answered a flat **2.5000 s** against a
-sample's true **35.20 ms**. A quantile over those buckets is not a loss of
-resolution, it is a loss of the measurement, and it plots a plausible number
-rather than failing.
+When these panels were written, `usher.enrichment.latency` and
+`usher.source.request.duration` both took the OTel SDK's **default second-scale
+boundaries** — `configure_metrics` installs no `View` and neither declared an
+`explicit_bucket_boundaries_advisory`. `usher.enrichment.latency` has declared
+one since D12 (below); `usher.source.request.duration` still does not. D1
+measured what the defaults do: over a real export, `histogram_quantile(0.5)`
+answered a flat **2.5000 s** against a sample's true **35.20 ms**. A quantile
+over those buckets is not a loss of resolution, it is a loss of the measurement,
+and it plots a plausible number rather than failing.
 
 `rate(_sum) / rate(_count)` is true whatever the boundaries are, so these two
 plot a mean until the instruments carry a ladder. **A mean has no p99**, so the
 enrichment panel's second quantile target was dropped rather than converted.
 
-Fixing the instruments is the better repair and is not done here: D1's ladder
+Fixing the instruments is the better repair and was not done here: D1's ladder
 was derived from measured distributions, and neither of these two instruments
-has a measured distribution to derive one from. Issue filed; the panels are
-honest in the meantime.
+had a measured distribution to derive one from. Issue filed; the panels are
+honest in the meantime, and the enrichment panel still plots a mean.
 
 ## 5 — Cost & Compliance (`05-cost-and-compliance.json`, uid `usher-cost-compliance`)
 
@@ -1308,12 +1306,11 @@ a filesystem's free space, so the denominator is a Prometheus series,
 `system_filesystem_usage_bytes{state="free"}`, and the pairing is the panel.
 Measured 2026-09-11 on this deployment: `pg_database_size('usher_catalog')`
 **8,384,394,931 B (7,996 MB)** at 1,276,268 titles with 133,576 enriched,
-against **677,427,249,152 B free** on `/`. ⚠️ PRD 08's resource envelope records
-**5,025,650,355 B (4,793 MB)** for the same database at `m09c` on 2026-08-12 —
-**+3.36 GB in thirty days against +3,901 titles**, so the growth followed
-`m09d`, `m09e` and a full re-embed rather than the catalog. That row is dated
-and denominated and this task did not rewrite it; it is flagged for whoever
-owns it.
+against **677,427,249,152 B free** on `/`. The same database read
+**5,025,650,355 B (4,793 MB)** at `m09c` on 2026-08-12 — **+3.36 GB in thirty
+days against +3,901 titles**, so the growth followed `m09d`, `m09e` and a full
+re-embed rather than the catalog. PRD 08's resource envelope has since been
+re-read on one date; it states its own.
 
 ⚠️ **It reads `pg_class` and so names no Usher table**, which means invariant 3
 has nothing of ours to grade. That is the one exemption in
@@ -1323,19 +1320,18 @@ becomes how every later panel escapes the check.
 
 # Alerts — `alerts/usher.yml` and `alerts/grafana/usher.yml`
 
-PRD 10's `## Alerts` table names seven rules and opens *"Kept few, so they mean
-something."* **All seven are here, in two files and two engines, as eight
-rules.** Six are Prometheus rules in `alerts/usher.yml` — **Ingest stalled**,
-**Jobs parking** and **Push down** from D11, **Enrichment SLA missed** and
-**Provider degraded** from D12, and **Disk projection**'s two halves from D13.
-Two are Grafana-managed Postgres rules in `alerts/grafana/usher.yml` — **Cost
-anomaly**, which has no series to name at all, and *Disk projection*'s
-**database-growth** half, which has an exact query and no metric. Nothing is
-owed any more;
-`tests/unit/test_alerts.py` held that debt as an `xfail(strict=True)` naming
-which task owed which, and **D13 removed the marker** rather than leaving it to
-XPASS-strict — which is the failure a strict xfail is for, and the mechanism
-that made the last task come back and close the ledger.
+PRD 10's `## Alerts` table names seven rules. **All seven are here, in two files
+and two engines, as eight rules.** Six are Prometheus rules in
+`alerts/usher.yml` — **Ingest stalled**, **Jobs parking** and **Push down** from
+D11, **Enrichment SLA missed** and **Provider degraded** from D12, and **Disk
+projection**'s two halves from D13. Two are Grafana-managed Postgres rules in
+`alerts/grafana/usher.yml` — **Cost anomaly**, which has no series to name at
+all, and *Disk projection*'s **database-growth** half, which has an exact query
+and no metric. Nothing is owed any more; `tests/unit/test_alerts.py` held that
+debt as an `xfail(strict=True)` naming which task owed which, and **D13 removed
+the marker** rather than leaving it to XPASS-strict — which is the failure a
+strict xfail is for, and the mechanism that made the last task come back and
+close the ledger.
 
 ⚠️ **D14 was told to be that day and was not.** Its acceptance reads *"D11's
 bidirectional name check is now green, seven rules against PRD 10's seven
@@ -1529,9 +1525,10 @@ exists and the gap is recorded here rather than worked around.
 ## ⚠️ The queue gauges do not exist unless a worker lane is running
 
 `register_queue_gauges` is called **inside** the worker lane — `api/lanes.py`'s
-`_work_lane` and `cli.py`'s `work`, nowhere else — and `telemetry._observations`
-returns `[]` with no reader, deliberately: *"a fabricated zero is the one value
-that makes the alert quietly wrong."*
+`_work_lane` and `cli.py`'s `work`, nowhere else — and `telemetry._ReaderSlot`
+observes nothing with no reader, deliberately: *"on every series here a
+fabricated zero is indistinguishable from a real reading, and is the value an
+alert would act on."*
 
 So `USHER_WORKER_ENABLED=false` publishes **no depth series at all** and *Ingest
 stalled* cannot fire against such a process. D11's task text proposed firing it
@@ -1572,11 +1569,12 @@ alert's own window, which **is** the condition rather than a way around the rule
 PRD 10's *Cost anomaly* is *"Daily LLM spend > 3x trailing 7-day median"*, and
 there is nothing in Prometheus to write it against. That is a refusal with a
 sentence behind it, not a gap: PRD 10's own first principle puts LLM spend on
-Postgres — *"`llm_calls` is the record — so there is no `usher.llm.*` series at
-all"* — and `telemetry.py`'s register records the mechanical half, that an OTel
-observable callback runs on the metric reader's background thread while every
-database call here is a coroutine on asyncpg. So the rule is SQL, evaluated by
-Grafana against the same datasource Dashboard 5's spend panels use.
+Postgres — *"… taste drift and LLM spend are SQL queries against the canonical
+database"* — so there is no `usher.llm.*` series at all, and `telemetry.py`'s
+register records the mechanical half, that an OTel observable callback runs on
+the metric reader's background thread while every database call here is a
+coroutine on asyncpg. So the rule is SQL, evaluated by Grafana against the same
+datasource Dashboard 5's spend panels use.
 
 **It is in `alerts/grafana/`, one directory down, and that is load-bearing.**
 `alerts/usher.yml`'s header tells an operator to mount `dashboards/alerts` at
@@ -1890,12 +1888,11 @@ rising `free`, which must produce nothing.
 
 All three are named *Disk projection* — two Prometheus rules here and a
 Postgres-datasource rule in `alerts/grafana/usher.yml`. A rule PRD 10's table
-does not name falsifies *"kept few, so they mean something"*, and the
-bidirectional name check grades the two name sets against each other through
-`alert_names()`, which unions both files. `promtool check rules` accepts the
-same alert name twice in one group — **SUCCESS: 7 rules found** — and Grafana
-accepts it across two groups, which the throwaway run below confirms rather than
-assumes.
+does not name is an eighth alert, and the bidirectional name check grades the
+two name sets against each other through `alert_names()`, which unions both
+files. `promtool check rules` accepts the same alert name twice in one group —
+**SUCCESS: 7 rules found** — and Grafana accepts it across two groups, which the
+throwaway run below confirms rather than assumes.
 
 They answer three different questions: **whether** a filesystem is filling (the
 projection), **whether the alert can see anything at all** (the `absent()`
@@ -1950,8 +1947,8 @@ the third stopped being wrong while this task was running.
    and this is the instruction that had to be taken as far as it goes rather
    than followed.
 2. **A second rule under a different name is caught by D11's own check.** PRD 10
-   names seven alerts; an eighth falsifies the sentence the table opens with,
-   and `test_every_alert_prd_10_names_exists_…` grades *"named by no PRD 10
+   names seven alerts; an eighth is a rule the table does not name, and
+   `test_every_alert_prd_10_names_exists_…` grades *"named by no PRD 10
    row"*. So the growth rule carries the **same** alert name, in a different
    engine — `alert_names()` unions the two files, and the union is still seven.
 3. ~~**A Postgres-datasource rule cannot live in this repository.**~~ True when
@@ -2059,22 +2056,20 @@ cache cap), `image_fetch_timeout_seconds` and `image_cdn_base_url`.
 ### No threshold comes from PRD 08's resource envelope, and a test says so
 
 That table's own header records that nothing reads it, no host enforces it and
-no policy derives from it; M9's Track 2 derived a 2.0 GB ceiling from one row,
-measured a design at 2.702 GB and **withdrew the design**. So
+no threshold or policy derives from it; M9's Track 2 derived a 2.0 GB ceiling
+from one row, measured a design at 2.702 GB and **withdrew the design**. So
 `test_the_disk_rule_is_grounded_in_a_measured_series_and_not_in_the_resource_table`
-parses **63 byte figures** out of that table — in both the decimal and the
-binary reading of every ambiguous unit — and forbids any of them appearing as a
-literal in any `expr` in the file.
+parses every byte figure out of that table — in both the decimal and the binary
+reading of every ambiguous unit — and forbids any of them appearing as a literal
+in any rule expression, Prometheus or SQL.
 
-⚠️ **The positive control the task text names does not land at this HEAD.** It
-proposes planting `8589934592` (the old `~8 GB` row); that row now reads
-*"`~8–12 GB` described a database this project no longer has"*, so `8 GB` is no
-longer a standalone figure and the plant would pass. The controls used instead
-are `5025650355` — the measured baseline, the figure most likely to be promoted
-from a measurement into a threshold — and `2147483648`, the withdrawn
-ceiling. Both die on
-*"a rule in this file carries a byte literal that is a figure from PRD 08's
-resource envelope"*.
+⚠️ **The positive control the task text named did not land.** It proposed
+planting `8589934592`, the table's old `~8 GB` row, which was no longer a
+standalone figure by D13, so the plant would have passed. The controls planted
+instead are the table's measured `pg_database_size` — the figure most likely to
+be promoted from a measurement into a threshold — and the binary reading of its
+headline `~GB` figure, one per rule language. Both die on *"a rule carries a
+byte literal that is a figure from PRD 08's resource envelope"*.
 
 The baseline **is** quoted, in the rule's description, as *what the database was
 on a date*: 5,025,650,355 B (4,793 MB) at 1,272,367 titles with 130,647 enriched
@@ -2399,9 +2394,10 @@ at equal rates. That is the mild case. The severe one is a *total* transport
 outage, where the numerator would be 0 and the denominator the error count, so
 the ratio reads a healthy **0 %** at the worst possible moment;
 `promtool` drives exactly that (test 2 below) and the rule fires at **100 %**.
-PRD 10 states only the denominator half of this — *"a denominator that omitted
-the failures would read low exactly during an outage"* — and the numerator half
-follows from the same sentence without being in it.
+Dashboard 3's TMDb panel states only the denominator half of this — *"a
+denominator that omitted the failures would read low exactly during an
+outage"* — and the numerator half follows from the same sentence without being
+in it.
 
 **The resolve was produced by fixing the fault, not by stopping the load.** The
 driver kept both lanes running at full rate for another fifteen minutes with the

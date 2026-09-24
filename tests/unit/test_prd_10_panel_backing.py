@@ -21,7 +21,7 @@ _DASHBOARD_FIVE = _ROOT / "dashboards" / "05-cost-and-compliance.json"
 
 _DASHBOARD_HEADING = re.compile(r"^### (?P<number>\d+) — (?P<title>.+)$", re.MULTILINE)
 
-# The status markers PRD 10 opens annotated paragraphs with. ⚠️ and ⏳ are here
+# The status markers PRD 10 opens annotated paragraphs with. 🔴 and ⏳ are here
 # because the vocabulary permits them, not because a dashboard uses them today.
 _STATUS_MARKER = "[✅⚠️\U0001f534⏳]"
 
@@ -303,11 +303,11 @@ _PROGRESS = _ROOT / "docs" / "plans" / "progress.md"
 # lines further down, and an unanchored scan for `| M<n> |` reads all of them.
 _MILESTONE_TABLE = "## Milestones (from"
 
-# **`⏳ M<n>` is the marker; a bare `⏳` is not.** PRD 10 uses one in prose —
-# *"**None of the three is marked ⏳** — that means *owed by a named
-# milestone*"* — to name the vocabulary rather than to claim a debt, and a
-# regex that matched the character alone would read that sentence as a marker
-# owed by no milestone and have nothing to compare.
+# **`⏳ M<n>` is the marker; a bare `⏳` is not.** Prose can use one to name
+# the vocabulary rather than to claim a debt — the third planted line in
+# `test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one` is one —
+# and a regex that matched the character alone would read that sentence as a
+# marker owed by no milestone and have nothing to compare.
 _OWED_MARKER = re.compile(r"⏳\s*(?P<milestone>M\d+)")
 
 # Cells are split on **unescaped** pipes only. One status cell is a 6 kB
@@ -404,8 +404,8 @@ def test_the_owed_marker_scan_separates_a_shipped_debt_from_a_live_one() -> None
 
     The real one carries no `⏳ M<n>`, so the case above cannot prove its scan still
     matches anything. Three lines: two markers, each read with its own line and
-    milestone, and the bare `⏳` PRD 10 uses in prose to name the vocabulary, which is
-    not a marker at all.
+    milestone, and a bare `⏳` used in prose to name the vocabulary, which is not a
+    marker at all.
     """
     planted = (
         "Cost per play attributed to an LLM row stays ⏳ M9: it needs a client.\n"
