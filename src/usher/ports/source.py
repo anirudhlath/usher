@@ -64,6 +64,11 @@ class SourceItem:
 
     `provider_ids` keys are lowercase, using `CANONICAL_PROVIDER_IDS`' names
     where they apply.
+
+    Every `int` field except `file_size_bytes` fits a signed 32-bit integer,
+    the width of the column it lands in; an adapter reports a value outside
+    that range as `None`, since one that reached the store would fail its
+    whole batch.
     """
 
     external_id: str
@@ -92,7 +97,12 @@ class SourceItem:
 
 @dataclass(frozen=True)
 class SourceWatchState:
-    """One item's watch state as a source reports it."""
+    """One item's watch state as a source reports it.
+
+    Its integers are 32-bit, as on `SourceItem`. A state whose position is
+    outside that range is not reported at all, since `position_seconds` has no
+    unknown value.
+    """
 
     external_id: str
     position_seconds: int

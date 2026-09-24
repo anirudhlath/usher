@@ -17,6 +17,7 @@ from usher.adapters.emby.mapping import (
     stream_of,
     to_source_item,
     to_watch_state,
+    user_data_states,
 )
 from usher.domain.enums import HdrFormat
 from usher.ports.errors import PortDataMalformed
@@ -699,3 +700,125 @@ def test_a_trusted_payload_that_reports_zero_plays_is_believed() -> None:
     state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
     assert state is not None
     assert state.play_count == 0
+
+
+# Every integer the port carries lands in a Postgres `integer` column. Written out
+# rather than imported, so a wrong constant in the code cannot agree with itself here.
+_INT32_MAX = 2**31 - 1
+_TICKS = 10_000_000
+
+
+def test_a_runtime_too_long_to_store_is_unknown() -> None:
+    """A real library's corrupt episode: 3,506,437,881 seconds, about 111 years.
+
+    One value past a 32-bit column fails the whole batch in asyncpg's encoder, as an
+    `OverflowError` rather than a `UsherPortError`, so a full sync died on this item
+    after 159,000 others and recorded nothing. The runtime is corrupt; it is unknown.
+    """
+    payload = {"Id": "x", "Type": "Episode", "Name": "Odd", "RunTimeTicks": 35_064_378_818_560_000}
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.runtime_seconds is None
+
+
+@pytest.mark.parametrize(
+    ("ticks", "expected"),
+    [(_INT32_MAX * _TICKS, _INT32_MAX), ((_INT32_MAX + 1) * _TICKS, None)],
+)
+def test_a_runtime_is_kept_up_to_the_columns_limit(ticks: int, expected: int | None) -> None:
+    item = to_source_item({"Id": "x", "Type": "Movie", "Name": "Long", "RunTimeTicks": ticks})
+    assert item is not None
+    assert item.runtime_seconds == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "field"),
+    [
+        ("ProductionYear", "year"),
+        ("Width", "width"),
+        ("Height", "height"),
+        ("ParentIndexNumber", "season_number"),
+        ("IndexNumber", "episode_number"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        (_INT32_MAX, True),
+        (_INT32_MAX + 1, False),
+        (-_INT32_MAX - 1, True),
+        (-_INT32_MAX - 2, False),
+    ],
+)
+def test_an_item_integer_outside_32_bits_is_unknown(
+    key: str, field: str, value: int, kept: bool
+) -> None:
+    item = to_source_item({"Id": "x", "Type": "Episode", "Name": "Odd", key: value})
+    assert item is not None
+    assert getattr(item, field) == (value if kept else None)
+
+
+@pytest.mark.parametrize(("channels", "expected"), [(8, 8), (_INT32_MAX + 1, None)])
+def test_an_audio_channel_count_outside_32_bits_is_unknown(
+    channels: int, expected: int | None
+) -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "MediaSources": [
+            {"Container": "mkv", "MediaStreams": [{"Type": "Audio", "Channels": channels}]}
+        ],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.audio_channels == expected
+
+
+def test_a_watch_position_too_large_to_store_reports_no_state() -> None:
+    """Nothing, rather than a fabricated position.
+
+    `position_seconds` is not optional, and `0` would overwrite a real resume point.
+    """
+    payload = {
+        "Id": "x",
+        "Type": "Episode",
+        "UserData": {"PlaybackPositionTicks": (_INT32_MAX + 1) * _TICKS, "Played": False},
+    }
+    assert to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True) is None
+
+
+def test_a_watch_position_at_the_columns_limit_is_kept() -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Episode",
+        "UserData": {"PlaybackPositionTicks": _INT32_MAX * _TICKS, "Played": False},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.position_seconds == _INT32_MAX
+
+
+def test_a_play_count_too_large_to_store_is_unknown() -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "UserData": {"PlaybackPositionTicks": 0, "Played": True, "PlayCount": _INT32_MAX + 1},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.play_count is None
+
+
+def test_a_pushed_position_too_large_to_store_drops_that_entry_only() -> None:
+    """Dropped from both lists, which a `WATCH_STATE_CHANGED` event pairs up."""
+    ids, states = user_data_states(
+        [
+            {"ItemId": "corrupt", "PlaybackPositionTicks": (_INT32_MAX + 1) * _TICKS},
+            {"ItemId": "fine", "PlaybackPositionTicks": 90 * _TICKS, "Played": False},
+        ],
+        source_user_id="u1",
+    )
+    assert ids == ["fine"]
+    assert [state.external_id for state in states] == ["fine"]
+    assert states[0].position_seconds == 90

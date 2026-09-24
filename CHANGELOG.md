@@ -15,6 +15,9 @@ Versioning is `0.x` while the wire contract may still move —
   let every later vector through unchecked.
 - **A fused search whose query can't be embedded is served as full text**, and
   says so through `requested_mode` ≠ `mode`, instead of answering 500.
+- **One corrupt Emby item no longer aborts a whole sync.** An integer too large
+  for its column, such as a runtime of 111 years, used to crash the walk and
+  leave its run `running`. It is now stored as unknown.
 
 ## [0.1.0] - 2026-09-24
 

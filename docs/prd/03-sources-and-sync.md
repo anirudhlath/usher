@@ -230,6 +230,11 @@ create or attach a `Title` stub. Movies, series **and episodes** are ingested.
 **Source payloads are not stored.** `raw_payloads` caches *provider* responses
 only.
 
+**A value too large to store is recorded as unknown.** A runtime, width,
+height, audio channel count, year, or season or episode number outside a
+signed 32-bit integer is ingested as absent, not as a failed walk. A watch
+state whose position is outside that range is ignored.
+
 **An episode is attached to its series' `Title`, even when the series arrived
 on an earlier page.** An episode whose series is not yet known is stored
 unmatched and enqueued for a re-match; it is never dropped and never attached

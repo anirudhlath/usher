@@ -166,7 +166,9 @@ job is enqueued at `BACKFILL` for that remote search.
 - **Nothing a source puts in a payload may abort a walk.** A pydantic
   `ValidationError` is not a `UsherPortError`, so one stray `ProviderIds.Imdb`
   would abort that source's sync permanently. **Filter every value to the shape
-  the model accepts before the constructor.**
+  the model accepts before the constructor**, and every integer to the 32-bit
+  column it lands in (`mapping.as_int32`): asyncpg's encoder raises a bare
+  `OverflowError` for one past it, and the walk dies with its run left `RUNNING`.
 - **A service that checkpoints per batch must not evolve its own stale copy in
   the failure handler** — `reconcile`'s binding is the pre-walk value, so
   `run.evolve(status=FAILED)` writes `items_seen = 0` over a real checkpoint.
