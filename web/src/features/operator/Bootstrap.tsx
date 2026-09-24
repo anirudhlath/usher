@@ -22,6 +22,11 @@
  *   invisibly forever.
  * · **A `failed` run is a normal, designed state**: bad-tone status word,
  *   `error` verbatim, position retained, trigger relabelled "Resume".
+ * · **`error` is read whatever the status says.** A rerun that fails before it
+ *   starts leaves a `completed` checkpoint `completed`, with the error beside it
+ *   (PRD 04), so a green "completed" can hide the only sign that the last press
+ *   of "Run again" did nothing. Such a row is warn-toned, never green and never
+ *   bad: the import it would have refreshed still stands.
  * · **Genome coverage is counts.** The route returns six of them and declines
  *   the division. Every ratio printed here is shown as numerator / denominator
  *   *and* as a percent whose denominator is named on screen, because picking
@@ -210,8 +215,8 @@ function statusTone(
 ): 'good' | 'bad' | 'warn' | 'info' | 'neutral' {
   if (!run) return 'neutral'
   if (stalled) return 'warn'
-  if (run.status === 'completed') return 'good'
   if (run.status === 'failed') return 'bad'
+  if (run.status === 'completed') return run.error === null ? 'good' : 'warn'
   return 'info'
 }
 
@@ -255,6 +260,19 @@ function PhaseRow({ spec, index, run, measured, onRun }: PhaseRowProps) {
           </span>
           <Badge tone={statusTone(run, stalled)}>{word}</Badge>
         </span>
+        {run && run.error !== null && (
+          <span
+            style={{
+              font: 'var(--text-body-xs)',
+              color: run.status === 'failed' ? 'var(--bad-text)' : 'var(--warn-text)',
+            }}
+          >
+            {run.status === 'completed' &&
+              'The last attempt could not start, so the completed import stands: '}
+            {/* Verbatim, and never parsed: it is the server's own sentence. */}
+            <span>{run.error}</span>
+          </span>
+        )}
         <span style={{ font: 'var(--text-body-xs)', color: 'var(--text-muted)' }}>
           {spec.size} · measured {measured} · writes {spec.writes} · resumable from the stored cursor
         </span>

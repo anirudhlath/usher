@@ -247,6 +247,41 @@ interface Attention {
   to: string
 }
 
+/**
+ * What an import checkpoint asks of a person, if anything.
+ *
+ * `error` is the test, not `status`: a rerun that fails before it starts leaves
+ * a `completed` checkpoint `completed` with the error beside it (PRD 04), and
+ * that is the only trace of a press of "Run again" that did nothing. It is warn,
+ * not bad — the import it would have refreshed still stands. A `failed` run
+ * with no error recorded is still a failure, and says so.
+ */
+function importAttention(run: ImportRun): Attention | null {
+  const base: Pick<Attention, 'id' | 'icon' | 'to'> = {
+    id: `import-${run.dataset}`,
+    icon: 'database',
+    to: ROUTES.bootstrap,
+  }
+  if (run.status === 'failed') {
+    return {
+      ...base,
+      tone: 'bad',
+      text: `The ${run.dataset} import failed`,
+      meta: run.error ?? 'no error was recorded',
+    }
+  }
+  if (run.error === null) return null
+  return {
+    ...base,
+    tone: 'warn',
+    text:
+      run.status === 'completed'
+        ? `The last ${run.dataset} import could not start; the completed one stands`
+        : `The ${run.dataset} import recorded an error`,
+    meta: run.error,
+  }
+}
+
 /* ------------------------------------------------------------------ screen */
 
 export default function Overview() {
@@ -275,7 +310,6 @@ export default function Overview() {
   const readinessStatus = readiness.data ? 200 : 503
 
   const running = (runs ?? []).filter((run) => run.status === 'running')
-  const failed = (runs ?? []).filter((run) => run.status === 'failed')
   const unmatchedLoaded = (unmatched.data?.pages ?? []).reduce((total, page) => total + page.items.length, 0)
 
   const attention: Attention[] = []
@@ -290,15 +324,9 @@ export default function Overview() {
       to: ROUTES.review,
     })
   }
-  for (const run of failed) {
-    attention.push({
-      id: `import-${run.dataset}`,
-      icon: 'database',
-      tone: 'bad',
-      text: `The ${run.dataset} import failed`,
-      meta: run.error ?? 'no error was recorded',
-      to: ROUTES.bootstrap,
-    })
+  for (const run of runs ?? []) {
+    const item = importAttention(run)
+    if (item) attention.push(item)
   }
 
   const sourceColumns: Column<SourceResponse>[] = [
@@ -507,15 +535,19 @@ export default function Overview() {
                   ))}
                 </div>
               ) : (
+                // A claim about both lists, so it waits for both: before the runs
+                // arrive, "no import has failed" would be a guess.
+                unmatched.data !== undefined &&
+                bootstrap.data !== undefined &&
                 !unmatched.isError &&
                 !bootstrap.isError && (
                   <StateBlock
                     kind="empty"
                     title="Nothing is waiting on a person"
-                    meta="unmatched: 0 loaded · runs: none failed"
+                    meta="unmatched: 0 loaded · runs: none failed, every error null"
                   >
-                    The review queue is empty and no import has failed. This list is built from those two
-                    facts and from nothing else.
+                    The review queue is empty and no import has failed or recorded an error. This list is
+                    built from those two facts and from nothing else.
                   </StateBlock>
                 )
               )}

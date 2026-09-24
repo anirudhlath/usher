@@ -7,7 +7,10 @@ import { server } from '@/test/server'
 import { expectNoViolations } from '@/test/axe'
 import {
   bootstrapStatus,
+  bootstrapStatusCompletedWithError,
   bootstrapStatusEmpty,
+  importCompletedWithError,
+  importFailed,
   importRunning,
   problemHandler,
   sourceUnavailable,
@@ -50,6 +53,20 @@ function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
 
 function heartbeatHandler(agoSeconds: number) {
   return http.get('/admin/bootstrap/status', () => HttpResponse.json(statusWithHeartbeat(agoSeconds)))
+}
+
+/** A phase row, found by its label: the row is the label's nearest `div`. */
+function phaseRow(label: string): HTMLElement {
+  const row = screen.getByText(label).closest('div')
+  if (!(row instanceof HTMLElement)) throw new Error(`no phase row is labelled ${label}`)
+  return row
+}
+
+/** The line in a phase row that carries the run's `error`, found by the error itself. */
+function errorLine(row: HTMLElement, error: string): HTMLElement {
+  const line = within(row).getByText(error).parentElement
+  if (!(line instanceof HTMLElement)) throw new Error('the error has no line around it')
+  return line
 }
 
 describe('Bootstrap', () => {
@@ -149,10 +166,91 @@ describe('Bootstrap', () => {
     // Named twice on purpose: once as the live run, once as the phase it is.
     expect((await screen.findAllByText('crosswalk')).length).toBeGreaterThan(0)
     // The status word in the bad tone, carried by the class the CSS keys on.
-    expect(container.querySelector('.u-cursor__status--failed')?.textContent).toBe('failed')
-    expect(screen.getByText('wdqs: HTTP 429 after 3 retries (query timeout 60 s)')).toBeInTheDocument()
+    const status = container.querySelector('.u-cursor__status--failed')
+    expect(status?.textContent).toBe('failed')
+    const card = status?.closest('.u-cursor')
+    if (!(card instanceof HTMLElement)) throw new Error('the failed run has no cursor card')
+    expect(within(card).getByText(importFailed.error ?? '')).toBeInTheDocument()
     expect(screen.getByText('88,140')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument()
+
+    // The phase row states the same error, in the same bad tone as its badge.
+    const row = phaseRow('Wikidata crosswalk')
+    expect(row.querySelector('.u-badge')).toHaveClass('u-badge--bad')
+    expect(errorLine(row, importFailed.error ?? '')).toHaveStyle({ color: 'var(--bad-text)' })
+  })
+
+  it('keeps a completed run with no error green, and gives it no error line', async () => {
+    render()
+
+    await screen.findByText('MovieLens genome')
+    const row = phaseRow('MovieLens genome')
+    const badge = row.querySelector('.u-badge')
+    expect(badge?.textContent).toBe('completed')
+    expect(badge).toHaveClass('u-badge--good')
+    expect(within(row).queryByText(/could not start/)).toBeNull()
+  })
+
+  describe('a completed run carrying an error — a rerun that could not start', () => {
+    const error = importCompletedWithError.error ?? ''
+
+    function renderCompletedWithError() {
+      server.use(
+        http.get('/admin/bootstrap/status', () => HttpResponse.json(bootstrapStatusCompletedWithError)),
+      )
+      return render()
+    }
+
+    it('keeps the status word verbatim and draws it in the warn tone with the warn glyph, never green', async () => {
+      renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      const badge = phaseRow('MovieLens genome').querySelector('.u-badge')
+      expect(badge?.textContent).toBe('completed')
+      expect(badge).toHaveClass('u-badge--warn')
+      expect(badge).not.toHaveClass('u-badge--good')
+      // §12: hue is never the only carrier.
+      expect(badge?.querySelector('[data-icon="alert-triangle"]')).not.toBeNull()
+    })
+
+    it('prints the error verbatim in the warn tone, beside the sentence saying the completed import stands', async () => {
+      renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      const row = phaseRow('MovieLens genome')
+      const line = errorLine(row, error)
+      expect(line).toHaveStyle({ color: 'var(--warn-text)' })
+      expect(line.textContent).toBe(
+        `The last attempt could not start, so the completed import stands: ${error}`,
+      )
+    })
+
+    it('still treats the checkpoint as the completed import it is: "Run again", and its measured duration', async () => {
+      renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      const row = phaseRow('MovieLens genome')
+      expect(within(row).getByRole('button', { name: 'Run again' })).toBeInTheDocument()
+      expect(within(row).queryByRole('button', { name: 'Resume' })).toBeNull()
+      expect(within(row).getByText(/15 m 26 s on this deployment/)).toBeInTheDocument()
+    })
+
+    it('never draws it as failed or as running', async () => {
+      const { container } = renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      expect(phaseRow('MovieLens genome').querySelector('.u-badge--bad')).toBeNull()
+      // "Running now" holds the running and the failed run, and nothing else.
+      const cards = Array.from(container.querySelectorAll('.u-cursor__ds')).map((node) => node.textContent)
+      expect(cards).toEqual([importRunning.dataset, importFailed.dataset])
+    })
+
+    it('has no accessibility violations', async () => {
+      const { container } = renderCompletedWithError()
+
+      await screen.findByText(error)
+      await expectNoViolations(container)
+    })
   })
 
   it('confirms an import with four facts, is not red, and raises a Queued receipt carrying the job key', async () => {

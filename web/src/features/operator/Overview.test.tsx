@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { renderApp, screen, waitFor, within } from '@/test/render'
 import { server } from '@/test/server'
 import { degradedReadiness } from '@/test/handlers'
 import { expectNoViolations } from '@/test/axe'
 import {
   bootstrapStatus,
+  bootstrapStatusCompletedWithError,
   bootstrapStatusEmpty,
+  importCompleted,
+  importCompletedWithError,
+  importFailed,
+  importRunning,
   problemHandler,
   readinessNotADocument,
   sourceUnavailable,
@@ -137,11 +142,95 @@ describe('Overview', () => {
 
     // Computed and empty — a different fact, drawn differently.
     expect(await screen.findByText('Nothing is waiting on a person')).toBeInTheDocument()
-    expect(screen.getByText('unmatched: 0 loaded · runs: none failed')).toBeInTheDocument()
+    expect(screen.getByText('unmatched: 0 loaded · runs: none failed, every error null')).toBeInTheDocument()
 
     expect(
       screen.getByText(/No media server is connected\. The catalog is still browsable/),
     ).toBeInTheDocument()
+  })
+
+  describe('an import that recorded an error', () => {
+    /** The item's glyph carries its tone; the button is the item. */
+    function glyphOf(item: HTMLElement): Element | null {
+      return item.firstElementChild
+    }
+
+    function renderCompletedWithError() {
+      server.use(
+        http.get('/admin/bootstrap/status', () => HttpResponse.json(bootstrapStatusCompletedWithError)),
+      )
+      return render()
+    }
+
+    it('raises a warn item for a completed run whose rerun could not start, with the error verbatim', async () => {
+      renderCompletedWithError()
+
+      const item = await screen.findByRole('button', {
+        name: /^The last movielens import could not start; the completed one stands/,
+      })
+      expect(within(item).getByText(importCompletedWithError.error ?? '')).toBeInTheDocument()
+      expect(glyphOf(item)).toHaveStyle({ color: 'var(--warn-text)' })
+    })
+
+    it('keeps a failed run beside it, in the bad tone', async () => {
+      renderCompletedWithError()
+
+      const item = await screen.findByRole('button', { name: /^The crosswalk import failed/ })
+      expect(within(item).getByText(importFailed.error ?? '')).toBeInTheDocument()
+      expect(glyphOf(item)).toHaveStyle({ color: 'var(--bad-text)' })
+    })
+
+    it('claims a completed import stands only when the run says completed', async () => {
+      // `start()` clears `error`, so the server should never send this; the
+      // type allows it, and the copy must not borrow the completed case's claim.
+      server.use(
+        http.get('/admin/bootstrap/status', () =>
+          HttpResponse.json({ ...bootstrapStatus, runs: [{ ...importRunning, error: 'left over' }] }),
+        ),
+      )
+      render()
+
+      const item = await screen.findByRole('button', { name: /^The imdb import recorded an error/ })
+      expect(within(item).getByText('left over')).toBeInTheDocument()
+      expect(screen.queryByText(/the completed one stands/)).toBeNull()
+    })
+
+    it('raises nothing for a completed run with no error', async () => {
+      server.use(
+        http.get('/admin/bootstrap/status', () =>
+          HttpResponse.json({ ...bootstrapStatus, runs: [importCompleted] }),
+        ),
+        http.get('/admin/unmatched', () => HttpResponse.json(unmatchedEmpty)),
+      )
+      render()
+
+      // The runs have arrived: "Running now" is built from the same response.
+      expect(await screen.findByText('Nothing is running')).toBeInTheDocument()
+      expect(screen.getByText('Nothing is waiting on a person')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /movielens/ })).toBeNull()
+    })
+
+    it('claims nothing is waiting only once the runs that claim is built from have arrived', async () => {
+      server.use(
+        http.get('/admin/bootstrap/status', async () => {
+          await delay('infinite')
+          return HttpResponse.json(bootstrapStatus)
+        }),
+        http.get('/admin/unmatched', () => HttpResponse.json(unmatchedEmpty)),
+      )
+      const { queryClient } = render()
+
+      await waitFor(() => expect(queryClient.getQueryState(['unmatched', null, 50])?.status).toBe('success'))
+      expect(screen.queryByText('Nothing is waiting on a person')).toBeNull()
+    })
+
+    it('has no accessibility violations', async () => {
+      const { container } = renderCompletedWithError()
+
+      await screen.findByText(importCompletedWithError.error ?? '')
+      await waitFor(() => expect(screen.getByText('Loft Emby')).toBeInTheDocument())
+      await expectNoViolations(container)
+    })
   })
 
   it('counts what is loaded and never quotes a total for the review queue', async () => {
