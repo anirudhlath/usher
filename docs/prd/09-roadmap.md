@@ -1,8 +1,7 @@
 # 09 — Roadmap
 
-> 🔶 **Provisional past M10.** M1–M10 are complete and refined against
-> what they measured; *Post-v1 candidates* below is a list of things
-> deliberately not committed to.
+> 🔶 **Provisional past M10.** M1–M10 are complete; *Post-v1 candidates*
+> below are not committed to.
 
 ## v1 — the abstraction works end to end
 
@@ -24,7 +23,7 @@ compatibility promise.
 | **M7 — Rows** ✅ | `Row`/`RowProvider` as ports and nine registered providers, `HomeService`'s propose→score→diversify→build, in-process row and screen caches, the taste centroid and genre affinity, `GET /home` and `usher home`, `row.invalidated`, the MovieLens tag-genome importer, and `Person`/`Credit`/`Collection` re-derived from `raw_payloads` with no second network call |
 | **M8 — Curation** ✅ | LLM row generation, validation, persistence and regeneration — `OpenAICompatibleClient` over httpx, `curated_rows` + `llm_calls`, `CandidatePoolService`, `CurationService`, `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate` and `usher curate`. Plus query expansion (shipped off) and the genome's tag vocabulary |
 | **M9 — API surface** ✅ | Full HTTP surface, image proxy, playback resolution and the playback ticket, outbound watch state, [07](07-client-api.md)'s RFC 9457 error envelope, `GET /titles/{id}/similar`, the `search_queries` analytics table, the two-tier suggest, attribution. Also the three ranking terms M7 built data for — taste-centroid proximity, watch state and recency — and the removal of the tag-genome similarity term |
-| **M10 — Hardening** ✅ | Observability, failure modes, backup/restore, docs, public release. Plus the scheduler: a small set of named jobs with a period rather than a general cron, **no scheduler table** — each job reads *when was I last done* off the artefact it maintains — and `USHER_SCHEDULER_ENABLED=false`, because there is no mutual exclusion without a row and the job it would start is hours long. `usher schedule --once` keeps the operator's-own-cron path supported |
+| **M10 — Hardening** ✅ | Observability, failure modes, backup/restore, docs, and the public release, `v0.1.0`. Plus the scheduler: a small set of named jobs with a period rather than a general cron, **no scheduler table** — each job reads *when was I last done* off the artefact it maintains — and `USHER_SCHEDULER_ENABLED=false`, because there is no mutual exclusion without a row and the job it would start is hours long. `usher schedule --once` keeps the operator's-own-cron path supported |
 
 TV is in scope throughout, not deferred — series/season/episode modelling, Next
 Up, and episode-level watch state land with the milestones that own them.

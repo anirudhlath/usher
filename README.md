@@ -137,8 +137,8 @@ inside the container through `docker compose exec`; the rest (`cp`, `openssl`,
 every line works as written in bash, zsh or fish.
 
 🔴 **Read this first: it is not a five-minute path, and the long poles are
-steps 5 and 6.** The times below are from a clean clone on 2026-09-23. Steps 1
-to 3 took about six minutes (359 s, with a crosswalk that failed part-way).
+steps 5 and 6.** The times below were measured on 2026-09-23 and 2026-09-24.
+Steps 1 to 3 take about ten minutes, most of it the crosswalk.
 Syncing and enriching a real library take **hours**, because both are paced
 by somebody else's server rather than by yours. That run never reached an
 enriched home screen, so nothing below claims one.
@@ -197,7 +197,7 @@ curl -sf http://localhost:8100/health/ready
 ```
 docker compose exec usher usher bootstrap --phase imdb       # 93 s, 1,279,749 titles
 docker compose exec usher usher bootstrap --phase tmdb-ids   # 17 s
-docker compose exec usher usher bootstrap --phase crosswalk  # 224 s, to a failure; see below
+docker compose exec usher usher bootstrap --phase crosswalk  # 491 s, four retries included
 ```
 
 🔴 **`--phase imdb` alone is not enough, and the failure is silent until step
@@ -205,14 +205,17 @@ docker compose exec usher usher bootstrap --phase crosswalk  # 224 s, to a failu
 enrich *from*: every job parks with `title carries no tmdb id to enrich from`,
 and `/home` never gets past the rows that need no enrichment (step 7).
 `tmdb-ids` and `crosswalk` are what make the catalog enrichable. A complete
-crosswalk on 2026-09-11 took 246 s and gave 293,219 titles a TMDb id.
+crosswalk on 2026-09-24 took 491 s and gave 293,665 titles a TMDb id, 55,590 of
+them series.
 
-⚠️ **The crosswalk can fail part-way, so check that it finished.** It reads
-Wikidata's public SPARQL endpoint shard by shard. On 2026-09-23 one shard
-(`position=3`) failed twice, once with a body that was not SPARQL JSON and once
-with a 90 s read timeout. Only movies were linked (193,188), and the series pass never ran.
-When a shard fails the command exits non-zero, and re-running the same command
-resumes from its checkpoint. Check that every row reads `completed`:
+⚠️ **Check that every phase finished.** The crosswalk reads Wikidata's public
+SPARQL endpoint page by page, and that endpoint times out and answers `502`
+often. A page that fails that way is retried from its checkpoint with backoff,
+up to five attempts and 15 minutes; each retry prints a line and the command
+carries on, and the 2026-09-24 run above retried four times. A phase that still
+fails, or is skipped because an import it reads failed, makes the command exit
+1, and its line ends with the command that resumes it. Check that every row
+reads `completed`:
 
 ```
 docker compose exec usher usher bootstrap-status
@@ -498,10 +501,12 @@ reported by name without its value, because a setting may be a credential.
 
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
-Wikidata's SPARQL endpoint. About three minutes and 1.27M titles on a
-reasonable machine for those three; the two IMDb expansion phases below read
+Wikidata's SPARQL endpoint. About ten minutes and 1.28M titles for those
+three, most of it the crosswalk; the two IMDb expansion phases below read
 another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
-and it continues from its own checkpoint. See
+and it continues from its own checkpoint. **A phase that fails exits 1**, and
+so does one skipped because an import it reads is `failed` or `running`; each
+prints a line ending with the command that resumes it. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash

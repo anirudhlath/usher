@@ -22,7 +22,7 @@ milestone smoke test passes.
 | M7 | Rows | docs/plans/2026-08-03-m7-rows.md | ✅ MERGED to main (6d9b2a1), 3,217 passed / 5 skipped, 7 import contracts |
 | M8 | Curation (LLM) | docs/plans/2026-08-06-m8-curation.md | ✅ complete on `milestone/m8-curation`, 8 import contracts — see the M8 section at the end of this file |
 | M9 | API surface | docs/plans/2026-08-10-m9-api-surface.md | ✅ complete on `milestone/m9-api-surface`, 10 import contracts — **74 tasks planned, and two names travel with the milestone**: T4 was **withdrawn** when its own pre-registered bar failed (2.702 GB against a 2.0 GB ceiling), and **H4/H5 ran late** — 2026-08-12, after the gate, against a real Emby 4.9.5.0 in 23 bounded requests, both halves passing and the write to a real account restored byte-for-byte. They had been recorded as an unrunnable gap on the strength of checking one `.env` file. H7 is the gate and the final whole-suite sweep |
-| M10 | Hardening + dashboards | docs/plans/2026-08-13-m10-hardening.md (plus the polish pass in docs/plans/2026-09-12-comment-convention-and-polish.md and its first stage, docs/plans/2026-09-12-stage-1a-shared-infrastructure.md) | ✅ **complete — all four phases gated, merged by PR #44 together with the polish pass**. The rest of this cell is Phase 0's record, kept as written: 67 tasks in four gated phases on `milestone/m10-hardening` (worktree `~/code/usher-m10`), cut from `main` @ `f2cf359`; its design spec sits beside it in `docs/specs/`. **Phase 0 is the first telemetry this project has ever exported.** O1 built `~/code/observability` (a separate repository, HEAD `daa4152`, clean — Grafana/Prometheus/Loki/Tempo/OTel Collector, only `127.0.0.1:3000` and `:4317` published); O2 pointed Usher at it and read three signals out of Grafana from **one `GET /search` over the live 1,272,401-title catalog** — a Tempo trace (`{name="GET /search"}` → `2fa839a2eb19612d9aeb7c3fca9b441e`, 73.95 ms, 13 spans, with real SQLAlchemy **statement** spans beneath the root), a Loki line found by grepping for that 32-hex id read **off the trace** (`{service_name="usher"} \|= "2fa839a2…"` → exactly one line, carrying `trace_id` and `span_id=35dad4c7b4bc6de1`), and two Prometheus samples (`usher_search_duration_seconds_count{job="usher",mode="full_text"}` → 1, `_sum` → 0.054056…; `http_server_duration_milliseconds_count{…,http_target="/search",http_status_code="200"}` → 1, `_sum` → 118); O3 pinned the convention — **the default HTTP semantic conventions**, a property of `uv.lock` rather than of the manifest, under `opentelemetry-sdk` **1.44.0** and `opentelemetry-instrumentation-fastapi`/`-asgi` **0.65b0**. **O4 is the gate**: all seven standard steps green on a clean tree with every number pre-registered in `/var/tmp/m10-gate/phase0/BAR.md` (`sha256 51a51b34…9e0cc3e`) before any command ran — `ruff check` clean, `ruff format --check` 603 files, `mypy` 585 files, `lint-imports` **10 kept / 0 broken** (unchanged, as predicted — Phase 0 adds no module and no contract), **4,072 unit / 4 skipped**, **1,232 integration / 22 skipped**, **5,304 whole-suite / 26 skipped** (run whole, because that is what `ci.yml:46` runs), PRD link check `OK`. **The phase-specific gate is a subprocess and not an environment variable draped over pytest**, because the original spelling could not fail: `conftest`'s autouse `clean_environment` scrubs every `OTEL_*` before any test body and the semconv singleton latches inside `create_app()` *after* the scrub — re-measured here at **3 passed either way**. Three real children instead: unset → `http.server.duration` at `ms` with the new name absent; `OTEL_SEMCONV_STABILITY_OPT_IN=http` → `http.server.request.duration` at `s` and the old name **absent entirely, not renamed alongside**; `http/dup` → both. **The variable renames a second metric the same way** — `http.server.response.size` → `http.server.response.body.size` — so two panels empty silently under one variable, not one; both are now named in PRD 10's opt-in hazard paragraph. Sweep: **3 targets killed, 3 equivalent-mutant controls surviving every gate step, 0 unintended survivors** (ledger in `.claude/rules/mutation-sweeps.md`). **The drafting pass refuted fifteen of the spec's own claims** — see the plan's *Corrections this plan carries*; the two that changed a justification are the rebuild's cost (**3.33 h, not 21.6** — `m09f` repaired `m09e`'s 594.7 ms/seed to 91.7, **over the 130,720 embedded seeds, which is not the 1,272,401-title catalog named earlier in this row**; the two are different populations and joining them is wrong by 3.5× — 91.7 ms across the whole catalog would be 32.4 h, and this row prices only the completed 130,720-seed walk; ⚠️ **that walk is 2026-08-13's and the one this deployment last completed is 12,884 s over 132,442 seeds at 97.3 ms/seed = 3.58 h, measured off `title_neighbors.computed_at` on 2026-09-07 by J6**) and the unmeasured "~1–5 s/request" source latency the whole safety cluster rested on (entered in the *first PRD commit*, two days before an Emby adapter existed; cited 21×, called "measured" 11×; the only live readings are ~0.14 s). **Phase 1 is clear to start.** |
+| M10 | Hardening + dashboards | docs/plans/2026-08-13-m10-hardening.md (plus the polish pass's first stage, docs/plans/2026-09-12-stage-1a-shared-infrastructure.md) | ✅ **complete — four phases gated; lands in PR #44 with the polish pass, and R13, the release, is the tag `v0.1.0` on its merge commit.** R13's runs are recorded under *M10 R13* below. The rest of this cell is Phase 0's record, kept as written: 67 tasks in four gated phases on `milestone/m10-hardening` (worktree `~/code/usher-m10`), cut from `main` @ `f2cf359`; its design spec sits beside it in `docs/specs/`. **Phase 0 is the first telemetry this project has ever exported.** O1 built `~/code/observability` (a separate repository, HEAD `daa4152`, clean — Grafana/Prometheus/Loki/Tempo/OTel Collector, only `127.0.0.1:3000` and `:4317` published); O2 pointed Usher at it and read three signals out of Grafana from **one `GET /search` over the live 1,272,401-title catalog** — a Tempo trace (`{name="GET /search"}` → `2fa839a2eb19612d9aeb7c3fca9b441e`, 73.95 ms, 13 spans, with real SQLAlchemy **statement** spans beneath the root), a Loki line found by grepping for that 32-hex id read **off the trace** (`{service_name="usher"} \|= "2fa839a2…"` → exactly one line, carrying `trace_id` and `span_id=35dad4c7b4bc6de1`), and two Prometheus samples (`usher_search_duration_seconds_count{job="usher",mode="full_text"}` → 1, `_sum` → 0.054056…; `http_server_duration_milliseconds_count{…,http_target="/search",http_status_code="200"}` → 1, `_sum` → 118); O3 pinned the convention — **the default HTTP semantic conventions**, a property of `uv.lock` rather than of the manifest, under `opentelemetry-sdk` **1.44.0** and `opentelemetry-instrumentation-fastapi`/`-asgi` **0.65b0**. **O4 is the gate**: all seven standard steps green on a clean tree with every number pre-registered in `/var/tmp/m10-gate/phase0/BAR.md` (`sha256 51a51b34…9e0cc3e`) before any command ran — `ruff check` clean, `ruff format --check` 603 files, `mypy` 585 files, `lint-imports` **10 kept / 0 broken** (unchanged, as predicted — Phase 0 adds no module and no contract), **4,072 unit / 4 skipped**, **1,232 integration / 22 skipped**, **5,304 whole-suite / 26 skipped** (run whole, because that is what `ci.yml:46` runs), PRD link check `OK`. **The phase-specific gate is a subprocess and not an environment variable draped over pytest**, because the original spelling could not fail: `conftest`'s autouse `clean_environment` scrubs every `OTEL_*` before any test body and the semconv singleton latches inside `create_app()` *after* the scrub — re-measured here at **3 passed either way**. Three real children instead: unset → `http.server.duration` at `ms` with the new name absent; `OTEL_SEMCONV_STABILITY_OPT_IN=http` → `http.server.request.duration` at `s` and the old name **absent entirely, not renamed alongside**; `http/dup` → both. **The variable renames a second metric the same way** — `http.server.response.size` → `http.server.response.body.size` — so two panels empty silently under one variable, not one; both are now named in PRD 10's opt-in hazard paragraph. Sweep: **3 targets killed, 3 equivalent-mutant controls surviving every gate step, 0 unintended survivors** (ledger in `.claude/rules/mutation-sweeps.md`). **The drafting pass refuted fifteen of the spec's own claims** — see the plan's *Corrections this plan carries*; the two that changed a justification are the rebuild's cost (**3.33 h, not 21.6** — `m09f` repaired `m09e`'s 594.7 ms/seed to 91.7, **over the 130,720 embedded seeds, which is not the 1,272,401-title catalog named earlier in this row**; the two are different populations and joining them is wrong by 3.5× — 91.7 ms across the whole catalog would be 32.4 h, and this row prices only the completed 130,720-seed walk; ⚠️ **that walk is 2026-08-13's and the one this deployment last completed is 12,884 s over 132,442 seeds at 97.3 ms/seed = 3.58 h, measured off `title_neighbors.computed_at` on 2026-09-07 by J6**) and the unmeasured "~1–5 s/request" source latency the whole safety cluster rested on (entered in the *first PRD commit*, two days before an Emby adapter existed; cited 21×, called "measured" 11×; the only live readings are ~0.14 s). **Phase 1 is clear to start.** |
 
 **This table was stale from M3 down until 2026-08-07** — it said "IN PROGRESS"
 for a milestone merged on 2026-07-31 and "not planned" for four that were built
@@ -3252,3 +3252,58 @@ screen**, and that is recorded rather than claimed.
 
 Torn down with `down -v`; the request body holding the credential was shredded.
 No credential, token, user id or host reached the repository.
+
+### R13's third run — rows on `/home`, and the quickstart could not survive a stranger (2026-09-23)
+
+A fresh clone of the public remote at `35c67fa2`, every command run through
+`fish -c` as written, with the sync bounded at 35 minutes. The only departures
+were a host port and a scratch compose project.
+
+| step | | |
+|---|---|---|
+| clone | 2.5 s | from GitHub |
+| 1 · `compose up -d --build` | 26.0 s | 7.9 s warm |
+| 3 · `bootstrap --phase imdb` | 92.6 s | 1,279,749 titles |
+| 3 · `bootstrap --phase tmdb-ids` | 16.6 s | |
+| 3 · `bootstrap --phase crosswalk` | 223.9 s | **failed** at shard 3 and **exited 0**; the resume failed the same way |
+| 4 · `POST /admin/sources` | HTTP 201 | real Emby |
+| 5 · `usher sync` | 35 min, then SIGINT | 81,000 items seen, 79,855 matched |
+| 6 · `usher work --once` | 46.6 s | 20 jobs; 2,872 enrich jobs parked |
+| 7 · `GET /home` | 6–28 ms | **200, one row** |
+
+✅ **`/home` came back with rows 25 min 19 s after the clone.** One row,
+Recently Added, carrying skeleton series. It appeared 10.5 minutes into step 5,
+before step 6 ran, and it needs neither a TMDb key nor enrichment, so it proves
+the source walk and nothing past it. **An enriched home screen was never
+observed**: 31 of 2,905 owned titles were enriched when the run stopped.
+
+Found, and fixed before the tag:
+
+- 🔴 **`compose.yml` joined an external `observability` network**, so step 1
+  failed on any host without that stack. It passed here only because this host
+  has one. The network is now opt-in through `compose.observability.yml`.
+- 🔴 **The warning about a second stack separated the network and not the
+  project.** A clone left at `git clone`'s default directory is project
+  `usher`, which is this host's live stack, and following the warning as
+  written **recreated the live containers**. That was about four minutes
+  down, with no data lost, and the image was rebuilt from the same tree. The
+  quickstart now sets `COMPOSE_PROJECT_NAME`, `USHER_COMPOSE_NETWORK` and
+  `USHER_COMPOSE_HOST_PORT` before the first `up`.
+- 🔴 **The crosswalk failed and exited 0, twice.** One shard answered with a
+  body that was not SPARQL JSON, then hit a 90 s read timeout. The series pass
+  never ran: 31 of 375,198 series had a TMDb id. The prefix shards turned out
+  to be the cause rather than the cure. Each one paid for the whole P345 join,
+  45.0 s for `tt3` against 23.8 s unfiltered. The adapter now reads
+  `bd:slice` pages of 25,000 statements, the service retries a transient
+  failure from its checkpoint with backoff, and a phase that still fails exits
+  1 and prints the command that resumes it. Re-run live on 2026-09-24 against a
+  scratch database while WDQS was unhealthy, with **four real retries**
+  (three 502s and a read timeout): the phase completed in 490.5 s and linked
+  293,665 titles, 55,590 of them series.
+- **The TMDb-key warning sat after `up`**, and `env_file` is read only when a
+  container is created. It now comes before `up`.
+- **Step 7 said "rows back means the whole path worked"**, and step 6
+  prescribed a second worker beside the server's own. Both are rewritten.
+
+Not fixed: the 2,872 enrich jobs parked after one attempt, and nothing
+un-parks a job. That is [#87](https://github.com/anirudhlath/usher/issues/87).
