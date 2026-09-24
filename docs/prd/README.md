@@ -5,8 +5,8 @@ television, assembled from bulk open datasets and enriched on demand, with
 pluggable *sources* (Emby first) telling it where each title can actually be
 watched.
 
-This directory is the **living PRD**. It describes what Usher does, feature by
-feature, in user-facing terms.
+This directory is the **living PRD**. It states what Usher does as user-facing
+behaviour, one concern per document, and not the reasoning behind it.
 
 ## What lives where
 

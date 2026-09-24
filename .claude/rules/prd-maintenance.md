@@ -40,7 +40,8 @@ docs/evals/                          run write-ups — and bars.toml /
 
 ## PRD vs spec
 
-`docs/prd/` says **what and why**, and evolves with the project.
+`docs/prd/` says **what Usher does** — user-facing behaviour, not the reasoning
+behind it — and evolves with the project.
 `docs/specs/` is a **point-in-time** design handed to an implementation plan.
 
 **When they disagree, the PRD is authoritative and the spec is stale.** Do not
@@ -51,13 +52,13 @@ Write a new spec if a new plan is needed.
 
 | When you… | Do this |
 |---|---|
-| Change a design decision during implementation | Update the relevant `docs/prd/NN-*.md` section |
-| Reverse an earlier decision | **Update the section that states it and add the new evidence** — never silently contradict it |
+| Change a behaviour during implementation | Update the relevant `docs/prd/NN-*.md` section in the same commit |
+| Reverse an earlier decision | **Replace the statement in the section that makes it** — never leave the old one standing beside the new. The evidence goes in the commit, the code or the plan, not the PRD |
 | Add or complete a section | Update the status table in `docs/prd/README.md` |
 | Land a task from a plan | Update the status cell in **both** tables. `docs/plans/progress.md` and `docs/prd/README.md`'s implementation-plan table each carry one for every plan, and `test_docs_currency.py` checks only that a plan is *named* by them, never that they agree — so the two drifted to `✅ all six landed` against `📋 planned, nothing landed` for the same branch, in one commit, on 2026-08-25 |
 | Write a plan file for a spec that has no status table yet | Give it **its own level-2 heading and table** in `docs/plans/progress.md` naming that spec, and add a row to `docs/prd/README.md`'s implementation-plan table. **Never a row under an existing heading** — that heading names a different spec, so the row makes it false in order to satisfy a check about documentation being true. A plan that really is a *milestone* of the v1 design is the exception and belongs in the milestone table. `tests/unit/test_docs_currency.py` reads every table as one union and fails if a plan file is named by none of them |
-| Discover a load-bearing fact (rate limit, dataset size, API behaviour) | Record it with its source in the relevant section |
-| Learn something that invalidates a stated fact | Correct it and say so — stale "verified" facts are worse than none |
+| Discover a load-bearing fact (rate limit, dataset size, API behaviour) | Record it with its source beside the code that depends on it — its docstring or the subsystem's rules file. The PRD states only the behaviour that follows: the setting, its default, what a user or operator sees |
+| Learn something that invalidates a stated fact | Correct it — a stale statement is worse than none |
 
 **The status tables can be green, mutually consistent and wrong together.** Both
 E1 rows — `docs/plans/progress.md`'s and `docs/prd/README.md`'s — read *"🔨 in
@@ -72,9 +73,10 @@ the test can see. (Both were corrected 2026-09-02.)
 - **One concern per file.** If a section starts covering two subsystems, split it.
 - **Mark incompleteness explicitly** — ⏳ not yet designed, 🔶 provisional. An
   unmarked section reads as settled when it isn't.
-- **Verified facts carry their source.** Dataset sizes, rate limits, and API
-  behaviours in this PRD were measured or read from primary docs. Keep the
-  citation when you copy the number.
+- **State the behaviour, not the reasoning.** No rationale, rejected
+  alternatives or measurement narrative. A number appears only as something a
+  user or operator sees — a default, a bound, a sizing estimate — and its
+  derivation stays with the code.
 
 ## Before changing a subsystem
 

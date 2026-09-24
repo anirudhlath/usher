@@ -27,10 +27,13 @@ than in a rules file because path-scoped rules do not survive compaction.
 
 ## Keep the PRD current
 
-`docs/prd/` is the authoritative description of what Usher is and why. Code that
-contradicts it is a bug in one of them. **Update the PRD in the same commit as
-the change that invalidates it** — not in a follow-up. Start at
-`docs/prd/README.md`; conventions load automatically when working in `docs/`.
+`docs/prd/` is the authoritative statement of what Usher does: user-facing
+behaviour, one concern per document, and not the reasoning behind it — the
+argument for a behaviour, and the alternatives it beat, live with the code or
+the plan that made it. Code that contradicts it is a bug in one of them.
+**Update the PRD in the same commit as the change that invalidates it** — not
+in a follow-up. Start at `docs/prd/README.md`; conventions load automatically
+when working in `docs/`.
 
 ## Conventions that will bite you
 
