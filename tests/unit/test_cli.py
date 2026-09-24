@@ -47,6 +47,7 @@ from usher.cli import (
     parse_args,
 )
 from usher.composition import (
+    BootstrapOutcome,
     _aliases,
     _credit_names,
     _movielens,
@@ -1916,8 +1917,9 @@ async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
     """
     seen: list[tuple[object, ...]] = []
 
-    async def record(*args: object, **kwargs: object) -> None:
+    async def record(*args: object, **kwargs: object) -> BootstrapOutcome:
         seen.append((*args, kwargs.get("report")))
+        return BootstrapOutcome()
 
     monkeypatch.setattr(usher.cli, "run_bootstrap", record)
     settings = Settings(database_url="postgresql+asyncpg://u:p@localhost/db", secret_key="0" * 32)

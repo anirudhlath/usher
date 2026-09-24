@@ -316,7 +316,7 @@ class BootstrapService:
             try:
                 # The caller's already-resolved value, so this run and the batches it
                 # streams cannot straddle two revisions.
-                resolved = revision if revision is not None else await dataset.revision()
+                resolved = revision if revision is not None else await self._revision(dataset)
                 span.set_attribute("usher.revision", resolved)
                 try:
                     run = await self._runs.start(dataset.name, resolved)
@@ -338,34 +338,99 @@ class BootstrapService:
                         )
                     run = await self._drain_resuming(dataset, write, run, resolved)
             except (UsherPortError, _GaveUp) as exc:
-                # Case 2. `_GaveUp` is recorded as the port error it wraps, with the
-                # attempts appended to the message.
-                cause = exc if isinstance(exc, UsherPortError) else exc.cause
-                run = (await self._runs.get(dataset.name)) or ImportRun(
-                    dataset=dataset.name, revision="unknown"
-                )
-                run = run.evolve(
-                    status=ImportRunStatus.FAILED,
-                    # str(exc), never the exception object and never a
-                    # payload: PRD 08's credentials-never-logged rule, and
-                    # `error` is a Text column an operator reads.
-                    error=str(exc),
-                    heartbeat_at=datetime.now(UTC),
-                    finished_at=datetime.now(UTC),
-                )
-                await self._runs.save(run)
-                await self._commit()
-                _failures.add(1, {"dataset": dataset.name, "kind": type(cause).__name__})
+                # Case 2.
                 span.set_attribute("usher.failed", True)
-                logger.error(
-                    "{dataset} import failed at position {position}: {error}",
-                    dataset=dataset.name,
-                    position=run.position,
-                    error=str(exc),
-                )
+                run = await self._record_failure(dataset.name, exc)
             finally:
                 _phase_duration.record(time.perf_counter() - started, {"dataset": dataset.name})
         return run
+
+    async def resolve_revision[RowT](self, dataset: BulkDataset[RowT]) -> str | ImportRun:
+        """`dataset`'s revision, retried like a fetch -- or the `FAILED` run it recorded.
+
+        For a caller that needs the revision before it can build its writer, and so
+        cannot leave resolving it to `import_dataset`: `movielens` stamps every vector
+        and its vocabulary with it. A `HEAD` that never answers is then recorded
+        exactly as `import_dataset` would record it, rather than raised out of the run.
+        """
+        try:
+            return await self._revision(dataset)
+        except (UsherPortError, _GaveUp) as exc:
+            return await self._record_failure(dataset.name, exc)
+
+    async def _record_failure(self, dataset: str, exc: UsherPortError | _GaveUp) -> ImportRun:
+        """Mark `dataset`'s checkpoint `FAILED`, saying why, and commit it.
+
+        `_GaveUp` is recorded as the port error it wraps, with the attempts appended to
+        the message.
+        """
+        cause = exc if isinstance(exc, UsherPortError) else exc.cause
+        run = (await self._runs.get(dataset)) or ImportRun(dataset=dataset, revision="unknown")
+        run = run.evolve(
+            status=ImportRunStatus.FAILED,
+            # str(exc), never the exception object and never a payload: PRD 08's
+            # credentials-never-logged rule, and `error` is a Text column an operator
+            # reads.
+            error=str(exc),
+            heartbeat_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        await self._runs.save(run)
+        await self._commit()
+        _failures.add(1, {"dataset": dataset, "kind": type(cause).__name__})
+        logger.error(
+            "{dataset} import failed at position {position}: {error}",
+            dataset=dataset,
+            position=run.position,
+            error=str(exc),
+        )
+        return run
+
+    async def _revision[RowT](self, dataset: BulkDataset[RowT]) -> str:
+        """`dataset.revision()`, retried under the same `RetryPolicy` as a fetch.
+
+        It is the first request a phase makes -- a `HEAD` for every IMDb, TMDb and
+        MovieLens dataset -- so it is the likeliest to meet a transient failure, and
+        nothing is checkpointed yet: a retry here is simply asking again.
+        """
+        attempt = 1
+        streak_started: float | None = None
+        while True:
+            try:
+                return await dataset.revision()
+            except TRANSIENT as exc:
+                now = self._clock()
+                if streak_started is None:
+                    streak_started = now
+                wait = self._next_wait(
+                    dataset.name, "resolving its revision", attempt, now - streak_started, exc
+                )
+                await self._sleep(wait)
+                attempt += 1
+
+    def _next_wait(
+        self, dataset: str, where: str, attempt: int, elapsed: float, exc: UsherPortError
+    ) -> float:
+        """The wait before attempt `attempt + 1`, announced -- or `_GaveUp`.
+
+        `elapsed` is measured from the streak's first failure. One rule for both
+        retried calls, so a revision and a fetch cannot drift apart on the bound.
+        """
+        if attempt >= self._retry.attempts:
+            raise _GaveUp(exc, attempt, elapsed, "") from exc
+        wait = self._retry.delay(attempt, exc)
+        if elapsed + wait > self._retry.budget:
+            raise _GaveUp(
+                exc,
+                attempt,
+                elapsed,
+                f": the next wait would pass the {self._retry.budget:.0f}s retry budget",
+            ) from exc
+        self._report(
+            f"{dataset}: attempt {attempt} of {self._retry.attempts} failed {where}: {exc}; "
+            f"retrying in {wait:.0f}s"
+        )
+        return wait
 
     async def _concede_to_other_owner(
         self, dataset: str, revision: str, exc: RepositoryConflict, span: trace.Span
@@ -416,20 +481,12 @@ class BootstrapService:
                     # either way this failure opens a new streak.
                     attempt, streak_started = 1, now
                 run = committed
-                elapsed = now - streak_started
-                if attempt >= self._retry.attempts:
-                    raise _GaveUp(exc, attempt, elapsed, "") from exc
-                wait = self._retry.delay(attempt, exc)
-                if elapsed + wait > self._retry.budget:
-                    raise _GaveUp(
-                        exc,
-                        attempt,
-                        elapsed,
-                        f": the next wait would pass the {self._retry.budget:.0f}s retry budget",
-                    ) from exc
-                self._report(
-                    f"{dataset.name}: attempt {attempt} of {self._retry.attempts} failed "
-                    f"at position {run.position}: {exc}; retrying in {wait:.0f}s"
+                wait = self._next_wait(
+                    dataset.name,
+                    f"at position {run.position}",
+                    attempt,
+                    now - streak_started,
+                    exc,
                 )
                 await self._sleep(wait)
                 attempt += 1

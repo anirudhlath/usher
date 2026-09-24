@@ -307,9 +307,10 @@ async def test_batches_receives_the_already_resolved_revision(
 async def test_a_failure_is_recorded_not_raised(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """`bootstrap --phase all` must continue to the next phase when one upstream is down.
+    """A failed import is a checkpoint that says why, not an exception.
 
-    An operator must be able to see why.
+    `run_bootstrap` reads it back to decide the exit code and which later phases may
+    run over what this one wrote -- and an operator reads it to see why.
     """
     commit = CommitSpy()
     dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]], fail_after=2)
@@ -330,12 +331,15 @@ async def test_a_rate_limited_revision_is_recorded_not_raised(
     must be caught the same way.
     """
     commit = CommitSpy()
+    clock = Clock()
     dataset = RateLimitedOnRevision([[_title(1)]])
-    run = await _service(runs, catalog, commit).import_dataset(
+    run = await _service(runs, catalog, commit, clock=clock).import_dataset(
         dataset, lambda rows: _write(catalog, rows)
     )
     assert run.status is ImportRunStatus.FAILED
-    assert "rate limited" in (run.error or "")
+    # Retried like any transient, with the hint as a floor under the first two waits.
+    assert clock.sleeps == [30.0, 30.0, 60.0, 120.0]
+    assert run.error == "rate limited, retry_after=30 (gave up after 5 attempts over 240s)"
 
 
 class _ConflictingImportRunRepository(FakeImportRunRepository):
@@ -894,3 +898,134 @@ async def test_each_retry_is_reported_as_it_happens_through_one_channel(
             assert (printed, logged) == (expected, [])
         else:
             assert (printed, logged) == ([], [("WARNING", line) for line in expected])
+
+
+class FlakyRevision(ScriptedDataset):
+    """`revision()` fails a scripted number of times, then answers.
+
+    It is a `HEAD` for every IMDb, TMDb and MovieLens dataset, and the first request a
+    phase makes, so a transient failure there is the likeliest one a phase meets.
+    """
+
+    def __init__(
+        self,
+        batches: Sequence[Sequence[ImdbTitle]],
+        *,
+        failures: int,
+        error: Callable[[], UsherPortError] = lambda: PortUnavailable(
+            "HEAD https://datasets.invalid/title.basics.tsv.gz failed: ConnectError"
+        ),
+    ) -> None:
+        super().__init__(batches)
+        self._remaining = failures
+        self._error = error
+        self.asked = 0
+
+    async def revision(self) -> str:
+        self.asked += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise self._error()
+        return await super().revision()
+
+
+_HEAD_FAILED = "HEAD https://datasets.invalid/title.basics.tsv.gz failed: ConnectError"
+
+
+async def test_a_transient_revision_failure_is_retried_before_anything_starts(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """A `HEAD` that fails twice costs two waits, not the phase.
+
+    Each retry is announced the way a fetch's is, naming the step it failed at instead
+    of a position -- there is no checkpoint yet to name.
+    """
+    clock = Clock()
+    printed: list[str] = []
+    dataset = FlakyRevision(_three(), failures=2)
+    run = await _service(
+        runs, catalog, CommitSpy(), clock=clock, report=printed.append
+    ).import_dataset(dataset, lambda rows: _write(catalog, rows))
+    assert run.status is ImportRunStatus.COMPLETED
+    assert (run.revision, run.position) == ("etag-1", 3)
+    assert dataset.asked == 3
+    assert clock.sleeps == [15.0, 30.0]
+    assert printed == [
+        f"scripted: attempt 1 of 5 failed resolving its revision: {_HEAD_FAILED}; retrying in 15s",
+        f"scripted: attempt 2 of 5 failed resolving its revision: {_HEAD_FAILED}; retrying in 30s",
+    ]
+
+
+async def test_a_revision_that_never_answers_gives_up_at_the_attempt_bound(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """The same bound as a fetch, and the same record: `FAILED`, saying how hard it tried."""
+    clock = Clock()
+    dataset = FlakyRevision(_three(), failures=99)
+    run = await _service(runs, catalog, CommitSpy(), clock=clock).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert dataset.asked == 5
+    assert clock.sleeps == [15.0, 30.0, 60.0, 120.0]
+    assert run.error == f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
+    assert dataset.resumed_from is None and dataset.revision_requested is None, (
+        "no batch was asked for"
+    )
+
+
+async def test_a_revision_retry_after_past_the_budget_gives_up_without_waiting(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """A three-hour `Retry-After` on the `HEAD` is refused at once, as it is on a fetch."""
+    clock = Clock()
+    dataset = FlakyRevision(
+        _three(), failures=1, error=lambda: PortRateLimited(retry_after=10_800.0)
+    )
+    run = await _service(runs, catalog, CommitSpy(), clock=clock).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert clock.sleeps == []
+    assert run.error == (
+        "rate limited, retry_after=10800.0 (gave up after 1 attempt over 0s: "
+        "the next wait would pass the 900s retry budget)"
+    )
+
+
+async def test_a_malformed_revision_is_not_retried(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """A `HEAD` answered with something unusable is the same answer next time."""
+    clock = Clock()
+    dataset = FlakyRevision(
+        _three(), failures=99, error=lambda: PortDataMalformed("no ETag on the HEAD")
+    )
+    run = await _service(runs, catalog, CommitSpy(), clock=clock).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert dataset.asked == 1
+    assert clock.sleeps == []
+    assert run.error == "no ETag on the HEAD"
+
+
+async def test_resolve_revision_answers_the_revision_or_the_failure_it_recorded(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """For a caller that needs the revision before it can build its writer.
+
+    `movielens` stamps every vector and its vocabulary with the revision, so it resolves
+    one up front. Through this, a `HEAD` that never answers is retried and then recorded
+    exactly as `import_dataset` records it -- rather than raised out of the whole run.
+    """
+    clock = Clock()
+    service = _service(runs, catalog, CommitSpy(), clock=clock)
+    assert await service.resolve_revision(FlakyRevision(_three(), failures=1)) == "etag-1"
+    assert clock.sleeps == [15.0]
+
+    failed = await service.resolve_revision(FlakyRevision(_three(), failures=99))
+    assert isinstance(failed, ImportRun)
+    assert failed.status is ImportRunStatus.FAILED
+    assert failed.error == f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
+    assert await runs.get("scripted") == failed, "the failure is the stored checkpoint"

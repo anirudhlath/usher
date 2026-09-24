@@ -47,13 +47,26 @@ Three ordering constraints:
 — and so embeddings — untouched. `--phase imdb` rewrites every name and year,
 and a changed name makes that title's embedding stale.
 
-**A failed import fails the command.** `usher bootstrap` exits 1 when any
-dataset it ran ends `failed`. For each one it prints the dataset, the position
-it stopped at, the error, and the `--phase` that resumes it. `--phase all`
-still runs every later step before exiting. A phase that refuses an empty
-catalog has imported nothing and is not a failure. Over the job queue
-(`POST /admin/bootstrap/{phase}`) a failed import completes the job: its
-checkpoint already records the failure, and the queue's retry would multiply
+**The ordering constraints are enforced.** A phase does not start while a
+dataset it reads has a checkpoint that is `failed` or `running`. `ratings`,
+`credit-names`, `aliases` and `movielens` read IMDb's titles. `crosswalk` reads
+the titles and both TMDb exports, because its link stamps each title's TMDb id
+and popularity once and never revisits it. Run over a partial import, each of
+these would checkpoint `completed` and every later run would resume past what
+was missing. So under `--phase all` a failed `imdb` skips those phases, while
+`tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
+refuses an earlier run's failure in the same way. A catalog with no IMDb
+checkpoint at all, one a source sync filled, blocks nothing.
+
+**A failed import or a skipped phase fails the command.** `usher bootstrap`
+exits 1 if anything it ran ended `failed` or was skipped. Its last lines give
+each one in dispatch order, which is also the order to resume them in. A
+failure line names the dataset, the position it stopped at, the error and the
+`--phase` that resumes it. A skip line names what the phase was waiting on and
+gives the commands that finish that and then run the phase. A phase that
+refuses an empty catalog has imported nothing and is not a failure. Over the
+job queue (`POST /admin/bootstrap/{phase}`) the job completes either way: the
+checkpoints already record the outcome, and the queue's retry would multiply
 with the service's own.
 
 ### Phase 0 — IMDb skeleton (~30 min)
@@ -141,8 +154,9 @@ waits 15, 30, 60 and then 120 s, with a `Retry-After` as a floor under the
 wait, and gives up after five attempts or once the next wait would pass 900 s,
 whichever comes first. A committed page starts a fresh count. Any other `4xx`,
 and well-formed JSON of the wrong shape, would be the same answer next time,
-so neither is retried. Every phase shares this policy; only the crosswalk has
-been observed to need it.
+so neither is retried. Every phase shares this policy, and it also covers the
+revision lookup: the `HEAD` each IMDb, TMDb and MovieLens dataset makes first.
+Only the crosswalk has been observed to need it.
 
 ### Phase 3 — TMDb enrichment crawl (tiered)
 
