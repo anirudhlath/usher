@@ -174,15 +174,21 @@ Screen refresh drops rather than blocks when its queue is full, costing one
 cache miss. `index` jobs run at `BACKFILL` priority, or at the rung their
 `enrich` job was claimed at when that is `VISIBLE` or above.
 
-A `--worker` entrypoint flag moves the lanes to a separate container.
+The push and worker lanes run in the server process behind
+`USHER_PUSH_ENABLED` and `USHER_WORKER_ENABLED`, both on by default. Splitting
+them into a second container is configuration: turn a lane off in the server and
+run it beside it — bare `usher push` runs the same lanes with no HTTP server,
+and `usher work` drains the queue.
 
 ## Extension seams left open in v1
 
 Deliberately designed-for but not built:
 
-- **Authentication.** All routes take a `current_user` dependency that returns
-  the singleton default user in v1. Adding real auth replaces one dependency;
-  watch state and taste are already per-user.
+- **Authentication.** Every route that needs a user resolves it through
+  `usher.api.deps` — `get_default_user_id`, or `get_default_user` where the
+  route needs the model — and in v1 both return the singleton default user.
+  Adding real auth replaces those dependencies; watch state and taste are
+  already per-user.
 - **Additional sources.** `MediaItem` is many-per-title from the start.
 - **Additional metadata providers.** Provider precedence is a config list; field
   provenance is recorded per title.

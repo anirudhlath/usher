@@ -427,7 +427,8 @@ invalidation drops only the entries whose cards name the enriched title, and a
 screen is invalidated at most once per card however many titles a backfill
 touches.
 
-**Cache keys carry the user**, taken from the request's own `current_user`.
+**Cache keys carry the user** the request is served as — in v1 always the
+singleton default user ([07](07-client-api.md#authentication-seam)).
 
 **The row half is bounded and evicts soonest-to-expire first**; expired
 entries are read past rather than removed.
