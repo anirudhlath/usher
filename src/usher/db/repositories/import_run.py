@@ -1,5 +1,6 @@
 """Checkpoint storage for the bulk importers."""
 
+import contextlib
 from datetime import UTC, datetime
 
 from sqlalchemy import TextClause, select, text, update
@@ -59,7 +60,8 @@ class PostgresImportRunRepository(ImportRunRepository):
     **The same property ends a live hold silently**: `idle_session_timeout`, a proxy's
     idle cut or a server restart closes the connection and frees the lock with nothing
     said. `touch` confirms the hold and the reads on theirs -- which also keeps them from
-    idling -- and one found gone is dropped with a `RepositoryConflict`.
+    idling -- and one found gone is dropped with a `RepositoryConflict`. Giving back a
+    lock whose connection has ended is no error: the lock went with it.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -126,18 +128,8 @@ class PostgresImportRunRepository(ImportRunRepository):
     async def release_reads(self) -> None:
         connection, reads = self._reader, sorted(self._reads)
         self._reader, self._reads = None, set()
-        if connection is None:
-            return
-        try:
-            for dataset in reads:
-                await connection.execute(
-                    _UNREAD, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
-                )
-        except BaseException:
-            await connection.invalidate()
-            raise
-        finally:
-            await connection.close()
+        if connection is not None:
+            await _give_back(connection, _UNREAD, reads)
 
     async def _drop_reads(self) -> None:
         """Forget every read, ending the backend they were on so none outlives it."""
@@ -220,20 +212,18 @@ class PostgresImportRunRepository(ImportRunRepository):
 
     async def release(self, dataset: str) -> None:
         connection = self._holds.pop(dataset, None)
-        if connection is None:
-            return
-        try:
-            await connection.execute(_UNLOCK, {"namespace": _LOCK_NAMESPACE, "dataset": dataset})
-        except BaseException:
-            # A connection that did not unlock may still hold the lock: closing its
-            # backend is what releases it, rather than returning it to the pool.
-            await connection.invalidate()
-            raise
-        finally:
-            await connection.close()
+        if connection is not None:
+            await _give_back(connection, _UNLOCK, [dataset])
 
     async def touch(self, dataset: str) -> None:
-        await self._confirm(dataset)
+        try:
+            await self._confirm(dataset)
+        except RepositoryConflict:
+            # A server restart ends the reads' connection with the hold's: read too, so
+            # one found gone is dropped now. The conflict raised is the hold's.
+            with contextlib.suppress(RepositoryConflict):
+                await self._confirm_reads()
+            raise
         await self._confirm_reads()
         async with refusals_as_conflict(self._session, f"the heartbeat of {dataset}"):
             await self._session.execute(
@@ -308,6 +298,27 @@ async def _why_lost(connection: AsyncConnection, still: TextClause, dataset: str
             raise
         return "its connection ended"
     return None if held else "its lock is gone"
+
+
+async def _give_back(connection: AsyncConnection, unlock: TextClause, datasets: list[str]) -> None:
+    """Unlock each of `datasets` on `connection` with `unlock`, then close it.
+
+    One that did not unlock may still hold a lock, so its backend is ended rather than
+    returned to the pool. One that had already ended -- a server restart,
+    `idle_session_timeout` -- took every lock on it along: given back, and no error.
+    """
+    try:
+        for dataset in datasets:
+            await connection.execute(unlock, {"namespace": _LOCK_NAMESPACE, "dataset": dataset})
+    except DBAPIError as exc:
+        await _discard(connection)
+        if not exc.connection_invalidated:
+            raise
+    except BaseException:
+        await _discard(connection)
+        raise
+    else:
+        await connection.close()
 
 
 async def _discard(connection: AsyncConnection) -> None:

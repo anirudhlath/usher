@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import delete, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from tests.contract.import_run_repository_contract import ImportRunRepositoryContract
@@ -217,6 +218,52 @@ async def test_a_hold_interrupted_after_its_lock_was_granted_leaves_no_lock_in_t
         await engine_b.dispose()
 
 
+@pytest.mark.parametrize("give_back", ["release", "release_reads"])
+async def test_a_give_back_interrupted_before_its_unlock_leaves_no_lock_in_the_pool(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, give_back: str
+) -> None:
+    """The twin of the case above, on the way out: the unlock never ran.
+
+    Closed, the connection would go back to the pool with the lock still on it, so a
+    give-back that fails ends the backend instead.
+    """
+    engine = build_engine(postgres_url, pool_size=1, max_overflow=0)
+    factory = build_session_factory(engine)
+    held: list[bool] = []
+    original = AsyncConnection.execute
+
+    async def interrupted_before_unlocking(
+        self: AsyncConnection, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        if self.sync_engine is engine.sync_engine and "pg_advisory_unlock" in str(statement):
+            held.append(not await _free(engine_b, _PROBE, within=0))
+            raise _Interrupted
+        return await original(self, statement, *args, **kwargs)
+
+    engine_b = build_engine(postgres_url)
+    try:
+        async with factory() as session:
+            runs = PostgresImportRunRepository(session)
+            if give_back == "release":
+                await runs.hold(_PROBE)
+            else:
+                assert await runs.hold_for_reading(_PROBE) is True
+            monkeypatch.setattr(AsyncConnection, "execute", interrupted_before_unlocking)
+            try:
+                with pytest.raises(_Interrupted):
+                    if give_back == "release":
+                        await runs.release(_PROBE)
+                    else:
+                        await runs.release_reads()
+            finally:
+                monkeypatch.undo()
+        assert held == [True], "the premise: the lock was still held when the unlock failed"
+        assert await _free(engine_b, _PROBE), "the pooled connection kept the dataset's lock"
+    finally:
+        await engine.dispose()
+        await engine_b.dispose()
+
+
 _PROBE = "movielens.genome"
 
 
@@ -286,6 +333,39 @@ async def test_a_hold_whose_backend_ended_is_refused_by_touch_and_taken_again_by
         assert await _free(engine, _PROBE), "the dataset is anybody's"
         await runs.hold(_PROBE)
         assert not await _free(engine, _PROBE, within=0), "taken again"
+    finally:
+        await runs.release_all()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("give_back", ["release", "release_reads"])
+async def test_a_lock_whose_backend_ended_is_given_back_without_a_raise(
+    session: AsyncSession, postgres_url: str, give_back: str
+) -> None:
+    """A server restart ends the backend, and every lock on it with it.
+
+    Unlocking on that connection raised the disconnect out of the `finally` that gives a
+    hold or a phase's reads back, over whatever the import had recorded. The lock is
+    already gone, so there is nothing left to give back.
+    """
+    runs = _Releasing(session)
+    engine = build_engine(postgres_url)
+    try:
+        if give_back == "release":
+            await runs.hold(_PROBE)
+        else:
+            assert await runs.hold_for_reading(_PROBE) is True
+            assert await runs.hold_for_reading("imdb.title.basics") is True
+        ended = await _end_the_backend_holding(engine, _PROBE)
+        assert ended == 1, "the premise: exactly one backend held the lock, and it ended"
+        try:
+            if give_back == "release":
+                await runs.release(_PROBE)
+            else:
+                await runs.release_reads()
+        except DBAPIError as exc:
+            pytest.fail(f"giving back a lock whose backend ended raised: {exc!r}")
+        assert await _free(engine, _PROBE), "the dataset is anybody's"
     finally:
         await runs.release_all()
         await engine.dispose()

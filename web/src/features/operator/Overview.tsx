@@ -299,8 +299,9 @@ export default function Overview() {
   const readiness = useReadiness()
   const bootstrap = useBootstrapStatus({
     // patterns.md §8: status costs ~0.33 s and is uncached, so it is polled
-    // only while something is running. Overview obeys the same rule Bootstrap
-    // does — a background screen polling forever is the worse offender.
+    // only while something is running. Overview keeps that rule as written:
+    // Bootstrap's 20 min after a 202 is a departure recorded in CONVENTIONS.md,
+    // and Overview queues nothing, so it has no 202 to watch.
     refetchInterval: (query) =>
       query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
   })
