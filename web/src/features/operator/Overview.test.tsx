@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { delay, http, HttpResponse } from 'msw'
 import { renderApp, screen, waitFor, within } from '@/test/render'
 import { server } from '@/test/server'
@@ -47,15 +47,24 @@ function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
   }
 }
 
+/** An arbitrary instant for the pinned clock. */
+const T0 = Date.parse('2026-08-18T03:10:00Z')
+
 /**
- * `Date.now()` moved `ms` ahead of the real clock, which keeps running. Only
- * `Date.now` is replaced — not timers — so MSW, React Query's scheduling and
- * `findBy*` behave as they do everywhere else.
+ * `Date` pinned at `at`, and nothing else faked, so MSW, React Query's
+ * scheduling and `findBy*` behave as they do everywhere else. The clock stands
+ * still until the test moves it with `vi.setSystemTime`: a clock that merely
+ * shifts keeps running, and a rate over two polls then carries whatever real
+ * time passed between them — 1,000 rows over 10.08 s is 99 a second.
  */
-function shiftClock(ms: number) {
-  const now = Date.now.bind(Date)
-  return vi.spyOn(Date, 'now').mockImplementation(() => now() + ms)
+function pinClock(at: number): void {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(at)
 }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('Overview', () => {
   it('renders readiness, the running cursor and the sources table when everything answers', async () => {
@@ -77,6 +86,7 @@ describe('Overview', () => {
   })
 
   it('re-reads the heartbeat age on every poll, so a run that dies while the page is open turns "Stalled?"', async () => {
+    pinClock(T0)
     // One body for every poll: the importer has died, so nothing on the wire changes.
     const body = statusWithHeartbeat(100)
     let polls = 0
@@ -91,17 +101,14 @@ describe('Overview', () => {
     await screen.findByText('No completion estimate — the server reports a cursor, not a percentage.')
     expect(screen.queryByText('Stalled?')).toBeNull()
 
-    const clock = shiftClock(30_000)
-    try {
-      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
-      expect(polls).toBe(2)
-      expect(await screen.findByText('Stalled?')).toBeInTheDocument()
-    } finally {
-      clock.mockRestore()
-    }
+    vi.setSystemTime(T0 + 30_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(polls).toBe(2)
+    expect(await screen.findByText('Stalled?')).toBeInTheDocument()
   })
 
   it('derives rows/sec from every poll, so a run that stops writing reads 0 rather than its last rate', async () => {
+    pinClock(T0)
     const first = statusWithHeartbeat(4)
     // Ten seconds later, 1,000 more rows on the running run; then a poll that finds nothing new.
     const moved: BootstrapStatusResponse = {
@@ -117,22 +124,14 @@ describe('Overview', () => {
     const label = await screen.findByText('rows / sec')
     expect(label.nextElementSibling?.textContent).toBe('—')
 
-    const later = shiftClock(10_000)
-    try {
-      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
-      await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
-    } finally {
-      later.mockRestore()
-    }
+    vi.setSystemTime(T0 + 10_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
 
-    const latest = shiftClock(20_000)
-    try {
-      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
-      expect(bodies).toHaveLength(0)
-      await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
-    } finally {
-      latest.mockRestore()
-    }
+    vi.setSystemTime(T0 + 20_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(bodies).toHaveLength(0)
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
   })
 
   it('shows the loading state as a skeleton with a busy region, never a spinner', () => {
@@ -231,11 +230,11 @@ describe('Overview', () => {
       return render()
     }
 
-    it('raises a warn item for a completed run whose rerun could not start, with the error verbatim', async () => {
+    it('raises a warn item for a completed run whose refresh landed no batch, with the error verbatim', async () => {
       renderCompletedWithError()
 
       const item = await screen.findByRole('button', {
-        name: /^The last movielens import could not start; the completed one stands/,
+        name: /^The last movielens attempt landed no batch, so the completed import stands/,
       })
       expect(within(item).getByText(importCompletedWithError.error ?? '')).toBeInTheDocument()
       expect(glyphOf(item)).toHaveStyle({ color: 'var(--warn-text)' })
@@ -261,7 +260,7 @@ describe('Overview', () => {
 
       const item = await screen.findByRole('button', { name: /^The imdb import recorded an error/ })
       expect(within(item).getByText('left over')).toBeInTheDocument()
-      expect(screen.queryByText(/the completed one stands/)).toBeNull()
+      expect(screen.queryByText(/the completed import stands/)).toBeNull()
     })
 
     it('raises nothing for a completed run with no error', async () => {

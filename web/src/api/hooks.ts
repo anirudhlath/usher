@@ -436,8 +436,10 @@ export type ImportRun = Schemas['ImportRunResponse']
  * `options` is a partial because the poll cadence is the *caller's* decision
  * and patterns.md §8 makes it a conditional one: status costs ~0.33 s and is
  * uncached, so poll every 10 s and **only while at least one run is
- * `running`*. A surface with nothing running says "idle — not polling" rather
- * than polling invisibly forever.
+ * `running`* — or, on the screen that queued one, for a bounded window after
+ * the 202, because a refresh reads `completed` until its first batch lands. A
+ * surface polling for neither reason says "idle — not polling" rather than
+ * polling invisibly forever.
  */
 export function useBootstrapStatus(options?: Partial<UseQueryOptions<BootstrapStatusResponse>>) {
   return useQuery({

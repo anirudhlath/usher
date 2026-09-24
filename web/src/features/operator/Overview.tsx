@@ -255,11 +255,12 @@ interface Attention {
 /**
  * What an import checkpoint asks of a person, if anything.
  *
- * `error` is the test, not `status`: a rerun that fails before it starts leaves
- * a `completed` checkpoint `completed` with the error beside it (PRD 04), and
- * that is the only trace of a press of "Run again" that did nothing. It is warn,
- * not bad — the import it would have refreshed still stands. A `failed` run
- * with no error recorded is still a failure, and says so.
+ * `error` is the test, not `status`: a refresh that lands no batch — it may
+ * have started and downloaded before failing — leaves a `completed` checkpoint
+ * `completed` with the error beside it (PRD 04), and that is the only trace of
+ * a press of "Run again" that landed nothing. It is warn, not bad — the import
+ * it would have refreshed still stands. A `failed` run with no error recorded
+ * is still a failure, and says so.
  */
 function importAttention(run: ImportRun): Attention | null {
   const base: Pick<Attention, 'id' | 'icon' | 'to'> = {
@@ -281,7 +282,7 @@ function importAttention(run: ImportRun): Attention | null {
     tone: 'warn',
     text:
       run.status === 'completed'
-        ? `The last ${run.dataset} import could not start; the completed one stands`
+        ? `The last ${run.dataset} attempt landed no batch, so the completed import stands`
         : `The ${run.dataset} import recorded an error`,
     meta: run.error,
   }

@@ -129,7 +129,18 @@ export function CursorProgress({
           this position.
         </span>
       ) : null}
-      {error ? <span className="u-cursor__note u-cursor__note--bad">{error}</span> : null}
+      {error ? (
+        // Bad only beside `failed`. A run that has not failed is not a failure,
+        // whatever it carries, so any other status draws its error warn.
+        <span
+          className={clsx(
+            'u-cursor__note',
+            status === 'failed' ? 'u-cursor__note--bad' : 'u-cursor__note--warn',
+          )}
+        >
+          {error}
+        </span>
+      ) : null}
       {!stalled && !error && status === 'running' ? (
         <span className="u-cursor__note">
           No completion estimate — the server reports a cursor, not a percentage.

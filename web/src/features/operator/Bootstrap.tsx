@@ -22,16 +22,22 @@
  *   importer never turns "Stalled?". `dataUpdatedAt` moves on every poll, so it
  *   is the clock.
  * · **Polling is conditional.** Status costs ~0.33 s and is uncached, so it is
- *   polled every 10 s and only while at least one run is `running`. When
- *   nothing runs the screen says "idle — not polling" rather than polling
- *   invisibly forever.
+ *   polled every 10 s while at least one run is `running`, and for a bounded
+ *   window after a 202: a refresh of a `completed` import reads `completed`
+ *   through its revision lookup and download until its first batch lands
+ *   (PRD 04), so "while running" alone stops watching at the press of "Run
+ *   again". When neither holds the screen says "idle — not polling" rather than
+ *   polling invisibly forever.
  * · **A `failed` run is a normal, designed state**: bad-tone status word,
  *   `error` verbatim, position retained, trigger relabelled "Resume".
- * · **`error` is read whatever the status says.** A rerun that fails before it
- *   starts leaves a `completed` checkpoint `completed`, with the error beside it
- *   (PRD 04), so a green "completed" can hide the only sign that the last press
- *   of "Run again" did nothing. Such a row is warn-toned, never green and never
- *   bad: the import it would have refreshed still stands.
+ * · **Only `failed` is drawn as a failure.** An `error` on a run of any other
+ *   status is warn-toned, in the live card and the phase row alike.
+ * · **`error` is read whatever the status says.** A refresh that lands no batch
+ *   — it may have started and downloaded before failing — leaves a `completed`
+ *   checkpoint `completed`, with the error beside it (PRD 04), so a green
+ *   "completed" can hide the only sign that the last press of "Run again"
+ *   landed nothing. Such a row is warn-toned, never green and never bad: the
+ *   import it would have refreshed still stands.
  * · **Genome coverage is counts.** The route returns six of them and declines
  *   the division. Every ratio printed here is shown as numerator / denominator
  *   *and* as a percent whose denominator is named on screen, because picking
@@ -275,7 +281,7 @@ function PhaseRow({ spec, index, run, asOf, measured, onRun }: PhaseRowProps) {
             }}
           >
             {run.status === 'completed' &&
-              'The last attempt could not start, so the completed import stands: '}
+              'The last attempt landed no batch, so the completed import stands: '}
             {/* Verbatim, and never parsed: it is the server's own sentence. */}
             <span>{run.error}</span>
           </span>
@@ -318,13 +324,37 @@ function ratio(numerator: number, denominator: number): string {
 
 /* ------------------------------------------------------------------ screen */
 
+/**
+ * How long a 202 keeps the screen polling when no run reads `running`. A
+ * refresh reads `completed` until its first batch lands, and one whose lookup
+ * or first fetch keeps failing retries for up to `RetryPolicy.budget`, 900 s,
+ * before it records why. Twenty minutes covers that, the last attempt and the
+ * queue, and still ends.
+ */
+const WATCH_MINUTES = 20
+
+function pollingWord(anyRunning: boolean, watching: boolean): string {
+  if (anyRunning) return 'polling every 10 s while something runs'
+  if (watching) return `polling every 10 s for ${WATCH_MINUTES} min after queueing`
+  return 'idle — not polling'
+}
+
 export default function Bootstrap() {
   const toasts = useToasts()
   const traceOf = useProblemTrace()
+  // The 202 being watched, numbered so a second one restarts the window.
+  const [watching, setWatching] = useState<number | null>(null)
+  const accepted = useRef(0)
+  useEffect(() => {
+    if (watching === null) return
+    const timer = setTimeout(() => setWatching(null), WATCH_MINUTES * 60_000)
+    return () => clearTimeout(timer)
+  }, [watching])
   const status = useBootstrapStatus({
-    // §8: uncached and ~0.33 s a call, so poll only while something is running.
+    // §8: uncached and ~0.33 s a call, so poll only while something is running
+    // or a 202 is being watched.
     refetchInterval: (query) =>
-      query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
+      watching !== null || query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
   })
   const start = useStartBootstrap()
   const [pending, setPending] = useState<PhaseSpec | 'all' | null>(null)
@@ -336,6 +366,7 @@ export default function Bootstrap() {
   const throughput = useThroughput(runs, asOf)
 
   const anyRunning = (runs ?? []).some((run) => run.status === 'running')
+  const polling = anyRunning || watching !== null
   const live = (runs ?? []).filter((run) => run.status === 'running' || run.status === 'failed')
   const neverBuilt = data !== undefined && data.runs.length === 0
 
@@ -364,6 +395,8 @@ export default function Bootstrap() {
     setPending(null)
     start.mutate(phase, {
       onSuccess: (queued) => {
+        accepted.current += 1
+        setWatching(accepted.current)
         toasts.receipt({
           title: phase === 'all' ? 'Queued every bootstrap phase' : `Queued the ${phase} phase`,
           detail: 'Accepted with a 202. Progress appears under Running now within a few seconds.',
@@ -397,13 +430,14 @@ export default function Bootstrap() {
             {count(data?.titles ?? 0)} titles
           </Badge>
           <Badge
-            tone={anyRunning ? 'info' : 'neutral'}
-            icon={<Icon name={anyRunning ? 'radio' : 'circle-dashed'} />}
+            tone={polling ? 'info' : 'neutral'}
+            icon={<Icon name={polling ? 'radio' : 'circle-dashed'} />}
           >
-            {anyRunning ? 'polling every 10 s while something runs' : 'idle — not polling'}
+            {pollingWord(anyRunning, watching !== null)}
           </Badge>
           <span style={{ font: 'var(--text-body-xs)', color: 'var(--text-muted)' }}>
-            Status costs about 0.33 s and is uncached, so it is only polled while a run is live.
+            Status costs about 0.33 s and is uncached, so it is only polled while a run is live, and for{' '}
+            {WATCH_MINUTES} min after a phase is queued.
           </span>
         </div>
 
@@ -491,8 +525,18 @@ export default function Bootstrap() {
               </div>
             ) : (
               <StateBlock kind="empty" title="Nothing is running" meta="no run reports status: running">
-                Every recorded run has finished. Nothing is being polled — status is uncached and costs about
-                0.33 s, so it is only asked for while a run is live.
+                {watching === null ? (
+                  <>
+                    Every recorded run has finished. Nothing is being polled — status is uncached and costs
+                    about 0.33 s, so it is only asked for while a run is live.
+                  </>
+                ) : (
+                  <>
+                    No run reads running yet. A refresh of a completed import reads completed until its first
+                    batch lands, so status is polled every 10 s for {WATCH_MINUTES} min after a phase is
+                    queued.
+                  </>
+                )}
               </StateBlock>
             )}
           </OpsSection>

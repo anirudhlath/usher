@@ -198,11 +198,14 @@ export const importCompleted: Schemas['ImportRunResponse'] = {
 }
 
 /**
- * `completed` with an `error` beside it: a rerun that could not start, over an
- * import that stands (PRD 04). The revision `HEAD` failed before `start()`, so
- * the server kept the checkpoint `completed` rather than downgrading it and
- * blocking every phase that reads it — and refreshed `heartbeat_at` as it
- * recorded why. Everything else is the import that finished.
+ * `completed` with an `error` beside it: a refresh that landed no batch, over
+ * an import that stands (PRD 04). A refresh can fail at the revision lookup,
+ * the download or the first fetch — after it has started, and downloaded — and
+ * until a batch of the new revision lands the server keeps the checkpoint
+ * `completed` at its revision and position rather than blocking every phase
+ * that reads it. This one's revision `HEAD` gave up; `heartbeat_at` is the
+ * refresh's, later than `finished_at`. Everything else is the import that
+ * finished.
  */
 export const importCompletedWithError: Schemas['ImportRunResponse'] = {
   ...importCompleted,
