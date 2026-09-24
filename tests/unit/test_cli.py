@@ -24,7 +24,6 @@ import httpx
 import pytest
 
 import usher
-import usher.api.lanes
 import usher.cli
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
@@ -55,6 +54,7 @@ from usher.composition import (
     _movielens,
     _percent,
     _report_coverage,
+    build_scheduler,
 )
 from usher.config import Settings
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
@@ -479,14 +479,14 @@ async def test_bare_usher_push_schedules_the_jobs_the_server_does(
     built without one runs a scheduler lane with no jobs in it.
     """
     built: list[tuple[str, ...]] = []
-    real = usher.api.lanes.build_scheduler
+    real = build_scheduler
 
     def spy(settings: Settings, *, sessions: Any) -> Any:
         scheduler = real(settings, sessions=sessions)
         built.append(tuple(job.name for job in scheduler.jobs))
         return scheduler
 
-    monkeypatch.setattr(usher.api.lanes, "build_scheduler", spy)
+    monkeypatch.setattr("usher.api.lanes.build_scheduler", spy)
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
         secret_key="0" * 32,
