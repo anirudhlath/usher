@@ -193,9 +193,10 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   **Both merge directions have a low yield, so a merge costs a second
   request per person.** That is *expensive*, not *impossible* — do not restate it
   as an absolute; that is how this claim went wrong once already.
-- **Price a TMDb crawl from the policy ceiling — ~25 rps, never an
-  observed lane rate** — over the people the catalog *holds*, not those its
-  payloads mention (`mapping._CAST_LIMIT` caps stored cast at 50 a title).
+- **Price a TMDb crawl from the configured ceiling —
+  `USHER_TMDB_REQUESTS_PER_SECOND`, default 30 — never an observed lane rate** —
+  over the people the catalog *holds*, not those its payloads mention
+  (`mapping._CAST_LIMIT` caps stored cast at 50 a title).
 - **The ≤6-month cache term applies to `raw_payloads`, not to derived
   columns**, so **cache the response and a crawl recurs; store the derived id
   and it does not.** `_UPSERT_PEOPLE`'s `DO UPDATE SET` omits `imdb_id`, so `usher

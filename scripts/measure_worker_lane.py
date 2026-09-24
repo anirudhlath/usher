@@ -44,7 +44,8 @@ _LATENCY_MEDIAN = 0.0588
 _LATENCY_MEAN = 0.0993
 _LATENCY_P95 = 0.4267
 
-# The three configured limits the bar names, all at or under TMDb's ~25 rps.
+# The three configured limits the bar names, all under the default
+# `USHER_TMDB_REQUESTS_PER_SECOND` (30).
 _LIMITS: tuple[float, ...] = (5.0, 12.0, 24.0)
 
 
