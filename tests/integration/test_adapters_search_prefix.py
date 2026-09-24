@@ -225,8 +225,8 @@ async def test_a_person_name_reaches_their_film_from_the_first_keystroke(
     That is the plausible simplification: `title_search_names` ships empty in
     `m09a`, so on a fresh install dropping the arm changes no answer at all
     and every case that only seeds `titles` stays green. The damage arrives
-    with the loaders -- typing a director's name finds nothing, which is one
-    of the two things PRD 05 says the narrow table exists for.
+    with the loaders -- typing a director's name finds nothing, and `person` is
+    one of the two members PRD 05 gives the narrow table.
 
     The distractor is 900x more popular and matches nothing, so an
     implementation returning its whole table ordered by popularity puts it

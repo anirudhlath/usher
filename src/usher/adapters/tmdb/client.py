@@ -26,7 +26,8 @@ TMDB_ATTRIBUTION = (
 
 _tracer = trace.get_tracer("usher.metadata.tmdb")
 _meter = metrics.get_meter("usher.metadata.tmdb")
-# PRD 10's dashboard 3: "TMDb requests/sec against the ~40 ceiling with 429 count".
+# PRD 10's dashboard 3: "TMDb requests/sec against the `USHER_TMDB_REQUESTS_PER_SECOND`
+# ceiling, with 429 count".
 _request_duration = _meter.create_histogram(
     "usher.metadata.request.duration", unit="s", description="Wall time per TMDb request"
 )

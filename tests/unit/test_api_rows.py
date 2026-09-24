@@ -113,7 +113,7 @@ async def test_nothing_but_the_curate_job_is_enqueued(
 async def test_asking_again_is_accepted_again_and_leaves_one_job(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"* is `(kind, key)` doing the work.
+    """PRD 06's *"one modest completion per generation"* is `(kind, key)` doing the work.
 
     The 202 is unconditional on it, and both halves matter. The second request must not
     answer 409, 204 or 200 -- an operator pressing the button twice has not made a
@@ -543,7 +543,7 @@ async def test_a_body_that_is_not_a_boolean_is_refused_by_the_envelope(
 
 
 def test_the_provider_routes_are_in_the_schema_under_the_admin_tag(toggling: FastAPI) -> None:
-    """PRD 07's acceptance criterion is *every endpoint in its four tables answers*.
+    """PRD 07's Admin table lists these routes, and its clients codegen from the schema.
 
     A route absent from `/openapi.json` is one no generated client can call.
 

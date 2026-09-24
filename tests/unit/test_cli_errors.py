@@ -794,8 +794,8 @@ def test_the_escape_hatch_is_offered_on_the_column_rather_than_on_the_message(
     """The refusal's kind is `error_code`, so a reworded sentence cannot hide it.
 
     The wrong implementation this kills is `in (one.error or "")`: `ports/ingest.py`
-    builds that sentence from three numbers and PRD 08 lets it be reworded in any
-    release, so a match on it silently stops offering `--allow-full-retraction` on the
+    builds that sentence from three numbers, PRD 08 names the numbers and not the
+    wording, and a match on it silently stops offering `--allow-full-retraction` on the
     one failure that has one. The message here deliberately carries no token at all.
     """
     _sync_against(

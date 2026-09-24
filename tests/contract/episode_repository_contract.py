@@ -548,12 +548,12 @@ class EpisodeRepositoryContract:
     ) -> None:
         """The concurrent-insert case, inside a season.
 
-        PRD 07 rules out offset paging because it *"produces duplicates under
-        concurrent writes"*, and the mirror property is what a keyset buys. Page 1 is
-        10/20/30; episode **15** then lands, which sorts into the window already
-        served -- under `OFFSET 3` every later row moves down one place and 30 is
-        served a second time. The premise is asserted: the insert has to sort *before*
-        the cursor, or the comparison is vacuous.
+        PRD 07 pages by cursor only. Offset paging serves a row twice when a
+        concurrent insert sorts before it, and not doing so is what a keyset buys.
+        Page 1 is 10/20/30; episode **15** then lands, which sorts into the window
+        already served -- under `OFFSET 3` every later row moves down one place and
+        30 is served a second time. The premise is asserted: the insert has to sort
+        *before* the cursor, or the comparison is vacuous.
 
         The keyset's `IS NOT NULL` leg does not appear in this read, and that is a
         fact about the schema rather than an omission: `episodes.episode_number` and

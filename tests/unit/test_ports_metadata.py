@@ -152,8 +152,8 @@ def test_search_can_be_scoped_to_one_kind() -> None:
 
     A caller that knows which one it wants -- the match stage always does, from
     `SourceItem.kind` -- would otherwise pay two upstream requests and then discard half
-    the answers, on the one tier PRD 03 already calls "a last resort" for rate-limit
-    reasons.
+    the answers, on the only match tier in PRD 03 that spends rate-limited TMDb
+    requests at all.
 
     Optional, so a provider with a single search space ignores it.
     """

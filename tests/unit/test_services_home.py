@@ -529,9 +529,9 @@ async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowConte
 def test_a_provider_no_one_has_ever_touched_renders_as_enabled() -> None:
     """The virgin-database case, and the one the wrong default gets wrong.
 
-    An empty `overrides()` is the *shipped* state of this table -- PRD 09 item 9 says
-    it is *"deliberately not seeded with ten slugs"* -- so this is not an edge case,
-    it is the state every deployment starts in and most stay in forever. The slug set
+    An empty `overrides()` is the *shipped* state of this table -- PRD 06 says it
+    *"ships empty and is never seeded"* -- so this is not an edge case, it is the
+    state every deployment starts in and most stay in forever. The slug set
     is compared against `{p.slug_prefix for p in ROW_PROVIDERS}` rather than against a
     literal, so an eleventh provider cannot be forgotten here.
     """

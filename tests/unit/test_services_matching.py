@@ -194,7 +194,7 @@ async def test_a_trusted_provider_id_the_catalog_lacks_creates_a_stub(
 async def test_an_item_with_no_usable_id_and_no_name_match_is_unmatched(
     fixture: _Fixture,
 ) -> None:
-    """PRD 03 stage 5.
+    """PRD 03's match ladder, step 6.
 
     A bare name is not an identity claim, so this lands in the review queue rather than
     fabricating a title -- and it is *not* dropped, which PRD 02 states as a rule.
@@ -205,7 +205,7 @@ async def test_an_item_with_no_usable_id_and_no_name_match_is_unmatched(
 
 
 async def test_an_unmatched_item_is_enqueued_for_a_remote_search(fixture: _Fixture) -> None:
-    """PRD 03's tier 4 is "TMDb search API as a last resort".
+    """PRD 03: the TMDb search tier "is queued, not inline".
 
     That is one network call per unmatched item, and a first full walk produces
     them in bulk, so running it inline would make the walk's duration a function

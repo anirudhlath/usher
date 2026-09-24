@@ -69,7 +69,7 @@ class MatchService:
         self._provider = provider
 
     async def match_remote(self, item: SourceItem) -> MatchOutcome:
-        """PRD 03's tier 4, one item at a time, off the queue."""
+        """PRD 03's TMDb search tier, one item at a time, off the queue."""
         kind = _TITLE_KIND.get(item.kind)
         if self._provider is None or kind is None:
             return MatchOutcome(
@@ -102,8 +102,8 @@ class MatchService:
             title_id=found,
             # `PROVIDER_SEARCH` whether the search *found* a title or minted
             # one, because the label answers "how was this resolved" and the
-            # answer is the search either way -- which is what makes PRD 10's
-            # "is the TMDb-search tier earning its rate limit" answerable.
+            # answer is the search either way -- which is what makes the search
+            # tier's yield answerable on PRD 10's `usher.match.result`.
             method=MatchMethod.PROVIDER_SEARCH,
         )
 

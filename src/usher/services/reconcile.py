@@ -1,4 +1,4 @@
-"""PRD 03's reconciliation lanes: the nightly full walk and the delta walk."""
+"""PRD 03's reconciliation lanes: the full walk and the delta walk."""
 
 import time
 from collections.abc import Awaitable, Callable, Sequence

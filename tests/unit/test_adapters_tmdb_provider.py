@@ -720,9 +720,9 @@ async def test_an_empty_year_filtered_search_is_retried_without_the_year(
 
     Without this retry the tighter of the two silently wins: every candidate TMDb
     returns carries exactly the year asked for, so `_confident`'s own
-    `abs(candidate.year - item.year) <= 1` is unreachable and tier 4 runs at +/-0
-    while tier 3 runs at +/-1. Re-asking without the year resolves the titles whose
-    TMDb date is one year off the source's.
+    `abs(candidate.year - item.year) <= 1` is unreachable and the TMDb search tier
+    runs at +/-0 while the local name + year step runs at +/-1. Re-asking without the
+    year resolves the titles whose TMDb date is one year off the source's.
     """
     server = _Server()
     server.year_filter_is_exact = True
@@ -754,8 +754,8 @@ async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> N
 async def test_an_empty_search_with_no_year_is_not_retried() -> None:
     """With no year to drop, a retry would be the identical request twice.
 
-    That is one wasted rate-limited call per unmatched item, on the tier PRD 03
-    already calls a last resort.
+    That is one wasted rate-limited call per unmatched item, on the only match tier
+    in PRD 03 that spends a TMDb request at all.
     """
     server = _Server()
     server.search_finds_nothing = True

@@ -40,7 +40,7 @@ class DerivationReport:
     """What one run of the walk did, in numbers an operator can act on.
 
     Counts rather than a ratio, and `usher derive`'s report prints them the
-    same way for the reason PRD 08 gives: a derived-coverage percentage is
+    same way: a derived-coverage percentage is
     `titles_derived / payloads_read`, and that is `0/0` on the empty database
     every command has to work against.
 

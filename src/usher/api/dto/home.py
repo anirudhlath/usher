@@ -60,8 +60,8 @@ class RowResponse(BaseModel):
     title: str
     # `null` rather than `""` when a row has nothing to explain. An empty
     # string is a subtitle a client renders as a blank line, and it cannot be
-    # told from a row that had something to say and said nothing. PRD 06: the
-    # reason "is already written to be spoken aloud, not just displayed".
+    # told from a row that had something to say and said nothing. PRD 06: "the
+    # `reason` field is already written to be spoken aloud".
     reason: str | None
     display_hint: DisplayHint
     cards: tuple[RowCardResponse, ...]

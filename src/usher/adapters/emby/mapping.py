@@ -266,7 +266,7 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
         series_external_id=as_text(payload.get("SeriesId")),
         season_number=as_int(payload.get("ParentIndexNumber")),
         episode_number=as_int(payload.get("IndexNumber")),
-        # PRD 03 stores this verbatim in `raw_payloads`.
+        # Opaque above the adapter, and never stored: PRD 03 stores no source payload.
         raw=deepcopy(dict(payload)),
     )
 

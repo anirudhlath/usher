@@ -33,8 +33,8 @@ class SimilarTitle(DomainModel):
 
     `score` is `SimilarityService`'s blend at the instant the batch ran, not a
     live computation -- which is the whole point of `title_neighbors` (PRD 05:
-    "item vectors are static, so this is a cheap batch artifact that makes
-    'more like this' instant and engine-independent").
+    neighbours are precomputed offline, "so 'more like this' is instant and
+    engine-independent").
     """
 
     title_id: uuid.UUID

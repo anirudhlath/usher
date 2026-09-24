@@ -689,10 +689,9 @@ class SearchService:
                     relevance=_RELEVANCE_K / (_RELEVANCE_K + rank),
                     popularity=_popularity_term(titles[hit.title_id].tmdb_popularity),
                     owned=1.0 if hit.title_id in owned else 0.0,
-                    # A small boost, never a demotion, and the direction is the
-                    # decision PRD 05 leaves open: a search is overwhelmingly a
-                    # re-find intent, so demoting what the household has finished
-                    # buries the exact film they just named.
+                    # PRD 05: a small boost, never a demotion. A search is
+                    # overwhelmingly a re-find intent, so demoting what the household
+                    # has finished buries the exact film they just named.
                     played=None if user_id is None else (1.0 if hit.title_id in played else 0.0),
                     recency=_recency_term(titles[hit.title_id], today=today),
                     # `None` rather than 0.0 in both absent cases.

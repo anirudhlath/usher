@@ -455,9 +455,9 @@ async def test_the_lifespan_puts_this_processs_embedder_on_app_state(
 
 
 async def test_a_deployment_with_no_embedding_model_exposes_none_rather_than_nothing() -> None:
-    """The push-only deployment PRD 08 describes.
+    """PRD 07 answers `?mode=semantic` with a 422 where this process holds no model.
 
-    and the claim `get_search_service`'s docstring used to make about it.
+    That is also the case `get_search_service`'s docstring used to make a claim about.
 
     `USHER_EMBEDDING_ENABLED` is `false` by default, so `composition.embedder`
     answers `(None, no-op)` and this attribute is `None` -- which is
@@ -466,7 +466,7 @@ async def test_a_deployment_with_no_embedding_model_exposes_none_rather_than_not
     the missing capability, never a 500.
 
     Fails: reaching for the model only where one exists, which leaves the
-    attribute absent and turns every search on a push-only deployment into an
+    attribute absent and turns every search on a model-less deployment into an
     `AttributeError` -- the failure the old docstring predicted, arriving for
     the reason it did not name.
     """
@@ -552,9 +552,9 @@ async def test_get_search_service_hands_over_the_model_this_process_holds() -> N
 async def test_the_mode_parameter_is_an_enum_on_the_wire_and_semantic_is_not_a_boolean(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 07's sketch spells this `?semantic=`.
+    """PRD 07's `?mode=` is the `SearchMode` enum, and `?semantic=` is not accepted at all.
 
-    which is a **boolean** and cannot express fusion at all.
+    A `?semantic=` flag is a **boolean**, and a boolean cannot express fusion.
 
     Two claims, and the second is the one a route could pass while getting
     wrong. First, `?mode=` reaches `/openapi.json` as an *enum* rather than as

@@ -223,9 +223,9 @@ async def test_a_franchise_renders_in_release_order_with_its_completeness(
     bare `IN (...)` that promises no order at all. An implementation rendering
     what it was handed would be rendering physical order off a real heap.
 
-    "You own 1 of 3" is the shape PRD 06 asks for, and the unowned members are
-    present rather than filtered -- a list narrowed to what the household has
-    reads "1 of 1".
+    "You own 1 of 3" is the ownership completeness PRD 07 asks of this route, and the
+    unowned members are present rather than filtered -- a list narrowed to what the
+    household has reads "1 of 1".
     """
     franchise = await catalog.collection("A Trilogy", tmdb_id=98_200_001)
     latest = await catalog.member(franchise, "The Third", release_date=date(2011, 1, 1))

@@ -31,7 +31,7 @@ class ProviderRef:
 
 @dataclass(frozen=True, slots=True)
 class NameYearProbe:
-    """PRD 03 stage 3: normalised name plus a year within +/-1.
+    """PRD 03's match ladder, step 4: normalised name plus a year within +/-1.
 
     `name` is passed exactly as the source gave it; the repository applies
     the same `lower()` the `ix_titles_name_lower_year` expression index is
@@ -49,8 +49,8 @@ class MatchOutcome:
     """What one source item resolved to, and by which tier.
 
     `method` is not diagnostics: it is the label on PRD 10's
-    `usher.match.result` counter, which is how "is the TMDb-search tier
-    earning its rate limit" is answerable at all.
+    `usher.match.result` counter, which is how the TMDb search tier's yield
+    against the requests it spends is answerable at all.
     """
 
     external_id: str

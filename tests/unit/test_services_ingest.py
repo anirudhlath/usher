@@ -368,7 +368,7 @@ async def test_an_attached_episode_reports_how_it_was_resolved(
 
     An episode resolved through its series is neither unmatched nor matched by any tier
     of the ladder it never walked, and reporting it as `unmatched` would put most of a
-    night's items in the wrong bucket of PRD 10's panel.
+    night's items in the wrong `result` bucket of PRD 10's counter.
     """
     result = await fixture.service.ingest_batch(SOURCE_ID, [SERIES, EPISODE], observed_at=RUN_AT)
     by_id = {outcome.external_id: outcome for outcome in result.outcomes}

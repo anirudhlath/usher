@@ -522,12 +522,11 @@ async def test_promotion_is_reported_even_when_the_enqueue_writes_nothing(
 async def test_a_parked_job_is_not_promoted_behind_a_humans_back(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """PRD 08: "Re-enqueueing does not un-park.
+    """PRD 08: *"Re-enqueueing does not un-park"*.
 
-    Poison a human has not looked at is not fixed by asking for it again, and a parked
-    job's priority is not promoted behind their back either." The enqueue statement
-    enforces it and this service does not work around it; the client is told what
-    happened through `enrichment_error`, which PRD 07's wire contract carries for
+    Nor is *"a parked job's priority ... promoted behind a human's back."* The enqueue
+    statement enforces it and this service does not work around it; the client is told
+    what happened through `enrichment_error`, which PRD 07's wire contract carries for
     exactly this.
     """
     title = await _seed_title(

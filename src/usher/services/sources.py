@@ -54,9 +54,9 @@ class SourceService:
         exists to avoid.
 
         The `credentials_ref` is a random token, not a function of the source
-        id. A derived ref would make PRD 08's indirection decorative and make
-        rotation -- write the new secret under a new ref, flip the pointer,
-        delete the old row -- impossible to express.
+        id -- PRD 03's "opaque, random token". A derived ref would make the
+        indirection decorative: anything holding a source id could address
+        its credential row.
 
         The source row is written *before* the credential, so the credential
         has an owner to cascade from the moment it exists. The reverse order
@@ -87,7 +87,7 @@ class SourceService:
         outcome is a `SourceStatus`, including a source whose credential row
         has gone missing and one whose credential no longer decrypts. PRD
         08: "a degraded subsystem narrows functionality; it never fails a
-        request local state can answer", and "this source is misconfigured"
+        request that local state can answer", and "this source is misconfigured"
         is exactly the answer an admin screen is asking for.
         """
         source = await self._sources.get(source_id)

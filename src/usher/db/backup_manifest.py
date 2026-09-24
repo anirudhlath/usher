@@ -150,29 +150,27 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "still exists"
         ),
         "llm_calls": _precious(
-            "0 rows here, 16 kB. PRD 08: 'the first thing in this project that is not "
-            "rebuildable from anything, at any price'. A spend ledger, and no "
-            "OpenAI-compatible endpoint offers a per-key call history to read it back from"
+            "0 rows here, 16 kB. PRD 08: 'NO. From nothing.' A spend ledger, the only "
+            "record that money was spent, and no OpenAI-compatible endpoint offers a "
+            "per-key call history to read it back from"
         ),
         "row_provider_settings": _precious(
             "0 rows. Operator-authored, like source config: no importer restores a human's "
-            "choice. PRD 08 said this table belonged here the day it existed and then went "
-            "a milestone without listing it. Keyed by `slug_prefix`, a string -- the one "
-            "precious table with no UUID in it at all"
+            "choice. Keyed by `slug_prefix`, a string -- the one precious table with no "
+            "UUID in it at all"
         ),
         "search_queries": _precious(
-            "9 rows. Unclassified by PRD 08 entirely, and unreproducible: a record of what "
-            "a household typed and what it then played. PRD 09 scopes issues #15/#16 "
-            "'post-v1 unless M9's search_queries supplies a real evaluation set', a plan "
-            "that depends on this table surviving"
+            "9 rows. Unreproducible: a record of what a household typed and what it then "
+            "played. PRD 09 keeps query expansion 'post-v1 unless `search_queries` "
+            "supplies a real evaluation set', a plan that depends on this table surviving"
         ),
         # --- partial: rebuildable but for named columns ---------------------
         "media_items": _partial(
             "One row per item the source holds, so on a real deployment this is large. "
-            "Every column is rebuilt by the next source walk except the two links -- "
-            "which is what PRD 08's 'manual unmatched resolutions' actually names, "
-            "since there is no such table. No provenance column exists, so all links "
-            "are carried and K4 writes only where the target's is NULL",
+            "Every column is rebuilt by the next source walk except the two links, "
+            "which PRD 08 carries alone. No provenance column tells an operator's "
+            "match from an automatic one, so all links are carried and K4 writes only "
+            "where the target's is NULL",
             ("title_id", "episode_id"),
         ),
         # --- rebuildable ----------------------------------------------------
@@ -265,9 +263,9 @@ MANIFEST: Final[MappingProxyType[str, BackupEntry]] = MappingProxyType(
             "bootstrap --phase movielens",
         ),
         "curated_rows": _rebuildable(
-            "0 rows. One completion per household. PRD 02: 'rebuildable (one completion) "
-            "and not restorable' -- no re-run reproduces the same rows, so 'rebuildable' "
-            "here means a screen appears, not that the screen comes back",
+            "0 rows. One completion per household. PRD 02: 'Rebuildable, not restorable' "
+            "-- no re-run reproduces the same rows, so 'rebuildable' here means a screen "
+            "appears, not that the screen comes back",
             "curate",
         ),
         "user_taste": _rebuildable(

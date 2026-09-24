@@ -62,7 +62,7 @@ class EnqueueOutcome:
 def is_tier_movie(title: Title) -> bool:
     """The priority tier, one title at a time.
 
-    `>= TIER_MIN_VOTES` and not `>`: PRD 04's tier is "≥100 votes", and a
+    `>= TIER_MIN_VOTES` and not `>`: PRD 04's tier is "≥ 100 votes", and a
     film sitting exactly on the floor is inside it.
     """
     return (

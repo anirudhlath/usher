@@ -28,7 +28,7 @@ class TitleMatchRepository(ABC):
     async def match_by_name_year(
         self, probes: Sequence[NameYearProbe]
     ) -> dict[NameYearProbe, uuid.UUID]:
-        """PRD 03 stage 3: normalised name plus a year within +/-1, scoped by kind."""
+        """PRD 03's match ladder, step 4: normalised name plus a year within +/-1, by kind."""
 
     @abstractmethod
     async def enrichment_states(

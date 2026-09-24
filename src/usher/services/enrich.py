@@ -158,7 +158,7 @@ class EnrichService:
         trigger = _trigger_for(priority)
         with _tracer.start_as_current_span("enrich.title") as span:
             span.set_attribute("usher.title_id", str(title_id))
-            # PRD 10: "Spans carry `title_id`, `source`, and `trigger` (`demand` vs
+            # PRD 10: "Spans carry `title_id`, `source` and `trigger` (`demand` vs
             # `background`) as attributes." The vocabulary is minted here, once, and
             # the histogram label below reads the same variable, so the span and the
             # metric cannot drift apart.
@@ -370,8 +370,7 @@ class EnrichService:
 
         Committed before the caller re-raises, because `JobWorker` parks the job
         on the exception and the reason has to be readable somewhere an operator
-        looks -- PRD 02's enrichment dashboard reads `enrichment_error`, not the
-        queue.
+        looks -- PRD 02 puts it on `Title.enrichment_error`, not in the queue.
         """
         # `str(exc)`, never the exception object and never a payload: PRD 08's
         # credentials-are-never-logged rule applies to a column an operator

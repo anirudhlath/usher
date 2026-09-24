@@ -385,7 +385,7 @@ async def test_the_match_handler_does_nothing_when_no_configured_source_owns_the
 
 
 async def test_an_ambiguous_search_resolves_to_nothing() -> None:
-    """PRD 03 stage 5: no *confident* match means the review queue, not a coin flip.
+    """PRD 03's match ladder, step 6: no *confident* match means the review queue, not a coin flip.
 
     Two same-name, same-year candidates is what a search for a film and its own remake
     looks like.
@@ -420,7 +420,7 @@ async def test_a_candidate_whose_year_is_far_off_is_not_confident() -> None:
 
 
 async def test_a_year_within_one_is_still_confident() -> None:
-    """PRD 03 stage 3's +/-1, applied to the remote tier too.
+    """PRD 03's name + year +/-1, applied to the remote tier too.
 
     a source and a provider disagreeing by one year is common and is not ambiguity.
     """
@@ -476,9 +476,9 @@ async def test_an_episode_is_never_remotely_searched() -> None:
 
 
 async def test_a_deployment_with_no_provider_configured_has_no_remote_tier() -> None:
-    """PRD 08: "TMDb key missing -> Bootstrap Phase 3 skipped".
+    """PRD 08: with the TMDb key missing, "Bootstrap Phase 3 skipped".
 
-    The same degradation one stage over -- no key, no tier 4, and no crash.
+    The same degradation one stage over -- no key, no TMDb search tier, and no crash.
     """
     outcome = await _matcher(FakeTitleRepository()).match_remote(
         SourceItem(external_id="e", name="A Film", kind=SourceItemKind.MOVIE, year=1999)
@@ -760,8 +760,8 @@ async def test_a_sync_key_naming_an_unknown_lane_is_malformed() -> None:
 async def test_the_sync_handler_completes_for_a_source_that_no_longer_exists() -> None:
     """A job for work that has since become impossible completes rather than parks.
 
-    PRD 08 reserves parking for work a human must look at, and a source deleted between
-    enqueue and claim is simply gone.
+    PRD 08: "Work that has become impossible completes, and does not park" -- and a
+    source deleted between enqueue and claim is simply gone.
     """
     events: list[str] = []
     opener = _Opener(None)
@@ -1091,7 +1091,7 @@ async def test_a_failed_write_back_propagates_rather_than_being_swallowed(
     do either with an exception it is allowed to see.
 
     A handler that absorbed one would `complete()` the job, delete its row
-    and lose the write silently -- which is what PRD 03's *"best effort"* is
+    and lose the write silently -- which is what PRD 03's *"best-effort"* is
     most often misread as licensing. Both arms, because a bare
     `except UsherPortError: return` swallows the two the worker treats
     differently and one arm alone cannot see that.

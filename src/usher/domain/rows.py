@@ -83,8 +83,8 @@ class BuiltRow(DomainModel):
 
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
-    # PRD 06: "the `reason` field is already written to be spoken aloud, not just
-    # displayed" -- Alfred reads it out.
+    # PRD 06: "the `reason` field is already written to be spoken aloud" --
+    # Alfred reads it out.
     reason: str | None = None
     family: RowFamily
     # On the row, never on the card: a hint describes the shelf, and a card

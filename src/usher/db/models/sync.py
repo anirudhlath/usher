@@ -89,9 +89,8 @@ class SyncRunRow(Base):
 class RawPayloadRow(Base):
     """A provider response, cached verbatim so reprocessing never refetches.
 
-    **Providers only**, never source items: a source item's payload is
-    re-readable from the source in one request, and caching every one of them
-    would cost more than PRD 08 budgets for the whole database.
+    **Providers only**, never source items (PRD 03): a source item's payload is
+    re-readable from the source in one request.
 
     `fetched_at` is what enforces TMDb's <=6-month caching term. Its
     `server_default` covers the INSERT arm only -- an upsert that refreshes a
@@ -114,9 +113,9 @@ class RawPayloadRow(Base):
         UniqueConstraint(
             "provider", "kind", "reference", name="uq_raw_payloads_provider_kind_reference"
         ),
-        # The compliance query: "oldest fetched_at against the 6-month
-        # ceiling" (PRD 10, dashboard 5). Ascending, because it asks for the
-        # minimum.
+        # The compliance query: "the oldest `raw_payloads.fetched_at` against
+        # the 6-month TMDb cache ceiling" (PRD 10, dashboard 5). Ascending,
+        # because it asks for the minimum.
         Index("ix_raw_payloads_fetched_at", "fetched_at"),
         CheckConstraint("provider <> ''", name="ck_raw_payloads_provider_not_empty"),
         CheckConstraint("reference <> ''", name="ck_raw_payloads_reference_not_empty"),

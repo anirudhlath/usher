@@ -35,11 +35,9 @@ def _stage(tmp_path: Path, source: str, name: str) -> Path:
 
 
 def test_retains_only_the_four_titletypes_that_map_to_titlekind() -> None:
-    """TvEpisode is dropped despite PRD 04 naming it.
+    """TvEpisode, short, videoGame, and isAdult=1 are dropped as PRD 04 specifies.
 
-    TitleKind is movie|series only, and Episode has no table until a later milestone.
-
-    short, videoGame, and isAdult=1 are dropped as PRD 04 specifies.
+    TitleKind is movie|series only, and an episode is never a skeleton title.
     """
     kept = [row for row in map(parse_basics_row, _basics_lines()) if row is not None]
     assert [row.imdb_id for row in kept] == [

@@ -1286,7 +1286,8 @@ def _push_adapter(
 async def test_supports_push_is_false_before_anything_is_opened() -> None:
     """The documented fallback, reached through the ledger rather than a hardcoded `False`.
 
-    An adapter with no live channel is covered by the reconciler's nightly walk.
+    PRD 03: an adapter with no live channel reports `supports_push = false` and the
+    reconciler covers the gap.
     """
     server = FakeEmbyServer()
     adapter = _push_adapter(server, FakePushConnector())
@@ -1300,8 +1301,8 @@ async def test_events_yields_what_arrives_and_flips_supports_push() -> None:
     """An open socket and a sent subscription are not yet a push channel.
 
     `supports_push` stays `False` until something is delivered: a handshake against a
-    nonexistent path produces exactly this state, and the reconciler skips a source that
-    answers `True` here.
+    nonexistent path produces exactly this state, and a `True` here is what the push
+    gauge reports as delivering.
     """
     server = FakeEmbyServer()
     connection = FakePushConnection()

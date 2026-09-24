@@ -305,14 +305,15 @@ async def test_a_row_invalidation_reaches_an_unfiltered_subscriber(
 async def test_a_row_invalidation_does_not_wake_a_detail_screen(
     client: httpx.AsyncClient, bus: InMemoryEventBus
 ) -> None:
-    """**The settlement.
+    """A row invalidation reaches no `?titles=` subscriber -- asserted rather than assumed.
 
-    asserted rather than assumed.** A row-slug event carries no title id, so it reaches
-    every subscriber or none -- there is no "some".
+    A row-slug event carries no title id, so it reaches every subscriber or none --
+    there is no "some".
 
-    It reaches none of the filtered ones, and that is correct rather than a limitation:
-    PRD 07's own reason for `?titles=` is "so a detail screen isn't woken by unrelated
-    churn", and a row invalidation is unrelated churn for a screen that renders no rows.
+    It reaches none of the filtered ones, as PRD 07 states: `row.invalidated` "reaches
+    unfiltered subscribers and no others". That is correct rather than a limitation --
+    a `?titles=` filter exists so a detail screen is not woken by unrelated churn, and a
+    row invalidation is unrelated churn for a screen that renders no rows.
 
     Kills a well-meant `wants()` special case that lets `ROW_INVALIDATED` bypass
     the filter -- which wakes every open detail screen for a row it does not

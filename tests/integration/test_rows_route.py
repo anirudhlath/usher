@@ -151,7 +151,7 @@ async def test_a_regeneration_commits_a_job_for_the_stored_household(
 async def test_asking_twice_writes_nothing_the_second_time(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 06's *"one modest completion per user per day"*, read off the queue itself.
+    """PRD 06's *"one modest completion per generation"*, read off the queue itself.
 
     The route never sees the count it is being held to.
     """

@@ -391,7 +391,7 @@ async def test_malformed_data_parks_immediately(fixture: _Fixture) -> None:
 async def test_a_job_that_keeps_failing_is_parked_rather_than_retried_forever(
     fixture: _Fixture,
 ) -> None:
-    """PRD 08's rule: after N attempts a job is *parked* with its error.
+    """PRD 08's rule: after `job_max_attempts` attempts a job is *parked* with its error.
 
     Not retried forever and not silently dropped. All three outcomes are
     asserted: it stopped being claimable, it is listed, and it kept its error.
@@ -874,7 +874,7 @@ async def test_one_jobs_events_are_not_discarded_by_another_jobs_failure(
 
 
 async def test_recover_requeues_a_claim_older_than_the_lease(fixture: _Fixture) -> None:
-    """PRD 08: recovery requeues anything left `in_progress` by an unclean shutdown.
+    """PRD 08: a claim nobody has touched for a lease is taken back.
 
     Without it a killed worker's claims are invisible until a human notices the
     queue has stopped moving.

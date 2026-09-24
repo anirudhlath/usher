@@ -138,8 +138,9 @@ class FakeTitleMatchRepository(TitleMatchRepository):
                 and row.year is not None
                 and abs(row.year - probe.year) <= 1
             ]
-            # Exactly one, or nothing. PRD 03 stage 5: no *confident* match
-            # means the review queue, not a coin flip between two remakes.
+            # Exactly one, or nothing. PRD 03's match ladder, step 6: no
+            # *confident* match means the review queue, not a coin flip
+            # between two remakes.
             if len(candidates) == 1:
                 resolved[probe] = candidates[0].id
         return resolved

@@ -244,8 +244,8 @@ class SearchIndexContract:
     ) -> None:
         """Rules out a non-idempotent `index_many` that appends on redelivery.
 
-        PRD 08 makes redelivery safe-by-construction a rule *because* the job queue
-        will redeliver -- `requeue_running` exists precisely to hand a claimed job to a
+        PRD 08: "Jobs are idempotent, so redelivery is always safe" -- and the job queue
+        will redeliver: `requeue_running` exists precisely to hand a claimed job to a
         second worker. Two seeded titles, not one: with a single row, "one hit" and
         "the implementation returned exactly one thing" are the same observation.
         """

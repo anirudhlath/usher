@@ -601,8 +601,8 @@ def test_every_exemption_names_a_real_response_and_the_shape_it_keeps(
     """
     assert len(_NOT_A_PROBLEM_DOCUMENT) >= 2, "the exemption tuple is too small to be a set"
 
-    # PRD 07 promises that the "every route declares its problem responses" check
-    # *imports* `dto/problem.py`'s reasoned map rather than re-deriving it.
+    # A route exempt here for what its handler answers must be on `dto/problem.py`'s
+    # reasoned map, imported rather than re-derived, so one decision has one record.
     by_handler = {path for path, _, model, _ in _NOT_A_PROBLEM_DOCUMENT if model is not None}
     assert by_handler == {"/health/ready"}, sorted(by_handler)
     assert by_handler <= set(PROBLEM_EXEMPTIONS), (

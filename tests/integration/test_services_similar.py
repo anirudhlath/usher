@@ -154,8 +154,8 @@ async def test_the_candidate_query_is_an_exact_scan_and_not_the_hnsw_index(
     """Asserted on the plan, not the clock.
 
     Recall loss in a live query is per-query; recall loss in a cached artefact
-    is permanent, and this table is read until the next rebuild. PRD 05 says
-    brute-force exact cosine is the right call at this scale. The statement
+    is permanent, and this table is read until the next rebuild. PRD 05: at
+    library scale similarity is exact brute-force cosine. The statement
     *sequence* is the load-bearing assertion and the plan is the corroboration:
     at three rows the planner would not choose an HNSW scan under any setting,
     so a plan assertion alone would pass against a repository that never issued
@@ -595,9 +595,8 @@ async def test_the_seed_page_reports_which_titles_carry_a_genome(
     """Kills a `has_genome` that is hardcoded, or an `EXISTS` joined the wrong way round.
 
     Two seeds, one genomed. A statement answering `true` for both, or `false`
-    for both, produces a rebuild whose coverage report is a constant -- which
-    is exactly the number PRD 05 has been quoting without a denominator, now
-    arriving from a query that could be wrong in silence.
+    for both, produces a rebuild whose coverage report is a constant -- a
+    coverage figure arriving from a query that could be wrong in silence.
     """
     _, near = planted_pair(math.pi / 3)
     genomed = await _seed(session, vector=near, name="Harbour Nine")

@@ -411,8 +411,8 @@ async def test_the_three_fields_m9_answered_with_a_route_are_not_keys_here(
 ) -> None:
     """Answering a field with a route of its own is not the same as inlining it here.
 
-    `credits` is two keys, `cast` and `crew`, because PRD 07's outstanding
-    shape decision was answered that way and "credits" names no field.
+    `credits` is two keys, `cast` and `crew`, because PRD 07 renders credits
+    that way and "credits" names no field.
     `similar` is `GET /titles/{title_id}/similar`: a neighbour list carries
     staleness signals this body has nowhere to put and is refreshed on its own
     schedule. The season hierarchy is `GET /series/{id}/seasons` and
@@ -435,9 +435,9 @@ async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
     people: FakePersonRepository,
     seeded: Seeded,
 ) -> None:
-    """PRD 07's outstanding shape decision, answered.
+    """PRD 07's `cast` and `crew` keys, with the cast in the provider's billing order.
 
-    How many, in what order, cast and crew apart.
+    In what order, and cast and crew apart.
 
     **The order is `billing_order`, and the premise is what makes this an
     ordering test.** The bit-part actor is seeded *first*, so their UUIDv7
@@ -1130,8 +1130,8 @@ async def test_an_unknown_search_id_changes_nothing_and_still_serves_the_title(
 ) -> None:
     """Analytics, not a resource.
 
-    A client holding an id whose row an operator has since pruned -- PRD 10's retention
-    is an operator's `DELETE` -- must not be handed an error page for a title that
+    A client holding an id whose row has since been pruned -- PRD 08's retention job
+    deletes rows on a schedule -- must not be handed an error page for a title that
     exists.
 
     The wrong implementation this kills: a route that 404s (or 422s) on an id

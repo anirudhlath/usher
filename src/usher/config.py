@@ -140,8 +140,8 @@ class Settings(BaseSettings):
     job_concurrency: int = Field(default=12, ge=1, le=64)
     # How long a claim may go un-heartbeated before another worker may take it back.
     job_lease_seconds: float = Field(default=300.0, ge=10.0)
-    # PRD 08's "after N attempts a job is parked with its error". `ge=1`
-    # rather than `ge=0`: a ceiling of zero would park every job on its first
+    # PRD 08: "after `job_max_attempts` attempts a job is *parked* with its
+    # error". `ge=1` rather than `ge=0`: a ceiling of zero would park every job on its first
     # failure, which is `retryable=False` applied indiscriminately and takes
     # the retry out of a retry queue.
     job_max_attempts: int = Field(default=5, ge=1)
@@ -152,11 +152,11 @@ class Settings(BaseSettings):
 
     # The metadata provider (PRD 03's enrich stage).
     tmdb_base_url: str = "https://api.themoviedb.org/3"
-    # PRD 10's dashboard 3 plots "TMDb requests/sec against the ~40 ceiling
-    # with 429 count" -- and TMDb's own documentation puts its limits
-    # "somewhere in the 40 requests per second range" without publishing a
-    # number. 30 leaves headroom for the retry a 429 triggers without the
-    # retry itself becoming the thing that trips the next one.
+    # TMDb's own documentation puts its limits "somewhere in the 40 requests
+    # per second range" without publishing a number (PRD 04), and PRD 10's
+    # dashboard 3 plots requests/sec against this setting. 30 leaves headroom
+    # for the retry a 429 triggers without the retry itself becoming the thing
+    # that trips the next one.
     tmdb_requests_per_second: float = Field(default=30.0, gt=0)
     # Which certification body's rating lands in `Title.content_rating`.
     # TMDb returns every country's; picking one is configuration, not a
@@ -237,9 +237,8 @@ class Settings(BaseSettings):
     search_hnsw_ef_search: int = Field(default=200, ge=1, le=1000)
     # `pg_trgm`'s `similarity()` floor for the suggest path. Bounded to (0, 1]
     # because that is `similarity()`'s own range: 0 admits every row in
-    # `titles` as a candidate, which is the latency cliff PRD 05 says the
-    # narrow path exists to avoid, and 1.0 admits only exact matches, which is
-    # `LIKE`.
+    # `titles` as a candidate, so the trigram index prunes nothing, and 1.0
+    # admits only exact matches, which is `LIKE`.
     search_trigram_threshold: float = Field(default=0.3, gt=0.0, le=1.0)
     # How many trigram candidates are collected before the `levenshtein`
     # re-rank. The candidate cut is what keeps edit distance off the whole
@@ -264,16 +263,16 @@ class Settings(BaseSettings):
     # crossing the window above is noticed within a tick of doing so.
     push_poll_seconds: float = Field(default=5.0, gt=0)
     # The base of the reconnect backoff, before jitter, and its ceiling.
-    # Equal jitter, the same shape `job_backoff_seconds` drives one lane
-    # over -- PRD 08's argument for it against full jitter transfers
-    # unchanged, and so does `gt=0`: a zero base collapses the schedule to
-    # "reconnect immediately", which is the hot loop it exists to prevent.
+    # Equal jitter, the shape PRD 08 gives `job_backoff_seconds` -- a draw
+    # from `[base/2, base)` per attempt, so a retry is never instant -- and
+    # the same `gt=0`: a zero base collapses the schedule to "reconnect
+    # immediately", which is the hot loop it exists to prevent.
     push_backoff_seconds: float = Field(default=5.0, gt=0)
     push_max_backoff_seconds: float = Field(default=300.0, gt=0)
-    # PRD 08: "after N failures mark `supports_push = false` and lean on the
-    # nightly walk". `ge=1` for the reason `job_max_attempts` has one: a
-    # ceiling of zero disables push on the first blip, before one reconnect
-    # has been attempted.
+    # PRD 08: "After `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark
+    # `supports_push = false` and lean on the full walk". `ge=1` for the reason
+    # `job_max_attempts` has one: a ceiling of zero disables push on the first
+    # blip, before one reconnect has been attempted.
     push_max_consecutive_failures: int = Field(default=5, ge=1)
     # How many items one push event may name before the lane stops resolving them one at
     # a time and asks for a delta walk instead.
@@ -299,8 +298,8 @@ class Settings(BaseSettings):
     # The neighbour rebuild's period (M10's J6), the scheduler's second registration.
     similar_rebuild_period_hours: float = Field(default=24.0, ge=1.0)
 
-    # `search_queries` retention (PRD 10's *"nothing owns this table's size"*, M10's
-    # J5), the scheduler's first registration.
+    # `search_queries` retention (PRD 10: *"The table's size is owned by a scheduled
+    # job"*; M10's J5), the scheduler's first registration.
     search_query_retention_days: int = Field(default=90, ge=1)
     # How many rows one transaction may delete.
     search_query_retention_batch: int = Field(default=10_000, ge=1)

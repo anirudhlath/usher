@@ -22,7 +22,7 @@ class PortUnavailable(UsherPortError):
     `SourceAdapter.get_item`, which returns `None` for that and never
     raises it as an error. A caller that sees this degrades rather than
     fails: PRD 08's "a degraded subsystem narrows functionality; it never
-    fails a request local state can answer."
+    fails a request that local state can answer."
     """
 
 
@@ -72,8 +72,8 @@ class PortDataMalformed(UsherPortError):
 
     Distinct from `PortUnavailable`: the upstream answered, and the answer
     was wrong. Retrying does not help, so a caller parks the work rather
-    than backing off — PRD 08's "after N attempts a job is *parked* with its
-    error, not retried forever and not silently dropped."
+    than backing off — PRD 08's "malformed data does not back off at all —
+    it parks on the first attempt."
 
     `detail` carries enough to find the offending record without dumping
     it: the dataset's own row identifier and what was expected. It must

@@ -166,11 +166,10 @@ async def test_two_sources_get_different_device_ids_and_refs() -> None:
 
 
 async def test_the_credentials_ref_is_not_derived_from_the_source_id() -> None:
-    """PRD 08 calls `credentials_ref` an indirection.
+    """PRD 03 puts credentials behind `credentials_ref`, "an opaque, random token".
 
-    A ref that is just the id spelled differently is not one, and rotation -- write the
-    new secret under a new ref, flip the pointer, delete the old -- stops being
-    expressible.
+    A ref that is just the id spelled differently is neither, and the indirection
+    becomes decorative: anything holding a source id could address the row.
     """
     service, _, _, _ = _service()
     source = await service.register(

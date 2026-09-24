@@ -434,7 +434,7 @@ async def test_a_removed_item_retracts_nothing(fixture: _Fixture) -> None:
 
     An Emby library refresh emits `ItemsRemoved` for items that have not gone
     anywhere, and Usher cannot tell that from a deletion -- one of which is
-    irreversible. PRD 08 prices the delay: availability goes stale, not wrong.
+    irreversible. PRD 03: *"the row stays available until a walk sweeps it."*
     Counted and logged so it is visible.
     """
     await fixture.given_matched("gone-1")
@@ -794,9 +794,10 @@ async def test_the_failure_counter_is_reset_by_delivery_not_by_connection(lane: 
 
     A proxy that upgrades and then buffers connects perfectly every time. If
     connecting reset the counter, that source would reconnect forever,
-    silently, reporting a healthy lane -- and PRD 08's "after N failures mark
-    `supports_push = false`" would never fire, so the reconciler would go on
-    skipping the one source it is the only cover for. Three connections that
+    silently, reporting a healthy lane -- and PRD 08's rule to mark
+    `supports_push = false` after `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` would never
+    fire, so the reconciler would go on skipping the one source it is the only
+    cover for. Three connections that
     open cleanly and deliver nothing is exactly that proxy.
     """
     adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [], unbounded=True)

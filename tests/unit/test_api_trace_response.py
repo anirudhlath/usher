@@ -220,8 +220,8 @@ async def test_no_header_at_all_when_nothing_is_recording() -> None:
 
     `trace.get_current_span()` answers `INVALID_SPAN` there, so this is the
     all-zero case: `00-000…0-000…0-00` is well-formed to every regex and names
-    nothing. **Absent, never zeroed** — the same rule `_observations` applies
-    to a gauge with no reader, one layer up.
+    nothing. **Absent, never zeroed** — the same rule `telemetry._ReaderSlot`
+    applies to a gauge with no reader, one layer up.
     """
     sent: list[Message] = []
 

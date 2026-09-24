@@ -63,7 +63,7 @@ async def test_a_second_put_does_not_add_a_row(
     """`uq_raw_payloads_provider_kind_reference` is the `ON CONFLICT` target.
 
     Without it every re-enrichment of the same title adds several kB to a database
-    PRD 08 budgets at 8-12 GB total.
+    PRD 04 sizes at ~8-12 GB after import.
     """
     await store.put("tmdb", "movie", "90000550", {"v": 1})
     await store.put("tmdb", "movie", "90000550", {"v": 2})

@@ -273,9 +273,10 @@ async def test_a_prefix_below_its_tiers_minimum_writes_no_row_on_either_tier(
 ) -> None:
     """The short-`q` arm returns before the service, so there is no answered query to record.
 
-    PRD 10 excludes *"a blank or whitespace-only query"* because a search box
-    sends one between every character; the length bound is the same exclusion
-    with a number on it, and it is stated in the route rather than inferred.
+    PRD 10: *"A blank query and a rejected one are not rows"*, and *"a `q` below
+    the tier's minimum"* writes nothing either. The length bound is the same
+    exclusion with a number on it, and it is stated in the route rather than
+    inferred.
 
     **Four requests, because the route has three arms and the minimum is per
     tier**: blank on both tiers, and a three-character `q` that is below tier
@@ -334,9 +335,10 @@ async def test_the_switch_is_whole_or_nothing_and_leaves_the_search_row_alone(
 async def test_a_suggest_with_no_household_writes_no_row_and_the_eval_harness_is_that_caller(
     settings: Settings, catalog: uuid.UUID, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """PRD 10's *"a search with no household"* exclusion.
+    """A search with no household behind it writes no row, and the eval harness is why.
 
-    and the caller it is now load- bearing for.
+    `search_queries.user_id` is `NOT NULL`, and `usher eval suggest` probes through
+    `tier_suggester` with no household at all.
     """
     engine = build_engine(settings.database_url.get_secret_value())
     lines: list[str] = []

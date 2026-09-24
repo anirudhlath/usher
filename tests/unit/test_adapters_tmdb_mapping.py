@@ -320,7 +320,7 @@ def test_a_null_genres_list_is_an_empty_tuple() -> None:
 
 
 def test_field_provenance_names_the_provider_for_what_it_supplied() -> None:
-    """PRD 02: "so a second metadata provider can be added later without ambiguity"."""
+    """PRD 02: "`field_provenance` records which provider supplied each field"."""
     title = _title(_movie())
     assert title.field_provenance["overview"] == "tmdb"
     assert title.field_provenance["genres"] == "tmdb"

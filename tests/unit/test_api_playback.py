@@ -634,7 +634,7 @@ async def test_a_play_that_resolved_nothing_records_no_play(
     out -- and a request that got no target got no closer to playing anything than a
     request that was never made. The wrong implementation it rules out is the
     attribution written on the way in, which would count every unreachable source and
-    every unplayable copy as a play and make the no-play rate PRD 10 exists to compute
+    every unplayable copy as a play and make PRD 10's search→play conversion
     unreadable. Two arms, because the two failures leave the route at two different
     `raise`s.
     """

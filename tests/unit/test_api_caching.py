@@ -98,9 +98,8 @@ async def test_a_repeat_get_home_with_the_returned_etag_answers_304_with_no_body
     the second, sent with `If-None-Match`, must answer 304, repeat both headers and
     carry a zero-length body. `max-age` is asserted against `_SCREEN_TTL` itself,
     imported rather than hard-coded, so the header and the TTL cannot drift apart.
-    `Vary` is asserted absent, per the module's own note beside `current_user`'s
-    seam: it would be needed the day a second user identity exists, and adding it
-    today would describe a distinction the API cannot draw.
+    `Vary` is asserted absent: it would be needed the day a second user identity
+    exists, and adding it today would describe a distinction the API cannot draw.
     """
     library = Library()
     await library.title("A Film That Just Arrived", added=days_ago(1))

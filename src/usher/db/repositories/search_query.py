@@ -78,7 +78,7 @@ _RECORD_OUTCOME = text(
 _OLDEST_AT = text("SELECT min(at) FROM search_queries")
 
 # **`<`, not `<=`**: a row answered at exactly the cutoff is inside the window, which is
-# the boundary PRD 10's own statement draws (`at < now() - interval '90 days'`).
+# the boundary PRD 08's retention statement draws (`at < :cutoff`).
 _PRUNE = text(
     "DELETE FROM search_queries WHERE id IN ("
     "  SELECT id FROM search_queries WHERE at < :before ORDER BY at LIMIT :limit"

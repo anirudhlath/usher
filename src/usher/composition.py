@@ -1655,10 +1655,10 @@ def _report_coverage(
 ) -> None:
     """Four fractions, the enriched-tier one last because it is the one that matters.
 
-    PRD 05 promised "~7% coverage" and PRD 04 repeated it as "~7% of the
-    priority tier", and that figure has never had a denominator. Three of
-    these are ceilings the *dataset* can reach; the fourth is what the join
-    actually did against this operator's catalog.
+    PRD 04 has the bootstrap report carry the genome coverage, and a coverage
+    figure is nothing without its denominator. Three of these are ceilings the
+    *dataset* can reach; the fourth is what the join actually did against this
+    operator's catalog.
 
     `tags` is how many vocabulary rows this run wrote, `0` when the drain did
     not complete and no vocabulary was loaded. Printed on the same line as the

@@ -128,7 +128,7 @@ def _genres(title: Title) -> str:
 
 
 def _engagement(entry: RecentWatch) -> str:
-    """PRD 06's *"recent watch history with ratings"*, with a substitution.
+    """PRD 06's last 25 finished titles, *"with a rewatch marked"*.
 
     There is no rating column, so the engagement signal `watch_states` carries
     is the rewatch. A single viewing says nothing extra and costs tokens.

@@ -496,8 +496,8 @@ class SearchQueryRepositoryContract:
         request failure rather than a fact about a table with nothing to update.
 
         This is also the shape a client holding a `search_id` from a
-        database that has since been pruned produces -- PRD 10's retention
-        is an operator's `DELETE`, so a stale id outliving its row is
+        database that has since been pruned produces -- PRD 08's retention
+        job deletes rows on a schedule, so a stale id outliving its row is
         ordinary rather than hostile.
         """
         unknown = new_id()
@@ -548,8 +548,8 @@ class SearchQueryRepositoryContract:
         and against one that deletes everything. And a prune that ignores its
         argument and deletes the table, which the two surviving rows rule out.
 
-        `cutoff` is 90 days before `AT` only so the arithmetic reads like the
-        statement PRD 10 prices; nothing here depends on the number.
+        `cutoff` is 90 days before `AT` only so the arithmetic reads like the default
+        retention window; nothing here depends on the number.
         """
         cutoff = AT - timedelta(days=90)
         before = search_query_record(user_id=user_id, at=cutoff - timedelta(microseconds=1))

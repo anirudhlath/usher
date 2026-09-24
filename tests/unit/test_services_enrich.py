@@ -149,7 +149,7 @@ async def test_the_provider_fills_in_what_the_source_only_guessed_at(
 async def test_field_provenance_records_which_provider_supplied_what(
     service: EnrichService, titles: FakeTitleRepository
 ) -> None:
-    """PRD 02: "so a second metadata provider can be added later without ambiguity".
+    """PRD 02: "`field_provenance` records which provider supplied each field".
 
     The service merges the provider's own provenance rather than replacing the stored
     map, so an earlier provider's claims survive.
@@ -518,7 +518,7 @@ async def test_a_successful_enrichment_publishes_title_updated(
     """PRD 03's read-through loop, closed.
 
     "Completion publishes a `title.updated` event on a Server-Sent Events
-    channel; clients patch in place. No polling on either side of the system."
+    channel; clients patch in place."
     """
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)

@@ -199,10 +199,10 @@ async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than
     """**`null`, not `0`, and the difference is a claim.**.
 
     `USHER_WORKER_ENABLED=false` beside a `usher work` container is the split
-    topology PRD 08 prices, and this process never calls `recover()` at all --
-    so `0` would assert *"no orphans"* about a question it never asked, on the
-    one endpoint an operator reads to find out. `SourceStatus.push_available`
-    is the precedent: `None` means **not probed**.
+    topology PRD 08's "Worker in its own process" row describes, and this process
+    never calls `recover()` at all -- so `0` would assert *"no orphans"* about a
+    question it never asked, on the one endpoint an operator reads to find out.
+    `SourceStatus.push_available` is the precedent: `None` means **not probed**.
 
     Driven against a **real** `LaneSupervisor` rather than the `_Lanes` stub
     above, because a stub returning `None` because it was told to says nothing
@@ -227,11 +227,12 @@ async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than
 
 
 async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() -> None:
-    """**The correction PRD 08 needs.** A readiness check that failed because Emby is down would.
+    """PRD 08: an unreachable source never takes the process out of a load balancer.
 
-    take Usher out of a load balancer for a reason restarting Usher cannot fix -- which
-    is the exact argument the liveness/readiness split is built on, and PRD 08's own
-    failure table says an unreachable source leaves the catalog "fully browsable".
+    A readiness check that failed because Emby is down would do exactly that, for a
+    reason restarting Usher cannot fix -- the argument the liveness/readiness split is
+    built on -- and PRD 08's failure table says an unreachable source leaves the
+    catalog "fully browsable".
 
     Driven against a *reachable* database so the only thing that could
     degrade it is the lane report. The database this app points at is not
@@ -291,10 +292,9 @@ async def test_no_lane_state_can_change_the_readiness_verdict(
 async def test_readiness_never_touches_a_source() -> None:
     """Docker's healthcheck polls this every 2 s in the shipped compose file.
 
-    against an upstream PRD 01 measures at 1-5 s per request.
-
-    A probe here is a request per poll per source, forever -- and it would take the
-    process out of a load balancer for a reason restarting it cannot fix.
+    PRD 08: readiness makes no upstream request at all. A probe here is a request
+    per poll per source, forever -- and it would take the process out of a load
+    balancer for a reason restarting it cannot fix.
 
     Asserted on the route's own dependency graph rather than on "no adapter
     was built": a probe added to `ready` would have to reach a

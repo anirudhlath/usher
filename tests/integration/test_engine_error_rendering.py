@@ -9,8 +9,8 @@ from usher.db.base import build_engine
 from usher.db.repositories._errors import constraint_name, is_row_refusal
 
 #: Bound as `llm_calls.model` — a **sibling** of the value that is refused,
-#: never the refused value itself. That is the shape PRD 08's 422 entry names:
-#: *"every sibling value, as submitted"*. A canary in the refused column would
+#: never the refused value itself. That is the shape the leak takes: every
+#: sibling value, as submitted. A canary in the refused column would
 #: be a weaker case, because Postgres names that one in its own DETAIL.
 CANARY = "sup3rs3cret-bound-parameter-canary"
 

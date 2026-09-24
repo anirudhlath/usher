@@ -485,8 +485,8 @@ async def test_a_prefix_of_another_copys_url_does_not_steal_its_deep_link() -> N
 async def test_a_second_source_serves_when_the_first_raises() -> None:
     """A partial degradation is still an answer.
 
-    PRD 08: "a degraded subsystem narrows functionality; it never fails a
-    request local state can answer." One source down and another holding the
+    PRD 08: "A degraded subsystem narrows functionality; it never fails a
+    request that local state can answer." One source down and another holding the
     file is a narrower answer, not a 503.
     """
     household = _Household()

@@ -623,11 +623,9 @@ async def test_a_lane_is_started_for_each_enabled_source(fakes: _Fakes) -> None:
 
 
 async def test_a_source_added_later_gets_a_lane_without_a_restart(fakes: _Fakes) -> None:
-    """PRD 08: "Sources live in the database because they are added through the admin API.
+    """PRD 08: sources are added "through the admin API, with no compose edit and no restart".
 
-    A deployment that needs a compose edit and a restart to connect a media server is
-    the wrong shape for this." A lane set fixed at startup makes that false for push
-    alone.
+    A lane set fixed at startup makes that false for push alone.
     """
     supervisor = _supervisor(fakes)
     await supervisor.start()
@@ -1518,11 +1516,10 @@ async def test_a_missing_tmdb_key_is_not_re_reported_on_every_pass(fakes: _Fakes
 
 
 async def test_the_lanes_are_settings_gated(fakes: _Fakes) -> None:
-    """PRD 01.
+    """PRD 01: the lanes run behind `USHER_PUSH_ENABLED` and `USHER_WORKER_ENABLED`.
 
-    "A `--worker` entrypoint flag exists from day one so lanes can be moved to a
-    separate container later by editing compose, with no code change." These settings
-    are that flag.
+    Turning a lane off in the server is how it moves to a second container, so these
+    two settings are the whole of the split.
     """
     await _seed(fakes, _source("A"))
     supervisor = _supervisor(fakes, push_enabled=False, worker_enabled=False)
@@ -1671,8 +1668,8 @@ async def test_a_worker_lane_without_an_llm_client_never_claims_curate_work(
     Enqueued rather than asserted against an empty queue: `claimed_kinds`
     records what was asked for whether or not anything was there, but a job
     surviving the pass is the operator-visible half -- curate work waits for a
-    process that can run it instead of parking (PRD 08 reserves parking for
-    work a human has to look at).
+    process that can run it instead of parking (parking is for work a human
+    has to look at).
     """
     await fakes.queue.enqueue(
         [JobRequest(kind=JobKind.CURATE, key=str(USER_ID), priority=JobPriority.BACKFILL)]

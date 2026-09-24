@@ -183,9 +183,8 @@ def test_every_prd_10_push_metric_actually_exists(meter_reader: InMemoryMetricRe
 
     Each name has its own case above that drives the code emitting it -- this is the one
     that fails when a rename in `src/` moves a dashboard's target, even if whoever
-    renamed it also updated the case that drives it. PRD 10 already prices the failure:
-    a metric emitted under a near-miss name is a permanently empty panel that nothing
-    distinguishes from a healthy zero.
+    renamed it also updated the case that drives it. A metric emitted under a near-miss
+    name is a permanently empty panel that nothing distinguishes from a healthy zero.
     """
     assert _instrument_names(meter_reader) >= PRD_10_M5_PUSH_METRICS
 
@@ -202,7 +201,7 @@ def test_the_module_owning_those_instruments_is_imported() -> None:
     assert "usher.services.push" in sys.modules
 
 
-# -- the two series PRD 10 reserved -----------------------------------------
+# -- push.connected and push.reconnects, from PRD 10's metric table ---------
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list[tuple[float, str]]:

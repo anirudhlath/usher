@@ -591,7 +591,7 @@ def test_push_reconnects_is_concrete_and_defaults_to_a_true_zero() -> None:
     Concrete rather than abstract for the reason `probe_push` is, and for
     one more: an adapter with **no** push channel has never reconnected, so
     `0` is that adapter's true answer rather than the fabricated zero
-    `usher.telemetry._push_observations` refuses to emit. An adapter that
+    `usher.telemetry._ReaderSlot` refuses to emit. An adapter that
     *has* a channel must override it -- and both that exist do, which is
     what the case below checks, because a lane supervisor reading this
     through the port has no other way to tell an honest zero from a

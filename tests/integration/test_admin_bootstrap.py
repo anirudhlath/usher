@@ -488,9 +488,9 @@ async def test_the_status_route_answers_200_against_a_database_no_import_has_tou
 ) -> None:
     """The empty-database case first.
 
-    PRD 08's operator rule is that a diagnostic must work before the thing it
-    diagnoses has run, and an empty answer is where a report assembled from four
-    reads is most likely to raise. 200 rather than 404: "no import has ever run" is a
+    PRD 07 has this route answer 200 for every state a database can be in, and an
+    empty answer is where a report assembled from four reads is most likely to
+    raise. 200 rather than 404: "no import has ever run" is a
     fact about the thing being described, not a failure of the request. The
     `runs == []` arm is what a route that 500'd on `revisions[0]` cannot reach, the
     vocabulary arm is what a report that only assembled the runs would leave absent,

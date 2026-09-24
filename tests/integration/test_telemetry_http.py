@@ -1,6 +1,7 @@
-"""`usher.http.server.duration`.
+"""`http.server.duration` is recorded, which is why Usher declares no duplicate of it.
 
-the positive control behind PRD 10's correction rather than a new instrument.
+PRD 10: a metric never duplicates one the instrumentation already supplies, and
+`http.server.duration` is `FastAPIInstrumentor`'s.
 """
 
 from collections.abc import AsyncIterator, Iterator

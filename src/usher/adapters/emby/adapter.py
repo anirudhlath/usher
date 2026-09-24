@@ -59,9 +59,8 @@ _tracer = trace.get_tracer("usher.source.emby")
 # Seasons and BoxSets too; the mapper skips them rather than failing.
 ITEM_TYPES = "Movie,Series,Episode"
 
-# Deliberately no `Path`: nothing in M3 or M4 needs a filesystem path, and
-# not requesting one keeps it out of `SourceItem.raw`, which PRD 03 stores
-# verbatim in `raw_payloads`.
+# Deliberately no `Path`: nothing needs a filesystem path, so none is
+# requested and none reaches `SourceItem.raw`.
 ITEM_FIELDS = (
     "ProviderIds,MediaSources,DateCreated,ProductionYear,RunTimeTicks,"
     "OriginalTitle,ParentIndexNumber,IndexNumber,SeriesId,SeriesName"
@@ -164,8 +163,8 @@ class EmbyAdapter(SourceAdapter):
         The answer comes from messages: `is_delivering` wants a connection, at
         least one received message, and a recent one. There is no path from "a
         socket object exists" to `True` -- a handshake against a nonexistent path
-        upgrades and is held open -- and PRD 03's reconciler skips a source that
-        says `True` here.
+        upgrades and is held open -- and this answer is what the push gauge
+        reports and what the stored source's `supports_push` records.
         """
         return self._health.is_delivering(now=self._clock())
 
@@ -319,8 +318,8 @@ class EmbyAdapter(SourceAdapter):
     async def _fetch(self, external_id: str, *, op: str = "get_item") -> dict[str, Any] | None:
         """One item's payload, or `None` for a 404.
 
-        `op` is the telemetry label only -- PRD 10 buckets
-        `usher.source.request.duration` and the `source.request` span by it. It
+        `op` is the telemetry label only -- `usher.source.request.duration`
+        (PRD 10) and the session's `source.request` span are bucketed by it. It
         is a parameter because `get_watch_state`'s history backfill is thousands
         of single-item reads, and folding those into `get_item`'s bucket makes
         "how slow is `get_item`" answer a different question every night.

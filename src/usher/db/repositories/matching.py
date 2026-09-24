@@ -52,9 +52,9 @@ WITH probe AS (
      AND t.year BETWEEN p.year - 1 AND p.year + 1
 )
 -- `matches = 1`, so an ambiguous probe drops out entirely rather than picking
--- a winner. PRD 03 stage 5: no *confident* match means the review queue, and
--- a coin flip between two remakes attaches the household's watch history to
--- the wrong film, silently.
+-- a winner. PRD 03's match ladder, step 6: no *confident* match means the
+-- review queue, and a coin flip between two remakes attaches the household's
+-- watch history to the wrong film, silently.
 SELECT name, year, kind, id FROM candidate WHERE matches = 1
 """
 

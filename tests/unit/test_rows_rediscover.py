@@ -71,11 +71,10 @@ async def test_a_title_abandoned_two_years_ago_is_absent_from_rediscover() -> No
 
 
 async def test_the_most_rewatched_title_comes_first() -> None:
-    """PRD 06 says *"rated highly"* and there is no rating.
+    """PRD 06 orders Rediscover by engagement, `play_count DESC`, and never filters on it.
 
-    The substitute is the **ordering**, never the filter: `play_count DESC`, because a
-    rewatch is a revealed preference and is the only thing in this table a household
-    writes more than once.
+    There is no rating. A rewatch is a revealed preference, and the only thing in this
+    table a household writes more than once.
 
     Seeded so the most-rewatched title is the *oldest*, which is where a
     recency-only ordering puts it last.

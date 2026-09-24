@@ -141,8 +141,8 @@ async def _force_exact_scan(session: AsyncSession) -> None:
     """Boundary call 4's exact path: no ANN, no approximation, no recall question.
 
     PRD 05 puts owned titles on exact brute-force cosine, and it is affordable
-    because the embedded population is the enriched tier at 2k-10k rather than
-    the whole catalog. `owned_only` is also the most selective filter in the
+    because PRD 05 sizes a library at ~2k-10k owned titles rather than the whole
+    catalog. `owned_only` is also the most selective filter in the
     vocabulary, which is the selectivity that collapses HNSW's post-filter.
 
     The cost: this also takes the index away from the `media_items` EXISTS, and

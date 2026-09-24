@@ -962,8 +962,8 @@ class TitleRepositoryCandidateContract:
     ) -> None:
         """A cold start is the *normal* state, not a degraded one.
 
-        PRD 06's own words, and an implementation whose exclusion joined rather than
-        anti-joined answers with nothing at all here.
+        PRD 06's pool membership is *"unwatched", full stop*, and an implementation
+        whose exclusion joined rather than anti-joined answers with nothing at all here.
 
         Positional rather than `len(rows) > 0`, which is satisfied by
         returning the whole table in physical order.
@@ -1114,10 +1114,10 @@ class TitleRepositoryBrowseContract:
     async def test_a_row_inserted_before_the_cursor_between_two_pages_neither_duplicates_nor_drops(
         self, repo: TitleRepository
     ) -> None:
-        """PRD 07's stated reason for the whole design, as a test.
+        """Why PRD 07 offers no offset paging, as a test.
 
-        *"Offset paging is not offered -- it degrades badly over a 1.3M-row catalog and
-        produces duplicates under concurrent writes."* This case is the second half.
+        An offset degrades badly over a 1.3M-row catalog and produces duplicates
+        under concurrent writes. This case is the second half.
 
         Page 1 is served, a row is inserted that sorts **inside** it, page 2 is
         served from the cursor. Under a keyset the client sees the pre-insert

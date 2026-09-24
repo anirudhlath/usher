@@ -149,7 +149,7 @@ async def test_search_queries_carries_prd_tens_columns_and_no_others(
 ) -> None:
     """`requested_mode` is wire-only.
 
-    PRD 10 assigns this table *whole* because a half-populated analytics table is worse
+    This table is kept *whole* because a half-populated analytics table is worse
     than an empty metric -- a dashboard reading it cannot tell a real zero from a column
     nobody filled -- and the other half of "whole" is that nothing is added to it
     speculatively either.
@@ -186,8 +186,8 @@ async def test_search_queries_ships_one_index_beyond_its_primary_key(
     """One index beyond the primary key, and its reader exists today.
 
     An index whose reader is a later milestone is `ix_titles_popularity` again;
-    `ix_search_queries_at`'s reader is written out verbatim in PRD 10 -- `DELETE FROM
-    search_queries WHERE at < now() - interval '90 days'`, an operator's own SQL.
+    `ix_search_queries_at`'s reader is written out in PRD 08 -- the retention job's
+    `DELETE FROM search_queries WHERE at < :cutoff`, chunked.
 
     That the statement plans onto it is asserted in
     `tests/integration/test_m10_schema.py`; that no *second* index appeared alongside it

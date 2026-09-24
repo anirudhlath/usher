@@ -345,7 +345,7 @@ SearchQueryScope = Callable[[], AbstractAsyncContextManager[SearchQueryRepositor
 
 
 class SearchQueryRetention(ScheduledJob):
-    """PRD 10's 90-day `search_queries` prune, as a scheduled job."""
+    """PRD 08's `search_queries` retention, as a scheduled job."""
 
     name = RETENTION_JOB_NAME
 

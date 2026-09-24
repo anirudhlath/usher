@@ -576,9 +576,9 @@ def _episodes_of(entry: Mapping[str, Any], season: Season, title_id: uuid.UUID) 
 def _provenance(fields: Mapping[str, Any], provider: str) -> dict[str, str]:
     """`field -> provider` for what this payload actually supplied.
 
-    An entry for a field the payload left empty is what makes a second
-    provider's merge ambiguous later (PRD 02), so an empty tuple and a `None`
-    are both "not supplied".
+    PRD 02's `field_provenance` records which provider supplied each field, and
+    an entry for a field the payload left empty would name a supplier of
+    nothing -- so an empty tuple and a `None` are both "not supplied".
     """
     return {
         field: provider

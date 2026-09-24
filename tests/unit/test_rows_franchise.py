@@ -58,7 +58,7 @@ async def test_the_reason_counts_owned_members_and_not_collection_size() -> None
 
 
 async def test_a_fully_watched_franchise_produces_no_row() -> None:
-    """PRD 06's condition sharpened with a second clause: at least one member unplayed.
+    """PRD 06's second clause: at least one member unplayed.
 
     A franchise row about a series the household has finished has nothing to
     offer -- every card is a rewatch, and the row is indistinguishable from a

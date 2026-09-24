@@ -328,8 +328,8 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
 def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ceiling of zero parks every job on its first failure.
 
-    That takes the retry out of a retry queue -- PRD 08 asks for "after N attempts", and
-    N is at least one.
+    That takes the retry out of a retry queue -- PRD 08 parks a job *"after
+    `job_max_attempts` attempts"*, and that is at least one.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
@@ -465,9 +465,8 @@ def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
 ) -> None:
     """The two lane switches are configuration rather than code.
 
-    PRD 01's "--worker entrypoint flag ... so lanes can be moved to a separate container
-    later by editing compose, with no code change" -- one image serves an all-in-one
-    deployment and a split one.
+    PRD 01: "Splitting them into a second container is configuration" -- one image
+    serves an all-in-one deployment and a split one.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)

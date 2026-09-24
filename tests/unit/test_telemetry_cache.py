@@ -173,7 +173,7 @@ async def test_a_cold_row_records_a_miss_labelled_row(
 async def test_a_row_that_outlives_its_screen_records_a_hit_labelled_row(
     ctx: RowContext, clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """PRD 06 caches at two layers because a row's own TTL can outlive the ~30s screen.
+    """PRD 06 caches at two layers, and a row's own TTL can outlive the 30 s screen.
 
     `test_services_rows_cache.py`'s own
     `test_a_row_survives_the_screen_expiring_because_its_own_ttl_is_longer` is the

@@ -492,7 +492,7 @@ async def test_all_four_routes_are_in_the_openapi_document_with_real_shapes(
 async def test_the_two_played_routes_declare_no_request_body(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 07: "`POST`/`DELETE /played` take no body".
+    """The `/played` pair takes no body: PRD 07's Actions table gives it only a path.
 
     A `DELETE` carrying one is refused by several HTTP clients outright, and a `POST`
     carrying an optional one would make "mark played and also move the position" a
@@ -514,12 +514,12 @@ async def test_the_position_bound_reaches_the_generated_schema(
 
 
 def test_the_watch_router_and_its_service_hold_no_source_adapter() -> None:
-    """PRD 03's *"best effort"* write-back as a **structural** property.
+    """PRD 03's *"best-effort"* write-back as a **structural** property.
 
-    The adapter's `push_watch_state` raises by contract, so "a client's write
-    never blocks or fails on a down server" is only true of this code if the
-    call is absent rather than caught -- "it did not raise" is what a route
-    that swallowed everything would also produce.
+    The adapter's `push_watch_state` raises by contract, so PRD 03's *"never
+    blocks the API response"* is only true of this code if the call is absent
+    rather than caught -- "it did not raise" is what a route that swallowed
+    everything would also produce.
 
     Two ways such a scan misses, both handled: an `ast.ImportFrom`-only scan does not
     see `import usher.ports.source`, and a signature check does not see a **string**

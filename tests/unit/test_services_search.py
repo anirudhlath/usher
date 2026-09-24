@@ -2170,7 +2170,7 @@ async def test_the_keystrokes_latency_covers_the_index_probe_and_the_hydration(
 async def test_type_ahead_with_no_household_records_nothing_on_either_tier(
     tier: SuggestTier,
 ) -> None:
-    """PRD 10's *"a search with no household"* exclusion, and the caller it matters for.
+    """A keystroke with no household behind it writes no row, and the caller it matters for.
 
     `search_queries.user_id` is `NOT NULL` behind `ON DELETE RESTRICT`, so a keystroke
     nobody is speaking for has no row rather than a row with a hole in it. Both request
@@ -2425,10 +2425,10 @@ async def test_the_suggest_switch_is_whole_and_leaves_the_search_row_alone(
     """`USHER_SEARCH_SUGGEST_ANALYTICS=false`, at the service.
 
     **Whole or nothing, never sampled**: every absence in PRD 10's *"which
-    absence means what"* table is exact, so a rate would turn every count over
+    absence means what"* paragraph is exact, so a rate would turn every count over
     this surface into an estimate and add a further absence nobody can name.
-    Asserted on both tiers,
-    because a switch honoured on one is a defect a single-tier case cannot see.
+    Asserted on both tiers, because a switch honoured on one is a defect a
+    single-tier case cannot see.
 
     The control is `search` through the same service: this setting narrows the
     suggest surface and must not reach the search one, or an operator who

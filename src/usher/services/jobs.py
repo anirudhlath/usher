@@ -126,8 +126,8 @@ class JobWorker:
     async def recover(self) -> int:
         """Return abandoned claims to `pending`.
 
-        Returns how many. PRD 08's *"startup requeues anything left
-        `in_progress`"*, with two qualifications:
+        Returns how many. PRD 08: *"Abandoned claims are recovered on a lease"*,
+        which takes two things:
 
         - An age threshold, not everything. `requeue_running()`'s
           `older_than_seconds=0.0` default requeues every `running` row, which

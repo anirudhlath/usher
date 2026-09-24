@@ -271,9 +271,9 @@ async def test_work_completes_a_job_for_an_item_no_source_addresses(
 ) -> None:
     """A `match` job no configured source addresses completes rather than parks.
 
-    PRD 08 reserves parking for work a human must look at, so the worker's loop is
-    exercised end to end without a network call: `SourceRegistry.resolve` answers
-    `None` from local state alone.
+    PRD 08 names the case -- *"one no configured source addresses, completes"* -- and
+    the worker's loop is exercised end to end without a network call:
+    `SourceRegistry.resolve` answers `None` from local state alone.
     """
     async with _session_for(cli_settings) as session:
         pipeline = build_pipeline(session, cli_settings)
@@ -418,8 +418,8 @@ async def test_the_work_daemon_reports_a_recovery_that_happens_after_it_started(
     """A daemon prints its recovery total on every pass, not once at startup.
 
     A single startup line lands when the total is almost always zero, so every later
-    recovery is invisible in the only mode a container runs. PRD 08's *"`usher work`
-    ... prints the same total in its pass line"* has to hold for the daemon too.
+    recovery is invisible in the only mode a container runs. `usher work --once`
+    prints the total in its pass line, and that has to hold for the daemon too.
 
     Two recoveries are needed to see the difference, and the second has to
     happen *after* the daemon is already running, so the lease is dialled to

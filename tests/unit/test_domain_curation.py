@@ -248,9 +248,9 @@ def test_evolve_revalidates_a_curated_row_where_model_copy_does_not() -> None:
 def test_an_llm_call_carries_prd_10s_columns() -> None:
     """Kills dropping any one of them, by `extra="forbid"`.
 
-    `generation_id` is the eleventh and is not in PRD 10's list: it is what
-    makes dashboard 5's "cost per curated row" a join against `curated_rows`
-    rather than a correlation on timestamps.
+    `generation_id` is the eleventh, and PRD 10 says what it is for: it makes
+    dashboard 5's "cost per curated row" a join against `curated_rows` rather
+    than a correlation on timestamps.
     """
     call_id, generation = uuid.uuid4(), uuid.uuid4()
     call = _call(id=call_id, generation_id=generation)
@@ -288,7 +288,7 @@ def test_a_successful_call_carries_no_error() -> None:
 
     A success carrying an error string reads as a failure in every `WHERE error
     IS NOT NULL` anybody will write against this table, which is the first query
-    an operator writes and the one PRD 10's failure panel is.
+    an operator writes.
     """
     with pytest.raises(ValidationError):
         _call(ok=True, error="upstream returned 503")
@@ -463,11 +463,11 @@ def test_an_llm_call_is_frozen_and_refuses_an_unknown_field() -> None:
 def test_the_purpose_vocabulary_is_closed_at_the_two_that_have_call_sites() -> None:
     """Kills adding a member without a call site.
 
-    PRD 10's own text marks this open-ended -- `curation | query_expansion | …`
-    -- and an ellipsis in a telemetry dimension is a cardinality footgun: a
-    free-form string here makes every `GROUP BY purpose` panel grow a row per
-    spelling. An exact set rather than a membership check, so a third member
-    cannot arrive without this list moving and someone reading that rule.
+    PRD 10's DDL names two, `curation | query_expansion`, and an open vocabulary
+    in a telemetry dimension is a cardinality footgun: a free-form string here
+    makes every `GROUP BY purpose` panel grow a row per spelling. An exact set
+    rather than a membership check, so a third member cannot arrive without
+    this list moving and someone reading that rule.
 
     **Both members have a call site**: `CurationService` emits `CURATION` and
     `QueryExpansionService` emits `QUERY_EXPANSION`.

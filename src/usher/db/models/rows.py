@@ -1,4 +1,4 @@
-"""`row_provider_settings` — PRD 09's boundary call 9 coming due."""
+"""`row_provider_settings` — PRD 06's overrides on the row provider registry."""
 
 from datetime import datetime
 

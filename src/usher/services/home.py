@@ -39,10 +39,11 @@ _row_build_duration = _meter.create_histogram(
 _MAX_ROWS = 10
 _MAX_PER_FAMILY = 4
 
-# PRD 06's caching table: "Composed home screen | ~30 s per user". The built
-# rows underneath carry their own TTLs on `BuiltRow.ttl`, which is why this is
-# the only lifetime stated here -- a row's is the row's to state, and the two
-# layers are what keeps a six-hour similarity row off a 30 s rebuild cycle.
+# PRD 06's caching table: "Composed home screen | 30 s per user, in-process, plus
+# a 60 s stale-serve grace". The built rows underneath carry their own TTLs on
+# `BuiltRow.ttl`, which is why the screen's are the only lifetimes stated here --
+# a row's is the row's to state, and the two layers are what keeps a six-hour
+# similarity row off a 30 s rebuild cycle.
 _SCREEN_TTL = timedelta(seconds=30)
 
 # How far past `_SCREEN_TTL` a composed screen may still be served while its replacement

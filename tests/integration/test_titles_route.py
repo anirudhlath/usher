@@ -657,7 +657,7 @@ async def test_another_households_row_survives_a_real_request_and_the_owners_lan
 async def test_an_unknown_search_id_is_served_normally_against_a_real_schema(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A stale id -- an operator's retention `DELETE` is PRD 10's pruning story.
+    """A stale id -- one whose row PRD 08's retention job has already deleted.
 
     It reaches a real `UPDATE` that matches nothing, and the response is byte-identical
     to the one without the parameter. Only this level can say the no-op is the

@@ -47,9 +47,10 @@ USERNAME = "usher-svc-8f21"
 PASSWORD = "wolf-hound-lantern-73"
 SECRET_KEY = "0" * 32
 
-# PRD 08 names both halves -- "the stored username and password" -- so both
-# are guarded. Neither appears on any response model, so a leak of either
-# means something serialized the request or the port DTO.
+# PRD 03 names both halves -- "neither the username, the password nor the ref is
+# ever returned by any endpoint" -- so both are guarded. Neither appears on any
+# response model, so a leak of either means something serialized the request or
+# the port DTO.
 _CREDENTIAL_PARTS = {"username": USERNAME, "password": PASSWORD}
 
 
@@ -686,7 +687,7 @@ async def test_a_sync_job_completes_rather_than_parks_when_the_credential_row_ha
 ) -> None:
     """`composition.open_adapter` answers `None` for exactly this.
 
-    PRD 08 reserves parking for work a human must look at -- an operator with three
+    Parking is for work a human must look at -- an operator with three
     sources needs the second and third to run when the first's credential has gone
     missing, and a parked `sync` job would put that problem on the wrong screen.
     """

@@ -143,7 +143,8 @@ async def test_a_completion_prefers_the_latency_the_adapter_measured() -> None:
     """Kills a ledger that always uses its own clock.
 
     The adapter's number is the send window; this service's is the send window *plus*
-    validation, and PRD 10's latency panel plots the former on every ordinary night.
+    validation, and PRD 10's `llm_calls.latency_ms` records the former on every ordinary
+    night.
     """
     ledger, repo, _events = _ledger()
     await ledger.settle(_T0, usage=_usage(latency_ms=99), error=None)

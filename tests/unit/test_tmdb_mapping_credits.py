@@ -148,7 +148,7 @@ def test_cast_billing_order_is_tmdbs_order_field_not_the_arrays_index() -> None:
     of them -- so the fixture here is deliberately **out of `order`
     sequence**: the array is [order 4, order 0, order 2]. Under `enumerate`
     the lead actor reads as third-billed, `list_for_title` reverses the cast
-    list, and PRD 06's People row is about the wrong person. Nothing raises.
+    list, and the cast PRD 07 renders opens on a bit part. Nothing raises.
     """
     _, credits = people_and_credits(
         _movie(
@@ -200,11 +200,12 @@ def test_cast_beyond_the_billing_cutoff_is_dropped() -> None:
     """The row bound.
 
     A large film's `credits.cast` runs into the low hundreds, and across an enriched
-    catalog an unbounded cast multiplies out past the database size PRD 08 budgets
-    for. **50 is chosen rather than derived**, on the same bargain `services/search.py`
-    states for `_POPULARITY_MIDPOINT`: a wrong cutoff drops the 51st-billed actor from
-    a filmography and changes nothing else. The cutoff is on `order`, not on array
-    position, so this fixture puts the out-of-range entry *first*.
+    catalog an unbounded cast multiplies `credits`, already among the largest
+    relations in PRD 08's resource envelope. **50 is chosen rather than derived**, on
+    the same bargain `services/search.py` states for `_POPULARITY_MIDPOINT`: a wrong
+    cutoff drops the 51st-billed actor from a filmography and changes nothing else.
+    The cutoff is on `order`, not on array position, so this fixture puts the
+    out-of-range entry *first*.
     """
     _, credits = people_and_credits(
         _movie(

@@ -882,10 +882,9 @@ async def _similar(
             report = await pipeline.similar.rebuild(resume=resume, max_seeds=max_seeds)
             print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
             # **The genome's coverage, with its denominators, printed by the path that
-            # reads the vectors.** PRD 05 promised "~7%" since before an importer
-            # existed and never said of what; these are the two numbers that answer it,
-            # and the second is the one that decided whether the term could promote
-            # anything.
+            # reads the vectors.** A coverage figure without its denominator says
+            # nothing; these are the two numbers that give it one, and the second is
+            # the one that decides whether the term can promote anything.
             if report.seeds:
                 share = 100.0 * report.seeds_with_genome / report.seeds
                 print(
@@ -1300,9 +1299,9 @@ def _print_backup_report(report: BackupReport) -> None:
     reason one function down: a table absent from the report and a table
     nobody carries read the same, and at a terminal there is no second export
     to compare against. That matters most for `llm_calls`, which is 0 rows on
-    this deployment and is the table PRD 08 calls *"the first thing in this
-    project that is not rebuildable from anything, at any price"* -- a spend
-    ledger silently dropped would be reported by nothing else.
+    this deployment and is the table PRD 08 calls *"the only record that money
+    was spent"* -- a spend ledger silently dropped would be reported by nothing
+    else.
 
     The size is `stat()` on the written file rather than a sum of what was
     encoded: gzip's ratio over JSON is the whole reason the format is
@@ -1481,8 +1480,8 @@ async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> 
 
     Bare `usher push` runs exactly the lanes `create_app` would, honouring
     `USHER_PUSH_ENABLED`/`USHER_WORKER_ENABLED`, with no HTTP server -- the
-    other side of PRD 01's "`--worker` entrypoint flag ... so lanes can be
-    moved to a separate container later by editing compose". It publishes to
+    second container of PRD 01's split, where the server has those lanes
+    turned off. It publishes to
     a `NullEventPublisher` for the reason `usher work` does: the bus is
     in-memory and there is no SSE client in this process.
     """

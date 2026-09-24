@@ -113,7 +113,7 @@ class SourceAdapterContract:
         """The guarantee the reconciler's correctness rests on.
 
         A generator that swallowed the error and stopped is indistinguishable from one
-        that finished, and PRD 03's nightly walk would mark every item it never reached
+        that finished, and PRD 03's full walk would mark every item it never reached
         `available = false`.
 
         Asserts both halves: the error surfaces, *and* the items served
@@ -646,7 +646,7 @@ class SourceAdapterContract:
 
         A WebSocket handshake against a *nonexistent path* also upgrades and also
         receives `Sessions`, so an open connection is not evidence of anything -- and
-        PRD 03's reconciler skips a source whose adapter says `True` here.
+        a `True` here is what the push gauge reports as delivering.
         """
         assert harness.adapter.supports_push is False
         async with harness.adapter.events() as events:

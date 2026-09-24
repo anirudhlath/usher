@@ -14,11 +14,11 @@ from usher.domain.title import Title
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows.base import ARTWORK_FOR_HINT, BaseRow
 
-# Five minutes, and PRD 06's "until regenerated" is the artefact's lifetime
-# rather than this number: the stored row really is immutable until a generation
-# replaces it, and the replacement is the only event that matters, because
-# `RowCache` holds the whole built row under `(user_id, slug)` and a generation
-# of the same width re-uses the same slugs.
+# Five minutes. PRD 06: "The curated TTL bounds staleness, not the artefact's
+# lifetime" -- the stored row really is immutable until a generation replaces it,
+# and the replacement is the only event that matters, because `RowCache` holds
+# the whole built row under `(user_id, slug)` and a generation of the same width
+# re-uses the same slugs.
 _TTL = timedelta(minutes=5)
 
 

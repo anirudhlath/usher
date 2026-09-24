@@ -34,12 +34,11 @@ class CredentialStoreContract:
         assert await store.get("never-stored") is None
 
     async def test_put_replaces_an_existing_secret(self, store: CredentialStore) -> None:
-        """Both re-registering a source with a corrected password and PRD 08's key rotation land.
-
-        here.
+        """Re-registering a source with a corrected password lands here.
 
         A store that inserted instead of upserting would raise on the second call, or --
-        worse -- keep serving the old secret.
+        worse -- keep serving the old secret. Key rotation does not come through `put`:
+        it rewrites each row's ciphertext in place, under the same ref.
         """
         owner = await self.owner(store)
         await store.put("ref-1", WRONG, owner_id=owner)
@@ -51,9 +50,8 @@ class CredentialStoreContract:
     async def test_refs_are_independent(self, store: CredentialStore) -> None:
         """Rules out a store keyed on the owner rather than the ref.
 
-        which would make PRD 08's rotation (write under a new ref, flip
-        `Source.credentials_ref`, delete the old) overwrite the very secret it is meant
-        to be replacing.
+        Two refs under one owner are two secrets; a store keyed on the owner would serve
+        whichever was written last for both.
         """
         owner = await self.owner(store)
         await store.put("ref-old", WRONG, owner_id=owner)

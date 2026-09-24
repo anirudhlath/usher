@@ -1072,8 +1072,8 @@ async def test_the_due_gauge_reads_a_snapshot_the_tick_refreshes() -> None:
 async def test_a_job_that_has_never_run_reports_no_due_point_at_all() -> None:
     """*"Seconds since `last_done()` minus period"* has no value when there is none.
 
-    A fabricated zero would read as *"exactly due"* -- the same rule `_observations`
-    states as *"no reader means no observation, never a zero"*. The absence is
+    A fabricated zero would read as *"exactly due"* -- the same rule
+    `telemetry._ReaderSlot` states: an unset reader observes nothing. The absence is
     bounded rather than open-ended: a never-run job is due, so the tick runs it and
     the next tick has a reading.
     """

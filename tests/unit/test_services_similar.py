@@ -527,7 +527,7 @@ def test_a_genome_cosine_a_port_put_outside_the_unit_interval_cannot_reach_a_sco
 async def test_the_rebuild_reports_how_many_seeds_carried_a_genome() -> None:
     """`has_genome` filled and never counted is the implementation this rules out.
 
-    The coverage figure PRD 05 promises has never had a denominator, and this counter
+    A genome coverage figure is nothing without its denominator, and this counter
     produces it from the code path that consumes the vectors rather than from a second
     query somebody has to think to run. Five seeds, two genomed: a rebuild reporting
     `seeds` alone cannot tell a thinly covered catalog from a fully covered one.

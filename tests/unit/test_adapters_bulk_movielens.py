@@ -115,8 +115,8 @@ async def test_yields_one_dense_vector_per_movie_not_one_row_per_score(
     """One dense vector per movie, never one record per score row.
 
     Kills an implementation that yields a record per line of
-    `genome-scores.csv`, which is the shape PRD 02 implies and which costs tens
-    of times the storage.
+    `genome-scores.csv`, which is the file's own shape and which costs tens of
+    times the storage of the one dense vector per title PRD 02 stores.
     """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:

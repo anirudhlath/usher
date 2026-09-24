@@ -492,8 +492,8 @@ _WORDS: dict[int, str] = {
 
 #: The header row of the census table in `docs/prd/01-architecture.md`. Scoped
 #: to this table rather than to its `##` heading, because that section carries a
-#: **second** table -- the port/implementation one -- whose rows name
-#: `adapters/bulk/movielens.py` and `services/rows/base.py`. A section-wide
+#: **second** table -- the port/implementation one -- whose rows name source
+#: paths such as `services/rows/base.py`. A section-wide
 #: harvest would collect those and read as a census that had grown.
 _PRD_TABLE = "| module → upstream | limiter |"
 

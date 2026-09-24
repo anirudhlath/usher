@@ -880,7 +880,7 @@ async def _browse_by_offset(
 async def test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
-    """PRD 07's own reason for refusing offset paging, exercised rather than asserted."""
+    """PRD 07 pages by cursor only: a concurrent insert makes `OFFSET` serve a row twice."""
     seeded = [
         Title(kind=TitleKind.MOVIE, name=name, sort_name=name.lower())
         for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo")

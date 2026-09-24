@@ -208,13 +208,12 @@ async def test_the_row_names_the_curated_family_and_carries_its_own_ttl() -> Non
 
     A cap on a family with no members is a branch nothing can reach.
 
-    The TTL is five minutes and it is not "until regenerated", which is PRD 06's
-    phrase for the *artefact*'s lifetime and is the wrong reading for a cache. The
-    stored row is immutable until a generation replaces it -- and a replacement is the
-    only event that matters, because `RowCache` holds the whole built row under
-    `(user_id, slug)` and a generation of the same width re-uses the same slugs.
-    Nothing invalidates that entry: the curation job runs in `usher work`, a different
-    process from the API that holds the cache. So this number is **how long a
+    The TTL is five minutes, and PRD 06 says what it bounds: *"staleness, not the
+    artefact's lifetime."* The stored row is immutable until a generation replaces it --
+    and a replacement is the only event that matters, because `RowCache` holds the whole
+    built row under `(user_id, slug)` and a generation of the same width re-uses the
+    same slugs. Nothing invalidates that entry: the curation job runs in `usher work`, a
+    different process from the API that holds the cache. So this number is **how long a
     household keeps seeing last night's shelf after tonight's replaced it** -- which
     `POST /admin/rows/regenerate` turns into an operator staring at a screen. Five
     minutes matches `RecentlyAddedProvider`'s, the other row whose content moves on an

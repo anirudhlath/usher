@@ -160,8 +160,8 @@ def test_search_queries_declares_exactly_the_one_index_with_a_written_reader() -
 
     The failure being guarded is an index added for a reader that does not exist
     yet, and such an index has no name to check for. `ix_search_queries_at`'s
-    reader does exist and is written out verbatim in PRD 10 -- an operator's own
-    `DELETE FROM search_queries WHERE at < now() - interval '90 days'`.
+    reader does exist and is written out in PRD 08 -- the retention job's
+    `DELETE FROM search_queries WHERE at < :cutoff`, chunked.
     """
     assert {index.name for index in cast(Table, SearchQueryRow.__table__).indexes} == {
         "ix_search_queries_at"

@@ -75,8 +75,8 @@ class SearchQueryRow(Base):
         CheckConstraint("query <> ''", name="ck_search_queries_query_not_empty"),
         CheckConstraint("result_count >= 0", name="ck_search_queries_result_count_non_negative"),
         CheckConstraint("latency_ms >= 0", name="ck_search_queries_latency_ms_non_negative"),
-        # For PRD 10's retention sweep, `DELETE FROM search_queries WHERE at <
-        # now() - interval '90 days'`, which without it is a sequential scan.
+        # For PRD 08's retention job, `DELETE FROM search_queries WHERE at <
+        # :cutoff`, which without it is a sequential scan.
         Index("ix_search_queries_at", "at"),
         # `clicked_title_id`'s SET NULL has no index behind it, so a title
         # delete still scans this table.

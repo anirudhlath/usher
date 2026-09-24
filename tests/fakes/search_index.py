@@ -21,9 +21,10 @@ from usher.ports.search import (
 # assertions about the constant.
 _RRF_K = 60
 
-# Weight classes, mirroring PRD 05's ordering: names, then credits (class B,
-# reserved and empty), then genres and keywords, then the long prose.
-# Constants rather than `setweight`, which is a divergence from Postgres.
+# Weight classes after PRD 05's: names, then credits (class B, `credit_names`).
+# Below those this fake ranks genres and keywords above the long prose, the
+# reverse of PRD 05's C (overview, tagline) over D (genres, keywords) -- a
+# divergence from Postgres, as the constants rather than `setweight` are.
 _NAME_WEIGHT = 1.0
 _CREDIT_WEIGHT = 0.4
 _TAG_WEIGHT = 0.2

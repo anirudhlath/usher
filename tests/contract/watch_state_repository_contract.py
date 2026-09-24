@@ -439,7 +439,7 @@ class WatchStateRepositoryContract:
     async def test_the_backfill_listing_is_bounded(
         self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
     ) -> None:
-        """One upstream request per row at 1-5 s each (PRD 01).
+        """One upstream request per row, spaced 2.5 s apart by PRD 03's default gate.
 
         A listing that ignored `limit` would hand the queue the whole household.
         """
@@ -854,7 +854,7 @@ class WatchStateRepositoryInProgressContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """A household is per-person (PRD 02's `User` docstring).
+        """Watch state is per-person (PRD 00: user records exist so it can be).
 
         The wrong implementation is a `WHERE` clause that lost its first
         predicate, which on a single-user deployment -- i.e. every deployment

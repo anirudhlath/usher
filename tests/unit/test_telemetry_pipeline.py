@@ -322,8 +322,9 @@ async def test_a_provider_request_is_counted_by_status(
 ) -> None:
     """PRD 10's `usher.provider.requests` (provider, status).
 
-    Dashboard 3 wants "TMDb requests/sec against the ~40 ceiling with 429 count", which
-    is a counter rate rather than a histogram's sampled `_count`.
+    Dashboard 3 wants "TMDb requests/sec against the `USHER_TMDB_REQUESTS_PER_SECOND`
+    ceiling, with 429 count", which is a counter rate rather than a histogram's sampled
+    `_count`.
     """
     client = TmdbClient(
         httpx.AsyncClient(

@@ -55,9 +55,10 @@ class SeasonsResponse(BaseModel):
     **An object rather than a bare JSON array**, and deliberately **not**
     `Page[SeasonResponse]`. A bare array cannot grow a sibling field without a
     breaking change, and a `Page` would put a `next_cursor` on the wire that is
-    structurally `null` forever -- PRD 07's pagination contract says a client
-    *takes both arms on every listing it renders*, so claiming it for an
-    unpaged answer teaches a client to look for a page that will never exist.
+    structurally `null` forever -- PRD 07's pagination contract puts a
+    `next_cursor` on every paged response, `null` only on the last page, so
+    claiming it for an unpaged answer teaches a client to look for a page that
+    will never exist.
 
     Unpaged: a series has a handful of seasons and a client renders all at once.
     """
@@ -71,8 +72,8 @@ class EpisodeResponse(BaseModel):
     id: uuid.UUID
     title_id: uuid.UUID
     season_id: uuid.UUID
-    # Stored on the episode as well as on its season, which PRD 02 keeps
-    # deliberately: ingest looks an episode up by
+    # Stored on the episode as well as on its season, as PRD 02's `Episode`
+    # has it: ingest looks an episode up by
     # `(title_id, season_number, episode_number)` before its `Season` row is
     # necessarily known. On the wire it saves a client a second request to
     # render "S02E04".

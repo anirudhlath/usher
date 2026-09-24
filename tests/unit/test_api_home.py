@@ -487,8 +487,9 @@ async def test_the_route_never_loads_an_embedding_model(client: httpx.AsyncClien
     """`create_app`'s lifespan builds the embedder **only when `worker_enabled`**.
 
     So a route that reached for one would work in development and 500 in exactly the
-    push-only deployment PRD 08 describes. This app is built with `worker_enabled=False`,
-    so `app.state` holds no model at all -- and the screen still composes. Every row
+    deployment PRD 08's "Worker in its own process" row describes. This app is built
+    with `worker_enabled=False`, so `app.state` holds no model at all -- and the
+    screen still composes. Every row
     here reads a *precomputed* artefact (`title_neighbors`, `user_taste`); computing
     those needs a model where reading them does not, which is the same property
     `usher index` already has.

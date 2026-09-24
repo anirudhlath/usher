@@ -165,7 +165,7 @@ class TitleMatchRepositoryContract:
     async def test_name_year_lookup_accepts_a_year_within_one(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
-        """PRD 03 stage 3's "+/-1".
+        """PRD 03's name + year tier: a year within +/-1.
 
         Source and IMDb routinely disagree by one on a film released near a year
         boundary.
@@ -214,8 +214,8 @@ class TitleMatchRepositoryContract:
         """Remakes, and IMDb's own duplicate entries.
 
         Picking whichever row a scan reaches first attaches the household's watch
-        history to the wrong film, silently. PRD 03 stage 5: no *confident* match means
-        the review queue.
+        history to the wrong film, silently. PRD 03's match ladder, step 6: no
+        *confident* match means the review queue.
         """
         await catalog.given_title(kind=TitleKind.MOVIE, name="The Killers", year=1964)
         await catalog.given_title(kind=TitleKind.MOVIE, name="The Killers", year=1964)

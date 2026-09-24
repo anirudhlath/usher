@@ -181,7 +181,7 @@ class GenomeRepositoryContract:
         It is not a hypothetical state: a catalog whose vectors loaded before the
         vocabulary did stays in it until an operator re-runs the phase. A caller
         that gets `None` renders no tags, which is PRD 08's "a degraded subsystem
-        narrows functionality; it never fails a request local state can answer".
+        narrows functionality; it never fails a request that local state can answer".
         Kills an implementation that treats an empty table as a mismatch, which
         would park every job that asks on a deployment where nothing is wrong.
 

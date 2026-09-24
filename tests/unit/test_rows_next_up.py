@@ -121,8 +121,7 @@ async def test_next_up_costs_the_same_calls_against_three_series_and_thirty() ->
     """Rules out one repository round trip per series.
 
     The per-series loop returns the **correct row**, which is exactly why no
-    assertion about contents can see it, on a screen PRD 08 budgets as a single
-    request.
+    assertion about contents can see it, on the screen every `GET /home` composes.
     """
 
     async def _calls(series_count: int) -> int:

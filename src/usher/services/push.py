@@ -66,8 +66,8 @@ class PushApplyService:
         self._events = events
         self._commit = commit
         # The push lane invalidates; the nightly walk expires. A push event *is* a
-        # change -- PRD 07's own reason for this lane publishing
-        # `watchstate.updated` where the walk does not -- so the fan-out is per
+        # change -- the same reason this lane publishes `watchstate.updated`
+        # where the walk does not -- so the fan-out is per
         # *event*, over a small fixed slug set, rather than per merged row.
         self._cache = cache
         self._max_items = max_items_per_event
@@ -231,8 +231,8 @@ class PushApplyService:
         those is reversible. Emby emits `ItemsRemoved` during an ordinary
         library refresh for items that have not gone anywhere.
 
-        PRD 08 already prices the delay: "Availability goes stale, not
-        wrong." Counted and logged rather than dropped silently, so an
+        PRD 03: "the row stays available until a walk sweeps it." Counted
+        and logged rather than dropped silently, so an
         operator watching a source that really did lose a library can see
         the events arriving before the nightly walk acts on them.
         """
@@ -296,8 +296,9 @@ class PushSupervisor:
 
         Returns; never raises a `UsherPortError`.
 
-        Returns rather than looping forever, and that is PRD 08: "after N
-        failures mark `supports_push = false` and lean on the nightly walk."
+        Returns rather than looping forever, and that is PRD 08: "After
+        `USHER_PUSH_MAX_CONSECUTIVE_FAILURES` (default 5) mark `supports_push =
+        false` and lean on the full walk."
         A lane that retried indefinitely against a proxy stripping `Upgrade`
         would look identical to a working one from every dashboard.
         """

@@ -401,7 +401,7 @@ async def test_a_second_run_changes_nothing(
     source: Source,
     catalog: uuid.UUID,
 ) -> None:
-    """PRD 03: "four idempotent, resumable stages".
+    """PRD 03: "Five idempotent, resumable stages".
 
     The second walk is where the two mutations no port fake can see would
     fire: skipping `resolve_seasons` or `resolve_episodes` leaves a

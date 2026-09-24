@@ -84,8 +84,8 @@ class SourceItem:
     series_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
-    # Opaque; stored in raw_payloads (PRD 03) for debugging and reprocessing,
-    # never interpreted above the adapter boundary. Every typed field above
+    # Opaque, and never stored -- PRD 03 caches provider responses only --
+    # and never interpreted above the adapter boundary. Every typed field above
     # exists so that nothing above the adapter has to read this one.
     raw: dict[str, Any] = field(default_factory=dict)
 

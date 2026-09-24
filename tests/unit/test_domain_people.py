@@ -45,14 +45,14 @@ def test_a_person_must_have_a_sort_name() -> None:
 
 
 def test_a_person_carries_no_biography_birth_year_or_death_year() -> None:
-    """Three of the four fields PRD 02 sketched are still not built.
+    """PRD 02's `Person` has no biography, birth year or death year.
 
     `birth_year`, `death_year` and `biography` live on `/person/{id}` and nothing can
     fill them. `imdb_id` is not among them: it is not filled from TMDb here, it is what
     an IMDb bulk row *is*, `nconst`, available with no request at all.
 
-    The wrong implementation this kills: transcribing PRD 02's sketch verbatim, which
-    produces three columns no derivation can ever fill.
+    The wrong implementation this kills: adding the three columns `/person/{id}`
+    offers, which no derivation here can ever fill.
     """
     assert not {"birth_year", "death_year", "biography"} & set(Person.model_fields)
 
@@ -158,7 +158,7 @@ def test_a_credit_names_a_title_and_never_an_episode() -> None:
     building the `title_id`/`episode_id` pair would fix a table's shape before anything
     had tried to fill it. `title_id` is required and there is no `episode_id`.
 
-    The wrong implementation this kills: PRD 02's sketch transcribed, which
+    The wrong implementation this kills: a `title_id`/`episode_id` pair, which
     makes `title_id` nullable -- at which point the natural key over it stops
     constraining anything, because NULL never collides with NULL in a unique
     index.
@@ -169,9 +169,9 @@ def test_a_credit_names_a_title_and_never_an_episode() -> None:
 
 
 def test_billing_order_is_kept_and_bounded() -> None:
-    """PRD 06's People row is about *top-billed* cast.
+    """`billing_order` orders the cast PRD 07 renders, capped at 20.
 
-    So `order` from the payload is the field that makes "top billed" mean anything. The
+    So `order` from the payload is the field that decides which 20 those are. The
     bound mirrors `ck_credits_billing_order_non_negative`; the schema mirrors every
     pydantic bound as a CHECK precisely because the bulk path constructs no pydantic
     model at all.

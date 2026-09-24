@@ -58,8 +58,9 @@ def test_the_row_port_declares_behaviour_and_implements_none() -> None:
     """`ports/` has zero concrete behaviour today.
 
     Every method in `ports/search.py`, `ports/source.py` and `ports/repository.py` is
-    abstract, and `Row` is the first port with an obvious reason to break that,
-    because PRD 06's sketch puts `hydrate()` and `empty()` on it.
+    abstract, and `Row` is the first port with an obvious reason to break that:
+    `hydrate()` and `empty()` are shared behaviour, and PRD 06's sketch puts them
+    on `BaseRow` in `services/rows/base.py`, not on the port.
     """
     defined = {
         name for name, value in vars(Row).items() if callable(value) and not name.startswith("__")

@@ -102,8 +102,8 @@ async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
 
     The key names an item no configured source addresses, so
     `SourceRegistry.resolve` answers `None` from local state alone and the
-    handler completes the job without a network call (PRD 08 reserves
-    parking for work a human has to look at).
+    handler completes the job without a network call (PRD 08: a job no
+    configured source addresses completes, and does not park).
     """
     async with sessions() as session:
         pipeline = build_pipeline(session, lane_settings)
@@ -133,7 +133,7 @@ async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
 async def test_the_worker_lane_is_off_when_the_setting_is(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """PRD 01's `--worker` flag, as configuration.
+    """PRD 01's split into a second container, as configuration.
 
     The same image with the switch off leaves the queue for another container. The
     mirror of the case above and the reason it is evidence -- without this, "the job

@@ -20,9 +20,10 @@ from usher.db.base import build_engine
 from usher.domain.ids import new_id
 
 _RETENTION_DELETE = "DELETE FROM search_queries WHERE at < now() - interval '90 days'"
-"""PRD 10's own pruning statement, verbatim rather than paraphrased.
+"""PRD 08's retention statement, with the default 90-day cutoff written in.
 
-An index that serves a statement nobody writes serves nothing.
+PRD 08 states it as `DELETE FROM search_queries WHERE at < :cutoff`, chunked; this is
+one unchunked pass. An index that serves a statement nobody writes serves nothing.
 """
 
 
@@ -217,7 +218,7 @@ async def test_the_backfill_reaches_a_row_that_existed_before_the_migration_ran(
 
 
 async def _delete_plan(url: str) -> str:
-    """`EXPLAIN` of PRD 10's pruning `DELETE`, under `enable_seqscan = off`.
+    """`EXPLAIN` of the retention `DELETE`, under `enable_seqscan = off`.
 
     `SET LOCAL` inside a transaction that is rolled back, and the `DELETE` is
     never executed -- `EXPLAIN` without `ANALYZE` plans the statement and

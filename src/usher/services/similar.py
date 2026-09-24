@@ -33,9 +33,10 @@ _WEIGHTS: dict[str, float] = {
 }
 
 # Deliberately just past where the halfvec ordering starts to diverge from
-# float32. PRD 06's `SimilarityRow` renders ten to twenty items and a consumer
-# that filters -- already watched, not owned -- needs headroom, while storing 200
-# would be storing an ordering the storage format cannot honour.
+# float32. A similarity row renders up to twenty cards (`because_you_watched`'s
+# `_MAX_CARDS`) and a consumer that filters -- already watched, not owned -- needs
+# headroom, while storing 200 would be storing an ordering the storage format
+# cannot honour.
 _NEIGHBORS_PER_TITLE = 25
 
 # Candidates per seed before the blend. Larger than what is stored, because the
@@ -76,8 +77,8 @@ class NeighborRebuild:
     # document.
     without_embedding: int
     # The genome's coverage, reported by the path that consumes it: these three
-    # are the denominators behind PRD 05's "~7% coverage", and they arrive from
-    # the rebuild rather than from a second query somebody has to think to run.
+    # are its denominators, and they arrive from the rebuild rather than from a
+    # second query somebody has to think to run.
     seeds_with_genome: int
     candidate_pairs: int
     pairs_with_tags: int
@@ -86,9 +87,9 @@ class NeighborRebuild:
 class SimilarityService:
     """Neighbours as a lookup rather than a computation.
 
-    PRD 05: "item vectors are static, so this is a cheap batch artifact that
-    makes 'more like this' instant and engine-independent." PRD 06's
-    `SimilarityRow` is the consumer.
+    PRD 05: "Neighbours are precomputed offline into `title_neighbors`, so 'more
+    like this' is instant and engine-independent." PRD 06's `SimilarityRow` is the
+    consumer.
 
     There is no HTTP route here: `GET /titles/{id}/similar` is the API's, over
     this service and this table.
