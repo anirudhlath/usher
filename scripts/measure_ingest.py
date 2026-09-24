@@ -33,6 +33,7 @@ from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.ports.credentials import SourceCredentials
+from usher.ports.events import NullEventPublisher
 from usher.ports.ingest import WatchStateMerge
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
@@ -155,6 +156,7 @@ def _service(session: AsyncSession, *, batch_size: int) -> ReconcileService:
         ),
         media_items=media_items,
         runs=PostgresSyncRunRepository(session),
+        events=NullEventPublisher(),
         commit=session.commit,
         batch_size=batch_size,
     )

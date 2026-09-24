@@ -148,32 +148,35 @@ fixed one, pin `revision()` to the sidecar's own value.
   *session* aborted and the next statement raises `PendingRollbackError`,
   including `import_dataset`'s own except handler. Deliberately a full
   `session.rollback()`, not a SAVEPOINT (`db/repositories/import_run.py`).
-- **A `RepositoryConflict` reaches `import_dataset` only from `start()`, and the
-  loser must touch nothing.** `_concede_to_other_owner` returns the owner's row as
-  stored, with no `save` and no `commit`; re-fetching by dataset name and saving
-  `FAILED` onto whatever comes back corrupts a `RUNNING` or `COMPLETED` import
-  belonging to someone else. ⚠️ **Unit fakes catch neither bug** — a conflict with
-  no competing row passes before and after, so seed a real winner row and assert
-  it returns unchanged.
+- **`start()` holds the dataset with a session-level advisory lock on a connection
+  of its own** (the session's returns to the pool at each commit, lock and all). Not
+  granted is the only `RepositoryConflict` `import_dataset` sees, and the loser
+  touches nothing — the owner's row as stored, no `save`, no `commit`. Released in
+  the `finally` or with a dead process's connection; a test that `start()`s releases.
 - ⚠️ **Known defect, recorded and not fixed:** `run_bootstrap` opens
   `bulk_load_window()` *around* `import_dataset`, so its `count_titles() == 0` guard
   is read before ownership is known. Two processes over an empty catalog both `DROP
-  INDEX` and both stream — the second takes over the committed `RUNNING` row, or
-  concedes if their inserts race — and the first out `CREATE INDEX`es under the other,
-  costing the saving plus a `SHARE` lock on `titles`. Both fixes change an M2 path.
+  INDEX`; the second concedes and streams nothing, but its window closes by `CREATE
+  INDEX`ing under the first, costing the saving plus a `SHARE` lock on `titles`.
 - **`bootstrap-status`' report scales with the catalog** — three of
   `_GENOME_COVERAGE`'s five terms scan `titles`, so no client route assembles it.
 - **WDQS times out as a `504 text/plain` (~65 s, no `Retry-After`) or a `200` cut
   off mid-document** — both `PortUnavailable`. Page with `bd:slice`, never
   `STRSTARTS`: a prefix filter still walks the whole join, slower than no filter.
 - **`import_dataset` records a failure and returns it; the CLI exits 1 on any failed,
-  skipped or refused phase.** It retries the revision `HEAD` and a fetch, never a
-  writer, and **commits after `start()` and before every wait**: a wait inside the
-  transaction holds an xid, hides `RUNNING`, and dies to
-  `idle_in_transaction_session_timeout` unrecorded (`test_bootstrap_transactions.py`).
-- **A failure before `start()` over a `COMPLETED` checkpoint keeps it `COMPLETED`,
-  `error` set** — downgrading blocks every phase reading it. So "failed this run" is
-  `error is not None`, never `status is FAILED` (`composition._failed_this_run`).
+  conceded, skipped or refused one.** It retries the revision `HEAD` and a fetch,
+  never a writer, and **commits before the first `HEAD`, after `start()` and before
+  every wait**: a transaction held across a wait keeps an xid, hides `RUNNING`, and
+  dies to `idle_in_transaction_session_timeout` unrecorded.
+- **`start()` over a `COMPLETED` checkpoint persists only a cleared `error` and a
+  heartbeat**, so it stays `COMPLETED` at its cursor until the first batch is saved,
+  and a failure, cancel or kill before that blocks no phase; until the row reads
+  `RUNNING`, `_drain_resuming` resumes from the attempt's run. "Failed this run" is
+  `error is not None`, asked after the concede check. A failure before `start()` is
+  `note_failure`: status and cursor kept, `FAILED` only where no row exists.
+- **A `RUNNING` heartbeat moves only while the event loop is free**: `_beating`
+  commits a `touch` every `HEARTBEAT_SECONDS` through a fetch or a retry's wait, and
+  a synchronous read of a dump that bypasses `download.paced` stalls it throughout.
 - **`download.py`'s `HEAD` follows WDQS's ladder**: 408/5xx unavailable, 429
   rate-limited, any other 4xx or no `ETag`/`Last-Modified` malformed. The TMDb
   walk-back reads only 404/403 as "not published" (`revision_if_published`) — read

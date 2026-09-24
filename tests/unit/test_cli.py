@@ -49,6 +49,8 @@ from usher.cli import (
 )
 from usher.composition import (
     BootstrapOutcome,
+    ConcededImport,
+    FailedImport,
     _aliases,
     _credit_names,
     _movielens,
@@ -1984,6 +1986,46 @@ async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
     assert named, "the import scan found nothing, so it proves nothing"
     assert [one for one in named if one.startswith("usher.adapters.bulk")] == []
     assert "BootstrapService" not in _without_docstrings(tree)
+
+
+@pytest.mark.parametrize(
+    ("conceded", "says"),
+    [
+        (("tmdb.ids.movie",), "1 import left to another process: tmdb.ids.movie"),
+        (
+            ("tmdb.ids.movie", "tmdb.ids.series"),
+            "2 imports left to another process: tmdb.ids.movie, tmdb.ids.series",
+        ),
+    ],
+)
+async def test_an_import_left_to_another_process_exits_1_and_is_named_as_one(
+    monkeypatch: pytest.MonkeyPatch, conceded: tuple[str, ...], says: str
+) -> None:
+    """Not among the failures: this run did not fail it, and did not import it either."""
+    failed = ImportRun(dataset="imdb.title.basics", revision="r", error="HEAD failed")
+    outcome = BootstrapOutcome(
+        (
+            FailedImport(BootstrapPhase.IMDB, failed),
+            *(
+                ConcededImport(BootstrapPhase.TMDB_IDS, ImportRun(dataset=name, revision="r"))
+                for name in conceded
+            ),
+        )
+    )
+
+    async def settled(*_: object, **__: object) -> BootstrapOutcome:
+        return outcome
+
+    monkeypatch.setattr(usher.cli, "run_bootstrap", settled)
+    settings = Settings(database_url="postgresql+asyncpg://u:p@localhost/db", secret_key="0" * 32)
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _bootstrap(settings, BootstrapPhase.ALL)
+
+    assert exit_info.value.code == (
+        f"usher bootstrap: 1 import failed: imdb.title.basics; {says}; each line above ends "
+        "with the command that resumes it, and `usher bootstrap-status` shows the checkpoints"
+    )
 
 
 def test_the_phase_choices_are_the_vocabulary_and_not_a_second_copy_of_it() -> None:

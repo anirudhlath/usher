@@ -52,6 +52,7 @@ from usher.api.deps import get_search_service, get_source_adapter_factory, get_s
 from usher.composition import (
     _READS,
     _WRITTEN_BY,
+    ConcededImport,
     FailedImport,
     Pipeline,
     SkippedStep,
@@ -1500,6 +1501,10 @@ class _JournallingRuns(FakeImportRunRepository):
         self._note(run.dataset)
         await super().save(run)
 
+    async def note_failure(self, dataset: str, error: str) -> ImportRun:
+        self._note(dataset)
+        return await super().note_failure(dataset, error)
+
 
 #: One title, invented, so a phase that refuses an empty catalog will proceed.
 #: Every value here is synthetic (`tests/fixtures/README.md`'s rule) and none
@@ -2304,8 +2309,8 @@ async def test_a_revision_blip_over_a_completed_import_fails_the_run_and_blocks_
     )
     assert outcome.skipped == ()
     assert printed == [
-        f"{one.dataset} could not start, and its completed import stands: {one.error}"
-        f"{_RESUME}{phase}"
+        f"{one.dataset} failed before its first batch landed, and its completed import "
+        f"stands: {one.error}{_RESUME}{phase}"
         for one, phase in zip(stood, ("imdb", "ratings"), strict=True)
     ]
 
@@ -2371,6 +2376,45 @@ async def test_a_phase_refusing_an_empty_catalog_leaves_the_run_unfinished(
         f"; resume with: {resume}"
     )
     assert await runs.list_runs() == [], "a refusal starts no checkpoint"
+
+
+async def test_an_import_another_process_holds_is_left_to_it_whatever_its_row_says(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The holder's row carries its own error, and this run neither owns nor failed it.
+
+    Read as this run's failure, the concede printed the holder's error as its own and
+    said the dataset failed. It is unfinished all the same -- this run did not import
+    it -- so the command exits 1 and says to resume once the holder ends.
+    """
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    holder = FakeImportRunRepository(shares=runs)
+    started = await holder.start("tmdb.ids.movie", "fixture-revision")
+    held = started.evolve(error="the holder's own retry, still going")
+    await holder.save(held)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _prerequisites_complete(monkeypatch)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.TMDB_IDS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await runs.get("tmdb.ids.movie") == held, "the holder's row, untouched"
+    series = await runs.get(f"tmdb.ids.{TitleKind.SERIES.value}")
+    assert series is not None and series.status is ImportRunStatus.COMPLETED
+    assert outcome.unfinished == (ConcededImport(BootstrapPhase.TMDB_IDS, held),)
+    assert printed == [
+        "tmdb.ids.movie was left alone: another process is importing it; once that process "
+        "ends, resume with: usher bootstrap --phase tmdb-ids"
+    ]
 
 
 class _WindowFailsToClose(FakeBulkCatalogRepository):

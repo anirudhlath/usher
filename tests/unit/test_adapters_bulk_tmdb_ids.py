@@ -196,6 +196,40 @@ async def test_a_failure_to_ask_is_not_read_as_a_day_that_is_not_published(
     assert str(exc_info.value) == message
 
 
+_TODAYS_URL = "https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz"
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (410, f"{_TODAYS_URL} returned HTTP 410"),
+        (
+            200,
+            f"{_TODAYS_URL} supplied neither ETag nor Last-Modified, so no snapshot token "
+            "exists and a resumable import cannot tell one snapshot from another",
+        ),
+    ],
+    ids=["410", "200-no-token"],
+)
+async def test_an_unusable_answer_is_not_read_as_a_day_that_is_not_published(
+    tmp_path: Path, status: int, message: str
+) -> None:
+    """Only a 404 or 403 walks back; every other malformed answer ends the walk at today.
+
+    Both are `PortDataMalformed`, as a 404 is inside `revision()`, so a walk-back reading
+    that class as "not published" would ask six more days and report no export at all.
+    """
+    asked: list[str] = []
+    async with httpx.AsyncClient(transport=_failing_transport(asked, status=status)) as client:
+        dataset = TMDbIdDataset(
+            client, tmp_path / "bulk", kind=TitleKind.MOVIE, batch_size=10, today=_TODAY
+        )
+        with pytest.raises(PortDataMalformed) as exc_info:
+            await dataset.revision()
+    assert asked == ["movie_ids_07_30_2026.json.gz"]
+    assert str(exc_info.value) == message
+
+
 async def test_a_line_that_is_not_json_is_malformed(tmp_path: Path) -> None:
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)

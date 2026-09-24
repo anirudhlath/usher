@@ -3,6 +3,7 @@
 No Docker, no network.
 """
 
+import asyncio
 import datetime as dt
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
@@ -245,16 +246,17 @@ async def test_commits_at_the_start_once_per_batch_and_at_the_end(
     """The commit boundary *is* the resumability mechanism.
 
     One commit for the whole run would make a crash lose everything; a commit between
-    the rows and the cursor would make it lose or duplicate a batch. And one for the
-    `RUNNING` row `start()` wrote, before the first fetch rather than with the first
-    batch: `test_the_start_is_committed_and_no_wait_happens_inside_a_transaction`.
+    the rows and the cursor would make it lose or duplicate a batch. And two before the
+    first fetch -- one ending the caller's read before the first `HEAD`, one for the
+    `RUNNING` row `start()` wrote:
+    `test_the_start_is_committed_and_no_wait_happens_inside_a_transaction`.
     """
     commit = CommitSpy()
     dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]])
     await _service(runs, catalog, commit).import_dataset(
         dataset, lambda rows: _write(catalog, rows)
     )
-    assert commit.count == 5
+    assert commit.count == 6
 
 
 async def test_the_checkpoint_advances_with_every_batch(
@@ -291,7 +293,7 @@ async def test_an_empty_batch_still_checkpoints_and_is_not_end_of_stream(
     stored = await runs.get("scripted")
     assert stored is not None
     assert stored.position == 2  # both batches advanced the cursor
-    assert commit.count == 4  # the start, one per batch (2) and the final COMPLETED save
+    assert commit.count == 5  # before the HEAD, the start, one per batch (2), COMPLETED
 
 
 async def test_batches_receives_the_already_resolved_revision(
@@ -352,9 +354,8 @@ async def test_a_rate_limited_revision_is_recorded_not_raised(
 class _ConflictingImportRunRepository(FakeImportRunRepository):
     """Wraps the fake so its first `start()` call raises `RepositoryConflict`.
 
-    Stands in for `PostgresImportRunRepository`'s real failure mode
-    (`uq_import_runs_dataset`) without needing Postgres: two processes bootstrapping the
-    same dataset at once.
+    Stands in for another process holding the dataset -- `PostgresImportRunRepository`'s
+    advisory lock, not granted -- with no second repository to hold it.
 
     `winner`, when given, seeds the fake's store with a *different*, already-persisted
     run for the same dataset before the conflict fires -- standing in for the real
@@ -414,9 +415,9 @@ async def test_a_conflicting_start_leaves_the_winners_run_untouched(
     # would also have failed if import_dataset had returned something
     # merely *equivalent* in status rather than the actual stored row.
     assert result == winner
-    # Nothing was written, so nothing needed committing -- the strongest
-    # possible statement that this path performs no persistence at all.
-    assert commit.count == 0
+    # One commit, the one ending the caller's read before the `HEAD`: the concede
+    # itself commits nothing, which is the strongest statement that it persists nothing.
+    assert commit.count == 1
 
 
 async def test_a_conflicting_start_with_no_discoverable_owner_does_not_persist(
@@ -440,7 +441,7 @@ async def test_a_conflicting_start_with_no_discoverable_owner_does_not_persist(
     # The synthetic report is never persisted -- this is the one thing the
     # method must never do for a dataset it holds no claim to.
     assert await runs.get("scripted") is None
-    assert commit.count == 0
+    assert commit.count == 1, "only the one before the HEAD"
 
 
 async def test_a_failed_run_resumes_from_where_it_stopped(
@@ -509,11 +510,11 @@ async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commi
 
     Each one is offered *after* the commit that made its batch durable.
 
-    **The commit count at publish time is the assertion.** The start commits once, two
-    batches once each and `_finish` a fourth time, so a correct run records frames at
-    counts 2 and 3 -- a publish moved above `self._commit()` records 1 and 2, which is
-    the same two events in the same order and the reason a list of frames alone cannot
-    see it.
+    **The commit count at publish time is the assertion.** Two commits precede the
+    first fetch, two batches commit once each and `_finish` a fifth time, so a correct
+    run records frames at counts 3 and 4 -- a publish moved above `self._commit()`
+    records 2 and 3, which is the same two events in the same order and the reason a
+    list of frames alone cannot see it.
 
     **Two batches rather than one, and no third frame.** One frame per *run* is the
     progress bar that jumps from 0% to 100%, which
@@ -528,8 +529,8 @@ async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commi
         dataset, lambda rows: _write(catalog, rows)
     )
 
-    assert commit.count == 4, "the premise: the start's, two batches' and the completing one"
-    assert [seen for _, seen in spy.frames] == [2, 3], (
+    assert commit.count == 5, "the premise: two before the fetch, two batches', the last"
+    assert [seen for _, seen in spy.frames] == [3, 4], (
         "a frame was offered before the commit that made its batch durable"
     )
 
@@ -760,8 +761,8 @@ async def test_the_start_is_committed_and_no_wait_happens_inside_a_transaction(
     `start()`, hiding `running` from `bootstrap-status`, and killed outright under
     `idle_in_transaction_session_timeout` with nothing recorded. So `start()` is
     committed before the first fetch, and every wait -- the revision's and a fetch's
-    alike -- is preceded by a commit, which ends whatever read the caller left open
-    (`run_bootstrap` reads checkpoints first).
+    alike -- is preceded by a commit. So is the first `HEAD`, which ends whatever read
+    the caller left open (`run_bootstrap` reads checkpoints first).
     `tests/integration/test_bootstrap_transactions.py` observes it in `pg_stat_activity`.
     """
     journal = _Journal()
@@ -773,6 +774,7 @@ async def test_the_start_is_committed_and_no_wait_happens_inside_a_transaction(
     ).import_dataset(_FlakyTwice(journal), lambda rows: _write(catalog, rows))
     assert run.status is ImportRunStatus.COMPLETED
     assert journal == [
+        "commit",  # the caller's read ends before the first HEAD
         "commit",
         "sleep 15",  # the revision's wait
         "start",
@@ -1174,28 +1176,40 @@ async def test_a_revision_that_fails_over_a_completed_import_leaves_it_completed
     assert dataset.resumed_from is None and dataset.revision_requested is None
 
 
-@pytest.mark.parametrize("status", [ImportRunStatus.FAILED, ImportRunStatus.RUNNING])
-async def test_a_revision_that_fails_over_an_unfinished_import_records_it_failed(
-    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, status: ImportRunStatus
+@pytest.mark.parametrize(
+    ("status", "heartbeat_moves"),
+    [(ImportRunStatus.FAILED, True), (ImportRunStatus.RUNNING, False)],
+)
+async def test_a_revision_that_fails_over_an_unfinished_import_only_adds_the_error(
+    runs: FakeImportRunRepository,
+    catalog: FakeBulkCatalogRepository,
+    status: ImportRunStatus,
+    heartbeat_moves: bool,
 ) -> None:
-    """The neighbours: a checkpoint that was not `COMPLETED` has nothing to keep standing."""
+    """The neighbours: before `start()` this process holds nothing, so it takes nothing over.
+
+    A `RUNNING` checkpoint may be another process's live import. Written `FAILED` with a
+    stale cursor, it lost that import's status and position; its heartbeat is that
+    process's too. So each keeps its status and cursor and gains the error.
+    """
     unfinished = (await _completed(runs)).evolve(status=status, finished_at=None)
     await runs.save(unfinished)
     run = await _service(runs, catalog, CommitSpy()).import_dataset(
         FlakyRevision(_three(), failures=99), lambda rows: _write(catalog, rows)
     )
-    assert run.status is ImportRunStatus.FAILED
-    assert run.position == 3
-    assert run.error == f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
+    error = f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
+    assert run == unfinished.evolve(error=error, heartbeat_at=run.heartbeat_at)
+    assert (run.heartbeat_at > unfinished.heartbeat_at) is heartbeat_moves
+    assert await runs.get("scripted") == run, "what is returned is what is stored"
 
 
 async def test_a_failure_after_the_start_over_a_completed_import_records_it_failed(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
-    """Once `start()` has run, the checkpoint is `RUNNING` and a new revision reset it.
+    """Once a batch of the new revision has landed, the catalog is part-way to it.
 
-    What the catalog holds is then part-way to another snapshot, which is what
-    `FAILED` says -- so the rule is about when the failure came, not what was there.
+    That is what `FAILED` says -- so the rule is about whether anything of the attempt
+    landed, not about what was there before it.
     """
     await _completed(runs)
     run = await _service(runs, catalog, CommitSpy()).import_dataset(
@@ -1204,6 +1218,213 @@ async def test_a_failure_after_the_start_over_a_completed_import_records_it_fail
     )
     assert run.status is ImportRunStatus.FAILED
     assert (run.revision, run.position) == ("etag-1", 1)
+
+
+@pytest.mark.parametrize(
+    ("error", "recorded"),
+    [
+        (
+            lambda: PortUnavailable("WDQS returned HTTP 504"),
+            "WDQS returned HTTP 504 (gave up after 5 attempts over 225s)",
+        ),
+        (lambda: PortDataMalformed("not a gzip file"), "not a gzip file"),
+    ],
+    ids=["gave-up", "malformed"],
+)
+async def test_a_first_fetch_that_never_lands_over_a_completed_import_leaves_it_completed(
+    runs: FakeImportRunRepository,
+    catalog: FakeBulkCatalogRepository,
+    error: Callable[[], UsherPortError],
+    recorded: str,
+) -> None:
+    """After `start()`, with no batch of the new revision landed: the refresh is all lost.
+
+    The completed import still describes the catalog, so it stands, error beside it,
+    and blocks no phase. It read `RUNNING` at position 0 of the new revision -- a
+    download failing, or a first WDQS page timing out, blocked every dependent phase.
+    """
+    finished = await _completed(runs)
+    dataset = FlakyDataset(_three(), failures={0: 99}, error=error)
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert dataset.resumes[0] is None, "the premise: a new revision, fetched from the start"
+    assert run == finished.evolve(error=recorded, heartbeat_at=run.heartbeat_at)
+    assert await runs.get("scripted") == run, "what is returned is what is stored"
+    assert await catalog.count_titles() == 0
+
+
+async def test_a_retry_before_the_first_batch_over_a_completed_import_imports_the_new_one(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """The retry resumes the attempt, not the completed import standing beside it.
+
+    Until the first batch lands the stored checkpoint is still that import: resumed from
+    its cursor, a retry skipped the new snapshot and recorded it `COMPLETED`, and built
+    on, its first batch was saved `COMPLETED` at the old revision.
+    """
+    await _completed(runs)
+    dataset = FlakyDataset(_three(), failures={0: 1})
+    stored_at_each_write: list[ImportRunStatus] = []
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        stored = await runs.get("scripted")
+        assert stored is not None
+        stored_at_each_write.append(stored.status)
+        return await _write(catalog, rows)
+
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(dataset, write)
+    assert dataset.resumes == [None, None]
+    assert stored_at_each_write == [
+        ImportRunStatus.COMPLETED,
+        ImportRunStatus.RUNNING,
+        ImportRunStatus.RUNNING,
+    ]
+    assert (run.status, run.revision, run.position) == (ImportRunStatus.COMPLETED, "etag-1", 3)
+    assert (run.rows_seen, run.rows_written) == (3, 3)
+    assert await runs.get("scripted") == run
+
+
+class _Parked(ScriptedDataset):
+    """Its first fetch waits until cancelled, with `fetching` set once it is waiting."""
+
+    def __init__(self) -> None:
+        super().__init__(_three())
+        self.fetching = asyncio.Event()
+
+    async def _iter(
+        self, resume_from: BulkCursor | None, revision: str | None
+    ) -> AsyncIterator[BulkBatch[ImdbTitle]]:
+        self.fetching.set()
+        await asyncio.Event().wait()
+        async for batch in super()._iter(resume_from, revision):
+            yield batch
+
+
+@pytest.mark.parametrize("ending", ["completed", "failed", "raised", "cancelled"])
+async def test_the_hold_is_released_however_the_import_ends(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, ending: str
+) -> None:
+    """Held past its end, a dataset is refused to every other process until this one exits.
+
+    A worker's process does not exit, so one import ending any way but cleanly would
+    leave the dataset unimportable anywhere else.
+    """
+    rival = FakeImportRunRepository(shares=runs)
+    service = _service(runs, catalog, CommitSpy())
+
+    async def explode(rows: Sequence[ImdbTitle]) -> int:
+        raise ZeroDivisionError("a real bug")
+
+    if ending == "completed":
+        run = await service.import_dataset(
+            ScriptedDataset(_three()), lambda rows: _write(catalog, rows)
+        )
+        assert run.status is ImportRunStatus.COMPLETED
+    elif ending == "failed":
+        run = await service.import_dataset(
+            FlakyDataset(_three(), failures={1: 1}, error=lambda: PortDataMalformed("bad row")),
+            lambda rows: _write(catalog, rows),
+        )
+        assert run.status is ImportRunStatus.FAILED
+    elif ending == "raised":
+        with pytest.raises(ZeroDivisionError):
+            await service.import_dataset(ScriptedDataset(_three()), explode)
+    else:
+        parked = _Parked()
+        task = asyncio.create_task(
+            service.import_dataset(parked, lambda rows: _write(catalog, rows))
+        )
+        await asyncio.wait_for(parked.fetching.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    taken = await rival.start("scripted", "etag-1")
+    assert taken.dataset == "scripted"
+
+
+class _Beats(FakeImportRunRepository):
+    def __init__(self, journal: _Journal) -> None:
+        super().__init__()
+        self._journal = journal
+
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        self._journal.append("start")
+        return await super().start(dataset, revision)
+
+    async def touch(self, dataset: str) -> None:
+        self._journal.append("touch")
+        await super().touch(dataset)
+
+
+class _SlowTwice(FlakyDataset):
+    """`revision()` fails once and the third fetch once; each fetch takes real time."""
+
+    def __init__(self, journal: _Journal) -> None:
+        super().__init__(_three(), failures={2: 1})
+        self._journal = journal
+        self._revision_failures = 1
+
+    async def revision(self) -> str:
+        if self._revision_failures:
+            self._revision_failures -= 1
+            raise PortUnavailable("HEAD failed: ConnectError")
+        return await super().revision()
+
+    async def _iter(
+        self, resume_from: BulkCursor | None, revision: str | None
+    ) -> AsyncIterator[BulkBatch[ImdbTitle]]:
+        self._journal.append("fetch")
+        await asyncio.sleep(_SLOW)
+        self._journal.append("fetched")
+        async for batch in super()._iter(resume_from, revision):
+            yield batch
+
+
+#: How long each slow step takes, against a heartbeat period a fifth of it.
+_SLOW = 0.05
+
+
+async def test_a_started_import_beats_through_every_fetch_and_wait_and_commits_each_beat(
+    catalog: FakeBulkCatalogRepository,
+) -> None:
+    """A download or a retry's wait has no batch to checkpoint, and the heartbeat moves anyway.
+
+    Left alone for minutes, it read as a dead importer to anyone watching the checkpoint.
+    Before `start()` nothing is held, so nothing beats: the revision's wait is silent.
+    """
+    journal = _Journal()
+
+    async def wait(_: float) -> None:
+        journal.append("wait")
+        await asyncio.sleep(_SLOW)
+        journal.append("waited")
+
+    service = BootstrapService(
+        _Beats(journal),
+        catalog,
+        _JournallingCommit(journal),
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.IMDB,
+        sleep=wait,
+        clock=Clock(),
+        heartbeat=_SLOW / 5,
+    )
+    run = await service.import_dataset(_SlowTwice(journal), lambda rows: _write(catalog, rows))
+
+    def during(opening: str, closing: str, after: int = 0) -> list[str]:
+        begins = journal.index(opening, after)
+        return journal[begins + 1 : journal.index(closing, begins)]
+
+    started = journal.index("start")
+    assert run.status is ImportRunStatus.COMPLETED
+    assert "waited" in journal[:started], "the premise: the revision's wait came first"
+    assert "touch" not in journal[:started]
+    assert "touch" in during("fetch", "fetched", started), "the first fetch"
+    assert "touch" in during("wait", "waited", started), "the fetch's retry wait"
+    assert all(
+        journal[index + 1] == "commit" for index, entry in enumerate(journal) if entry == "touch"
+    ), journal
 
 
 _BASICS_URL = "https://datasets.imdbws.com/title.basics.tsv.gz"

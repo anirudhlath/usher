@@ -95,3 +95,7 @@ class TestFakeImportRunRepository(ImportRunRepositoryContract):
     @pytest.fixture
     def runs(self) -> FakeImportRunRepository:
         return FakeImportRunRepository()
+
+    @pytest.fixture
+    def rival(self, runs: FakeImportRunRepository) -> FakeImportRunRepository:
+        return FakeImportRunRepository(shares=runs)

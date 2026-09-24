@@ -2,11 +2,18 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from usher.domain.bootstrap import ImportRunStatus
+from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import ImportRunRepository
+
+_LONG_AGO = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 class ImportRunRepositoryContract:
+    """`runs` and `rival` are two holders over one store: two processes, one database."""
+
     async def test_a_first_start_creates_a_run_at_position_zero(
         self, runs: ImportRunRepository
     ) -> None:
@@ -96,3 +103,141 @@ class ImportRunRepositoryContract:
 
     async def test_list_runs_is_empty_before_anything_runs(self, runs: ImportRunRepository) -> None:
         assert await runs.list_runs() == []
+
+    # --- holding a dataset -------------------------------------------------
+
+    async def test_a_second_holder_is_refused_and_touches_nothing(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        first = await runs.start("imdb.title.basics", "etag-1")
+        with pytest.raises(RepositoryConflict):
+            await rival.start("imdb.title.basics", "etag-2")
+        assert await runs.get("imdb.title.basics") == first
+
+    async def test_a_release_lets_another_holder_take_the_checkpoint_over(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        first = await runs.start("imdb.title.basics", "etag-1")
+        await runs.save(first.evolve(position=4200))
+        await runs.release("imdb.title.basics")
+        taken = await rival.start("imdb.title.basics", "etag-1")
+        assert (taken.id, taken.position, taken.status) == (first.id, 4200, ImportRunStatus.RUNNING)
+
+    async def test_a_release_gives_up_only_the_releasers_own_hold(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        await runs.release("imdb.title.basics")
+        await rival.start("imdb.title.basics", "etag-1")
+        await runs.release("imdb.title.basics")
+        with pytest.raises(RepositoryConflict):
+            await runs.start("imdb.title.basics", "etag-1")
+
+    # --- a completed checkpoint stands until a batch lands -----------------
+
+    @pytest.mark.parametrize(("revision", "position"), [("etag-2", 0), ("etag-1", 9)])
+    async def test_a_start_over_a_completed_checkpoint_leaves_it_standing_until_a_save(
+        self, runs: ImportRunRepository, revision: str, position: int
+    ) -> None:
+        """The attempt is returned `RUNNING`; the store keeps the import it would refresh.
+
+        Only `error` is cleared and the heartbeat moved, so an attempt killed or failed
+        before its first batch leaves the checkpoint `completed` and blocking nothing.
+        """
+        started = await runs.start("imdb.title.basics", "etag-1")
+        completed = started.evolve(
+            status=ImportRunStatus.COMPLETED,
+            position=9,
+            rows_seen=9,
+            rows_written=9,
+            error="a later attempt could not start",
+            heartbeat_at=_LONG_AGO,
+            finished_at=_LONG_AGO,
+        )
+        await runs.save(completed)
+
+        attempt = await runs.start("imdb.title.basics", revision)
+        stored = await runs.get("imdb.title.basics")
+
+        assert (attempt.status, attempt.revision, attempt.position) == (
+            ImportRunStatus.RUNNING,
+            revision,
+            position,
+        )
+        assert (attempt.error, attempt.finished_at) == (None, None)
+        assert stored is not None
+        assert stored == completed.evolve(error=None, heartbeat_at=stored.heartbeat_at)
+        assert stored.heartbeat_at > _LONG_AGO
+        await runs.save(attempt.evolve(position=position + 1))
+        landed = await runs.get("imdb.title.basics")
+        assert landed is not None
+        assert (landed.status, landed.revision, landed.position) == (
+            ImportRunStatus.RUNNING,
+            revision,
+            position + 1,
+        )
+
+    # --- heartbeats --------------------------------------------------------
+
+    async def test_a_start_moves_the_heartbeat(self, runs: ImportRunRepository) -> None:
+        """A resumed checkpoint is fresh from its start, not from its first batch."""
+        run = await runs.start("imdb.title.basics", "etag-1")
+        await runs.save(run.evolve(status=ImportRunStatus.FAILED, heartbeat_at=_LONG_AGO))
+        resumed = await runs.start("imdb.title.basics", "etag-1")
+        stored = await runs.get("imdb.title.basics")
+        assert stored is not None
+        assert resumed.heartbeat_at > _LONG_AGO
+        assert stored.heartbeat_at == resumed.heartbeat_at
+
+    @pytest.mark.parametrize(
+        ("status", "moves"),
+        [
+            (ImportRunStatus.RUNNING, True),
+            (ImportRunStatus.COMPLETED, False),
+            (ImportRunStatus.FAILED, False),
+        ],
+    )
+    async def test_touch_moves_a_running_heartbeat_and_nothing_else(
+        self, runs: ImportRunRepository, status: ImportRunStatus, moves: bool
+    ) -> None:
+        run = await runs.start("imdb.title.basics", "etag-1")
+        before = run.evolve(status=status, position=17, heartbeat_at=_LONG_AGO)
+        await runs.save(before)
+        await runs.touch("imdb.title.basics")
+        stored = await runs.get("imdb.title.basics")
+        assert stored is not None
+        assert stored == before.evolve(heartbeat_at=stored.heartbeat_at)
+        assert (stored.heartbeat_at > _LONG_AGO) is moves
+
+    # --- a failure before start() ----------------------------------------
+
+    async def test_a_failure_noted_with_no_checkpoint_creates_a_failed_one(
+        self, runs: ImportRunRepository
+    ) -> None:
+        noted = await runs.note_failure("imdb.title.basics", "HEAD failed")
+        assert (noted.status, noted.revision, noted.position, noted.error) == (
+            ImportRunStatus.FAILED,
+            "unknown",
+            0,
+            "HEAD failed",
+        )
+        assert await runs.get("imdb.title.basics") == noted
+
+    @pytest.mark.parametrize(
+        ("status", "heartbeat_moves"),
+        [
+            (ImportRunStatus.RUNNING, False),
+            (ImportRunStatus.COMPLETED, True),
+            (ImportRunStatus.FAILED, True),
+        ],
+    )
+    async def test_a_noted_failure_adds_the_error_and_takes_nothing_over(
+        self, runs: ImportRunRepository, status: ImportRunStatus, heartbeat_moves: bool
+    ) -> None:
+        """Status and cursor stay; a `RUNNING` heartbeat belongs to whoever is importing."""
+        run = await runs.start("imdb.title.basics", "etag-1")
+        before = run.evolve(status=status, position=17, rows_seen=40, heartbeat_at=_LONG_AGO)
+        await runs.save(before)
+        noted = await runs.note_failure("imdb.title.basics", "HEAD failed")
+        assert noted == before.evolve(error="HEAD failed", heartbeat_at=noted.heartbeat_at)
+        assert (noted.heartbeat_at > _LONG_AGO) is heartbeat_moves
+        assert await runs.get("imdb.title.basics") == noted

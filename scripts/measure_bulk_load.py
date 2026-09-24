@@ -13,7 +13,9 @@ from usher.config import get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
+from usher.domain.bootstrap import BootstrapPhase
 from usher.ports.bulk import ImdbTitle
+from usher.ports.events import NullEventPublisher
 from usher.services.bootstrap import BootstrapService
 
 _INDEX_SIZES = text("""
@@ -27,7 +29,13 @@ async def _load(factory: async_sessionmaker[AsyncSession], *, suspend: bool) -> 
         await session.execute(text("TRUNCATE titles, import_runs CASCADE"))
         await session.commit()
         catalog = PostgresBulkCatalogRepository(session)
-        service = BootstrapService(PostgresImportRunRepository(session), catalog, session.commit)
+        service = BootstrapService(
+            PostgresImportRunRepository(session),
+            catalog,
+            session.commit,
+            events=NullEventPublisher(),
+            phase=BootstrapPhase.IMDB,
+        )
         settings = get_settings()
 
         async def write(rows: Sequence[ImdbTitle]) -> int:

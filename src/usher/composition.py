@@ -1379,14 +1379,28 @@ def bulk_client(settings: Settings) -> httpx.AsyncClient:
 class FailedImport:
     """A dataset whose import failed in this run, and the phase that resumes it.
 
-    `run` is its checkpoint as stored: `FAILED`, or still `COMPLETED` with the error
-    beside it when the attempt failed before it started (`_failed_this_run`).
+    `run` is its checkpoint as stored, with the error beside it: `FAILED`, still
+    `COMPLETED` when the attempt landed no batch over a completed import, or still
+    `RUNNING` when it failed before `start()` over a checkpoint reading `running`.
 
     The phase is the one that imports the dataset alone, not the phase the run was
     asked for: under `--phase all` a failed crosswalk resumes with `--phase crosswalk`
     rather than by re-running everything, and the ratings file resumes with `--phase
     ratings` whichever phase imported it -- naming `imdb` there would cost 214 MiB and
     a rewrite of every name and year for a file the alias re-imports alone.
+    """
+
+    phase: BootstrapPhase
+    run: ImportRun
+
+
+@dataclass(frozen=True, slots=True)
+class ConcededImport:
+    """A dataset another process held when this run came to import it, left alone.
+
+    `run` is that process's checkpoint as stored, error and all, or a synthetic run
+    persisted nowhere when its row was not yet visible; nothing in it is this run's. The
+    command did not import the dataset, so it is unfinished like the other three.
     """
 
     phase: BootstrapPhase
@@ -1428,11 +1442,15 @@ class BootstrapOutcome:
     Empty is success. Anything in it makes `usher bootstrap` exit 1.
     """
 
-    unfinished: tuple[FailedImport | SkippedStep | RefusedStep, ...] = ()
+    unfinished: tuple[FailedImport | ConcededImport | SkippedStep | RefusedStep, ...] = ()
 
     @property
     def failed(self) -> tuple[FailedImport, ...]:
         return tuple(one for one in self.unfinished if isinstance(one, FailedImport))
+
+    @property
+    def conceded(self) -> tuple[ConcededImport, ...]:
+        return tuple(one for one in self.unfinished if isinstance(one, ConcededImport))
 
     @property
     def skipped(self) -> tuple[SkippedStep, ...]:
@@ -1481,34 +1499,47 @@ def _resume(step: BootstrapPhase, first: tuple[BootstrapPhase, ...]) -> tuple[Bo
 
 
 def _failed_this_run(run: ImportRun) -> bool:
-    """Whether the run `import_dataset` returned ended without doing what it was asked.
+    """Whether an import this process attempted ended without doing what it was asked.
 
-    `error` is the test, not `status`: a failure before `start()` over a `COMPLETED`
-    import leaves it `COMPLETED` with the error beside it, and every `FAILED` run carries
-    one. A run that finished, or another process's that this one conceded to, has none
-    -- `start()` and `_finish` both clear it.
+    Never asked of a concede: that run is another process's row, whose error belongs to
+    that process, or a synthetic `FAILED` one -- `settle` answers it from
+    `BootstrapService.conceded` first. `error` is the test, not `status`: a failure that
+    landed no batch over a `COMPLETED` import leaves it `COMPLETED` with the error, one
+    before `start()` over a `RUNNING` checkpoint leaves it `RUNNING` with the error, and
+    every `FAILED` run this process records carries one. A finished run has none --
+    `_finish` clears it.
     """
     return run.error is not None
 
 
-def _closing_line(one: FailedImport | SkippedStep | RefusedStep) -> str:
+def _closing_line(one: FailedImport | ConcededImport | SkippedStep | RefusedStep) -> str:
     """What did not finish, why, and the commands that continue it.
 
     Led by the dataset or phase name so a reader scanning a long report -- or a log --
     finds it by the thing that stopped. A failure resumes because every step
     checkpoints per batch: the command picks up at `position` while the upstream
-    revision is unchanged, and restarts cleanly when it has moved. One that could not
-    start over a completed import names no position: the import it had stands whole.
+    revision is unchanged, and restarts cleanly when it has moved. One that landed no
+    batch over a completed import names no position: the import it had stands whole.
     """
     commands = ", then ".join(
         f"usher bootstrap --phase {step.value}"
-        for step in (one.resume if not isinstance(one, FailedImport) else (one.phase,))
+        for step in ((one.phase,) if isinstance(one, FailedImport | ConcededImport) else one.resume)
     )
+    if isinstance(one, ConcededImport):
+        return (
+            f"{one.run.dataset} was left alone: another process is importing it"
+            f"; once that process ends, resume with: {commands}"
+        )
     if isinstance(one, FailedImport):
         if one.run.status is ImportRunStatus.COMPLETED:
             return (
-                f"{one.run.dataset} could not start, and its completed import stands: "
-                f"{one.run.error}; resume with: {commands}"
+                f"{one.run.dataset} failed before its first batch landed, and its completed "
+                f"import stands: {one.run.error}; resume with: {commands}"
+            )
+        if one.run.status is ImportRunStatus.RUNNING:
+            return (
+                f"{one.run.dataset} could not start, and its checkpoint reads running at "
+                f"position {one.run.position}: {one.run.error}; resume with: {commands}"
             )
         return (
             f"{one.run.dataset} failed at position {one.run.position}: {one.run.error}"
@@ -1550,8 +1581,8 @@ async def run_bootstrap(
 
     **A phase does not start while a dataset it reads is unfinished** (`_READS`), which
     is read from the stored checkpoints: under `--phase all` a failed `imdb` skips every
-    later phase that joins its titles, and a single phase refuses an earlier run's
-    failure the same way. What reads nothing unfinished still runs, so one upstream
+    later phase that joins its titles, and a single phase is skipped over an earlier
+    run's failure the same way. What reads nothing unfinished still runs, so one upstream
     being down costs only what depends on it. A phase that refuses an empty catalog is
     unfinished too. The transient class never gets this far unretried --
     `import_dataset` retries a revision and resumes a fetch until its `RetryPolicy`
@@ -1563,7 +1594,7 @@ async def run_bootstrap(
     service = BootstrapService(
         runs, catalog, commit, events=events, phase=phase, report=retries or report
     )
-    unfinished: list[FailedImport | SkippedStep | RefusedStep] = []
+    unfinished: list[FailedImport | ConcededImport | SkippedStep | RefusedStep] = []
     titles_dataset = IMDbTitleDataset(
         client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
     )
@@ -1579,6 +1610,8 @@ async def run_bootstrap(
         # catalog -- and has said why in its own report line.
         if run is None:
             unfinished.append(RefusedStep(step, _resume(step, (BootstrapPhase.IMDB,))))
+        elif run.dataset in service.conceded:
+            unfinished.append(ConcededImport(step, run))
         elif _failed_this_run(run):
             unfinished.append(FailedImport(step, run))
 
