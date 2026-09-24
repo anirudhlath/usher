@@ -1,53 +1,26 @@
-"""Encrypted-at-rest storage for source credentials.
-
-PRD 08: credentials are encrypted using a key supplied via
-`USHER_SECRET_KEY`, `Source.credentials_ref` points at the encrypted row,
-and the plaintext exists only in memory in the adapter that needs it.
-
-Fernet (AES-128-CBC with an HMAC-SHA256 authentication tag) over a key
-derived from `USHER_SECRET_KEY` with HKDF-SHA256. HKDF rather than a
-password-based KDF such as scrypt because the input is already
-high-entropy: the documented way to produce this value is
-`openssl rand -hex 32`, `Settings.secret_key` enforces `min_length=32`, and
-`Settings` rejects the example placeholder outright. HKDF is the primitive
-designed for deriving subkeys from an existing strong secret; scrypt's work
-factor buys nothing against 32 random bytes and would cost a full KDF run
-per call.
-
-The `info` string is versioned so a future scheme change becomes a new
-derivation rather than a silent reinterpretation of old ciphertext, and so
-this subkey is domain-separated from any other use a later milestone makes
-of `USHER_SECRET_KEY`.
-
-The authentication tag is what makes a rotated key a *diagnosable* failure
-rather than a garbage read: decrypting with the wrong key raises
-`InvalidToken`, which becomes `PortDataMalformed` with the ref (never the
-payload, never the key) so an operator can find the row and re-enter the
-credential.
-
-`SecretStr.get_secret_value()` is unwrapped exactly once, in `__init__`,
-and the plaintext secret is not retained -- only the derived Fernet key,
-which is an HKDF output and not the secret. That satisfies CLAUDE.md's
-"never store the unwrapped value in a variable that outlives that call",
-and re-deriving per call would be strictly worse for no benefit.
-"""
+"""Encrypted-at-rest storage for source credentials."""
 
 import base64
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pydantic import SecretStr
-from sqlalchemy import delete
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.source import SourceCredentialRow
-from usher.ports.credentials import CredentialStore, SourceCredentials
+from usher.ports.credentials import (
+    CredentialCiphertextStore,
+    CredentialStore,
+    SourceCredentials,
+)
 from usher.ports.errors import PortDataMalformed, RepositoryConflict
 
 _HKDF_INFO = b"usher.source-credentials.v1"
@@ -56,9 +29,12 @@ _HKDF_INFO = b"usher.source-credentials.v1"
 def build_cipher(secret_key: SecretStr) -> Fernet:
     """Derive this deployment's credential-encryption key.
 
-    Module-level and public so a rotation command (PRD 08's "a documented
-    rotation command handles the bulk case") can build both the old and the
-    new cipher without instantiating two repositories.
+    Module-level and public so a rotation command can build both the old and the
+    new cipher without instantiating two repositories. `cli._rotate` makes both
+    calls at the composition root, because `usher.services` may not import
+    `usher.db`, so `RotationService` is handed two `Fernet` objects and never a
+    key: `get_secret_value()` is unwrapped exactly once, here, and only the HKDF
+    output outlives the call.
     """
     derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_HKDF_INFO).derive(
         secret_key.get_secret_value().encode("utf-8")
@@ -128,4 +104,40 @@ class PostgresCredentialStore(CredentialStore):
     async def delete(self, ref: str) -> None:
         await self._session.execute(
             delete(SourceCredentialRow).where(SourceCredentialRow.ref == ref)
+        )
+
+
+class PostgresCredentialRotationStore(CredentialCiphertextStore):
+    """`source_credentials`' ciphertext, moved without being read."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_refs(self) -> Sequence[str]:
+        # `ORDER BY ref` so a report, a rerun and an interrupted run all name
+        # the rows in the same order. `ref` is the primary key, so this is
+        # the index order rather than a sort.
+        rows = await self._session.execute(
+            select(SourceCredentialRow.ref).order_by(SourceCredentialRow.ref)
+        )
+        return list(rows.scalars().all())
+
+    async def read_ciphertext(self, ref: str) -> bytes | None:
+        # A one-column projection rather than `session.get`, which would put
+        # a `SourceCredentialRow` in the identity map for the length of a
+        # rotation -- and `db-and-sql.md`'s issue #8 entry is what a caught
+        # conflict does to one of those. Nothing here needs the entity.
+        row = await self._session.execute(
+            select(SourceCredentialRow.ciphertext).where(SourceCredentialRow.ref == ref)
+        )
+        return row.scalar_one_or_none()
+
+    async def write_ciphertext(self, ref: str, ciphertext: bytes) -> None:
+        # `updated_at` is set here because `source_credentials` carries no
+        # `set_updated_at` trigger: every writer of this table names the column.
+        await self._session.execute(
+            update(SourceCredentialRow)
+            .where(SourceCredentialRow.ref == ref)
+            .values(ciphertext=ciphertext, updated_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
         )

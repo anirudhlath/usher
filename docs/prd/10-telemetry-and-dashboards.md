@@ -3,7 +3,7 @@
 ## Principle: right datasource per question
 
 Most of what is worth knowing about a media catalog is **not a metric**.
-Composition, quality distribution, franchise gaps, taste drift, and LLM spend
+Composition, quality distribution, franchise gaps, taste drift and LLM spend
 are SQL queries against the canonical database — exact, fully historical, and
 free of cardinality limits or retention windows. The catalog *is* the record.
 
@@ -22,42 +22,37 @@ them.
 
 Structured JSON to stdout, shipped to Loki. Every record is patched with the
 **active `trace_id` and `span_id`**, so a log line links to its trace and back
-again:
-
-```python
-logger.configure(patcher=inject_trace_context)
-```
-
-Credentials never appear in a log record, including in error paths and request
-dumps ([08](08-operations.md)).
+again. Credentials never appear in a log record, including in error paths and
+request dumps ([08](08-operations.md)).
 
 ### Traces — OpenTelemetry
 
-Auto-instrumentation for FastAPI, SQLAlchemy, and httpx, plus explicit spans on
-the pipeline — the flow most worth explaining when it is slow:
+Auto-instrumentation for FastAPI, SQLAlchemy and httpx, plus explicit spans on
+the pipeline:
 
 ```
-sync.reconcile                    ← one per SyncRun (M4)
+sync.reconcile                    ← one per SyncRun
 └── ingest.item                   ← one per batch
     └── match.title               ← the five-tier ladder, batched
 
-sync.watch_state                  ← the watch-state lane (M4)
+sync.watch_state                  ← the watch-state lane
 
 job.enrich · job.match · job.watch_history   ← a worker's root span,
 └── enrich.title                     Linked (never parented) to whatever
     └── metadata.request             enqueued it
-index.title                       ← M6, a child of job.index
+index.title                       ← a child of job.index
 └── index.embed
 
-home.compose                      ← M7, one per GET /home or usher home
+home.compose                      ← one per GET /home or usher home
+├── propose                          one per *registered* provider
 └── row.build                        one per row actually built
 
-rows.refresh                      ← M9, the serve-stale lane's root span,
-└── row.build                        Linked (never parented) to the request
-                                     that served the stale screen
+rows.refresh                      ← the serve-stale lane's root span,
+├── propose                          Linked (never parented) to the request
+└── row.build                        that served the stale screen
 
-job.curate                        ← M8, a worker's root span like the three
-└── curation.generate                above it; one per generation
+job.curate                        ← a worker's root span
+└── curation.generate                one per generation
     └── llm.complete                 the one completion it is allowed
 
 bootstrap.import
@@ -66,115 +61,61 @@ bootstrap.import
 ```
 
 **Everything a request triggers nests under that request's server span.**
-`FastAPIInstrumentor` (wired in `create_app`) opens it; `sync.reconcile` and
-everything below it are its descendants, and `SQLAlchemyInstrumentor`'s
-statement spans hang off the pipeline span that issued them. A pipeline that
-started its own *root* spans would still produce valid ids and still export,
-so this is asserted as parentage rather than existence
-(`tests/integration/test_pipeline_spans.py`).
 
-A worker's `job.*` span is the deliberate exception: a **root with a `Link`**
-back to the enqueueing span, because the request that enqueued it has
-usually already returned and a child span of a finished parent misstates
-causality. **M9's `rows.refresh` is the second, on identical terms** — [06](06-rows-and-recommendations.md)'s
-serve-stale lane builds a screen out of band, having been handed the key by a
-request that has already answered.
+**A worker's `job.*` span is the exception: a root with a `Link`** back to the
+enqueueing span. `rows.refresh` is the second, on identical terms.
 
-**`index.fulltext` was in this tree until M6 and is deliberately gone, rather
-than unimplemented.** The search document is a `GENERATED ALWAYS AS (…)
-STORED` column on `titles`, so PostgreSQL recomputes it inside the same
-statement that writes `name` or `overview` and there is no full-text indexing
-*stage* for a span to measure — half this milestone's freshness problem is
-deleted rather than solved (see
-[05](05-search-and-similarity.md)). A span emitted for work that does not
-happen is the mirror of a metric under a near-miss name: it looks like
-coverage and reports nothing. `index.embed` remains, because the embedding
-genuinely is a job that can be slow, fail or park.
+There is no `index.fulltext` span; the search document is a generated column.
 
-`bootstrap.import` spans (one per dataset, per `BootstrapService.import_dataset`
-call) and their child `bootstrap.batch` spans carry `usher.dataset` and
-`usher.revision` as attributes — the same "why was this slow" query the
-ingest pipeline's spans answer, for the M2 bulk importers.
+**The provider is an *attribute*, not part of the span name.** `row.build`
+carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
+`usher.row.cards`; `home.compose` carries `usher.home.proposed`,
+`usher.home.built`, `usher.home.rows` and `usher.home.curated.discarded`. So
+"find the one slow provider" is a group-by on an attribute.
 
-**The `home.compose` tree was confirmed by reading the emitting code rather
-than by remembering the plan**, and three of its properties are not what a
-reader would assume:
+**`propose` is one span per *registered* provider**, carrying
+`usher.row.provider` and `usher.row.proposed`. A provider that proposed nothing
+has a span reading `usher.row.proposed=0` rather than no span at all. **A
+cached screen produces none**, and **no metric goes with it**.
 
-- **The provider is an *attribute*, not part of the span name.** `row.build`
-  carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
-  `usher.row.cards`; `home.compose` carries `usher.home.proposed`,
-  `usher.home.built`, `usher.home.rows` and — M8's, set by `CuratedProvider`
-  itself rather than by the composer — `usher.home.curated.discarded`. So
-  "find the one slow provider" is
-  a group-by on an attribute, not a scan of span names — which is what keeps
-  the name cardinality at two where `because-you-watched-<seed>` would have
-  made it catalog-sized. **Dashboard 4 can have its breakdown**, from either
-  side: the histogram's `provider` label or this attribute.
-- **There is no `propose` span.** Proposal runs inside `home.compose` and is
-  untraced individually, so a provider that is slow to *propose* and cheap to
-  *build* shows up only in the parent's duration. Recorded as a gap rather
-  than drawn, because an unwritten span in a documented tree is the trace-side
-  version of the permanently empty panel this file's preamble argues against.
-- **A cached row produces no `row.build` span**, for the same reason it records
-  no histogram point: the cache returns before the span opens. So the number of
-  `row.build` children of a `home.compose` is the number of *misses on that
-  composition*, and a warm request is a lone parent with none. ⚠️ **It is not
-  the number of misses in the deployment, and M9 is where that stopped being
-  the same sentence.** A `rows.refresh` builds outside any request, so its
-  `row.build` spans have **no `home.compose` parent at all** — the refresh
-  opens none, deliberately, rather than minting a second `home.compose` nobody
-  asked for or nesting under a request that has returned. So "misses" is a
-  group-by over both roots, and the refresh's cost stays visible where it
-  always was: as `usher.row.build.duration` points, carrying the same
-  `provider` label, with no parent composition.
+**A cached row produces no `row.build` span** and records no histogram point.
+So the number of `row.build` children of a `home.compose` is the number of
+*misses on that composition* — but **not** the number of misses in the
+deployment, because a `rows.refresh` builds outside any request and its
+`row.build` spans have no `home.compose` parent at all.
 
-Spans carry `title_id`, `source`, and `trigger` (`demand` vs `background`) as
+Spans carry `title_id`, `source` and `trigger` (`demand` vs `background`) as
 attributes, so "why did the title I just opened take 45 seconds" is one query.
+`bootstrap.import` and `bootstrap.batch` carry `usher.dataset` and
+`usher.revision`.
 
 #### How a trace gets from a browser to Tempo
 
-The traces above are only reachable by somebody who already knows a trace id,
-and until M10 nothing told anybody one. Every request has had a real server span
-since M1 — `FastAPIInstrumentor` is wired unconditionally and
-`configure_tracing` installs a real `TracerProvider` whether or not there is an
-OTLP endpoint — but the id never left the process, so the console's "Open trace"
-affordance was a control that could not fire on any deployment there was.
+Three links:
 
-Three links, and all three have to exist or the chain is decorative:
+1. **`traceresponse` on the response** — the server span, on every response
+   with a live span, successes included ([07](07-client-api.md)).
+2. **`tempoUrl` on `GET /console/config.json`**, from `USHER_TEMPO_URL`.
+   Nullable: with no Tempo configured the link is *absent*, never dead.
+3. **The console's own rendering.** `Problem` shows "Open trace" whenever it
+   has both; the dev drawer carries the id per journal entry.
 
-1. **`traceresponse` on the response.** The server span as
-   `00-<trace-id>-<span-id>-<flags>`, on every response with a live span, on
-   successes as well as failures. [07](07-client-api.md)'s *Correlation* section
-   is the contract — including the two cases that emit **no header rather than a
-   zeroed one**, and the bare-500 gap.
-2. **`tempoUrl` on `GET /console/config.json`**, from `USHER_TEMPO_URL`. A
-   deployment fact the bundle cannot know at build time, and **deliberately
-   nullable**: an unconfigured Tempo makes the link *absent*, never dead. This
-   is the same never-computed-versus-computed-and-empty rule the rest of the
-   product follows, and it is why the console renders no `<a href="">` when the
-   id is known and the base URL is not.
-3. **The console's own rendering.** `Problem` shows "Open trace" whenever it has
-   both; the dev drawer carries the id per journal entry, which is the one an
-   operator pastes into a trace search for a call that has already scrolled away.
-
-So `USHER_TEMPO_URL` is what makes Loki's `trace_id` patch and this project's
-span tree reachable from a screen rather than only from a query bar. Unset, the
-traces are all still emitted and still exported; there is simply no link from a
-browser to them, and the console says so in words instead of offering a control
-that does nothing.
+Unset, the traces are still emitted and still exported; there is simply no link
+from a browser to them, and the console says so in words instead of offering a
+control that does nothing.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-Emitted today (✅) or owned by a later milestone (the milestone is named).
-A documented metric nothing emits is a dashboard panel that is permanently
-empty, and nothing distinguishes that from a healthy zero — so this column
-is maintained rather than aspirational.
+**Every row is emitted today. 42 rows: 41 instruments Usher declares, plus one
+`FastAPIInstrumentor` supplies.**
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
 | `http.server.duration` | histogram | `http.target`, `http.status_code` | ✅ M9 |
 | `usher.search.duration` | histogram | mode | ✅ M6 |
 | `usher.search.results` | histogram | mode | ✅ M6 |
+| `usher.suggest.duration` | histogram | tier | ✅ M10 |
+| `usher.suggest.results` | histogram | tier | ✅ M10 |
 | `usher.home.compose.duration` | histogram | — | ✅ M7 |
 | `usher.row.build.duration` | histogram | provider | ✅ M7 |
 | `usher.curation.rows` | counter | — | ✅ M8 |
@@ -182,14 +123,16 @@ is maintained rather than aspirational.
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
 | `usher.jobs.duration` | histogram | kind | ✅ M4 |
 | `usher.jobs.parked` | gauge | kind | ✅ M4 |
-| `usher.enrichment.latency` | histogram | outcome | ✅ M4 |
+| `usher.enrichment.latency` | histogram | outcome, trigger | ✅ M4 (`trigger` M10) |
 | `usher.enrich.result` | counter | outcome | ✅ M4 |
 | `usher.ingest.items` | counter | source, result | ✅ M4 |
 | `usher.match.result` | counter | method, confident | ✅ M4 |
 | `usher.sync.run.duration` | histogram | source, kind, status | ✅ M4 |
+| `usher.sync.retraction.fraction` | histogram | source, outcome | ✅ M10 |
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
+| `usher.source.throttle.wait` | histogram | source | ✅ M10 |
 | `usher.source.push.connected` | gauge | source | ✅ M5 |
 | `usher.source.push.reconnects` | counter | source | ✅ M5 |
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
@@ -207,325 +150,42 @@ is maintained rather than aspirational.
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
+| `usher.scheduler.job.duration` | histogram | job | ✅ M10 |
+| `usher.scheduler.job.failures` | counter | job | ✅ M10 |
+| `usher.scheduler.job.due` | gauge | job | ✅ M10 |
 
-**`http.server.duration` is a correction, not an addition, and carries no
-`usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
-real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
-(wired in `create_app`, `api/app.py:127`) already emits this histogram on
-every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
-with `http.target` set to the **route template**
-(`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
-into one series) and `http.status_code`. That is exactly what this row asked
-for, under OpenTelemetry's own semantic-convention name rather than ours, so
-the row now names what ships instead of asking for a second histogram over
-the same measurement — recording `usher.http.server.duration` alongside it
-would double the export for one relabelled series, the same
-two-vocabularies-under-one-name hazard this document already warns about for
-`provider` below.
-**The semconv opt-in is a named hazard, not a footnote**: setting
-`OTEL_SEMCONV_STABILITY_OPT_IN=http` renames this metric to
-`http.server.request.duration`, changes its unit from `ms` to seconds, and
-swaps `http.target` for `http.route` — any one of which empties a dashboard
-panel built against the names above, silently, with no error anywhere.
-Nothing in this project's config sets that variable; it is recorded here so
-the day someone does, the panel that goes quiet is not a mystery.
+**The three scheduler rows.** `job` is the scheduled job's name, which is
+stable.
 
-**`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
-own values, lower-case, and written down here because a label whose vocabulary
-is undocumented is a label two call sites spell differently (M4 made three
-corrections in this table for exactly that reason). Two things about it that a
-dashboard query has to know:
+- `usher.scheduler.job.duration` is **seconds**, and records on a failed run
+  too.
+- `usher.scheduler.job.failures` counts a run that raised **and** a tick where
+  `last_done()` itself raised. **It is the only series that sees a job being
+  retried.** ⚠️ **A `similar.rebuild` that *refuses* is not among them** — the
+  refusal shows up as a `duration` near zero and a `due` that never falls, and
+  nowhere else. The `ERROR` log line naming both model names is the only place
+  it is spelled out.
+- ⚠️ `usher.scheduler.job.due` is **fed from a synchronous snapshot, so it is
+  stale but never wrong** — the same caveat `usher.jobs.queued` carries.
+  **Negative means not due**, so one series answers *"how overdue"* and *"how
+  long left"*. A job with no reading reports **no point at all** rather than a
+  `0` that would read as *exactly due*.
 
-- **It is the mode that *ran*, not the mode that was requested.** A `fused`
-  search served as full-text — which is what a deployment with no embedder
-  gets — is attributed to `full_text`, because attributing full-text latency
-  to a lane that did not run is
-  [ADR-0002](decisions/0002-postgres-first-search.md)'s prohibition arriving
-  in the panel an operator would use to check for it. The *requested* mode is
-  carried in the answer (`SearchOutcome.requested_mode`), not in a label.
-- **There is no `suggest` value**, and there is no series for the type-ahead
-  path at all. `suggest` is a separate port with its own latency budget
-  ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)), and M6
-  emits nothing for it — a gap named here rather than left to be discovered
-  from an empty panel, and one **the gate's measured latency makes worth
-  closing rather than merely worth noting**: the shipped suggest path measures
-  p50 33.6 ms / p95 211 ms / max 730 ms at 1.27M names, against the 50 ms
-  as-you-type budget [ADR-0002](decisions/0002-postgres-first-search.md) was
-  gated on. A path that misses its budget by 4× at p95 and has no series is a
-  regression nobody would see.
+🔴 **Most seconds-unit histograms here are unreadable below five seconds.** No
+bucket `View` is installed, so the SDK's default explicit bucket boundaries
+apply — `(0.0, 5.0, 10.0, 25.0, 50.0, …)`, in **seconds** — and every
+observation under five seconds falls in one bucket, where `histogram_quantile`
+answers the same value for any median. The fix is per-instrument bucket
+boundaries; it is **not** yet done, and nothing in this document's dashboard
+section should be built on those histograms before it is.
 
-A blank query is deliberately not a data point: a search box sends one between
-every keystroke.
+⚠️ **`usher.suggest.duration` and `usher.enrichment.latency` are the
+exceptions**: each declares its own bucket boundaries. Every other
+seconds-unit histogram has the defaults.
 
-**`provider`'s vocabulary is the ten `slug_prefix` constants**, and it is
-written down here for the reason the paragraph above gives — `continue-watching`,
-`next-up`, `recently-added`, `rediscover`, `because-you-watched`, `franchise`,
-`genre-affinity`, `seasonal`, `people`, `curated`. The tenth arrived with M8's
-`CuratedProvider`. Four things a dashboard query has to know:
-
-- **It is the provider's prefix, never the row's slug.** `because-you-watched`
-  emits one row *per seed* — `because-you-watched-<title id>` — so a slug-keyed
-  label would be bounded by the catalog rather than by the registry. Bounded at
-  ten is the whole reason the label is affordable on a per-request histogram,
-  and `curated` is the sharpest instance: its row slugs are `curated-01`,
-  `curated-02`, … per generation, so a slug label there is unbounded in the
-  number of shelves a model has ever proposed.
-- **It is not the class name.** `services/rows/__init__.py` also keys a
-  `BASE_SCORES` map by `__name__`; that is a different vocabulary for a
-  different purpose, and confusing the two produces a panel with ten empty
-  series and ten populated ones.
-- **`provider` on this metric and `provider` on `usher.provider.requests` are
-  different vocabularies under one label name.** The latter is a *metadata*
-  provider (`tmdb`). They never appear on the same series, but a dashboard
-  variable defined as "all values of `provider`" collects both.
-- **A cache hit records no point at all.** `HomeService` returns a cached row
-  before it opens the timer, deliberately, so this histogram measures the cost
-  of *building* a row and not the cost of serving one. The population is
-  therefore misses, and the hit rate is not recoverable from it —
-  `usher.cache.hits`/`.misses` is what answers that instead (M9), recorded
-  where the read happens (`RowCache.read_screen`/`get_row`), labelled
-  `cache` = `row` / `screen` and, by rule rather than a closed list, whatever
-  value the next cache appends in the commit that ships it. An entry found
-  expired counts as a **miss**, not a hit — it is a rebuild, the same
-  population the histogram above measures.
-- **The exception is a *served-stale* read, which is a hit carrying
-  `freshness="stale"`, and the pair of decisions is worth spelling out
-  because [06](06-rows-and-recommendations.md)'s serve-stale trade is only
-  legible here.** A **hit**, because the request was answered out of the cache
-  and paid no rebuild — counting it a miss would make the hit rate report a
-  compose that did not happen, on the very series a reader takes as "requests
-  that avoided one". **Not a plain hit**, because a plain hit hides the thing
-  being traded: the household is looking at a screen older than its TTL, and no
-  other series would say so. `freshness` (`fresh` | `stale`) is on the **hits**
-  counter only — a miss served nothing, so it has no freshness to report — which
-  keeps the pair at four series and makes "what fraction of served screens were
-  stale" a group-by rather than an inference.
-
-**`usher.images.references` exists because a filter with no counter is
-invisible.** Both read surfaces — `GET /titles/{id}`'s `images` key and
-`GET /home`'s card artwork — drop references the image proxy can never
-serve, on one definition (`usher.ports.images.is_servable_path`), because two
-reads of one table disagreeing about what is servable is exactly the drift
-that predicate exists to prevent. The provider publishes some logos as `.svg`,
-and
-[ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s width
-ladder cannot bound that type — so without a counter *"this catalog has no
-logos"* and *"this proxy dropped all of them"* are the same body, the same
-empty space on a screen, and the same answer to an operator holding only the
-API. Three things a dashboard query has to know:
-
-- **`outcome` is two values, `served` and `unservable`**, and both are
-  recorded on **every** read, zeros included. A drop count with no denominator
-  cannot be read: 4,000 unservable references is a broken deployment on a small
-  catalog and roughly one title in seventeen on a large one (measured across 51
-  popular and top-rated titles). And a series absent from the export is
-  indistinguishable from a series nobody counts — `usher.curation.dropped`'s
-  rule below, and it matters more here, because silence is the exact condition
-  this instrument exists to break.
-- **It counts *references a read considered*, not images in the catalog, and
-  the two surfaces consider different populations.** A title detail weighs
-  every image the title has; a shelf card weighs the **one** the composer
-  already chose. So the absolute is proportional to traffic and the two
-  surfaces are not summable into a catalog-wide rate — the ratio is what is
-  readable, and it is readable per surface only if a dashboard splits by the
-  route, which this counter does not carry a label for. Deliberate: a `route`
-  dimension on a per-request counter is the cardinality footgun
-  `usher.curation.dropped`'s closed vocabulary exists to avoid, and
-  `http.server.duration` already carries the route template for anyone
-  correlating.
-- **A rising `unservable` share is not by itself an incident.** It is the
-  provider publishing more SVG logos, and the reopening trigger for ADR-0032 is
-  a household needing those logos *rendered*, whose answer is a rasteriser
-  rather than a wider ladder.
-
-**`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
-two curation metrics, and neither is about money.** This document's own first principle
-puts LLM spend on Postgres — `llm_calls` is the record — so there is no
-`usher.llm.*` series at all. What these two answer is the question no
-`llm_calls` row can: **whether the validator is eating the output.** A call
-that returned 200 and produced nothing usable is a healthy call from the wire's
-side, and
-[ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 108/108 run is what
-that looks like in production. Four things a dashboard query has to know:
-
-- **`reason`'s vocabulary is closed and is five values** — `not_in_pool`,
-  `unparseable`, `duplicate`, `row_unusable`, `row_too_short` (`DropReason`'s
-  own members, and ADR-0028 carries the argument for each). Closed because a
-  metric dimension built from free-form strings is a cardinality footgun, and
-  because the pair `not_in_pool`/`unparseable` produces the identical empty
-  screen with opposite fixes.
-- **Two of the five count rows and three count cards**, which is what the
-  `row_` prefix says out loud: summing across the label is meaningless.
-
-  🔴 **`curation.generate`'s span summed them anyway until 2026-08-10**, into a
-  single `usher.curation.dropped` attribute — so a generation that lost three
-  cards out of a shelf it kept and two shelves entire published `5`, a number
-  that is neither five cards nor five shelves. The span now carries
-  `usher.curation.dropped_rows` and `usher.curation.dropped_cards`, split on
-  the same `row_` prefix this bullet names, and the per-reason attributes are
-  unchanged. The **counter** was never wrong: `reason` is a label, and it is
-  the roll-up across it that had no unit.
-- **Every reason is exported on every generation, zeros included.** A reason
-  absent from the export is indistinguishable from a reason nobody counts,
-  which is this pair's own subject one level up.
-
-  ⚠️ **Expect most of those zeros to be permanent, and know it before reading
-  the panel.** Measured over 20 live generations on 2026-08-07
-  ([06](06-rows-and-recommendations.md)): **four of the five members never
-  fired**, and only `row_too_short` did. Under a provider honouring
-  `strict: true` three of the four are close to *unreachable* by construction —
-  `unparseable` and `row_unusable` are shape failures guided decoding prevents,
-  and `not_in_pool` is a range violation the schema's `minimum`/`maximum`
-  prevents (0 out of pool over 405 identifiers, and 0 integers above a declared
-  `maximum` over 2,048 output tokens). A dashboard of flat zeros here is the
-  system working, not a broken counter — and it is exactly why they are still
-  exported: the day a `base_url` change puts a provider that ignores the schema
-  behind this port, `unparseable` going from a permanent 0 to a spike is the
-  *only* signal that anything changed, because the call still returns 200.
-- **Counters, not histograms, and the pair is the point.** One generation per
-  household per night is far too sparse a population for a distribution to say
-  anything; what an operator reads is the ratio of the two. "How many rows did
-  *this* generation produce" is on `curation.generate`'s span, attached to the
-  generation that produced it.
-
-**`usher.home.curated.discarded` is the third drop, and it is a span attribute
-for the same reason.** The validator's two counters answer *"is the validator
-eating the output"*; this one answers *"is the screen eating it"*.
-`CuratedProvider` cuts the stored generation to PRD 06's `0-5 rows` and
-`services.curation_validate` deliberately caps nothing, so a model that ignores
-the prompt's row range has its excess shelves bought, validated, stored — and
-then dropped on the request path with nothing else recording it.
-`ComposeReport`'s `ProviderReport` structurally cannot: its `proposed` is the
-**post**-cut count, so a seven-shelf generation reads `proposed 5` and the two
-discards are invisible. This is dashboard 5's *"spend with no screen to show
-for it"* made countable, so it belongs beside the composition that discarded
-them rather than in a third counter — the same call this section's last bullet
-makes for "how many rows did this generation produce". **Set on every
-composition, zeros included**, for the reason every drop reason is exported
-every time.
-
-`usher.home.compose.duration` carries **no labels**, and that is a decision:
-the natural one would be the row count or the user, and the first is an
-outcome rather than a dimension while the second is unbounded by construction.
-The per-provider breakdown Dashboard 4 wants comes from
-`usher.row.build.duration` beside it, not from a label on this one.
-
-`usher.search.embeddings.stale` and `.refused` are the two backlog gauges, and
-they are fed by **the same predicate that drives the backfill and the contract
-case** — one definition, three consumers, which is
-[ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s whole
-argument in one metric. They are two gauges rather than one because a refused
-title is *current*, not behind: summing them would put the total above the
-population and "the backfill has drained" would stop being observable.
-
-`usher.similarity.neighbors.stale` is the same shape for a **different table**
-and it is deliberately not grouped with the two above: it counts
-`title_neighbors` rows whose `blend_fingerprint` is not the running one, and it
-is drained by `usher similar --rebuild` rather than by `usher index
---backfill`. A dashboard putting all three under one "index backlog" panel
-would suggest one command drains them, and it does not.
-
-**Two things a reader of this gauge must not conclude.** A zero does not mean
-the neighbour artefact is current — it means no row disagrees with the *running
-blend*; a row can carry the right fingerprint and still be stale because some
-other title was embedded into its neighbourhood since, which is undecidable per
-row and is what `computed_at()` is for. And a non-zero value is not an outage:
-the rows are readable and internally consistent, they were computed under a
-different meaning, and `usher similar` narrows rather than refuses. **Nothing
-schedules the rebuild**, so this series is expected to sit at a plateau after
-an upgrade that moves the blend until an operator or a cron entry acts on it —
-which is precisely what makes it worth plotting.
-
-Three label corrections M4 made, each because the code that emits the metric
-can only answer the question it actually has:
-
-- **`usher.jobs.queued` is labelled `kind`, not `priority`.** `JobQueue.depth()`
-  counts pending rows per kind, which is what "which lane is backed up"
-  asks. A priority band needs a second `GROUP BY` on the port, and it would
-  carry two constant values in M4 anyway — nothing here enqueues at
-  `DEMAND` or `VISIBLE`. M5 introduces demand promotion and is where the
-  band becomes a real series.
-- **`usher.enrichment.latency` is labelled `outcome`, not `trigger`.** Same
-  reason: `trigger` (`demand` vs `background`) has one value until M5, while
-  a failed enrichment's latency and a successful one's are genuinely
-  different populations. It was also emitted under the name
-  `usher.enrich.duration` until M4 — a near-miss name that would have left
-  this row's panel and the "enrichment SLA missed" alert permanently blank.
-- **`usher.provider.requests` counts failures too**, labelled
-  `status="error"`. A transport failure never reaches a status line, and the
-  "provider degraded" alert divides 429s and 5xxs by the total — a
-  denominator that omitted the failures would read *low* exactly during an
-  outage.
-
-Four more M5 made, in the same spirit — and one note on what ticking the
-three push rows required.
-
-**The three push rows were held at "see below" until a lane actually ran.**
-The gauges, the counter and their reader hook shipped early in M5, each
-pinned by a test that drives the emitting code and reads the value back out
-of an in-memory metric reader — but an instrument nothing feeds is a panel
-that is permanently blank, so a ✅ would have been the exact claim this
-column's rule forbids. They are ticked now because `create_app`'s lifespan
-builds a `LaneSupervisor`, registers `push_snapshots` as the reader, and
-runs a push lane per enabled source; `usher.source.push.events` is emitted
-by `PushApplyService`, which that lane calls. `usher.sse.connections` was
-ticked first, and the difference is the point: it needs no lane, only the
-bus, which `create_app` builds unconditionally.
-
-**`reconnects` is read through the port, not off a ledger.** The supervisor
-holds a `SourceAdapter` and nothing more, so `SourceAdapter.push_reconnects`
-is where the count lives — concrete on the port, defaulting to `0`, which is
-the *true* answer for an adapter with no channel rather than the fabricated
-zero the reader below refuses to emit. An adapter that has a channel
-overrides it, and that is checked structurally, because a forgotten override
-is indistinguishable from "it has not reconnected yet" in every behavioural
-test.
-
-- **`usher.source.push.connected` reports *delivery*, not connection.** A
-  gauge fed by the socket's state would read 1 for the failure
-  [ADR-0004](decisions/0004-push-over-polling.md) measured — a handshake
-  against a nonexistent path, upgraded and held open, delivering nothing —
-  which is precisely the condition the "Push down" alert below exists to
-  catch. The series keeps its name, because a metric renamed is a dashboard
-  panel silently blank, and reports the honest quantity: the adapter's
-  message ledger, not its connection object.
-- **`usher.source.push.reconnects` is an *asynchronous* counter, and it
-  counts on the second and later `open`.** Asynchronous because the value is
-  a cumulative total read out of an in-memory ledger rather than something
-  incremented at an event — the one place in this project where an
-  observable callback is unambiguously safe, since there is no query to
-  bounce onto the event loop. On the second open rather than on a failure
-  because a lane that failed to connect five times and then succeeded
-  reconnected *once*; a counter on the failure reports five and makes an
-  unreachable source look like a flapping one, which is a different
-  diagnosis with a different fix.
-- **`usher.source.push.events` is new to this table, labelled `source` and
-  `kind`.** It is what separates "the lane is up" from "the lane is doing
-  anything", and the `kind` label is what separates an event that cost a
-  merge from one that
-  [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
-  forbids acting on at all. Counted on the way *out* of applying, so an
-  event answered with a delta walk is still counted — a series that dropped
-  those would read as a quiet source during exactly the library scan that
-  produced them.
-- **`usher.sse.connections` is the one observable callback in this project
-  that really is a live read.** The rule stated above for
-  `usher.jobs.queued` -- an observable callback runs on the metric reader's
-  background thread and every database call here is a coroutine on asyncpg,
-  so the reader must be a *snapshot* -- turns entirely on there being a
-  query. There is none: this is `len()` on an in-memory set of subscribers,
-  so the registered reader is the bus itself and the value can never be
-  stale. A process with no bus reports *no observation* rather than a zero,
-  for the reason the push gauges do: a fabricated zero is a claim the process
-  does not have.
-- **Queue depth by priority (dashboard 3) is a Postgres query, not a
-  metric.** M4 recorded that `usher.jobs.queued` is labelled `kind` and that
-  "M5 introduces demand promotion and is where the band becomes a real
-  series". M5 introduces demand promotion and the label stays `kind`: a
-  priority band needs a second `GROUP BY` on `JobQueue`, and this document's
-  own first principle puts "what is in the queue right now, broken down
-  however you like" on the datasource that can answer it exactly. The panel
-  reads `jobs` directly.
+**A metric never duplicates one the instrumentation already supplies.**
+`http.server.duration` is `FastAPIInstrumentor`'s and carries no `usher.`
+prefix.
 
 ## Analytics tables
 
@@ -537,340 +197,146 @@ llm_calls(
   id, at, model, purpose,           -- purpose: curation | query_expansion
   tokens_in, tokens_out, cost_usd,
   latency_ms, ok, error,
-  generation_id                     -- ✅ M8. NULL for a purpose that produces
-)                                   --    no rows. See below
+  generation_id                     -- NULL for a purpose that produces no rows
+)
 
-search_queries(                       -- ✅ M9 (`m09a`): the table, whole.
-  id, at, user_id, query, mode,       -- ✅ M9 (F2): written per answered search
+search_queries(
+  id, at, user_id, query, mode,
   result_count, latency_ms,
-  clicked_title_id, played          -- outcome attribution. ✅ M9 (F3)
+  clicked_title_id, played,         -- outcome attribution
+  surface, tier                     -- `tier` is NULL on a `search` row
 )
 ```
 
-✅ **`search_queries` exists as of `m09a` with these nine columns and no tenth,
-and as of F3 every one of them has a named writer.** *Whole* is what the table
-got and it
-was only half of what the paragraph above asks for — the argument for shipping
-all nine at once is that a dashboard reading a half-populated analytics table
-cannot tell a real zero from a column nobody filled, and an empty table is at
-least honestly empty. `SearchQueryRepository.record` writes `id`, `at`,
-`user_id`, `query`, `mode`, `result_count` and `latency_ms` at the moment a
-search answers (F2); `record_outcome` fills `clicked_title_id` and `played`
-afterwards (F3), from the two actions a client actually performs.
+**The outcome half is two writers, two columns, and no route that sets both.**
+`GET /search` returns the row's own id as an opaque `search_id`;
+`GET /titles/{id}?search_id=…` records the **click**, and
+`POST /titles/{id}/play` carrying the same id records the **play**, naming no
+title.
 
-✅ **The outcome half is two writers, two columns, and no route that sets
-both.** `GET /search` returns the row's own id as an opaque `search_id`;
-`GET /titles/{id}?search_id=…` records the **click**, because opening a result
-is the only moment anything knows *which* one the household opened; and
-`POST /titles/{id}/play` (or `/episodes/{id}/play`) carrying the same id
-records the **play**, naming no title. No new endpoint was needed for either.
-The split is what stops the ambiguity this document spends a paragraph
-refusing from arriving anyway through the back door: a single writer setting
-both would make `clicked_title_id` mean *"the last thing this household did
-with this search"* rather than *"which result it opened"*.
+**Which absence means what.** `clicked_title_id IS NULL` means the household
+answered no result; `played = false` means no play was reported *through this
+id*. ⚠️ **So the denominator is answered searches, never plays.** A play
+carrying no `search_id` is not in this table at all, so the conversion rate is
+*"of searches, how many led to a play Usher was told about"* and never *"of
+plays, how many came from a search"*. This column is joined to a **search**, not
+to a row: `search_queries` has no row slug, no `generation_id` and no provider,
+and a play launched from a home shelf carries no `search_id` at all.
 
-Four properties of that update, each a decision rather than an implementation
-detail:
+**One row per *answered* request.** A blank query and a rejected one are not
+rows, so the denominator is searches rather than characters typed.
 
-- **The update is scoped `WHERE id = :search_id AND user_id = :user_id`**, and
-  that is a security boundary rather than tidiness. A `search_id` is
-  client-supplied and UUIDv7 is partially time-ordered and therefore partially
-  guessable, so without the scope one household writes attribution onto
-  another's row — silently, with no error, no log line and no metric.
-- **First write wins on `clicked_title_id`**, so a repeated or later, different
-  click cannot rewrite history. That is what makes the column answer *"what did
-  this search lead to"* rather than *"what did this client last do"* — and it
-  is also what makes the row immutable after its outcome, which is why this
-  table needs no `updated_at` and no trigger.
-- **`played` is monotonic and moves only toward `true`.** Nothing in this
-  design means *"undo the play"*, so a later call that has not itself observed
-  one is stale information rather than a correction.
-- **An unknown, stale or malformed `search_id` is ignored, never a 4xx.** This
-  is analytics, not a resource: pruning is an operator's `DELETE` (below), so a
-  client outliving its row is ordinary, and a client that truncated its id must
-  not be denied a title that exists.
+**`GET /search/suggest` writes one row per answered keystroke**, on both tiers,
+with `surface` and `tier` distinguishing them from a `search` row. ⚠️ **The row
+is not on the path the keystroke waits for**: it is buffered in process and
+written asynchronously. A `q` below the tier's minimum and a deployment with
+`USHER_SEARCH_SUGGEST_ANALYTICS` off both write nothing and pay nothing.
 
-**Which absence means what, because a reader computing a no-click rate needs
-all three and only one of them is a real zero.**
+**The table's size is owned by a scheduled job** —
+`USHER_SEARCH_QUERY_RETENTION_DAYS` is the window and the job's period is how
+much expired data may accumulate ([08](08-operations.md)).
 
-| what you see | what it means |
-|---|---|
-| a row with `clicked_title_id IS NULL` and `played = false` | **the signal.** The search answered and the household opened nothing — the no-click rate this table exists to compute |
-| a row with `clicked_title_id` set and `played = false` | **also the signal.** A click that never became a play, which is the row `usher search`'s own gate cannot produce and a synthetic typo set cannot imitate |
-| a row with `played = true` and `clicked_title_id IS NULL` | legal and meaningful: the household played a result without ever asking for its detail page, so no click was ever reported. Not a hole |
-| a play with **no row at all** | simply **unattributed**. A client that carried no `search_id` — a home row, a deep link, a bookmark — is not a search that led nowhere, and counting it as one would make the denominator the whole library |
-| **no rows from `GET /search/suggest`** | by design, on either tier (F2, and the two amendments below). The type-ahead box contributes nothing to any rate on this table |
-
-⚠️ **So the denominator is answered searches, never plays.** *"Plays with no
-search"* and *"searches with no play"* are counted in different tables — the
-first is not in this one at all — and a panel dividing one by the other is
-measuring how often people search rather than how well search works.
-
-**One row per *answered* search, and four things that are deliberately not
-rows.** Each is a decision rather than an omission, and each is stated here
-because the absence is invisible in the data:
-
-- **A blank or whitespace-only query.** A search box sends one between every
-  character, and `SearchService` refuses one before it reaches an index. Counted
-  they would dominate this table exactly as they would dominate the two
-  histograms, and the zero-result rate below would become a measure of how fast
-  somebody types.
-- **A search with no household.** `user_id` is `NOT NULL` behind a real foreign
-  key, so a search nobody is speaking for has no row rather than a row with a
-  hole in it. Unreachable from either shipped caller — `GET /search` and
-  `usher search` both resolve the singleton default user first.
-- **A page of a search.** Neither `GET /search` nor `SearchService.search` takes
-  a cursor, so a search is one row and cannot become one per scroll. The day
-  either grows pagination this is a decision to make again, not a default.
-- **A keystroke.** See the next paragraph.
-
-🔴 **`GET /search/suggest` writes no row, on either tier, and what that costs
-is stated rather than hidden.** `mode` is a `SearchMode` — three reachable
-values — and a suggest request is parameterised by a disjoint `SuggestTier`
-(`prefix` | `fuzzy`), so storing both under one column is the
-two-vocabularies-under-one-name hazard this document already names for
-`provider`. It would also make every mode-split panel in dashboards 1 and 4 a
-measure of the type-ahead box: tier 1 is p50 **0.6 ms** against full text's p50
-**33.3 ms** over the same 2,993 cases
-([05](05-search-and-similarity.md)), so a client driving the box per keystroke
-would out-number *and* out-weight the searches by an order of magnitude each.
-
-**The cost is that this table cannot answer the question below that it is most
-wanted for** — *whether real users type 2–4-character queries at all*, which is
-a question about the suggest box. Two ways to fix it, both **PRD 10
-amendments** and both deliberately out of M9's scope, named here so M10 plans
-one rather than rediscovering the choice:
-
-1. **A fourth `SearchMode` member** (a `suggest` value, or one per tier). It is
-   the smaller schema change — no column, no migration for the enum's Postgres
-   side beyond widening a CHECK — and the larger *wire* change: `SearchMode` is
-   `GET /search`'s `?mode=` and `SearchAnswer`'s two fields, so a member no
-   search lane can serve becomes reachable on a route that would have to refuse
-   it.
-2. **A tenth column** (`surface`, `search | suggest`, or a nullable `tier`). It
-   keeps the two vocabularies apart, which is the objection above answered
-   rather than absorbed, and it costs a migration plus a decision about every
-   existing row. It is also the only one of the two that can record *which tier*
-   answered, which is the half [ADR-0031](decisions/0031-the-two-tier-suggest.md)
-   would actually want measured.
-
-Either way the volume argument stands on its own and does not go away with the
-vocabulary one, because of the next paragraph.
-
-**What the row costs, measured once rather than assumed:** `record()` plus the
-commit is p50 **3.957 ms** / p95 4.738 ms over 2,000 iterations against a real
-`pgvector/pgvector:pg17`, of which the INSERT is 0.9 ms and the WAL flush is
-3.0 ms. Against the shipped full-text path's p50 33.3 ms
-([05](05-search-and-similarity.md)) that is **11.9% of a median search** — one
-order of magnitude smaller, not the two an earlier estimate assumed, which is
-worth knowing before anything prices a *keystroke* against it. No bar is minted
-and none is needed; the full table and its caveats are in
-`.claude/rules/search-and-embeddings.md`.
-
-⚠️ **Nothing owns this table's size, and that is stated rather than left
-implied.** There is no retention job and no scheduler anywhere in `src/` —
-every periodic thing in this project is an operator's cron line ([M8's boundary
-call 8](09-roadmap.md)) — so `search_queries` grows monotonically at one row per
-answered search, forever. On the shipped surface that is bounded by how often a
-household presses enter, which is why it is tolerable in M9; it is *not* what a
-keystroke-recording amendment above would produce, and pricing the retention is
-part of that amendment rather than a follow-up to it. Pruning is
-`DELETE FROM search_queries WHERE at < now() - interval '90 days'`, an
-operator's SQL, and the table has **no index on `at`**, so that statement is a
-sequential scan until somebody adds one.
-
-The same "whole" cuts the other way: `requested_mode` is wire-only and is
-deliberately **not** a tenth column. `played` is `NOT NULL` rather than
-nullable for exactly the reason in this paragraph. `user_id` is `ON DELETE
-RESTRICT` — a household's search history is user state — and
-`clicked_title_id` is `ON DELETE SET NULL`, because a deleted title must not
-delete the record that somebody searched. The table ships **no index beyond
-its primary key**: its readers are the dashboards below, and an index whose
-reader is a later milestone is the failure [09](09-roadmap.md)'s boundary call
-9 names.
-
-🔴 **This paragraph read *"`litellm` reports per-call cost natively, so cost
-analysis is exact SQL rather than estimated counters"* and its premise is
-false — independently of M8's decision not to take that dependency.** Measured
-2026-08-06 against a live OpenAI-compatible endpoint: `usage` carries
-`prompt_tokens`, `completion_tokens` and `total_tokens` and **no cost field at
-all**. litellm does not *report* cost, it *computes* it, from a price table it
-bundles. So "exact SQL rather than estimated counters" was describing a lookup
-either way; the only question was whose table it is and how it ages.
-
-✅ **`generation_id` is new to this sketch and it is what makes dashboard 5 a
-join.** This column list had ten entries and no way to connect a completion to
-what it produced, so "cost per curated row" would have been a correlation on
-timestamps — two tables written milliseconds apart, matched by proximity, with
-no way to tell two users' concurrent generations apart. `curated_rows` carries
-the same `generation_id` on every row of one generation, so the panel is
-`llm_calls JOIN curated_rows USING (generation_id)` and nothing else.
-
-**It is also *why* this table has no `user_id`.** Spend is attributed to an
-outcome through that join rather than by denormalising a household onto a cost
-row, which is what keeps this a spend ledger rather than a second copy of the
-curation record. `NULL` for a purpose that produces no rows at all — query
-expansion is one, **shipped in M8 and writing `NULL` here on every row**
-([05](05-search-and-similarity.md)), so on a deployment that both curates and
-searches those rows are the majority of the table, which is why the index that
-eventually serves this join is partial on
-`generation_id IS NOT NULL`. ⚠️ **That majority is a property of a
-configuration almost nobody will be in, corrected 2026-08-07.** Query expansion
-ships behind its own switch, `USHER_QUERY_EXPANSION_ENABLED`, default `false`
-*even where `USHER_LLM_ENABLED` is true*, because the retrieval measurement in
-[05](05-search-and-similarity.md) put its effect the wrong way round. So on the
-shipped default this table is **100% `curation`**, every `generation_id` is
-non-NULL, and the partial index degenerates to a full one. The partial spelling
-is still the right one — it costs nothing on that population and is what stops
-the index inverting on the day an operator opts in — but the sentence above
-argued for it from a majority the default does not produce, and the honest
-argument is that it is correct under both. **No foreign key**, in either direction: a
-generation is three to five `curated_rows` rows, so that column is not unique
-and must not become so; and any foreign key would make a ledger row deletable
-by a cascade from the thing whose cost it records, when a curated row is
-replaced nightly and the money was still spent. Migration `m08a`.
-
-`cost_usd` is therefore computed from two configured per-million-token prices
-and **written onto the row**, so a later price change cannot rewrite history.
-Both default to `0`, which is the honest value for a local model and the wrong
-one for a hosted model an operator forgot to price — and the mitigation is that
-`tokens_in`/`tokens_out` are recorded exactly, so spend is recomputable from
-the ledger after the fact.
-[ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md).
-
-`search_queries` does something more useful than reporting: **it turns the
-Meilisearch gate in [ADR-0002](decisions/0002-postgres-first-search.md) into a
-live measurement.** Zero-result and no-click rates on queries you actually typed
-are better evidence than a synthetic typo set.
-
-**It was assigned to no milestone, and M6 assigns it to M9 whole.** Its
-columns split cleanly in two:
-
-| Columns | Nature | Fillable in M6? | Writer |
-|---|---|---|---|
-| `at`, `query`, `mode`, `result_count`, `latency_ms` | retrieval-side — everything `SearchService` already knows | yes | **F2** |
-| `user_id`, `clicked_title_id`, `played` | outcome attribution — a click and a play are things a *client* does | **no.** Needs an HTTP surface, which is M9's (M6 adds no route, boundary call 1), and a real `user_id`, which is the authentication seam [01](01-architecture.md) leaves open | **F3** for `clicked_title_id`/`played`; **F2** for `user_id` — see below |
-
-Creating it in M6 would ship a table three of whose seven columns nothing ever
-fills. **This document's own first principle is that a documented thing
-nothing emits is a permanently empty panel indistinguishable from a healthy
-zero — and a half-populated *table* is worse than an empty metric**, because a
-`NULL` in `clicked_title_id` is genuinely ambiguous between "not implemented"
-and "the user searched and clicked nothing", and that second reading is
-exactly the signal the column exists to carry. The whole point of this table
-is the sentence above it: it turns the gate into a live measurement. **A
-no-click rate computed over a column nothing writes is not better evidence
-than anything.** So the table lands with the surface that can fill it: **M9**.
-The **"Fillable in M6?" column is left standing as the historical record it
-is** — it answers a question M6 was actually asked, not a question about M9's
-task split, which is what the **Writer** column is for.
-
-🔶 **F1's divergence, recorded rather than smoothed over.** The row above
-groups `user_id` with the outcome half because an authenticated deployment
-needs the seam [01](01-architecture.md) leaves open. M9 ships no
-authentication (group F's boundary calls) — `user_id` is the singleton
-default user — so on the seam this milestone actually has, `user_id` is
-already known at the moment a search answers, and it costs nothing to write
-it early rather than wait for the attribution call that fills the other two.
-`SearchQueryRepository.record` (F2) therefore writes `user_id` alongside the
-five retrieval-side columns, and `record_outcome` (F3) writes only
-`clicked_title_id` and `played`.
-
-✅ **And `user_id` earned a second job in F3 that this row did not anticipate:
-it is the *scope* of the outcome update, not only a column.** On an
-unauthenticated deployment that reads like a formality; it is not one, and it
-is a predicate rather than a comment because the day the seam above is filled
-is the day a `search_id` guessed from a timestamp stops being harmless. The
-column is written once, by `record`, and never moved.
-
-**M6's contribution is the two histograms** — `usher.search.duration` and
-`usher.search.results`, both labelled by mode — which answer latency and
-result count without needing a durable row per query. Said explicitly so a
-reader does not conclude M6 measured nothing about search.
-
-And the synthetic typo set this paragraph compares itself favourably to is
-[ADR-0002](decisions/0002-postgres-first-search.md)'s gate. **It ran on
-2026-08-03 against a real 1,271,138-title catalog and it failed** — 27.8%
-recall@5 on 2–4-character names against a bar of 0.75, 68.3% on 5–7 against
-0.85, transposition on a short name at 0.0%, and a p95 of 211 ms against the
-50 ms latency half, which no configuration clearing the recall half beats. The comparison is fair and it is not a criticism; what the
-result changes is that this paragraph's argument is now **stronger, not
-weaker**. A synthetic typo set answers "can the index find a name somebody
-misspelled"; `search_queries` answers "what did people actually type and did
-they play anything" — and the gate demonstrated the gap between the two by
-producing a decisive number that still cannot say whether real users type
-2–4-character queries at all. The gate is the best evidence available *until*
-M9 lands this table, and there is now a measured result for this table to be
-better than.
-
-Row attribution (`played` joined back to the row a title was launched from) does
-the same for [06](06-rows-and-recommendations.md) — it shows which
-`RowProvider`s earn their slot.
-
-⚠️ **That sentence is an aspiration and M9 does not deliver it — stated here
-because F3 lands `played` and a reader would otherwise assume it did.** This
-column is joined to a **search**, not to a row: `search_queries` has no row
-slug, no `generation_id` and no provider, and a play launched from a home
-shelf carries no `search_id` at all, so it is one of the *unattributed* plays
-in the table above. Attributing a play to the shelf it came from needs a
-handle `GET /home` does not hand out and a column this table does not have —
-the same shape [06](06-rows-and-recommendations.md)'s "cost per play
-attributed to an LLM row" panel needs, and a PRD amendment rather than a
-follow-up to this one.
+**`llm_calls` has no `user_id`.** Spend is attributed to an *outcome* by
+joining `curated_rows` on `generation_id`, which is what dashboard 5's "cost
+per curated row" *is*. Failed calls are recorded too, with `ok` false, so the
+ledger's spend includes them. `cost_usd` is `NUMERIC(12, 8)`, never a float.
 
 ## Dashboards
 
-Six. **Specified here, and not yet built** — no dashboard JSON exists in this
-repository and no Grafana service is in `compose.yml`; the sentence that said
-they were shipped as provisioned JSON "so a fresh deploy has them without
-clicking" was aspirational and is corrected here (2026-08-19). They live with
-the code that emits the data when they land, so they version together.
+Six specified here, **five built**. Dashboards 1–5 ship as JSON under
+`dashboards/` — the first is
+[`dashboards/01-library-and-catalog.json`](../../dashboards/01-library-and-catalog.json)
+— with their provisioning file at `dashboards/provisioning/dashboards.yml`, so a
+fresh deploy has them without clicking; 6 is still specification. **Each
+panel's recorded observation against the live catalog is
+[`dashboards/README.md`](../../dashboards/README.md)** — the query as issued and
+the data it returned, per panel.
+
+**The provisioning mechanism is a bind mount from the other repository, and
+Usher's `compose.yml` still gains nothing** — there is no Grafana service in
+it. "Where the stack lives" below puts the stack in `~/code/observability/`;
+its compose project mounts `dashboards/provisioning` at Grafana's own
+`/etc/grafana/provisioning/dashboards` and `dashboards/` at the `path` that file
+names. Both mounts are needed: mounting either alone yields no dashboards and
+no error.
 
 ### 1 — Library & Catalog
 
 Titles by enrichment state · owned vs catalog coverage · genre, decade,
-language, and runtime distributions · **quality ladder** (4K/HDR/codec share
-broken down by decade — shows what is worth upgrading) · **franchise
-completeness** with the missing entries listed, which doubles as a want-list ·
-most-represented directors and actors · library growth per week · unmatched
-review queue depth.
+language and runtime distributions · **quality ladder** (4K/HDR/codec share
+broken down by decade) · **franchise completeness** with the missing entries
+listed, which doubles as a want-list · most-represented directors and actors ·
+library growth per week · unmatched review queue depth.
+
+✅ **All eleven panels here are backed by real data as of M10.**
+
+**Three caveats:**
+
+1. `titles.collection_id` and every `credits` row arrive from TMDb enrichment,
+   so franchise completeness, the credits panel and the language panel are
+   bounded by the **enriched tier**. A franchise whose other entries were never
+   enriched reads as complete.
+2. `media_items.added_at` is nullable, so a growth curve omits any item whose
+   source reported no creation date.
+3. ⚠️ **`HdrFormat` has no SDR member**, so `hdr_format IS NULL` means *"SDR
+   **or** never probed"* and never *"SDR"*. The ladder's HDR share is a
+   fraction of `video_codec IS NOT NULL` and never of the table.
 
 ### 2 — Taste & Watching
 
 Watch time by day and user · **abandonment cliff** — a histogram of where you
-actually stop, which answers whether you bail at 20 minutes or 70% ·
-completion rate · time-of-day heatmap · **taste drift** as genre affinity in a
-stacked area over months · **longest unwatched** (in the library, never played,
-sorted by age) · rewatches · **row effectiveness**: plays attributed per
-`RowProvider`.
+actually stop · completion rate · time-of-day heatmap · **taste drift** as
+genre affinity in a stacked area over months · **longest unwatched** ·
+rewatches · **row effectiveness**: plays attributed per `RowProvider`.
+
+⚠️ **Five of these eight panels are backed by real data as of M10, three have
+no backing series at all, and the three are schema changes rather than build
+tasks.** **This schema has no play-event log.** `watch_states` is one row per
+`(user, title)` or `(user, episode)`, carrying a single `last_played_at` — a
+*current state*, not a history.
+
+- **"Watch time by day and user" has no backing series** (#84). Minutes
+  attributable to a day need a row per play; the only date any row carries is
+  the last one, and `play_count` carries none at all.
+- **"Taste drift as genre affinity in a stacked area over months" has no
+  backing series** (#84), for the same reason: one date per title is a scatter
+  of points, not a stacked area under any denominator, and a rewatch erases a
+  title's earlier dates.
+- **"Row effectiveness: plays attributed per `RowProvider`" has no backing
+  series** (#85). `search_queries` has no row slug, no `generation_id` and no
+  provider, a play launched from a home shelf carries no `search_id` at all, and
+  `surface` and `tier` are not row handles either.
+
+- **"Time-of-day heatmap" is backed and mis-titled.** `last_played_at` gives
+  one hour per item — the hour of its *last* play — so the honest panel is
+  **"when each item was last played"** and never *"when this household
+  watches"*.
+- **"Abandonment cliff" is backed.** It is `position_seconds /
+  runtime_seconds` over `played = false`; `watch_states.runtime_seconds` is
+  null after a walk, so the denominator falls back to
+  `media_items.runtime_seconds`, then `titles.runtime_minutes` × 60. The panel
+  must state which it used, or a null denominator silently drops the row.
+- **"Longest unwatched" is backed.** *Never played* is "no `watch_states` row
+  **or** a row with `play_count = 0 AND NOT played`" — the walk writes a row for
+  nearly everything it sees.
+- Completion rate and rewatches are backed outright.
+
+The three unbacked panels need a play-event log (#84) and a row handle
+`GET /home` does not hand out (#85). Dashboard 2 ships **five panels and a
+stated absence**.
 
 ### 3 — Pipeline
 
 Queue depth by priority · enrichment throughput and p50/p99 · **promotion
-latency against the 5 s read-through target** — backed by real data as of M5,
-which added the first caller of the promotion clause and puts the requesting
-span's `traceparent` on the promoted job, so the panel is a join rather than
-an estimate · parked jobs · sync run outcomes
-and duration · **push connection uptime and reconnect count** — the direct
-health signal for the WebSocket risk in
-[ADR-0004](decisions/0004-push-over-polling.md), reported from a message
-ledger rather than a socket
-([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)) · **push
-events applied, by kind**, which separates "the lane is up" from "the lane is
-doing anything"
-· Emby request latency · TMDb requests/sec against the ~40 ceiling with 429
-count.
+latency against the 5 s read-through target** · parked jobs · sync run outcomes
+and duration · **push connection uptime and reconnect count** · **push events
+applied, by kind**, which separates "the lane is up" from "the lane is doing
+anything" · Emby request latency · TMDb requests/sec against the
+`USHER_TMDB_REQUESTS_PER_SECOND` ceiling, with 429 count.
 
-**Queue depth, parked jobs, sync run outcomes and duration are backed by real
-data as of M4** — `jobs`, `sync_runs` and `usher.sync.run.duration` all exist
-and are written by a live walk. Promotion latency, enrichment throughput and
-push uptime are not: the first two need M5's demand path and a configured TMDb
-key, the third needs M5's socket. Dashboard 1's **unmatched review-queue
-depth** is likewise real — `ix_media_items_unmatched` and
-`list_unmatched` ship in M4 — with the caveat that `list_unmatched` pages by
-`OFFSET`, measured at 43.7 ms at offset 0 against 388.9 ms at offset
-1,126,574, so a panel that drains the whole queue is quadratic and wants a
-keyset cursor first.
+✅ **Every panel here is backed by real data as of M9.** ⚠️ A panel that drains
+the whole unmatched queue should page with the keyset cursor; the `OFFSET` form
+is quadratic in queue depth.
 
 ### 4 — Performance
 
@@ -879,116 +345,132 @@ finds the one slow provider · search latency by mode · **zero-result rate** an
 search→play conversion · DB query time and pool saturation · cache hit rates ·
 image proxy hit rate and cache size.
 
-**Home composition time is backed by real data as of M7**, from both sides:
-`usher.home.compose.duration` for the total and `usher.row.build.duration`'s
-`provider` label for the breakdown, with `home.compose → row.build` spans for
-the drill-down. **API latency by endpoint and cache hit rates are backed as of
-M9**: the former by `http.server.duration` (no `usher.` prefix — see the
-correction above the metric table), the latter by `usher.cache.hits`/
-`.misses`. **The zero-result rate is backed as of M9's F2** — it is
-`search_queries.result_count = 0` over the rows a real household produced,
-which is the live measurement this whole table exists to turn ADR-0002's gate
-into, and it counts only *answered* searches: a blank query and a keystroke are
-not rows, so the denominator is searches rather than characters typed.
-**Search→play conversion is backed as of M9's F3** — `played` over the same
-denominator, with the no-click rate (`clicked_title_id IS NULL`) beside it — so
-every panel on this dashboard now has a writer behind it. ⚠️ Read both against
-the absence table above before quoting either: a play carrying no `search_id`
-is not in this table at all, so the conversion rate is *"of searches, how many
-led to a play Usher was told about"* and never *"of plays, how many came from
-a search"*. And
-one caveat travels with the home panels — the build histogram's population is
-cache *misses* only, so a p50 that rises after a deploy may be a colder cache
-rather than a slower provider. **Two M9 additions change how these panels
-read.** The hit rate splits on `freshness`, so "served, but stale" is its own
-number rather than folded into the good one; and the build histogram now
-includes rows built by the `rows.refresh` lane, which have no `home.compose`
-parent — so the histogram's population is *all* builds while the span drill-down
-under a request shows only that request's.
+✅ **Every panel here is backed by real data as of M9.** The home total is
+`usher.home.compose.duration` and the breakdown is `usher.row.build.duration`'s
+`provider` label, with `home.compose → row.build` spans for the drill-down; the
+zero-result rate is `search_queries.result_count = 0` and the conversion is
+`played` over the same denominator, with the no-click rate beside it.
+
+Three caveats travel with them. The build histogram's population is cache
+*misses* only, so a p50 that rises after a deploy may be a colder cache rather
+than a slower provider. The hit rate splits on `freshness`, so "served, but
+stale" is its own number rather than folded into the good one. And the build
+histogram includes rows built by the `rows.refresh` lane, which have no
+`home.compose` parent — so the histogram's population is *all* builds while the
+span drill-down under a request shows only that request's.
 
 ### 5 — Cost & Compliance
 
 LLM spend per day and month by model and purpose · tokens in/out · **cost per
-curated row** and **cost per play attributed to an LLM row** — the honest answer
-to whether the LLM earns its keep · embedding compute time · TMDb quota
-headroom · **oldest `enriched_at` against the 6-month TMDb cache ceiling**, a
-licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md) ·
-data freshness (age of last IMDb import and TMDb changes sync) · Postgres size
-by table with a disk-exhaustion projection.
+curated row** and **cost per play attributed to an LLM row** · embedding
+compute time · TMDb quota headroom · **the oldest `raw_payloads.fetched_at`
+against the 6-month TMDb cache ceiling** · data freshness · Postgres size by
+table with a disk-exhaustion projection.
 
-Data freshness is backed by real data as of M2: `import_runs.heartbeat_at`
-(updated every committed batch) and `finished_at` (set on completion or
-failure) are its source, one row per bulk dataset.
+⚠️ **The cache-age series is `raw_payloads.fetched_at`, never
+`titles.enriched_at`, which is the wrong column:** enriching a title from an
+already-cached payload advances `enriched_at` and leaves `fetched_at` where it
+was, so a panel on `enriched_at` reports a freshness the cache does not have.
+`provider_cache_meta` does not exist.
 
-✅ **Half of the LLM half is backed by real data as of M8, and the split is
-worth stating because these two panels sit in one sentence above.** *Spend by
-model and purpose*, *tokens in/out* and **cost per curated row** are
-`llm_calls` and `llm_calls ⋈ curated_rows USING (generation_id)`, both of which
-exist and were verified live on 2026-08-07: `cost_usd` is `0.00000000` against
-a local model — the honest value — and `0.01658700` with prices 3/15 per Mtok
-configured, exactly `Decimal((4359×3 + 234×15) / 1e6)`, with the column
-`numeric` and `SUM()` agreeing to 8 decimal places. **Cost per play attributed
-to an LLM row is still unbacked** and stays ⏳ M9: it needs `search_queries`'
-`played`, which needs a client. So the panel that answers *"did this cost
-anything"* is live and the one that answers *"was it worth it"* is not — which
-is the same asymmetry [06](06-rows-and-recommendations.md) records at the
-product level, where 88% of one live run's headings were the genre labels the
-prompt forbids and nothing in this stack could have told an operator so.
+**The panel is three numbers and a threshold line, not one number**: **the
+oldest entry**, **the count of entries past the ceiling**, and **that count as
+a share of `count(*)`** — against a **threshold line** at
+`now() - interval '6 months'`.
+
+⚠️ **Keep them as three targets, not one statement.** Folded together, all
+three lose the `fetched_at` index and scan the whole cache.
+
+```sql
+-- 1. the oldest entry, and the threshold line it is read against
+SELECT min(fetched_at) AS oldest_fetched_at,
+       now() - interval '6 months' AS ceiling
+FROM raw_payloads
+WHERE provider = 'tmdb';
+
+-- 2. how many entries are past the ceiling. `<`, never `<=`: TMDb's term is
+--    "no more than 6 months", so a payload cached exactly six months ago is
+--    still in term and counting it reports a breach that has not happened.
+SELECT count(*) AS past_ceiling
+FROM raw_payloads
+WHERE provider = 'tmdb'
+  AND fetched_at < now() - interval '6 months';
+
+-- 3. the denominator, and the count as a share of it. NULLIF guards the empty
+--    cache, where the honest answer is NULL and not a division by zero.
+SELECT count(*) AS cached,
+       count(*) FILTER (WHERE fetched_at < now() - interval '6 months')::numeric
+         / NULLIF(count(*), 0) AS past_ceiling_share
+FROM raw_payloads
+WHERE provider = 'tmdb';
+```
+
+⚠️ **Spell the ceiling `interval '6 months'` and never `interval '180 days'`**,
+which matches strictly more rows and over-reports the breach.
+
+✅ **The cache-age panel is backed by real data as of M4.**
+
+**Data freshness** is `import_runs.heartbeat_at` (updated every committed
+batch) and `finished_at` (set on completion or failure), one row per bulk
+dataset.
+
+⚠️ **Two panels sit inside *"cost per play attributed to an LLM row"* and only
+one of them is reachable — the correlation is backed and the attribution is
+not.** The backed one is **cost per curated row that was later played**:
+`llm_calls ⋈ curated_rows USING (generation_id)`, joined once more against
+`watch_states` on `watch_states.title_id = ANY(curated_rows.card_title_ids)`
+for the same `user_id`. **It must be titled as an upper bound, in the panel**:
+`watch_states` records no origin for a play, so a title played after appearing
+on a curated shelf was not necessarily played *from* that shelf
+([06](06-rows-and-recommendations.md)).
+
+Two caveats. The title arm is **blind to every episode-keyed watch state** — a
+curated row about a series reads as unplayed unless the query adds a join
+through `episodes.title_id`. And ✅ on these panels means *the query resolves
+and its arithmetic was checked*, never *this panel has data today*.
 
 ### 6 — Quality evals
 
 Recall and MRR per surface, per tier, per stratum, over time · bar pass/fail
 per run · catalog-input digest beside every point, so a step change that
-coincides with a re-index is visible as one · judge calibration agreement
-(E3) · run verdict mix, which is where `baseline-invalid` becomes visible as a
-catalog that keeps moving rather than as a quality problem.
+coincides with a re-index is visible as one · judge calibration agreement · run
+verdict mix, which is where `baseline-invalid` becomes visible as a catalog
+that keeps moving rather than as a quality problem.
 
-✅ **Backed by real data as of E1** for the suggest surface: `eval.v_trend`,
-which the harness creates outside the alembic chain
-([ADR-0041](decisions/0041-the-eval-schema-is-not-a-migration.md)). The other
-three surfaces arrive with E2 and E3.
-
-✅ **Two recorded runs, and between them they are the trend panel's own
-control.** The first, 2026-08-19, **failed**: the `prefix recall_at_5` window
-`[0.016, 0.022]` was inherited from
-[ADR-0031](decisions/0031-the-two-tier-suggest.md) and the re-anchored frame
-measured 0.023738 against it. The second, 2026-08-21, **passed** — against the
-widened `[0.016, 0.028]`, which ADR-0031 amended on the strength of sixteen
-measured draws after its own B3 gate run was found to have failed the old
-window too, at 0.0267.
-
-🔴 **The two rows carry the identical `inputs_digest` and the identical value
-to six decimals — 0.023738 both times — and differ only in `bars_sha256`.** So
-the trend panel's first two points say, in the ledger's own columns, that
-nothing about the system moved and only the bar did. That is what a bar change
-is supposed to look like in this table, and it is why `bars_sha256` is a column
-rather than a comment: a widening that had also moved the measurement would be
-visible here as two things changing at once. The bar-status series starts red
-and turns green with no accompanying movement in the value series.
+✅ **Backed by real data as of E1** for the suggest surface, through
+`eval.v_trend`, which the eval harness creates (no migration does). The other
+three surfaces arrive with later eval phases.
 
 ## Where the stack lives
 
 **External and shared**, not bundled into Usher's compose:
-`~/code/observability/` running Grafana, Prometheus, Loki, and Tempo.
+`~/code/observability/` running Grafana, Prometheus, Loki and Tempo. One stack
+serves Usher and anything added later.
 
-Rationale: Alfred is already instrumented and configured to export OTLP but has
-had nothing listening. One stack serves Usher, Alfred, and anything added later,
-and it survives the planned Proxmox migration as an always-on LXC.
-
-Usher's only coupling is configuration:
+Usher's only coupling is configuration: two keys set in `.env`, the endpoint
+edited where `.env.example` already has it (its `OTEL_SERVICE_NAME=usher`
+needs no change):
 
 ```
-OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4317
-OTEL_SERVICE_NAME=usher
+COMPOSE_FILE=compose.yml:compose.observability.yml
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 ```
 
-**Telemetry is never required.** With no endpoint configured, Usher runs
-normally — exporters become no-ops. The dashboards are an asset of this
+The stack publishes every port on `127.0.0.1`, so a container reaches the
+collector only over the shared `observability` docker network, by the
+collector's service name. **Joining that network is opt-in.**
+`compose.observability.yml` declares it `external: true` and adds it to the
+`usher` service beside `default`. `compose.yml` does neither, so
+`docker compose up` works on a host with no telemetry stack. `COMPOSE_FILE` in
+`.env` applies the override to every compose command, which `-f` on one command
+does not.
+`Settings` drops `COMPOSE_*` keys ([08](08-operations.md)).
+
+**Telemetry is never required.** With no endpoint configured Usher runs
+normally and constructs no exporter at all. The dashboards are an asset of this
 repository; the stack that renders them is infrastructure.
 
 ## Alerts
-
-Kept few, so they mean something:
 
 | Alert | Condition |
 |---|---|

@@ -1,33 +1,4 @@
-"""The lanes, running inside a real `create_app()` against real Postgres.
-
-**This file exists because "the server process grows two lanes" is a claim
-about a process, and no unit test can make it.** `tests/unit/test_api_lanes.py`
-drives `LaneSupervisor` directly over port fakes, which proves the supervisor
-does what it is told; it says nothing about whether `create_app`'s lifespan
-tells it anything. So the headline case here starts nothing but the app,
-runs no `usher work`, and asserts a real row in `jobs` disappears.
-
-The three things a fake cannot express, all here:
-
-- **The worker lane claims from the real queue.** `FakeJobQueue` has no
-  `FOR UPDATE SKIP LOCKED`, no `clock_timestamp()`, and no transaction --
-  and the lane opens one session per pass, which is exactly the shape a
-  rolled-back single-transaction fixture cannot model.
-- **What `_write_push_available` actually writes.** `sources` has a
-  `BEFORE UPDATE` trigger that owns `updated_at` and `now()` is frozen per
-  transaction, so two separate transactions really do produce two different
-  instants -- which is what lets the case below see a *real* change land and
-  a no-op one not. It also measured something the guard's own comment used
-  to claim wrongly: see that case's docstring.
-- **A push lane against a source row.** The lane's source list, credential
-  decryption and adapter build all go through the real repositories.
-
-The adapter itself is a fake, deliberately and by necessity: a real one
-would open a socket to a media server, and no test in this repository makes
-a network request. `dependency_overrides` do not reach the lifespan, so the
-substitution is made where a composition root makes it -- in the unit of
-work handed to `LaneSupervisor`.
-"""
+"""The lanes, running inside a real `create_app()` against real Postgres."""
 
 import asyncio
 import time
@@ -47,7 +18,6 @@ from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
 from usher.composition import DefaultUserId, Pipeline, build_pipeline, unit_of_work
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.domain.enums import SourceKind
@@ -84,42 +54,17 @@ def lane_settings(postgres_url: str) -> Settings:
     )
 
 
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Real, separately-committing sessions -- not the suite's usual
-    rolled-back one.
-
-    The lane under test commits for real from another task, so a test that
-    wanted to see its writes through a single shared transaction would see
-    nothing. Each case therefore cleans up after itself; `jobs` and `titles`
-    do not cascade from anything (CLAUDE.md's "a route-driven test commits
-    for real").
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     """Undo what a committing test wrote.
 
-    Two `DROP TABLE IF EXISTS stg_*` statements used to be part of this, and
-    the reason is worth keeping even though the lines are gone:
-    `usher.db.staging` created `stg_*` with DDL, Postgres DDL is
-    transactional, so a *committing* test was the only kind that could leak
-    one -- and it surfaced as schema drift in
-    `test_migrations.py::test_migration_matches_the_orm_metadata`, a
-    different file that then failed only in combination. Reproduced here
-    exactly as CLAUDE.md predicted at the time. M6 made the staging tables
-    `CREATE TEMP TABLE ... ON COMMIT DROP`, so the commit is what removes
-    them.
+    The staging tables are `CREATE TEMP TABLE ... ON COMMIT DROP`, so the commit is what
+    removes them and nothing here has to. A leaked one surfaces as schema drift in
+    `test_migrations.py`, a different file that then fails only in combination.
     """
     async with sessions() as session:
         for statement in (
             "DELETE FROM jobs",
-            # M8's cost ledger, which cascades from nothing: it has no
+            # The cost ledger, which cascades from nothing: it has no
             # `user_id` at all (`generation_id` is its only correlation key,
             # which is what makes PRD 10's dashboard 5 a join rather than a
             # lookup), so a committing curate case has to clean it up itself.
@@ -147,7 +92,7 @@ async def _queue_depth(sessions: async_sessionmaker[AsyncSession]) -> int:
 async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
     lane_settings: Settings, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The milestone's central claim, proved rather than asserted.**
+    """The central claim of this file, proved rather than asserted.
 
     A real `match` job goes into a real `jobs` table, an app is started with
     nothing but `LifespanManager`, and the row is gone before the app stops.
@@ -157,8 +102,8 @@ async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
 
     The key names an item no configured source addresses, so
     `SourceRegistry.resolve` answers `None` from local state alone and the
-    handler completes the job without a network call (PRD 08 reserves
-    parking for work a human has to look at).
+    handler completes the job without a network call (PRD 08: a job no
+    configured source addresses completes, and does not park).
     """
     async with sessions() as session:
         pipeline = build_pipeline(session, lane_settings)
@@ -188,11 +133,12 @@ async def test_the_worker_lane_drains_the_queue_inside_the_server_process(
 async def test_the_worker_lane_is_off_when_the_setting_is(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """PRD 01's `--worker` flag, as configuration: the same image with the
-    switch off leaves the queue for another container.
+    """PRD 01's split into a second container, as configuration.
 
-    The mirror of the case above and the reason it is evidence -- without
-    this, "the job disappeared" could be anything in the process."""
+    The same image with the switch off leaves the queue for another container. The
+    mirror of the case above and the reason it is evidence -- without this, "the job
+    disappeared" could be anything in the process.
+    """
     async with sessions() as session:
         pipeline = build_pipeline(
             session, Settings(database_url=postgres_url, secret_key=SECRET_KEY)
@@ -228,31 +174,10 @@ async def _curate_status(sessions: async_sessionmaker[AsyncSession], key: str) -
 async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to_curate(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The wiring `create_app` has that no unit test can see**, and it is
-    the shape a `RowContext.curated = None` took when `mypy` was the only
-    thing holding it: `tests/unit/test_api_lanes.py` proves a `LaneSupervisor`
-    *given* an `LLMClient` claims curate work, and says nothing about whether
-    the lifespan ever builds one. So this starts nothing but the app.
+    """The wiring `create_app` has that no unit test can see.
 
-    Three facts in one run, and each has a different wrong answer behind it:
-
-    - **`llm_client(settings)` is called and its result reaches
-      `build_worker`.** Without it the row is never claimed and stays
-      `pending` -- which is exactly the control below, so the two together
-      are what make either one evidence.
-    - **`PortDataMalformed` parks rather than backing off**, which is the
-      classification PRD 06 rests on: an empty catalog is an operator's
-      problem and does not improve on a backoff schedule, so five more
-      attempts are five more completions at five times the price.
-    - **An empty catalog costs nothing.** `CurationService` raises *before*
-      the client is touched, so this case runs against the default
-      `USHER_LLM_BASE_URL` with `llm_enabled=True` and opens no socket --
-      which is also why it is `llm_calls`-free: nothing was attempted for a
-      ledger to hold a row about.
-
-    PRD 08's operator rule ("every command works against an empty database")
-    is the reason the fixture seeds no catalog at all: this *is* the shape a
-    fresh install has, not an edge case constructed for the test.
+    `tests/unit/test_api_lanes.py` proves a `LaneSupervisor` *given* an `LLMClient`
+    claims curate work, and says nothing about whether the lifespan ever builds one.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -288,8 +213,9 @@ async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to
 async def test_a_curate_job_waits_for_a_process_that_has_a_model(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """The mirror, and the reason the case above is evidence: without it,
-    "the job parked" could be anything in the process.
+    """The mirror, and the reason the case above is evidence.
+
+    Without it, "the job parked" could be anything in the process.
 
     `USHER_LLM_ENABLED=false` is the shipped default, so this is what nearly
     every deployment does with a curate job -- it leaves it `pending` for a
@@ -323,10 +249,9 @@ async def test_a_curate_job_waits_for_a_process_that_has_a_model(
 class _Closes:
     """Counts what a composition root actually released.
 
-    A `(thing, close it)` pair whose `close it` is never called is the one
-    defect neither a fake nor `mypy` can see: the object is built, the
-    process works, and the transport leaks. `FakeLLMClient` carries a
-    `closed` counter for the same reason and nothing had ever read it.
+    A `(thing, close it)` pair whose `close it` is never called is the one defect
+    neither a fake nor `mypy` can see: the object is built, the process works, and the
+    transport leaks.
     """
 
     def __init__(self) -> None:
@@ -345,31 +270,7 @@ class _Closes:
 async def test_the_lifespan_releases_every_process_resource_it_built(
     postgres_url: str, monkeypatch: pytest.MonkeyPatch, clean: None
 ) -> None:
-    """**`create_app`'s `finally` is asserted rather than read.**
-
-    Its own comment says a skipped cleanup here "is a real leak, not a
-    theoretical one. This is that milestone; the comment stops being a
-    prediction" -- and until this case nothing in the suite could tell the
-    difference. Measured before writing it: deleting any one of
-    `close_provider()`, `close_model()` or `close_client()` from that
-    `finally` left `tests/unit` and `tests/integration` fully green. The
-    `close_client()` line is M8's and the other two are inherited, so this
-    closes all three rather than only the new one -- a case that pinned the
-    newest resource and left its two neighbours unobserved would be the same
-    gap with a shorter list.
-
-    The three factories are substituted rather than the real ones driven,
-    because the *real* `metadata_provider`/`embedder`/`llm_client` all answer
-    `(None, nothing)` on this deployment's settings and `nothing` is a
-    module-level no-op shared by every degradation path -- so a real run
-    cannot distinguish "closed the thing" from "closed the no-op". Each stub
-    hands back a distinct closer, which is what makes the count and the
-    identity of what was released both observable.
-
-    `worker_enabled=True` is the premise: all three are built only where a
-    worker will use them, so a push-only process legitimately closes
-    nothing.
-    """
+    """`create_app`'s `finally` is asserted rather than read."""
     closes = _Closes()
     monkeypatch.setattr("usher.api.app.metadata_provider", closes.factory("provider"))
     monkeypatch.setattr("usher.api.app.embedder", closes.factory("embedder"))
@@ -422,13 +323,12 @@ def _with_fake_adapters(
 async def test_a_push_lane_starts_for_a_real_source_row(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """The lane's source list, credential decryption and adapter build, all
-    through the real repositories against real rows.
+    """The lane's source list, credential decryption and adapter build.
 
-    A fake `SourceRepository` cannot express the one thing that has ever
-    gone wrong here -- an encrypted credential that does not decrypt under
-    the configured `USHER_SECRET_KEY` -- and `PostgresCredentialStore` is
-    the only implementation that can.
+    All through the real repositories against real rows. A fake `SourceRepository`
+    cannot express the one thing that has ever gone wrong here -- an encrypted
+    credential that does not decrypt under the configured `USHER_SECRET_KEY` -- and
+    `PostgresCredentialStore` is the only implementation that can.
     """
     settings = Settings(
         database_url=postgres_url,
@@ -479,24 +379,22 @@ async def test_a_push_lane_starts_for_a_real_source_row(
 async def test_writing_the_push_availability_it_already_has_writes_nothing(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`, so a
-    lane that wrote unconditionally would move a column an operator reads to
-    see when a source last changed, once per reconnect of a flapping socket.
+    """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`.
 
-    **And the guard is not what prevents that, measured.** Deleting
-    `_write_push_available`'s equality check leaves this case green:
-    `PostgresSourceRepository.update` sets attributes on a *loaded ORM row*
-    and SQLAlchemy's unit of work emits no `UPDATE` when no attribute
-    actually changed, so the trigger never fires either way. Recorded as an
-    equivalent mutant against today's repository rather than as a kill --
-    the same treatment M4 gave `_ENQUEUE`'s `GREATEST` -- and the guard is
-    kept, because the day that repository issues a bare `UPDATE ... SET`
-    the property stops being free.
+    So a lane that wrote unconditionally would move a column an operator reads to see
+    when a source last changed, once per reconnect of a flapping socket.
 
-    What this case does pin is the other half, which is not free: a real
-    change still writes, and it writes the value the lane asked for. Two
-    separate transactions throughout, because `now()` is
-    `transaction_timestamp()` and is frozen for the life of one.
+    **The guard is not what prevents that today.** Deleting `_write_push_available`'s
+    equality check leaves this case green: `PostgresSourceRepository.update` sets
+    attributes on a *loaded ORM row* and SQLAlchemy's unit of work emits no `UPDATE`
+    when no attribute actually changed, so the trigger never fires either way. The guard
+    is kept, because the day that repository issues a bare `UPDATE ... SET` the property
+    stops being free.
+
+    What this case does pin is the other half, which is not free: a real change still
+    writes, and it writes the value the lane asked for. Two separate transactions
+    throughout, because `now()` is `transaction_timestamp()` and is frozen for the life
+    of one.
     """
     settings = Settings(
         database_url=postgres_url,

@@ -15,11 +15,14 @@ class TestPostgresSourceRepositoryContract(SourceRepositoryContract):
 
 
 async def test_the_session_survives_a_conflict(session: AsyncSession) -> None:
-    """The SAVEPOINT, not just the translation: without it Postgres leaves
-    the whole transaction aborted and the caller's very next statement
-    raises PendingRollbackError instead of running. `SourceService.register`
-    is exactly such a caller -- it writes the credential on this same
-    session immediately afterwards."""
+    """The SAVEPOINT, not just the translation.
+
+    without it Postgres leaves the whole transaction aborted and the caller's very next
+    statement raises PendingRollbackError instead of running.
+
+    `SourceService.register` is exactly such a caller -- it writes the credential on
+    this same session immediately afterwards.
+    """
     repo = PostgresSourceRepository(session)
     source = _source()
     await repo.add(source)

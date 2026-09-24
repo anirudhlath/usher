@@ -1,61 +1,17 @@
-"""The semantic half's persistence, and the predicate three tasks share.
-
-Every write here takes the staged-`COPY` path `usher.db.staging` documents:
-one `COPY` into an `UNLOGGED` staging table plus exactly one
-`INSERT ... SELECT ... ON CONFLICT`, wrapped in `no_autoflush` and a
-SAVEPOINT that covers **the DDL as well as the DML** -- Postgres DDL is
-transactional, so a failed batch must leave no half-populated staging table
-for the next one to inherit. `PostgresMediaItemRepository.upsert_many` is
-the idiom being mirrored, verbatim, including why.
-
-**The vector is staged as `text` and cast at the insert.** asyncpg's binary
-`COPY` is strictly typed and has no codec for an extension type like
-`halfvec`, and the staging tables this project creates are deliberately
-unconstrained anyway -- so `embedding text` in the staging DDL plus
-`CAST(s.embedding AS halfvec)` in the `INSERT ... SELECT` needs no codec
-registration on a pooled connection and puts the type error, if there is
-one, at the statement SQLAlchemy can translate. Cost: ~5 kB of formatted
-text per row, at the 2k-10k rows boundary call 4 embeds. A `NULL` stages as
-`NULL` and casts to `NULL`, which is how a refusal is written.
-
-**`_FINGERPRINT_SQL` is a second implementation of the document composer,
-and it is permitted only because a test pins the two together.** The
-assembly cannot be a bound parameter -- it is per-title -- so the predicate
-spells it out over `titles`' own columns. The task that writes the composer
-owes a cross-check that runs it in Python over seeded titles and compares
-against `SELECT md5(<this assembly>)` for the same rows. Same discipline as
-the generated column's stored-versus-fresh drift test, for the same reason.
-
-*Why not a third generated column.* `titles.search_fingerprint text
-GENERATED ALWAYS AS (md5(...)) STORED` would make the predicate one column
-comparison and put the assembly in exactly one place. It is the wrong trade:
-33 bytes plus an expression evaluation on every write of all 1,271,138 rows,
-to serve a query that runs a few times a day over 2k-10k rows. Recorded so
-it is not "optimised" in later without the arithmetic.
-
-**The contention note this carried is settled, and it was settled where it
-belonged.** `stage_records` did `DROP TABLE IF EXISTS` + `CREATE UNLOGGED
-TABLE` on a fixed shared name -- two `ACCESS EXCLUSIVE` locks held to commit
--- so an `index` handler writing one row at a time serialised on
-`stg_title_embeddings` exactly as `stg_jobs` did. The fix is one line per
-DDL constant, `CREATE TEMP TABLE ... ON COMMIT DROP`, and it landed in
-`usher.db.staging` rather than in any one repository, so this call site
-inherited it with no change of its own. See that module's docstring for the
-three failures it removes and the measurements behind them.
-"""
+"""The semantic half's persistence, and the predicate three tasks share."""
 
 import uuid
 from collections.abc import Sequence
 
 from pydantic import AwareDatetime
 from sqlalchemy import ColumnElement, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 
 from usher.db.models.search import TitleEmbeddingRow
 from usher.db.models.title import TitleRow
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 
 # Same package, and deliberately shared rather than reimplemented: the
 # `DERIVED_COLUMNS` filter is what keeps `Title`'s `extra="forbid"` from
@@ -75,12 +31,8 @@ from usher.ports.repository import (
     TitleNeighborRepository,
 )
 
-# `ordinal` is the row's index within the batch, and it is what makes
-# deduplication deterministic: `ORDER BY title_id, ordinal DESC` is literally
-# last-wins. Ordering on anything else would make that depend on UUIDv7
-# generation being monotonic within a millisecond -- true of `uuid6.uuid7()`
-# today, but a property of a dependency rather than of this statement. Same
-# reasoning, same spelling, as `media_item.py`.
+# `ordinal` is the row's index within the batch, and it is what makes deduplication
+# deterministic: `ORDER BY title_id, ordinal DESC` is literally last-wins.
 _STAGING_DDL = """
 CREATE TEMP TABLE stg_title_embeddings (
     ordinal integer, title_id uuid, embedding text,
@@ -90,18 +42,9 @@ CREATE TEMP TABLE stg_title_embeddings (
 
 _COLUMNS = ("ordinal", "title_id", "embedding", "model_name", "source_fingerprint")
 
-# `now()` rather than `clock_timestamp()`: nothing computes an interval
-# against this column -- staleness is the fingerprint, never a clock -- and a
-# batch whose rows share one instant is the more honest record of a batch.
-# The `jobs` table uses clock_timestamp() for the opposite reason and the
-# contrast is worth keeping visible.
-#
-# **`updated_at = now()` is an equivalent mutant and is kept deliberately.**
-# Measured: deleting it from this DO UPDATE clause fails nothing, because no
-# consumer reads the column -- staleness is the fingerprint, and Task 8's
-# decision that this table gets no `set_updated_at` trigger is what makes
-# this the only writer. It stays because an operator diagnosing a backfill
-# that is not draining has nothing else to read.
+# `now()` rather than `clock_timestamp()`: nothing computes an interval against this
+# column -- staleness is the fingerprint, never a clock -- and a batch whose rows share
+# one instant is the more honest record of a batch.
 _UPSERT = """
 WITH deduped AS (
     SELECT DISTINCT ON (title_id) * FROM stg_title_embeddings
@@ -122,29 +65,7 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 FROM upserted
 """
 
-# The exact text whose md5 is `source_fingerprint`. The document composer
-# must assemble the identical string, and a test pins the two. CHR(10) rather
-# than a literal newline so the constant survives reformatting; `coalesce` on
-# every nullable field so a NULL overview is an empty segment rather than a
-# NULL fingerprint. `usher_array_text` is the same IMMUTABLE wrapper the
-# generated column uses -- one definition of "an array as text" in this
-# schema, not two.
-#
-# **`credit_names` at position three, and it moved here in the same commit as
-# `compose_document` and `IndexService`'s call site.** Move one alone and
-# every credited title matches the stale predicate forever: the backfill
-# re-embeds it, writes a fingerprint this cannot reproduce, and re-claims it
-# on the next pass. An infinite backfill that never errors -- a plausible
-# stale count that never reaches zero, a busy worker, and
-# `usher.embedding.duration` looking healthy because the embeds are real.
-# `test_an_indexed_title_with_credits_stops_matching_the_stale_predicate` is
-# the only case that sees it, and it asserts the closure property rather than
-# an equality of two strings.
-#
-# `usher_array_text` and not a hand-rolled join, on this side as on the
-# other: `usher_array_text(ARRAY[]::text[])` is `''` and its md5 is `md5('')`,
-# verified on pg17.10, so an uncredited title emits the identical empty
-# segment either way.
+# The exact text whose md5 is `source_fingerprint`.
 _FINGERPRINT_SQL = """md5(
     coalesce(t.name, '')             || CHR(10) ||
     coalesce(t.original_name, '')    || CHR(10) ||
@@ -156,11 +77,8 @@ _FINGERPRINT_SQL = """md5(
 )"""
 
 # **The one predicate, three consumers**: this cursor, the
-# `usher.search.embeddings.stale` gauge, and the test that proves the
-# enqueue-on-enrichment path closes. Later tasks import it rather than
-# restating it -- a predicate written twice is two predicates, and the
-# failure that produces is a dashboard reading zero while the backfill still
-# claims rows.
+# `usher.search.embeddings.stale` gauge, and the test that proves the enqueue-on-
+# enrichment path closes.
 STALE_EMBEDDING = f"""
     e.title_id IS NULL
     OR e.model_name IS DISTINCT FROM :model_name
@@ -179,22 +97,8 @@ REFUSED_EMBEDDING = f"NOT ({STALE_EMBEDDING}) AND e.embedding IS NULL"
 # the whole scan off an index that already exists.
 _POPULATION = "t.enrichment_state <> 'skeleton'"
 
-# --- the similarity precompute ------------------------------------------
-#
-# One page of seeds, with the two tag columns the blend reads. A keyset cursor
-# for the reason `list_stale`'s is one: `OFFSET` pagination is 43.7 ms at
-# offset 0 and 388.9 ms at offset 1,126,574 on this project's own measurement.
-#
-# `e.embedding IS NOT NULL` is the seed-side half of the exclusion pair. A
-# refused title -- one whose composed document was degenerate -- is written as a
-# row with a NULL vector precisely so it stops matching the stale predicate;
-# there is nothing to search *from*, so it is not a seed.
-#
-# `has_genome` is an `EXISTS` rather than a `LEFT JOIN`, because the question
-# is membership and the vector is a TOASTed `halfvec(1128)`: a join would fetch
-# 2,256 bytes per seed to answer a boolean. It is read by the *rebuild*, which
-# counts it, and never by the blend -- the genome cosine is a property of a
-# pair and rides on `NeighborCandidate` instead.
+# --- the similarity precompute ---------------------------------------------------
+# One page of seeds, with the two tag columns the blend reads.
 _LIST_EMBEDDED = """
 SELECT e.title_id, t.genres, t.keywords,
        EXISTS (SELECT 1 FROM genome_scores AS g WHERE g.title_id = e.title_id) AS has_genome
@@ -206,32 +110,8 @@ ORDER BY e.title_id
 LIMIT :limit
 """
 
-# The candidate pool: a whole page of seeds in one statement, through
-# `CROSS JOIN LATERAL`. One round trip per *seed* is the same shape
-# `index_many` was introduced to delete from `SearchIndex` -- at 10,000 instead
-# of 1.3M, which is smaller and is still no reason to reintroduce it.
-#
-# **Three clauses carry the whole design and none of them is decoration:**
-#
-# - `e.embedding IS NOT NULL` is the candidate-side exclusion. Without it,
-#   `e.embedding <=> seed.embedding` is NULL, Postgres sorts NULLs *last* on an
-#   ascending order, and so refused rows arrive only when the population is
-#   smaller than the pool -- at which point they are either a type error on the
-#   float conversion or, under a careless `coalesce(..., 0)`, a distance of 0
-#   pinning every refused title to the top of every list. Measured, and the
-#   reason the failure is invisible without the clause: every whitespace-only
-#   input embeds to the *identical* vector, cosine 1.0000 exactly.
-# - `e.title_id <> seed.title_id`, because cosine with itself is 1.0 and every
-#   neighbour list would otherwise open with the film the reader is looking at.
-# - `ORDER BY <distance>, e.title_id`. The distance alone leaves *which*
-#   candidates enter the pool to the executor, and this artefact is read until
-#   the next rebuild.
-#
-# **`titles` is deliberately not joined here.** The tag columns are read by a
-# second statement, because this one runs with index scans disabled (see
-# `_EXACT_SCAN_OFF`) and a forced sequential join against a 1,271,138-row
-# `titles` per seed would cost orders of magnitude more than the brute-force
-# distance scan this is here to do.
+# The candidate pool: a whole page of seeds in one statement, through `CROSS JOIN
+# LATERAL`.
 _NEAREST = """
 SELECT seed.title_id AS seed_id, near.title_id AS neighbor_id, 1 - near.distance AS cosine
 FROM title_embeddings AS seed
@@ -248,32 +128,10 @@ WHERE seed.title_id = ANY(:seed_ids) AND seed.embedding IS NOT NULL
 
 _TAGS_FOR = "SELECT id, genres, keywords FROM titles WHERE id = ANY(:title_ids)"
 
-# The genome cosine, per **pair**, and it is a separate statement for exactly
-# the reason `titles` is not joined into `_NEAREST`: that statement runs inside
-# `_EXACT_SCAN_OFF`, and with `enable_indexscan = off` a join to
-# `genome_scores` degrades to a **sequential scan of the whole genome table
-# once per seed**.
-#
-# **The M7 plan says to put this inside `_NEAREST` and to avoid "a third round
-# trip per page". Measured on the real 15,565-row table, that is the more
-# expensive spelling, and the margin grows with the page:**
-#
-# | page | `_NEAREST` alone | joined inside (the plan) | separate statement |
-# |---|---|---|---|
-# | 50 seeds | 165.7-166.2 ms | **246.6-255.4 ms (+49%)** | 165.9 + 20.3 = 186.2 ms (+12%) |
-# | 200 seeds | 619.9 ms | **958.1 ms (+55%)** | (one hash build, unchanged) |
-#
-# The plan shape is what makes it decisive rather than the timings:
-# `Seq Scan on genome_scores gc ... loops=200` -- once per seed, 15,565 rows
-# each time. Outside the bracket the same work is one hash build over
-# `genome_scores` shared by every pair in the page.
-#
-# **An `INNER JOIN`, and that is the ADR-0014 rule expressed structurally.** A
-# pair where either side has no `genome_scores` row simply produces no row
-# here, and the adapter maps an absent pair to `tags=None`. A `LEFT JOIN` would
-# hand back an explicit NULL that means the identical thing, one nullable
-# column later; an implementation tempted to `COALESCE` it has to reach past
-# the absence to do so.
+# The genome cosine, per **pair**, and it is a separate statement for exactly the reason
+# `titles` is not joined into `_NEAREST`: that statement runs inside `_EXACT_SCAN_OFF`,
+# and with `enable_indexscan = off` a join to `genome_scores` degrades to a **sequential
+# scan of the whole genome table once per seed**.
 _GENOME_PAIRS = """
 SELECT p.seed_id, p.neighbor_id, 1 - (gs.relevance <=> gc.relevance) AS tags
 FROM unnest(CAST(:seed_ids AS uuid[]), CAST(:neighbor_ids AS uuid[]))
@@ -282,26 +140,25 @@ JOIN genome_scores AS gs ON gs.title_id = p.seed_id
 JOIN genome_scores AS gc ON gc.title_id = p.neighbor_id
 """
 
-# **Exact, not approximate, and bracketed around one statement rather than left
-# on for the transaction.** PRD 05 puts brute-force exact cosine at this scale
-# (10k x 384 halfvec is 7.7 MB, inside this host's 96 MB L3), and the argument
-# is sharper than "it is affordable": recall loss in a live query is per-query,
-# and recall loss in a cached artefact is permanent -- a neighbour an
-# approximate scan missed is missed by every read of that row until the next
-# rebuild. This milestone has **not** measured HNSW recall, and borrowing the
-# halfvec quantisation figures to justify an approximate index would be
-# laundering one measurement into a claim about another.
-#
-# The adapter's `_force_exact_scan` sets the same two GUCs and leaves them set,
-# because its transaction serves one read. This one writes: the rebuild's own
-# `DELETE` and `INSERT` run in the same transaction and must keep their
-# indexes, so the pair is turned back on immediately. `SET LOCAL`, never `SET`
-# -- verified, a bare `SET` is still readable from a brand-new session on the
-# same engine after the connection is returned.
+# **Exact, not approximate, and bracketed around one statement rather than left on for
+# the transaction.** Recall loss in a live query is per-query; recall loss in a cached
+# artefact is permanent -- a neighbour an approximate scan misses is missed by every
+# later read of the row it wrote.
 _EXACT_SCAN_OFF = ("SET LOCAL enable_indexscan = off", "SET LOCAL enable_bitmapscan = off")
 _EXACT_SCAN_ON = ("SET LOCAL enable_indexscan = on", "SET LOCAL enable_bitmapscan = on")
 
 _COUNT_WITHOUT_EMBEDDING = "SELECT count(*) FROM title_embeddings WHERE embedding IS NULL"
+
+# The model guard's read. Scoped to rows that **have a vector**: a refused
+# title is stored with a NULL embedding, is never a seed, and names no vector a
+# rebuild can draw a pool from, so `DISTINCT` over the whole table would refuse
+# a rebuild whose readable vectors are uniform. `ix_title_embeddings_model_name`
+# carries the same predicate, and the `ORDER BY` is what reaches for it.
+_STORED_MODEL_NAMES = """
+SELECT DISTINCT model_name FROM title_embeddings
+WHERE embedding IS NOT NULL
+ORDER BY model_name
+"""
 
 # Scoped to `seed_ids`, never to the rows being written. A seed whose
 # neighbours all disappeared contributes no rows at all, so a delete derived
@@ -310,15 +167,7 @@ _COUNT_WITHOUT_EMBEDDING = "SELECT count(*) FROM title_embeddings WHERE embeddin
 # repair.
 _DELETE_NEIGHBORS = "DELETE FROM title_neighbors WHERE title_id = ANY(:seed_ids)"
 
-# One statement per page, through parallel `unnest`. No staging table and
-# therefore no `ACCESS EXCLUSIVE` lock on a shared name: this write is already
-# set-based and there is nothing for a `COPY` to buy at a page of at most
-# `page_size * 25` rows.
-#
-# `computed_at` is left to its `server_default` of `now()`, which is
-# `transaction_timestamp()` -- frozen for the page's transaction, so every row
-# a page writes shares one instant and `min(computed_at)` is genuinely the
-# oldest *page* rather than the oldest row.
+# One statement per page, through parallel `unnest`.
 _INSERT_NEIGHBORS = """
 INSERT INTO title_neighbors (title_id, neighbor_id, score, rank, blend_fingerprint)
 SELECT *, :blend_fingerprint FROM unnest(
@@ -349,12 +198,31 @@ ORDER BY rank, neighbor_id
 LIMIT :limit
 """
 
-# `min`, not `max`. The newest row would report a whole-table rebuild as fresh
-# the moment its first page committed, which is this milestone's own failure
-# mode -- looks healthy while describing yesterday -- wearing an accessor.
-# `NULL` for an empty table is the "never computed" signal, and it is a
-# different fact from "this title has no neighbours".
+# `min`, not `max`: the newest row would report a whole-table rebuild as fresh the
+# moment its first page committed -- healthy-looking while describing yesterday.
+# `NULL` for an empty table is the "never computed" signal, a different fact from
+# "this title has no neighbours".
 _OLDEST_NEIGHBOR = "SELECT min(computed_at) FROM title_neighbors"
+
+# The resume cursor: where an interrupted walk picks its keyset back up.
+_RESUME_CURSOR = """
+WITH first_uncovered AS (
+    SELECT e.title_id FROM title_embeddings e
+    WHERE e.embedding IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM title_neighbors n
+          WHERE n.title_id = e.title_id
+            AND n.blend_fingerprint = :blend_fingerprint
+      )
+    ORDER BY e.title_id
+    LIMIT 1
+)
+SELECT e.title_id FROM title_embeddings e
+WHERE e.embedding IS NOT NULL
+  AND e.title_id < (SELECT title_id FROM first_uncovered)
+ORDER BY e.title_id DESC
+LIMIT 1
+"""
 
 # Every interpolated fragment here is a module constant built from module
 # constants; `model_name` is the only caller-supplied value and it crosses as
@@ -399,13 +267,15 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     )
                     result = await self._session.execute(text(_UPSERT))
                     inserted, updated = result.one()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`.** `title_embeddings.embedding`
+            # is `halfvec(1024)` and `TitleEmbeddingUpsert.embedding` is a bare
+            # `tuple[float, ...]`, so a vector of another width reaches the `CAST` in
+            # the destination statement as SQLSTATE `22000`.
+            if not is_row_refusal(exc):
+                raise
             # A `title_id` naming no title, or a CHECK on model_name /
-            # source_fingerprint. The CHECK fires here rather than during the
-            # COPY because the staging table is declared without constraints,
-            # which is what makes catching IntegrityError sufficient --
-            # `copy_records_to_table` runs on the raw asyncpg connection,
-            # outside SQLAlchemy's error translation.
+            # source_fingerprint.
             raise RepositoryConflict(
                 "an embedding batch conflicts with the catalog",
                 constraint=constraint_name(exc),
@@ -413,16 +283,8 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
 
     async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
-        # The one read here that is not the predicate, and the one place a
-        # stored vector crosses back into Python. pgvector hands `halfvec`
-        # back as a numpy array of float16, so the tuple below is both the
-        # port's declared type and the conversion -- a caller comparing it
-        # against a freshly embedded vector must not be handed something
-        # whose `==` returns an array.
-        #
-        # `no_autoflush` for the reason every read in this package carries
-        # it: an unflushed, invalid row left on this shared session by
-        # unrelated code would otherwise surface as this read's failure.
+        # The one read here that is not the predicate, and the one place a stored vector
+        # crosses back into Python.
         with self._session.no_autoflush:
             result = await self._session.execute(
                 select(
@@ -454,12 +316,10 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             return {}
         conditions: list[ColumnElement[bool]] = [
             TitleEmbeddingRow.title_id.in_(list(title_ids)),
-            # NULL vectors excluded here rather than by the caller, the
-            # same call `list_embedded` makes: a *refused* title is
-            # written with a NULL embedding precisely so it stops
-            # matching the stale predicate, and it has no vector to
-            # contribute to any mean. Excluding it in the caller means
-            # every future caller has to remember.
+            # NULL vectors excluded here rather than by the caller, the same call
+            # `list_embedded` makes: a *refused* title is written with a NULL embedding
+            # precisely so it stops matching the stale predicate, and it has no vector
+            # to contribute to any mean.
             TitleEmbeddingRow.embedding.is_not(None),
         ]
         if model_name is not None:
@@ -483,39 +343,10 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
     async def list_stale(
         self, model_name: str, *, limit: int = 100, after: uuid.UUID | None = None
     ) -> list[Title]:
-        # `CAST(:after AS uuid)`, never `:after::uuid`: SQLAlchemy's `text()`
-        # bind-parameter regex treats a name immediately followed by `::` as
-        # a Postgres cast and skips the bind entirely, so the latter reaches
-        # asyncpg as the literal string and answers PostgresSyntaxError. The
-        # cast is needed regardless -- an untyped NULL parameter has no type
-        # for `IS NULL` to resolve against.
-        #
-        # `defer(..., raiseload=True)` on the generated column. `titles`
-        # carries a tsvector roughly the size of the document it indexes and
-        # the backfill has no use for it; without the deferral every page
-        # ships one per row for nothing, and without `raiseload` a stray
-        # attribute access becomes one extra query per title -- an N+1 that
-        # answers correctly and is therefore invisible. `_to_domain` filters
-        # DERIVED_COLUMNS before touching it, so nothing legitimate trips it.
-        #
-        # **`raiseload=True` is an equivalent mutant today** -- measured:
-        # removing it fails nothing, because `_to_domain` is currently the
-        # only reader and it never touches the column. It stays because the
-        # day something does touch it, the failure without this flag is an
-        # extra query per title that returns the right answer, which is the
-        # kind of defect that ships.
-        #
-        # Both entities are aliased to the names the shared predicate
-        # constants are written against -- `t` and `e` -- so `_COUNT` and this
-        # cursor evaluate the *same* strings rather than two spellings of
-        # them. That is the whole point of the constants being module-level.
-        #
-        # The join target is the real `TitleEmbeddingRow`, not a `text()`
-        # fragment: the ORM then owns the ON clause, and a column renamed on
-        # one side is a mypy error rather than a runtime `UndefinedColumn`.
-        # `select(t)` still projects only `titles`, so joining costs nothing
-        # in the payload, and `title_id` is `title_embeddings`' primary key so
-        # the outer join cannot fan a title out into several rows.
+        # `CAST(:after AS uuid)`, never `:after::uuid`: SQLAlchemy's `text()` bind-
+        # parameter regex treats a name immediately followed by `::` as a Postgres cast
+        # and skips the bind entirely, so the latter reaches asyncpg as the literal
+        # string and answers PostgresSyntaxError.
         t = aliased(TitleRow, name="t")
         e = aliased(TitleEmbeddingRow, name="e")
         statement = (
@@ -524,23 +355,11 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             .outerjoin(e, e.title_id == t.id)
             .where(
                 text(f"{_POPULATION} AND ({STALE_EMBEDDING})"),
-                # **The outer parentheses are load-bearing and their absence
-                # is silent.** `where()` joins its fragments with `AND`, and
-                # `AND` binds tighter than `OR`, so the unparenthesised form
-                # parses as
-                #
-                #     (population AND stale AND after IS NULL) OR (t.id > after)
-                #
-                # which is exactly right on the *first* page -- `after` is
-                # NULL, the left arm is the real predicate, the right arm is
-                # NULL -- and collapses to `t.id > after` on every page after
-                # it, returning every remaining row in `titles`: skeletons,
-                # already-current titles, the lot. At 1,271,138 rows that is
-                # the whole catalog enqueued for embedding, 4-6 hours against
-                # 25 seconds, from a sweep whose first page was correct and
-                # whose reported numbers stay plausible throughout. Invisible
-                # to any cursor test whose rows are all stale, because then
-                # the two spellings return the same set.
+                # **The outer parentheses are load-bearing and their absence is
+                # silent.** `where()` joins its fragments with `AND`, and `AND` binds
+                # tighter than `OR`, so the unparenthesised form parses as (population
+                # AND stale AND after IS NULL) OR (t.id > after) -- right on the first
+                # page and wrong on every one after it.
                 text("(CAST(:after AS uuid) IS NULL OR t.id > CAST(:after AS uuid))"),
             )
             .order_by(t.id)
@@ -604,12 +423,7 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                 # which is the kind of degradation nothing reports.
                 for statement in _EXACT_SCAN_ON:
                     await self._session.execute(text(statement))
-            # Both tag reads run *after* the bracket, with indexes back. For
-            # `titles` it is a primary-key lookup; for `genome_scores` it is
-            # one hash build shared by the whole page instead of one sequential
-            # scan per seed. That is the whole reason each is a second
-            # statement rather than a join inside the LATERAL -- measured, and
-            # written out above `_GENOME_PAIRS`.
+            # Both tag reads run *after* the bracket, with indexes back.
             tags = await self._tags_for({row.neighbor_id for row in rows})
             genome = await self._genome_pairs([(row.seed_id, row.neighbor_id) for row in rows])
         answer: dict[uuid.UUID, list[NeighborCandidate]] = {}
@@ -625,7 +439,7 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     genres=genres,
                     keywords=keywords,
                     # Absent means "one of these two has no genome vector",
-                    # which is `None` and never 0.0 (ADR-0014).
+                    # which is `None` and never 0.0.
                     tags=genome.get((row.seed_id, row.neighbor_id)),
                 )
             )
@@ -662,6 +476,11 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
         with self._session.no_autoflush:
             result = await self._session.execute(text(_COUNT_WITHOUT_EMBEDDING))
         return int(result.scalar_one())
+
+    async def stored_model_names(self) -> list[str]:
+        with self._session.no_autoflush:
+            result = await self._session.execute(text(_STORED_MODEL_NAMES))
+        return [str(name) for name in result.scalars().all()]
 
 
 class PostgresTitleNeighborRepository(TitleNeighborRepository):
@@ -707,13 +526,17 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
                                 "blend_fingerprint": blend_fingerprint,
                             },
                         )
-        except IntegrityError as exc:
-            # A score outside [0, 1], a self-neighbour, a negative rank, or a
-            # title id naming no row -- all four are CHECKs or foreign keys on
-            # `title_neighbors`, and all four are a bug in the blend rather
-            # than a conflict a retry could clear. Translated so nothing above
-            # imports sqlalchemy.exc, and raised inside a SAVEPOINT so the
-            # rebuild's caller keeps a usable session.
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`.** `title_neighbors.rank` is
+            # `integer` and `ScoredNeighbor.rank` is a bare `int`, so an out-of-range
+            # rank is refused by asyncpg's binary encoder before a byte is sent -- no
+            # SQLSTATE, and no `IntegrityError`.
+            if not is_row_refusal(exc):
+                raise
+            # A score outside [0, 1], a self-neighbour, a negative rank, or a title id
+            # naming no row -- all four are CHECKs or foreign keys on `title_neighbors`,
+            # and all four are a bug in the blend rather than a conflict a retry could
+            # clear.
             raise RepositoryConflict(
                 "a neighbour batch violates the similarity table's own bounds",
                 constraint=constraint_name(exc),
@@ -750,14 +573,22 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
             )
         return int(result.scalar_one())
 
+    async def resume_cursor(self, *, blend_fingerprint: str) -> uuid.UUID | None:
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                text(_RESUME_CURSOR), {"blend_fingerprint": blend_fingerprint}
+            )
+        cursor = result.scalar_one_or_none()
+        return None if cursor is None else uuid.UUID(str(cursor))
+
 
 def _as_vector_literal(embedding: tuple[float, ...] | None) -> str | None:
-    """pgvector's own text form, which the staging table holds and the
-    `INSERT ... SELECT` casts. `repr` per component because it is the
-    shortest round-tripping form -- `halfvec` quantises it to float16 anyway
-    (measured max cosine error 1.21e-04), so precision beyond round-trip
-    buys nothing, and a lossy formatter here would be indistinguishable from
-    the quantisation it hides behind.
+    """Pgvector's own text form, which the staging table holds and the `INSERT` casts.
+
+    `repr` per component because it is the shortest round-tripping form --
+    `halfvec` quantises to float16 anyway, so precision beyond round-trip buys
+    nothing, and a lossy formatter here would be indistinguishable from the
+    quantisation it hides behind.
 
     `None` for a refused title, which stages as NULL and casts to NULL.
     """

@@ -1,13 +1,4 @@
-"""SQLAlchemy model tests: structural checks against Base.metadata.
-
-The first five tests below are what Task 8 originally shipped. The rest
-cover what changed in the post-implementation review: `enrichment_error`
-replacing `EnrichmentState.FAILED`, `WatchStateRow.origin` replacing
-`updated_by`, and the named CHECK constraints that mirror each domain
-model's Pydantic constraints. A CHECK constraint's SQL text can't be
-exercised through metadata alone -- that's proven against a real Postgres
-in Task 9's migration verification, not here.
-"""
+"""SQLAlchemy model tests: structural checks against Base.metadata."""
 
 from typing import cast
 
@@ -46,7 +37,7 @@ from usher.domain.enums import (
     WatchStateOrigin,
 )
 from usher.domain.title import Title
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 
 def test_all_core_tables_registered() -> None:
@@ -84,12 +75,14 @@ def test_source_and_user_tables_exist() -> None:
     assert WatchStateRow.__tablename__ == "watch_states"
 
 
-# --- coverage for what changed after Task 8's original draft ---------------
+# --- enrichment and watch-state columns ------------------------------------
 
 
 def test_title_row_has_enrichment_error_column() -> None:
-    """enrichment_error replaced EnrichmentState.FAILED (ADR-0008); see
-    test_enums.py::test_failed_is_not_a_tier for the enum side of this."""
+    """`enrichment_error` replaced `EnrichmentState.FAILED`.
+
+    See test_enums.py::test_failed_is_not_a_tier for the enum side of this.
+    """
     assert TitleRow.__table__.c.enrichment_error.nullable is True
 
 
@@ -147,16 +140,17 @@ def test_source_and_user_check_constraint_names() -> None:
     assert "ck_users_name_not_empty" in user_names
 
 
-# --- coverage for the schema-hardening review -------------------------------
+# --- foreign keys, enums, and constraint naming -----------------------------
 
 
 def test_foreign_key_ondelete_semantics() -> None:
-    """Pins the asymmetry that used to be a review finding instead of a
-    design conversation: MediaItem.title_id is SET NULL (an unmatched item
-    is worth keeping -- review queue), WatchState.title_id is RESTRICT (a
-    watch record *is* the thing worth keeping, so a Title merge must
-    repoint it explicitly rather than have it vanish under a DELETE). See
-    ADR-0010."""
+    """The two title foreign keys are deliberately asymmetric.
+
+    `MediaItem.title_id` is SET NULL, because an unmatched item is worth keeping for
+    the review queue. `WatchState.title_id` is RESTRICT, because a watch record *is*
+    the thing worth keeping, so a Title merge must repoint it explicitly rather than
+    have it vanish under a DELETE.
+    """
     media_items_source_fk = next(iter(MediaItemRow.__table__.c.source_id.foreign_keys))
     assert media_items_source_fk.ondelete == "CASCADE"
     media_items_title_fk = next(iter(MediaItemRow.__table__.c.title_id.foreign_keys))
@@ -168,11 +162,13 @@ def test_foreign_key_ondelete_semantics() -> None:
 
 
 def test_enum_columns_are_real_enums_not_bare_strings() -> None:
-    """A bare String(N) column has no result processor, so Mapped[TitleKind]
-    would lie: isinstance(row.kind, TitleKind) is False on read even though
-    mypy believes otherwise (verified). Every enum-typed column must use
-    usher.db.base.enum_column instead, storing each member's .value (the
-    lowercase wire/storage identifier enums.py documents), not its .name."""
+    """A bare String(N) column has no result processor, so `Mapped[TitleKind]` would lie.
+
+    `isinstance(row.kind, TitleKind)` is False on read even though mypy believes
+    otherwise. Every enum-typed column must use `usher.db.base.enum_column` instead,
+    storing each member's `.value` -- the lowercase wire identifier enums.py documents
+    -- and not its `.name`.
+    """
     cases = [
         (TitleRow.__table__.c.kind, TitleKind),
         (TitleRow.__table__.c.status, ProductionStatus),
@@ -180,34 +176,24 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
         (SourceRow.__table__.c.kind, SourceKind),
         (MediaItemRow.__table__.c.hdr_format, HdrFormat),
         (WatchStateRow.__table__.c.origin, WatchStateOrigin),
-        # M8. `LLMPurpose` lives in `usher.domain.curation` rather than in
-        # `usher.ports.llm` where M1 declared it, because `LLMCall` is a
-        # domain model and `usher.domain` may not import `usher.ports` --
-        # `ports.llm` re-exports it, so this is the same enum either way.
+        # `LLMPurpose` lives in `usher.domain.curation` rather than `usher.ports.llm`
+        # because `LLMCall` is a domain model and `usher.domain` may not import
+        # `usher.ports`; `ports.llm` re-exports it, so this is the same enum either way.
         (LLMCallRow.__table__.c.purpose, LLMPurpose),
-        # M9's three, all from `m09a`. `search_queries.mode` reuses
-        # `usher.ports.search.SearchMode` rather than minting a domain copy:
-        # `usher.db` sits outside the four-layer contract so the import is
-        # legal, and `usher/domain/search.py` deliberately declares no
-        # `SearchMode`. A second copy of a three-member vocabulary is a
-        # vocabulary that can drift.
+        # The image and search-name columns.
         (ImageRow.__table__.c.kind, ImageKind),
         (SearchQueryRow.__table__.c.mode, SearchMode),
         (TitleSearchNameRow.__table__.c.kind, SearchNameKind),
+        # The search-surface columns.
+        (SearchQueryRow.__table__.c.surface, SearchSurface),
+        (SearchQueryRow.__table__.c.tier, SuggestTier),
     ]
     for column, enum_cls in cases:
         column_type = column.type
         assert isinstance(column_type, SAEnum)
         assert column_type.enum_class is enum_cls
         assert column_type.native_enum is False
-        # The critical property: stored values are each member's .value
-        # (e.g. TitleKind.MOVIE -> "movie"), never its .name (-> "MOVIE").
-        # SQLAlchemy's default binds/reads .name -- verified directly that
-        # without values_callable, this assertion fails and, worse, the
-        # result processor cannot even parse this schema's own already-
-        # lowercase-stored data. (HdrFormat's real values -- "HDR10", "DV",
-        # "HLG" -- are legitimately uppercase, so this must compare against
-        # enum_cls's actual .value set, not assert a blanket lowercase rule.)
+        # The critical property: stored values are each member's `.value`.
         assert set(column_type.enums) == {member.value for member in enum_cls}
         # No membership CHECK: Pydantic owns that, matching every other
         # constraint in this schema (see enum_column's docstring).
@@ -215,15 +201,17 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
 
 
 def test_naming_convention_named_the_previously_unnamed_constraints() -> None:
-    """Spot-checks a PK, an FK, and the one inline unique=True column --
-    the three kinds of constraint that had no explicit name before
-    NAMING_CONVENTION existed, and would otherwise carry a Postgres-
-    generated name like "titles_pkey" or "media_items_title_id_fkey"."""
+    """Spot-checks a PK, an FK, and the one inline `unique=True` column.
+
+    Those are the three kinds of constraint carrying no explicit name, which would
+    otherwise get a Postgres-generated one like "titles_pkey" or
+    "media_items_title_id_fkey".
+    """
     assert cast(Table, TitleRow.__table__).primary_key.name == "pk_titles"
     media_items_title_fk = next(iter(MediaItemRow.__table__.c.title_id.foreign_keys))
     # ForeignKey.name is a different (and here unset) attribute from the
     # name of its parent ForeignKeyConstraint, which is what the naming
-    # convention actually names -- verified directly.
+    # convention actually names.
     assert media_items_title_fk.constraint is not None
     assert media_items_title_fk.constraint.name == "fk_media_items_title_id_titles"
     user_table = cast(Table, UserRow.__table__)
@@ -234,11 +222,12 @@ def test_naming_convention_named_the_previously_unnamed_constraints() -> None:
 
 
 def test_naming_convention_does_not_touch_explicit_check_constraint_names() -> None:
-    """The naming convention's "ck" key (deliberately absent -- see
-    NAMING_CONVENTION's docstring) would double-prefix an already-fully-
-    formed explicit name into e.g. "ck_titles_ck_titles_year_non_negative"
-    if it were present -- verified directly. This test would catch that
-    regression if "ck" were ever added back."""
+    """The naming convention deliberately carries no "ck" key.
+
+    With one, an already-fully-formed explicit name would be double-prefixed into e.g.
+    "ck_titles_ck_titles_year_non_negative". This catches that regression if "ck" is
+    ever added back.
+    """
     table = cast(Table, TitleRow.__table__)
     # isinstance, not `is not None`: Constraint.name's stub is
     # `str | Literal[_NoneName.NONE_NAME]`, a sentinel mypy doesn't narrow
@@ -258,10 +247,12 @@ def test_new_indexes_from_the_schema_hardening_review_exist() -> None:
 
 
 def test_bulk_load_friendly_columns_have_server_defaults() -> None:
-    """These are exactly the NOT NULL columns whose only default used to be
-    Python-side (default=), so a raw INSERT/COPY that omits them -- M2's
-    entire bulk-load path -- failed with a NotNullViolation. origin is
-    deliberately excluded: it must never get a default, see watch.py."""
+    """These NOT NULL columns need a server default, not only a Python-side `default=`.
+
+    A raw INSERT/COPY that omits them -- the entire bulk-load path -- fails with a
+    NotNullViolation. `origin` is deliberately excluded: it must never get a default,
+    see watch.py.
+    """
     columns_needing_server_default = [
         TitleRow.__table__.c.genres,
         TitleRow.__table__.c.keywords,
@@ -283,22 +274,15 @@ def test_bulk_load_friendly_columns_have_server_defaults() -> None:
 
 
 def test_title_and_title_row_have_matching_field_sets() -> None:
-    """STANDING CONSTRAINT (title.py's module docstring, point 1): Title's
-    field set and TitleRow's column set must stay in exact 1:1
-    correspondence by name, *modulo the columns the row deliberately
-    derives* -- `_to_domain`'s dict-comprehension-into-`model_validate` and
-    `_to_row`'s `TitleRow(**title.model_dump(...))` both rely on it, and
-    `Title`'s `extra="forbid"` makes a break loud only at read/write time,
-    inside the Docker-requiring integration suite, as a ValidationError or
-    TypeError with no obvious cause. This is the same check, running here for
-    free, no Postgres required.
+    """`Title`'s fields and `TitleRow`'s columns stay in 1:1 correspondence by name.
 
-    Written as `columns - DERIVED_COLUMNS == fields` rather than
-    `columns == fields | DERIVED_COLUMNS` so it still fails two ways, not
-    one: an undeclared new column fails it (the property the rule exists
-    for), *and* a name added to `DERIVED_COLUMNS` that `Title` also models
-    fails it -- which is the mistake that would quietly stop a real domain
-    field from ever being read back.
+    Modulo the columns the row deliberately derives: `_to_domain` and `_to_row` both
+    rely on it, and `Title`'s `extra="forbid"` makes a break loud only at read/write
+    time, inside the Postgres-requiring suite, as a ValidationError or TypeError with
+    no obvious cause. Written as `columns - DERIVED_COLUMNS == fields` so it fails two
+    ways rather than one: an undeclared new column fails it, and so does a name added
+    to `DERIVED_COLUMNS` that `Title` also models -- which would quietly stop a real
+    domain field from ever being read back.
     """
     columns = {c.name for c in TitleRow.__table__.columns}
     assert columns >= DERIVED_COLUMNS, "DERIVED_COLUMNS names a column that does not exist"
@@ -306,23 +290,16 @@ def test_title_and_title_row_have_matching_field_sets() -> None:
 
 
 def test_credit_names_is_a_derived_column_and_not_a_domain_field() -> None:
-    """Boundary call 5's denormalised column, on the side of the 1:1 rule the
-    task argued it onto.
+    """`credit_names` is a derived column and not a domain field.
 
-    `columns - DERIVED_COLUMNS == fields` fails *both* ways round, so it forces
-    this decision to be made and does not make it. Recorded as its own case so
-    the reasoning has somewhere to live: `credit_names` is `credits` projected
-    to names and truncated to a ranking constant, which is an index artefact
-    and not a fact about the film.
-
-    The second assertion is the load-bearing one. `_NOT_UPDATABLE` is
-    `{"id", "created_at", "updated_at"} | DERIVED_COLUMNS`, so membership is
-    what stops `TitleRepository.update()` from writing this column -- and
-    unlike `search_document`, which Postgres refuses to let anyone write,
-    this is an ordinary column and nothing else would stop it. The wrong
-    implementation it kills is `Title` gaining a `credit_names` field, which
-    makes `title.evolve(credit_names=...)` spell an array that disagrees with
-    the `credits` table.
+    It is `credits` projected to names and truncated to a ranking constant, which is an
+    index artefact and not a fact about the film. The second assertion is the
+    load-bearing one: `_NOT_UPDATABLE` is `{"id", "created_at", "updated_at"} |
+    DERIVED_COLUMNS`, so membership is what stops `TitleRepository.update()` from
+    writing it, and unlike `search_document` -- which Postgres refuses to let anyone
+    write -- nothing else would. The wrong implementation it rules out is `Title`
+    gaining a `credit_names` field, which makes `title.evolve(credit_names=...)` spell
+    an array that disagrees with the `credits` table.
     """
     assert "credit_names" in DERIVED_COLUMNS
     assert "credit_names" not in Title.model_fields
@@ -338,9 +315,9 @@ def test_the_embedding_column_is_nullable_and_the_neighbour_columns_are_not() ->
     the stale predicate and starts matching a countable one. Making it NOT
     NULL removes the only place that outcome can be recorded.
 
-    Runs here rather than in the integration suite because it needs no
-    Postgres, and because the property is about the declaration -- someone
-    "tidying" a nullable column is a code change, not a migration.
+    It runs here rather than against Postgres because the property is about the
+    declaration -- someone "tidying" a nullable column is a code change, not a
+    migration.
     """
     embeddings = cast(Table, TitleEmbeddingRow.__table__)
     neighbours = cast(Table, TitleNeighborRow.__table__)
@@ -352,25 +329,17 @@ def test_the_embedding_column_is_nullable_and_the_neighbour_columns_are_not() ->
 
 
 def test_the_genome_tag_id_column_is_wide_enough_that_a_constraint_refuses_it_first() -> None:
-    """`genome_tags.tag_id` is `Integer`, not `SmallInteger`, and the reason
-    is which layer refuses an out-of-range value rather than how many bytes a
-    1,128-row table costs.
+    """`Integer`, so a named constraint refuses before asyncpg's encoder does.
 
-    `.claude/rules/db-and-sql.md` records the trap this is picked against: a
-    column narrower than the field feeding it is refused by **asyncpg's own
-    encoder**, client-side, as an unnamed `DataError` (SQLSTATE `22000`) --
-    `curated_rows."position"` at `2**31` is the measured instance. The only
-    values that reach this column are ones `replace_genome_tags` has already
-    checked are exactly `1…n`, so the largest is the length of the vocabulary
-    handed in. Under `SmallInteger` that boundary is **32,768**, which a
-    caller can reach with a list; under `Integer` it is `2**31`, which it
-    cannot. Everything below the boundary is refused by
-    `ck_genome_tags_tag_id_in_vocabulary` instead -- an `IntegrityError`
-    carrying the constraint's own name, which is the classifiable path.
-
-    So this case is not about the type. It is about the ordering of two
-    refusals, and it fails if a later reader "tidies" a lane index into the
-    narrowest type that holds 1,128.
+    A column narrower than the field feeding it is refused by asyncpg's own encoder,
+    client-side, as an unnamed `DataError` (SQLSTATE `22000`). The only values that
+    reach this column are ones `replace_genome_tags` has already checked are exactly
+    `1…n`, so the largest is the length of the vocabulary handed in: under
+    `SmallInteger` that boundary is 32,768, which a caller can reach with a list, and
+    under `Integer` it is `2**31`, which it cannot. Everything below the boundary is
+    refused by `ck_genome_tags_tag_id_in_vocabulary` instead -- an `IntegrityError`
+    carrying the constraint's own name, which is the classifiable path. The case is
+    about the ordering of those two refusals, not about the type.
     """
     tags = cast(Table, GenomeTagRow.__table__)
     assert isinstance(tags.c.tag_id.type, Integer)
@@ -388,10 +357,11 @@ def test_the_genome_tag_id_column_is_wide_enough_that_a_constraint_refuses_it_fi
 
 
 def test_the_embedding_width_is_declared_once() -> None:
-    """`EMBEDDING_DIMENSIONS` is the storage side of a number the `Embedder`
-    port also declares. Nothing can make the two structural -- a model swap
-    that changes width writes vectors this column rejects, which is the loud
-    failure -- so the least this can do is have one spelling on this side.
+    """`EMBEDDING_DIMENSIONS` is the storage side of a number the `Embedder` port also declares.
+
+    Nothing can make the two structural -- a model swap that changes width writes
+    vectors this column rejects, which is the loud failure -- so the least this can do
+    is have one spelling on this side.
     """
     embeddings = cast(Table, TitleEmbeddingRow.__table__)
     column_type = embeddings.c.embedding.type

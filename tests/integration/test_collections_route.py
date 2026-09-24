@@ -1,23 +1,4 @@
-"""`GET /collections/{id}` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_collections.py` drives
-the route over two fakes, so the counts, the ownership flags and the 404 are
-covered there. What is left is the wiring and the SQL: that `create_app()`'s
-**un-overridden** graph resolves both repositories onto one request-scoped
-session, that `_GET_COLLECTION`'s `array_agg(... ORDER BY release_date ...)`
-really is what the page renders in, that its own `kind = 'movie'` clause holds
-against a row `attach_titles` would have refused, and what the whole answer
-costs in statements.
-
-The `available` half of `owned` is real only here as well:
-`FakeCollectionRepository` models it, but nothing about the fake can show that
-`media_items.available` is what the *join* reads.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request. Order matters in the teardown: `media_items` references
-both `sources` and `titles`, and `titles.collection_id` references
-`collections`, so the rows come out innermost-first.
-"""
+"""`GET /collections/{id}` through a real request against a real schema."""
 
 from collections.abc import AsyncIterator, Iterator
 from datetime import date
@@ -32,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.collection import Collection
@@ -59,17 +39,6 @@ def settings(postgres_url: str) -> Settings:
     )
 
 
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one: the
-    route reads from its own session in its own transaction."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
         for statement, parameters in (
@@ -93,9 +62,11 @@ async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[Non
 
 @pytest_asyncio.fixture
 async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
-    """**No `dependency_overrides` at all**, which is the point of this file:
+    """**No `dependency_overrides` at all**, which is the point of this file.
+
     `get_collection_repository` and `get_title_repository` are resolved through
-    FastAPI's own machinery onto one `get_session`."""
+    FastAPI's own machinery onto one `get_session`.
+    """
     app: FastAPI = create_app(settings)
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
@@ -105,8 +76,10 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, captured off
-    `before_cursor_execute` rather than transcribed."""
+    """Every SQL statement SQLAlchemy issues.
+
+    captured off `before_cursor_execute` rather than transcribed.
+    """
     seen: list[str] = []
 
     def record(
@@ -242,8 +215,7 @@ def catalog(sessions: async_sessionmaker[AsyncSession]) -> _Catalog:
 async def test_a_franchise_renders_in_release_order_with_its_completeness(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """The whole answer, assembled by the shipped graph with nothing
-    overridden.
+    """The whole answer, assembled by the shipped graph with nothing overridden.
 
     **The ordering premise is asserted**, and it is the one a UUIDv7 primary
     key gives away for free: the films are seeded latest-first, so insertion
@@ -251,9 +223,9 @@ async def test_a_franchise_renders_in_release_order_with_its_completeness(
     bare `IN (...)` that promises no order at all. An implementation rendering
     what it was handed would be rendering physical order off a real heap.
 
-    "You own 1 of 3" is the shape PRD 06 asks for, and the unowned members are
-    present rather than filtered -- a list narrowed to what the household has
-    reads "1 of 1".
+    "You own 1 of 3" is the ownership completeness PRD 07 asks of this route, and the
+    unowned members are present rather than filtered -- a list narrowed to what the
+    household has reads "1 of 1".
     """
     franchise = await catalog.collection("A Trilogy", tmdb_id=98_200_001)
     latest = await catalog.member(franchise, "The Third", release_date=date(2011, 1, 1))
@@ -306,9 +278,10 @@ async def test_a_franchise_the_household_owns_one_of_is_readable_where_the_home_
 async def test_a_retracted_copy_does_not_count_as_owned(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """`media_items.available` is what the join reads, and only this arm can
-    show it: the sweep sets it false for every item a walk stops seeing, so a
-    film on a temporarily unmounted drive is an ordinary state.
+    """`media_items.available` is what the join reads, and only this arm can show it.
+
+    the sweep sets it false for every item a walk stops seeing, so a film on a
+    temporarily unmounted drive is an ordinary state.
 
     The wrong implementation overstates -- "you own 2 of 2" for a household
     that can play one -- which is the direction nobody checks.
@@ -329,8 +302,9 @@ async def test_a_retracted_copy_does_not_count_as_owned(
 async def test_a_series_carrying_a_collection_id_is_not_on_the_franchise_page(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """The fourth wrong implementation, at a second call site and against a row
-    that really is in the table.
+    """The fourth wrong implementation.
+
+    at a second call site and against a row that really is in the table.
 
     `attach_titles` refuses to write it and `titles` carries no
     `CHECK (collection_id IS NULL OR kind = 'movie')`, so the row is storable
@@ -357,8 +331,10 @@ async def test_a_series_carrying_a_collection_id_is_not_on_the_franchise_page(
 
 
 async def test_an_unknown_collection_is_a_404_from_the_real_graph(client: AsyncClient) -> None:
-    """The 404 through the un-overridden wiring, so it is the row that is
-    missing rather than a fake that was never seeded."""
+    """The 404 through the un-overridden wiring.
+
+    so it is the row that is missing rather than a fake that was never seeded.
+    """
     collection_id = new_id()
     response = await client.get(f"/collections/{collection_id}")
     assert response.status_code == 404

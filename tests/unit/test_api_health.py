@@ -1,19 +1,12 @@
-"""The degraded-readiness path -- deliberately not in tests/integration/:
-it needs no real Postgres (a connection refused on a port nothing listens
-on fails the same way an actually-down database would, from the app's
-perspective), so it belongs where the rest of this suite's Docker-free
-tests live rather than paying for a container it doesn't need.
+"""The degraded-readiness path.
 
-Neither the plan nor the originally-shipped tests asserted this path at
-all -- the happy-path test in tests/integration/test_health.py only
-proves readiness works when Postgres is reachable, which is exactly why
-a 200-with-degraded-body response (rather than the 503 below) went
-undebated for as long as it did.
+deliberately not in tests/integration/: it needs no real Postgres (a connection refused
 """
 
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import pytest
 from asgi_lifespan import LifespanManager
@@ -21,6 +14,7 @@ from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
+import usher
 from usher.api.app import create_app
 from usher.api.deps import (
     get_lane_supervisor,
@@ -62,21 +56,25 @@ async def test_ready_returns_503_when_database_unreachable(
 async def test_health_stays_ok_even_when_database_unreachable(
     client_against_unreachable_database: AsyncClient,
 ) -> None:
-    """The liveness/readiness split's entire point: a database outage must
-    not affect liveness, so this and the 503 test above use the same
-    unreachable-database app to prove the difference directly rather than
-    asserting it in isolation."""
+    """The liveness/readiness split's entire point.
+
+    a database outage must not affect liveness, so this and the 503 test above use the
+    same unreachable-database app to prove the difference directly rather than asserting
+    it in isolation.
+    """
     response = await client_against_unreachable_database.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "version": usher.__version__}
 
 
 async def test_create_app_builds_the_client_event_bus() -> None:
-    """`get_reconcile_service` resolves `EventPublisher` off `app.state.events`
-    on every request that walks a source, so an app without one 500s at
-    request time rather than at start-up. Built in `create_app` rather than in
-    the lifespan for the reason `settings` is: it holds no connection, no
-    thread, and nothing to dispose.
+    """`get_reconcile_service` resolves `EventPublisher` off `app.state.events` on every request.
+
+    that walks a source, so an app without one 500s at request time rather than at
+    start-up.
+
+    Built in `create_app` rather than in the lifespan for the reason `settings` is: it
+    holds no connection, no thread, and nothing to dispose.
     """
     settings = Settings(
         database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
@@ -107,21 +105,22 @@ class _Lanes(LaneSupervisor):
         *,
         push: list[str] | None = None,
         worker: bool = False,
+        crashed: list[str] | None = None,
+        recovered: int | None = None,
+        recovered_when: datetime | None = None,
         available: dict[uuid.UUID, bool | None] | None = None,
     ) -> None:
         super().__init__(
-            Settings(
-                database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-                secret_key="0123456789abcdef0123456789abcdef",
-                push_enabled=False,
-                worker_enabled=False,
-            ),
+            _settings(),
             _no_work,
             NullEventPublisher(),
             user_id=_no_user,
         )
         self._reported = push or []
         self._worker_reported = worker
+        self._crashed = crashed or []
+        self._recovered = recovered
+        self._recovered_when = recovered_when
         self._available = available or {}
 
     def running_sources(self) -> list[str]:
@@ -130,8 +129,26 @@ class _Lanes(LaneSupervisor):
     def worker_running(self) -> bool:
         return self._worker_reported
 
+    def crashed_sources(self) -> list[str]:
+        return self._crashed
+
+    def recovered_claims(self) -> int | None:
+        return self._recovered
+
+    def recovered_at(self) -> datetime | None:
+        return self._recovered_when
+
     def push_available(self, source_id: uuid.UUID) -> bool | None:
         return self._available.get(source_id)
+
+
+def _settings() -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+        secret_key="0123456789abcdef0123456789abcdef",
+        push_enabled=False,
+        worker_enabled=False,
+    )
 
 
 @asynccontextmanager
@@ -146,13 +163,7 @@ async def _no_user() -> uuid.UUID:
 
 @asynccontextmanager
 async def _client_with_lanes(lanes: LaneSupervisor) -> AsyncIterator[AsyncClient]:
-    settings = Settings(
-        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-        secret_key="0123456789abcdef0123456789abcdef",
-        push_enabled=False,
-        worker_enabled=False,
-    )
-    app = create_app(settings)
+    app = create_app(_settings())
     app.dependency_overrides[get_lane_supervisor] = lambda: lanes
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
@@ -161,17 +172,67 @@ async def _client_with_lanes(lanes: LaneSupervisor) -> AsyncIterator[AsyncClient
 
 
 async def test_readiness_reports_the_lanes() -> None:
-    async with _client_with_lanes(_Lanes(push=["Living Room Emby"], worker=True)) as client:
+    stamp = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+    lanes = _Lanes(
+        push=["Living Room Emby"],
+        worker=True,
+        crashed=["Attic Emby"],
+        recovered=20,
+        recovered_when=stamp,
+    )
+    async with _client_with_lanes(lanes) as client:
         body = (await client.get("/health/ready")).json()
-    assert body["lanes"] == {"push": ["Living Room Emby"], "worker": True}
+    assert body["lanes"] == {
+        "push": ["Living Room Emby"],
+        "worker": True,
+        "crashed_sources": ["Attic Emby"],
+        "recovered_claims": 20,
+        # The literal wire spelling, not `stamp.isoformat()`: pydantic renders
+        # a UTC datetime with a `Z` and `isoformat()` renders `+00:00`, so the
+        # derived form asserts what Python does rather than what a client
+        # receives.
+        "recovered_at": "2026-08-19T12:00:00Z",
+    }
+
+
+async def test_a_process_that_runs_no_worker_reports_no_orphan_count_rather_than_zero() -> None:
+    """**`null`, not `0`, and the difference is a claim.**.
+
+    `USHER_WORKER_ENABLED=false` beside a `usher work` container is the split
+    topology PRD 08's "Worker in its own process" row describes, and this process
+    never calls `recover()` at all -- so `0` would assert *"no orphans"* about a
+    question it never asked, on the one endpoint an operator reads to find out.
+    `SourceStatus.push_available` is the precedent: `None` means **not probed**.
+
+    Driven against a **real** `LaneSupervisor` rather than the `_Lanes` stub
+    above, because a stub returning `None` because it was told to says nothing
+    about what the shipped supervisor reports. Its unit of work and its user
+    reader both raise, so a readiness check that went looking fails loudly.
+    """
+    lanes = LaneSupervisor(_settings(), _no_work, NullEventPublisher(), user_id=_no_user)
+    assert lanes.worker_running() is False, "the premise: this process runs no worker lane"
+
+    async with _client_with_lanes(lanes) as client:
+        body = (await client.get("/health/ready")).json()
+
+    assert body["lanes"]["recovered_claims"] is None
+    assert body["lanes"]["recovered_at"] is None
+
+    # **The control, and it is the assertion with teeth.** `is None` is satisfied by a
+    # field that can only ever be `null` -- a `bool` reported as `None`, a serialiser
+    # dropping a zero.
+    async with _client_with_lanes(_Lanes(worker=True, recovered=0)) as client:
+        asked = (await client.get("/health/ready")).json()
+    assert asked["lanes"]["recovered_claims"] == 0
 
 
 async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() -> None:
-    """**The correction PRD 08 needs.** A readiness check that failed
-    because Emby is down would take Usher out of a load balancer for a
-    reason restarting Usher cannot fix -- which is the exact argument M1's
-    liveness/readiness split is built on, and PRD 08's own failure table
-    says an unreachable source leaves the catalog "fully browsable".
+    """PRD 08: an unreachable source never takes the process out of a load balancer.
+
+    A readiness check that failed because Emby is down would do exactly that, for a
+    reason restarting Usher cannot fix -- the argument the liveness/readiness split is
+    built on -- and PRD 08's failure table says an unreachable source leaves the
+    catalog "fully browsable".
 
     Driven against a *reachable* database so the only thing that could
     degrade it is the lane report. The database this app points at is not
@@ -187,34 +248,53 @@ async def test_a_source_whose_push_is_down_does_not_make_this_process_unready() 
 
 
 @pytest.mark.parametrize(
-    ("push", "worker"),
-    [([], False), ([], True), (["A"], False), (["A", "B"], True)],
+    ("push", "worker", "crashed", "recovered", "recovered_when"),
+    [
+        ([], False, [], None, None),
+        ([], True, [], 0, None),
+        (["A"], False, ["B"], 20, datetime(2026, 8, 19, 12, 0, tzinfo=UTC)),
+        (["A", "B"], True, [], None, datetime(2026, 8, 19, 12, 0, tzinfo=UTC)),
+        ([], True, ["A", "B"], 1, datetime(2026, 8, 19, 12, 0, tzinfo=UTC)),
+    ],
 )
 async def test_no_lane_state_can_change_the_readiness_verdict(
-    push: list[str], worker: bool
+    push: list[str],
+    worker: bool,
+    crashed: list[str],
+    recovered: int | None,
+    recovered_when: datetime | None,
 ) -> None:
-    """Every combination of lane state, one verdict.
-
-    This is the case the two mutations in the plan's table land on: putting
-    `push` inside `ReadinessChecks` makes `all(checks.model_dump().values())`
-    pick it up automatically, and `... and lanes.running_sources()` does it
-    by hand. Both change the answer for at least one row below; the
-    database is unreachable throughout, so `checks` is constant and the
-    lanes are the only thing varying.
-    """
-    async with _client_with_lanes(_Lanes(push=push, worker=worker)) as client:
+    """Every combination of lane state, one verdict."""
+    lanes = _Lanes(
+        push=push,
+        worker=worker,
+        crashed=crashed,
+        recovered=recovered,
+        recovered_when=recovered_when,
+    )
+    async with _client_with_lanes(lanes) as client:
         response = await client.get("/health/ready")
     assert response.status_code == 503
     body = response.json()
     assert body["status"] == "degraded"
     assert body["checks"] == {"database": False, "migrations": False}
+    # And every one of them really is in the body, so the equality above is
+    # refusing a *move* rather than passing because the field does not exist.
+    assert set(body["lanes"]) == {
+        "push",
+        "worker",
+        "crashed_sources",
+        "recovered_claims",
+        "recovered_at",
+    }
 
 
 async def test_readiness_never_touches_a_source() -> None:
-    """Docker's healthcheck polls this every 2 s in the shipped compose
-    file, against an upstream PRD 01 measures at 1-5 s per request. A probe
-    here is a request per poll per source, forever -- and it would take the
-    process out of a load balancer for a reason restarting it cannot fix.
+    """Docker's healthcheck polls this every 2 s in the shipped compose file.
+
+    PRD 08: readiness makes no upstream request at all. A probe here is a request
+    per poll per source, forever -- and it would take the process out of a load
+    balancer for a reason restarting it cannot fix.
 
     Asserted on the route's own dependency graph rather than on "no adapter
     was built": a probe added to `ready` would have to reach a
@@ -242,8 +322,34 @@ def _flatten(dependant: Dependant) -> set[object]:
 
     FastAPI 0.121 has no public `get_flat_dependant`, so this walks
     `Dependant.dependencies` itself -- three lines, and pinned by the
-    positive assertion above rather than trusted."""
+    positive assertion above rather than trusted.
+    """
     found: set[object] = {dependant.call}
     for sub in dependant.dependencies:
         found |= _flatten(sub)
     return found
+
+
+async def test_liveness_names_the_running_version(
+    client_against_unreachable_database: AsyncClient,
+) -> None:
+    """The one fact an operator needs during an incident: which image is actually running.
+
+    **Shares the unreachable-database fixture with the case above, and adds
+    the two things that case is not about.** That one is the liveness/readiness
+    split's proof and would keep its meaning if the version key were spelled
+    anything at all; this one is about the key itself. The equality is
+    deliberate rather than `"version" in body` -- an absence assertion cannot
+    tell a served version from a served empty string. And the control is the
+    first assertion: an uninstalled tree would otherwise let both cases pass
+    against a `/health` reporting the `0.0.0+unknown` fallback, which is not
+    the fact this endpoint exists to carry.
+    """
+    assert usher.__version__ != "0.0.0+unknown", (
+        "the package is not installed, so this case cannot tell a real version from the fallback"
+    )
+
+    response = await client_against_unreachable_database.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "version": usher.__version__}

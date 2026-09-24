@@ -1,13 +1,4 @@
-"""`FakeLLMCallRepository` against the shared `LLMCallRepository` contract.
-
-No Docker, no database. See `tests/fakes/llm_call_repository.py` for the six
-places this half is more forgiving than
-`tests/integration/test_llm_call_repository.py`'s -- the first of which is
-that the fake stores the very `LLMCall` it was handed, so there is no column
-mapping here to get wrong and almost every assertion in the contract is
-structural on this arm and load-bearing on the other -- and for the one place
-it is *stricter*, which is that it never rounds a cost to the column's scale.
-"""
+"""`FakeLLMCallRepository` against the shared `LLMCallRepository` contract."""
 
 import uuid
 
@@ -24,12 +15,13 @@ from usher.domain.curation import LLMCall
 class FakeLLMCallLedger(LLMCallLedger):
     """Reads the fake's own list.
 
-    Bypasses nothing, because there is nothing to bypass: the port is
-    append-only, so `record()` is the only writer either arm has and the
-    ledger's whole job is to observe. It is an `LLMCallLedger` rather than a
-    direct reach into `repository.calls` so that the *same* observation is
-    made on both arms -- the contract asserts through this interface and
-    cannot accidentally learn something only one implementation can answer.
+    Bypasses nothing, because there is nothing to bypass: `record()` is the
+    only writer either arm has, and the port has no read at all. It is an
+    `LLMCallLedger` rather than a direct reach into `repository.calls` so that
+    the *same* observation is made on both arms -- the contract asserts through
+    this interface and cannot accidentally learn something only one
+    implementation can answer, nor satisfy a write case with a read carrying
+    the mirrored defect.
     """
 
     def __init__(self, repository: FakeLLMCallRepository) -> None:

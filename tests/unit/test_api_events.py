@@ -1,16 +1,4 @@
-"""`GET /events`.
-
-Driven through a **streaming** transport (`tests/fakes/
-streaming_asgi_transport.py`), not `httpx.ASGITransport`, which runs the ASGI
-app to completion before returning a response and therefore hangs forever on
-a route whose whole purpose is not to complete. That is the one piece of
-infrastructure these cases needed that did not exist.
-
-The bus is set on `app.state.events` by the fixture rather than by the
-lifespan: wiring `create_app` to build one is the composition-root task, and
-a route that could not be tested before its process grew a lane would be a
-route tested only end to end.
-"""
+"""`GET /events`."""
 
 import asyncio
 import uuid
@@ -134,18 +122,18 @@ async def test_two_titles_are_comma_separated(
 async def test_a_malformed_titles_filter_is_a_422_that_does_not_echo_it(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 07's RFC 9457 envelope, which this route's *stream* is exempt from
-    and this failure is not: the 422 is decided before `200
-    text/event-stream` is answered, so there is still a status code to carry
-    a document. (It read `== {"detail": …}` until M9 -- see the M5 plan's
-    "Does a streaming surface force the error envelope?" for the shape it
-    used to have.)
+    """PRD 07's RFC 9457 envelope.
+
+    which this route's *stream* is exempt from and this failure is not: the 422 is
+    decided before `200 text/event-stream` is answered, so there is still a status code
+    to carry a document.
 
     The detail still names the *rule* rather than the submitted value, and
     `instance` is the path with the query string dropped: `usher.api.errors`
     strips `input` from every validation error app-wide because a 422 must
     never echo what it rejected, and a query string is a submitted body's
-    neighbour rather than its exception."""
+    neighbour rather than its exception.
+    """
     response = await client.get("/events?titles=not-a-uuid")
     assert response.status_code == 422
     assert "not-a-uuid" not in response.text
@@ -163,9 +151,11 @@ async def test_a_malformed_titles_filter_is_a_422_that_does_not_echo_it(
 async def test_a_partly_malformed_titles_filter_is_also_a_422(
     client: httpx.AsyncClient,
 ) -> None:
-    """Dropping the bad half would leave a *narrower* filter than the client
-    asked for -- a detail screen that silently never updates, which is worse
-    than an error because nothing says so."""
+    """Dropping the bad half would leave a *narrower* filter than the client asked for.
+
+    a detail screen that silently never updates, which is worse than an error because
+    nothing says so.
+    """
     response = await client.get(f"/events?titles={uuid.uuid4()},not-a-uuid")
     assert response.status_code == 422
 
@@ -173,28 +163,7 @@ async def test_a_partly_malformed_titles_filter_is_also_a_422(
 async def test_a_stream_that_has_heartbeat_still_delivers_events(
     client: httpx.AsyncClient, bus: InMemoryEventBus
 ) -> None:
-    """**The heartbeat must not kill the subscription it is keeping alive.**
-
-    `asyncio.wait_for(anext(iterator), timeout)` cancels the `__anext__` it
-    is waiting on, and cancelling `__anext__` **closes the async generator**
-    -- so the *next* `anext` raises `StopAsyncIteration` and this route
-    returns. Six lines with no Usher code in them reproduce it:
-
-        it = aiter(gen())
-        await asyncio.wait_for(anext(it), 0.05)   # TimeoutError
-        await asyncio.wait_for(anext(it), 0.05)   # StopAsyncIteration
-
-    The consequence in production is that every SSE client is disconnected
-    one `sse_heartbeat_seconds` (20 s by default) after the last event it
-    received, forever -- an `EventSource` reconnects, so the symptom is a
-    reconnect storm and a replay per client per 20 s rather than a dead
-    channel, which is exactly the kind of failure that hides.
-
-    **The case beside this one passed against it**, and that is the reason
-    this one is written the way it is: reading three heartbeat *lines* is
-    satisfied by a route that greets, heartbeats once and then ends. What
-    cannot be satisfied is delivering an event **after** the heartbeats.
-    """
+    """**The heartbeat must not kill the subscription it is keeping alive.**."""
     await _wait_for_no_subscribers(bus)
     async with client.stream("GET", "/events") as response:
         lines = aiter(response.aiter_lines())
@@ -208,18 +177,20 @@ async def test_a_stream_that_has_heartbeat_still_delivers_events(
 
 
 async def test_a_heartbeat_keeps_an_idle_stream_open(client: httpx.AsyncClient) -> None:
-    """nginx closes an idle connection at 60 s and Cloudflare at ~100 s. An
-    SSE stream on a library nobody touched sends nothing for hours, so the
-    server generates the traffic -- the same requirement PRD 03 states for
-    the WebSocket lane, in the other direction. A `:` comment line is one an
-    SSE client is required to ignore.
+    """Nginx closes an idle connection at 60 s and Cloudflare at ~100 s.
+
+    An SSE stream on a library nobody touched sends nothing for hours, so the server
+    generates the traffic -- the same requirement PRD 03 states for the WebSocket lane,
+    in the other direction. A `:` comment line is one an SSE client is required to
+    ignore.
 
     **This case alone is not enough**, and it is worth knowing which half it
-    covers: it passed for the whole of M5 against a route that closed the
+    covers: it passed against a route that closed the
     connection immediately after this second heartbeat, because three lines
     is what a route that greets, heartbeats once and returns also produces.
     `test_a_stream_that_has_heartbeat_still_delivers_events` above is the
-    half with teeth."""
+    half with teeth.
+    """
     async with client.stream("GET", "/events") as response:
         lines = aiter(response.aiter_lines())
         first = await asyncio.wait_for(anext(lines), timeout=2.0)
@@ -247,11 +218,15 @@ async def test_a_last_event_id_header_is_honoured(
 async def test_a_stale_last_event_id_answers_resync_required(
     client: httpx.AsyncClient, bus: InMemoryEventBus
 ) -> None:
-    """The end of the chain the bus owns the middle of: an id from a
-    previous process reaches the client as a `resync_required` *frame*, not
-    as a status code. There is no status code left -- the response already
-    answered 200 -- which is the whole argument for the SSE vocabulary being
-    a wire enum rather than PRD 07's problem-details envelope."""
+    """The end of the chain the bus owns the middle of.
+
+    an id from a previous process reaches the client as a `resync_required` *frame*, not
+    as a status code.
+
+    There is no status code left -- the response already answered 200 -- which is the
+    whole argument for the SSE vocabulary being a wire enum rather than PRD 07's
+    problem-details envelope.
+    """
     headers = {"Last-Event-ID": "deadbeef-40"}
     async with client.stream("GET", "/events", headers=headers) as response:
         frame = await asyncio.wait_for(_read_frame(aiter(response.aiter_lines())), timeout=2.0)
@@ -260,9 +235,11 @@ async def test_a_stale_last_event_id_answers_resync_required(
 
 
 async def test_a_disconnect_unsubscribes(client: httpx.AsyncClient, bus: InMemoryEventBus) -> None:
-    """An SSE client disconnecting is the common case. A route that leaked a
-    subscriber per connection would grow one queue per browser tab for the
-    life of the process."""
+    """An SSE client disconnecting is the common case.
+
+    A route that leaked a subscriber per connection would grow one queue per browser tab
+    for the life of the process.
+    """
     assert bus.subscribers == 0
     async with client.stream("GET", "/events") as response:
         await asyncio.wait_for(anext(aiter(response.aiter_lines())), timeout=2.0)
@@ -276,10 +253,12 @@ async def test_a_disconnect_unsubscribes(client: httpx.AsyncClient, bus: InMemor
 
 
 async def _wait_for_no_subscribers(bus: InMemoryEventBus) -> None:
-    """A previous case's disconnect is not instantaneous -- Starlette
-    cancels the body iterator on `http.disconnect` -- so a case that asserts
-    on a subscriber *count* has to start from a known zero rather than from
-    whatever the last case left behind."""
+    """A previous case's disconnect is not instantaneous.
+
+    Starlette cancels the body iterator on `http.disconnect` -- so a case that asserts
+    on a subscriber *count* has to start from a known zero rather than from whatever the
+    last case left behind.
+    """
     for _ in range(200):
         if bus.subscribers == 0:
             return
@@ -288,9 +267,10 @@ async def _wait_for_no_subscribers(bus: InMemoryEventBus) -> None:
 
 
 async def _wait_for_subscriber(bus: InMemoryEventBus, *, expected: int = 1) -> None:
-    """The route subscribes inside its response generator, so the
-    subscription lands when the *first chunk* is produced rather than when
-    the request returns.
+    """The route subscribes inside its response generator.
+
+    so the subscription lands when the *first chunk* is produced rather than when the
+    request returns.
 
     Publishing before it lands is a publish to nobody -- and this project has
     already had one concurrency case time out on exactly that harness bug
@@ -306,8 +286,11 @@ async def _wait_for_subscriber(bus: InMemoryEventBus, *, expected: int = 1) -> N
 async def test_a_row_invalidation_reaches_an_unfiltered_subscriber(
     client: httpx.AsyncClient, bus: InMemoryEventBus
 ) -> None:
-    """The home client's subscription. It renders the whole screen and has no
-    title ids to scope to before it fetches one, so it subscribes unfiltered."""
+    """The home client's subscription.
+
+    It renders the whole screen and has no title ids to scope to before it fetches one,
+    so it subscribes unfiltered.
+    """
     async with client.stream("GET", "/events") as response:
         lines = aiter(response.aiter_lines())
         await _wait_for_subscriber(bus)
@@ -322,12 +305,15 @@ async def test_a_row_invalidation_reaches_an_unfiltered_subscriber(
 async def test_a_row_invalidation_does_not_wake_a_detail_screen(
     client: httpx.AsyncClient, bus: InMemoryEventBus
 ) -> None:
-    """**The settlement, asserted rather than assumed.** A row-slug event
-    carries no title id, so it reaches every subscriber or none -- there is no
-    "some". It reaches none of the filtered ones, and that is correct rather
-    than a limitation: PRD 07's own reason for `?titles=` is "so a detail screen
-    isn't woken by unrelated churn", and a row invalidation is unrelated churn
-    for a screen that renders no rows.
+    """A row invalidation reaches no `?titles=` subscriber -- asserted rather than assumed.
+
+    A row-slug event carries no title id, so it reaches every subscriber or none --
+    there is no "some".
+
+    It reaches none of the filtered ones, as PRD 07 states: `row.invalidated` "reaches
+    unfiltered subscribers and no others". That is correct rather than a limitation --
+    a `?titles=` filter exists so a detail screen is not woken by unrelated churn, and a
+    row invalidation is unrelated churn for a screen that renders no rows.
 
     Kills a well-meant `wants()` special case that lets `ROW_INVALIDATED` bypass
     the filter -- which wakes every open detail screen for a row it does not

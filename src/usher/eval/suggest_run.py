@@ -1,8 +1,4 @@
-"""The suggest surface end to end: preflight, generate, run, score, record.
-
-Its own module rather than a function in `runner.py` because `runner.py` is
-surface-agnostic and E2 adds two more of these beside it.
-"""
+"""The suggest surface end to end: preflight, generate, run, score, record."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -119,8 +115,8 @@ async def run_suggest(
         return Report(verdict, tuple(lines))
 
     # Named `run_record` rather than `record`: the scoring loop above binds
-    # `record` to a `ScoreRecord`, and reusing it for the `RunRecord` is an
-    # incompatible reassignment mypy strict refuses.
+    # `record` to a `ScoreRecord`, so reusing the name is a reassignment mypy
+    # strict refuses.
     run_record = RunRecord(
         surface="suggest",
         mode="full",

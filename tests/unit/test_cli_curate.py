@@ -1,25 +1,4 @@
-"""`usher curate` -- its argument surface, the report it prints, and the one
-arm that answers before it opens anything.
-
-**The success and failure arms are not here**, and that is the same split
-`test_cli_derive.py` makes for the same reason: every command coroutine in
-`usher.cli` takes a `Settings` and builds its own engine through
-`_session_for`, so a case about what `generate()` does with a real pipeline
-belongs beside a real Postgres (`tests/integration/test_cli_pipeline.py`).
-What is here is what needs no database at all:
-
-- the parser,
-- `_print_curation_report`, a pure function over a `CurationReport` -- the
-  same seam `_print_home_report` is, and for the same reason: the numbers an
-  operator reads are worth asserting without seeding a household, a pool and
-  a scripted completion per assertion, and
-- **the disabled deployment**, which is the one arm that must answer *before*
-  a connection is opened, because there is nothing to connect for, and
-- **the raise this command renders rather than re-raises.** That one is not an
-  exception to the split above: its subject is `_curate`'s own `except
-  PortDataMalformed`, not what `generate()` did to produce one, so the service
-  and its pipeline are substituted rather than driven.
-"""
+"""`usher curate`: its argument surface, its report, and the arm that answers early."""
 
 import contextlib
 import uuid
@@ -30,7 +9,8 @@ from decimal import Decimal
 import pytest
 from loguru import logger
 
-from usher.cli import _curate, _print_curation_report, build_parser, main, parse_args
+from tests.unit.commands import configured, dispatched
+from usher.cli import _curate, _print_curation_report, build_parser, parse_args
 from usher.config import Settings
 from usher.domain.curation import CuratedRow
 from usher.ports.errors import PortDataMalformed
@@ -102,59 +82,31 @@ def test_curate_takes_no_arguments_at_all() -> None:
 
 
 def test_curate_is_advertised_by_the_parser() -> None:
-    """A subcommand `build_parser` does not declare is a command
-    `test_cli_errors.py`'s boundary sweep never runs."""
+    """A subcommand `build_parser` does not declare is a command nobody can run."""
     assert build_parser().parse_args(["curate"]).command == "curate"
 
 
 def test_curate_dispatches_to_curate_and_not_to_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`_dispatch`'s `else` arm is `serve`**, so a subcommand that parses and
-    has no arm of its own does not fail -- it silently starts the HTTP server.
-    That is the same defect `main`'s own docstring records one layer up, where
-    an `argv is None` treated as "no arguments" made `usher sync-status` start
-    uvicorn and look like it worked, because the server does start.
+    """Deleting the `curate` arm from `_dispatch` passes every other case."""
+    configured(monkeypatch)
 
-    **`test_every_command_reports_a_dead_database_the_same_way` cannot see
-    it**, and that is why this case exists rather than being folded in there:
-    that one makes every command coroutine *and* `uvicorn.run` raise the
-    identical exception on purpose, so the two arms are indistinguishable by
-    construction. Measured -- deleting the `curate` arm from `_dispatch`
-    survived the whole selection this task swept until this case was written.
+    calls = dispatched(monkeypatch, arm="_curate", argv=["curate"])
 
-    So the two are made to differ: `_curate` records, the server raises.
-    """
-    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:1/usher")
-    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
-    ran: list[str] = []
-
-    async def _record(settings: Settings) -> None:
-        ran.append("curate")
-
-    def _served(*_: object, **__: object) -> None:
-        raise AssertionError("usher curate started the HTTP server")
-
-    monkeypatch.setattr("usher.cli._curate", _record)
-    monkeypatch.setattr("uvicorn.run", _served)
-
-    main(["curate"])
-
-    assert ran == ["curate"]
+    # The shape as well as the call: `usher curate` takes no flags, so an arm
+    # that grew a keyword is a flag the parser is not offering.
+    assert calls == [{}]
 
 
 def test_the_report_prints_the_pool_it_chose_from_and_not_the_rows_it_kept(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The number that cannot be recomputed**, which is why
-    `CurationReport` carries it.
+    """The pool size cannot be recomputed, which is why `CurationReport` carries it.
 
-    A CLI that asked the pool service again would be building a *second*
-    pool -- a second `list_unwatched_candidates`, a second centroid read, and
-    a number that is only equal to the first by luck of nothing having been
-    watched in between. And a CLI that summed the rows it was handed would
-    print `3` for a generation chosen from 200 candidates, which is the ratio
-    an operator reads to decide whether the pool is big enough.
+    A CLI that asked the pool service again would build a *second* pool, equal to the
+    first only by luck; one that summed the rows it was handed would print the shelf
+    count instead of the ratio an operator reads to size the pool.
     """
     kept = (
         _row("curated-1", title="Slow-burn sci-fi", cards=6),
@@ -168,13 +120,12 @@ def test_the_report_prints_the_pool_it_chose_from_and_not_the_rows_it_kept(
 
 
 def test_the_report_names_every_row_it_kept(capsys: pytest.CaptureFixture[str]) -> None:
-    """The shelves are the product, so they are the answer -- a report that
-    printed only counts would leave an operator unable to tell a generation
-    that worked from one that produced three shelves of the same thing.
+    """The shelves are the product, so they are the answer.
 
-    Each row's own card count too, because `min_cards` is a floor and a row
-    sitting exactly on it is the signal that the pool is running out of
-    answers rather than the model running out of ideas.
+    A report printing only counts would leave an operator unable to tell a generation
+    that worked from one that produced three shelves of the same thing. Each row's own
+    card count too: `min_cards` is a floor, and a row sitting exactly on it says the
+    pool is running out of answers.
     """
     kept = (
         _row("curated-1", title="Slow-burn sci-fi for a rainy night", cards=6),
@@ -194,18 +145,14 @@ def test_the_report_names_every_row_it_kept(capsys: pytest.CaptureFixture[str]) 
 def test_the_report_prints_all_five_reasons_including_the_zeros(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Zeros included, and the report says why.**
+    """Zeros included, and the report says why.
 
-    `usher.curation.dropped` records every reason every time for exactly this
-    argument one layer down: *a reason absent from a tally is
-    indistinguishable from a reason nobody counts*. At a terminal it is
-    worse, because there is no second export to compare against -- an
-    operator reading `not_in_pool 4` with no `unparseable` line beside it
-    cannot tell "the shape was fine" from "this build stopped counting
-    shapes".
+    A reason absent from a tally is indistinguishable from a reason nobody counts: an
+    operator reading `not_in_pool 4` with no `unparseable` line beside it cannot tell
+    "the shape was fine" from "this build stopped counting shapes".
 
-    Asserted member by member off `DropReason` rather than against a written
-    list, so a sixth member cannot arrive with no line and no failure.
+    Asserted member by member off `DropReason` rather than against a written list, so
+    a new member cannot arrive with no line and no failure.
     """
     _print_curation_report(_report(dropped={**_NOTHING_DROPPED, DropReason.NOT_IN_POOL: 4}))
 
@@ -220,15 +167,11 @@ def test_the_report_prints_all_five_reasons_including_the_zeros(
 def test_the_two_row_reasons_count_rows_and_the_three_card_reasons_count_cards(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The unit split is the load-bearing half of the five**, and a report
-    that printed a bare number beside each would invite the one arithmetic
-    the vocabulary exists to forbid: summing across the label.
+    """Each drop reason prints its unit, so nobody sums across the label.
 
-    `row_unusable` and `row_too_short` count *rows*; `not_in_pool`,
-    `unparseable` and `duplicate` count *cards*. That is what the `row_`
-    prefix says out loud (`curation_validate`'s module docstring), which is
-    why the unit is derived from the member's own name here rather than
-    tabulated a second time in `cli.py`.
+    `row_unusable` and `row_too_short` count *rows*; `not_in_pool`, `unparseable` and
+    `duplicate` count *cards*. The unit is derived from the member's own `row_` prefix
+    rather than tabulated a second time in `cli.py`.
     """
     _print_curation_report(
         _report(
@@ -285,15 +228,12 @@ def test_a_tally_of_one_does_not_read_as_a_tally_of_several(
 def test_the_report_prints_the_tokens_and_the_model_that_answered(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`LLMUsage.model` is *what answered*, not what this deployment asked
-    for, and that is the one worth printing: PRD 10 groups spend by model,
-    and a proxy silently serving a different one is exactly the state
-    `curated_rows.model_name` exists to make queryable.
+    """`LLMUsage.model` is what answered, not what this deployment asked for.
 
-    The token counts are printed separately rather than summed, because they
-    are priced separately -- `USHER_LLM_PRICE_IN_PER_MTOK` and
-    `USHER_LLM_PRICE_OUT_PER_MTOK` are two settings and a total hides which
-    of the two a prompt change moved.
+    A proxy silently serving a different model is exactly the state
+    `curated_rows.model_name` exists to make queryable. The token counts print
+    separately because they are priced separately, and a total hides which of the two
+    a prompt change moved.
     """
     _print_curation_report(
         _report(
@@ -317,11 +257,10 @@ def test_the_report_prints_the_tokens_and_the_model_that_answered(
 def test_the_generation_id_is_printed_because_it_is_the_only_join_key(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`llm_calls` carries no `user_id`. `generation_id` is its only
-    correlation key and PRD 10's dashboard 5 is
-    `llm_calls JOIN curated_rows USING (generation_id)` -- so an operator who
-    wants to see what this run cost, after the fact, has nothing else to
-    select on."""
+    """`llm_calls` carries no `user_id`, so `generation_id` is its only correlation key.
+
+    An operator asking after the fact what this run cost has nothing else to select on.
+    """
     _print_curation_report(_report())
 
     assert str(_GENERATION) in capsys.readouterr().out
@@ -330,28 +269,7 @@ def test_the_generation_id_is_printed_because_it_is_the_only_join_key(
 def test_the_cost_is_rendered_from_the_decimal_and_never_through_a_float(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**`cost_usd` is a `Decimal` all the way to the screen**, and this is
-    the input that says so.
-
-    `float(Decimal("0.000000005"))` is `5.000000000000000409...e-09` -- very
-    slightly *above* the half -- so it rounds **up** at eight places, while
-    the `Decimal` sits exactly on the half and rounds to even, i.e. down. The
-    two renderings differ:
-
-        f"{Decimal('0.000000005'):.8f}"        -> "0.00000000"
-        f"{float(Decimal('0.000000005')):.8f}" -> "0.00000001"
-
-    An unremarkable value cannot see it: `NUMERIC(12, 8)` is twelve
-    significant digits and a float64 carries fifteen, so every cost the
-    ledger can *store* survives the round trip unchanged and a case built on
-    one ratifies the mutation. The observable difference is at a price
-    *below* the column's own precision, which is where a cheap model on a
-    per-token price actually lands.
-
-    Eight places rather than the `Decimal`'s own repr because eight is what
-    `llm_calls.cost_usd` stores: an operator reconciling this line against
-    `SELECT sum(cost_usd) FROM llm_calls` should be reading the same digits.
-    """
+    """`cost_usd` is a `Decimal` all the way to the screen."""
     _print_curation_report(
         _report(
             usage=LLMUsage(
@@ -372,27 +290,9 @@ def test_the_cost_is_rendered_from_the_decimal_and_never_through_a_float(
 async def test_a_deployment_with_no_llm_says_so_instead_of_curating_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**The disabled deployment, which is a configuration fact rather than a
-    failure**, and the one arm of this command that answers before anything
-    is opened.
+    """The disabled deployment is a configuration fact, not a failure.
 
-    `composition.llm_client` answers `(None, no-op)` for
-    `USHER_LLM_ENABLED=false`, and `CurationService` spells its client
-    `LLMClient` and never `LLMClient | None` -- so there is no service to
-    build, no degraded form to run, and nothing to narrow to. Nine of ten row
-    providers need no model, so `GET /home` is a shorter screen; `usher work`
-    keeps five job kinds; this command has exactly one job.
-
-    So it exits non-zero with a sentence rather than printing an empty report
-    and exiting 0. A cron entry reading exit 0 from a command that did
-    nothing is an operator who believes curation is running.
-
-    **The message names the setting, and deliberately does not name a lane.**
-    `llm_client`'s own warning is *"curate jobs will not be claimed"*, which
-    is right for `usher work` and wrong twice over here: this process claims
-    no jobs, and `cli.py`'s printed-not-logged rule would make it a JSON
-    envelope in front of the answer. Hence `report=False`, the same call
-    `_search` makes to the embedder for the same reason.
+    It is the one arm of this command that answers before anything is opened.
     """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
@@ -429,27 +329,9 @@ async def test_a_deployment_with_no_llm_says_so_instead_of_curating_nothing(
 async def test_a_pool_too_small_for_one_row_reaches_the_operator_as_a_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**`git diff src/usher/cli.py` is empty for M9 Task G4, and this is what
-    makes that a claim rather than an omission.**
+    """A pool too small for one row exits with a sentence, not a traceback.
 
-    The guard that refuses a pool below `min_cards` raises the *same*
-    `PortDataMalformed` the empty pool has always raised, from the same place --
-    in front of `complete_json` -- so `_curate`'s existing handler renders it
-    with no new `except`. A guard needing one would be a guard raising something
-    this command does not model, and the operator would get sixty frames
-    instead of a sentence.
-
-    **The sentence is the shipped one, not a plausible one.** It comes from
-    `curation._nothing_to_curate`, which is the function `generate` raises
-    through, so a reworded guard fails here rather than quietly leaving this
-    case asserting a string nothing produces. What the *service* owes the
-    sentence -- the count, the floor, no household id -- is pinned beside the
-    service in `test_services_curation.py`; what the *command* owes it is that
-    it arrives whole, with the reassurance appended and no traceback.
-
-    The four substitutions are the four collaborators between `_curate` and the
-    raise. This file's split still holds: nothing here asks what `generate()`
-    does with a real pipeline, only what the command does with what it raised.
+    The client the command already built is released on the way out.
     """
     sentence = curation._nothing_to_curate(DEFAULT_MIN_CARDS - 1, DEFAULT_MIN_CARDS)
     assert str(DEFAULT_MIN_CARDS) in sentence, sentence

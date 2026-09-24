@@ -136,6 +136,21 @@ These come from `patterns.md` and the product brief. They are not style.
   Do not quietly build a fake around a missing route. The register is
   patterns.md §15.
 
+## Departures from the handoff
+
+The handoff wins on behaviour, so a screen that departs from it is recorded here
+with the reason, and `web/docs/` stays a verbatim copy.
+
+- **Bootstrap keeps polling for 20 minutes after a `202`, though no run reads
+  `running`.** patterns.md §8 says to poll "only while at least one run is
+  `running`", but a refresh of a `completed` import reads `completed` until its
+  first batch lands (PRD 04), so that rule stops watching at the press of "Run
+  again". The window is bounded and on screen, and so is what it does not
+  cover: it sees a queued phase read `running` or record a failure within 20
+  minutes, not a first batch that lands later, a later step of "Run all phases"
+  or a job queued behind another bootstrap job. `WATCH_MINUTES` in
+  `Bootstrap.tsx` has its arithmetic. Overview keeps §8 as written.
+
 ## Commands
 
 ```bash

@@ -61,8 +61,8 @@ number only when someone would otherwise re-litigate a settled decision, and
 then keep the number rather than its derivation.
 
 **Prefer a pointer to the source over a copy of it.** The 2026-09-02 audit found
-the pattern repeatedly: a module docstring or an ADR had been corrected while
-the rules file that paraphrased it had not. `adapters/search/postgres.py`
+the pattern repeatedly: a module docstring had been corrected while the rules
+file that paraphrased it had not. `adapters/search/postgres.py`
 carried its own `ef_search` retraction while `search-and-embeddings.md` still
 asserted the refuted claim 1,600 lines away from its own counter-evidence. The
 copy rots; the original does not.

@@ -45,6 +45,16 @@ export type SettingRow = {
   observed?: { value: string; proof: string }
 }
 
+/**
+ * The arithmetic `Settings` refuses a pool by, at the defaults of the two rows it
+ * explains: a session per job in flight, the worker's claim and heartbeat, and a
+ * bootstrap import's hold and its reads — one import at a time. The pool row's
+ * sentence is built from it, and `tests/unit/test_console_settings_catalogue.py`
+ * holds it to the validator, reading this line as text: keep it on one line.
+ */
+const POOL_RULE = { jobs: 12, worker: 2, bootstrap: 2, pool: 20 } as const
+const POOL_NEEDED = POOL_RULE.jobs + POOL_RULE.worker + POOL_RULE.bootstrap
+
 export const CONFIG: readonly SettingRow[] = [
   /* ------------------------------------------------------------- database */
   {
@@ -59,8 +69,7 @@ export const CONFIG: readonly SettingRow[] = [
     key: 'USHER_DB_POOL_SIZE',
     group: 'database',
     def: '20',
-    about:
-      'Connections per process. 20 because the worker lane runs in the same process and holds one session per job in flight: 12 jobs plus a claim and a heartbeat is 14, leaving 6 for the API.',
+    about: `Connections per process. ${POOL_RULE.pool} because the worker lane runs in the same process: ${POOL_RULE.jobs} jobs in flight hold a session each, the worker a claim and a heartbeat, and a bootstrap import the hold on its dataset and the reads of what it joins against — together ${POOL_NEEDED}, leaving ${POOL_RULE.pool - POOL_NEEDED} for the API.`,
     secret: false,
     measured: true,
   },
@@ -171,6 +180,15 @@ export const CONFIG: readonly SettingRow[] = [
     about: 'How long one request to a media server may take before it is a failure.',
     secret: false,
     measured: false,
+  },
+  {
+    key: 'USHER_SOURCE_REQUESTS_PER_SECOND',
+    group: 'sources',
+    def: '0.4',
+    about:
+      'The proactive outbound gate: one request per source per process, spaced 1/rate apart, never a burst. Zero is unlimited. The default is derived rather than picked — a household media server is a machine somebody is watching something on, and 0.4 rps is a courtesy margin under the rate this project measured against a real Emby 4.9.5.0.',
+    secret: false,
+    measured: true,
   },
   {
     key: 'USHER_SOURCE_REAUTH_COOLDOWN_SECONDS',
@@ -489,6 +507,15 @@ export const CONFIG: readonly SettingRow[] = [
     secret: false,
     measured: true,
   },
+  {
+    key: 'USHER_SEARCH_SUGGEST_ANALYTICS',
+    group: 'search',
+    def: 'true',
+    about:
+      'Whether the type-ahead box writes a search_queries row per answered keystroke, naming the tier that answered. On: the row is buffered and written off the request path, so the keystroke pays an append rather than the ~3.5 ms the write costs. Whole or nothing, never a sample rate — every absence in that table has to keep meaning one thing. GET /search records either way.',
+    secret: false,
+    measured: true,
+  },
 
   /* ---------------------------------------------------------------- lanes */
   {
@@ -577,6 +604,15 @@ export const CONFIG: readonly SettingRow[] = [
     measured: false,
   },
   {
+    key: 'USHER_PUSH_GAP_MAX_ITEMS',
+    group: 'lanes',
+    def: '20000',
+    about:
+      'The ceiling on one gap-closing delta that does have a cursor, counted in items; zero is unlimited. 20,000 is 100 pages at the shipped page size and about ten minutes of upstream at the 6.04 s/page mean measured 2026-08-15, deliberately under the 28,934 items a 30-day delta returned on that library. A walk that stops here records FAILED, so no cursor advances and nothing it never reached is skipped — `usher sync --kind full` closes the rest. It bounds the item lane only.',
+    secret: false,
+    measured: true,
+  },
+  {
     key: 'USHER_PUSH_SOURCE_REFRESH_SECONDS',
     group: 'lanes',
     def: '60.0',
@@ -584,6 +620,51 @@ export const CONFIG: readonly SettingRow[] = [
       'How often the supervisor re-reads the source list, so a new source gets a lane without a restart.',
     secret: false,
     measured: false,
+  },
+  {
+    key: 'USHER_SCHEDULER_ENABLED',
+    group: 'lanes',
+    def: 'false',
+    about:
+      'The scheduled-work lane switch, and the only lane that is off by default. A fresh deployment has no embeddings, so an enabled scheduler starts a multi-hour job nobody asked for once the backfill drains; and the scheduler holds no rows, so nothing excludes a second runner. Turn it on in exactly one process, or run `usher schedule --once` from a crontab instead.',
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_SEARCH_QUERY_RETENTION_DAYS',
+    group: 'lanes',
+    def: '90',
+    about:
+      "How long a search_queries row is kept. The scheduler prunes anything older; 90 days is PRD 10's own window. The prune only runs where the scheduler does, and the job offers itself once a day.",
+    secret: false,
+    measured: false,
+  },
+  {
+    key: 'USHER_SEARCH_QUERY_RETENTION_BATCH',
+    group: 'lanes',
+    def: '10000',
+    about:
+      'How many rows one retention transaction may delete. The prune loops and commits per chunk, because a single DELETE over a year of keystrokes locks a table every answered search writes to. Measured 2026-09-07, this deployment writes single digits of rows a day, so the steady-state prune is one chunk; the size is for the first run after the suggest writer is switched on, which wrote 14,898 rows in a day. Below 1 the drain never terminates.',
+    secret: false,
+    measured: true,
+  },
+  {
+    key: 'USHER_SIMILAR_REBUILD_PERIOD_HOURS',
+    group: 'lanes',
+    def: '24.0',
+    about:
+      'How long after a completed neighbour rebuild the scheduler may start the next one. Read the arithmetic before lowering it: the job reads min(title_neighbors.computed_at), which at the instant a walk ends is already the walk\u2019s own duration old, so a period P behaves as P minus the walk. This catalog\u2019s last completed walk ran 12,884 s over 132,442 seeds \u2014 3.58 hours, 2026-08-19 \u2014 so anything at or under that runs back to back forever. The job also refuses to run when USHER_EMBEDDING_MODEL disagrees with the model the stored vectors were written by.',
+    secret: false,
+    measured: true,
+  },
+  {
+    key: 'USHER_SCHEDULER_TICK_SECONDS',
+    group: 'lanes',
+    def: '300.0',
+    about:
+      'How long the loop sleeps between ticks. The loop asks each registered job when it was last done and nothing more: measured 2026-08-27 against the live 756 MB title_neighbors at 71-73 ms, so about 0.12% duty at 300 s and 7% at 1 s, which is why the floor of 60 is enforced rather than suggested. That one question is two round trips on the retention job, whose read commits its scope.',
+    secret: false,
+    measured: true,
   },
 
   /* ------------------------------------------------------------------ sse */

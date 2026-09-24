@@ -1,69 +1,4 @@
-"""One `POST /chat/completions` against any OpenAI-compatible endpoint.
-
-**This is the whole `LLMClient` implementation, and that is the decision
-rather than an accident.** [PRD 01](../../../../docs/prd/01-architecture.md),
-[06](../../../../docs/prd/06-rows-and-recommendations.md) and
-[10](../../../../docs/prd/10-telemetry-and-dashboards.md) named `litellm` from
-M1 until M8 priced it: +146 MB and 29 distributions against +0 and 0, where
-the 29 are a second async HTTP stack, a model-download client and two
-tokenizer runtimes. The provider abstraction is `base_url` -- OpenAI,
-OpenRouter, Together, Groq, DeepSeek, Mistral, vLLM, llama.cpp, Ollama and LM
-Studio all serve this one route.
-[ADR-0027](../../../../docs/prd/decisions/0027-the-llm-client-is-one-http-call.md).
-
-**Three defences against a malformed answer, in order, because a real
-endpoint produced all three shapes.** Measured 2026-08-06 against a live
-vLLM:
-
-1. `response_format: json_schema` with `strict: true` is asked for and works
-   -- schema-conformant JSON in 314 ms. It is a guarantee about *shape* and
-   says nothing about whether an identifier denotes anything, which is
-   `services/curation` validator's job
-   ([ADR-0028](../../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)).
-2. A provider that ignores it may still answer in JSON. With
-   `response_format: json_object` the same endpoint returned parseable
-   objects on 5 of 5.
-3. A provider given neither wraps its answer in a ` ```json ` fence -- **5 of
-   5**, measured -- so `json.loads(content)` fails every time. The fence is
-   stripped before parsing. That is a measurement, not defensive coding.
-
-**A truncated completion is refused, and it is the failure that hides.**
-`finish_reason == "length"` under guided decoding produces *valid* JSON: the
-provider closes the braces at the token ceiling, the parse succeeds, and rows
-are simply missing from the end of the list. Nothing downstream can tell a
-truncated generation from a short one, so it is caught here and named.
-
-**Cost is computed, never read.** No provider reports it -- the live `usage`
-object carries `prompt_tokens`, `completion_tokens` and `total_tokens` and
-nothing else -- so PRD 10's "litellm reports per-call cost natively" was
-describing a bundled price table rather than a response field. Two configured
-per-million-token prices, in `Decimal`, defaulting to `0`, which is the honest
-value for a local model.
-
-**Latency is measured here, and on a successful generation this is the number
-PRD 10 plots.** `CurationService` and `QueryExpansionService` each carry a
-stopwatch of their own, but `_ledger_row` in both prefers whatever came back in
-the `LLMUsage` whenever one did -- so their number is the *fallback* for a call
-that failed and never produced a usage, and this one is what the ledger's
-`latency_ms` column holds every ordinary night. The clock is injected for that
-rather than for symmetry: a delta across `_send` is the whole of what this
-class can be wrong about, and with the shipped `time.monotonic` nothing can
-hold the two readings apart to check.
-
-**The credential is a header and never a URL.** `HTTPXClientInstrumentor` is
-wired in `configure_tracing` and records the full URL as a span attribute --
-the reason `TmdbClient` prefers a bearer token, applied here where there is no
-query-parameter form to fall back to. And **no exception message carries a URL
-or the prompt**: the first because a household may be pointed at a provider
-whose URL holds a token, the second because the prompt is the household's
-watch history and PRD 08 forbids a rejected request echoing the body it
-rejected.
-
-Unlike `TmdbClient`, this class **owns** its `httpx.AsyncClient`, because
-`LLMClient.aclose` promises to "release the underlying HTTP connection pool"
-and a port cannot promise that about a client somebody else built. Tests
-inject a `transport` rather than a client, so ownership is never ambiguous.
-"""
+"""One `POST /chat/completions` against any OpenAI-compatible endpoint."""
 
 import json
 import time
@@ -95,13 +30,11 @@ _tracer = trace.get_tracer("usher.llm")
 def _strip_fence(content: str) -> str:
     """Remove a Markdown code fence, if the answer came wrapped in one.
 
-    Measured against a live endpoint with no `response_format`: **5 of 5**
-    responses were fenced, so this is the shape the third fallback actually
-    has to handle. Deliberately tolerant about the language tag and about
-    whether a newline follows it, and deliberately *not* a regex over the
-    whole string -- a fence-stripper that searched for the first `{` would
-    also "succeed" on prose containing a brace, which is a parse of
-    something nobody sent.
+    An endpoint asked for JSON without a `response_format` fences its answer,
+    which is the shape the third fallback has to handle. Deliberately tolerant
+    about the language tag and about whether a newline follows it, and
+    deliberately *not* a regex over the whole string -- a stripper that searched
+    for the first `{` would also "succeed" on prose containing a brace.
     """
     text = content.strip()
     if not text.startswith("```"):
@@ -109,7 +42,7 @@ def _strip_fence(content: str) -> str:
     text = text[3:]
     newline = text.find("\n")
     first_line = text[:newline] if newline != -1 else text
-    # ```json{...}``` -- no newline after the tag, observed.
+    # ```json{...}``` -- no newline after the tag.
     if first_line.strip().isalpha():
         text = text[newline + 1 :] if newline != -1 else ""
     elif text[:4].lower() == "json":
@@ -203,18 +136,15 @@ class OpenAICompatibleClient(LLMClient):
     def _decode(self, response: httpx.Response) -> dict[str, Any]:
         """Status first, then JSON, both from `usher.adapters.http`.
 
-        The ladder is `TmdbClient`'s ladder -- same four branches in the same
-        order, and the M4-against-TMDb measurements that justify them are
-        recorded with it rather than restated here. What this method still owns
-        is what it hands over: **no branch may interpolate the response body,
-        the URL or the prompt**, so neither call gets a `detail` and both are
-        given the `_ENDPOINT` constant as their subject. The one bounded
-        exception is the status code itself, which is a number.
+        The ladder is `TmdbClient`'s -- same four branches in the same order.
+        What this method owns is what it hands over: **no branch may interpolate
+        the response body, the URL or the prompt**, so neither call gets a
+        `detail` and both are given the `_ENDPOINT` constant as their subject.
+        The one bounded exception is the status code, which is a number.
 
         `decode_json`'s `RecursionError` arm is the exposed half of a pair --
-        `_parse`'s subject is bounded by `max_output_tokens` and shielded by
-        the truncation guard, while the envelope is whatever the endpoint, or a
-        proxy in front of it, put on the wire.
+        `_parse`'s subject is bounded by `max_output_tokens` and the truncation
+        guard, while the envelope is whatever a proxy put on the wire.
         """
         error = port_error_for(response, what=_ENDPOINT, request_line=f"POST {_COMPLETIONS_PATH}")
         if error is not None:
@@ -251,9 +181,8 @@ class OpenAICompatibleClient(LLMClient):
         try:
             parsed = json.loads(_strip_fence(content))
         except (ValueError, RecursionError) as exc:
-            # See `_decode`. Reachable here on the two unconstrained-generation
-            # fallbacks this module's docstring names, where a degenerate
-            # repeating loop is a shape this project has already measured.
+            # See `_decode`. Reachable on the two unconstrained-generation
+            # fallbacks, where a degenerate repeating loop is a real shape.
             raise PortDataMalformed("the completion was not JSON") from exc
         if not isinstance(parsed, dict):
             # The port is annotated `-> tuple[dict[str, Any], LLMUsage]`, and

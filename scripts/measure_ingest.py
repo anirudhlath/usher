@@ -1,41 +1,4 @@
-"""Measure a full reconcile at library scale.
-
-Answers the one question the test suite cannot: what does a walk of a real
-library *cost*, in statements and in wall time? **Not a test.** It seeds a
-`FakeEmbyServer` with tens of thousands of synthetic items and writes them
-to a real database, so it never runs in CI and never runs against a real
-catalog -- it truncates the tables it uses between passes.
-
-    docker run -d --name usher-measure -e POSTGRES_USER=usher \\
-      -e POSTGRES_PASSWORD=usher -e POSTGRES_DB=usher -p 55432:5432 \\
-      pgvector/pgvector:pg17
-    export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:55432/usher"
-    export USHER_SECRET_KEY="$(openssl rand -hex 32)"
-    uv run alembic upgrade head
-    uv run python scripts/measure_ingest.py --items 50000
-
-**The number that matters is statements per item.** A correct
-implementation is a small constant -- one staged `COPY` plus a handful of
-set-based statements per batch, so at a batch size of 1,000 it is well under
-0.05. Anything approaching 1.0 means something is per-item, and at 1,126,674
-items that is the difference between a walk that finishes overnight and one
-that does not.
-
-Two passes, because they answer different questions and the first one
-flatters the second. **Pass 1 is a cold catalog**: every movie and series is
-new, so `MatchService._create_stub` -- the one call in the pipeline that is
-not set-based -- fires once per new *title*. **Pass 2 is the nightly walk**:
-everything matches what pass 1 stored, no stub is created, and the count
-collapses to the batch-level constant. The shape is the measured library's:
-94,438 movies, 32,409 series, 999,827 episodes, so 89% episodes by default
--- and an episode never walks the match ladder at all, which is why the
-per-title cost is bounded by 11% of the library rather than by all of it.
-
-`kill -9 "$(cat pidfile)"` does not stop this if you background it: `uv run`
-forks a child rather than exec-replacing itself, so kill the whole process
-group (or `pgrep -P` the wrapper) or an orphaned writer keeps committing
-underneath your next measurement. That contaminated an M2 run.
-"""
+"""Measure a full reconcile at library scale."""
 
 import argparse
 import asyncio
@@ -70,14 +33,15 @@ from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.ports.credentials import SourceCredentials
+from usher.ports.events import NullEventPublisher
 from usher.ports.ingest import WatchStateMerge
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 
-# The measured deployment: 94,438 movies, 32,409 series, 999,827 episodes of
-# 1,126,674 items. Episodes are 88.7%, series 2.9%, movies 8.4%.
+# One real deployment's shape: episodes 88.7%, series 2.9%, movies 8.4% of
+# 1,126,674 items.
 EPISODE_SHARE = 0.887
 SERIES_SHARE = 0.029
 CHANGED_AT = datetime(2026, 7, 1, tzinfo=UTC)
@@ -86,8 +50,7 @@ CHANGED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 def _capture(
     predicate: Callable[[str], bool],
 ) -> tuple[list[tuple[str, Sequence[object]]], Callable[[], None]]:
-    """Record (statement, parameters) for statements matching `predicate`,
-    and the callable that stops recording."""
+    """Record `(statement, parameters)` for matches, and the stop callable."""
     seen: list[tuple[str, Sequence[object]]] = []
 
     def record(
@@ -107,10 +70,12 @@ def _capture(
 
 @contextmanager
 def counted() -> Iterator[list[str]]:
-    """Every statement SQLAlchemy issues. A `COPY` is invisible here --
-    `copy_records_to_table` runs on the raw asyncpg connection -- which is
-    the point: a `COPY` is one command however many records stream through
-    it."""
+    """Every statement SQLAlchemy issues.
+
+    A `COPY` is invisible here -- `copy_records_to_table` runs on the raw asyncpg
+    connection -- which is the point: a `COPY` is one command however many records
+    stream through it.
+    """
     seen: list[str] = []
 
     def record(
@@ -131,7 +96,7 @@ def counted() -> Iterator[list[str]]:
 
 
 def library(count: int) -> list[SourceItem]:
-    """`count` items in the measured library's proportions."""
+    """`count` items in a real library's proportions."""
     series_count = max(1, int(count * SERIES_SHARE))
     episode_count = int(count * EPISODE_SHARE)
     movie_count = count - series_count - episode_count
@@ -191,6 +156,7 @@ def _service(session: AsyncSession, *, batch_size: int) -> ReconcileService:
         ),
         media_items=media_items,
         runs=PostgresSyncRunRepository(session),
+        events=NullEventPublisher(),
         commit=session.commit,
         batch_size=batch_size,
     )
@@ -224,12 +190,9 @@ async def _walk(
             await adapter.aclose()
             await client.aclose()
 
-    # `TitleRepository.add` wraps its INSERT in a SAVEPOINT (it catches
-    # `IntegrityError` and must leave the session usable), so a stub really
-    # costs three statements, not one. Counting only the INSERT would
-    # under-report the one non-set-based path in the pipeline by 3x, which
-    # is exactly the sort of flattering arithmetic this script exists to
-    # avoid.
+    # `TitleRepository.add` wraps its INSERT in a SAVEPOINT (it catches `IntegrityError`
+    # and must leave the session usable), so a stub really costs three statements, not
+    # one.
     inserts = sum(1 for one in statements if one.lstrip().upper().startswith("INSERT INTO TITLES"))
     stub_cost = sum(
         1
@@ -325,8 +288,7 @@ async def _plan_of(session: AsyncSession, statement: str, parameters: Sequence[o
 
 
 async def scale(rows: int) -> None:
-    """The four scale risks Groups A-E flagged and could not measure, at the
-    scale that makes them real.
+    """The four scale risks, at the scale that makes them real.
 
     Each seeds its own population directly (a `generate_series` insert, not a
     walk -- the point is the read, not how the rows got there) and then plans

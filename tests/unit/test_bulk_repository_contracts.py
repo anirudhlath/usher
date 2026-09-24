@@ -1,7 +1,6 @@
-"""The bulk contracts, run against the in-memory doubles. No Docker.
+"""The bulk contracts, run against the in-memory doubles.
 
-tests/integration/test_bulk_repository.py runs the identical assertions
-against Postgres.
+No Docker.
 """
 
 import uuid
@@ -83,9 +82,11 @@ class TestFakeBulkCatalogRepository(BulkCatalogRepositoryContract):
         repo.seed_person_search_name(imdb_id, name)
 
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
-        """Vacuously true: this fake has no index to suspend. Asserted
-        anyway so the contract case is not skipped for one implementation
-        and enforced for the other."""
+        """Vacuously true: this fake has no index to suspend.
+
+        Asserted anyway so the contract case is not skipped for one implementation and
+        enforced for the other.
+        """
         assert isinstance(repo, FakeBulkCatalogRepository)
         return repo.window_depth == 0
 
@@ -94,3 +95,7 @@ class TestFakeImportRunRepository(ImportRunRepositoryContract):
     @pytest.fixture
     def runs(self) -> FakeImportRunRepository:
         return FakeImportRunRepository()
+
+    @pytest.fixture
+    def rival(self, runs: FakeImportRunRepository) -> FakeImportRunRepository:
+        return FakeImportRunRepository(shares=runs)

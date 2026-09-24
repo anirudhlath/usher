@@ -1,104 +1,4 @@
-"""Resolving how to play something, with a ticket in place of every URL.
-
-The service behind `POST /titles/{id}/play` and `POST /episodes/{id}/play`,
-and **the first thing in Usher whose honest answer can be "the source is down
-and I cannot serve this from local state"**. `services/titles.py` says the
-opposite about itself in as many words -- *"Nothing here calls a source, and
-that is the whole design... This service cannot produce that failure, so there
-is no status code to give a `code` to"* -- and this is the deliberate other
-side: `stream_targets` needs the item's own `MediaSources` payload (container,
-`MediaSourceId`), which is the network call, which is the 503.
-
-**Three outcomes, not two**, and the route branches on the value rather than
-on a message:
-
-- `PLAYABLE` -- targets were found, *even if another source failed*. A partial
-  degradation is still an answer, which is PRD 08's "a degraded subsystem
-  narrows functionality; it never fails a request local state can answer".
-- `UNAVAILABLE` -- nothing was found and at least one source could not answer.
-- `NOT_PLAYABLE` -- nothing was found and every source that holds a copy
-  answered. `SourceAdapter.stream_targets` documents `[]` as "no way to play
-  this" (a series or season folder, a media source with no container) and
-  explicitly not an error, and a household holding no copy is the ordinary
-  case: the catalog holds 1,271,138 titles against one measured source's
-  1,126,789 items.
-
-**The mixed case is decided here rather than left to the route.** One source
-answering `[]` while another is unreachable resolves to `UNAVAILABLE`, not
-`NOT_PLAYABLE`: "you cannot play this" is a claim about the household's whole
-holding, and a source that raised is a source that did not answer, so the
-claim is unsupported. The retryable reply is the honest one.
-
-**Ranking is the repository's, and this service never re-sorts.** Both
-`MediaItemRepository.list_for_title` and `list_for_episode` promise `available`
-first, then most recently seen, then `id` as a total-order tiebreak. Available
-copies first is not an availability *filter*: PRD 02's soft delete means a
-retracted copy very often still plays, and a household whose nightly sweep
-over-retracted must not be told it owns nothing (ADR-0015). A second sort here
-would be a second spelling of one rule, which is how two orderings come to
-disagree; targets are concatenated in copy order, each copy's own ranking
-(`stream_targets` answers "best first") preserved inside it.
-
-**One adapter per copy, built through the injected factory and closed in a
-`finally`** -- the exact path `SourceService.status` takes, whose comment is
-the reason verbatim: *"one adapter is one connection pool, and a status
-endpoint a dashboard polls would otherwise leak one per call"*. That costs one
-`AuthenticateByName` per copy per play against an upstream PRD 01 measures at
-1-5 s per request. Accepted, because it is the shape
-`GET /admin/sources/{id}/status` already ships; `SourceRegistry`
-(`composition.py`) already caches adapters for a registry's life and already
-has `rebind`, but hoisting it onto `app.state` would couple a client route to
-a background lane's lifetime and to the push lane's reconnect behaviour.
-Named, not decided. **`EmbySession` mints a session per adapter**: M3 measured
-that presenting a token with a different `DeviceId` neither forks nor
-invalidates a session, and `Source.device_id` is persisted, so devices do not
-accumulate -- sessions may, and that is worth watching in a live run.
-
-**`Source.enabled` is deliberately not consulted.** It is how an operator parks
-a server that is being rebuilt, and what it parks is the *background* work --
-`api/lanes.py` drops a disabled source's push lane, and the sync selection
-skips it. A client pressing play on a copy it can already see is foreground,
-and refusing it would be a second, unstated meaning for one flag. A parked
-server that really is down resolves to `UNAVAILABLE` with its name in the
-detail, which is the answer an operator can act on.
-
-**The detail an operator reads is a fixed sentence plus the source's name,
-never `str(exc)`.** `SourceService.status` draws the same line for the same
-reason: an upstream's own message quotes what it choked on, and what it choked
-on here is a URL with a token in it (ADR-0012). `str(exc)` goes to the log line
-and nowhere near a response.
-
-**Ticket substitution is total, and keyed rather than positional.** Every
-returned `url` is the injected `mint`'s answer, or a deep link wrapping one --
-ADR-0012 records that `dataclasses.asdict`, `vars()`, `json.dumps` and
-pydantic's `dump_json` all return `StreamTarget.url` in full, so a single
-target left unsubstituted publishes the credential the ticket exists to hide.
-A `DEEP_LINK` is matched to the `DIRECT` target **whose URL it contains**,
-never to the one beside it in the list: this repository has recorded the
-positional failure twice -- `SourceEvent.watch_states` is *"keyed by
-`external_id` rather than aligned by position"*, and M5's `zip` of a matched
-subset against a whole batch published item A's position under item B's id
-(`services/push.py:203-219`). A deep link wrapping no direct URL this service
-can see is **dropped, counted and logged**, because passing it through
-publishes exactly the token the ticket hides. One ticket per distinct source
-URL, memoised across the whole resolution, so both targets redeem the same
-string.
-
-**What `mint` is.** `Callable[[str], str]`, injected, so this service needs no
-cipher and no knowledge of the redeem route's path -- `services/playback_
-ticket.py` holds the primitive and the `/play` route owns the TTL and the URL
-shape (ADR-0029). Whatever `mint` returns is substituted verbatim; if it
-returns a whole `https://usher/stream/{ticket}` URL then that is what the deep
-link wraps, percent-encoded by `wrap_deep_link` exactly as it encoded the
-source URL before. Nothing here percent-encodes a ticket itself, so D1's
-`quote(ticket, safe="=")` finding lands at the route that builds the path
-segment and not in this module.
-
-**Spans only, no metric.** PRD 10 puts spend and outcomes in SQL and names no
-playback metric; M8's boundary call 7 is the precedent. No attribute here
-carries a URL, a ticket or a token -- ADR-0012's "never a span attribute" is
-about the source URL, and a ticket decrypts to one.
-"""
+"""Resolving how to play something, with a ticket in place of every URL."""
 
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -224,9 +124,9 @@ class PlaybackService:
         """Ranked targets for one episode.
 
         `list_for_episode`, not `list_for_title`: that read carries
-        `AND episode_id IS NULL`, which is exactly what makes it useless here
-        -- an episode's row is precisely one of the rows it excludes, and
-        999,927 of the one measured library's 1,126,789 items are episodes.
+        `AND episode_id IS NULL`, which is exactly what makes it useless here --
+        an episode's row is precisely one of the rows it excludes, and almost
+        every item in a television library is an episode.
         """
         with _tracer.start_as_current_span("playback.resolve") as span:
             span.set_attribute("usher.episode_id", str(episode_id))
@@ -309,9 +209,9 @@ class PlaybackService:
             credentials = await self._credentials.get(source.credentials_ref)
             if credentials is None:
                 # Answered without building an adapter, exactly as
-                # `SourceService.status` does: there is nothing to
-                # authenticate with, so a probe could only spend a 1-5 s
-                # round trip to learn what local state already knows.
+                # `SourceService.status` does: there is nothing to authenticate
+                # with, so a probe could only spend an upstream round trip to learn
+                # what local state already knows.
                 logger.warning(
                     "playback: source {source_id} has no stored credentials", source_id=source.id
                 )
@@ -326,7 +226,7 @@ class PlaybackService:
                 await adapter.aclose()
         except UsherPortError as exc:
             # `str(exc)` here and nowhere else: an upstream's message quotes
-            # the URL it choked on, and that URL carries a token (ADR-0012).
+            # the URL it choked on, and that URL carries a token.
             logger.warning(
                 "playback: source {source_id} could not serve {external_id}: {exc}",
                 source_id=source.id,
@@ -336,13 +236,13 @@ class PlaybackService:
             return None
 
     def _with_tickets(self, served: Sequence[tuple[Source, StreamTarget]]) -> list[PlaybackTarget]:
-        """Substitute a ticket for every URL. See the module docstring.
+        """Substitute a ticket for every URL.
 
-        **Two passes, and that is what makes the pairing order-independent.**
-        Every distinct direct URL is minted first, so a deep link that arrives
-        *before* the target it wraps still finds its ticket -- an
-        implementation that minted as it walked would depend on an adapter
-        returning direct targets first, which no port promises.
+        Two passes, and that is what makes the pairing order-independent. Every
+        distinct direct URL is minted first, so a deep link that arrives *before*
+        the target it wraps still finds its ticket -- an implementation that
+        minted as it walked would depend on an adapter returning direct targets
+        first, which no port promises.
         """
         minted: dict[str, str] = {}
         for _, target in served:
@@ -353,12 +253,9 @@ class PlaybackService:
             if target.kind is StreamTargetKind.DIRECT:
                 substituted = replace(target, url=minted[target.url])
             else:
-                # Every non-direct kind is treated as wrapping, which is the
-                # leak-safe default rather than an oversight: a fourth
-                # `StreamTargetKind` added later either matches by
-                # containment and is rebuilt, or is dropped. Passing an
-                # unrecognised kind through unchanged is the one behaviour
-                # that could publish a source URL.
+                # Every non-direct kind is treated as wrapping, which is the leak-safe
+                # default rather than an oversight: a fourth `StreamTargetKind` added
+                # later either matches by containment and is rebuilt, or is dropped.
                 carried = _carried_url(target.url, minted)
                 if carried is None:
                     continue
@@ -379,7 +276,7 @@ def _carried_url(deep_link: str, minted: Mapping[str, str]) -> str | None:
     that appeared raw would be a leak this must still catch rather than pass
     through.
 
-    **The longest match, not the first.** One source URL can contain another
+    The longest match, not the first: one source URL can contain another
     -- two Emby session tokens where one is a prefix of the other produce
     exactly that, and there is no delimiter after the token -- so a first
     match would hand a deep link the wrong copy's ticket.

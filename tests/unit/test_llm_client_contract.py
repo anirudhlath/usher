@@ -1,15 +1,4 @@
-"""`LLMClientContract` against both implementations that need no container.
-
-The fake and the adapter are held to the same suite for the reason every
-other contract suite in this repository exists: the two are only verified to
-agree if something runs the same assertions against both. `tests/fakes/
-llm_client.py`'s docstring enumerates the six places it is deliberately more
-forgiving, and those are exactly the places this suite says nothing about.
-
-A third subclass driving a **live** endpoint is in
-`tests/integration/test_llm_client_live.py` and skips itself unless one is
-configured.
-"""
+"""`LLMClientContract` against both implementations that need no container."""
 
 import json
 from typing import Any

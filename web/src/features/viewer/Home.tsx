@@ -305,7 +305,7 @@ interface RowCardTileProps {
 
 /**
  * `display_hint` picks the card component and nothing else. It says what shape
- * a card *is*; it never says where to put it (ADR-0006), which is why the
+ * a card *is*; it never says where to put it, which is why the
  * layout above is the same for every row.
  *
  * Continue-watching progress is the 3 px bar `PosterCard` and `LandscapeCard`

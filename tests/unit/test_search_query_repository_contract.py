@@ -1,19 +1,12 @@
-"""`FakeSearchQueryRepository` against the shared `SearchQueryRepository`
-contract.
-
-No Docker, no database. See `tests/fakes/search_query_repository.py` for the
-four places this half is more forgiving than
-`tests/integration/test_search_query_repository.py`'s -- chiefly that the
-fake has no foreign keys and no client-side integer encoder, so the two
-`RepositoryConflict` cases about *values* a column cannot hold are
-Postgres-only.
-"""
+"""`FakeSearchQueryRepository` against the shared `SearchQueryRepository` contract."""
 
 import uuid
 
 import pytest
 
 from tests.contract.search_query_repository_contract import (
+    ReferenceCounts,
+    ReferenceRowCounts,
     SearchQueryLedger,
     SearchQueryRepositoryContract,
     StoredSearchQuery,
@@ -25,11 +18,8 @@ from usher.domain.ids import new_id
 class FakeSearchQueryLedger(SearchQueryLedger):
     """Reads the fake's own two dicts.
 
-    Bypasses nothing, because there is nothing to bypass: the port has no
-    read method on either arm, so `record()`/`record_outcome()` are the only
-    writers and the ledger's whole job is to observe. It is a
-    `SearchQueryLedger` rather than a direct reach into `repository.rows` so
-    that the *same* observation is made on both arms.
+    A `SearchQueryLedger` rather than a direct reach into `repository.rows`, so that
+    both arms of the contract make the same observation.
     """
 
     def __init__(self, repository: FakeSearchQueryRepository) -> None:
@@ -50,16 +40,39 @@ class FakeSearchQueryLedger(SearchQueryLedger):
             latency_ms=record.latency_ms,
             clicked_title_id=clicked_title_id,
             played=played,
+            # Read off the record the fake stored rather than defaulted here:
+            # a ledger supplying `SEARCH`/`None` of its own would make the
+            # suggest case pass on this arm whatever the fake did with them.
+            surface=record.surface,
+            tier=record.tier,
         )
 
     async def count(self) -> int:
         return len(self._repository.rows)
 
 
+class FakeReferenceCounts(ReferenceCounts):
+    """The two tables the fake does not have, modelled as constants.
+
+    A divergence rather than a shortcut: `search_queries` being a leaf is a property of
+    two foreign keys and this arm has none, so "the prune took no household and no
+    title" holds here by construction. The claim is load-bearing only on the Postgres
+    arm, where `tests/integration/test_search_query_repository.py` counts real rows. The
+    counts are 1 each so the case's premise guard is satisfied honestly.
+    """
+
+    async def read(self) -> ReferenceRowCounts:
+        return ReferenceRowCounts(users=1, titles=1)
+
+
 class TestFakeSearchQueryRepository(SearchQueryRepositoryContract):
     @pytest.fixture
     def repository(self) -> FakeSearchQueryRepository:
         return FakeSearchQueryRepository()
+
+    @pytest.fixture
+    def counts(self) -> FakeReferenceCounts:
+        return FakeReferenceCounts()
 
     @pytest.fixture
     def ledger(self, repository: FakeSearchQueryRepository) -> FakeSearchQueryLedger:

@@ -1,12 +1,4 @@
-"""The shared contract against real Postgres, plus the four things a dict
-cannot express: a foreign key, a CHECK constraint, a
-`CardinalityViolationError`, and a poisoned session.
-
-`FakeEpisodeRepository` keys on the natural key, so every "duplicate inside
-one batch" case passes there because a dict cannot hold a key twice. Here the
-same batch is a real `ON CONFLICT DO UPDATE command cannot affect row a
-second time` unless the staging read is `SELECT DISTINCT ON`.
-"""
+"""The shared contract against real Postgres, plus the four things a dict cannot express."""
 
 import re
 import uuid
@@ -22,6 +14,7 @@ from tests.contract.episode_repository_contract import (
     OTHER_SEEDED_KEYS,
     SEEDED_KEYS,
     EpisodeRepositoryContract,
+    EpisodeRepositoryNaturalKeyContract,
     EpisodeRepositoryNextUpContract,
     MarkPlayed,
     MarkSeriesPlayed,
@@ -38,6 +31,7 @@ from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.ingest import WatchStateMerge
+from usher.ports.repository import EpisodeReference, TitleReference
 
 
 @pytest.fixture
@@ -61,8 +55,11 @@ async def other_title_id(session: AsyncSession) -> uuid.UUID:
 
 @pytest_asyncio.fixture
 async def season_id(session: AsyncSession, title_id: uuid.UUID) -> uuid.UUID:
-    """A real season row: `episodes.season_id` is `NOT NULL` with an
-    `ON DELETE CASCADE` FK, so an episode cannot exist without one."""
+    """A real season row.
+
+    `episodes.season_id` is `NOT NULL` with an `ON DELETE CASCADE` FK, so an episode
+    cannot exist without one.
+    """
     identifier = new_id()
     await session.execute(
         text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
@@ -73,9 +70,7 @@ async def season_id(session: AsyncSession, title_id: uuid.UUID) -> uuid.UUID:
 
 @pytest_asyncio.fixture
 async def other_season_id(session: AsyncSession, other_title_id: uuid.UUID) -> uuid.UUID:
-    """A second series' season 1, so a batch can carry two shows' S01E01 --
-    which is what every page of a real walk carries and what the old
-    single-title `resolve` could not express."""
+    """A second series' season 1, so a batch can carry two shows' S01E01, as a walk does."""
     identifier = new_id()
     await session.execute(
         text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
@@ -182,8 +177,7 @@ def mark_in_progress(session: AsyncSession, user_id: uuid.UUID) -> MarkPlayed:
 
 @pytest.fixture
 def mark_series_played(session: AsyncSession, user_id: uuid.UUID) -> MarkSeriesPlayed:
-    """The row Emby writes when a user marks a whole show watched: keyed on
-    the series' `title_id`, with no episode at all."""
+    """The row Emby writes when a user marks a whole show watched, with no episode at all."""
 
     async def _mark(series_id: uuid.UUID) -> None:
         await PostgresWatchStateRepository(session).merge_from_source(
@@ -200,10 +194,11 @@ class TestPostgresEpisodeRepository(EpisodeRepositoryContract, EpisodeRepository
 async def test_a_title_id_no_title_carries_is_a_port_error(
     repository: PostgresEpisodeRepository,
 ) -> None:
-    """The case the fake's docstring names as its own divergence: a dict has
-    no foreign keys, so it can store an episode hung off nothing. Postgres
-    raises, and `services/` must not have to import `sqlalchemy.exc` to handle
-    it (ADR-0009)."""
+    """A dict has no foreign keys, so it can store an episode hung off nothing.
+
+    Postgres raises, and `services/` must not have to import `sqlalchemy.exc` to
+    handle it.
+    """
     with pytest.raises(RepositoryConflict) as caught:
         await repository.upsert_seasons([season(new_id(), 1)])
     assert caught.value.constraint == "fk_seasons_title_id_titles"
@@ -212,10 +207,12 @@ async def test_a_title_id_no_title_carries_is_a_port_error(
 async def test_a_season_id_no_season_carries_is_a_port_error(
     repository: PostgresEpisodeRepository, title_id: uuid.UUID
 ) -> None:
-    """`episodes` has two FKs, not one, and an implementation that declared
-    only `title_id`'s would let an episode name a season that never existed --
-    which is exactly what happens when a walk sees an episode before its
-    season."""
+    """`episodes` has two foreign keys, not one.
+
+    An implementation that declared only `title_id`'s would let an episode name a
+    season that never existed -- which is exactly what happens when a walk sees an
+    episode before its season.
+    """
     with pytest.raises(RepositoryConflict) as caught:
         await repository.upsert_episodes([episode(title_id, new_id(), 1)])
     assert caught.value.constraint == "fk_episodes_season_id_seasons"
@@ -224,10 +221,12 @@ async def test_a_season_id_no_season_carries_is_a_port_error(
 async def test_a_caught_conflict_leaves_the_session_usable(
     repository: PostgresEpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
 ) -> None:
-    """Postgres aborts the entire transaction on any statement error until a
-    ROLLBACK, so without a SAVEPOINT a caught conflict poisons the session for
-    the caller's next, unrelated call -- and this repository's caller commits a
-    batch of episodes together with its sync-run checkpoint."""
+    """Postgres aborts the entire transaction on any statement error until a ROLLBACK.
+
+    Without a SAVEPOINT a caught conflict poisons the session for the caller's next,
+    unrelated call -- and this repository's caller commits a batch of episodes
+    together with its sync-run checkpoint.
+    """
     with pytest.raises(RepositoryConflict):
         await repository.upsert_seasons([season(new_id(), 1)])
     result = await repository.upsert_episodes([episode(title_id, season_id, 1)])
@@ -237,9 +236,10 @@ async def test_a_caught_conflict_leaves_the_session_usable(
 async def test_a_failed_batch_writes_none_of_itself(
     repository: PostgresEpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
 ) -> None:
-    """The SAVEPOINT is what makes a batch atomic across its staging DDL, its
-    `COPY` and its upsert. Half of a 1,000-episode batch landing would leave
-    an ingest run unable to tell what it still owes."""
+    """The SAVEPOINT makes a batch atomic across its staging DDL, `COPY` and upsert.
+
+    Half a batch landing would leave an ingest run unable to tell what it still owes.
+    """
     with pytest.raises(RepositoryConflict):
         await repository.upsert_episodes(
             [episode(title_id, season_id, 1), episode(title_id, new_id(), 2)]
@@ -254,19 +254,19 @@ async def test_a_failed_batch_writes_none_of_itself(
 async def test_a_negative_runtime_is_a_port_error_not_a_copy_failure(
     repository: PostgresEpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
 ) -> None:
-    """`usher.db.staging`'s tables are deliberately unconstrained, so a value
-    that violates the *destination's* CHECK survives the `COPY` and fails one
-    statement later at the `INSERT ... SELECT` -- which goes through SQLAlchemy
-    and is therefore an `IntegrityError` this repository can translate. Had the
-    constraint been on the staging table, `copy_records_to_table` would raise
-    asyncpg's own `CheckViolationError` straight past the `except`.
+    """`usher.db.staging`'s tables are deliberately unconstrained.
 
-    `Episode.runtime_minutes` carries `Field(ge=0)`, so the offending row
-    cannot be built through the normal path at all -- `model_construct` is
-    pydantic's own "skip validation" constructor and is the deliberate tool
-    here, not a stand-in for `.evolve()`. That is also the honest shape: the
-    `COPY` path never sees a pydantic model, so the only thing standing
-    between a mis-mapped adapter value and this column is the CHECK.
+    A value that violates the *destination's* CHECK survives the `COPY` and fails one
+    statement later at the `INSERT ... SELECT`, which goes through SQLAlchemy and is
+    therefore an `IntegrityError` this repository can translate. Had the constraint
+    been on the staging table, `copy_records_to_table` would raise asyncpg's own
+    `CheckViolationError` straight past the `except`.
+
+    `Episode.runtime_minutes` carries `Field(ge=0)`, so the offending row cannot be
+    built through the normal path at all -- `model_construct` is pydantic's own "skip
+    validation" constructor and is the deliberate tool here. The `COPY` path never
+    sees a pydantic model, so the only thing standing between a mis-mapped adapter
+    value and this column is the CHECK.
     """
     invalid = Episode.model_construct(
         **{**episode(title_id, season_id, 1).model_dump(), "runtime_minutes": -1}
@@ -282,23 +282,19 @@ async def test_the_update_trigger_owns_updated_at(
     title_id: uuid.UUID,
     season_id: uuid.UUID,
 ) -> None:
-    """`trg_episodes_set_updated_at` is a `BEFORE UPDATE` trigger assigning
-    `now()` unconditionally, and it exists precisely because this path never
-    goes through the ORM -- SQLAlchemy's `onupdate=` never fires for an
-    `INSERT ... SELECT` off a staging table. Recorded rather than assumed,
-    because `FakeEpisodeRepository` carries the incoming model's `updated_at`
-    through instead.
+    """`trg_episodes_set_updated_at` assigns `now()` on every update, unconditionally.
 
-    **The starting row is inserted by hand with a backdated `updated_at`, and
-    that is not incidental.** `set_updated_at()` assigns `now()`, which is
-    `transaction_timestamp()` and therefore *frozen* for the life of a
-    transaction -- and this suite's fixture is one long transaction. Two
-    updates through the repository read back the identical instant, so
-    "the second write is later than the first" is unobservable here and says
-    nothing about whether the trigger fired at all. Backdating gives it
-    something to move away from. (The trigger cannot be dodged with a plain
-    `UPDATE` either, since it fires on that too -- hence a raw `INSERT`, which
-    it does not.)
+    It exists because this path never goes through the ORM -- SQLAlchemy's `onupdate=`
+    never fires for an `INSERT ... SELECT` off a staging table -- and is asserted
+    rather than assumed, because `FakeEpisodeRepository` carries the incoming model's
+    `updated_at` through instead.
+
+    **The starting row is inserted by hand with a backdated `updated_at`, and that is
+    not incidental.** `now()` is `transaction_timestamp()` and therefore *frozen* for
+    the life of a transaction, and this suite's fixture is one long transaction, so
+    two writes read back the identical instant and "the second is later" says nothing.
+    Backdating gives it something to move away from. (A plain `UPDATE` cannot dodge
+    the trigger either, hence a raw `INSERT`, which it does not fire on.)
     """
     await session.execute(
         text(
@@ -350,9 +346,11 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     season_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """999,827 of the one measured source's 1,126,674 items are episodes, so
-    a per-row write here is ~19 minutes of pure repository overhead per full
-    walk before a byte of upstream I/O."""
+    """A batch costs the same number of statements however big it is.
+
+    Most of a library's items are episodes, so a per-row write here is minutes of pure
+    repository overhead per full walk, before a byte of upstream I/O.
+    """
     statement_counter.clear()
     await repository.upsert_episodes([episode(title_id, season_id, index) for index in range(1, 6)])
     small = len(statement_counter)
@@ -374,10 +372,11 @@ async def test_resolve_costs_one_statement_for_a_whole_page(
     other_season_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
-    """Two series in the batch, deliberately: the property is one statement
-    for the whole *page*, not one per series. `FakeEpisodeRepository` counts
-    calls and so can pin the service's side of this; only here can the
-    statement count be real."""
+    """Two series in the batch, because the property is one statement per *page*.
+
+    `FakeEpisodeRepository` counts calls and so can pin the service's side of this;
+    only here can the statement count be real.
+    """
     await repository.upsert_episodes(
         [episode(title_id, season_id, index) for index in range(1, 201)]
         + [episode(other_title_id, other_season_id, index) for index in range(1, 201)]
@@ -420,13 +419,11 @@ async def test_next_up_costs_one_statement_however_many_series_are_asked_about(
     mark_played: MarkPlayed,
     statement_counter: list[str],
 ) -> None:
-    """`NextUpProvider` asks about every series the household has started, so
-    a per-series loop is one round trip per started series -- and it returns
-    the identical mapping, which is why nothing about the result can see it.
+    """`NextUpProvider` asks about every series the household has started, in one statement.
 
-    `list_for_title` is the method a loop would reach for and it returns the
-    whole tree: 20,000 rows for the measured pathological series, four
-    million to produce two hundred cards.
+    A per-series loop is one round trip per started series and returns the identical
+    mapping, which is why nothing about the result can see it. `list_for_title` is the
+    method a loop would reach for, and it returns the whole tree.
     """
     await mark_played(seeded[(1, 1)])
     await mark_played(other_seeded[(1, 1)])
@@ -443,26 +440,9 @@ async def test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes(
     series_id: uuid.UUID,
     seeded: dict[tuple[int, int], uuid.UUID],
 ) -> None:
-    """Scoped to the stage with an ordering to serve, per the standing rule:
-    `uq_episodes_title_season_episode` must appear and `Seq Scan on episodes`
-    must not. Nothing is asserted about the rest of the plan, because an
-    eight-episode fixture seq-scans whatever it is given and an unscoped
-    assertion would be a claim about the fixture.
+    """Scoped to the stage with an ordering to serve, per the standing rule.
 
-    This is also the case that justifies **not** adding an index in Task 17.
-    Both spellings of the comparison return identical rows, so nothing about
-    a result can tell them apart.
-
-    **The third assertion is the one with teeth, and the first two are not
-    enough -- measured.** A correctly hand-expanded `OR` still names
-    `uq_episodes_title_season_episode` (the *mark* side uses it either way)
-    and still shows no `Seq Scan` under `enable_seqscan = off`, so that
-    mutation survived both of them. What separates the spellings is *where*
-    the comparison lands: as an `Index Cond` it bounds the scan, and as a
-    `Filter` it reads the whole series and discards. At catalog scale --
-    32,409 series, 999,827 episodes, 200 probed -- that is 15.7 ms against
-    134.1 ms with a `Seq Scan` over every episode in the library, for the
-    identical 200 rows.
+    `uq_episodes_title_season_episode` must appear and `Seq Scan on episodes` must not.
     """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
     result = await session.execute(
@@ -473,3 +453,78 @@ async def test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes(
     assert "uq_episodes_title_season_episode" in plan, plan
     assert "Seq Scan on episodes" not in plan, plan
     assert re.search(r"Index Cond:.*ROW\(season_number, episode_number\)", plan), plan
+
+
+@pytest_asyncio.fixture
+async def series_reference(session: AsyncSession, title_id: uuid.UUID) -> TitleReference:
+    """The `title_id` fixture's own row, given the two provider ids the ladder resolves on.
+
+    An `UPDATE` rather than a second `titles` row: the natural key has to be
+    true of the series the episodes actually hang from, and a fixture that
+    seeded a *different* title would make every case here resolve to nothing
+    while looking like coverage.
+    """
+    await session.execute(
+        text("UPDATE titles SET imdb_id = :imdb, tmdb_id = :tmdb WHERE id = :id"),
+        {"imdb": "tt99001001", "tmdb": 99001001, "id": title_id},
+    )
+    return TitleReference(
+        kind=TitleKind.SERIES, id=title_id, imdb_id="tt99001001", tmdb_id=99001001
+    )
+
+
+@pytest_asyncio.fixture
+async def other_series_reference(
+    session: AsyncSession, other_title_id: uuid.UUID
+) -> TitleReference:
+    await session.execute(
+        text("UPDATE titles SET imdb_id = :imdb, tmdb_id = :tmdb WHERE id = :id"),
+        {"imdb": "tt99001002", "tmdb": 99001002, "id": other_title_id},
+    )
+    return TitleReference(
+        kind=TitleKind.SERIES, id=other_title_id, imdb_id="tt99001002", tmdb_id=99001002
+    )
+
+
+class TestPostgresEpisodeRepositoryNaturalKeys(EpisodeRepositoryNaturalKeyContract):
+    """`resolve_natural_keys` against real Postgres, where the join can actually fail.
+
+    The four-way join, `WITH ORDINALITY`, and the inner join that makes an unresolved
+    series and an unresolved episode one answer.
+    """
+
+
+async def test_resolving_episode_natural_keys_costs_one_statement_for_a_whole_batch(
+    repository: PostgresEpisodeRepository,
+    title_id: uuid.UUID,
+    season_id: uuid.UUID,
+    series_reference: TitleReference,
+    statement_counter: list[str],
+) -> None:
+    """A restore resolving the series and then the episode is the refused N+1, doubled.
+
+    Most of a library's items are episodes, so two round trips a row is the shape this
+    port already refuses twice. The fake cannot express it: `title_keys` there is a
+    dict, so there is no round trip to count and `calls` is a stand-in.
+    """
+    await repository.upsert_episodes(
+        [episode(title_id, season_id, number) for number in range(1, 6)]
+    )
+    carried = [
+        EpisodeReference(title=series_reference, season_number=1, episode_number=number)
+        for number in range(1, 6)
+    ]
+
+    statement_counter.clear()
+    await repository.resolve_natural_keys(carried[:1])
+    one_key = len(statement_counter)
+
+    statement_counter.clear()
+    answers = await repository.resolve_natural_keys(carried)
+    whole_batch = len(statement_counter)
+
+    assert one_key == 1, f"one reference cost {one_key} statements: {statement_counter}"
+    assert whole_batch == one_key, (
+        f"{one_key} statement(s) for one reference, {whole_batch} for five"
+    )
+    assert len(answers) == 5, "the premise: every reference in the batch really resolved"

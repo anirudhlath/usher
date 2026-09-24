@@ -1,13 +1,7 @@
-"""In-memory TitleRepository, for services to be unit-tested against.
-
-Lives outside `tests/unit/` deliberately: from M4 onward, service tests
-import this the same way an adapter imports its port, and importing a test
-*module* (`tests.unit.test_ports`) would drag in that module's fixtures and
-parametrized tests along with it.
-"""
+"""In-memory TitleRepository, for services to be unit-tested against."""
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -20,19 +14,14 @@ from usher.ports.repository import (
     BrowseFacets,
     BrowseSort,
     TitleGenres,
+    TitleReference,
     TitleRepository,
 )
 
-# Mirrors db/models/title.py's three partial unique indexes exactly, name
-# for name -- this is what lets RepositoryConflict.constraint agree
-# between this fake and the real, Postgres-backed repository (which reads
-# its constraint name from asyncpg's own structured error fields; see
-# title.py's _constraint_name). Checked in this fixed order so the fake is
-# deterministic when a candidate conflicts on more than one field at once.
-#
-# tmdb_id's entry carries `kind_scoped=True`: its index is composite
-# (tmdb_id, kind), so two rows sharing a tmdb_id across kinds do NOT
-# conflict. ADR-0011.
+# Mirrors db/models/title.py's three partial unique indexes exactly, name for name --
+# this is what lets RepositoryConflict.constraint agree between this fake and the real,
+# Postgres-backed repository (which reads its constraint name from asyncpg's own
+# structured error fields; see title.py's _constraint_name).
 _PROVIDER_ID_CONSTRAINTS: tuple[tuple[str, str, bool], ...] = (
     ("tmdb_id", "ix_titles_tmdb_id_kind", True),
     ("imdb_id", "ix_titles_imdb_id", False),
@@ -41,18 +30,13 @@ _PROVIDER_ID_CONSTRAINTS: tuple[tuple[str, str, bool], ...] = (
 
 
 def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
-    """The constraint name Postgres's own partial unique index would
-    report for the first non-null tmdb_id, imdb_id, or tvdb_id `candidate`
-    and `other` (a different row) share -- `None` if they don't conflict.
+    """The constraint name Postgres's partial unique index would report for a clash.
 
-    Mirrors `db/models/title.py`'s three partial unique indexes
-    (`ix_titles_tmdb_id_kind`/`ix_titles_imdb_id`/`ix_titles_tvdb_id` —
-    unique only where the column `IS NOT NULL`, so many rows may share a
-    null provider id) — without this, the fake would let a service add or
-    update two rows onto the same TMDb/IMDb/TVDB title in a unit test,
-    while the real, Postgres-backed repository rejects the identical call
-    with `RepositoryConflict`. That divergence would only surface in
-    production, which is exactly what a fake exists to prevent.
+    The first non-null `tmdb_id`, `imdb_id` or `tvdb_id` that `candidate` and `other`
+    share, or `None` if they do not conflict. Mirrors `db/models/title.py`'s three
+    partial unique indexes, which are unique only where the column `IS NOT NULL`;
+    without this the fake would let a service put two rows onto one provider title
+    where the Postgres-backed repository raises `RepositoryConflict`.
     """
     for field, constraint, kind_scoped in _PROVIDER_ID_CONSTRAINTS:
         value = getattr(candidate, field)
@@ -64,10 +48,40 @@ def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
     return None
 
 
+def resolve_title_reference(
+    wanted: TitleReference, stored: Iterable[TitleReference]
+) -> uuid.UUID | None:
+    """`usher.db.backup_identity.RESOLUTION_ORDER`, in Python.
+
+    `imdb_id`, then `(kind, tmdb_id)`, then the raw id, first hit wins. **One
+    definition, imported by `FakeEpisodeRepository` rather than re-spelled there**:
+    two copies of a three-rung ladder are two chances for one to lose a rung, and the
+    divergence would be invisible to the *title* contract cases.
+
+    Case-exact on `imdb_id` (`==`, never `casefold`), and `kind`-scoped on `tmdb_id`,
+    both of which the Postgres arm gets from its own `=` over `text` and from the
+    composite join predicate.
+    """
+    if wanted.imdb_id is not None:
+        for one in stored:
+            if one.imdb_id == wanted.imdb_id:
+                return one.id
+    if wanted.tmdb_id is not None:
+        for one in stored:
+            if one.tmdb_id == wanted.tmdb_id and one.kind is wanted.kind:
+                return one.id
+    for one in stored:
+        if one.id == wanted.id:
+            return one.id
+    return None
+
+
 def _conflict(title_id: uuid.UUID, constraint: str) -> RepositoryConflict:
-    """Same message shape as the real repository's title.py:_conflict --
-    see that function's docstring for why it never claims `title_id`
-    itself already exists."""
+    """Same message shape as the real repository's `title.py:_conflict`.
+
+    See that function's docstring for why it never claims `title_id` itself already
+    exists.
+    """
     return RepositoryConflict(
         f"title {title_id} conflicts with an existing title (constraint: {constraint})",
         constraint=constraint,
@@ -76,18 +90,14 @@ def _conflict(title_id: uuid.UUID, constraint: str) -> RepositoryConflict:
 
 @dataclass(frozen=True, slots=True)
 class FakeWatchRow:
-    """One `watch_states` row, as much of it as `list_unwatched_candidates`
-    reads.
+    """One `watch_states` row, as much of it as `list_unwatched_candidates` reads.
 
-    **Both targets are modelled rather than collapsed to a title id**, for
-    `available_copies`' reason one table over: the real statement rolls a
-    watched episode up through `episodes.title_id`, and a fake holding
-    already-rolled-up title ids could not tell that implementation from the
-    one that answers films-only on a library that is 89% episodes.
-
-    `played` is a field rather than a filter applied on the way in, because
-    "has a watch state" is the wrong predicate this read has to rule out and a
-    store holding only played rows could not express it.
+    **Both targets are modelled rather than collapsed to a title id**: the real
+    statement rolls a watched episode up through `episodes.title_id`, and a fake
+    holding already-rolled-up title ids could not tell that implementation from the
+    one that answers films-only on a library that is mostly episodes. `played` is a
+    field rather than a filter applied on the way in, because "has a watch state" is
+    the wrong predicate this read has to rule out.
     """
 
     user_id: uuid.UUID
@@ -97,129 +107,17 @@ class FakeWatchRow:
 
 
 class FakeTitleRepository(TitleRepository):
-    """Keyed the same way the real Postgres-backed
-    `PostgresTitleRepository` (Task 10) is: by id, with tmdb_id and
-    imdb_id as secondary lookups. `add`/`update` mirror the real
-    insert-only/update-only split documented on `TitleRepository` — a
-    duplicate `add` raises `RepositoryConflict` and a missing-id `update`
-    raises `RepositoryNotFound`, the same exceptions the real,
-    Postgres-backed repository raises (translated from `IntegrityError`
-    and a missing row respectively). A fake that raised anything else
-    would defeat the point: a service unit-tested against this one must
-    see the same failure shape it would see in production. That includes
-    a duplicate tmdb_id/imdb_id/tvdb_id under a *different* id — the real
-    repository's unique partial indexes reject that too (see
-    `_provider_id_conflict`), so this fake does the same.
-
-    **Where `list_unwatched_candidates` here is more forgiving than the
-    statement, on purpose. Seven, each of which the paired
-    `tests/integration/test_title_repository.py` run is what actually closes:**
-
-    - **"No ordering at all" is not expressible.** `list.sort` is stable, so
-      deleting a key -- or the whole `sort` call -- still answers in insertion
-      order here, where the real statement's deleted `ORDER BY` answers in
-      heap order. That is why every ordering case in
-      `TitleRepositoryCandidateContract` is seeded worst-first: with a
-      best-first fixture neither arm would notice.
-    - **The roll-up is a mapping handed in, not a `LEFT JOIN episodes`.** The
-      real one reaches a series through `episodes.title_id`; this has no
-      episodes table, so `episode_series` is seeded by the caller.
-      `FakeWatchStateRepository` records the identical divergence for
-      `list_recent`, and it is the reason the episode case is load-bearing in
-      the integration run and merely available here.
-    - **The genre overlap is a Python set intersection.** `&&` on the generic
-      `ARRAY(Text)` these columns are declared with is exactly the shape
-      `list_owned_by_tag` records raising `NotImplementedError` for its
-      sibling `@>` -- an operator that fails at statement-build time against
-      Postgres and cannot fail at all against a set.
-    - **`NULLS LAST` is a two-part Python key, so the two agree only because
-      both were written to.** Postgres defaults a `DESC` sort to NULLS FIRST
-      and Python raises on comparing `None`; the tempting repair on either
-      side (`or 0`, or the default) is a wrong answer rather than a crash.
-    - **No `users` table and no foreign key**, so a `user_id` naming no
-      household is accepted here and is a `ForeignKeyViolationError` there --
-      which is why the integration arm's `user_id` fixture writes a real row
-      rather than minting a bare id.
-    - **`media_items.available` is not modelled at all.** `available_copies`
-      holds the *available* half by construction, so a retracted copy leaves
-      no trace and the statement's `WHERE available` predicate is unobservable
-      from here. `test_a_copy_the_source_has_retracted_does_not_rank_as_owned`
-      is therefore load-bearing only in the integration run, and the
-      corresponding mutation survived the whole suite until that case existed.
-    - **`available_copies` cannot tell an episode's copy from a title's**, so
-      the divergence from `owned_title_ids` -- no `episode_id IS NULL` bound
-      -- is likewise Postgres-only. The list stores an episode id for the
-      episode case, which records the caller's intent and changes no answer
-      here; only a real `media_items` row carrying **both** ids (the
-      production shape, per `ports/ingest.py`'s `MediaItemTarget`) can fail
-      against a spurious bound.
-
-    **And where `browse`/`browse_facets` here are more forgiving. Five, and
-    the first is the one this port's whole design turns on:**
-
-    - **A NULL cannot poison a comparison in Python, so the keyset's hardest
-      failure is Postgres-only.** `((k IS NOT NULL), k, id) > (...)` answers
-      **NULL** — not false — for an unkeyed boundary and silently drops the
-      rest of the unkeyed group; the Python transcription of the same mistake
-      (`None > None`) raises `TypeError`, loudly, in the first case that
-      reaches it. So `test_a_page_boundary_inside_the_unkeyed_group_does_not_
-      drop_the_rest_of_it` is a *quiet* defect there and a crash here, and only
-      the integration arm reproduces the shipped hazard.
-    - **`NULLS LAST` is two lists rather than a clause**, for the reason
-      `list_unwatched_candidates` records one bullet up: the two agree only
-      because both were written to, and Postgres's `DESC` default is the
-      opposite of what the read wants.
-    - **`@>` is `in` and `unnest` is a `for` loop.** Neither operator exists
-      here to be spelled wrongly, and the genre facet's subquery has no Python
-      counterpart at all.
-    - **`media_items.available` is still not modelled**, so browse's
-      *retracted* distractor is load-bearing only in the integration run —
-      exactly as it is for `list_unwatched_candidates`. The `episode_id IS
-      NULL` half of the same filter **is** expressible here, because
-      `available_copies` stores `None` for a title-level copy and an episode
-      id for an episode one, which is the one bound this fake can tell apart.
-    - **`browse` cannot be spelled with an `OFFSET` by accident.** The fake
-      holds a list and the port takes a position, so the defect PRD 07 refuses
-      has to be written deliberately to be observed. The comparison against a
-      real `OFFSET`, over a real concurrent write, is
-      `tests/integration/test_title_repository.py::test_offset_duplicates_a_
-      row_a_concurrent_insert_pushed_down_and_the_keyset_does_not`.
-    """
+    """Keyed as `PostgresTitleRepository` is: by id, with tmdb_id and imdb_id secondary."""
 
     def __init__(self) -> None:
         self._titles: dict[uuid.UUID, Title] = {}
-        # `titles.credit_names`. Public because `CreditRepository` is what
-        # writes it -- `credit_names` is not a `Title` field (DERIVED_COLUMNS)
-        # and `update()` cannot reach it, which is the guarantee rather than
-        # the cost -- so `FakeCreditRepository` is handed this dict the way
-        # `FakeCollectionRepository` is handed a catalog. A test that writes
-        # it directly is standing in for a derivation, not for the port.
+        # `titles.credit_names`.
         self.credit_names: dict[uuid.UUID, tuple[str, ...]] = {}
-        # `media_items`, as much of it as `list_owned_by_tag` reads: a title
-        # maps to the episode ids of its available copies, with `None` for a
-        # title-level one. Public and seeded directly, the affordance
-        # `FakeCollectionRepository.catalog` and `FakePersonRepository.
-        # household` already are -- this fake models one table and the read
-        # semi-joins another, so the alternative is a fake that answers
-        # "unowned" for everything and a contract case that cannot be written.
-        #
-        # **Episode ids are modelled rather than collapsed to a bool**, and
-        # that is the point of the shape: the real statement deliberately does
-        # *not* carry `episode_id IS NULL`, so a series owned only through its
-        # episodes is owned, and a fake holding a bare set could not tell that
-        # implementation from the one that reports every series unowned.
+        # `media_items`, as much of it as `list_owned_by_tag` reads: a title maps to the
+        # episode ids of its available copies, with `None` for a title-level one.
         self.available_copies: dict[uuid.UUID, list[uuid.UUID | None]] = {}
         # `watch_states` and `episodes.title_id`, as much of the two as
-        # `list_unwatched_candidates` reads. Public and seeded directly, the
-        # same affordance `available_copies` above is and for the same reason:
-        # this fake models one table and the read anti-joins two others, so
-        # the alternative is a fake that answers "unwatched" for everything
-        # and a set of contract cases that cannot be written.
-        #
-        # A list rather than a dict keyed on the household: the real statement
-        # scans `watch_states` and a per-user dict would make the `user_id`
-        # predicate structurally true here, which is exactly the divergence
-        # that makes a case vacuous.
+        # `list_unwatched_candidates` reads.
         self.watch_states: list[FakeWatchRow] = []
         # `episodes.title_id` -- the roll-up's other side, and the reason
         # `FakeWatchStateRepository` takes an `episode_series` mapping too. An
@@ -237,17 +135,9 @@ class FakeTitleRepository(TitleRepository):
             if constraint is not None:
                 raise _conflict(title.id, constraint)
         # Postgres is the authoritative clock for created_at/updated_at --
-        # PostgresTitleRepository._to_row excludes both from the INSERT, so
-        # the database's own server_default assigns them, never whatever
-        # the caller's Title happened to carry (a stale retry, a
-        # deliberately backdated import, ...). Stamping here, ignoring
-        # title.created_at/title.updated_at entirely, is what makes this
-        # fake agree -- verified divergence: before this, the fake
-        # preserved the caller's values verbatim, including letting
-        # update() overwrite created_at, which the real repository can
-        # never do (see tests/contract/title_repository_contract.py's
-        # test_created_at_is_not_taken_from_the_caller and
-        # test_created_at_is_stable_across_updates).
+        # PostgresTitleRepository._to_row excludes both from the INSERT, so the
+        # database's own server_default assigns them, never whatever the caller's Title
+        # happened to carry (a stale retry, a deliberately backdated import, ...).
         now = datetime.now(UTC)
         self._titles[title.id] = title.evolve(created_at=now, updated_at=now)
 
@@ -260,13 +150,8 @@ class FakeTitleRepository(TitleRepository):
             constraint = _provider_id_conflict(title, other)
             if constraint is not None:
                 raise _conflict(title.id, constraint)
-        # created_at is carried over from the persisted row, never taken
-        # from the incoming title -- same reasoning as add() above. Real
-        # Postgres UPDATEs simply never mention the column (title.py's
-        # update() explicitly excludes it from the copy loop), so it can't
-        # move after insert; updated_at, in contrast, always advances on a
-        # real write (the set_updated_at trigger / onupdate=func.now()),
-        # so it's re-stamped here too rather than copied from `existing`.
+        # created_at is carried over from the persisted row, never taken from the
+        # incoming title -- same reasoning as add() above.
         self._titles[title.id] = title.evolve(
             created_at=existing.created_at, updated_at=datetime.now(UTC)
         )
@@ -291,15 +176,35 @@ class FakeTitleRepository(TitleRepository):
         self, kind: TitleKind, tmdb_ids: Sequence[int]
     ) -> dict[int, uuid.UUID]:
         # The `kind` filter mirrors ix_titles_tmdb_id_kind and is half the
-        # key, not a narrowing: 26,968 measured TMDb ids are live in both
-        # spaces. An id this store does not hold is simply absent -- the
-        # port's contract, because `raw_payloads` outlives `titles`.
+        # key, not a narrowing: a TMDb id can be live in both the movie and
+        # the series space. An id this store does not hold is simply absent --
+        # the port's contract, because `raw_payloads` outlives `titles`.
         wanted = set(tmdb_ids)
         return {
             title.tmdb_id: title.id
             for title in self._titles.values()
             if title.tmdb_id in wanted and title.kind is kind and title.tmdb_id is not None
         }
+
+    async def resolve_natural_keys(
+        self, references: Sequence[TitleReference]
+    ) -> dict[TitleReference, uuid.UUID]:
+        # The ladder is `resolve_title_reference` -- one definition, shared with
+        # `FakeEpisodeRepository`, which resolves the same references because its own
+        # `resolve_natural_keys` does the series and the episode in one statement
+        # against Postgres.
+        stored = tuple(
+            TitleReference(
+                kind=title.kind, id=title.id, imdb_id=title.imdb_id, tmdb_id=title.tmdb_id
+            )
+            for title in self._titles.values()
+        )
+        found = {}
+        for reference in references:
+            resolved = resolve_title_reference(reference, stored)
+            if resolved is not None:
+                found[reference] = resolved
+        return found
 
     async def credit_names_for(
         self, title_ids: Sequence[uuid.UUID]
@@ -322,15 +227,9 @@ class FakeTitleRepository(TitleRepository):
         return None
 
     async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
-        # Ids the store does not hold are simply absent, which is the port's
-        # contract rather than this fake being lenient: a title deleted
-        # between an index write and a search read is ordinary.
-        #
-        # Deliberately **not** returned in the order asked for. The real one
-        # is a single `IN (...)` and promises no order at all, and a caller
-        # that got insertion order from this fake would be relying on
-        # something Postgres never said -- the same shape as `list_for_title`'s
-        # tiebreak, which this module's siblings already document.
+        # Ids the store does not hold are simply absent, which is the port's contract
+        # rather than this fake being lenient: a title deleted between an index write
+        # and a search read is ordinary.
         wanted = set(title_ids)
         return [title for title in self._titles.values() if title.id in wanted]
 
@@ -339,11 +238,9 @@ class FakeTitleRepository(TitleRepository):
 
         Not a port method. The two fakes model *one* table -- a real
         `TitleRepository.add` flushes, so the row is visible to the next
-        `TitleMatchRepository` read on the same session -- and keeping two
-        independent dicts made a correct `MatchService` fail on the second
-        walk of a series it had itself stubbed: the ladder missed, the
-        re-create conflicted, and nothing could look the winner up. See that
-        fake's own docstring.
+        `TitleMatchRepository` read on the same session -- and two independent
+        dicts would make a correct `MatchService` fail on the second walk of a
+        series it had itself stubbed.
         """
         return list(self._titles.values())
 
@@ -406,8 +303,7 @@ class FakeTitleRepository(TitleRepository):
         return candidates[: max(limit, 0)]
 
     def _played_title_ids(self, user_id: uuid.UUID) -> set[uuid.UUID]:
-        """`COALESCE(ws.title_id, e.title_id)` for this household's played
-        rows, as a dict lookup.
+        """`COALESCE(ws.title_id, e.title_id)` for this household's played rows.
 
         An episode this fake has no `episode_series` entry for resolves to
         `None` and is dropped, which is what the real statement's `COALESCE`
@@ -438,15 +334,12 @@ class FakeTitleRepository(TitleRepository):
     def _browse_matches(
         self, title: Title, *, genre: str | None, year: int | None, owned: bool | None
     ) -> bool:
-        """`browse`'s `WHERE`, shared with `browse_facets` so a facet is the
-        same population minus one predicate rather than a second reading of
-        the filters.
+        """`browse`'s `WHERE`, shared with `browse_facets`.
 
-        The genre leg is the `&&`-over-every-spelling of ADR-0039, in Python:
-        `titles.genres` unions two importers' vocabularies and the label the
-        client sent is written in one of them, so plain membership answered
-        half a concept. For any label outside the alias table the expansion is
-        a one-element set and this collapses to the test it replaced.
+        A facet is then the same population minus one predicate rather than a second
+        reading of the filters. The genre leg is `&&`-over-every-spelling in Python:
+        `titles.genres` unions two importers' vocabularies and the label the client
+        sent is written in one of them, so plain membership answers half a concept.
         """
         if genre is not None and not set(genre_spellings(genre)) & set(title.genres):
             return False
@@ -533,13 +426,11 @@ class FakeTitleRepository(TitleRepository):
             # `genre=None`: the genre facet drops its **own** predicate and
             # keeps the other two.
             if self._browse_matches(title, genre=None, year=year, owned=owned):
-                # One entry per **concept**, not per spelling (ADR-0039), and
-                # the increment is per raw label rather than per title so this
-                # is the same arithmetic as the Postgres arm's `GROUP BY` and
-                # `_canonical_facet` -- summing, with the measured premise that
-                # no title carries two spellings of one concept. Deduping here
-                # and not there is how the two arms come to disagree on the one
-                # population that distinguishes them.
+                # One entry per **concept**, not per spelling, and the increment
+                # is per raw label rather than per title so this is the same
+                # arithmetic as the Postgres arm's `GROUP BY` and
+                # `_canonical_facet` -- summing, on the premise that no title
+                # carries two spellings of one concept.
                 for name in title.genres:
                     for canonical in canonical_genres(name):
                         genres[canonical] = genres.get(canonical, 0) + 1
@@ -570,9 +461,9 @@ class FakeTitleRepository(TitleRepository):
         self, *, limit: int = 1000, after: uuid.UUID | None = None
     ) -> list[TitleGenres]:
         # `ORDER BY id` explicitly, because a dict preserves insertion order
-        # and the real read preserves id order -- and a sweep asserted against
-        # insertion order here would be relying on something Postgres never
-        # said. Same divergence `list_by_ids` documents, in the direction that
+        # and the real read preserves id order -- a case asserted against
+        # insertion order here would rely on something Postgres never said.
+        # Same divergence `list_by_ids` documents, in the direction that
         # matters for a keyset cursor.
         ordered = sorted(self._titles.values(), key=lambda title: title.id)
         return [

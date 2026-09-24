@@ -29,11 +29,10 @@ class JobRow(Base):
     by staged bulk upserts; nothing bulk-loads through a path that could
     forget. Same call `SourceCredentialRow` made, for the same reason.
 
-    A completed job's row is deleted, so this table's steady-state size is
-    the outstanding work, not the work ever done. A first full walk of the
-    one measured source enqueues 1,126,674 match jobs at once and then
-    drains them; the churn is why `ix_jobs_claim` is partial on `pending`
-    rather than covering the whole table.
+    A completed job's row is deleted, so this table's steady-state size is the
+    outstanding work, not the work ever done. A first full walk enqueues a match
+    job per library item at once and then drains them; that churn is why
+    `ix_jobs_claim` is partial on `pending` rather than covering the table.
     """
 
     __tablename__ = "jobs"
@@ -61,17 +60,8 @@ class JobRow(Base):
 
     __table_args__ = (
         UniqueConstraint("kind", "key", name="uq_jobs_kind_key"),
-        # The claim query, exactly: WHERE status = 'pending' AND
-        # (run_after IS NULL OR run_after <= now()) ORDER BY priority DESC,
-        # created_at. Partial on 'pending' so parked poison and in-flight
-        # claims are not indexed at all -- the whole population this index
-        # exists to order is the pending one, and at a 1.1M-item backfill
-        # the other two are noise. run_after is deliberately not a key: it
-        # is NULL for almost every job, so the ordering scan's first tuple
-        # normally qualifies, and the OR predicate a nullable column forces
-        # is not range-scannable anyway. The cost is bounded by the number
-        # of backed-off jobs, which the attempt ceiling caps by parking them
-        # out of this index entirely.
+        # The claim query, exactly: WHERE status = 'pending' AND (run_after IS NULL OR
+        # run_after <= now()) ORDER BY priority DESC, created_at.
         Index(
             "ix_jobs_claim",
             text("priority DESC"),

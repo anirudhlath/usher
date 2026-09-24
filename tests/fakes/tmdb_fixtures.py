@@ -1,10 +1,4 @@
-"""Loader for the committed TMDb payload fixtures.
-
-Shape-recorded, value-synthetic: field names, nesting and types were
-transcribed from TMDb's published API documentation on 2026-07-31; every
-human-readable value is invented. See `tests/fixtures/tmdb/README.md` for
-which endpoint each file records and why a real capture is not committed.
-"""
+"""Loader for the committed TMDb payload fixtures."""
 
 import json
 from pathlib import Path

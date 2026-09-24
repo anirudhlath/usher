@@ -84,7 +84,7 @@ export type SuggestResponse = Ok<'/search/suggest'>
 export type SuggestTier = Schemas['SuggestTier']
 
 /**
- * The two-tier suggest (ADR-0031). `prefix` is the as-you-type tier; `fuzzy`
+ * The two-tier suggest. `prefix` is the as-you-type tier; `fuzzy`
  * is the typo-tolerant one the 2026-08-03 gate showed cannot meet an
  * as-you-type latency budget on this catalog -- which is why the tier is a
  * parameter the UI exposes rather than a detail it hides.
@@ -117,7 +117,7 @@ export type BrowseFilters = {
 }
 
 /**
- * Keyset paging, never an offset (ADR-0034). `next_cursor` carries a position
+ * Keyset paging, never an offset. `next_cursor` carries a position
  * *and* a hash of the query, so changing a filter invalidates the cursor --
  * which is why the filters are part of the query key.
  *
@@ -250,7 +250,7 @@ export type PlayTarget = Schemas['PlayTargetResponse']
 
 /**
  * Mints a short-lived opaque ticket that `GET /stream/{ticket}` 302s to the
- * real target (ADR-0029). The shareable artifact is the ticket, never a URL
+ * real target. The shareable artifact is the ticket, never a URL
  * carrying somebody's session token -- so the player must be pointed at
  * `/stream/{ticket}` (`streamPath` in `client.ts`) and never at `target.url`.
  *
@@ -436,8 +436,10 @@ export type ImportRun = Schemas['ImportRunResponse']
  * `options` is a partial because the poll cadence is the *caller's* decision
  * and patterns.md §8 makes it a conditional one: status costs ~0.33 s and is
  * uncached, so poll every 10 s and **only while at least one run is
- * `running`*. A surface with nothing running says "idle — not polling" rather
- * than polling invisibly forever.
+ * `running`* — or, on the screen that queued one, for a bounded window after
+ * the 202, because a refresh reads `completed` until its first batch lands. A
+ * surface polling for neither reason says "idle — not polling" rather than
+ * polling invisibly forever.
  */
 export function useBootstrapStatus(options?: Partial<UseQueryOptions<BootstrapStatusResponse>>) {
   return useQuery({
@@ -556,12 +558,26 @@ export function readinessFromError(error: unknown): ReadinessResponse | null {
     lanes: {
       push: readStringArray(Reflect.get(lanes, 'push')),
       worker: Reflect.get(lanes, 'worker') === true,
+      crashed_sources: readStringArray(Reflect.get(lanes, 'crashed_sources')),
+      // `null` rather than 0 or a timestamp of our own: the API sends null for
+      // "this process has recovered nothing", and a zero here would be a count
+      // we invented for a body that never carried one.
+      recovered_claims: readNumber(Reflect.get(lanes, 'recovered_claims')),
+      recovered_at: readString(Reflect.get(lanes, 'recovered_at')),
     },
   }
 }
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v: unknown): v is string => typeof v === 'string') : []
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' ? value : null
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 export type AttributionResponse = Ok<'/meta/attribution'>

@@ -61,7 +61,7 @@ export const browseItems: BrowseItem[] = [
     // `null` for every title TMDb's daily export has never described — 980,523
     // of the 1,272,367 rows this route was measured against — so `popularity or
     // 0.0` would render "nobody has measured this" identically to "measured,
-    // and unpopular" (ADR-0014).
+    // and unpopular".
     popularity: null,
     vote_count: null,
   },

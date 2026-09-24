@@ -1,13 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
+import userEvent from '@testing-library/user-event'
 import { ToastProvider } from '@/patterns'
 import { ToastStack } from '@/features/shared/ToastStack'
-import { renderApp, screen, within } from '@/test/render'
+import { renderApp, screen, waitFor, within } from '@/test/render'
 import { server } from '@/test/server'
 import { expectNoViolations } from '@/test/axe'
 import {
   bootstrapStatus,
+  bootstrapStatusCompletedWithError,
   bootstrapStatusEmpty,
+  importCompletedWithError,
+  importFailed,
   importRunning,
   problemHandler,
   sourceUnavailable,
@@ -32,8 +36,8 @@ function render() {
  * The shipped fixture's `heartbeat_at` is a fixed timestamp and is therefore
  * always older than the 120 s threshold by the time a test runs. The stall
  * boundary is a fact about *age*, so it is dated against the same clock the
- * screen reads — no fake timers, and the assertion is exercisable at 119 and
- * 121 exactly as `CursorProgress` was designed to be.
+ * screen reads, and the assertion is exercisable at 119 and 121 exactly as
+ * `CursorProgress` was designed to be.
  */
 function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
   return {
@@ -50,6 +54,39 @@ function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
 
 function heartbeatHandler(agoSeconds: number) {
   return http.get('/admin/bootstrap/status', () => HttpResponse.json(statusWithHeartbeat(agoSeconds)))
+}
+
+/** An arbitrary instant for the pinned clock. */
+const T0 = Date.parse('2026-08-18T03:10:00Z')
+
+/**
+ * `Date` pinned at `at`, and nothing else faked, so MSW, React Query's
+ * scheduling and `findBy*` behave as they do everywhere else. The clock stands
+ * still until the test moves it with `vi.setSystemTime`: a clock that merely
+ * shifts keeps running, and a rate over two polls then carries whatever real
+ * time passed between them — 1,000 rows over 10.08 s is 99 a second.
+ */
+function pinClock(at: number): void {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(at)
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+/** A phase row, found by its label: the row is the label's nearest `div`. */
+function phaseRow(label: string): HTMLElement {
+  const row = screen.getByText(label).closest('div')
+  if (!(row instanceof HTMLElement)) throw new Error(`no phase row is labelled ${label}`)
+  return row
+}
+
+/** The line in a phase row that carries the run's `error`, found by the error itself. */
+function errorLine(row: HTMLElement, error: string): HTMLElement {
+  const line = within(row).getByText(error).parentElement
+  if (!(line instanceof HTMLElement)) throw new Error('the error has no line around it')
+  return line
 }
 
 describe('Bootstrap', () => {
@@ -106,6 +143,8 @@ describe('Bootstrap', () => {
   })
 
   it('does not call a heartbeat 119 s old stalled', async () => {
+    // Pinned, because 1.5 s between the response and the poll landing would make it 121.
+    pinClock(T0)
     server.use(heartbeatHandler(119))
     render()
 
@@ -123,6 +162,52 @@ describe('Bootstrap', () => {
     expect(
       screen.queryByText('No completion estimate — the server reports a cursor, not a percentage.'),
     ).toBeNull()
+  })
+
+  it('re-reads the heartbeat age on every poll, so a run that dies while the page is open turns "Stalled?"', async () => {
+    pinClock(T0)
+    // One body for every poll: the importer has died, so nothing on the wire changes.
+    const body = statusWithHeartbeat(100)
+    let polls = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        polls += 1
+        return HttpResponse.json(body)
+      }),
+    )
+    const { queryClient } = render()
+
+    await screen.findByText('No completion estimate — the server reports a cursor, not a percentage.')
+    expect(screen.queryByText('Stalled?')).toBeNull()
+
+    vi.setSystemTime(T0 + 30_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(polls).toBe(2)
+    expect(await screen.findByText('Stalled?')).toBeInTheDocument()
+  })
+
+  it('derives rows/sec from every poll, so a run that stops writing reads 0 rather than its last rate', async () => {
+    pinClock(T0)
+    const first = statusWithHeartbeat(4)
+    const [run] = first.runs
+    if (!run) throw new Error('the fixture has no run')
+    // Ten seconds later, 1,000 more rows; then a poll that finds nothing new.
+    const moved: BootstrapStatusResponse = { ...first, runs: [{ ...run, rows_seen: run.rows_seen + 1_000 }] }
+    const bodies = [first, moved, moved]
+    server.use(http.get('/admin/bootstrap/status', () => HttpResponse.json(bodies.shift() ?? moved)))
+    const { queryClient } = render()
+
+    const label = await screen.findByText('rows / sec')
+    expect(label.nextElementSibling?.textContent).toBe('—')
+
+    vi.setSystemTime(T0 + 10_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
+
+    vi.setSystemTime(T0 + 20_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(bodies).toHaveLength(0)
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
   })
 
   it('polls only while something is running, and says so when nothing is', async () => {
@@ -143,16 +228,189 @@ describe('Bootstrap', () => {
     expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
   })
 
+  it('keeps polling for 20 min after a 202 though no run reads running, then stops and says so', async () => {
+    // A refresh of a completed import reads `completed` through its download,
+    // so "poll while something runs" alone would stop at the press of "Run
+    // again". Timers are faked, and advance with real time too so MSW and
+    // `findBy*` still settle.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+      shouldAdvanceTime: true,
+    })
+    const idle = {
+      ...bootstrapStatus,
+      runs: bootstrapStatus.runs.filter((run) => run.status === 'completed'),
+    }
+    let polls = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        polls += 1
+        return HttpResponse.json(idle)
+      }),
+    )
+    const user = userEvent.setup({ advanceTimers: (ms) => void vi.advanceTimersByTime(ms) })
+    const { queryClient } = render()
+    const settled = () =>
+      waitFor(() => expect(queryClient.isFetching({ queryKey: ['bootstrap-status'] })).toBe(0))
+
+    expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is being polled/)).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(polls).toBe(1)
+
+    await user.click(within(phaseRow('MovieLens genome')).getByRole('button', { name: 'Run again' }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start import' }))
+    expect(await screen.findByText('polling every 10 s for 20 min after queueing')).toBeInTheDocument()
+    expect(screen.getByText(/No run reads running yet\. A refresh of a completed import/)).toBeInTheDocument()
+    // The bound the window gives, and what it does not cover, on screen.
+    const bound =
+      /for 20 min after a phase is queued: long enough to see it read running or record why it failed, not a first batch that lands later, a later step of Run all phases, or a job queued behind another bootstrap job\. Reload to look again\./
+    expect(screen.getByText(bound)).toBeInTheDocument()
+    // The 202's own refetch.
+    await waitFor(() => expect(polls).toBe(2))
+    await settled()
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await waitFor(() => expect(polls).toBe(3))
+    await settled()
+
+    // Still asking at 19 min 20 s.
+    await vi.advanceTimersByTimeAsync(19 * 60_000)
+    await settled()
+    const late = polls
+    await vi.advanceTimersByTimeAsync(10_000)
+    await waitFor(() => expect(polls).toBe(late + 1))
+    await settled()
+
+    // Past 20 min it stops, and says so.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is being polled/)).toBeInTheDocument()
+    expect(screen.getByText(bound)).toBeInTheDocument()
+    await settled()
+    const last = polls
+    await vi.advanceTimersByTimeAsync(60 * 60_000)
+    expect(polls).toBe(last)
+  })
+
   it('treats a failed run as a normal state: bad tone, the error verbatim, the position kept, and "Resume"', async () => {
     const { container } = render()
 
     // Named twice on purpose: once as the live run, once as the phase it is.
     expect((await screen.findAllByText('crosswalk')).length).toBeGreaterThan(0)
     // The status word in the bad tone, carried by the class the CSS keys on.
-    expect(container.querySelector('.u-cursor__status--failed')?.textContent).toBe('failed')
-    expect(screen.getByText('wdqs: HTTP 429 after 3 retries (query timeout 60 s)')).toBeInTheDocument()
+    const status = container.querySelector('.u-cursor__status--failed')
+    expect(status?.textContent).toBe('failed')
+    const card = status?.closest('.u-cursor')
+    if (!(card instanceof HTMLElement)) throw new Error('the failed run has no cursor card')
+    expect(within(card).getByText(importFailed.error ?? '')).toBeInTheDocument()
     expect(screen.getByText('88,140')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument()
+
+    // The phase row states the same error, in the same bad tone as its badge.
+    const row = phaseRow('Wikidata crosswalk')
+    expect(row.querySelector('.u-badge')).toHaveClass('u-badge--bad')
+    expect(errorLine(row, importFailed.error ?? '')).toHaveStyle({ color: 'var(--bad-text)' })
+  })
+
+  it('never draws a running run that carries an error as a failure, in the live card or its row', async () => {
+    const error = 'left over from another attempt'
+    const [run] = statusWithHeartbeat(4).runs
+    if (!run) throw new Error('the fixture has no run')
+    server.use(
+      http.get('/admin/bootstrap/status', () =>
+        HttpResponse.json({ ...bootstrapStatus, runs: [{ ...run, error }] }),
+      ),
+    )
+    const { container } = render()
+
+    const note = await screen.findByText(error, { selector: '.u-cursor__note' })
+    expect(note).toHaveClass('u-cursor__note--warn')
+    expect(note).not.toHaveClass('u-cursor__note--bad')
+    const card = note.closest('.u-cursor')
+    if (!(card instanceof HTMLElement)) throw new Error('the running run has no cursor card')
+    expect(card.querySelector('.u-cursor__status')).toHaveClass('u-cursor__status--running')
+    expect(container.querySelector('.u-cursor__status--failed')).toBeNull()
+
+    const row = phaseRow('IMDb basics')
+    expect(row.querySelector('.u-badge')).not.toHaveClass('u-badge--bad')
+    expect(errorLine(row, error)).toHaveStyle({ color: 'var(--warn-text)' })
+    expect(within(row).queryByRole('button', { name: 'Resume' })).toBeNull()
+  })
+
+  it('keeps a completed run with no error green, and gives it no error line', async () => {
+    render()
+
+    await screen.findByText('MovieLens genome')
+    const row = phaseRow('MovieLens genome')
+    const badge = row.querySelector('.u-badge')
+    expect(badge?.textContent).toBe('completed')
+    expect(badge).toHaveClass('u-badge--good')
+    expect(within(row).queryByText(/the last attempt recorded an error/)).toBeNull()
+  })
+
+  describe('a completed run carrying an error — the completed import stands beside it', () => {
+    const error = importCompletedWithError.error ?? ''
+
+    function renderCompletedWithError() {
+      server.use(
+        http.get('/admin/bootstrap/status', () => HttpResponse.json(bootstrapStatusCompletedWithError)),
+      )
+      return render()
+    }
+
+    it('keeps the status word verbatim and draws it in the warn tone with the warn glyph, never green', async () => {
+      renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      const badge = phaseRow('MovieLens genome').querySelector('.u-badge')
+      expect(badge?.textContent).toBe('completed')
+      expect(badge).toHaveClass('u-badge--warn')
+      expect(badge).not.toHaveClass('u-badge--good')
+      // §12: hue is never the only carrier.
+      expect(badge?.querySelector('[data-icon="alert-triangle"]')).not.toBeNull()
+    })
+
+    it('prints the error verbatim in the warn tone, beside the sentence saying the completed import stands', async () => {
+      renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      const row = phaseRow('MovieLens genome')
+      const line = errorLine(row, error)
+      expect(line).toHaveStyle({ color: 'var(--warn-text)' })
+      // True of both ways a completed row comes to carry one: a refresh that landed no
+      // batch, and a MovieLens vocabulary that failed to load after its vectors completed.
+      expect(line.textContent).toBe(
+        `The completed import stands; the last attempt recorded an error: ${error}`,
+      )
+    })
+
+    it('still treats the checkpoint as the completed import it is: "Run again", and its measured duration', async () => {
+      renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      const row = phaseRow('MovieLens genome')
+      expect(within(row).getByRole('button', { name: 'Run again' })).toBeInTheDocument()
+      expect(within(row).queryByRole('button', { name: 'Resume' })).toBeNull()
+      expect(within(row).getByText(/15 m 26 s on this deployment/)).toBeInTheDocument()
+    })
+
+    it('never draws it as failed or as running', async () => {
+      const { container } = renderCompletedWithError()
+
+      await screen.findByText('MovieLens genome')
+      expect(phaseRow('MovieLens genome').querySelector('.u-badge--bad')).toBeNull()
+      // "Running now" holds the running and the failed run, and nothing else.
+      const cards = Array.from(container.querySelectorAll('.u-cursor__ds')).map((node) => node.textContent)
+      expect(cards).toEqual([importRunning.dataset, importFailed.dataset])
+    })
+
+    it('has no accessibility violations', async () => {
+      const { container } = renderCompletedWithError()
+
+      await screen.findByText(error)
+      await expectNoViolations(container)
+    })
   })
 
   it('confirms an import with four facts, is not red, and raises a Queued receipt carrying the job key', async () => {

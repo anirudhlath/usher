@@ -1,16 +1,4 @@
-"""The typo-tolerance surface: PRD 05, ADR-0002, ADR-0031.
-
-Drives the **real** `SearchService.suggest` through the real composition
-root. It reimplements no part of either tier -- an eval that reimplements the
-thing it measures measures itself.
-
-**Both tiers are measured separately and never averaged.** ADR-0031 ships a
-btree exact-prefix probe at p50 0.6 ms with 1.9% typo recall and a trigram +
-`levenshtein_less_equal` path at p50 33.6 ms that carries the tolerance.
-Neither is a degraded form of the other, so a mean over them describes
-neither -- the same argument `SuggestTier` exists for rather than a
-`typo_tolerant: bool`.
-"""
+"""The typo-tolerance surface (PRD 05)."""
 
 import time
 import uuid
@@ -24,8 +12,8 @@ from usher.eval.goldens.suggest import TypoCase
 from usher.eval.metrics.ir import Ranking
 
 # What a tier looks like to this module: a probe and a limit in, title ids out,
-# best first. Narrow on purpose -- it is everything the measurement needs and
-# nothing else, so the unit tests need no database and no service graph.
+# best first. Narrow on purpose -- everything the scoring needs and nothing
+# else, so the unit tests need no database and no service graph.
 Suggester = Callable[[str, int], Awaitable[list[uuid.UUID]]]
 
 
@@ -63,7 +51,7 @@ async def rank_cases(
         relevant[case.query_id] = str(case.title_id)
         # Order preserved: neither tier is re-ranked by `SearchService.suggest`
         # (each already ordered its own answer), so reordering here would make
-        # MRR a measurement of this module.
+        # MRR a property of this module rather than of the tier.
         rankings.append(Ranking(case.query_id, tuple(str(hit) for hit in hits)))
         strata[case.query_id] = (
             "all",
@@ -86,7 +74,7 @@ def tier_suggester(session: AsyncSession, settings: Settings, tier: str) -> Sugg
     pay for building a service graph.
     """
     from usher.composition import build_pipeline
-    from usher.services.search import SuggestTier
+    from usher.ports.search import SuggestTier
 
     pipeline = build_pipeline(session, settings)
     chosen = SuggestTier(tier)

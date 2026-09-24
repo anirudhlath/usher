@@ -1,8 +1,4 @@
-"""Migration status: compares the code's expected head revision against
-what a live database reports, so readiness can fail on a schema mismatch
-instead of guessing -- PRD 08: "the app refuses to serve on a schema
-mismatch rather than guessing."
-"""
+"""Migration status: the code's expected head revision against what a database reports."""
 
 from functools import lru_cache
 
@@ -17,29 +13,22 @@ import usher.db.migrations as _migrations_package
 def code_head_revision() -> str | None:
     """The single migration revision this deployed code expects.
 
-    Computed once per process (the same `@lru_cache`-on-a-zero-arg-function
-    pattern as `usher.config.get_settings`) from the `versions/` directory
-    shipped alongside this package itself -- not from `alembic.ini`, which
-    would need a path that's correct both for a local `uv run` invocation
-    (CWD is the repo root) and a container (a wheel or editable install
-    whose site-packages location need not match where `alembic.ini` itself
-    was `COPY`'d to). `usher.db.migrations.__path__` moves with the package
-    under either install method instead, since it always points at the
-    directory the real `env.py`/`versions/` files were installed into
-    (verified directly).
+    Computed once per process from the `versions/` directory shipped alongside
+    this package -- not from `alembic.ini`, which would need a path correct both
+    for a local `uv run` (CWD is the repo root) and a container, where the
+    site-packages location need not match where `alembic.ini` was `COPY`'d to.
+    `usher.db.migrations.__path__` moves with the package under either.
 
-    Returns `None` if there are zero or more than one head. This schema
-    has exactly one today (verified directly), but a branched history
-    would make "the" expected revision ambiguous rather than something
-    worth silently picking one of.
+    `None` when there are zero or more than one head: a branched history makes
+    "the" expected revision ambiguous rather than something to silently pick one
+    of.
     """
     (location,) = _migrations_package.__path__
     return ScriptDirectory(location).get_current_head()
 
 
 async def database_revision(session: AsyncSession) -> str | None:
-    """The revision Alembic's own bookkeeping table says this database is
-    actually at.
+    """The revision Alembic's own bookkeeping table says this database is actually at.
 
     Raises like any other failed query if the `alembic_version` table
     doesn't exist (a database that predates any migration) or the

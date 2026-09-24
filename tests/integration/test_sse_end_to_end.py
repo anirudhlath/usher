@@ -1,40 +1,4 @@
-"""PRD 03's read-through loop, closed, through a real app.
-
-`open -> stub -> promote -> enrich -> title.updated -> the client refetches
-and gets the enriched row`. Every hop is real: a real request, real
-Postgres, a real `StreamingResponse`, a real worker lane claiming from the
-real queue, and `get_session`'s own commit boundary.
-
-**The ordering is what only this level can see, and the way it is asserted
-is not the way the plan sketched it.** `EnrichService` publishes *after* its
-commit, so a client that refetches the instant it is told reads the enriched
-row. The obvious shape -- await the enrichment, read the frame, refetch --
-cannot fail against the wrong order: by the time the test is reading, both
-the publish and the commit have happened whichever order they ran in, and
-what is left is a race that is green on a fast host. So the publisher the
-lane is given reads the title back **on its own connection, at the instant
-of the publish**. A separate connection cannot see an uncommitted write, so
-"published before committing" is a deterministic failure rather than a
-timing one.
-
-**Two things the app under test is not.** Its own worker lane is off and a
-second `LaneSupervisor` runs one instead, because `create_app`'s lifespan
-builds the TMDb provider from a real key and no test in this repository
-makes a network request -- `dependency_overrides` do not reach a lifespan,
-so the substitution is made where a composition root makes it. That the
-lifespan *does* start a worker lane is
-`tests/integration/test_lanes_in_the_server_process.py`'s claim and is not
-re-made here. And `test_a_disconnect_unsubscribes` is not repeated from
-`tests/unit/test_api_events.py`: that case runs against the same app
-factory, the same route and the same streaming transport, and `GET /events`
-touches no session at all, so a real database changes nothing about it.
-
-**This module commits for real** -- the route's promotion, the lane's
-enrichment, the default user, and three `usher.db.staging` tables that
-Postgres DDL leaves behind. All of it is undone in teardown, because
-CLAUDE.md records what leaving `titles` and `jobs` behind did to four tests
-in three other files, each of which passed in isolation.
-"""
+"""PRD 03's read-through loop, closed, through a real app."""
 
 import asyncio
 import gzip
@@ -59,7 +23,6 @@ from usher.api.app import create_app
 from usher.api.lanes import LaneSupervisor
 from usher.composition import DefaultUserId, run_bootstrap, unit_of_work
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -98,38 +61,19 @@ def settings(postgres_url: str) -> Settings:
     )
 
 
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
         for statement in (
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM jobs",
             "DELETE FROM raw_payloads WHERE provider = 'tmdb'",
-            # Three `DROP TABLE IF EXISTS stg_*` statements stood here until
-            # M6. Every write in this module goes through `usher.db.staging`,
-            # which created its table with DDL -- and DDL is transactional, so
-            # a committing module was the only kind that leaked one, surfacing
-            # as schema drift in `test_migrations.py`, a different file that
-            # then failed only in combination. The staging tables are
-            # temporary now and drop at commit.
         ):
             await session.execute(text(statement))
-        # **`tmdb_id` as well as the name mark, because enrichment renames
-        # the row.** `FakeMetadataProvider.to_result` supplies its own
-        # `name`/`sort_name` and `EnrichService` writes it, so a title this
-        # file seeded as `Sse Case A Film` reads back as `A Film` the moment
-        # the lane succeeds -- and a teardown keyed on the mark alone leaves
-        # it behind. The next test then fails on `ix_titles_tmdb_id_kind`,
-        # in a case that has nothing to do with enrichment and passes in
-        # isolation. Measured, in this file, in that order.
+        # **`tmdb_id` as well as the name mark, because enrichment renames the row.**
+        # `FakeMetadataProvider.to_result` supplies its own `name`/`sort_name` and
+        # `EnrichService` writes it, so a title this file seeded as `Sse Case A Film`
+        # reads back as `A Film` the moment the lane succeeds -- and a teardown keyed on
+        # the mark alone leaves it behind.
         await session.execute(
             text("DELETE FROM titles WHERE sort_name LIKE :pattern OR tmdb_id = :tmdb_id"),
             {"pattern": f"{MARK} %", "tmdb_id": TMDB_ID},
@@ -179,36 +123,7 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 
 class _CommittedStateProbe(EventPublisher):
-    """The real bus, plus what the database had committed at publish time.
-
-    This is the ordering assertion. `EnrichService` publishes after its
-    commit so a client that refetches immediately reads the enriched row;
-    publishing first passes every unit case (a fake repository has no
-    transaction) and races here. Reading the row back on **this publisher's
-    own session** -- a different connection, in a different transaction --
-    cannot see an uncommitted write, so the wrong order is a recorded
-    `stub` rather than a flaky refetch.
-
-    **It records the rows the handler *wrote*, not only the row the event is
-    about**, and the two answer different questions.
-    `titles.enrichment_state` answers *"was the client told too early?"* --
-    it is the subject of the frame, and the whole `?titles=` contract is that
-    a client may refetch it. The `jobs` rows answer *"what is still open at
-    the instant of the frame?"*, which is
-    [ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
-    subject: the enrich handler stages two `BACKFILL` requests
-    (`enrich.py:270-277`) into a transaction that is `JobWorker`'s rather
-    than its own, and that transaction does not close until
-    `complete(job.id)` + `_commit()` (`jobs.py:143-147`).
-
-    **Until G2 those two reads disagreed, and now they cannot.** This probe
-    recorded `[('enrich', 'running')]` -- the handler's own claim and neither
-    of the jobs it had just enqueued -- because the frame was offered from
-    inside that window. The worker now holds the frame until the window is
-    closed, so the same read on the same second connection is the state a
-    client can act on: the enqueues committed, and the claim gone with the
-    `DELETE` that completed it.
-    """
+    """The real bus, plus what the database had committed at publish time."""
 
     def __init__(self, inner: EventPublisher, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._inner = inner
@@ -245,8 +160,7 @@ class _CommittedStateProbe(EventPublisher):
 async def worker(
     settings: Settings, sessions: async_sessionmaker[AsyncSession], bus: InMemoryEventBus
 ) -> AsyncIterator[tuple[LaneSupervisor, _CommittedStateProbe]]:
-    """A real worker lane over a fake metadata provider, publishing into the
-    app's own bus.
+    """A real worker lane over a fake metadata provider, publishing into the app's own bus.
 
     The same `LaneSupervisor` the server's lifespan builds, wired by the
     same `unit_of_work` -- what differs is the provider (no network) and
@@ -299,17 +213,13 @@ async def _read_frame(lines: AsyncIterator[str]) -> str:
 
 
 async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None:
-    """The route subscribes inside its response generator, so the
-    subscription lands when the first chunk is produced rather than when the
-    request returns. Publishing before it lands is a publish to nobody, and
-    this project has already had one concurrency case time out on exactly
-    that harness bug rather than on the code it was written for.
+    """The route subscribes inside its response generator, not when the request returns.
 
-    `count` is for the two-subscriber case below, where waiting for *one*
-    would let the bootstrap start with the filtered stream not yet attached
-    -- and "the filtered subscriber saw nothing" would then be true for the
-    wrong reason, which is the failure that case's liveness control exists
-    to make impossible."""
+    Publishing before the subscription lands is a publish to nobody. `count` is for the
+    two-subscriber case below, where waiting for one would let the bootstrap start with
+    the filtered stream unattached, making "the filtered subscriber saw nothing" true
+    for the wrong reason.
+    """
     for _ in range(400):
         if bus.subscribers >= count:
             return
@@ -320,10 +230,11 @@ async def _wait_for_subscriber(bus: InMemoryEventBus, *, count: int = 1) -> None
 
 
 async def _job_xmin(sessions: async_sessionmaker[AsyncSession], key: uuid.UUID) -> str | None:
-    """The row version. `xmin` is the transaction that last wrote this row,
-    so an unchanged one is proof no new row version was created -- which a
-    `SELECT priority` cannot show, since a rewrite to the same value reads
-    identically."""
+    """The row version: `xmin` is the transaction that last wrote the row.
+
+    An unchanged `xmin` is proof no new row version was created, which a
+    `SELECT priority` cannot show, since a rewrite to the same value reads identically.
+    """
     async with sessions() as session:
         return (
             await session.execute(
@@ -339,25 +250,15 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     bus: InMemoryEventBus,
     worker: tuple[LaneSupervisor, _CommittedStateProbe],
 ) -> None:
-    """**The loop PRD 03 diagrams, end to end, in one case.**
+    """The read-through loop, end to end, in one case.
 
-    A client opens a stub and gets it immediately; the open promotes its
-    enrichment to `DEMAND`; a worker lane in this process claims it, enriches
-    it, commits, and publishes; the client is told on the SSE stream it
-    already had open; and the refetch that the notice provokes reads the
-    enriched row.
-
-    The stream is opened with `?titles=`, so this also asserts the filter a
-    real client would use rather than an unfiltered firehose: PRD 07's detail
-    screen subscribes to one title.
-
-    **This case is also the one that found the heartbeat defect**, and it is
-    the reason a case that looks like an end-to-end demonstration is worth
-    its cost. The enrichment takes long enough for several
-    `sse_heartbeat_seconds` to elapse, and the route used to cancel its own
-    pending `__anext__` on each one -- which closes the async generator, so
-    the stream ended before the event it was waiting for ever arrived. It
-    fails against that route today.
+    A client opens a stub and gets it immediately; the open promotes its enrichment to
+    `DEMAND`; a worker lane in this process claims it, enriches it, commits, and
+    publishes; the client is told on the SSE stream it already had open; and the refetch
+    reads the enriched row. The stream is opened with `?titles=`, so the filter a real
+    client uses is asserted too. The enrichment outlasts several
+    `sse_heartbeat_seconds`, so a route that cancelled its pending `__anext__` on each
+    heartbeat — closing the generator before the event arrived — fails here.
     """
     supervisor, probe = worker
     stub = await _given_stub(sessions, "A Film")
@@ -385,20 +286,8 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
 
         refetched = await client.get(f"/titles/{stub.id}")
 
-    # **The deterministic half first**, so the failure that gets reported is
-    # the structural one rather than the racy one. Measured: with the
-    # publish moved before the commit, the refetch below *also* fails here
-    # -- but only because this probe's own database round trip suspends the
-    # lane between the two, which is an accident of the harness rather than
-    # a property of the code. On a host where the commit won that race, the
-    # refetch would be green and this line would still be red.
-    # **The positive control, before any claim is read out of the probe.** A
-    # publisher that never ran records nothing, and every assertion about
-    # what it saw then passes vacuously -- `[] == []`. Measured while writing
-    # ADR-0033: the sibling harness for `push._apply_items` recorded exactly
-    # that, because the fixture had seeded no title the match ladder could
-    # find, and read as a result it would have said "the availability event
-    # publishes nothing".
+    # **The deterministic half first**, so the failure that gets reported is the
+    # structural one rather than the racy one.
     assert probe.seen, "the probe recorded no publish at all; nothing below measures anything"
     assert probe.seen == [(ClientEventKind.TITLE_UPDATED, "enriched")], (
         "at the instant of the publish, another connection could not yet see the "
@@ -407,53 +296,28 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     assert refetched.json()["enrichment_state"] == "enriched", (
         "the client was told before the enrichment committed"
     )
-    # **The residual window, closed.** ADR-0033 measured its exact contents
-    # -- the two `BACKFILL` requests `enrich.py:270-277` stages and the
-    # `DELETE` that completes the job -- and G2 made the ordering a property
-    # of `JobWorker` rather than of each handler, so the frame is offered
-    # after `complete(job.id)` and its commit. This line read
-    # `[[("enrich", "running")]]` until then: the handler's own claim and
-    # neither of the jobs it had just enqueued.
-    #
-    # **This is the whole of what the change bought, on the wire.** Every
-    # write the unit of work made is committed before the client hears about
-    # it, so a client acting on the frame -- `?titles=` says refetch -- reads
-    # a catalog with no half-finished job in it. It is also the assertion
-    # that would go red first if a future `_run` flushed early, because the
-    # `enrich` row reappears as `running` the instant the flush moves back
-    # inside the window.
+    # The residual window is closed: the ordering is a property of `JobWorker` rather
+    # than of each handler, so the frame is offered after `complete(job.id)` and its
+    # commit -- with the two `BACKFILL` enqueues and the claim's `DELETE` inside it.
     assert probe.jobs_seen == [[("derive", "pending"), ("index", "pending")]], (
         "at the instant of the frame every write the job made should be committed -- "
         "the two BACKFILL enqueues visible and the claim gone with the DELETE"
     )
-    # And the job is gone rather than parked: a lane that "completed" by
-    # failing would still have published nothing, but a lane that published
-    # and then parked would leave a client told about work that did not land.
-    #
-    # **A single read, and that is G1's bounded poll retired rather than
-    # merely tidied.** `_job_xmin_settles` existed because the client was
-    # told strictly before the completing commit, so this assertion raced it
-    # -- 6 failures in 13 runs unplanted, 5 of 5 with a 0.25 s delay planted
-    # between the handler returning and `complete()`. The frame the test
-    # already read above is now offered *after* that commit, so the state is
-    # committed before the reader can reach this line and there is nothing
-    # left to wait for. Restoring the poll would hide exactly the regression
-    # the line above catches.
+    # And the job is gone rather than parked: a lane that "completed" by failing would
+    # still have published nothing, but a lane that published and then parked would
+    # leave a client told about work that did not land.
     assert await _job_xmin(sessions, stub.id) is None
 
 
 async def test_a_second_open_writes_no_row(
     client: httpx.AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """M4's `WHERE jobs.priority < excluded.priority`, called from a client
-    for the first time.
+    """A detail screen a user opens twice must not cost a row version.
 
-    A detail screen a user opens twice must not cost a row version.
-    Asserted on `xmin` rather than on the stored priority, because a rewrite
-    to the same value is invisible to a `SELECT`: `enqueue` answering "1 row
-    written" for the second open is both a wrong number and, at a nightly
-    walk's scale, 1,126,674 dead row versions a night. `FakeJobQueue` counts
-    that same re-enqueue as a write, so no unit case can see this.
+    Asserted on `xmin` rather than on the stored priority, because a rewrite to the same
+    value is invisible to a `SELECT` — and at a nightly walk's scale it is a dead row
+    version per title. `FakeJobQueue` counts the re-enqueue as a write, so no unit case
+    can see this.
     """
     stub = await _given_stub(sessions, "A Twice-Opened Film")
 
@@ -468,20 +332,13 @@ async def test_a_second_open_writes_no_row(
 async def test_a_slow_client_is_told_to_resync_and_the_publisher_is_unaffected(
     client: httpx.AsyncClient, bus: InMemoryEventBus, settings: Settings
 ) -> None:
-    """PRD 07's one in-stream failure vocabulary, delivered as a real SSE
-    frame down a real response body.
+    """The in-stream failure vocabulary, as a real SSE frame down a real response body.
 
-    A client that opens the stream and does not read it fills its queue. The
-    publisher must finish anyway -- `EnrichService` completing a title at
-    04:00 may not wait on a browser tab that closed hours ago -- and the
-    client must be *told* rather than left quietly stale.
-
-    The burst is deliberately tight and unawaited between publishes:
-    `InMemoryEventBus.publish` never suspends (pinned by driving the
-    coroutine one step by hand in `tests/unit/test_services_events.py`), so
-    the route's generator cannot drain the queue mid-burst and the overflow
-    is deterministic rather than a race. A publish that started awaiting
-    would show up here as no `resync_required` at all.
+    A client that opens the stream and does not read it fills its queue. The publisher
+    must finish anyway rather than wait on a browser tab that closed hours ago, and the
+    client must be told rather than left quietly stale. The burst is tight and unawaited
+    between publishes because `InMemoryEventBus.publish` never suspends, so the route's
+    generator cannot drain the queue mid-burst and the overflow is deterministic.
     """
     async with client.stream("GET", "/events") as stream:
         lines = aiter(stream.aiter_lines())
@@ -502,11 +359,6 @@ async def test_a_slow_client_is_told_to_resync_and_the_publisher_is_unaffected(
     assert "event: resync_required" in frame, frame
     assert '"reason":"buffer_overflow"' in frame, frame
     # The publisher was not slowed by the subscriber that stopped reading.
-    # A weak bound on purpose -- the guarantee is asserted on measured
-    # intervals in `tests/contract/event_publisher_contract.py` and on a
-    # hand-driven coroutine in `tests/unit/test_services_events.py`; what
-    # this adds is that it stays true with a real response body attached to
-    # the other end.
     assert elapsed < 1.0, f"{settings.sse_queue_size * 4} publishes took {elapsed:.3f}s"
 
 
@@ -518,29 +370,7 @@ async def test_a_bootstrap_batch_reaches_an_unfiltered_subscriber_and_never_a_fi
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`bootstrap.progress` on the wire: the row PRD 07's SSE table carried
-    with no milestone against it until M9's E7.
-
-    **Both arms, because "the filtered subscriber saw nothing" is also what a
-    dead subscriber produces.** The filtered stream is proved live by a
-    `title.updated` published after the bootstrap, carrying the title it
-    subscribed to -- without that control this case passes against a route
-    that never subscribed, a bus that dropped everything, and a filter that
-    rejects every frame.
-
-    **Two batches, not one.** `bulk_batch_size=2` over the committed
-    five-row IMDb slice gives three, which is what distinguishes one frame
-    per *batch* from one per *run* -- the `0% to 100%` failure
-    `ReconcileService._publish_progress` already names for `sync.progress`.
-    The frames are read in order and their cursors must ascend, which is the
-    half a set-membership assertion would miss.
-
-    Driven through `composition.run_bootstrap` rather than through
-    `BootstrapService`, so the publisher this case observes is the one the
-    shared dispatch really constructs. Nothing downloads: the same
-    `MockTransport` handler `tests/integration/test_admin_bootstrap.py` uses,
-    over the same committed synthetic slice.
-    """
+    """`bootstrap.progress` on the wire, as a client would receive it."""
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     fixtures = pathlib.Path(__file__).parent.parent / "fixtures" / "bulk"

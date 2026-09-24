@@ -1,70 +1,6 @@
-"""TMDb's daily ID export -> `TmdbId`. No API key, no auth.
+"""TMDb's daily ID export -> `TmdbId`.
 
-The export is newline-delimited JSON inside a gzip, at date-stamped URLs.
-Verified 2026-07-30 against `files.tmdb.org` (`https`, not `http` -- the
-plaintext URL an earlier draft of this module used returns a redirect at
-best and, without a checksum anywhere in this pipeline, gives an active
-network intermediary a free hand at worst):
-
-    movie_ids_07_29_2026.json.gz      26.1 MiB
-      {"adult":false,"id":90000045,"original_title":"A Synthetic Feature",
-       "popularity":1.2707,"video":false}
-    tv_series_ids_07_29_2026.json.gz
-      {"id":90000046,"original_name":"日本語のタイトル","popularity":3.7982}
-
-The two records above are the observed *shape* with invented values, not two
-real ones -- they were transcribed verbatim until 2026-08-01, which is
-third-party data in a shipped package. See `tests/fixtures/README.md`.
-
-Two asymmetries that matter and are handled explicitly: the TV export has no
-`adult` field at all, and it spells the name `original_name` rather than
-`original_title`. The second record keeps a non-ASCII title because the
-export really does carry them and a fixture that did not would hide an
-encoding bug.
-
-Neither export carries a localised title, a year, a release date, or an
-overview -- which is why Phase 1 lands in `tmdb_ids` rather than creating
-`Title` rows. There is not enough here to build a catalog entry from, and
-Phase 2 connects these ids to skeleton titles IMDb already supplied.
-
-TMDb's own API key is *not* used here and is not required for this phase --
-PRD 08's "TMDb key missing -> Bootstrap Phase 3 skipped" holds: Phases 0-2
-run without one.
-
-**Two distinct "revisions" are in play, deliberately kept separate -- and
-deliberately reconciled before a resume trusts either.** The dataset-level
-checkpoint revision this port exposes is the export's *date* (`YYYY-MM-DD`)
--- stable, human-readable, and the actual identity of a daily snapshot,
-since a new export is a new URL rather than a new body at an old one.
-`CachedDatasetFile`'s own revision is that specific file's `ETag` /
-`Last-Modified`, which `ensure_local` needs for its cache check and
-`If-Range`. `batches(revision=...)` accepts the former (what a caller's own
-prior `revision()` call already resolved) and uses it to skip straight to
-the known day's file -- but still issues exactly one `HEAD` to learn that
-file's own ETag, because the caller was never given that token in the first
-place. What it avoids is the multi-day backward scan `_newest_available`
-would otherwise repeat, and -- when no `revision` is passed at all -- the
-redundant second `HEAD` an earlier draft of this adapter issued to the
-winning URL a second time, immediately after the scan had already resolved
-its ETag once and thrown it away.
-
-The reconciliation matters because the date is a *coarser* identity than the
-ETag: TMDb can republish a *different* body at the *same* date-stamped URL
-(a correction, a re-run of their own export pipeline), and when it does,
-`ensure_local` notices -- its own cache check is ETag-keyed, not date-keyed
--- and re-downloads. A resume's `skip`/`rows_seen`, however, were computed
-purely from the date matching a stored checkpoint, before any of that was
-known. An earlier draft trusted them anyway: `ensure_local` would correctly
-fetch the *new* body, and `_batches` would then skip the first `N` lines of
-it under the belief that they were the *same* `N` records the checkpoint
-already accounted for -- silently dropping however many records the new
-body's opening lines actually contain, with no error, ever, since a
-same-length response looks identical to a resumed one from the outside.
-`CachedDatasetFile.ensure_local` now reports whether it actually replaced
-the local file (`LocalFile.replaced`); `_batches` resets `skip`/`rows_seen`
-to zero when it did, because at that point the only thing known for certain
-about the new body is that it is not the one the stored position was
-computed against.
+No API key, no auth.
 """
 
 import datetime as dt
@@ -74,10 +10,10 @@ from pathlib import Path
 
 import httpx
 
-from usher.adapters.bulk.download import CachedDatasetFile
+from usher.adapters.bulk.download import CachedDatasetFile, paced
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, TmdbId
-from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.errors import PortDataMalformed
 
 TMDB_EXPORTS_BASE_URL = "https://files.tmdb.org/p/exports/"
 
@@ -94,8 +30,10 @@ _MAX_DAYS_BACK = 7
 
 
 class TMDbIdDataset(BulkDataset[TmdbId]):
-    """One export file. Instantiated twice -- once per `TitleKind` -- because
-    movies and series are separate files with different field names."""
+    """One export file, instantiated once per `TitleKind`.
+
+    Movies and series are separate files with different field names.
+    """
 
     def __init__(
         self,
@@ -129,27 +67,26 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
         return f"{self._base_url}{self._stem}_{day.strftime('%m_%d_%Y')}.json.gz"
 
     async def _newest_available(self) -> tuple[dt.date, CachedDatasetFile, str]:
-        """Walk backward from `today`, returning the first day whose export
-        exists, its `CachedDatasetFile`, and the ETag that day's own `HEAD`
-        already returned.
+        """The newest day whose export exists, its file, and that day's ETag.
 
-        The ETag is captured and returned rather than discarded: the loop
-        below already calls `candidate.revision()` to find out whether the
-        day exists at all, so that response has already answered "what is
-        this file's current ETag" too. A caller of `_newest_available` that
-        threw the value away and asked `ensure_local` to re-derive it would
-        pay for a second `HEAD` to the exact URL the first one just proved
-        was live.
+        The ETag is returned rather than discarded: the probe that finds out
+        whether the day exists has already answered what the file's ETag is, and
+        a caller that threw it away would pay for a second `HEAD` to the URL the
+        first one just proved was live.
+
+        **Only a 404 or 403 means "that day is not published".** Any other failure ends
+        the walk at the request it happened on: read as an absent day, an outage would
+        cost seven requests an attempt and be reported as the absence of an export. A week
+        with none published is malformed, not unavailable -- asking again in fifteen
+        seconds changes none of seven answers.
         """
         for days in range(_MAX_DAYS_BACK):
             day = self._today - dt.timedelta(days=days)
             candidate = CachedDatasetFile(self._client, self._url(day), self._cache_dir)
-            try:
-                etag = await candidate.revision()
-            except PortUnavailable:
-                continue
-            return day, candidate, etag
-        raise PortUnavailable(
+            etag = await candidate.revision_if_published()
+            if etag is not None:
+                return day, candidate, etag
+        raise PortDataMalformed(
             f"no TMDb {self._stem} export found in the last {_MAX_DAYS_BACK} days "
             f"under {self._base_url}"
         )
@@ -206,20 +143,14 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
     ) -> AsyncIterator[BulkBatch[TmdbId]]:
         if revision is not None:
             # The caller already resolved this run's revision -- skip
-            # `_newest_available`'s backward-walking scan entirely and go
-            # straight to the known day's file. One HEAD is still
-            # unavoidable here: the caller only handed us the export's
-            # *date*, never that specific file's ETag, and `ensure_local`
-            # needs the ETag, not the date, for its cache/If-Range check.
+            # `_newest_available`'s backward-walking scan entirely and go straight to
+            # the known day's file.
             try:
                 day = dt.date.fromisoformat(revision)
             except ValueError as exc:
-                # `revision` is contractually the value this dataset's own
-                # `revision()` already returned this run -- always a valid
-                # ISO date -- but round-tripping through a caller and a
-                # stored checkpoint means a corrupted or hand-edited value
-                # must not crash the process with a raw, unclassified
-                # ValueError; park it as a diagnosable port error instead.
+                # `revision` round-trips through a caller and a stored
+                # checkpoint, so a corrupted or hand-edited value must not
+                # crash the process with a raw, unclassified `ValueError`.
                 raise PortDataMalformed(
                     f"TMDb resume revision {revision!r} is not a valid ISO date",
                     detail=revision,
@@ -234,20 +165,15 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
         rows_seen = usable.rows_seen if usable else 0
         local = await dataset_file.ensure_local(etag)
         if usable is not None and local.replaced:
-            # The date-shaped checkpoint revision matched, but the file
-            # itself was not already cached under this exact ETag --
-            # upstream republished different bytes at the same date-stamped
-            # URL. `skip` was computed against whatever body produced the
-            # stored position, which this demonstrably is not: applying it
-            # here would silently skip or misalign records in the new body
-            # instead of the ones it was actually meant to skip. See the
-            # module docstring's "two distinct revisions" section.
+            # The date-shaped checkpoint revision matched, but the file itself was not
+            # already cached under this exact ETag -- upstream republished different
+            # bytes at the same date-stamped URL.
             skip = 0
             rows_seen = 0
 
         batch: list[TmdbId] = []
         position = skip
-        for line in dataset_file.lines(skip=skip):
+        async for line in paced(dataset_file.lines(), skip=skip):
             position += 1
             parsed = self._parse(line)
             if parsed is None:
@@ -269,8 +195,6 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
 
     async def aclose(self) -> None:
         # The httpx client is owned by whoever constructed it (the CLI's
-        # composition root), which also closes it -- closing a shared
-        # client from here would break the sibling dataset using the same
-        # one. See `usher.adapters.bulk.imdb._ImdbDataset.aclose` for the
-        # same rationale spelled out once.
+        # composition root), which also closes it -- closing a shared client
+        # from here would break the sibling dataset using the same one.
         return None

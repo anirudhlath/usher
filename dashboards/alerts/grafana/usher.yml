@@ -1,0 +1,565 @@
+# PRD 10's one alert whose subject is not a metric, as a Grafana-managed rule.
+#
+# 🔴 **This file is in a subdirectory of `dashboards/alerts/`, and that is
+# load-bearing rather than tidy.** `../usher.yml`'s header tells an operator to
+# mount `dashboards/alerts` at `/etc/prometheus/rules` and to set
+# `rule_files: [/etc/prometheus/rules/*.yml]`. That glob is **not** recursive,
+# so a Grafana provisioning file sitting beside `usher.yml` would be read by
+# Prometheus as a rule file, fail to unmarshal -- Prometheus uses strict YAML,
+# and `apiVersion`, `folder`, `condition` and `data` are all unknown fields --
+# and **take the whole rule set down with it**. Measured on
+# `prom/prometheus:v3.13.2`, 2026-09-11, with this file copied to
+# `/rules/grafana.yml`: `promtool check rules /rules/*.yml` exits 1 with nine
+# unmarshal errors, and a **server** started on that directory exits **2 before
+# opening a port** (`Error loading rule file patterns from config`). Not four
+# rules instead of five -- **no Prometheus at all**, and therefore none of
+# D11's three or D12's two, as the price of adding this one. The same server
+# on the committed layout serves 5. `../../README.md` carries the transcript.
+# One directory down is what keeps the two engines' files from loading each
+# other.
+#
+# To wire it up, mount this directory into the shared Grafana in
+# `~/code/observability/` -- the same asymmetry `provisioning/dashboards.yml`
+# and `../usher.yml` both open with, one engine further along:
+#
+#     volumes:
+#       - ../usher/dashboards/alerts/grafana:/etc/grafana/provisioning/alerting:ro
+#
+# Nothing is committed there today, so committing this file arms nothing. The
+# firing recorded in `../../README.md` was produced by a throwaway Grafana
+# reading a throwaway Postgres, exactly as D11's firings were produced by a
+# throwaway Prometheus over `remote_read`: real engine, real data, shared stack
+# untouched.
+#
+# 🔴 **Why this rule is not in the Prometheus file, beyond the glob.** There is
+# no series to write it against and that is a refusal rather than a gap.
+# `docs/prd/10-telemetry-and-dashboards.md` (the `usher.curation.rows`
+# paragraph): *"This document's own first principle puts LLM spend on Postgres
+# -- `llm_calls` is the record -- so there is no `usher.llm.*` series at all."*
+# An OTel observable callback could not supply one even if the principle
+# allowed it: `src/usher/telemetry.py`'s register records that the metric
+# reader invokes callbacks on its own background thread while every database
+# call here is a coroutine on asyncpg.
+#
+# 🔴 **Exactly one numeric column, and the rest cast to `text`.** Grafana's
+# SQL-to-alerting conversion turns every *numeric* column of a table frame into
+# a series the condition is evaluated over, and every *string* column into a
+# label on it. A second numeric column -- `days_in_window`, say -- would be
+# judged by the same `> 0` threshold and would fire this alert on every
+# evaluation forever, which is the Postgres-side twin of the empty-vector
+# failure `../usher.yml`'s header opens with. `days_in_window::text` is not
+# cosmetic. Confirmed rather than assumed: the firing in `../../README.md` is
+# **one** instance whose six labels are exactly these six columns.
+#
+# ⚠️ **And the price of putting the numbers in labels is that they are series
+# identity.** Grafana keys an alert instance on its label set, so the moment
+# `today_spend_usd` changes -- which is the moment a new `llm_calls` row lands
+# -- the *old* instance stops being returned and a **new** one starts at
+# `Pending`. Measured on 2026-09-11: one evaluation after the trailing week was
+# raised, this rule reported `{'alerting': 1, 'normal': 1}` -- the 4.0785
+# instance still Alerting because its series had merely vanished, and a fresh
+# 1.0000 instance Normal beside it. So a day whose spend keeps growing
+# re-instantiates rather than updates, and an operator sees a resolve and a
+# re-fire rather than one page that moves.
+#
+# **That is a trade and it is taken deliberately**, because the alternative is
+# a page carrying no numbers: Grafana's annotation templates can only reach a
+# SQL frame's values *through* `$labels`, so a diagnostic that is not a label
+# is not on the page at all. D14's acceptance is that *"the firing records the
+# `cost_usd` values it was computed from, because a firing whose inputs were
+# not written down cannot be distinguished from a threshold that was
+# lowered"*. What bounds the churn is the ledger's own shape: `llm_calls`
+# gains one row per generation per household per night, not one per scrape.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: usher-cost
+    # The folder `provisioning/dashboards.yml` already declares, so the rule
+    # lands beside the dashboard whose panels it is about rather than in a
+    # second folder named for the alerting half of the same project.
+    folder: Usher
+    # **Ten minutes, and `for:` below is one interval and not an hour.** The
+    # money is already spent: today's total only ever rises, so once this
+    # condition is true it stays true until the next UTC midnight, and a long
+    # `for:` is not patience -- it is a delay with nothing to learn in it. What
+    # one interval does buy is a second opinion from the same query, so a
+    # datasource blip or a half-committed transaction cannot page on its own.
+    interval: 10m
+    rules:
+      - uid: usher-cost-anomaly
+        title: Cost anomaly
+        condition: FIRED
+        # **`OK`, not `NoData`, and this is the alert's answer to the empty
+        # ledger.** The statement below is a `SELECT` over CTEs with no
+        # `FROM`-driven row source at the top level, so it returns exactly one
+        # row whatever `llm_calls` holds -- on this deployment, where that
+        # table is genuinely **0 rows**, it returns
+        # `fired=0, today=0.00000000, median=0.00000000, days_with_spend=0`.
+        # `NoData` is therefore unreachable through the data and is set here
+        # for the *other* way it arrives: a datasource that cannot be reached
+        # at all. A deployment that has never curated has not had a cost
+        # anomaly, and paging for the absence of spend is the zero-versus-
+        # absence mistake in its most expensive direction.
+        noDataState: OK
+        # An error is **not** silently green. A statement that failed is a
+        # statement whose answer nobody has, which is different from an answer
+        # of "no anomaly" -- the same distinction one line up, decided the
+        # other way because a broken query is a thing an operator can fix.
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          # 🔴 **The ratio is not multiplied into the sentence, and the first
+          # spelling was.** `{{ $labels.spend_ratio }}x the trailing 7-day
+          # median` reads perfectly on every firing where a median exists --
+          # and this rule's other reachable firing is a *zero* trailing median
+          # above the floor, where `spend_ratio` is the sentence
+          # `undefined (zero trailing median)` and the page renders
+          # "LLM spend today is undefined (zero trailing median)x the trailing
+          # 7-day median". Measured against a real Grafana on 2026-09-11 before
+          # it was respelled. The two numbers lead instead, and the ratio
+          # follows as its own clause, which reads correctly whether it is
+          # `4.0785` or a sentence.
+          # `test_the_cost_anomaly_summary_survives_an_undefined_ratio` guards
+          # exactly that adjacency.
+          summary: >-
+            LLM spend today is {{ $labels.today_spend_usd }} USD against a
+            trailing 7-day median of {{ $labels.trailing_median_usd }}; ratio
+            {{ $labels.spend_ratio }}
+          description: >-
+            PRD 10's "Daily LLM spend > 3x trailing 7-day median", read off
+            llm_calls rather than off a series: llm_calls.cost_usd summed per
+            UTC day over llm_calls.at, which is the query
+            ix_llm_calls_at exists for. The labels are today_spend_usd,
+            trailing_median_usd, spend_ratio, floor_usd, days_in_window and
+            days_with_spend -- every number the verdict was computed from, so
+            a firing can be told apart from a threshold somebody lowered.
+            Panel: "LLM spend by model and purpose" on dashboard 5 (Cost &
+            Compliance, uid usher-cost-compliance), with "Cost per curated
+            row" beside it for what the money bought.
+            THE FLOOR. This rule does not fire below floor_usd = 0.02 USD of
+            spend in a day, and the floor is the whole of what makes it usable:
+            a trailing median of 0 makes 3x median 0, so without it any spend
+            at all is an anomaly, forever, on every deployment that has not
+            priced its model. 0.02 is above one ordinary night -- one
+            generation per household per night cost exactly 0.01658700 USD in
+            the 2026-08-07 live verification at 3/15 USD per Mtok -- and below
+            a tripled one (0.04976100), so the deployment that prices its model
+            on a Wednesday is not paged on Wednesday, and a genuinely tripled
+            night still pages. Raise it on a deployment whose ordinary night is
+            larger; it is a spend, not a ratio.
+            AN UNPRICED DEPLOYMENT IS SILENT BY CONSTRUCTION. llm_price_in_per_mtok
+            and llm_price_out_per_mtok (USHER_LLM_PRICE_IN_PER_MTOK,
+            USHER_LLM_PRICE_OUT_PER_MTOK) both default to 0, which
+            src/usher/config.py calls the honest value for a local model and
+            the wrong one for a hosted model an operator forgot to price. With
+            them unset every cost_usd is 0.00000000, today_spend_usd reads
+            0.00000000, and this rule can never fire. That is not a fault to be
+            tuned around -- the token counts are recorded exactly, so spend is
+            recomputable afterwards -- but an operator who believes this alert
+            is watching a hosted model should check those two settings first.
+            THE LEDGER IS ATTEMPTS, NOT SUCCESSES. record() is called on the
+            failure path too, so a night of completions that each burned tokens
+            and validated to nothing appears here as spend. That is the anomaly
+            an operator most wants to see and the one a WHERE ok would hide, by
+            exactly the failures.
+        data:
+          - refId: LEDGER
+            # ⚠️ **Unused, and Grafana still refuses a zero-width one.** This
+            # statement carries its own window in SQL and reads no
+            # `$__timeFilter`, so the dashboard-style relative range has
+            # nothing to say about it -- but `from: 0, to: 0` is rejected at
+            # provisioning time with
+            # `[alerting.alert-rule.invalidRelativeTime] invalid relative time
+            # range [From: 0s, To: 0s]`, and a rejected *file* provisions no
+            # rules at all rather than one bad one. Measured against
+            # grafana/grafana:13.1.3 on 2026-09-11. So it is set to the
+            # evaluation interval, which is the shortest value that reads as
+            # "this rule has no time range of its own" rather than as a second
+            # window that agrees with the real one until somebody edits one.
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: usher-postgres
+            model:
+              refId: LEDGER
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: usher-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              # **Eight days in the calendar and seven in the median, and the
+              # day series is generated rather than grouped.** `generate_series`
+              # over the bounds and a LEFT JOIN is what makes a night with no
+              # calls a **0** instead of an absence: a plain `GROUP BY day`
+              # drops such a night entirely, so a deployment that curates three
+              # nights a week would take its median over three nonzero days and
+              # never see the week it ran every night. `days_in_window` is 8 by
+              # construction and is returned so the case that asserts it is
+              # reading this query's own answer.
+              #
+              # **`percentile_disc`, not `percentile_cont`, and the reason is a
+              # type.** Postgres has no `numeric` overload of `percentile_cont`
+              # -- `percentile_cont(0.5) WITHIN GROUP (ORDER BY <numeric>)`
+              # implicitly casts to `double precision` and returns
+              # `double precision` (`pg_typeof`, measured 2026-09-11 on
+              # PostgreSQL 17.10). `percentile_disc` is
+              # `WITHIN GROUP (ORDER BY anyelement) -> anyelement` and stays in
+              # `numeric`. Over the seven trailing days -- a set whose
+              # cardinality is fixed at 7 by the `generate_series` above, so
+              # always odd -- both return the same element, and only one of
+              # them does it without leaving the type `cost_usd` was declared
+              # `NUMERIC(12, 8)` to stay in. `float8` is not an academic
+              # concern here: at a trailing median of exactly 0.14500000 and a
+              # today of exactly 0.43500000 the two disagree, because
+              # `3 * 0.145` is `0.43499999999999994` in binary floating point
+              # and `0.435` in `numeric` -- so the float spelling pages on a
+              # day that is exactly, and not more than, three times the median.
+              #
+              # ⚠️ **And `round(..., 8)` below is a type guard, not a
+              # renderer.** `round(double precision, integer)` does not exist
+              # in PostgreSQL, so swapping this aggregate back to
+              # `percentile_cont` does not quietly start comparing floats --
+              # the statement raises `UndefinedFunctionError` and Grafana's
+              # `execErrState: Error` carries it to a human. Measured by
+              # planting exactly that swap against `pgvector/pgvector:pg17`,
+              # 2026-09-11.
+              #
+              # **UTC days, spelled out.** `date_trunc('day', <timestamptz>)`
+              # truncates in the *session's* time zone, which for a Grafana
+              # datasource is whatever the server was started with, so the
+              # unqualified spelling makes "today" a property of who is asking.
+              # `AT TIME ZONE 'UTC'` pins it. The window bound stays on the raw
+              # `timestamptz` column so `ix_llm_calls_at` still serves it.
+              rawSql: |
+                WITH bounds AS (
+                    SELECT date_trunc('day', now() AT TIME ZONE 'UTC') AS today,
+                           date_trunc('day', now() AT TIME ZONE 'UTC') - interval '7 days' AS oldest
+                ),
+                ledger AS (
+                    SELECT date_trunc('day', llm_calls.at AT TIME ZONE 'UTC') AS day,
+                           sum(llm_calls.cost_usd) AS spend
+                    FROM llm_calls
+                    WHERE llm_calls.at >= (date_trunc('day', now() AT TIME ZONE 'UTC')
+                                           - interval '7 days') AT TIME ZONE 'UTC'
+                    GROUP BY 1
+                ),
+                daily AS (
+                    SELECT calendar.day AS day, coalesce(ledger.spend, 0) AS spend
+                    FROM bounds
+                         CROSS JOIN generate_series(bounds.oldest, bounds.today,
+                                                    interval '1 day') AS calendar(day)
+                         LEFT JOIN ledger ON ledger.day = calendar.day
+                ),
+                judged AS (
+                    SELECT
+                        coalesce(sum(daily.spend)
+                                 FILTER (WHERE daily.day = bounds.today), 0) AS today_spend,
+                        coalesce(percentile_disc(0.5) WITHIN GROUP (ORDER BY daily.spend)
+                                 FILTER (WHERE daily.day < bounds.today), 0) AS trailing_median,
+                        count(*) AS days_in_window,
+                        count(*) FILTER (WHERE daily.spend > 0) AS days_with_spend
+                    FROM daily CROSS JOIN bounds
+                )
+                SELECT
+                    CASE WHEN judged.today_spend >= 0.02
+                          AND judged.today_spend > 3 * judged.trailing_median
+                         THEN 1 ELSE 0 END                                    AS fired,
+                    round(judged.today_spend, 8)::text                        AS today_spend_usd,
+                    round(judged.trailing_median, 8)::text                    AS trailing_median_usd,
+                    coalesce(round(judged.today_spend
+                                   / nullif(judged.trailing_median, 0), 4)::text,
+                             'undefined (zero trailing median)')              AS spend_ratio,
+                    round(0.02, 8)::text                                      AS floor_usd,
+                    judged.days_in_window::text                               AS days_in_window,
+                    judged.days_with_spend::text                              AS days_with_spend
+                FROM judged
+          - refId: FIRED
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: FIRED
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: LEDGER
+              # `> 0` over a column that is 0 or 1. The comparison that decides
+              # anything is the one in `numeric` above; this is the wire that
+              # carries its answer, and it is deliberately not a second place a
+              # multiplier could live.
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+
+  # 🔴 **The other half of *Disk projection*, and it is here for the same
+  # reason *Cost anomaly* is: there is no series and there cannot be one.**
+  # `../usher.yml` carries that alert's free-space arm, which answers *whether*
+  # a filesystem is filling. This one answers *which consumer*, and the answer
+  # is a `pg_*` function rather than a metric. An observable OTel callback
+  # cannot supply it either -- `src/usher/telemetry.py`'s register records that
+  # the metric reader invokes callbacks on its own background thread while
+  # every database call here is a coroutine on asyncpg -- and there is no
+  # `postgres_exporter` in the shared stack: measured 2026-09-11, its
+  # Prometheus holds 93 metric names and not one begins `pg_`.
+  #
+  # 🔴 **`pg_database_size` has no history, so the growth is measured from the
+  # rows that do.** This is the task text's one unbuildable instruction taken
+  # as far as it goes: Postgres does not keep a size series, so a linear fit
+  # over `pg_database_size` is not expressible in SQL at all. What *is*
+  # measurable is rows created in a window, and bytes per row now -- so the
+  # seven largest relations that carry a creation timestamp are counted over
+  # the trailing seven days and priced at their current
+  # `pg_total_relation_size / count(*)`. That is an **estimate of the bytes
+  # those rows cost** and is labelled as one; `pg_database_size` itself is
+  # exact and is the denominator.
+  #
+  # ⚠️ **Seven relations and not all of them, and the omission is named.**
+  # `title_search_names` (682 MB) and `images` (455 MB) carry no creation
+  # timestamp, so their growth is invisible here and shows up only in the
+  # denominator. Measured 2026-09-11 by running the committed statement against
+  # the live catalog: the seven counted relations are **6,830,292,992 B** of an
+  # **8,384,394,931 B** database, so this statement sees **81.5%** of it.
+  #
+  # ⚠️ **One seq scan per relation, because only one of the seven time columns
+  # is indexed.** `ix_raw_payloads_fetched_at` serves `raw_payloads`; the other
+  # six are sequential. Measured on the live catalog 2026-09-11 over 1.27M
+  # titles, 2.9M credits, 3.3M neighbours and 896k people: **1.080 s cold and
+  # 483.6 ms warm**. At `interval: 10m` the cold figure is a 0.18% duty cycle,
+  # which is the price of the signal and is recorded rather than assumed. If it
+  # ever matters, the repair is an index on `titles.created_at`, not a shorter
+  # window.
+  #
+  # 🔴 **The threshold is the database against itself and comes from no
+  # table.** `08-operations.md`'s resource envelope says in its own header that
+  # nothing reads it, no host enforces it and no policy derives from it, and
+  # M9's Track 2 derived a 2.0 GB ceiling from one row and **withdrew a
+  # design** over it. So there is no byte ceiling here: the
+  # condition is *"the next fortnight adds more than everything this database
+  # currently holds"*, which is self-calibrating and needs no operator to have
+  # told it how big the disk is. Measured on this deployment 2026-09-11:
+  # 2,585,865 B added in seven days, 5,171,731 B projected over fourteen,
+  # against 8,384,394,931 B held -- **0.0617%**, nowhere near firing, which is
+  # what a catalog that is not being rebuilt should read.
+  #
+  # ⚠️ **A bootstrap fires this rule and that is correct.** A deployment
+  # filling an empty catalog really is on track to add more than it holds, and
+  # an operator provisioning a disk is exactly who should be told. It is
+  # `warning` and not `page` for that reason and for one more: this rule
+  # answers *which*, and `../usher.yml`'s free-space arm answers *whether*. A
+  # page for the diagnostic half would train an operator to silence the pair.
+  #
+  # **Exactly one numeric column, the rest `::text`** -- D14's finding, and it
+  # applies unchanged: Grafana turns every numeric column of a table frame into
+  # a series the `> 0` threshold judges, so a stray second number fires this
+  # alert forever.
+  - orgId: 1
+    name: usher-disk
+    folder: Usher
+    # Ten minutes, matching `usher-cost`: the statement costs 1.080 s and its
+    # answer is a seven-day trailing measure, so it moves by a rounding error
+    # between evaluations. A shorter interval would buy nothing and pay for it
+    # seven times an hour.
+    interval: 10m
+    rules:
+      - uid: usher-disk-projection-postgres
+        title: Disk projection
+        condition: FIRED
+        # **`OK`, not `NoData`.** The statement is a `SELECT` over CTEs with no
+        # row source at the top level, so it returns exactly one row whatever
+        # the catalog holds -- an empty database answers
+        # `fired=0, added_bytes_7d=0`. `NoData` is therefore only reachable
+        # through a datasource that cannot be reached at all, and a catalog
+        # that is not growing has not got a disk problem.
+        noDataState: OK
+        # A statement that failed is a statement whose answer nobody has, which
+        # is not the same as an answer of "not growing" -- and it is something
+        # an operator can fix.
+        execErrState: Error
+        # **One interval, and deliberately *not* the free-space half's hour.**
+        # The two halves of this alert watch different kinds of signal and the
+        # `for:` follows the signal rather than the alert name. The other half
+        # is a least-squares fit over a *scraped gauge*, where a single
+        # mis-sampled point moves the answer -- an hour of patience there buys
+        # a fit that has seen more samples. This half is a `count(*)` over
+        # committed rows: there is no sampling noise, the quantity is monotone
+        # over the window, and it changes by at most the ingest rate between
+        # evaluations. A long `for:` here is not patience, it is a delay with
+        # nothing to learn in it -- *Cost anomaly*'s own argument one group up,
+        # and it applies for the same reason. What one extra interval does buy
+        # is a second opinion from the same statement, so a half-committed bulk
+        # load cannot page on its own.
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Postgres is on track to add {{ $labels.projected_bytes_14d }} B in
+            14 days against the {{ $labels.database_bytes }} B it holds
+          description: >-
+            PRD 10's "Postgres or image cache on track to fill within 14 days",
+            read off the catalog rather than off a series -- there is none, and
+            pg_database_size keeps no history, so the growth is rows created in
+            the trailing seven days priced at each relation's current
+            pg_total_relation_size divided by its row count. The labels are
+            database_bytes (exact, pg_database_size), measured_table_bytes,
+            added_bytes_7d, projected_bytes_14d and
+            projected_pct_of_database -- every number the verdict was computed
+            from, so a firing can be told apart from a threshold somebody
+            lowered. THIS IS THE WHICH, NOT THE WHETHER. Its pair is the
+            free-space rule in alerts/usher.yml, which projects
+            system_filesystem_usage_bytes and is the one that knows how much
+            disk is left; this one knows only how fast the database is
+            growing. Read them together: both firing means Postgres is the
+            consumer, the other one alone means something else on that
+            filesystem is -- most likely the image cache, which has no
+            eviction and grows with browse coverage (see du over
+            image_cache_dir). Panel: "Table size, and headroom against measured
+            free disk" on dashboard 5 (Cost & Compliance, uid
+            usher-cost-compliance), which plots the same
+            pg_total_relation_size this statement prices rows at.
+            WHAT IT CANNOT SEE. title_search_names and images carry no creation
+            timestamp, so their growth reaches only the denominator; measured
+            2026-09-11 the seven counted relations were 6,830,292,992 B of an
+            8,384,394,931 B database, i.e. 81.5% of it. And a bootstrap fires
+            this rule on purpose -- a deployment filling an empty catalog is on
+            track to add more than it holds, and the operator provisioning its
+            disk is who should be told.
+        data:
+          - refId: GROWTH
+            # `from: 600, to: 0` and never `0, 0`: D14 measured that Grafana
+            # rejects a zero-width relative range at provisioning time
+            # (`[alerting.alert-rule.invalidRelativeTime]`) and that a rejected
+            # file provisions **no** rules at all. This statement carries its
+            # own window in SQL and reads no `$__timeFilter`, so the value is
+            # the evaluation interval -- the shortest thing that reads as "this
+            # rule has no time range of its own".
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: usher-postgres
+            model:
+              refId: GROWTH
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: usher-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              # **`numeric` throughout, and the division is the reason.**
+              # `total_bytes::numeric / count(*)` in `bigint` would truncate to
+              # whole bytes per row -- at raw_payloads' 8,229 B/row that is a
+              # rounding error, but at a wide narrow table it is not, and the
+              # sum is over seven of them. The `::numeric` is on the numerator
+              # so the whole expression stays exact rather than becoming
+              # `double precision`, which is the type the sibling argument in
+              # `Cost anomaly` is about.
+              #
+              # **`nullif(rows_now, 0)`** is what makes an empty relation
+              # contribute nothing instead of raising: `sum()` skips the NULL.
+              #
+              # **Unaliased `table.column` throughout**, deliberately, so
+              # `test_the_disk_growth_statement_names_only_tables_this_schema_holds`
+              # can grade every pair against `Base.metadata`. An alias is not a
+              # table name and an aliased statement is graded on nothing.
+              rawSql: |
+                WITH bounds AS (
+                    SELECT now() - interval '7 days' AS oldest
+                ),
+                sized AS (
+                    SELECT pg_total_relation_size('public.titles') AS total_bytes,
+                           count(*) AS rows_now,
+                           count(*) FILTER (
+                               WHERE titles.created_at >= (SELECT oldest FROM bounds)
+                           ) AS rows_added
+                    FROM titles
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.credits'), count(*),
+                           count(*) FILTER (
+                               WHERE credits.created_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM credits
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.raw_payloads'), count(*),
+                           count(*) FILTER (
+                               WHERE raw_payloads.fetched_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM raw_payloads
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.title_neighbors'), count(*),
+                           count(*) FILTER (
+                               WHERE title_neighbors.computed_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM title_neighbors
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.title_embeddings'), count(*),
+                           count(*) FILTER (
+                               WHERE title_embeddings.created_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM title_embeddings
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.tmdb_ids'), count(*),
+                           count(*) FILTER (
+                               WHERE tmdb_ids.exported_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM tmdb_ids
+                    UNION ALL
+                    SELECT pg_total_relation_size('public.people'), count(*),
+                           count(*) FILTER (
+                               WHERE people.created_at >= (SELECT oldest FROM bounds)
+                           )
+                    FROM people
+                ),
+                grown AS (
+                    SELECT coalesce(sum(sized.total_bytes), 0) AS measured_bytes,
+                           coalesce(sum(sized.rows_added
+                                        * (sized.total_bytes::numeric
+                                           / nullif(sized.rows_now, 0))), 0) AS added_bytes
+                    FROM sized
+                ),
+                judged AS (
+                    SELECT grown.measured_bytes,
+                           grown.added_bytes,
+                           2 * grown.added_bytes AS projected_bytes,
+                           pg_database_size(current_database())::numeric AS database_bytes
+                    FROM grown
+                )
+                SELECT
+                    CASE WHEN judged.projected_bytes > judged.database_bytes
+                         THEN 1 ELSE 0 END                                 AS fired,
+                    round(judged.database_bytes)::text                     AS database_bytes,
+                    round(judged.measured_bytes)::text                     AS measured_table_bytes,
+                    round(judged.added_bytes)::text                        AS added_bytes_7d,
+                    round(judged.projected_bytes)::text                    AS projected_bytes_14d,
+                    round(100 * judged.projected_bytes
+                          / nullif(judged.database_bytes, 0), 4)::text     AS projected_pct_of_database
+                FROM judged
+          - refId: FIRED
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: FIRED
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: GROWTH
+              # `> 0` over a column that is 0 or 1. The comparison that decides
+              # anything is the one in `numeric` above; this wire carries its
+              # answer and is deliberately not a second place a multiplier
+              # could live.
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0

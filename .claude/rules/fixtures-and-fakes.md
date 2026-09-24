@@ -124,6 +124,12 @@ case drives a fake fetcher or `httpx.MockTransport`.
   case that would sleep for a lease. `PostgresJobQueue` reads `clock_timestamp()`
   so a fake clock would test a mechanism the other arm lacks — contract cases
   vary `older_than_seconds` on both arms instead.
+- **A double that never awaits gives `asyncio.wait_for` nothing to cancel at.**
+  The Postgres arm awaits a round trip per call, so a caller looping over it
+  always has a cancellation point; a fake completing synchronously spins the
+  event loop and no deadline can fire, so a non-terminating caller reaches
+  pytest as a hang instead of a failure. `await asyncio.sleep(0)` in the fake
+  is the whole fix, and it is a divergence only the fake can produce.
 - **Wire fakes that model one table together** — `FakeTitleRepository` and
   `FakeTitleMatchRepository` are one table, and independent dicts made a
   *correct* service fail rather than a wrong one pass.

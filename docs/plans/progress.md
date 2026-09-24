@@ -22,7 +22,7 @@ milestone smoke test passes.
 | M7 | Rows | docs/plans/2026-08-03-m7-rows.md | ✅ MERGED to main (6d9b2a1), 3,217 passed / 5 skipped, 7 import contracts |
 | M8 | Curation (LLM) | docs/plans/2026-08-06-m8-curation.md | ✅ complete on `milestone/m8-curation`, 8 import contracts — see the M8 section at the end of this file |
 | M9 | API surface | docs/plans/2026-08-10-m9-api-surface.md | ✅ complete on `milestone/m9-api-surface`, 10 import contracts — **74 tasks planned, and two names travel with the milestone**: T4 was **withdrawn** when its own pre-registered bar failed (2.702 GB against a 2.0 GB ceiling), and **H4/H5 ran late** — 2026-08-12, after the gate, against a real Emby 4.9.5.0 in 23 bounded requests, both halves passing and the write to a real account restored byte-for-byte. They had been recorded as an unrunnable gap on the strength of checking one `.env` file. H7 is the gate and the final whole-suite sweep |
-| M10 | Hardening + dashboards | — | not planned |
+| M10 | Hardening + dashboards | docs/plans/2026-08-13-m10-hardening.md (plus the polish pass's first stage, docs/plans/2026-09-12-stage-1a-shared-infrastructure.md) | ✅ **complete — Phases 0–2 gated; lands in PR #44 with the polish pass, and Phase 3 closes with R13, the tag `v0.1.0` on its merge commit.** R13's runs are recorded under *M10 R13* below. The rest of this cell is Phase 0's record, kept as written: 67 tasks in four gated phases on `milestone/m10-hardening` (worktree `~/code/usher-m10`), cut from `main` @ `f2cf359`; its design spec sits beside it in `docs/specs/`. **Phase 0 is the first telemetry this project has ever exported.** O1 built `~/code/observability` (a separate repository, HEAD `daa4152`, clean — Grafana/Prometheus/Loki/Tempo/OTel Collector, only `127.0.0.1:3000` and `:4317` published); O2 pointed Usher at it and read three signals out of Grafana from **one `GET /search` over the live 1,272,401-title catalog** — a Tempo trace (`{name="GET /search"}` → `2fa839a2eb19612d9aeb7c3fca9b441e`, 73.95 ms, 13 spans, with real SQLAlchemy **statement** spans beneath the root), a Loki line found by grepping for that 32-hex id read **off the trace** (`{service_name="usher"} \|= "2fa839a2…"` → exactly one line, carrying `trace_id` and `span_id=35dad4c7b4bc6de1`), and two Prometheus samples (`usher_search_duration_seconds_count{job="usher",mode="full_text"}` → 1, `_sum` → 0.054056…; `http_server_duration_milliseconds_count{…,http_target="/search",http_status_code="200"}` → 1, `_sum` → 118); O3 pinned the convention — **the default HTTP semantic conventions**, a property of `uv.lock` rather than of the manifest, under `opentelemetry-sdk` **1.44.0** and `opentelemetry-instrumentation-fastapi`/`-asgi` **0.65b0**. **O4 is the gate**: all seven standard steps green on a clean tree with every number pre-registered in `/var/tmp/m10-gate/phase0/BAR.md` (`sha256 51a51b34…9e0cc3e`) before any command ran — `ruff check` clean, `ruff format --check` 603 files, `mypy` 585 files, `lint-imports` **10 kept / 0 broken** (unchanged, as predicted — Phase 0 adds no module and no contract), **4,072 unit / 4 skipped**, **1,232 integration / 22 skipped**, **5,304 whole-suite / 26 skipped** (run whole, because that is what `ci.yml:46` runs), PRD link check `OK`. **The phase-specific gate is a subprocess and not an environment variable draped over pytest**, because the original spelling could not fail: `conftest`'s autouse `clean_environment` scrubs every `OTEL_*` before any test body and the semconv singleton latches inside `create_app()` *after* the scrub — re-measured here at **3 passed either way**. Three real children instead: unset → `http.server.duration` at `ms` with the new name absent; `OTEL_SEMCONV_STABILITY_OPT_IN=http` → `http.server.request.duration` at `s` and the old name **absent entirely, not renamed alongside**; `http/dup` → both. **The variable renames a second metric the same way** — `http.server.response.size` → `http.server.response.body.size` — so two panels empty silently under one variable, not one; both are now named in PRD 10's opt-in hazard paragraph. Sweep: **3 targets killed, 3 equivalent-mutant controls surviving every gate step, 0 unintended survivors** (ledger in `.claude/rules/mutation-sweeps.md`). **The drafting pass refuted fifteen of the spec's own claims** — see the plan's *Corrections this plan carries*; the two that changed a justification are the rebuild's cost (**3.33 h, not 21.6** — `m09f` repaired `m09e`'s 594.7 ms/seed to 91.7, **over the 130,720 embedded seeds, which is not the 1,272,401-title catalog named earlier in this row**; the two are different populations and joining them is wrong by 3.5× — 91.7 ms across the whole catalog would be 32.4 h, and this row prices only the completed 130,720-seed walk; ⚠️ **that walk is 2026-08-13's and the one this deployment last completed is 12,884 s over 132,442 seeds at 97.3 ms/seed = 3.58 h, measured off `title_neighbors.computed_at` on 2026-09-07 by J6**) and the unmeasured "~1–5 s/request" source latency the whole safety cluster rested on (entered in the *first PRD commit*, two days before an Emby adapter existed; cited 21×, called "measured" 11×; the only live readings are ~0.14 s). **Phase 1 is clear to start.** |
 
 **This table was stale from M3 down until 2026-08-07** — it said "IN PROGRESS"
 for a milestone merged on 2026-07-31 and "not planned" for four that were built
@@ -3083,3 +3083,250 @@ Gate: ruff clean, `ruff format --check` 587 files, `mypy` over 572 files,
 `lint-imports` **9 kept / 0 broken**, **3,946 unit / 4 skipped**, **1,207
 integration / 22 skipped**, PRD link check `OK`. Tree `md5`-verified clean after
 the sweep.
+
+## M10 J7 — the overnight full walk, run once (2026-09-08)
+
+Bar pre-registered at `/var/tmp/m10-J7/BAR.md`, `sha256
+4746557714243417fa7d30742c01f01568346730be7659baacc251da239e88ec`, hashed
+2026-09-07T18:59:37Z — **before** any rebuild started. A hashed addendum
+(`26543bde…`, 23:23:56Z) records the one change of target.
+
+🔴 **It ran on a clone, not on the live catalog, and that was the operator's
+call.** `usher_catalog` cannot be a `TEMPLATE` while `usher-usher-1` holds
+connections to it (12 open), and terminating them is the disruption the
+instruction forbade. So the target is `usher_j7`, created in **25.97 s** from
+the `usher_seed_full` snapshot — 45 embeddings and 58 titles short of live,
+identical in neighbour counts. **The report therefore says `usher_j7` and does
+not claim the deployment's own catalog.** The clone is the reason a wrong-label
+rewrite would have cost a `DROP DATABASE` rather than real data.
+
+### Refutations first
+
+**P7 — "the scheduler drove it" — NOT MET, and stated rather than glossed.**
+`usher schedule --once` drove the **guard-refusal arm** only. The walk itself
+was `usher similar --rebuild`, because the interrupt-and-resume arm needs a
+process to signal and a `--resume` flag to pass, and the scheduler offers
+neither. So the end-to-end claim this task exists to make is made for the
+guard and not for the walk.
+
+🔴 **`usher similar --rebuild` ignores `SIGINT`.** Sent to the running process,
+it was still walking **three minutes later**; `SIGTERM` stopped it at once. The
+bar's own wording — *"a signal that reaches the loop"* — assumes otherwise, and
+an operator interrupting a 3.5-hour job reaches for Ctrl-C first. (My first
+attempt also signalled the `uv` wrapper rather than the child, which forwards
+nothing — a harness error, not a defect, and separate from the above.)
+
+⚠️ **The resume skipped 5,899 seeds, and that is correct rather than a hole.**
+The cursor is defined against the **artefact** — the first embedded seed with
+no neighbour row carrying the current fingerprint — not against "what this run
+has covered". Those 5,899 already carried current-fingerprint rows from before
+the run, so the artefact was complete without them. A resume defined the other
+way would need state, which ADR-0046 refuses.
+
+### Predictions that held
+
+| | prediction | outcome |
+|---|---|---|
+| P1 | 3.58 h ± 15% at 97.3 ms/seed | **3.46 h**, 127,420 seeds in 11,895 s = **93.4 ms/seed** |
+| P2a | ~3.31 M rows at 25/seed | **3,332,975** rows, **25.00**/seed exactly |
+| P2b | the walk closes the 877-seed gap | **closed** — 133,319 seeds = every embedded title |
+| P3 | `stale` 0, with the count beside it | *"no neighbour row disagrees with the running blend"*, over 3,332,975 rows |
+| P4 | exactly one fingerprint, `a7013154…` | **1 distinct**, and it re-stamped the 125 rows the guard arm had left under `afd00fff…` |
+| P5 | the guard refuses, **zero** rows written | refused on the scheduled path, both model strings at `ERROR`, count / `max(computed_at)` / fingerprint-count all unchanged |
+| P6 | a resumed run converges | **`redone_overlap = 0`** — 37,500 seeds before the interrupt, 89,920 after, zero intersection |
+
+**P5's arm is worth keeping.** Run under the wrong model, `usher similar
+--rebuild` **does** write — 125 rows stamped `afd00fff…` — and that is
+deliberate: `similar.py` states the guard is on the job and not on `rebuild`,
+because *"an operator typing a command about a table they can see"* may
+legitimately force a mid-swap rebuild, where *"a timer starting a multi-hour
+walk unasked"* may not. I misread that as a failed guard before reading the
+module; the scheduled path is the one that must refuse, and it does.
+
+Segment timings: seg1 37,500 seeds / 3,546 s / 94.6 ms/seed; seg2 89,920 seeds
+/ 8,349 s / 92.8 ms/seed. `computed_at` is stamped **per page** (500 seeds,
+~48 s), which is what makes segment-level progress measurable at all.
+
+## M10 R13 — the clean-checkout run (2026-09-11)
+
+Cloned from the **public remote** at `2cb8361` into `/var/tmp/r13-clean` (2 s,
+no `.venv` carried), scratch stack on port 8231, every command pasted as
+written. Wall clock per step:
+
+| step | | |
+|---|---|---|
+| clone | 2 s | from GitHub, not a copy of the worktree |
+| 1 · configure | 0 s | `cp .env.example .env`, `openssl rand -hex 32`, the `chown` |
+| 1 · `compose up -d --build` | 28 s | build included |
+| 2 · `/health/ready` | 0 s | `{"status":"ready","checks":{"database":true,"migrations":true}}` |
+| 3 · `bootstrap --phase imdb` | **94 s** | 1,277,520 titles; ratings 1,708,600 seen / 539,207 written |
+| 7 · `GET /home` | 29 ms | HTTP 200 |
+
+`/health` also answered `{"status":"ok","version":"0.1.0"}` — R1's and R2's work
+observed in a clean deployment rather than in a test.
+
+**"A few minutes" is honest.** Clone to a populated catalog is **~2 minutes**.
+
+### 🔴 The finding: a second Usher stack on one host collides on `postgres`
+
+`docker compose up` succeeded, `/health/ready` was green, and then
+`usher bootstrap` died with `asyncpg.exceptions.InvalidCatalogNameError:
+database "usher" does not exist` — while `psql -U usher -d usher` on the very
+same stack answered `0` rows from `titles`.
+
+`compose.yml` **pins `default.name: usher_default`** deliberately, so that the
+name is a contract for sidecars rather than a consequence of the directory. The
+consequence nobody had met: a second project joins the *first* stack's network,
+**both postgres containers hold the alias `postgres`**, and `getent hosts
+postgres` returns two addresses. Docker's DNS round-robins, so the CLI reached
+this host's existing `usher-postgres-1` — which has `usher_catalog` and no
+`usher`. The server had connected to the right one and stayed connected, which
+is why readiness was green and only the CLI failed.
+
+Diagnosed by `getent hosts postgres` returning `172.30.0.2` and `172.26.0.2`.
+Isolated with a one-key override file and step 3 then passed first time.
+Recorded in the README's quickstart, at step 1, where somebody will meet it.
+
+**This is a host-environment collision and not a defect in the quickstart** —
+on a machine with no Usher it cannot happen — but it is exactly the class this
+run exists to surface, and the symptom points at the wrong thing.
+
+### Steps 4–6 are NOT verified, and the reason is a credential
+
+`POST /admin/sources` requires `username` and `password`. The only Emby
+credential on this host is a **token** (`emby_token`), which is what Home
+Assistant uses; there is no password. Verifying the documented path would have
+meant either asking the operator for one or swapping `_authenticate_locked`
+through a `sitecustomize.py` the way S11's harness does — and a harness is not
+the path a stranger takes, so it would not have verified the quickstart.
+
+So: **steps 1, 2, 3 and 7 are verified; 4, 5 and 6 are not.** `GET /home`
+returned `200` with **zero rows**, which is correct for a catalog with no
+registered source — every row provider needs owned titles — and is exactly why
+the quickstart's step 7 says *rows back* means the whole path worked.
+
+Torn down with `down -v`; no containers, no network, and this host's
+`usher-postgres-1` still has no database named `usher`.
+
+### R13's second run — steps 4–7, and the quickstart was wrong
+
+The operator supplied the Emby password, so the three steps the first run could
+not verify were run. **All three pass, and between them they found that the
+quickstart could never reach its own step 7.**
+
+| step | | |
+|---|---|---|
+| 4 · `POST /admin/sources` | **HTTP 201** | real Emby, credentials authenticate |
+| 5 · `usher sync` | **24,000 items in 10 min**, killed | ≈ **8 h** for the 1.14M-item library |
+| 6 · `usher work --once` | 52 s | 2,229 enrich jobs left pending |
+| 7 · `GET /home` | 200, **0 rows** | with 25,000 items and 24,034 matched |
+
+🔴 **`--phase imdb` alone makes enrichment impossible, and nothing says so until
+step 6.** Every enrich job parked with `title carries no tmdb id to enrich
+from`. IMDb supplies titles with no TMDb id; `tmdb-ids` and `crosswalk` are what
+supply one, and without them `/home` returns `200` with an empty `rows` array
+**forever**. Measured after running them: 16 s and 246 s, taking 293,219 titles
+from no TMDb id to one. The quickstart prescribed neither.
+
+🔴 **`.env.example` ships an empty `USHER_TMDB_API_KEY` and step 1 never
+mentioned it**, though `## Requirements` lists it. Same failure shape: nothing
+complains until step 6, and the symptom appears at step 7.
+
+🔴 **Step 5 has no bound and was presented as one line of a short path.** The
+outbound limiter is deliberate (ADR-0043), so the walk is paced by the media
+server, not by Usher — hours on a real library.
+
+**The quickstart is rewritten rather than the claim defended**, which is this
+task's own instruction. It now opens by saying the path is not five minutes and
+names steps 5 and 6 as the long poles; step 1 carries the TMDb key and the
+network-collision warning; step 3 runs three phases with the measured times and
+says what skipping the third costs; step 5 carries the 24,000-in-10-minutes
+measurement; and step 7 lists the three honest reasons an empty screen comes
+back.
+
+⚠️ **`/home` was still empty at teardown** — 20 titles enriched of 25,000 owned,
+because the remaining 2,229 enrichments are rate-limited TMDb calls. That is the
+documented behaviour of a half-enriched catalog rather than a further defect,
+and step 7 now says so. **The path was not observed end to end with rows on the
+screen**, and that is recorded rather than claimed.
+
+Torn down with `down -v`; the request body holding the credential was shredded.
+No credential, token, user id or host reached the repository.
+
+### R13's third run — rows on `/home`, and the quickstart could not survive a stranger (2026-09-23)
+
+A fresh clone of the public remote at `35c67fa2`, every command run through
+`fish -c` as written, with the sync bounded at 35 minutes. The only departures
+were a host port and a scratch compose project.
+
+| step | | |
+|---|---|---|
+| clone | 2.5 s | from GitHub |
+| 1 · `compose up -d --build` | 26.0 s | 7.9 s warm |
+| 3 · `bootstrap --phase imdb` | 92.6 s | 1,279,749 titles |
+| 3 · `bootstrap --phase tmdb-ids` | 16.6 s | |
+| 3 · `bootstrap --phase crosswalk` | 223.9 s | **failed** at shard 3 and **exited 0**; the resume failed the same way |
+| 4 · `POST /admin/sources` | HTTP 201 | real Emby |
+| 5 · `usher sync` | 35 min, then SIGINT | 81,000 items seen, 79,855 matched |
+| 6 · `usher work --once` | 46.6 s | 20 jobs; 2,872 enrich jobs parked |
+| 7 · `GET /home` | 6–28 ms | **200, one row** |
+
+✅ **`/home` came back with rows 25 min 19 s after the clone.** One row,
+Recently Added, carrying skeleton series. It appeared 10.5 minutes into step 5,
+before step 6 ran, and it needs neither a TMDb key nor enrichment, so it proves
+the source walk and nothing past it. **An enriched home screen was never
+observed**: 31 of 2,905 owned titles were enriched when the run stopped.
+
+Found, and fixed before the tag:
+
+- 🔴 **`compose.yml` joined an external `observability` network**, so step 1
+  failed on any host without that stack. It passed here only because this host
+  has one. The network is now opt-in through `compose.observability.yml`.
+- 🔴 **The warning about a second stack separated the network and not the
+  project.** A clone left at `git clone`'s default directory is project
+  `usher`, which is this host's live stack, and following the warning as
+  written **recreated the live containers**. That was about four minutes
+  down, with no data lost, and the image was rebuilt from the same tree. The
+  quickstart now sets `COMPOSE_PROJECT_NAME`, `USHER_COMPOSE_NETWORK` and
+  `USHER_COMPOSE_HOST_PORT` before the first `up`.
+- 🔴 **The crosswalk failed and exited 0, twice.** One shard answered with a
+  body that was not SPARQL JSON, then hit a 90 s read timeout. The series pass
+  never ran: 31 of 375,198 series had a TMDb id. The prefix shards turned out
+  to be the cause rather than the cure. Each one paid for the whole P345 join,
+  45.0 s for `tt3` against 23.8 s unfiltered. The adapter now reads
+  `bd:slice` pages of 25,000 statements, the service retries a transient
+  failure from its checkpoint with backoff, and a phase that still fails exits
+  1 and prints the command that resumes it. Re-run live on 2026-09-24 against a
+  scratch database while WDQS was unhealthy, with **four real retries**
+  (three 502s and a read timeout): the phase completed in 490.5 s and linked
+  293,665 titles, 55,590 of them series.
+- **The TMDb-key warning sat after `up`**, and `env_file` is read only when a
+  container is created. It now comes before `up`.
+- **Step 7 said "rows back means the whole path worked"**, and step 6
+  prescribed a second worker beside the server's own. Both are rewritten.
+
+Not fixed: the 2,872 enrich jobs parked after one attempt, and nothing
+un-parks a job. That is [#87](https://github.com/anirudhlath/usher/issues/87).
+
+### R13's fourth run — steps 1–3 at the release head (2026-09-24)
+
+A fresh clone of the public remote at `4c0a923e`, every command run through
+`fish -c` as written. The stack was separated as the README's second-stack
+warning says: `COMPOSE_PROJECT_NAME` added, `USHER_COMPOSE_NETWORK` and
+`USHER_COMPOSE_HOST_PORT` changed where `.env.example` puts them. `docker
+compose config` resolved one network, the project's own, before the first `up`.
+
+| step | | |
+|---|---|---|
+| clone | 3.7 s | from GitHub |
+| 1 · `compose up -d --build` | 18.9 s | no external network needed |
+| 3 · `bootstrap --phase imdb` | 99.3 s | 1,279,749 titles |
+| 3 · `bootstrap --phase tmdb-ids` | 16.6 s | |
+| 3 · `bootstrap --phase crosswalk` | 1,274.4 s | **exit 0**, 293,665 titles linked, 55,590 of them series |
+| 3 · `bootstrap-status` | 2.7 s | every row `completed`, none with `error=` |
+
+✅ **The crosswalk completed through eight WDQS failures, on five of its pages**:
+four read timeouts, two dropped connections, one `502` and one truncated body.
+Three pages needed a third attempt and none a fourth. Both counts matched the
+scratch-database run exactly. The README's step 3 now gives the range, 491 s to 1,274 s.
+Steps 4–7 were not re-run; the third run above is their record.

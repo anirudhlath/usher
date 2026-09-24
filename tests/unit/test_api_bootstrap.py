@@ -1,20 +1,4 @@
-"""`POST /admin/bootstrap/{phase}` -- the M2 command, as an enqueue.
-
-Unit-level: the enqueued row, the 422 for a phase the vocabulary does not
-hold, and the structural shape (no `BulkDataset`, no `BootstrapService`
-reachable from the router). Driven through a real `create_app()` with
-`get_job_queue` overridden, exactly as `test_api_sources.py` does for
-`POST /admin/sources/{id}/sync` and `test_api_rows.py` for
-`POST /admin/rows/regenerate`.
-
-The end-to-end walk -- a claimed `bootstrap` job really running a phase
-against real Postgres, and a concurrent owner's checkpoint surviving it --
-lives in `tests/integration/test_admin_bootstrap.py`; this file is what a
-route that merely *looked* like an enqueue could still fail. **"It did not
-download" is also what a route that did nothing at all produces**, which is
-why the enqueued row and the silent transport are both asserted in the same
-case rather than in two.
-"""
+"""`POST /admin/bootstrap/{phase}`, as an enqueue."""
 
 import ast
 import dataclasses
@@ -69,8 +53,10 @@ async def client(app: FastAPI):  # type: ignore[no-untyped-def]
 async def test_a_bootstrap_request_enqueues_one_job_and_downloads_nothing(
     client: httpx.AsyncClient, queue: FakeJobQueue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """202 carrying `(bootstrap, "imdb")`, the queue holding exactly that
-    row, and no socket opened while the request was in flight.
+    """202 carrying `(bootstrap.
+
+    "imdb")`, the queue holding exactly that row, and no socket opened while the request
+    was in flight.
 
     **Both halves, because a request that did nothing at all satisfies only
     the second.** A `--phase imdb` run is 224 MB of IMDb dump and 74.8 s of
@@ -124,8 +110,10 @@ async def test_every_phase_the_cli_offers_is_a_phase_the_route_accepts(
 async def test_a_phase_the_vocabulary_does_not_hold_is_a_422_that_enqueues_nothing(
     client: httpx.AsyncClient, queue: FakeJobQueue
 ) -> None:
-    """422 in V1's envelope, and `depth()` read back to prove the refusal
-    came before the enqueue rather than after it.
+    """422 in the envelope.
+
+    `depth()` is read back to prove the refusal came before the enqueue rather
+    than after it.
 
     A 404 would be the wrong answer and is what a `str` path parameter plus a
     membership test would have produced: `/admin/bootstrap/embeddings` names
@@ -144,10 +132,10 @@ async def test_a_phase_the_vocabulary_does_not_hold_is_a_422_that_enqueues_nothi
 
 
 def test_the_bootstrap_router_holds_no_dataset_and_can_download_nothing() -> None:
-    """Structural, for the reason `test_api_sources.py` gives one router
-    over: *"it did not download"* is satisfied by a route whose download
-    merely happened not to be reached, and only the imports say it could not
-    be.
+    """Structural, for the reason `test_api_sources.py` gives one router over.
+
+    *"it did not download"* is satisfied by a route whose download merely happened not
+    to be reached, and only the imports say it could not be.
 
     `usher.adapters.bulk` is where every `BulkDataset` lives and
     `usher.services.bootstrap` is what drives one; neither may be named here,
@@ -173,8 +161,10 @@ def test_the_bootstrap_router_holds_no_dataset_and_can_download_nothing() -> Non
 
 @pytest.fixture
 def report() -> BootstrapReport:
-    """A catalog mid-bootstrap: one dataset done, one failed with a message an
-    operator has to be able to read, a genome with a vocabulary that names it.
+    """A catalog mid-bootstrap.
+
+    one dataset done, one failed with a message an operator has to be able to read, a
+    genome with a vocabulary that names it.
 
     Deliberately not the empty report -- the empty case is
     `tests/integration/test_admin_bootstrap.py`'s first case, driven against a
@@ -224,8 +214,9 @@ def status_client(app: FastAPI, report: BootstrapReport):  # type: ignore[no-unt
 async def test_the_status_route_serialises_the_report_and_invents_nothing(
     status_client: FastAPI, report: BootstrapReport
 ) -> None:
-    """Every field of the report reaches the body, and the body holds nothing
-    the report does not.
+    """Every field of the report reaches the body.
+
+    and the body holds nothing the report does not.
 
     The equality is against a whole literal document rather than against a
     handful of keys, because the failure this route can actually have is a
@@ -264,8 +255,9 @@ async def test_the_status_route_serialises_the_report_and_invents_nothing(
 
 
 def test_every_field_of_the_report_is_a_field_of_the_response(report: BootstrapReport) -> None:
-    """The projection is total, derived from the dataclass rather than from a
-    list somebody keeps in step.
+    """The projection is total.
+
+    derived from the dataclass rather than from a list somebody keeps in step.
 
     A field added to `BootstrapReport` and forgotten in
     `BootstrapStatusResponse.of` is a fact an operator screen silently stops
@@ -303,9 +295,9 @@ def test_every_vocabulary_state_survives_the_wire_as_its_own_member(
 
 
 def test_the_status_route_is_in_the_openapi_document_with_a_real_shape(app: FastAPI) -> None:
-    """M9's own acceptance: `/openapi.json` describes the report rather than
-    `{"type": "object"}`, which is half the reason the report is a value
-    object at all.
+    """`/openapi.json` describes the report rather than `{"type": "object"}`.
+
+    That is half the reason the report is a value object at all.
 
     The premise guard is not decoration -- a schema lookup that resolved
     nothing would leave every assertion below iterating an empty dict and

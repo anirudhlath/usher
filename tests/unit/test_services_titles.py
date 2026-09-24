@@ -1,16 +1,8 @@
-"""Read-through: the local answer, and the promotion it triggers.
-
-Against port fakes. No database, no network, and -- structurally -- no source:
-the assertions below that matter most are about a call this service does not
-make, because PRD 08's "a degraded subsystem narrows functionality; it never
-fails a request local state can answer" is only a property of the code if the
-failing call is absent rather than caught.
-"""
+"""Read-through: the local answer, and the promotion it triggers."""
 
 import ast
 import inspect
 import pathlib
-import re
 import uuid
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
@@ -52,12 +44,6 @@ USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 OTHER_USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000002")
 OBSERVED_AT = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
-#: `detail`'s docstring counts its reads in words, because it is prose first.
-#: Only the range a service of this shape could plausibly occupy -- a
-#: `KeyError` here is a docstring that grew past what this case understands,
-#: which is a louder failure than a silent re-parse.
-_NUMBER_WORDS = {"four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-
 
 class _Recording:
     """Records every awaited call made through it and forwards it unchanged.
@@ -65,7 +51,8 @@ class _Recording:
     A proxy rather than a counter on each fake: two of the six fakes this
     service takes have no `calls` attribute, and adding two would make the
     case that reads them a case about which fakes count. `__getattr__` fires
-    only for names this class does not define, which is all of them."""
+    only for names this class does not define, which is all of them.
+    """
 
     def __init__(self, wrapped: object, calls: list[str]) -> None:
         self._wrapped = wrapped
@@ -85,11 +72,12 @@ class _Recording:
 
 @pytest.fixture
 def meter_reader() -> Iterator[InMemoryMetricReader]:
-    """A real `MeterProvider` with an in-memory reader, installed for this
-    test alone -- `tests/conftest.py::reset_otel_meter_provider` is what makes
-    "for this test alone" true, since the API refuses a second
-    `set_meter_provider` in a process and every module-level instrument caches
-    the first real one it is handed."""
+    """A real `MeterProvider` with an in-memory reader, installed for this test alone.
+
+    `tests/conftest.py::reset_otel_meter_provider` is what makes "for this test alone"
+    true, since the API refuses a second `set_meter_provider` in a process and every
+    module-level instrument caches the first real one it is handed.
+    """
     reader = InMemoryMetricReader()
     metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
     yield reader
@@ -331,10 +319,12 @@ async def test_availability_names_the_source_an_operator_configured(
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
 ) -> None:
-    """A client renders "on Living Room Emby", not a uuid. The name comes from
-    the `Source` row, and one batched read serves every copy -- a household
-    has sources in the single digits and a per-copy lookup here would be a
-    query per badge."""
+    """A client renders "on Living Room Emby", not a uuid.
+
+    The name comes from the `Source` row, and one batched read serves every copy -- a
+    household has sources in the single digits and a per-copy lookup here would be a
+    query per badge.
+    """
     source = await _seed_source(sources)
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_copy(media_items, source_id=source.id, title_id=title.id, external_id="e1")
@@ -349,11 +339,12 @@ async def test_a_copy_on_a_source_that_has_been_deleted_still_renders(
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
 ) -> None:
-    """`media_items.source_id` is `ON DELETE CASCADE`, so this is a race
-    rather than a steady state -- the source row goes between the copy read
-    and the name read. `names[copy.source_id]` raises `KeyError` there, which
-    is a 500 on the screen an operator opens to find out what happened, for a
-    row that is about to disappear anyway. Narrow the answer, do not fail it.
+    """`media_items.source_id` is `ON DELETE CASCADE`, so this is a race, not a state.
+
+    The source row goes between the copy read and the name read, and
+    `names[copy.source_id]` raises `KeyError` there, which is a 500 on the screen an
+    operator opens to find out what happened, for a row that is about to disappear
+    anyway. Narrow the answer, do not fail it.
     """
     source = await _seed_source(sources)
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
@@ -370,11 +361,12 @@ async def test_a_retracted_copy_is_returned_rather_than_hidden(
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
 ) -> None:
-    """PRD 08's rule at the one place a *source's* health is visible on this
-    path. An unmounted drive makes the nightly sweep retract the copy; the
-    read still answers, with the copy present and `available = false`, and
-    the client renders "on Living Room Emby, currently not reported" rather
-    than "on no source" or an error. Narrowed, not failed.
+    """PRD 08's rule at the one place a *source's* health is visible on this path.
+
+    An unmounted drive makes the nightly sweep retract the copy; the read still answers,
+    with the copy present and `available = false`, and the client renders "on Living
+    Room Emby, currently not reported" rather than "on no source" or an error. Narrowed,
+    not failed.
     """
     source = await _seed_source(sources)
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
@@ -395,12 +387,10 @@ async def test_a_copy_with_no_dimensions_has_no_resolution(
 ) -> None:
     """`None`, never the string `"NonexNone"`.
 
-    Not hypothetical: a `Series` item has no `MediaSource` at all, so it
-    carries no width or height, and M4's live run counted **20 such rows in
-    601** ingested from the real server. The formatting guard is the whole
-    difference between an absent field and a rendered null pair, and an
-    assertion on a *populated* copy cannot see it -- measured, the mutation
-    that formats unconditionally survived every other case in this file.
+    Not hypothetical: a `Series` item has no `MediaSource` at all, so it carries no
+    width or height. The formatting guard is the whole difference between an absent
+    field and a rendered null pair, and an assertion on a *populated* copy cannot see
+    it.
     """
     source = await _seed_source(sources)
     series = await _seed_title(titles, EnrichmentState.ENRICHED, kind=TitleKind.SERIES)
@@ -420,8 +410,7 @@ async def test_a_copy_with_no_dimensions_has_no_resolution(
 async def test_a_title_on_no_source_answers_with_an_empty_availability(
     service: TitleReadService, titles: FakeTitleRepository
 ) -> None:
-    """The common case: the catalog holds 1,271,138 titles and the one
-    measured source holds 1,126,789 items, most of them episodes."""
+    """The common case: a catalog holds far more titles than any one source has items."""
     title = await _seed_title(titles, EnrichmentState.SKELETON)
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
@@ -430,8 +419,10 @@ async def test_a_title_on_no_source_answers_with_an_empty_availability(
 
 async def test_a_missing_title_is_none_not_an_error(service: TitleReadService) -> None:
     """`None` for absence, matching every read on every port in this project.
-    The route turns it into a 404; a raise would make the common case travel
-    through an exception path."""
+
+    The route turns it into a 404; a raise would make the common case travel through an
+    exception path.
+    """
     assert await service.detail(uuid.uuid4(), user_id=USER_ID) is None
 
 
@@ -452,9 +443,11 @@ async def test_watch_state_is_this_users(
 async def test_watch_state_is_none_when_this_user_has_none(
     service: TitleReadService, titles: FakeTitleRepository, watch_states: FakeWatchStateRepository
 ) -> None:
-    """`None`, never a fabricated all-zero record: "started and abandoned at
-    second zero" is a real state and a client has to be able to tell them
-    apart."""
+    """`None`, never a fabricated all-zero record.
+
+    "started and abandoned at second zero" is a real state and a client has to be able
+    to tell them apart.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_watch_state(
         watch_states, user_id=OTHER_USER_ID, title_id=title.id, position_seconds=9999
@@ -467,10 +460,10 @@ async def test_watch_state_is_none_when_this_user_has_none(
 async def test_a_stub_is_returned_immediately_and_promoted(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """PRD 03: "Requesting an unenriched title promotes its job to the front
-    of the queue rather than blocking the response. The API returns the stub
-    immediately with `enrichment_state: "stub"`." The *first* caller of the
-    promotion clause M4 wrote and left uncalled."""
+    """Requesting an unenriched title promotes its job rather than blocking the response.
+
+    The API returns the stub immediately, with `enrichment_state: "stub"`.
+    """
     title = await _seed_title(titles, EnrichmentState.STUB)
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
@@ -482,13 +475,13 @@ async def test_a_stub_is_returned_immediately_and_promoted(
 async def test_a_skeleton_is_promoted_too(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """`skeleton` is the tier a bulk-imported title sits at and it is the one
-    most in need of a client-triggered fill -- 979,366 of the catalog's
-    1,271,138 titles carry no `tmdb_id` at all. A guard written as
-    `state is EnrichmentState.STUB` promotes only the middle rung, and the
-    tempting `state < ENRICHED` promotes nothing at all: `EnrichmentState` is
-    a `StrEnum` whose members compare lexicographically and `ENRICHED` sorts
-    below both other rungs (ADR-0008)."""
+    """`skeleton` is the tier a bulk-imported title sits at, and the one most needing a fill.
+
+    A guard written as `state is EnrichmentState.STUB` promotes only the middle rung,
+    and the tempting `state < ENRICHED` promotes nothing at all: `EnrichmentState` is
+    a `StrEnum` whose members compare lexicographically and `ENRICHED` sorts below
+    both other rungs.
+    """
     title = await _seed_title(titles, EnrichmentState.SKELETON)
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
@@ -499,9 +492,7 @@ async def test_a_skeleton_is_promoted_too(
 async def test_an_enriched_title_is_not_enqueued(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """A queue that grew a row per title view is M4's "enqueueing an enrich
-    job for each makes the queue permanently the size of the library",
-    arriving from the client side."""
+    """A queue that grew a row per title view would sit permanently at the library's size."""
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
@@ -512,12 +503,14 @@ async def test_an_enriched_title_is_not_enqueued(
 async def test_promotion_is_reported_even_when_the_enqueue_writes_nothing(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """A second open of the same stub writes zero rows -- the enqueue clause's
-    own `WHERE jobs.priority < excluded.priority` sees nothing left to
-    promote, and M4 measured that as the honest number rather than a failure.
-    `promoted` therefore reports "this read asked for the front of the
-    queue", not "a row changed"; the alternative makes the second open of an
-    already-promoted title look like a read that declined to promote."""
+    """A second open of the same stub writes zero rows.
+
+    The enqueue clause's own `WHERE jobs.priority < excluded.priority` sees nothing
+    left to promote, which is the honest number rather than a failure. `promoted`
+    therefore reports "this read asked for the front of the queue", not "a row
+    changed"; the other spelling makes the second open of an already-promoted title
+    look like a read that declined to promote.
+    """
     title = await _seed_title(titles, EnrichmentState.STUB)
     first = await service.detail(title.id, user_id=USER_ID)
     second = await service.detail(title.id, user_id=USER_ID)
@@ -529,12 +522,13 @@ async def test_promotion_is_reported_even_when_the_enqueue_writes_nothing(
 async def test_a_parked_job_is_not_promoted_behind_a_humans_back(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """PRD 08: "Re-enqueueing does not un-park. Poison a human has not looked
-    at is not fixed by asking for it again, and a parked job's priority is
-    not promoted behind their back either." The enqueue statement enforces it
-    and this service does not work around it; the client is told what
-    happened through `enrichment_error`, which PRD 07's wire contract carries
-    for exactly this."""
+    """PRD 08: *"Re-enqueueing does not un-park"*.
+
+    Nor is *"a parked job's priority ... promoted behind a human's back."* The enqueue
+    statement enforces it and this service does not work around it; the client is told
+    what happened through `enrichment_error`, which PRD 07's wire contract carries for
+    exactly this.
+    """
     title = await _seed_title(
         titles, EnrichmentState.STUB, error="TMDb answered 404 for tmdb_id=90000550"
     )
@@ -555,17 +549,16 @@ async def test_a_parked_job_is_not_promoted_behind_a_humans_back(
 async def test_the_promotion_records_the_requests_trace(
     service: TitleReadService, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """PRD 10's "why did the title I just opened take 45 seconds" is one query,
-    and it is `traceparent` on the job row followed backwards from the
-    worker's `Link`. The worker's span links to it rather than parenting from
-    it, because the request has usually returned by then.
+    """`traceparent` on the job row is what answers "why did this title take 45 seconds".
 
-    A **real** SDK provider, installed here rather than relied on: the API's
-    default is a `ProxyTracer` whose spans carry an invalid context, and
-    `current_traceparent` correctly declines to inject one -- so the case
-    would assert `None is not None` against perfectly correct code, and no
-    mutation of the enqueue could be distinguished from it. `tests/conftest.
-    py::reset_otel_tracer_provider` is what makes installing one here safe.
+    The worker's span links to it rather than parenting from it, because the request
+    has usually returned by then.
+
+    A **real** SDK provider, installed here rather than relied on: the API's default
+    is a `ProxyTracer` whose spans carry an invalid context, and `current_traceparent`
+    correctly declines to inject one -- so the case would assert `None is not None`
+    against perfectly correct code. `tests/conftest.py::reset_otel_tracer_provider` is
+    what makes installing one here safe.
     """
     trace.set_tracer_provider(TracerProvider())
     tracer = trace.get_tracer("test")
@@ -582,10 +575,11 @@ async def test_a_series_availability_is_not_one_badge_per_episode(
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
 ) -> None:
-    """89% of the one measured source's items are episodes, and an episode's
-    row carries its series' `title_id`. The bound lives in
-    `MediaItemRepository.list_for_title`; this asserts the service inherits it
-    rather than re-deriving availability from something wider."""
+    """Most of a source's items are episodes, and an episode's row carries its series' id.
+
+    The bound lives in `MediaItemRepository.list_for_title`; this asserts the service
+    inherits it rather than re-deriving availability from something wider.
+    """
     source = await _seed_source(sources)
     series = await _seed_title(titles, EnrichmentState.ENRICHED, kind=TitleKind.SERIES)
     await _seed_copy(media_items, source_id=source.id, title_id=series.id, external_id="series-1")
@@ -608,10 +602,11 @@ async def test_the_source_names_cost_one_read_however_many_badges(
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
 ) -> None:
-    """One batched read of the source list serves every badge. A `get` per
-    copy is a query per badge -- the shape of defect this pipeline is built
-    around, arriving at the read side -- and it is invisible to an assertion
-    on the *response*, which is byte-identical either way.
+    """One batched read of the source list serves every badge.
+
+    A `get` per copy is a query per badge -- the shape of defect this pipeline is built
+    around, arriving at the read side -- and it is invisible to an assertion on the
+    *response*, which is byte-identical either way.
 
     Asserted as "the count does not grow with the copies" rather than as a
     magic number, so a legitimate extra read does not break this and a
@@ -673,18 +668,16 @@ async def test_the_cast_and_crew_are_capped_and_the_caps_are_chosen_not_measured
     credits: FakeCreditRepository,
     people: FakePersonRepository,
 ) -> None:
-    """Twenty each, **chosen rather than measured**, and what this case pins
-    is that the cap is applied *after* the ordering -- the survivors are the
-    top-billed, not whichever the storage layer reached first.
+    """Twenty each, and the cap is applied *after* the ordering.
 
-    **It cannot pin the caps' values, and that is measured rather than
-    assumed.** Every number here is spelled `CAST_LIMIT ± n`, so a plant
-    widening the constant moves the fixture and the expectation together and
-    this case stays green -- `CAST_LIMIT = 50` survived it, along with all 64
-    cases in the round. That is a claim about the constant being *in force*,
-    which is a different claim from its value, and
-    `test_the_caps_are_twenty_and_not_the_number_the_storage_layer_bounds`
-    is the one that makes the other. Both are kept.
+    The survivors are the top-billed, not whichever the storage layer reached first.
+
+    **It cannot pin the caps' values.** Every number here is spelled `CAST_LIMIT ± n`,
+    so widening the constant moves the fixture and the expectation together and this
+    case stays green. That is a claim about the constant being *in force*, which is a
+    different claim from its value, and
+    `test_the_caps_are_twenty_and_not_the_number_the_storage_layer_bounds` is the one
+    that makes the other. Both are kept.
     """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_cast(credits, people, title.id, size=CAST_LIMIT + 5, crew=CREW_LIMIT + 5)
@@ -706,20 +699,19 @@ async def test_the_caps_are_twenty_and_not_the_number_the_storage_layer_bounds(
     credits: FakeCreditRepository,
     people: FakePersonRepository,
 ) -> None:
-    """Every number in this case is a **literal**, deliberately, and that is
-    the whole reason it exists beside the case above.
+    """Every number in this case is a **literal**, which is why it exists beside the one above.
 
-    A boundary case whose fixture is spelled `CAST_LIMIT + 5` pins that the
-    constant is in force and cannot pin its value: widen the constant and both
-    sides move together. Measured -- `CAST_LIMIT = 50` survives that case and
-    fails this one. It is not an equivalent mutant: 50 is exactly what
-    `adapters/tmdb/mapping._CAST_LIMIT` *stores* per title, so a cap set there
-    is a cap that never fires, and the response quietly becomes the whole
-    stored cast on the screen a client opens most.
+    A boundary case whose fixture is spelled `CAST_LIMIT + 5` pins that the constant
+    is in force and cannot pin its value: widen the constant and both sides move
+    together. A cap of 50 survives that case and fails this one, and it is not an
+    equivalent: 50 is exactly what `adapters/tmdb/mapping._CAST_LIMIT` *stores* per
+    title, so a cap set there is a cap that never fires, and the response quietly
+    becomes the whole stored cast on the screen a client opens most.
 
-    The numbers being chosen rather than measured is what makes pinning them
-    worth a case rather than an irritation: nothing downstream would notice
-    them drifting, so nothing except this would notice them being wrong."""
+    The numbers being chosen rather than derived is what makes pinning them worth a
+    case rather than an irritation: nothing downstream would notice them drifting, so
+    nothing except this would notice them being wrong.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_cast(credits, people, title.id, size=25, crew=25)
 
@@ -769,15 +761,17 @@ async def test_the_credit_reads_do_not_grow_with_the_cast(
 async def test_a_title_with_no_credits_answers_with_two_empty_tuples(
     service: TitleReadService, titles: FakeTitleRepository
 ) -> None:
-    """The service returns empty, and the *wire* turns empty into absent
-    (`api/dto/title.py`). Keeping the emptiness here means the one place that
-    decides "absent rather than `[]`" is the DTO, rather than a `None` that
-    every reader of `TitleDetail` has to narrow.
+    """The service returns empty, and the *wire* turns empty into absent (`api/dto/title.py`).
 
-    T6 makes this the ordinary answer rather than a corner: it fills
-    `titles.credit_names` for ~93.8% of the catalog from IMDb with no
-    `people`/`credits` rows behind it, so a title can be searchable by a
-    credited name and still have nothing for this read to find."""
+    Keeping the emptiness here means the one place that decides "absent rather than
+    `[]`" is the DTO, rather than a `None` that every reader of `TitleDetail` has to
+    narrow.
+
+    This is the ordinary answer rather than a corner: `titles.credit_names` is filled
+    from IMDb for most of the catalog with no `people`/`credits` rows behind it, so a
+    title can be searchable by a credited name and still have nothing for this read to
+    find.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
@@ -805,10 +799,11 @@ async def _seed_images(
 async def test_a_title_with_no_images_answers_with_an_empty_tuple(
     service: TitleReadService, titles: FakeTitleRepository
 ) -> None:
-    """Same shape as `cast`/`crew`: the service returns empty and the *wire*
-    turns empty into absent (`api/dto/title.py`), so the one place that
-    decides "absent rather than `[]`" is the DTO rather than a `None` every
-    reader of `TitleDetail` has to narrow."""
+    """Same shape as `cast`/`crew`: the service returns empty and the wire turns it absent.
+
+    So the one place that decides "absent rather than `[]`" is `api/dto/title.py`,
+    rather than a `None` every reader of `TitleDetail` has to narrow.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
@@ -818,19 +813,18 @@ async def test_a_title_with_no_images_answers_with_an_empty_tuple(
 async def test_artwork_the_proxy_cannot_serve_never_reaches_the_detail(
     service: TitleReadService, titles: FakeTitleRepository, images: FakeImageRepository
 ) -> None:
-    """**Filter, not annotate**, and it happens here rather than in the DTO so
-    that `is_servable_path` stays the single definition -- a
-    `provider_path.endswith(".svg")` written in `api/dto/` would be a
-    provider-shaped inference in the layer PRD 01's no-source-concept rule is
-    about.
+    """Filter, not annotate, and here rather than in the DTO.
 
-    `/svg-poster.jpg`, `/.svg.jpg` and `/A-LOGO.SVG` are the three adversarial
-    paths C4 measured the wrong spellings of a suffix test against: `"svg" in
-    path` drops the first, `".svg" in path` drops the second, and a test that
-    does not lower-case keeps the third. Each wrong implementation dies on
-    exactly one parameter out of that task's 325, so an ordinary `.jpg`/`.svg`
-    pair here would ratify all three -- and a version of this case carrying
-    only the first two ratified the middle one, measured."""
+    `is_servable_path` stays the single definition -- a
+    `provider_path.endswith(".svg")` written in `api/dto/` would be a provider-shaped
+    inference in the layer PRD 01's no-source-concept rule is about.
+
+    `/svg-poster.jpg`, `/.svg.jpg` and `/A-LOGO.SVG` are the three adversarial paths
+    the wrong spellings of a suffix test fall over on: `"svg" in path` drops the
+    first, `".svg" in path` drops the second, and a check that does not lower-case
+    keeps the third. Each wrong implementation dies on exactly one of them, so an
+    ordinary `.jpg`/`.svg` pair here would ratify all three.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     poster = _image(title.id)
     contains = _image(title.id, path="/svg-poster.jpg", is_primary=False)
@@ -863,21 +857,19 @@ async def test_a_filtered_reference_is_counted_and_not_only_dropped(
     images: FakeImageRepository,
     meter_reader: InMemoryMetricReader,
 ) -> None:
-    """⚠️ **A filter with no counter is invisible**, which is the requirement
-    `is_servable_path`'s docstring hands to this task by name: once these rows
-    are dropped, *"this catalog has no logos"* and *"this proxy dropped all of
-    them"* are the same body and the same empty space on a screen.
+    """A filter with no counter is invisible.
 
-    So the assertion is not "the metric exists" -- a `create_counter` nobody
-    records to would pass that -- but that a read of a title with one servable
-    and one declined reference publishes **both** series with the right
-    numbers. The `served` half is what gives the drop count a denominator:
-    4,000 unservable references is a broken deployment on a small catalog and
-    one title in seventeen on a large one, and a bare drop count cannot tell
-    those apart either.
+    Once these rows are dropped, *"this catalog has no logos"* and *"this proxy
+    dropped all of them"* are the same empty space on a screen.
+
+    So the assertion is not "the metric exists" -- a `create_counter` nobody records
+    to would pass that -- but that a read of a title with one servable and one
+    declined reference publishes **both** series with the right numbers. The `served`
+    half is what gives the drop count a denominator, which a bare drop count has not.
 
     Driven through the real service rather than by calling the counter, so an
-    instrument created at import and never recorded to fails here."""
+    instrument created at import and never recorded to fails here.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     await _seed_images(
         images,
@@ -903,7 +895,8 @@ async def test_a_title_with_no_artwork_publishes_both_series_at_zero(
     counts, so an instrument that only spoke when it fired would leave an
     operator unable to read anything at all until the first drop -- which is
     exactly the silence it exists to break. `usher.curation.dropped`'s rule,
-    arriving at a read path."""
+    arriving at a read path.
+    """
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
 
     assert await service.detail(title.id, user_id=USER_ID) is not None
@@ -911,7 +904,7 @@ async def test_a_title_with_no_artwork_publishes_both_series_at_zero(
     assert _counted(meter_reader, "usher.images.references") == {"served": 0.0, "unservable": 0.0}
 
 
-async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
+async def test_detail_makes_seven_reads_over_six_repositories(
     titles: FakeTitleRepository,
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
@@ -920,30 +913,20 @@ async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
     credits: FakeCreditRepository,
     images: FakeImageRepository,
 ) -> None:
-    """`detail`'s docstring counts its own reads, and this is what keeps the
-    number honest.
+    """`detail`'s fan-out is a literal here, so growing it is a decision somebody makes.
 
-    **No ordinal is written into a plan for this**, deliberately: B9 added a
-    repository and C7 added another, and which of the two merges last is not
-    knowable when either is written -- so a sentence saying "six reads over
-    five repositories" is wrong for whichever order actually happened. The
-    acceptance is that the docstring's own words equal what the service does
-    **in the tree as it stands**, which only a case can check.
+    A count stated in prose is a count nothing holds to the code, and the count is the
+    fact. Seven reads because `credits` is asked twice, once per `CreditKind`.
 
     Counted through a proxy that records every awaited call rather than
     through per-fake counters, because two of the six fakes have none and
     adding them would make this case's subject "which fakes count" rather than
     "how many reads happen". The title is `ENRICHED` so `_promote` enqueues
     nothing and every recorded call is a read; that is asserted rather than
-    assumed."""
-    docstring = inspect.getdoc(TitleReadService.detail) or ""
-    stated = re.search(r"\*\*(\w+) reads over (\w+) repositories", docstring)
-    assert stated is not None, (
-        "the premise: detail's docstring states its own read count, which is the "
-        "sentence this case exists to hold to the code"
-    )
-    reads = _NUMBER_WORDS[stated.group(1).lower()]
-    repositories = _NUMBER_WORDS[stated.group(2).lower()]
+    assumed.
+    """
+    reads = 7
+    repositories = 6
 
     calls: list[str] = []
     service = TitleReadService(
@@ -962,26 +945,32 @@ async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
     assert not any(call.startswith("FakeJobQueue.") for call in calls), (
         "the premise: an enriched title is not promoted, so every recorded call is a read"
     )
-    assert len(calls) == reads, f"{docstring.splitlines()[2]!r} against {calls}"
-    assert len({call.split(".")[0] for call in calls}) == repositories
+    assert len(calls) == reads, (
+        f"`detail` makes {len(calls)} reads, not {reads} -- a read was added or "
+        f"removed and nothing else counts them: {calls}"
+    )
+    assert len({call.split(".")[0] for call in calls}) == repositories, (
+        f"`detail` now reads {len({call.split('.')[0] for call in calls})} "
+        f"repositories, not {repositories}: {sorted({call.split('.')[0] for call in calls})}"
+    )
 
 
 async def test_reading_a_title_never_touches_a_source(service: TitleReadService) -> None:
-    """PRD 08's governing rule as a structural property rather than a caught
-    exception: this service holds no `SourceAdapter`, so there is no path from
-    an unreachable Emby to a failed read. "It did not raise" is also what a
-    service that caught everything would produce, so the assertion is on the
-    module's own imports and on the constructor's own parameters instead.
+    """PRD 08's governing rule as a structural property rather than a caught exception.
 
-    The import check is the load-bearing half -- a signature check alone
-    passes against a service that reaches for a factory inside a method --
-    and it covers `import usher.ports.source` as well as `from ... import`,
-    because `ast.walk` sees both and only one of them was caught before.
+    This service holds no `SourceAdapter`, so there is no path from an unreachable
+    Emby to a failed read. "It did not raise" is also what a service that caught
+    everything would produce, so the assertion is on the module's own imports and on
+    the constructor's own parameters instead.
 
-    The signature check reads the annotation as **text**. `parameter.
-    annotation.__name__` was the obvious spelling and it misses the sneakiest
-    form: a *string* annotation needs no import at all, so `__name__` is
-    absent and the check silently passes. Measured -- that mutation survived.
+    The import check is the load-bearing half -- a signature check alone passes
+    against a service that reaches for a factory inside a method -- and it covers
+    `import usher.ports.source` as well as `from ... import`, because `ast.walk` sees
+    both.
+
+    The signature check reads the annotation as **text**: a *string* annotation needs
+    no import at all, so `parameter.annotation.__name__` is absent and that spelling
+    silently passes.
     """
     tree = ast.parse(pathlib.Path(inspect.getfile(TitleReadService)).read_text())
     imported: set[str] = set()

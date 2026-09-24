@@ -1,33 +1,4 @@
-"""PRD 03 stage 1: one page of a walk, into canonical state.
-
-Deliberately owns no walk and no run. `ReconcileService` drives the adapter,
-batches, checkpoints, and decides whether the availability sweep may run;
-this owns what happens to one batch once it exists. The split is what makes
-every case in `tests/unit/test_services_ingest.py` runnable with no adapter
-at all.
-
-**`observed_at` is the run's start instant, passed in, never `now()`.** The
-availability sweep retracts everything with `last_seen_at < run.started_at`,
-so `last_seen_at` has to mean "the run that saw this item" rather than "when
-this row happened to be written" -- the two are only ever equal by accident,
-and nothing downstream can reconstruct the first from the second. It is a
-parameter rather than a default for that reason.
-
-**Episodes are attached, never invented, and never matched.** An episode's
-canonical parent is its series' `Title`. `MatchService` refuses to run one
-through the ladder at all (its own docstring says why: the ids a source
-reports for an episode are the *episode's*, and 999,827 junk titles is the
-cost of pretending otherwise), so every episode arrives here `UNMATCHED` and
-leaves either attached to its series or still unmatched. Neither outcome
-drops it -- PRD 02's "unmatched items are never dropped", applied to the 89%
-of this library that is episodes.
-
-**Every repository call is once per batch.** Two provider/name lookups and
-one enrichment-state read through `TitleMatchRepository`, one
-`resolve_series_titles`, one `upsert_many`, four episode calls, and exactly
-one `enqueue` carrying every follow-up job the batch produced. The per-item
-spelling of any of them is 999,827 round trips a walk.
-"""
+"""PRD 03 stage 1: one page of a walk, into canonical state."""
 
 import uuid
 from collections.abc import Sequence
@@ -60,8 +31,8 @@ _ENRICHED_RANK = ENRICHMENT_RANK[EnrichmentState.ENRICHED]
 
 # `(title_id, season_number)` and `(title_id, season_number, episode_number)`
 # -- the natural keys `EpisodeRepository` resolves on. Named because they are
-# what makes two shows' S01E01 two rows: 32,409 series means a key without the
-# title is a collision, not a risk.
+# what makes two shows' S01E01 two rows: a key without the title is a
+# collision, not a risk.
 _SeasonKey = tuple[uuid.UUID, int]
 _EpisodeKey = tuple[uuid.UUID, int, int]
 
@@ -84,7 +55,10 @@ class IngestService:
     async def ingest_batch(
         self, source_id: uuid.UUID, items: Sequence[SourceItem], *, observed_at: AwareDatetime
     ) -> IngestResult:
-        """Match, store, attach episodes, enqueue follow-up work. Idempotent."""
+        """Match, store, attach episodes, enqueue follow-up work.
+
+        Idempotent.
+        """
         with _tracer.start_as_current_span("ingest.item") as span:
             span.set_attribute("usher.source_id", str(source_id))
             span.set_attribute("usher.batch.items", len(items))
@@ -124,13 +98,12 @@ class IngestService:
         items: Sequence[SourceItem],
         outcomes: dict[str, MatchOutcome],
     ) -> dict[str, MatchOutcome]:
-        """Resolve each episode item's series, create its season and episode
-        rows, and rewrite its outcome to carry both ids.
+        """Resolve each episode item's series, and attach its season and episode.
 
         Four writes and one read for the whole batch, never per episode. The
-        per-episode spelling reads more clearly and is a scale defect: at
-        999,827 episodes and three round trips apiece it is the difference
-        between a walk that finishes and one that does not.
+        per-episode spelling reads more clearly and is a scale defect: three
+        round trips per episode is the difference between a walk that finishes
+        and one that does not.
         """
         episodes = [item for item in items if item.kind is SourceItemKind.EPISODE]
         if not episodes:
@@ -316,28 +289,7 @@ class IngestService:
     async def _titles_needing_enrichment(
         self, outcomes: dict[str, MatchOutcome]
     ) -> list[uuid.UUID]:
-        """The titles this batch touched that are not already `enriched`.
-
-        A nightly walk sees all 1,126,674 items every night. Enqueueing
-        enrichment for each one makes the queue permanently the size of the
-        library and starves every demand-promoted job behind it -- and the
-        `(kind, key)` uniqueness would collapse them to one per title, which
-        merely turns "1.1M inserts" into "1.1M no-op upserts" every night.
-
-        One read for the whole batch, stubs included. Short-circuiting the
-        titles this batch just stubbed looks free -- `CREATED_STUB` sounds
-        like a claim that the row is new -- and is not: that method also
-        covers an item that *lost* the create race and attached to an
-        existing title, which may already be enriched. Asking about every id
-        costs nothing (they are already in one statement) and is right in
-        both cases. It is also readable: `TitleRepository.add` flushes, so a
-        stub the match stage wrote a moment ago is visible to this read.
-
-        `ENRICHMENT_RANK`, never a direct comparison: `EnrichmentState` is a
-        `StrEnum` and `ENRICHED > SKELETON` is `False` (ADR-0008), so
-        `state >= ENRICHED` is `True` for `"stub"` and would skip precisely
-        the tier most in need of enrichment.
-        """
+        """The titles this batch touched that are not already `enriched`."""
         title_ids = list(
             {outcome.title_id for outcome in outcomes.values() if outcome.title_id is not None}
         )

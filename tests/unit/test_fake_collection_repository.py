@@ -1,12 +1,4 @@
-"""`FakeCollectionRepository` against the shared `CollectionRepository`
-contract.
-
-No Docker, no database. See tests/fakes/collection_repository.py for the five
-places this half is more forgiving -- the first of which is that the
-`kind = 'movie'` filter is an `if` here and a `WHERE` clause there, which is
-the one place these two implementations fail identically under the same
-mutation.
-"""
+"""`FakeCollectionRepository` against the shared `CollectionRepository` contract."""
 
 import uuid
 
@@ -63,10 +55,13 @@ class FakeCollectionSeeder(CollectionSeeder):
         return self._repository.catalog.collection_ids.get(title_id)
 
     async def force_collection(self, title_id: uuid.UUID, collection_id: uuid.UUID) -> None:
-        """Straight into the affordance, past the `kind = 'movie'` filter
-        `attach_titles` applies -- which is the whole point of the method. In
-        Postgres the same bypass is a raw `UPDATE`; here it is the dict the
-        port's own filter reads."""
+        """Straight into the affordance, past the `kind = 'movie'` filter `attach_titles` applies.
+
+        which is the whole point of the method.
+
+        In Postgres the same bypass is a raw `UPDATE`; here it is the dict the port's
+        own filter reads.
+        """
         self._repository.catalog.collection_ids[title_id] = collection_id
 
 

@@ -1,28 +1,7 @@
-"""`usher.db.repositories._errors`, the module three repositories now share.
+"""`usher.db.repositories._errors`, the module three repositories now share."""
 
-`is_row_refusal` and `constraint_name` are exercised end to end by every
-repository that catches with them, against a real driver, in
-`tests/integration/`. What is pinned *here* is `refusals_as_conflict` — the
-context manager M8 factored out of `PostgresCuratedRowRepository.
-replace_for_user`, `PostgresLLMCallRepository.record` and
-`BulkCatalogRepository.replace_genome_tags`, which had shipped the same
-five-line pyramid three times.
-
-**The session is a stub, deliberately, and that is a claim about what this file
-can and cannot say.** What a stub can show is the part that was copied: that
-the body runs inside a SAVEPOINT with autoflush suppressed, in that order; that
-a refusal is translated and everything else is not; and that the SAVEPOINT is
-unwound *before* the port error is raised, which is what leaves the caller a
-usable session. What it cannot show is that a real `AsyncSession`'s SAVEPOINT
-actually restores the transaction -- that needs Postgres, and
-`tests/integration/test_curated_row_repository.py::
-test_a_generation_that_fails_part_way_leaves_the_previous_screen_whole` and
-`tests/integration/test_llm_call_repository.py::
-test_a_refused_call_leaves_the_earlier_rows_and_the_session_usable` are where
-it is said. Neither file is replaced by this one; this one is why they now
-describe one implementation instead of three.
-"""
-
+import ast
+import pathlib
 from collections.abc import AsyncIterator, Iterator
 from contextlib import (
     AbstractAsyncContextManager,
@@ -34,18 +13,18 @@ from typing import cast
 
 import pytest
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from usher.db.repositories._errors import refusals_as_conflict
+from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.ports.errors import RepositoryConflict, UsherPortError
 
 
 class _DriverError(Exception):
-    """asyncpg's own exception, in the two fields `_errors.py` reads off it.
+    """Asyncpg's own exception, in the two fields `_errors.py` reads off it.
 
-    Both are read through `exc.orig.__cause__` -- SQLAlchemy wraps the driver's
-    exception and chains the original onto the wrapper -- so the fake has to be
-    two layers deep or it would pin an accessor that does not exist.
+    Both are read through `exc.orig.__cause__`, so the fake has to be two layers deep or
+    it would pin an accessor that does not exist.
     """
 
     def __init__(self, sqlstate: str | None, constraint_name: str | None = None) -> None:
@@ -82,10 +61,8 @@ def _integrity_error(constraint: str) -> IntegrityError:
 class _RecordingSession:
     """An `AsyncSession` in exactly the two members the helper touches.
 
-    Records the order it was driven in, because the ordering is the thing the
-    three copies agreed on and the thing a fourth caller could get wrong:
-    `no_autoflush` outside the SAVEPOINT, and the SAVEPOINT unwound before the
-    translation runs.
+    Records the order it was driven in: `no_autoflush` outside the SAVEPOINT, and the
+    SAVEPOINT unwound before the translation runs.
     """
 
     def __init__(self) -> None:
@@ -123,11 +100,11 @@ def _session() -> tuple[_RecordingSession, AsyncSession]:
 
 
 async def test_the_body_runs_in_a_savepoint_with_autoflush_suppressed() -> None:
-    """The order, which is what was copied three times.
+    """`no_autoflush` is outside the SAVEPOINT, not inside it.
 
-    `no_autoflush` is outside: a shared session can be carrying some other
-    call's unflushed, invalid row, and a flush of *that* inside this SAVEPOINT
-    would be reported to this caller as its own row being refused.
+    A shared session can be carrying some other call's unflushed, invalid row, and a
+    flush of *that* inside this SAVEPOINT would be reported to this caller as its own
+    row being refused.
     """
     recorded, session = _session()
 
@@ -144,10 +121,11 @@ async def test_the_body_runs_in_a_savepoint_with_autoflush_suppressed() -> None:
 
 
 async def test_a_refused_row_is_translated_and_carries_its_constraint() -> None:
-    """SQLSTATE class 23, the shape every constraint on these three tables
-    produces, and the message is the caller's rather than the helper's -- three
-    tables refusing a row for three different reasons say three different
-    things to a service."""
+    """SQLSTATE class 23 is the shape every constraint on these three tables produces.
+
+    The message is the caller's rather than the helper's: three tables refusing a row
+    for three different reasons say three different things to a service.
+    """
     recorded, session = _session()
     refusal = _refusal("23503", "fk_curated_rows_user_id_users")
 
@@ -170,12 +148,10 @@ async def test_a_refused_row_is_translated_and_carries_its_constraint() -> None:
 
 
 async def test_a_value_the_column_cannot_hold_is_translated_without_a_name() -> None:
-    """SQLSTATE class 22 -- `curated_rows."position"` at `2**31` and
-    `llm_calls.cost_usd` above `$9,999.99999999` -- which is the pair that made
-    `except IntegrityError` the wrong clause for these three callers.
+    """SQLSTATE class 22 is a value too wide for its column, which `except IntegrityError` misses.
 
-    `constraint` is `None` and that is the honest answer: a column's declared
-    width refusing a value is not a named constraint firing.
+    `constraint` is `None` and that is the honest answer: a column's declared width
+    refusing a value is not a named constraint firing.
     """
     _, session = _session()
 
@@ -187,13 +163,10 @@ async def test_a_value_the_column_cannot_hold_is_translated_without_a_name() -> 
 
 
 async def test_a_plain_integrity_error_is_still_a_refusal() -> None:
-    """No SQLSTATE on the chain at all, which is how a refusal arrives when
-    any layer of the best-effort accessor is not what was expected.
+    """A refusal with no SQLSTATE on the chain must still translate.
 
-    It must still translate: degrading to "propagate" would let an integrity
-    violation cross the port boundary raw, which is the one thing ADR-0009
-    forbids and the thing every sibling repository's `except IntegrityError`
-    already gets right.
+    Degrading to "propagate" would let an integrity violation cross the port boundary
+    raw, which is the one thing a port error exists to prevent.
     """
     _, session = _session()
 
@@ -205,13 +178,11 @@ async def test_a_plain_integrity_error_is_still_a_refusal() -> None:
 
 
 async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
-    """Class 42 -- an undefined table, standing in for the dropped connection
-    and the statement timeout that are not deterministic enough to write.
+    """Class 42, an undefined table, stands in for the faults that are not the row's.
 
-    Captured rather than `pytest.raises(DBAPIError)`: under the mutation this
-    kills the helper raises `RepositoryConflict`, which is not a `DBAPIError`,
-    so `pytest.raises` would decline it and the case would fail before the
-    discriminating assertion ever ran.
+    Captured rather than `pytest.raises(DBAPIError)`: a helper that wrongly translated
+    would raise `RepositoryConflict`, which is not a `DBAPIError`, so `pytest.raises`
+    would fail the case before the discriminating assertion ran.
     """
     _, session = _session()
     raised: BaseException | None = None
@@ -228,3 +199,250 @@ async def test_a_failure_that_is_not_the_rows_fault_is_not_translated() -> None:
         "service the row was wrong when the schema is what is missing"
     )
     assert isinstance(raised, DBAPIError)
+
+
+# --------------------------------------------------------------------------
+# The re-raise, at every site that widened -- a property, not eleven cases
+# --------------------------------------------------------------------------
+
+_SCANNED = (
+    pathlib.Path(__file__).resolve().parents[2] / "src" / "usher" / "db" / "repositories",
+    pathlib.Path(__file__).resolve().parents[2] / "src" / "usher" / "adapters" / "search",
+)
+
+
+def _dbapi_handlers() -> list[tuple[str, str, ast.ExceptHandler]]:
+    """Every `except DBAPIError` in the packages that translate, with the method it is in."""
+    found: list[tuple[str, str, ast.ExceptHandler]] = []
+    for directory in _SCANNED:
+        for path in sorted(directory.rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                for handler in ast.walk(node):
+                    if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                        continue
+                    named = {one.id for one in ast.walk(handler.type) if isinstance(one, ast.Name)}
+                    if "DBAPIError" in named:
+                        found.append((path.name, node.name, handler))
+    return found
+
+
+# Every `except DBAPIError` in the two packages that translate, named rather
+# than counted.
+WIDENED_SITES = frozenset(
+    {
+        ("_errors.py", "refusals_as_conflict"),
+        ("collection.py", "attach_titles"),
+        ("import_run.py", "_give_back"),
+        ("import_run.py", "_why_lost"),
+        ("import_run.py", "save"),
+        ("jobs.py", "enqueue"),
+        ("people.py", "replace_for_titles"),
+        ("postgres.py", "index_many"),
+        ("search.py", "replace"),
+        ("search.py", "upsert_many"),
+        ("sync.py", "add"),
+        ("sync.py", "save"),
+        ("title.py", "add"),
+        ("title.py", "update"),
+    }
+)
+
+# Sites that catch a disconnect rather than a refusal: on a lock's own connection, one that
+# ended is a lock lost, or one already given back. Each re-raises everything else.
+DISCONNECT_SITES = frozenset({("import_run.py", "_give_back"), ("import_run.py", "_why_lost")})
+
+
+def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
+    """`WIDENED_SITES` is a census, not a floor.
+
+    Widening a site changes what crosses a port boundary, and so does narrowing one.
+    Either without editing this set fails here, which makes the list a decision rather
+    than an observation.
+    """
+    found = {(module, method) for module, method, _ in _dbapi_handlers()}
+    assert found == set(WIDENED_SITES), (
+        f"widened but not named here: {sorted(found - set(WIDENED_SITES))}; "
+        f"named here but no longer widened: {sorted(set(WIDENED_SITES) - found)}"
+    )
+
+
+def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
+    """The invariant that buys `except DBAPIError` its width, checked across every site."""
+    handlers = _dbapi_handlers()
+    assert {(module, method) for module, method, _ in handlers} == set(WIDENED_SITES), (
+        "the handler scan disagrees with WIDENED_SITES -- fix that census first, since "
+        "this case cannot be read until it is known which sites it covered"
+    )
+
+    unguarded = []
+    for module, method, handler in handlers:
+        if module == "_errors.py" and method == "refusals_as_conflict":
+            continue
+        if (module, method) in DISCONNECT_SITES:
+            asks = any(
+                isinstance(node, ast.Attribute) and node.attr == "connection_invalidated"
+                for node in ast.walk(handler)
+            )
+        else:
+            asks = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "is_row_refusal"
+                for node in ast.walk(handler)
+            )
+        guarded = asks and any(
+            isinstance(node, ast.Raise) and node.exc is None for node in ast.walk(handler)
+        )
+        if not guarded:
+            unguarded.append(f"{module}:{method}")
+
+    assert not unguarded, (
+        "these `except DBAPIError` handlers catch more than a row refusal and re-raise "
+        f"none of it, so a transport fault reaches the caller as a RepositoryConflict: "
+        f"{unguarded}"
+    )
+
+
+class _HoldConnection:
+    """A lock's connection in the members a check or a give-back touches, every one failing."""
+
+    def __init__(self, *, invalidated: bool) -> None:
+        self._invalidated = invalidated
+        self.events: list[str] = []
+
+    async def scalar(self, statement: object, parameters: object = None) -> bool:
+        raise DBAPIError(
+            "SELECT EXISTS (...)",
+            {},
+            Exception("the driver's"),
+            connection_invalidated=self._invalidated,
+        )
+
+    async def execute(self, statement: object, parameters: object = None) -> None:
+        await self.scalar(statement, parameters)
+
+    async def invalidate(self) -> None:
+        self.events.append("invalidated")
+
+    async def close(self) -> None:
+        self.events.append("closed")
+
+
+@pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
+async def test_the_hold_check_calls_only_a_disconnect_a_lost_hold(invalidated: bool) -> None:
+    """`_confirm`'s `except DBAPIError` by behaviour; the census above reads only its shape.
+
+    A disconnect on the hold's own connection is the hold lost. Anything else says
+    nothing about the lock, and as a `RepositoryConflict` would end an import that still
+    holds its dataset.
+    """
+    connection = _HoldConnection(invalidated=invalidated)
+    runs = PostgresImportRunRepository(_session()[1])
+    runs._holds["scripted"] = cast(AsyncConnection, connection)
+    if not invalidated:
+        with pytest.raises(DBAPIError):
+            await runs.touch("scripted")
+        assert connection.events == []
+        return
+    with pytest.raises(RepositoryConflict, match="lost the hold on the import of scripted: its"):
+        await runs.touch("scripted")
+    assert connection.events == ["invalidated", "closed"]
+    with pytest.raises(RepositoryConflict, match="does not hold the import of scripted"):
+        await runs.touch("scripted")
+
+
+class _AliveConnection:
+    """A lock's connection whose lock is still there."""
+
+    async def scalar(self, statement: object, parameters: object = None) -> bool:
+        return True
+
+    async def invalidate(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
+async def test_the_read_check_calls_only_a_disconnect_a_lost_read(invalidated: bool) -> None:
+    """The same rule on the connection a repository's reads live on, through `touch`.
+
+    A disconnect there is every read lost, and all of them are dropped at once.
+    """
+    connection = _HoldConnection(invalidated=invalidated)
+    runs = PostgresImportRunRepository(_session()[1])
+    runs._holds["own"] = cast(AsyncConnection, _AliveConnection())
+    runs._reader = cast(AsyncConnection, connection)
+    runs._reads = {"scripted", "other"}
+    if not invalidated:
+        with pytest.raises(DBAPIError):
+            await runs.touch("own")
+        assert connection.events == []
+        assert runs._reads == {"scripted", "other"}
+        return
+    with pytest.raises(
+        RepositoryConflict, match="lost the shared hold on other, which this reads: its"
+    ):
+        await runs.touch("own")
+    assert connection.events == ["invalidated", "closed"]
+    assert _reads_of(runs) == (None, set())
+
+
+def _reads_of(runs: PostgresImportRunRepository) -> tuple[AsyncConnection | None, set[str]]:
+    return runs._reader, runs._reads
+
+
+@pytest.mark.parametrize("reads", ["ended", "alive"])
+async def test_touch_confirms_the_reads_when_the_hold_is_gone_too(reads: str) -> None:
+    """A server restart ends the hold's connection and the reads' at once.
+
+    The hold's check raised before the reads were read, so reads already gone were kept,
+    to be given back on a connection that had ended. Both are confirmed; only a read found
+    gone is dropped, and the conflict raised is the hold's.
+    """
+    reader = _HoldConnection(invalidated=True) if reads == "ended" else _AliveConnection()
+    runs = PostgresImportRunRepository(_session()[1])
+    runs._holds["own"] = cast(AsyncConnection, _HoldConnection(invalidated=True))
+    runs._reader = cast(AsyncConnection, reader)
+    runs._reads = {"scripted"}
+    with pytest.raises(
+        RepositoryConflict, match=r"^lost the hold on the import of own: its connection ended$"
+    ):
+        await runs.touch("own")
+    if isinstance(reader, _HoldConnection):
+        assert reader.events == ["invalidated", "closed"], "the ended read was kept"
+        assert _reads_of(runs) == (None, set())
+    else:
+        assert _reads_of(runs) == (cast(AsyncConnection, reader), {"scripted"}), (
+            "a live read was dropped"
+        )
+
+
+@pytest.mark.parametrize("give_back", ["release", "release_reads"])
+@pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
+async def test_a_give_back_calls_only_a_disconnect_given_back(
+    invalidated: bool, give_back: str
+) -> None:
+    """The same rule where a lock is given back.
+
+    A connection that ended took its locks with it, so that is no error. Anything else
+    may have left the lock held and raises. Either way the backend is ended, not pooled.
+    """
+    connection = _HoldConnection(invalidated=invalidated)
+    runs = PostgresImportRunRepository(_session()[1])
+    if give_back == "release":
+        runs._holds["scripted"] = cast(AsyncConnection, connection)
+        give = runs.release("scripted")
+    else:
+        runs._reader, runs._reads = cast(AsyncConnection, connection), {"scripted"}
+        give = runs.release_reads()
+    if invalidated:
+        await give
+    else:
+        with pytest.raises(DBAPIError):
+            await give
+    assert connection.events == ["invalidated", "closed"]

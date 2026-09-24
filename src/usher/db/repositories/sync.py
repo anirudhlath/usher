@@ -1,44 +1,4 @@
-"""Sync-run history and the provider payload cache.
-
-Implements `SyncRunRepository` and `RawPayloadStore`
-(`usher.ports.repository`). Two small ports in one module because they share
-nothing but a migration and are each a handful of statements.
-
-**`PostgresSyncRunRepository` goes through the ORM**, unlike the batch
-repositories in this package. Its writes are genuinely one row at a time -- a
-run is started once and saved a handful of times over its life -- so the
-~1.15 ms of SAVEPOINT/INSERT/RELEASE per call that made the staged `COPY`
-mandatory for 1.1M media items is irrelevant here, and `SyncRunRow` is in
-exact 1:1 column correspondence with `SyncRun`, which is what makes the
-round trip a `model_validate` rather than a hand-map.
-
-**`add` and `save` are deliberately not one upsert.** "The run I started" and
-"a run I invented while finishing" must not be the same call: a service that
-lost track of its own row would otherwise silently write history that never
-happened, and `latest_completed_cursor` reads exactly that history to decide
-what a delta walk may skip.
-
-**And `save` is non-destructive, which ADR-0042 is what made necessary.** A
-`WATCH_STATE` run's row is now reused across attempts, so two walks can reach
-one row -- the job queue serialises `sync` *jobs*, and neither
-`LaneSupervisor._close_gap` nor `usher sync` goes through the queue, the second
-from another process entirely. A plain last-writer-wins `UPDATE` over every
-column then lets a slow attempt that started first un-complete the walk that
-overtook it and pull `position` back to where the loser began -- which is #41's
-restart loop restored by the change that fixed it. The two rules are in **SQL**
-rather than in Python for a reason this session cannot get right on its own: the
-ORM answers `get()` out of its identity map, so a caller whose own session
-already holds the row cannot see the other transaction's committed write at all,
-and under READ COMMITTED a blocked `UPDATE` re-evaluates its `WHERE` against the
-new row version while values a caller already chose in Python stay stale.
-
-**`clock_timestamp()`, not `now()`, in `PostgresRawPayloadStore.put`.**
-`now()` is frozen for the life of a transaction, and an enrichment worker
-that refreshes several payloads in one transaction would stamp them all with
-its start instant -- which is the wrong answer to the one compliance question
-`fetched_at` exists to answer, and it gets more wrong the longer the
-transaction runs.
-"""
+"""Sync-run history and the provider payload cache."""
 
 import json
 import uuid
@@ -47,11 +7,11 @@ from typing import Any, cast
 
 from pydantic import AwareDatetime
 from sqlalchemy import CursorResult, func, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.sync import SyncRunRow
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.domain.ids import new_id
 from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
@@ -72,21 +32,8 @@ ORDER BY started_at DESC
 LIMIT 1
 """
 
-# No `WHERE status <> 'completed'` -- the status test is in Python, on the one
-# row this returns. `SyncRunRepository.latest_incomplete_run` argues why; both
-# spellings die there and this is not the place to repeat it.
-#
-# `id DESC` is for **determinism between the two arms**, not for a reachable
-# input: both service sites stamp `datetime.now(UTC)`, so a production tie
-# needs two runs in one microsecond for one `(source, kind)`. Postgres promises
-# nothing for equal sort keys and the fake's `max` returns the first maximal
-# element, so untied they could answer differently about the same two rows and
-# only one arm would be right.
-#
-# Measured, not assumed: `ix_sync_runs_source_kind_started` is
-# (source_id, kind, started_at DESC), so it supplies the leading key and the
-# `id` tiebreak is an Incremental Sort over one `started_at` group.
-# `test_the_resume_query_uses_the_source_kind_index` pins that plan.
+# No `WHERE status <> 'completed'` -- the status test is in Python, on the one row this
+# returns.
 _INCOMPLETE = """
 SELECT * FROM sync_runs
 WHERE source_id = :source_id AND kind = :kind
@@ -115,29 +62,11 @@ ON CONFLICT (provider, kind, reference) DO UPDATE SET
     fetched_at = excluded.fetched_at
 """
 
-# **The outer parentheses around the OR-ed predicate are load-bearing and
-# their absence is silent.** Written without them the clause parses as
-# `(provider = <p> AND after IS NULL) OR (id > after)`, which is exactly
-# right on the first page -- `after` is NULL, the left arm is the real
-# predicate -- and collapses to `id > after` on every page after it, handing
-# back every remaining row in the table whatever provider wrote it.
-# `db/repositories/search.py`'s `list_stale` carries the same note for the
-# same reason; this is the second site, not a new discovery. Observed rather
-# than argued: written without them,
-# `test_iterate_stays_scoped_to_one_provider_on_every_page_not_only_the_first`
-# is the *only* case in this store's twenty that fails, because every other
-# case's rows share one provider.
-#
-# `CAST(:after AS uuid)`, never `:after::uuid`: SQLAlchemy's `text()`
-# bind-parameter regex treats a name immediately followed by `::` as a
-# Postgres cast and skips the bind entirely, so the latter reaches asyncpg as
-# a literal string. The cast is needed regardless -- an untyped NULL
-# parameter has no type for `IS NULL` to resolve against.
-#
-# `ORDER BY id`, which is the primary key and therefore total.
-# `ix_raw_payloads_fetched_at` is not a candidate and is not read by this
-# statement: `fetched_at` ties across every row a bootstrap transaction
-# writes, so a page boundary inside that group would drop the rest of it.
+# **The outer parentheses around the OR-ed predicate are load-bearing and their absence
+# is silent.** Written without them the clause parses as `(provider = <p> AND after IS
+# NULL) OR (id > after)`, which is exactly right on the first page -- `after` is NULL,
+# the left arm is the real predicate -- and collapses to `id > after` on every page
+# after it, handing back every remaining row in the table whatever provider wrote it.
 _ITERATE = """
 SELECT id, kind, reference, payload, fetched_at
 FROM raw_payloads
@@ -162,7 +91,13 @@ class PostgresSyncRunRepository(SyncRunRepository):
             async with self._session.begin_nested():
                 self._session.add(SyncRunRow(**run.model_dump()))
                 await self._session.flush()
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`.** `sync_runs` carries four
+            # `integer` counters -- `items_seen`, `items_matched`, `items_unmatched`,
+            # `items_retracted` -- each fed by a `SyncRun` field bounded `ge=0` and
+            # not above.
+            if not is_row_refusal(exc):
+                raise
             raise RepositoryConflict(
                 f"sync run {run.id} conflicts with an existing run",
                 constraint=constraint_name(exc),
@@ -171,13 +106,10 @@ class PostgresSyncRunRepository(SyncRunRepository):
     async def save(self, run: SyncRun) -> None:
         stored = run.model_dump()
         values: dict[str, Any] = {name: stored[name] for name in _MUTABLE}
-        # **`position` may advance and may never regress.** It is a
-        # checkpoint rather than a value, so the honest merge of two attempts'
-        # opinions about it is the further one: a slow attempt saving the page
-        # it started from over a faster one's progress is the #41 loop with a
-        # checkpoint column added. `GREATEST` against the *column* rather than
-        # against a value read a moment ago, because only the column is
-        # re-read under the row lock.
+        # **`position` may advance and may never regress.** It is a checkpoint rather
+        # than a value, so the honest merge of two attempts' opinions about it is the
+        # further one: a slow attempt saving the page it started from over a faster
+        # one's progress is the #41 loop with a checkpoint column added.
         values["position"] = func.greatest(SyncRunRow.position, run.position)
         try:
             # Inside the SAVEPOINT, not before it: these statements autoflush,
@@ -186,19 +118,8 @@ class PostgresSyncRunRepository(SyncRunRepository):
             # rollback-to-SAVEPOINT only cleanly reverts changes it watched
             # happen within its own scope.
             async with self._session.begin_nested():
-                # **`completed` is absorbing**, and the guard refuses the whole
-                # write rather than the status column alone. A walk that was
-                # overtaken has nothing to contribute to the row that overtook
-                # it: its counters are lower, and its `error` on a completed
-                # run renders through `usher sync-status` as a failure of the
-                # walk that succeeded.
-                #
-                # `synchronize_session="fetch"` is load-bearing, not tidiness:
-                # this is a Core-shaped UPDATE, so a mapped copy of the row in
-                # the identity map would otherwise keep the pre-save values
-                # and `get()` -- which answers out of that map -- would report
-                # them. On Postgres it is carried by RETURNING rather than by a
-                # second round trip.
+                # **`completed` is absorbing**, and the guard refuses the whole write
+                # rather than the status column alone.
                 result = await self._session.execute(
                     update(SyncRunRow)
                     .where(SyncRunRow.id == run.id, SyncRunRow.status != SyncRunStatus.COMPLETED)
@@ -214,7 +135,12 @@ class PostgresSyncRunRepository(SyncRunRepository):
                 # ordinary and silent. Only the second may return.
                 if await self._session.get(SyncRunRow, run.id) is None:
                     raise RepositoryNotFound(f"no existing sync run {run.id} to update")
-        except IntegrityError as exc:
+        except DBAPIError as exc:
+            # **`DBAPIError` rather than `IntegrityError`.** The same four counters as
+            # `add`, on the path that writes them at the end of a walk rather than at
+            # its start.
+            if not is_row_refusal(exc):
+                raise
             raise RepositoryConflict(
                 f"sync run {run.id} conflicts with an existing run",
                 constraint=constraint_name(exc),
@@ -306,15 +232,11 @@ class PostgresRawPayloadStore(RawPayloadStore):
 
     async def put(self, provider: str, kind: str, reference: str, payload: dict[str, Any]) -> None:
         try:
-            # A SAVEPOINT and a translation, for the same two reasons every
-            # other repository in this package has them: `services/` must not
-            # import `sqlalchemy.exc` to handle a rejected key (ADR-0009), and
-            # Postgres aborts the whole transaction on any statement error, so
-            # a caught `ck_raw_payloads_provider_not_empty` would otherwise
-            # poison the session for the caller's next, unrelated call. The
-            # three key parts are plain strings -- no domain model validates
-            # them on the way in -- so this is a reachable path, not a
-            # defensive one.
+            # A SAVEPOINT and a translation, for the same two reasons every other
+            # repository in this package has them: `services/` must not import
+            # `sqlalchemy.exc` to handle a rejected key, and Postgres aborts the whole
+            # transaction on any statement error, so a caught
+            # `ck_raw_payloads_provider_not_empty` would poison the session.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await self._session.execute(
@@ -376,13 +298,10 @@ class PostgresRawPayloadStore(RawPayloadStore):
                 id=row["id"],
                 kind=row["kind"],
                 reference=row["reference"],
-                # The same ambiguity `get` documents, at a second `text()`
-                # statement over the same column: a `text()` statement carries
-                # no SQLAlchemy type, so what asyncpg hands back for `jsonb`
-                # depends on whether a codec was installed on that connection.
-                # Not skipped on the grounds that `get` already has it -- a
-                # `str` masquerading as a payload would reach `DeriveService`
-                # as a mapping with no keys.
+                # The same ambiguity `get` documents, at a second `text()` statement
+                # over the same column: a `text()` statement carries no SQLAlchemy type,
+                # so what asyncpg hands back for `jsonb` depends on whether a codec was
+                # installed on that connection.
                 payload=json.loads(row["payload"])
                 if isinstance(row["payload"], str)
                 else dict(row["payload"]),

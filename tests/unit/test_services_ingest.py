@@ -1,11 +1,4 @@
-"""One batch of a walk, against port fakes.
-
-The single-item cases are the easy half. What a batch exposes -- and what
-every case below the "the batch" heading is about -- is an episode whose
-series arrives on the *same page* rather than an earlier one, a season
-upserted once per episode instead of once per page, and a nightly walk
-re-enqueueing enrichment for all 1,126,674 items it just saw.
-"""
+"""One batch of a walk, against port fakes."""
 
 import uuid
 from collections.abc import Sequence
@@ -109,11 +102,13 @@ async def test_a_movie_becomes_a_media_item_carrying_its_quality_facts(
 async def test_every_item_in_a_batch_carries_the_runs_instant_not_its_own(
     fixture: _Fixture,
 ) -> None:
-    """The availability sweep compares `last_seen_at < run.started_at`. If
-    each row stamped its own `now()`, `last_seen_at` would stop meaning "the
-    run that saw this" and start meaning "when this row happened to be
-    written" -- which is not the quantity `ReconcileService` compares
-    against, and not one anything else in the pipeline can reproduce."""
+    """The availability sweep compares `last_seen_at < run.started_at`.
+
+    If each row stamped its own `now()`, `last_seen_at` would stop meaning "the run that
+    saw this" and start meaning "when this row happened to be written" -- which is not
+    the quantity `ReconcileService` compares against, and not one anything else in the
+    pipeline can reproduce.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [MOVIE, SERIES], observed_at=RUN_AT)
     for external_id in ("movie-1", "series-1"):
         stored = await fixture.media_items.get_by_external_id(SOURCE_ID, external_id)
@@ -124,9 +119,11 @@ async def test_every_item_in_a_batch_carries_the_runs_instant_not_its_own(
 async def test_an_unmatched_movie_is_stored_rather_than_dropped(
     fixture: _Fixture,
 ) -> None:
-    """PRD 02: "Unmatched items are never dropped." A MediaItem with a NULL
-    title_id is a legitimate, expected state and the review queue is what it
-    is for."""
+    """Unmatched items are never dropped.
+
+    A MediaItem with a NULL title_id is a legitimate, expected state and the review
+    queue is what it is for.
+    """
     orphan = SourceItem(external_id="orphan-1", name="Home Video 2004", kind=SourceItemKind.MOVIE)
     await fixture.service.ingest_batch(SOURCE_ID, [orphan], observed_at=RUN_AT)
     unmatched = await fixture.media_items.list_unmatched(SOURCE_ID)
@@ -136,9 +133,10 @@ async def test_an_unmatched_movie_is_stored_rather_than_dropped(
 async def test_ingesting_the_same_batch_twice_changes_nothing(
     fixture: _Fixture,
 ) -> None:
-    """PRD 03: "Four idempotent, resumable stages. Any stage can be re-run
-    without duplicating work." A resumed sync replays the batch that was in
-    flight when it died."""
+    """Every stage is idempotent, so re-running one duplicates no work.
+
+    A resumed sync replays the batch that was in flight when it died.
+    """
     first = await fixture.service.ingest_batch(SOURCE_ID, [SERIES, EPISODE], observed_at=RUN_AT)
     second = await fixture.service.ingest_batch(SOURCE_ID, [SERIES, EPISODE], observed_at=RUN_AT)
     assert (first.inserted, first.updated) == (2, 0)
@@ -157,8 +155,11 @@ async def test_ingesting_the_same_batch_twice_changes_nothing(
 async def test_a_newly_stubbed_title_is_enqueued_for_enrichment(
     fixture: _Fixture,
 ) -> None:
-    """PRD 03: "Newly added to a source" is priority 50. A stub that is never
-    enqueued stays a stub forever and the read-through design does nothing."""
+    """PRD 03: "Newly added to a source" is priority 50.
+
+    A stub that is never enqueued stays a stub forever and the read-through design does
+    nothing.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [MOVIE], observed_at=RUN_AT)
     enrich = await fixture.queue.claim([JobKind.ENRICH], limit=10)
     assert len(enrich) == 1
@@ -168,10 +169,12 @@ async def test_a_newly_stubbed_title_is_enqueued_for_enrichment(
 async def test_a_matched_skeleton_is_enqueued_for_enrichment(
     fixture: _Fixture,
 ) -> None:
-    """The path a bootstrapped catalog actually takes. M2 left 1,271,138
-    titles at `skeleton`; a walk that only enqueued the stubs it minted
-    itself would leave every one of them unenriched forever, and nothing in
-    the stub case above can tell."""
+    """The path a bootstrapped catalog actually takes.
+
+    Bootstrap leaves the whole catalog at `skeleton`; a walk that only enqueued the
+    stubs it minted itself would leave every one of them unenriched forever, and
+    nothing in the stub case above can tell.
+    """
     await fixture.matching.given_title(
         kind=TitleKind.MOVIE, name="Example Movie", year=2021, tmdb_id=90000100
     )
@@ -182,9 +185,11 @@ async def test_a_matched_skeleton_is_enqueued_for_enrichment(
 async def test_an_already_enriched_title_is_not_re_enqueued(
     fixture: _Fixture,
 ) -> None:
-    """A nightly walk sees every item every night. Enqueueing enrichment for
-    all 1,126,674 of them each time makes the queue permanently the size of
-    the library and starves everything else."""
+    """A nightly walk sees every item every night.
+
+    Enqueueing enrichment for every one of them each time makes the queue permanently
+    the size of the library and starves everything else.
+    """
     await fixture.matching.given_title(
         kind=TitleKind.MOVIE,
         name="Example Movie",
@@ -197,10 +202,12 @@ async def test_an_already_enriched_title_is_not_re_enqueued(
 
 
 async def test_a_stub_title_is_re_enqueued(fixture: _Fixture) -> None:
-    """The `ENRICHMENT_RANK` trap from the other side. `StrEnum` compares
-    lexicographically, so `"stub" >= "enriched"` is `True` -- a guard written
-    as a direct comparison silently *skips* every stub, which is the
-    population most in need of enrichment. ADR-0008."""
+    """The `ENRICHMENT_RANK` trap from the other side.
+
+    `StrEnum` compares lexicographically, so `"stub" >= "enriched"` is `True` -- a guard
+    written as a direct comparison silently *skips* every stub, which is the population
+    most in need of enrichment.
+    """
     await fixture.matching.given_title(
         kind=TitleKind.MOVIE,
         name="Example Movie",
@@ -216,9 +223,11 @@ async def test_a_stub_title_is_re_enqueued(fixture: _Fixture) -> None:
 
 
 async def test_an_episode_is_hung_off_its_series_title(fixture: _Fixture) -> None:
-    """The series is ingested first, in the same batch. `SourceItem` carries
-    `series_external_id`, `season_number` and `episode_number` precisely so
-    this is possible without a second upstream request."""
+    """The series is ingested first, in the same batch.
+
+    `SourceItem` carries `series_external_id`, `season_number` and `episode_number`
+    precisely so this is possible without a second upstream request.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [SERIES, EPISODE], observed_at=RUN_AT)
     series_item = await fixture.media_items.get_by_external_id(SOURCE_ID, "series-1")
     episode_item = await fixture.media_items.get_by_external_id(SOURCE_ID, "episode-1")
@@ -236,11 +245,12 @@ async def test_an_episode_is_hung_off_its_series_title(fixture: _Fixture) -> Non
 async def test_an_episode_arriving_before_its_series_in_the_same_batch_still_attaches(
     fixture: _Fixture,
 ) -> None:
-    """`SortBy=DateCreated` says nothing about a series preceding its
-    episodes, and Emby genuinely returns them interleaved. An implementation
-    that built its in-batch series map from the items it had already
-    *processed* rather than from the whole page attaches on one ordering and
-    silently misses on the other."""
+    """`SortBy=DateCreated` says nothing about a series preceding its episodes.
+
+    Emby genuinely returns them interleaved. An implementation that built its in-batch
+    series map from the items it had already *processed* rather than from the whole
+    page attaches on one ordering and silently misses on the other.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [EPISODE, SERIES], observed_at=RUN_AT)
     episode_item = await fixture.media_items.get_by_external_id(SOURCE_ID, "episode-1")
     series_item = await fixture.media_items.get_by_external_id(SOURCE_ID, "series-1")
@@ -252,11 +262,14 @@ async def test_an_episode_arriving_before_its_series_in_the_same_batch_still_att
 async def test_an_episode_whose_series_is_not_yet_known_is_left_unmatched(
     fixture: _Fixture,
 ) -> None:
-    """A walk is sorted by creation date, which offers no guarantee a series
-    is seen before its episodes -- and an episode whose series arrives in a
-    later page must not be dropped, nor attached to a guess. It goes to the
-    review queue and is re-enqueued; the next batch or the next run resolves
-    it."""
+    """A walk is sorted by creation date.
+
+    Which offers no guarantee a series is seen before its episodes, and an episode
+    whose series arrives in a later page must not be dropped, nor attached to a guess.
+
+    It goes to the review queue and is re-enqueued; the next batch or the next run
+    resolves it.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [EPISODE], observed_at=RUN_AT)
     stored = await fixture.media_items.get_by_external_id(SOURCE_ID, "episode-1")
     assert stored is not None
@@ -270,11 +283,12 @@ async def test_an_episode_whose_series_is_not_yet_known_is_left_unmatched(
 async def test_an_unresolved_episode_is_stored_rather_than_dropped(
     fixture: _Fixture,
 ) -> None:
-    """`test_an_unmatched_movie_is_stored_rather_than_dropped`'s episode
-    sibling, and the one that bites: 999,827 of this deployment's items are
-    episodes, so an implementation that quietly filtered the unresolvable
-    ones out of the upsert would lose most of a first walk and the sweep
-    would then retract them all on the second."""
+    """`test_an_unmatched_movie_is_stored_rather_than_dropped`'s episode sibling.
+
+    Most of a library's items are episodes, so an implementation that quietly filtered
+    the unresolvable ones out of the upsert would lose most of a first walk and the
+    sweep would then retract them all on the second.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [EPISODE], observed_at=RUN_AT)
     unmatched = await fixture.media_items.list_unmatched(SOURCE_ID)
     assert [item.external_id for item in unmatched] == ["episode-1"]
@@ -284,8 +298,10 @@ async def test_an_unresolved_episode_is_stored_rather_than_dropped(
 async def test_an_episode_finds_a_series_ingested_by_an_earlier_batch(
     fixture: _Fixture,
 ) -> None:
-    """The batch-boundary case the one above sets up. `resolve_series_titles`
-    is a database read, not an in-batch dict, for exactly this."""
+    """The batch-boundary case the one above sets up.
+
+    `resolve_series_titles` is a database read, not an in-batch dict, for exactly this.
+    """
     await fixture.service.ingest_batch(SOURCE_ID, [SERIES], observed_at=RUN_AT)
     await fixture.service.ingest_batch(SOURCE_ID, [EPISODE], observed_at=RUN_AT)
     stored = await fixture.media_items.get_by_external_id(SOURCE_ID, "episode-1")
@@ -297,10 +313,12 @@ async def test_an_episode_finds_a_series_ingested_by_an_earlier_batch(
 async def test_an_episode_missing_its_numbers_is_left_unmatched(
     fixture: _Fixture,
 ) -> None:
-    """A `season_number`/`episode_number` of `None` is not a zero. Attaching
-    on a defaulted number hangs every such episode off S00E00 of its series
-    and collapses them into one row -- and `Episode.episode_number` is
-    `ge=0`, so `0` is a legal value the model will happily store."""
+    """A `season_number`/`episode_number` of `None` is not a zero.
+
+    Attaching on a defaulted number hangs every such episode off S00E00 of its series
+    and collapses them into one row -- and `Episode.episode_number` is `ge=0`, so `0` is
+    a legal value the model will happily store.
+    """
     numberless = SourceItem(
         external_id="episode-2",
         name="Unnumbered",
@@ -319,10 +337,12 @@ async def test_an_episode_missing_its_numbers_is_left_unmatched(
 async def test_an_episode_of_an_unmatched_series_is_left_unmatched(
     fixture: _Fixture,
 ) -> None:
-    """`resolve_series_titles` omits a series it has not matched, and the
-    difference between "no such series" and "that series has no title yet"
-    must not be papered over: attaching to a `None` title is the one thing
-    `media_items.title_id` being nullable makes syntactically possible."""
+    """`resolve_series_titles` omits a series it has not matched.
+
+    The difference between "no such series" and "that series has no title yet" must not
+    be papered over: attaching to a `None` title is the one thing `media_items.title_id`
+    being nullable makes syntactically possible.
+    """
     unmatchable = SourceItem(
         external_id="series-2", name="No Ids At All", kind=SourceItemKind.SERIES
     )
@@ -344,10 +364,12 @@ async def test_an_episode_of_an_unmatched_series_is_left_unmatched(
 async def test_an_attached_episode_reports_how_it_was_resolved(
     fixture: _Fixture,
 ) -> None:
-    """`usher.ingest.items` is labelled by outcome. An episode resolved
-    through its series is neither unmatched nor matched by any tier of the
-    ladder it never walked, and reporting it as `unmatched` would put
-    999,827 items a night in the wrong bucket of PRD 10's panel."""
+    """`usher.ingest.items` is labelled by outcome.
+
+    An episode resolved through its series is neither unmatched nor matched by any tier
+    of the ladder it never walked, and reporting it as `unmatched` would put most of a
+    night's items in the wrong `result` bucket of PRD 10's counter.
+    """
     result = await fixture.service.ingest_batch(SOURCE_ID, [SERIES, EPISODE], observed_at=RUN_AT)
     by_id = {outcome.external_id: outcome for outcome in result.outcomes}
     assert by_id["episode-1"].method is MatchMethod.SERIES_PARENT
@@ -361,10 +383,12 @@ async def test_an_attached_episode_reports_how_it_was_resolved(
 async def test_two_series_worth_of_episodes_land_under_their_own_series(
     fixture: _Fixture,
 ) -> None:
-    """The batch-level version of "every series has an S01E01". A walk sorted
-    by creation date interleaves shows, so one page routinely carries two
-    S01E01s -- and a resolve scoped to a single title, or a season map keyed
-    on the number alone, hangs one show's episode off the other's."""
+    """The batch-level version of "every series has an S01E01".
+
+    A walk sorted by creation date interleaves shows, so one page routinely carries two
+    S01E01s -- and a resolve scoped to a single title, or a season map keyed on the
+    number alone, hangs one show's episode off the other's.
+    """
     other_series = SourceItem(
         external_id="series-2",
         name="Other Series",
@@ -406,9 +430,11 @@ async def test_two_series_worth_of_episodes_land_under_their_own_series(
 async def test_ingest_costs_a_bounded_number_of_writes_per_batch(
     fixture: _Fixture,
 ) -> None:
-    """500 episodes must not be 1,500 round trips. The batched form issues
-    one season upsert, one season resolve, one episode upsert and one episode
-    resolve, whatever the batch holds."""
+    """500 episodes must not be 1,500 round trips.
+
+    The batched form issues one season upsert, one season resolve, one episode upsert
+    and one episode resolve, whatever the batch holds.
+    """
     episodes = [
         SourceItem(
             external_id=f"e{index}",
@@ -431,9 +457,11 @@ async def test_ingest_costs_a_bounded_number_of_writes_per_batch(
 
 
 async def test_ingest_enqueues_once_per_batch(fixture: _Fixture) -> None:
-    """A page of 500 unresolvable episodes is one `enqueue` carrying 500
-    requests, not 500 calls -- and the enrichment and re-match requests share
-    it, because they are one statement's worth of work."""
+    """A page of 500 unresolvable episodes is one `enqueue` carrying 500 requests.
+
+    The enrichment and re-match requests share it, because they are one statement's
+    worth of work.
+    """
     calls: list[int] = []
     original = fixture.queue.enqueue
 
@@ -460,9 +488,11 @@ async def test_ingest_enqueues_once_per_batch(fixture: _Fixture) -> None:
 async def test_a_nightly_re_walk_of_an_enriched_library_enqueues_nothing(
     fixture: _Fixture,
 ) -> None:
-    """The steady state, and the one that decides whether the queue is a
-    queue or a copy of the library. Every item matched, every title enriched:
-    a second walk must produce no jobs at all."""
+    """The steady state.
+
+    It decides whether the queue is a queue or a copy of the library: every item
+    matched, every title enriched, so a second walk must produce no jobs at all.
+    """
     await fixture.matching.given_title(
         kind=TitleKind.MOVIE,
         name="Example Movie",
@@ -486,10 +516,12 @@ async def test_a_nightly_re_walk_of_an_enriched_library_enqueues_nothing(
 async def test_the_batch_reports_its_own_matched_and_unmatched_counts(
     fixture: _Fixture,
 ) -> None:
-    """`SyncRun` carries `items_matched`/`items_unmatched`, and the batch is
-    the only thing that already knows them. The alternative -- a
-    `list_unmatched` query per batch to recover a number just computed -- is
-    a round trip per batch for an answer in hand."""
+    """`SyncRun` carries `items_matched`/`items_unmatched`.
+
+    The batch is the only thing that already knows them. The alternative -- a
+    `list_unmatched` query per batch to recover a number just computed -- is a round
+    trip per batch for an answer in hand.
+    """
     orphan = SourceItem(external_id="orphan-1", name="Home Video 2004", kind=SourceItemKind.MOVIE)
     result = await fixture.service.ingest_batch(
         SOURCE_ID, [MOVIE, SERIES, EPISODE, orphan], observed_at=RUN_AT
@@ -501,10 +533,12 @@ async def test_the_batch_reports_its_own_matched_and_unmatched_counts(
 async def test_a_duplicate_inside_one_batch_is_one_row_and_two_outcomes(
     fixture: _Fixture,
 ) -> None:
-    """`list_items`' own contract permits the same item twice in one walk, so
-    the counts a batch reports and the rows it writes legitimately disagree.
-    An implementation that assumed they matched would report a re-sync as
-    growth on PRD 10's "library growth per week" panel."""
+    """`list_items`' own contract permits the same item twice in one walk.
+
+    So the counts a batch reports and the rows it writes legitimately disagree. An
+    implementation that assumed they matched would report a re-sync as growth on PRD
+    10's "library growth per week" panel.
+    """
     result = await fixture.service.ingest_batch(SOURCE_ID, [MOVIE, MOVIE], observed_at=RUN_AT)
     assert (result.inserted, result.updated) == (1, 0)
     assert (result.matched, result.unmatched) == (2, 0)
@@ -512,8 +546,10 @@ async def test_a_duplicate_inside_one_batch_is_one_row_and_two_outcomes(
 
 
 async def test_an_empty_batch_touches_nothing(fixture: _Fixture) -> None:
-    """A walk's last page is routinely empty, and so is a delta walk that
-    found no changes. Neither should cost a statement."""
+    """A walk's last page is routinely empty, and so is a delta walk that found no changes.
+
+    Neither should cost a statement.
+    """
     fixture.matching.reset_calls()
     fixture.episodes.reset_calls()
     fixture.media_items.reset_calls()
@@ -529,11 +565,13 @@ async def test_an_empty_batch_touches_nothing(fixture: _Fixture) -> None:
 
 
 async def test_a_manual_resolution_survives_the_next_walk(fixture: _Fixture) -> None:
-    """The review queue's whole point. An operator attaches an unmatched item
-    by hand; tonight's walk upserts it again with `title_id=None`, because
-    nothing about the source changed. `upsert_many`'s COALESCE is what keeps
-    the resolution, and this is the service-level case that a walk really
-    does pass `None` rather than re-deriving it."""
+    """The review queue's whole point.
+
+    An operator attaches an unmatched item by hand; tonight's walk upserts it again with
+    `title_id=None`, because nothing about the source changed. `upsert_many`'s COALESCE
+    is what keeps the resolution, and this is the service-level case that a walk really
+    does pass `None` rather than re-deriving it.
+    """
     orphan = SourceItem(external_id="orphan-1", name="Home Video 2004", kind=SourceItemKind.MOVIE)
     await fixture.service.ingest_batch(SOURCE_ID, [orphan], observed_at=RUN_AT)
     stored = await fixture.media_items.get_by_external_id(SOURCE_ID, "orphan-1")

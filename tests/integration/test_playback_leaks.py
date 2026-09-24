@@ -1,43 +1,4 @@
-"""D5's other two leak pins: a telemetry attribute and the loguru sink.
-
-**Why these two live here and not beside `test_api_playback_leaks.py`.** Both
-of ADR-0012's remaining named surfaces need a *real* outbound call to be a
-meaningful pin. Against a `FakeSourceAdapter` nothing calls `httpx` at all, so
-"no span attribute -- including `url.full` from `HTTPXClientInstrumentor` --
-carries the token" would be vacuously true: there would be no httpx span to
-carry anything. This file drives the real `EmbyAdapter` over
-`FakeEmbyServer`, the same graph `test_playback_route.py` uses, so the claim
-is proved against a real round trip rather than assumed from its absence.
-
-**Every case uses a deliberately tiny URL.** `FakeEmbyServer` mints its own
-session token (`session-token-N`), which is short by construction and not
-controllable to the exact `tok-Zq7` the unit file uses -- what makes the
-positive control meaningful here is not the token's length, it is that
-nothing here scripts it: `server.tokens[-1]` is the token the adapter really
-authenticated with, read back rather than written down in advance.
-
-**Pin 5's positive control is a `WARNING`, not an `INFO`, and that is a
-finding rather than a shortcut.** `usher.telemetry.configure_logging`
-deliberately drops `httpx`'s own per-request `INFO` line
-(`logging.getLogger("httpx").setLevel(logging.WARNING)`, `telemetry.py:162`)
--- measured directly here before this file was written: driving a real
-request through `httpx.MockTransport` after `configure_logging` runs puts
-**zero** httpx records in a DEBUG sink, only WARNING and above. And nothing
-else in a successful play-then-redeem cycle logs at `INFO` at all --
-`api/routers/playback.py`'s own docstring says so ("there is no `logger` in
-this module"), and `PlaybackService` logs only at `DEBUG` (a copy naming a
-source that is gone) and `WARNING` (a source that failed). A `sink == []`
-assertion over a cycle where nothing above WARNING can ever be produced is
-exactly the false green the rules files name under `sink == []`
-(`grep -rn 'sink == \[\]' .claude/rules/` finds it; it moved between files
-on 2026-09-01, which a line number would not have survived), so the
-positive control this pin uses is the one genuine record the resolution
-logic itself produces: a second, uncredentialed source on the same title
-triggers `PlaybackService._copy_targets`'s existing
-`"playback: source {source_id} has no stored credentials"` `WARNING` --
-safe by construction (it names a source id, never a URL) and, critically,
-*real* rather than planted for the test.
-"""
+"""Two leak pins over the playback path: a telemetry attribute and the loguru sink."""
 
 import http.server
 import threading
@@ -67,7 +28,6 @@ from usher.adapters.emby.adapter import EmbyAdapter
 from usher.api.app import create_app
 from usher.api.deps import get_source_adapter_factory
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.source import PostgresSourceRepository
@@ -89,10 +49,11 @@ MOVIE_EXTERNAL_ID = "movie-playback-leaks-0"
 
 
 class _FakeServerFactory(SourceAdapterFactory):
-    """Builds the *real* `EmbyAdapter`, over `FakeEmbyServer`. Same shape as
-    `test_playback_route.py`'s own factory -- kept as an independent copy
-    rather than imported, matching this repo's habit of not sharing fixture
-    internals across files that pin different things."""
+    """Builds the *real* `EmbyAdapter`, over `FakeEmbyServer`.
+
+    An independent copy of `test_playback_route.py`'s own factory rather than an
+    import, so the two files can pin different things.
+    """
 
     def __init__(self, server: FakeEmbyServer) -> None:
         self._server = server
@@ -146,27 +107,24 @@ class _EmbyLoopbackHandler(http.server.BaseHTTPRequestHandler):
     do_DELETE = _serve
 
     def log_message(self, format: str, *args: object) -> None:
-        """Quiet. The default writes one line per request to stderr, which
-        this suite's "clean stdout" discipline (`.claude/rules/testing-
-        discipline.md`'s httpx-INFO-line finding, one library over) argues
-        against for the identical reason."""
+        """Quiet.
+
+        The default writes one line per request to stderr, which this suite's "clean
+        stdout" discipline argues against.
+        """
 
 
 class _LoopbackEmbyServer(http.server.ThreadingHTTPServer):
     """`FakeEmbyServer`'s routing, answered over a real loopback socket.
 
-    **Why a real socket, and why this is the smallest one.**
-    `HTTPXClientInstrumentor` wraps `httpx.HTTPTransport.handle_request` /
-    `AsyncHTTPTransport.handle_async_request` -- the *real* transport
-    classes -- and never `httpx.MockTransport`, a different class entirely.
-    Measured directly, before this fixture existed: an instrumented client
-    sending through `MockTransport` produces **zero** spans regardless of
-    instrumentation order, which is exactly the false green this file's own
-    pin exists to avoid -- a `url.full` assertion with no httpx span behind
-    it passes whether or not the claim it names is true. A real
-    `ThreadingHTTPServer` on `127.0.0.1` stays inside the netguard's
-    loopback allowance (`.claude/rules/fixtures-and-fakes.md`) while still
-    exercising the real transport class HTTPXClientInstrumentor patches.
+    `HTTPXClientInstrumentor` wraps `httpx.HTTPTransport.handle_request` and
+    `AsyncHTTPTransport.handle_async_request` -- the *real* transport classes -- and
+    never `httpx.MockTransport`. An instrumented client sending through `MockTransport`
+    produces zero spans regardless of instrumentation order, which is exactly the false
+    green this file's pin exists to avoid: a `url.full` assertion with no httpx span
+    behind it passes whether or not the claim it names is true. A real
+    `ThreadingHTTPServer` on `127.0.0.1` stays inside the netguard's loopback allowance
+    while still exercising the transport class the instrumentor patches.
     """
 
     def __init__(self, fake: FakeEmbyServer) -> None:
@@ -201,9 +159,11 @@ def loopback(server: FakeEmbyServer) -> Iterator[_LoopbackEmbyServer]:
 
 
 class _LoopbackFactory(SourceAdapterFactory):
-    """The real `EmbyAdapter`, over httpx's real default transport --
-    deliberately **no** `transport=` override, so `HTTPXClientInstrumentor`'s
-    wrapped `AsyncHTTPTransport` is the one actually carrying the request."""
+    """The real `EmbyAdapter`, over httpx's real default transport.
+
+    Deliberately no `transport=` override, so `HTTPXClientInstrumentor`'s wrapped
+    `AsyncHTTPTransport` is the one actually carrying the request.
+    """
 
     def __init__(self) -> None:
         self.clients: list[httpx.AsyncClient] = []
@@ -216,14 +176,13 @@ class _LoopbackFactory(SourceAdapterFactory):
 
 @pytest.fixture
 def span_exporter() -> InMemorySpanExporter:
-    """Installed *before* `create_app`, so `configure_tracing`'s `isinstance`
-    idempotency guard leaves this provider in place. Both instrumentors are
-    uninstrumented first: `SQLAlchemyInstrumentor` resolves its tracer once,
-    eagerly, into a `wrapt` closure bound to whatever provider is global at
-    that instant (`test_pipeline_spans.py`'s own finding), and
-    `HTTPXClientInstrumentor` -- the one this file's pin 3 actually needs --
-    follows the identical `BaseInstrumentor` shape, so the same defence is
-    applied to both rather than assumed safe for the one nobody had measured.
+    """Installed *before* `create_app`, so the idempotency guard leaves it in place.
+
+    Both instrumentors are uninstrumented first: `SQLAlchemyInstrumentor` resolves its
+    tracer once, eagerly, into a `wrapt` closure bound to whatever provider is global
+    at that instant, and `HTTPXClientInstrumentor` follows the identical
+    `BaseInstrumentor` shape, so the same defence is applied to both rather than
+    assumed safe for one of them.
     """
     SQLAlchemyInstrumentor().uninstrument()
     HTTPXClientInstrumentor().uninstrument()
@@ -242,15 +201,6 @@ def settings(postgres_url: str) -> Settings:
         push_enabled=False,
         worker_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 class _Seeded:
@@ -276,18 +226,15 @@ async def _seed(
     base_url: str,
     with_uncredentialed_source: bool,
 ) -> _Seeded:
-    """The shared seeding both fixtures below build on: one working source
-    with a real encrypted credential and a movie it holds a copy of, plus --
-    when asked -- a **second** source over the same movie with no stored
-    credential at all.
+    """The shared seeding both fixtures below build on.
 
-    The second source is what makes pin 5's positive control real rather
-    than staged: `PlaybackService._copy_targets` warns
-    `"...has no stored credentials"` for it and moves on, so the overall play
-    still succeeds (the first source answers) while the cycle genuinely logs
-    something above DEBUG -- see the module docstring. Pin 3 has no use for
-    it -- one real httpx round trip is already what its assertion needs --
-    so it is opt-in rather than always seeded.
+    One working source with a real encrypted credential and a movie it holds a copy of,
+    plus -- when asked -- a second source over the same movie with no stored credential
+    at all. That second source is what makes the log-sink positive control real rather
+    than staged: `PlaybackService._copy_targets` warns "...has no stored credentials"
+    for it and moves on, so the play still succeeds while the cycle genuinely logs
+    something above DEBUG. The telemetry case needs only one real httpx round trip, so
+    it is opt-in rather than always seeded.
     """
     await _wipe(sessions)
     fixture = _Seeded()
@@ -344,8 +291,7 @@ async def _seed(
 async def seeded(
     sessions: async_sessionmaker[AsyncSession], server: FakeEmbyServer
 ) -> AsyncIterator[_Seeded]:
-    """Pin 5's household: a working source plus the uncredentialed one its
-    positive control needs."""
+    """The log-sink case's household: a working source plus the uncredentialed one."""
     fixture = await _seed(
         sessions, server, base_url="https://emby.invalid", with_uncredentialed_source=True
     )
@@ -361,9 +307,12 @@ async def loopback_seeded(
     server: FakeEmbyServer,
     loopback: _LoopbackEmbyServer,
 ) -> AsyncIterator[_Seeded]:
-    """Pin 3's household: the one working source, pointed at the real
-    loopback server rather than the placeholder `https://emby.invalid` --
-    `EmbyAdapter` really dials this URL, over a real socket."""
+    """The telemetry case's household.
+
+    The one working source, pointed at the real loopback server rather than the
+    placeholder `https://emby.invalid` -- `EmbyAdapter` really dials this URL, over a
+    real socket.
+    """
     fixture = await _seed(
         sessions, server, base_url=loopback.base_url, with_uncredentialed_source=False
     )
@@ -436,8 +385,11 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def loopback_app(
     settings: Settings, span_exporter: InMemorySpanExporter
 ) -> AsyncIterator[FastAPI]:
-    """Pin 3's app: the `_LoopbackFactory`, so the adapter's httpx client
-    carries the real transport `HTTPXClientInstrumentor` patches."""
+    """The telemetry case's app.
+
+    Uses `_LoopbackFactory`, so the adapter's httpx client carries the real transport
+    `HTTPXClientInstrumentor` patches.
+    """
     application = create_app(settings)
     factory = _LoopbackFactory()
     application.dependency_overrides[get_source_adapter_factory] = lambda: factory
@@ -456,7 +408,7 @@ async def loopback_client(loopback_app: FastAPI) -> AsyncIterator[AsyncClient]:
             yield http_client
 
 
-# -- pin 3: the telemetry attribute ------------------------------------
+# -- the telemetry attribute -------------------------------------------
 
 
 async def test_no_exported_span_attribute_carries_the_token(
@@ -465,22 +417,15 @@ async def test_no_exported_span_attribute_carries_the_token(
     server: FakeEmbyServer,
     span_exporter: InMemorySpanExporter,
 ) -> None:
-    """ADR-0012's third named leak surface: a telemetry attribute built with
-    `model_dump`.
+    """A telemetry attribute built with `model_dump` is a named leak surface.
 
-    Positive control: a `playback.resolve` span exists, carrying
-    `usher.title_id` and the resolved target count -- proving the span
-    exporter is really wired to this request rather than to nothing -- and a
-    real httpx client span exists too, proving `HTTPXClientInstrumentor`
-    really instrumented this call (see `_LoopbackEmbyServer`'s own docstring
-    for why a `MockTransport`-backed request could not prove this: it never
-    reaches HTTPXClientInstrumentor's wrapped transport class at all, so the
-    absence assertion below would pass over zero httpx spans). Assertion: no
-    attribute on *any* exported span -- including `url.full` on the httpx
-    client spans -- contains the real session token the adapter
-    authenticated with. "Usher never fetches the direct URL" is asserted
-    here rather than assumed: this run makes real httpx calls over a real
-    socket and the exporter sees every span they produced.
+    Positive control: a `playback.resolve` span exists carrying `usher.title_id` and
+    the resolved target count, proving the exporter is wired to this request, and a
+    real httpx client span exists too, proving `HTTPXClientInstrumentor` instrumented
+    this call -- a `MockTransport`-backed request never reaches the wrapped transport
+    class, so the absence assertion would pass over zero httpx spans. The assertion is
+    that no attribute on any exported span, including `url.full` on the client spans,
+    carries the session token the adapter authenticated with.
     """
     play = await loopback_client.post(f"/titles/{loopback_seeded.movie_id}/play")
     assert play.status_code == 200, play.text
@@ -508,13 +453,10 @@ async def test_no_exported_span_attribute_carries_the_token(
         and "opentelemetry.instrumentation.httpx" in one.instrumentation_scope.name
     ]
     assert http_spans, "the premise: the real EmbyAdapter really produced an httpx span"
-    # The attribute name is `url.full` under OTel's newer semantic-convention
-    # opt-in and `http.url` under the default this deployment runs with
-    # (`OTEL_SEMCONV_STABILITY_OPT_IN` unset) -- both name the same value, and
-    # the premise is that *one of them* is really on the span, not which
-    # spelling. `HTTPXClientInstrumentor` measured 2026-08-11 emitting
-    # `http.url` on this stack; both are checked so the case survives either
-    # convention rather than pinning the one this environment happens to run.
+    # The attribute name is `url.full` under OTel's newer semantic-convention opt-in and
+    # `http.url` under the default this deployment runs with
+    # (`OTEL_SEMCONV_STABILITY_OPT_IN` unset) -- both name the same value, and the
+    # premise is that *one of them* is really on the span, not which spelling.
     urls = [
         str(span.attributes.get(name, ""))
         for span in http_spans
@@ -522,10 +464,9 @@ async def test_no_exported_span_attribute_carries_the_token(
         for name in ("url.full", "http.url")
     ]
     assert any(urls), "the premise: an httpx span actually carries the request url"
-    # And the premise that matters for ADR-0012's claim: the URL an httpx
-    # span carries is Emby's own API path, never the direct-play URL --
-    # `EmbyAdapter` sends the session token as the `X-Emby-Token` *header*,
-    # which OTel's httpx instrumentation does not capture by default.
+    # And the premise that matters: the URL an httpx span carries is Emby's own API
+    # path, never the direct-play URL -- `EmbyAdapter` sends the session token as the
+    # `X-Emby-Token` *header*, which OTel's httpx instrumentation does not capture.
     assert any("AuthenticateByName" in url or "Items" in url for url in urls), urls
 
     for span in spans:
@@ -535,21 +476,19 @@ async def test_no_exported_span_attribute_carries_the_token(
             )
 
 
-# -- pin 5: the log sink -------------------------------------------------
+# -- the log sink --------------------------------------------------------
 
 
 async def test_the_debug_log_sink_never_carries_the_token_across_a_play_then_redeem_cycle(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """ADR-0012's log-sink handling rules, over a whole play-then-redeem
-    cycle rather than over one rendered `StreamTarget`.
+    """The log-sink handling rules, over a whole play-then-redeem cycle.
 
-    See the module docstring for why the positive control is a `WARNING`
-    (the second, uncredentialed source's existing "no stored credentials"
-    line) rather than an `INFO` -- `httpx`'s own per-request `INFO` line is
-    deliberately suppressed by `configure_logging`, and nothing on this path
-    logs at `INFO` at all, so an `INFO`-only positive control would be the
-    false green `.claude/rules/mutation-sweeps.md:561` names.
+    Rather than over one rendered `StreamTarget`. The positive control is a `WARNING`
+    -- the uncredentialed source's "no stored credentials" line -- because `httpx`'s
+    own per-request `INFO` line is deliberately suppressed by `configure_logging` and
+    nothing on this path logs at `INFO` at all, so an `INFO`-only control would be a
+    false green.
     """
     sink: list[str] = []
     handler = logger.add(sink.append, level="DEBUG")

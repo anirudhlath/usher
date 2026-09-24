@@ -1,10 +1,4 @@
-"""Everything about these three tables that only real Postgres can answer.
-
-Asserted off the catalog (`pg_constraint`, `pg_indexes`) rather than off
-`Base.metadata`, following tests/integration/test_search_schema.py: metadata
-is what we asked for and the catalog is what we got, and the two are exactly
-what a migration can disagree about.
-"""
+"""Everything about these three tables that only real Postgres can answer."""
 
 import uuid
 
@@ -94,12 +88,10 @@ async def _credit(
 
 
 async def test_two_people_who_share_a_name_are_two_rows(session: AsyncSession) -> None:
-    """The front matter's first named wrong implementation, asserted at the
-    storage layer before any repository touches it: "dedupes people by `name`
-    rather than by `tmdb_id`, collapsing two directors who share a name".
+    """Rules out deduping people by `name`, which collapses two directors who share one.
 
-    There is deliberately no unique constraint on `name`, and this is the case
-    that would fail if somebody added one for "cleanliness".
+    There is deliberately no unique constraint on `name`, and this is the case that
+    would fail if somebody added one for "cleanliness".
     """
     for tmdb_id in (93_000_010, 93_000_011):
         await session.execute(
@@ -116,14 +108,12 @@ async def test_two_people_who_share_a_name_are_two_rows(session: AsyncSession) -
 
 
 async def test_the_tmdb_id_index_is_unique_and_partial(session: AsyncSession) -> None:
-    """Partial for `ix_titles_imdb_id`'s reason -- NULL never collides with
-    NULL, and making the WHERE explicit is what lets Postgres use the index
-    for lookups that already filter IS NOT NULL, *and* what obliges an
-    `ON CONFLICT` against it to repeat the predicate.
+    """Partial for `ix_titles_imdb_id`'s reason: NULL never collides with NULL.
 
-    Read off `pg_indexes.indexdef` rather than asserted through behaviour,
-    because a non-partial unique index passes every behavioural case here --
-    the same reason `ix_title_embeddings_hnsw`'s predicate is pinned this way.
+    An explicit WHERE is what lets Postgres use the index for lookups that already
+    filter IS NOT NULL, and what obliges an `ON CONFLICT` against it to repeat the
+    predicate. Read off `pg_indexes.indexdef` rather than through behaviour, because a
+    non-partial unique index passes every behavioural case here.
     """
     definition = await _indexdef(session, "ix_people_tmdb_id")
     assert definition is not None
@@ -132,8 +122,11 @@ async def test_the_tmdb_id_index_is_unique_and_partial(session: AsyncSession) ->
 
 
 async def test_two_people_with_no_tmdb_id_do_not_collide(session: AsyncSession) -> None:
-    """The partial index's other half. A derivation that ever writes a person
-    without a `tmdb_id` must not be blocked by the one before it."""
+    """The partial index's other half: two people with no `tmdb_id` are two rows.
+
+    A derivation that writes a person without a `tmdb_id` must not be blocked by the one
+    before it.
+    """
     for _ in range(2):
         await session.execute(
             text(
@@ -149,13 +142,10 @@ async def test_two_people_with_no_tmdb_id_do_not_collide(session: AsyncSession) 
 
 
 async def test_a_duplicated_credit_id_is_refused(session: AsyncSession) -> None:
-    """The natural key. Its job is not idempotency -- `replace_for_titles`'
-    scoped delete is that -- it is that a bug in the delete's *scope* raises
-    instead of doubling a title's cast on every derivation pass.
+    """The natural key is unique, so a bug in the delete's scope raises.
 
-    The wrong implementation this kills: `credit_id` stored as a plain
-    non-unique column, which is what you get by transcribing the payload field
-    list without deciding anything.
+    Rules out `credit_id` stored as a plain non-unique column, which would double a
+    title's cast on every derivation pass instead of failing.
     """
     person_id = await _person(session, tmdb_id=93_000_020)
     first_title = await _title(session)
@@ -168,10 +158,11 @@ async def test_a_duplicated_credit_id_is_refused(session: AsyncSession) -> None:
 async def test_two_credits_with_no_tmdb_credit_id_do_not_collide(
     session: AsyncSession,
 ) -> None:
-    """The partial half of that same index. A future non-TMDb derivation has
-    no credit ObjectId at all, and the constraint may not be what blocks it --
-    ADR-0003's rule that a provider identifier is never identity, one table
-    over."""
+    """The partial half of that same index.
+
+    A future non-TMDb derivation has no credit ObjectId at all, and the constraint must
+    not be what blocks it: a provider identifier is never identity.
+    """
     person_id = await _person(session, tmdb_id=93_000_021)
     title_id = await _title(session)
     await _credit(session, person_id=person_id, title_id=title_id, tmdb_credit_id=None)
@@ -186,15 +177,11 @@ async def test_two_credits_with_no_tmdb_credit_id_do_not_collide(
 async def test_deleting_a_collection_nulls_its_titles_rather_than_deleting_them(
     session: AsyncSession,
 ) -> None:
-    """`ON DELETE SET NULL`, and the two refused alternatives are what this
-    case is really about.
+    """`ON DELETE SET NULL`: the title is worth keeping and merely loses its link.
 
-    CASCADE would delete the films in the collection -- wrong in kind, against
-    PRD 02's own "the catalog outlives the servers". RESTRICT would refuse
-    every collection delete, because a collection with no members is never
-    written, so the refusal fires unconditionally. SET NULL is
-    `media_items.title_id`'s precedent: the row is worth keeping and it just
-    loses the link, and the next derivation re-attaches it.
+    CASCADE would delete the films in the collection, and RESTRICT would refuse every
+    collection delete, since a collection with no members is never written. The next
+    derivation re-attaches the title.
     """
     collection_id = await _collection(session)
     title_id = await _title(session, collection_id=collection_id)
@@ -210,12 +197,11 @@ async def test_deleting_a_collection_nulls_its_titles_rather_than_deleting_them(
 
 
 async def test_deleting_a_title_takes_its_credits_with_it(session: AsyncSession) -> None:
-    """CASCADE, deliberately the opposite of `watch_states.title_id`'s
-    RESTRICT (ADR-0010). The merge argument runs the other way here, exactly
-    as it does for `title_embeddings`: after a repointing merge the loser's
-    credits are duplicates of the winner's and are *wrong*, so they die with
-    the loser rather than block the delete. RESTRICT would make deleting any
-    enriched title fail, which is nearly always.
+    """CASCADE, deliberately the opposite of `watch_states.title_id`'s RESTRICT.
+
+    After a repointing merge the loser's credits duplicate the winner's and are wrong,
+    so they die with the loser rather than block the delete. RESTRICT would make
+    deleting any enriched title fail, which is nearly always.
     """
     person_id = await _person(session, tmdb_id=93_000_030)
     title_id = await _title(session)
@@ -231,9 +217,10 @@ async def test_deleting_a_title_takes_its_credits_with_it(session: AsyncSession)
 
 
 async def test_deleting_a_person_takes_their_credits_with_it(session: AsyncSession) -> None:
-    """`seasons.title_id`'s argument verbatim: ADR-0010's reasoning applies to
-    what a row *protects*, and a credit protects nothing -- no user state, and
-    fully re-derivable from a cached payload in one pass."""
+    """`seasons.title_id`'s argument verbatim: a credit protects nothing.
+
+    No user state, and fully re-derivable from a cached payload in one pass.
+    """
     person_id = await _person(session, tmdb_id=93_000_031)
     title_id = await _title(session)
     await _credit(session, person_id=person_id, title_id=title_id)
@@ -252,13 +239,11 @@ async def test_deleting_a_person_takes_their_credits_with_it(session: AsyncSessi
 async def test_the_new_foreign_keys_carry_the_delete_rule_they_were_given(
     session: AsyncSession,
 ) -> None:
-    """Read back off `pg_constraint`, not off `Base.metadata`: `confdeltype`
-    is what Postgres will actually do, and it is the whole content of the
-    ADR-0010 asymmetry. `c` is CASCADE, `n` is SET NULL.
+    """Read back off `pg_constraint`, not off `Base.metadata`.
 
-    `confdeltype::text` is not decoration -- the column's type is `"char"`,
-    which asyncpg hands back as `bytes`, so the uncast comparison fails
-    against `b'c'`.
+    `confdeltype` is what Postgres will actually do: `c` is CASCADE, `n` is SET NULL.
+    The cast to `text` is not decoration — the column's type is `"char"`, which asyncpg
+    hands back as `bytes`, so the uncast comparison fails against `b'c'`.
     """
     result = await session.execute(
         text(
@@ -276,15 +261,11 @@ async def test_the_new_foreign_keys_carry_the_delete_rule_they_were_given(
 
 
 async def test_the_collection_id_index_exists_and_is_partial(session: AsyncSession) -> None:
-    """PRD 02's 🔶 deferred this to M9 alongside `media_items`' three columns,
-    and M7 needs it now: it is the whole of `FranchiseProvider`'s read, and it
-    is the referencing-side lookup `collections`' SET NULL performs on every
-    delete.
+    """The index is the whole of `FranchiseProvider`'s read, and of `collections`' SET NULL.
 
-    Partial because it is NULL on every one of the catalog's 371,310 series
-    rows -- `belongs_to_collection` is movies-only -- and on the majority of
-    its 899,828 movie rows. That is `ix_titles_popularity`'s argument: there
-    is nothing to place "last" inside the index at all.
+    Partial because `collection_id` is NULL on every series row — `belongs_to_collection`
+    is movies-only — and on most movie rows, so there is nothing to place "last" inside
+    the index at all.
     """
     definition = await _indexdef(session, "ix_titles_collection_id")
     assert definition is not None
@@ -294,8 +275,7 @@ async def test_the_collection_id_index_exists_and_is_partial(session: AsyncSessi
 async def test_a_credit_cannot_name_a_title_that_does_not_exist(
     session: AsyncSession,
 ) -> None:
-    """Postgres-only, like `test_a_title_id_no_title_carries_is_a_port_error`
-    -- the fake is a dict and has nothing to violate."""
+    """Postgres-only: the fake is a dict and has no foreign key to violate."""
     person_id = await _person(session, tmdb_id=93_000_040)
     with pytest.raises(IntegrityError):
         await _credit(session, person_id=person_id, title_id=new_id())
@@ -323,13 +303,11 @@ async def test_a_credit_cannot_name_a_title_that_does_not_exist(
 async def test_the_check_constraints_mirror_the_pydantic_bounds(
     session: AsyncSession, statement: str, params: dict[str, object]
 ) -> None:
-    """The bulk COPY path constructs no pydantic model at all, so a bound that
-    lives only in `Person` is a bound the staged upsert can walk straight
-    past. Every CHECK here is a mirror of a `Field(...)` in
-    `usher/domain/people.py`, and
-    `test_every_check_constraint_in_the_models_exists_in_the_database` is what
-    keeps the two from drifting -- alembic is blind to a changed CHECK body
-    and blind to a missing CHECK entirely.
+    """The bulk COPY path constructs no pydantic model, so the bound has to be a CHECK.
+
+    Every CHECK here mirrors a `Field(...)` in `usher/domain/people.py`, and
+    `test_every_check_constraint_in_the_models_exists_in_the_database` keeps the two
+    from drifting: alembic is blind to a changed CHECK body and to a missing one.
     """
     with pytest.raises(DBAPIError):
         await session.execute(text(statement), {"id": new_id(), **params})
@@ -339,9 +317,7 @@ async def test_the_check_constraints_mirror_the_pydantic_bounds(
 async def test_the_credit_check_constraints_mirror_the_pydantic_bounds(
     session: AsyncSession, billing_order: int, tmdb_credit_id: str | None
 ) -> None:
-    """`Credit.billing_order`'s `ge=0` and `Credit.tmdb_credit_id`'s
-    `min_length=1`, mirrored as CHECKs for the same reason: the staged path
-    never constructs the model."""
+    """The credit bounds are CHECKs too, since the staged path never constructs the model."""
     person_id = await _person(session, tmdb_id=93_000_050)
     title_id = await _title(session)
     with pytest.raises(DBAPIError):

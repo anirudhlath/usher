@@ -1,18 +1,4 @@
-"""`GET /titles/{id}/similar` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_similar.py` drives the
-route over fakes; `tests/integration/test_services_similar.py` drives
-`SimilarityService` over real Postgres directly. What is left is the request
-itself: that `api/deps.py`'s `get_similarity_service` wiring actually resolves
-against a real session, that `count_stale`'s real SQL predicate (not the
-fake's Python comparison -- `testing-discipline.md`'s staleness-gauge finding)
-reaches the wire scoped to the right seed, and the risk B8's own plan names --
-**the route only reads, so nothing commits** -- checked against real SQL
-rather than argued in a docstring.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`GET /titles/{id}/similar` through a real request against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -27,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.search import PostgresTitleNeighborRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import TitleKind
@@ -35,18 +20,15 @@ from usher.domain.title import Title
 from usher.ports.repository import ScoredNeighbor
 from usher.services.similar import blend_fingerprint
 
-# **Read off `Settings` rather than invented, and that changed on 2026-08-13.**
-# A literal was harmless while `blend_fingerprint` ignored the model; now the
-# app under test builds `SimilarityService` from `settings.embedding_model`, so
-# a fake name here makes every "fresh" row read stale through the real wiring —
-# which is the mechanism working, and would be a test asserting against it.
-# `Settings()` here is the same default the `settings` fixture above inherits;
-# neither overrides `embedding_model`.
+# Read off `Settings` rather than invented: the app under test builds
+# `SimilarityService` from `settings.embedding_model`, so a fake name here makes
+# every "fresh" row read stale through the real wiring — the mechanism working,
+# and a test asserting against it.
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 # Every title this file writes carries it, so teardown removes exactly what
 # this file created -- `test_titles_route.py`'s convention, for the same
-# reason: a committing test that left rows behind took down four cases in
-# three other files that each passed in isolation.
+# reason: a committing test that leaves rows behind breaks cases in other
+# files that each pass in isolation.
 MARK = "Similar Route Case"
 
 
@@ -58,18 +40,6 @@ def settings(postgres_url: str) -> Settings:
         push_enabled=False,
         worker_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one --
-    the app's own session commits per request, so seeding through a shared,
-    rolled-back transaction would hand it rows it cannot see."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -101,10 +71,12 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement issued from every engine in the process, captured
-    off `before_cursor_execute` -- `test_titles_route.py`'s own helper,
-    copied rather than imported so this file has no import of a sibling test
-    module's fixtures and parametrized cases."""
+    """Every SQL statement issued from every engine in the process.
+
+    Captured off `before_cursor_execute` -- `test_titles_route.py`'s own helper, copied
+    rather than imported so this file has no import of a sibling test module's fixtures
+    and parametrized cases.
+    """
     seen: list[str] = []
 
     def record(
@@ -151,14 +123,12 @@ async def _given_neighbors(
 async def test_the_route_resolves_through_the_real_wiring_and_reports_staleness(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    """The end-to-end check `tests/unit/test_api_similar.py` cannot make:
-    `api/deps.py`'s `get_similarity_service` actually resolves against a real
-    session, and the real `count_stale` SQL predicate -- not the fake's
-    Python comparison, which `testing-discipline.md` records as the thing an
-    inverted `WHERE blend_fingerprint <> :fp` survived against for a whole
-    milestone -- reaches the wire scoped to this seed. Two seeds, one stale
-    and one fresh in the *same* real table, for the same reason that finding
-    gives: with only one kind present an inversion of the predicate answers
+    """The end-to-end check `tests/unit/test_api_similar.py` cannot make.
+
+    `api/deps.py`'s `get_similarity_service` resolves against a real session, and the
+    real `count_stale` SQL predicate -- not the fake's Python comparison -- reaches the
+    wire scoped to this seed. Two seeds, one stale and one fresh in the *same* real
+    table, because with only one kind present an inversion of the predicate answers
     correctly by luck of direction.
     """
     stale_seed = await _given_title(sessions, "Stale Seed")
@@ -206,11 +176,13 @@ async def test_the_route_issues_no_write_statement(
     statement_counter: list[str],
     settings: Settings,
 ) -> None:
-    """B8's own risk, checked against real SQL rather than argued in a
-    docstring: `SimilarityService`'s fourth constructor argument is
-    `session.commit`, the same callable `get_session` calls at the end of
-    every request -- and this route only reads. A write here would mean the
-    wiring meant for `usher similar --rebuild` leaked onto a `GET`."""
+    """The read route writes nothing, checked against real SQL.
+
+    `SimilarityService`'s fourth constructor argument is `session.commit`, the same
+    callable `get_session` calls at the end of every request -- and this route only
+    reads. A write here would mean the wiring meant for `usher similar --rebuild`
+    leaked onto a `GET`.
+    """
     seed = await _given_title(sessions, "A Read Only Seed")
     neighbor = await _given_title(sessions, "Its Neighbour")
     await _given_neighbors(

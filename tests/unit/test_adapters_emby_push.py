@@ -37,12 +37,7 @@ ADDED = ("90000200", "90000201")
 REMOVED = "90000202"
 UPDATED = "90000203"
 
-# Every `async for` over the channel is bounded. An iterator that stopped
-# yielding instead of raising, or a `recv` that stopped awaiting, must fail
-# its own case rather than hang the suite -- `SELECT ... FOR UPDATE SKIP
-# LOCKED`'s two wrong spellings taught this project the same lesson, which
-# is why `pytest-timeout` is deliberately not a dependency and the bound
-# belongs to the cases that need it.
+# Every `async for` over the channel is bounded.
 BOUND = 5.0
 
 
@@ -65,11 +60,12 @@ def test_a_fresh_ledger_is_not_delivering() -> None:
 
 
 def test_an_open_connection_that_has_delivered_nothing_is_not_delivering() -> None:
-    """**The rule this whole milestone exists for.** ADR-0004: a handshake
-    against a *nonexistent path* also upgrades and also receives `Sessions`,
-    so a successful upgrade is not evidence of anything. A reverse proxy
-    that forwards `Upgrade` and then buffers produces exactly this state --
-    connected, and delivering nothing -- and reporting it healthy makes the
+    """A handshake against a *nonexistent path* also upgrades and receives `Sessions`.
+
+    A successful upgrade is therefore not evidence of anything.
+
+    A reverse proxy that forwards `Upgrade` and then buffers produces exactly this state
+    -- connected, and delivering nothing -- and reporting it healthy makes the
     reconciler skip a source it is the only cover for.
     """
     health = PushHealth(stale_after=90.0)
@@ -81,17 +77,12 @@ def test_an_open_connection_that_has_delivered_nothing_is_not_delivering() -> No
 def test_a_last_message_instant_with_no_message_behind_it_is_not_delivering() -> None:
     """`messages_received > 0` pinned directly, because nothing else pins it.
 
-    The plan predicted this clause was covered by the case above. It is not:
-    `record_message` is the only writer of either field and it writes both,
-    so through the `record_*` methods alone `messages_received > 0` and
-    `last_message_at is not None` are the same test, and deleting the count
-    clause leaves every other case green -- measured, it survived the sweep.
-    The count is the clause this whole milestone is named for, so it is
-    pinned the way M4 pins its two other guards that are unreachable through
-    their own contract: directly. The fields are public and mutable (the
-    case above sets `connected` and `opened_at` by hand), so a ledger
-    holding a timestamp with no message behind it is a state this type can
-    really be in.
+    `record_message` is the only writer of either field and it writes both, so through
+    the `record_*` methods alone `messages_received > 0` and `last_message_at is not
+    None` are the same test, and deleting the count clause leaves every other case
+    green. The fields are public and mutable (the case above sets `connected` and
+    `opened_at` by hand), so a ledger holding a timestamp with no message behind it is
+    a state this type can really be in.
     """
     health = PushHealth(stale_after=90.0)
     health.connected = True
@@ -111,10 +102,11 @@ def test_one_message_makes_it_deliver() -> None:
 
 
 def test_delivery_decays_after_the_staleness_window() -> None:
-    """A socket that delivered once an hour ago and nothing since is not a
-    working push channel. `websockets`' own `ping_timeout` cannot see this:
-    a peer that answers pongs while delivering nothing passes the WebSocket
-    keepalive and fails here."""
+    """A socket that delivered once an hour ago and nothing since is not a working push channel.
+
+    `websockets`' own `ping_timeout` cannot see this: a peer that answers pongs while
+    delivering nothing passes the WebSocket keepalive and fails here.
+    """
     health = PushHealth(stale_after=90.0)
     health.connected = True
     health.opened_at = 100.0
@@ -133,10 +125,12 @@ def test_a_closed_connection_is_not_delivering_however_recently_it_spoke() -> No
 
 
 def test_silence_is_measured_from_the_last_message_or_from_the_open() -> None:
-    """The watchdog's input. Before the first message there is nothing to
-    measure from but the open, and a channel that never delivers must still
-    become measurably silent -- otherwise the one failure mode this
-    milestone is built around is the one the watchdog cannot see."""
+    """The watchdog's input.
+
+    Before the first message there is nothing to measure from but the open, and a
+    channel that never delivers must still become measurably silent -- otherwise the
+    one failure mode this channel is built around is the one the watchdog cannot see.
+    """
     health = PushHealth(stale_after=90.0)
     health.opened_at = 100.0
     assert health.silent_for(now=140.0) == pytest.approx(40.0)
@@ -145,17 +139,18 @@ def test_silence_is_measured_from_the_last_message_or_from_the_open() -> None:
 
 
 def test_silence_before_a_connection_is_zero_rather_than_undefined() -> None:
-    """`silent_for` is called from a loop that only runs while a connection
-    is open, so this branch is unreachable in production -- and a `None`
-    minus a float is a `TypeError` that would take the lane down rather than
-    reconnect it. Pinned directly, the way M4 pins its two other
-    unreachable-through-the-contract guards."""
+    """`silent_for` is called from a loop that only runs while a connection is open.
+
+    This branch is unreachable in production -- and a `None` minus a float is a
+    `TypeError` that would take the lane down rather than reconnect it.
+
+    Pinned directly, the way the other unreachable-through-the-contract guards are.
+    """
     assert PushHealth(stale_after=90.0).silent_for(now=140.0) == 0.0
 
 
 def test_a_reconnect_keeps_the_lanes_message_history() -> None:
-    """`messages_received` and `reconnects` are the *lane's* history, not one
-    connection's.
+    """`messages_received` and `reconnects` are the *lane's* history, not one connection's.
 
     A `record_open` that zeroed the count would make a lane that has been
     delivering for hours read as one that has never delivered at all, and
@@ -173,8 +168,9 @@ def test_a_reconnect_keeps_the_lanes_message_history() -> None:
 
 
 def test_a_first_connection_is_not_a_reconnect() -> None:
-    """PRD 10's `usher.source.push.reconnects`, and the off-by-one that
-    would put every source's dashboard panel at 1 from start-up.
+    """PRD 10's `usher.source.push.reconnects`.
+
+    The off-by-one would put every source's dashboard panel at 1 from start-up.
 
     Counted on the second and later *open* rather than on a failure, because
     a lane that failed to connect five times and then succeeded reconnected
@@ -191,9 +187,9 @@ def test_a_first_connection_is_not_a_reconnect() -> None:
 
 
 async def test_the_channel_counts_its_own_reconnects() -> None:
-    """The ledger's arithmetic is only worth anything if the channel drives
-    it -- and until this, nothing in `src/` ever did: `record_reconnect` was
-    a method with no caller, so PRD 10's reconnect series would have plotted
+    """The ledger's arithmetic is only worth anything if the channel drives it.
+
+    A `record_reconnect` with no caller would leave PRD 10's reconnect series plotting
     a flat zero for every source forever.
 
     Two opens through the real `open()`, and one reconnect. Defined here
@@ -216,7 +212,7 @@ def test_a_reconnect_measures_silence_from_the_new_open_not_the_old_message() ->
     arrived on the *previous* connection is not evidence about this one. If
     it were carried across, a socket that upgraded and then buffered would
     inherit its predecessor's freshness and read `is_delivering` -- which is
-    precisely the state this milestone refuses to call healthy -- and the
+    precisely the state this ledger refuses to call healthy -- and the
     watchdog would measure its silence from an instant on a socket that is
     already closed.
     """
@@ -244,12 +240,12 @@ def test_a_user_data_changed_message_becomes_one_watch_state_event() -> None:
 
 
 def test_a_carried_state_reports_position_and_played_and_nothing_else() -> None:
-    """ADR-0014 on a third payload shape. `PlayCount: 3` and a
-    `LastPlayedDate` are both present in the fixture and both ignored: no
-    run in this repository has ever parsed a real `UserDataChanged`, and a
-    number reported from a shape nobody has measured is exactly the claim
-    that rule forbids. The `watch_history` backfill recovers the pair from
-    the single-item route, which is the chain M4 already built and measured.
+    """Position and played, on a third payload shape.
+
+    `PlayCount: 3` and a `LastPlayedDate` are both present in the fixture and both
+    ignored: nothing here has ever parsed a real `UserDataChanged`, and a number
+    reported from a shape nobody has seen is exactly the claim that rule forbids. The
+    `watch_history` backfill recovers the pair from the single-item route.
     """
     events = to_source_events(load_emby_fixture("push_user_data_changed"), source_user_id="u1")
     first, second = events[0].watch_states
@@ -274,9 +270,11 @@ def test_a_library_changed_message_becomes_one_event_per_non_empty_array() -> No
 
 
 def test_a_library_changed_message_with_empty_arrays_becomes_nothing() -> None:
-    """Emby emits `LibraryChanged` with every array empty during a scan that
-    changed nothing. Three events naming no items would each drive a
-    `get_item` loop over an empty list and a batch ingest of nothing."""
+    """Emby emits `LibraryChanged` with every array empty during a scan that changed nothing.
+
+    Three events naming no items would each drive a `get_item` loop over an empty list
+    and a batch ingest of nothing.
+    """
     assert to_source_events({"MessageType": "LibraryChanged", "Data": {}}, source_user_id="u") == ()
     empty = {
         "MessageType": "LibraryChanged",
@@ -286,19 +284,24 @@ def test_a_library_changed_message_with_empty_arrays_becomes_nothing() -> None:
 
 
 def test_a_sessions_message_becomes_nothing() -> None:
-    """**And that is its whole job.** `Sessions` carries playback state for
-    sessions Usher is not part of; deriving anything from it would mean
-    tracking play sessions Usher never starts. Its value is that it
-    *arrives* -- it is what keeps `is_delivering` true on an idle library --
-    and the counting happens in the channel, on every frame, before this
-    function is consulted."""
+    """`Sessions` maps to nothing, and that is its whole job.
+
+    It carries playback state for sessions Usher is not part of; deriving anything
+    from it would mean tracking play sessions Usher never starts.
+
+    Its value is that it *arrives* -- it is what keeps `is_delivering` true on an idle
+    library -- and the counting happens in the channel, on every frame, before this
+    function is consulted.
+    """
     assert to_source_events(load_emby_fixture("push_sessions"), source_user_id="u1") == ()
 
 
 def test_an_unknown_message_type_becomes_nothing_rather_than_raising() -> None:
-    """A new Emby build's new message type must not take a lane down. It is
-    still counted as a received message one layer up, so it also must not
-    make a healthy socket look silent."""
+    """A new Emby build's new message type must not take a lane down.
+
+    It is still counted as a received message one layer up, so it also must not make a
+    healthy socket look silent.
+    """
     unknown = {"MessageType": "ScheduledTaskEnded", "Data": {}}
     assert to_source_events(unknown, source_user_id="u") == ()
     assert to_source_events({}, source_user_id="u") == ()
@@ -307,8 +310,9 @@ def test_an_unknown_message_type_becomes_nothing_rather_than_raising() -> None:
 
 
 def test_a_user_data_entry_with_no_item_id_is_dropped_not_guessed() -> None:
-    """An entry the mapper cannot key is an entry it must not merge. The
-    alternative -- positional alignment against `external_ids` -- writes one
+    """An entry the mapper cannot key is an entry it must not merge.
+
+    The alternative -- positional alignment against `external_ids` -- writes one
     household member's resume position onto a different film.
 
     It is also the one construction `SourceEvent.__post_init__` refuses: an
@@ -338,10 +342,13 @@ def test_a_user_data_entry_with_no_item_id_is_dropped_not_guessed() -> None:
 
 
 def test_a_user_data_list_that_is_not_a_list_is_dropped_not_raised() -> None:
-    """`PortDataMalformed` from a push mapper would park nothing (there is
-    no job) and would take the lane down through `PushSupervisor`'s
-    `UsherPortError` arm, so one malformed frame would cost a reconnect and
-    a gap-closing delta. Dropping it costs one message."""
+    """A `PortDataMalformed` from a push mapper would park nothing and cost a reconnect.
+
+    There is no job to park, and `PushSupervisor`'s `UsherPortError` arm takes the
+    lane down, so one malformed frame would cost a reconnect and a gap-closing delta.
+
+    Dropping it costs one message.
+    """
     assert (
         to_source_events(
             {"MessageType": "UserDataChanged", "Data": {"UserDataList": "nope"}}, source_user_id="u"
@@ -357,10 +364,12 @@ def test_a_user_data_list_that_is_not_a_list_is_dropped_not_raised() -> None:
 
 
 def test_a_user_data_list_of_entries_that_are_all_unkeyable_becomes_nothing() -> None:
-    """Not the same case as an absent list, and it is the one that would
-    construct a `SourceEvent` naming no items: `external_ids=()` with a
-    `WATCH_STATE_CHANGED` kind is an event `PushApplyService` would resolve
-    against an empty batch."""
+    """Not the same case as an absent list.
+
+    It is the one that would construct a `SourceEvent` naming no items:
+    `external_ids=()` with a `WATCH_STATE_CHANGED` kind is an event `PushApplyService`
+    would resolve against an empty batch.
+    """
     message = {"MessageType": "UserDataChanged", "Data": {"UserDataList": [{}, "nope", 7]}}
     assert to_source_events(message, source_user_id="u") == ()
 
@@ -375,10 +384,11 @@ def test_an_id_that_is_not_a_string_is_dropped() -> None:
 
 
 def test_a_state_carries_no_user_when_the_source_did_not_distinguish() -> None:
-    """`source_user_id=None` is passed straight through rather than being
-    filled with a placeholder -- `SourceWatchState` documents it as "the
-    source didn't distinguish", and a made-up id would become a real column
-    value on `watch_states`."""
+    """`source_user_id=None` passes straight through rather than being filled in.
+
+    `SourceWatchState` documents it as "the source didn't distinguish", and a made-up
+    id would become a real column value on `watch_states`.
+    """
     events = to_source_events(load_emby_fixture("push_user_data_changed"), source_user_id=None)
     assert all(state.source_user_id is None for state in events[0].watch_states)
 
@@ -444,11 +454,12 @@ def _channel(
     )
 
 
-async def test_the_channel_subscribes_with_adr_0004s_own_frame() -> None:
-    """The frame ADR-0004's end-to-end session actually sent, verbatim.
-    Without it Emby holds the socket and sends nothing -- which is the exact
-    upgraded-but-silent state this milestone is built around, arrived at by
-    forgetting one line."""
+async def test_the_channel_subscribes_with_the_frame_the_live_session_sent() -> None:
+    """The frame the end-to-end session actually sent, verbatim.
+
+    Without it Emby holds the socket and sends nothing -- the exact upgraded-but-
+    silent state this channel is built around, arrived at by forgetting one line.
+    """
     connector = FakePushConnector()
     channel = _channel(connector)
     async with channel.open() as events:
@@ -461,9 +472,12 @@ async def test_the_channel_subscribes_with_adr_0004s_own_frame() -> None:
 
 
 async def test_the_socket_url_carries_the_token_and_the_device_id() -> None:
-    """PRD 03's own spelling. `deviceId` is lower-cased on the query where
-    the `Authorization` header spells it `DeviceId`; ADR-0004 read both out
-    of `SessionWebSocketListener` and they are genuinely different."""
+    """PRD 03's own spelling.
+
+    `deviceId` is lower-cased on the query where the `Authorization` header spells it
+    `DeviceId`; both were read out of `SessionWebSocketListener` and they are
+    genuinely different.
+    """
     connector = _RecordingConnector()
     channel = _channel(connector)
     async with channel.open():
@@ -474,10 +488,12 @@ async def test_the_socket_url_carries_the_token_and_the_device_id() -> None:
 
 
 async def test_the_socket_url_percent_encodes_both_values() -> None:
-    """A token and a device id are both persisted strings an operator could
-    have influenced, and `&`/`=`/`?` in either would otherwise re-shape the
-    query. `EmbyAdapter._segment` documents the same reasoning for a path
-    segment."""
+    """A token and a device id are both persisted strings an operator could have influenced.
+
+    `&`/`=`/`?` in either would otherwise re-shape the query.
+
+    `EmbyAdapter._segment` documents the same reasoning for a path segment.
+    """
     connector = _RecordingConnector()
     channel = EmbyPushChannel(
         _StubSession(token="a&b=c?d"),
@@ -495,11 +511,12 @@ async def test_the_socket_url_percent_encodes_both_values() -> None:
 
 
 async def test_the_channel_takes_its_token_from_the_session_on_every_open() -> None:
-    """PRD 03's durable-client property comes from authenticating *once*
-    with a stable `DeviceId`. Caching the token on the channel instead would
-    survive the first re-authentication and then present a revoked one
-    forever, and `EmbySession` is the thing that owns the single-flight
-    re-auth, the negative cache and the exactly-one-retry."""
+    """PRD 03's durable client authenticates *once*, with a stable `DeviceId`.
+
+    Caching the token on the channel instead would survive the first re-authentication
+    and then present a revoked one forever, and `EmbySession` is the thing that owns the
+    single-flight re-auth, the negative cache and the exactly-one-retry.
+    """
     session = _StubSession()
     channel = _channel(_RecordingConnector(), session=session)
     async with channel.open():
@@ -510,10 +527,11 @@ async def test_the_channel_takes_its_token_from_the_session_on_every_open() -> N
 
 
 async def test_the_channel_counts_every_frame_including_ones_it_maps_to_nothing() -> None:
-    """A `Sessions` message produces no event and is the *reason* an idle
-    library's channel stays measurably alive. Counting only mapped events
-    would make a library nobody touched for a day look dead, and the
-    watchdog would reconnect it every `stale_after` seconds forever."""
+    """A `Sessions` message produces no event and is the *reason* an idle channel lives.
+
+    Counting only mapped events would make a library nobody touched for a day look dead,
+    and the watchdog would reconnect it every `stale_after` seconds forever.
+    """
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
     channel = _channel(connector)
@@ -532,9 +550,10 @@ async def test_the_channel_counts_every_frame_including_ones_it_maps_to_nothing(
 
 
 async def test_a_frame_that_is_not_json_is_counted_and_skipped() -> None:
-    """It is evidence the socket is alive, which is the only thing the
-    health ledger claims. Raising would cost a reconnect and a gap-closing
-    delta walk for one bad frame."""
+    """It is evidence the socket is alive, which is the only thing the health ledger claims.
+
+    Raising would cost a reconnect and a gap-closing delta walk for one bad frame.
+    """
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
     channel = _channel(connector)
@@ -548,8 +567,10 @@ async def test_a_frame_that_is_not_json_is_counted_and_skipped() -> None:
 
 
 async def test_a_json_frame_that_is_not_an_object_is_counted_and_skipped() -> None:
-    """`json.loads("[1, 2]")` succeeds and hands back a list, which has no
-    `.get`. A frame that parses is not a frame that is a message."""
+    """`json.loads("[1, 2]")` succeeds and hands back a list, which has no `.get`.
+
+    A frame that parses is not a frame that is a message.
+    """
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
     channel = _channel(connector)
@@ -561,17 +582,14 @@ async def test_a_json_frame_that_is_not_an_object_is_counted_and_skipped() -> No
 
 
 async def test_a_dropped_connection_raises_out_of_the_iterator() -> None:
-    """`SourceAdapter.list_items`' guarantee, one channel over: an iterator
-    that *stopped* is indistinguishable from a source with nothing more to
-    say, and `PushSupervisor` would record a clean shutdown and never
-    reconnect.
+    """`SourceAdapter.list_items`' guarantee, one channel over.
 
-    The drop happens *inside* the block, after the subscribe. The plan
-    dropped it before `open()`, which fails at `connection.send` and never
-    reaches the iterator at all -- a case that passes while testing a
-    different path. The one it named is covered here, and the one it
-    accidentally tested is covered by
-    `test_a_send_that_fails_does_not_leave_the_connection_open`.
+    An iterator that *stopped* is indistinguishable from a source with nothing more to
+    say, and `PushSupervisor` would record a clean shutdown and never reconnect.
+
+    The drop happens *inside* the block, after the subscribe. A drop before `open()`
+    fails at `connection.send` and never reaches the iterator at all; that path is
+    covered by `test_a_send_that_fails_does_not_leave_the_connection_open`.
     """
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
@@ -606,7 +624,7 @@ async def test_the_channel_closes_its_connection_on_a_clean_exit() -> None:
 
 
 async def test_a_connector_exception_carrying_the_url_does_not_leak_it() -> None:
-    """ADR-0012's handling rules, on the second URL that carries the token.
+    """The credential-handling rule, on the second URL that carries the token.
 
     `websockets.exceptions.InvalidURI.__str__` contains the URI, so an error
     message built the way `EmbySession` builds its own -- which interpolates
@@ -628,16 +646,13 @@ async def test_a_connector_exception_carrying_the_url_does_not_leak_it() -> None
 
 
 async def test_an_already_translated_connect_failure_propagates_unchanged() -> None:
-    """The plan asserted `WEBSOCKET_PATH in str(...)` against this shape and
-    it is not true: a `PortUnavailable` from the connector is re-raised as
-    it stands, so the message is the connector's.
+    """A `PortUnavailable` from the connector is re-raised as it stands.
 
-    That is the right behaviour and the assertion was the wrong one. The
-    only connector that raises a `UsherPortError` is this project's own
-    wrapper, whose message names a path and never a URL by construction;
-    re-wrapping it would bury the reason ("no route to host") behind a
-    generic one and would double-translate an error that is already this
-    port's vocabulary.
+    The message is the connector's. The only connector that raises a `UsherPortError`
+    is this project's own wrapper, whose message names a path and never a URL by
+    construction; re-wrapping it would bury the reason ("no route to host") behind a
+    generic one and would double-translate an error that is already this port's
+    vocabulary.
     """
     connector = FakePushConnector()
     connector.fail_next("no route to host")
@@ -650,10 +665,11 @@ async def test_an_already_translated_connect_failure_propagates_unchanged() -> N
 
 
 async def test_a_send_that_fails_does_not_leave_the_connection_open() -> None:
-    """The subscribe frame is sent *after* `record_open`, so a failure there
-    is the one path that could leave a ledger reporting `connected` on a
-    socket nobody is holding -- which is the milestone's own failure mode,
-    reached from inside."""
+    """The subscribe frame is sent *after* `record_open`.
+
+    A failure there is the one path that could leave a ledger reporting `connected` on
+    a socket nobody is holding -- this channel's own failure mode, reached from inside.
+    """
     connection = FakePushConnection()
     connection.drop("peer went away during the handshake")
     connector = FakePushConnector([connection])
@@ -666,9 +682,11 @@ async def test_a_send_that_fails_does_not_leave_the_connection_open() -> None:
 
 
 async def test_the_health_ledger_is_the_one_the_caller_handed_in() -> None:
-    """The adapter holds it across reconnects, so `reconnects` and
-    `messages_received` are the lane's history rather than one
-    connection's."""
+    """The adapter holds it across reconnects.
+
+    `reconnects` and `messages_received` are then the lane's history rather than one
+    connection's.
+    """
     health = PushHealth(stale_after=90.0)
     connector = FakePushConnector()
     channel = EmbyPushChannel(
@@ -683,30 +701,7 @@ async def test_the_health_ledger_is_the_one_the_caller_handed_in() -> None:
 
 
 async def test_a_consumer_and_a_producer_genuinely_overlap() -> None:
-    """The trap this project has been bitten by, applied to a long-lived
-    socket.
-
-    A bare mock never suspends, so the event loop runs each gathered task
-    through its *entire* cycle before starting the next -- and M3's deleted
-    single-flight lock passed five runs in a row against exactly that. A
-    count assertion here would be worthless for the same reason: "four
-    frames produced, four events consumed" is also what a fully serialised
-    run produces.
-
-    So this asserts on *observed overlap*: the consumer's first event must
-    land before the producer's last frame is queued, and the two wall-clock
-    windows must genuinely intersect.
-
-    The producer is paced against the consumer -- it waits for a `recv` call
-    to land before queueing the next frame -- rather than dumping frames on
-    its own schedule. Both spellings were measured. Unpaced, the producer
-    outruns the consumer (which spends two loop turns per frame, one of them
-    the channel's own cooperative yield) and the windows share only ~37% of
-    their union with 3 of 8 events landing mid-production; paced, they share
-    **80.3-85.4% over 30 runs** with 7 of 8. The paced number is the honest one to assert on,
-    because it is measuring the property under test -- that the two tasks
-    take turns -- rather than the ratio of their loop-turn costs.
-    """
+    """Genuine interleaving, applied to a long-lived socket."""
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
     channel = _channel(connector)
@@ -751,16 +746,14 @@ async def test_a_consumer_and_a_producer_genuinely_overlap() -> None:
 
 
 async def test_a_tick_with_nothing_on_it_is_not_the_end_of_the_stream() -> None:
-    """`recv` raising `TimeoutError` means "nothing yet", never "nothing
-    more".
+    """`recv` raising `TimeoutError` means "nothing yet", never "nothing more".
 
     An iterator that returned on a tick would end the stream at the first
     quiet moment -- which on an idle library is every moment -- and
     `PushSupervisor` would read that as a clean shutdown and never
-    reconnect. The plan left `except TimeoutError: continue` in place from
-    Task 6 with no case behind it: every other case here pre-fills the queue,
-    so the consumer never meets an empty one and the `return` spelling
-    survives them all. This is the case that meets one.
+    reconnect. Every other case here pre-fills the queue, so the consumer
+    never meets an empty one and the `return` spelling survives them all.
+    This is the case that meets one.
     """
     connection = FakePushConnection()
     connector = FakePushConnector([connection])
@@ -788,12 +781,12 @@ async def test_a_tick_with_nothing_on_it_is_not_the_end_of_the_stream() -> None:
 
 
 async def test_a_channel_that_never_delivers_raises_after_the_staleness_window() -> None:
-    """**The failure this milestone exists for**, in one test.
+    """The failure this channel exists for, in one test.
 
-    The socket upgraded -- ADR-0004 measured a handshake against a
-    *nonexistent* path doing exactly that and being held open -- the
-    subscription was sent, the connection object is fine, and nothing is
-    arriving. Without the watchdog the lane holds it forever:
+    The socket upgraded -- a handshake against a *nonexistent* path does
+    exactly that and is held open -- the subscription was sent, the
+    connection object is fine, and nothing is arriving. Without the
+    watchdog the lane holds it forever:
     `supports_push` is then the only thing that reports the truth and
     nothing acts on it, because a channel that never raises is a channel
     `PushSupervisor` never reconnects.
@@ -829,19 +822,16 @@ async def test_a_channel_that_never_delivers_raises_after_the_staleness_window()
 
 
 async def test_a_channel_that_delivered_and_then_went_quiet_raises() -> None:
-    """The other half, and the one `ping_timeout` cannot reach: a peer that
-    answers pongs while delivering nothing passes the WebSocket keepalive.
+    """The other half, and the one `ping_timeout` cannot reach.
+
+    A peer that answers pongs while delivering nothing passes the WebSocket keepalive.
     The socket worked, and then stopped, and the lane must notice.
 
-    **The plan's version of this case could not have passed and could not
-    have tested this path.** It called `connection.stall()` *before* the
-    first `anext`, and `stall()` refuses whatever is already queued -- so
-    the seeded frame was never delivered, `messages_received` was 0 rather
-    than the 1 it asserted, and the case was a second copy of the
-    never-delivered one above. The message has to actually arrive first,
-    which means consuming it, which means seeding one that maps to an event
-    rather than `Sessions` (which maps to nothing and so never returns from
-    `anext`).
+    The message has to actually arrive first, which means consuming it, which means
+    seeding one that maps to an event rather than `Sessions` (which maps to nothing
+    and so never returns from `anext`). `stall()` refuses whatever is already queued,
+    so calling it before the first `anext` would leave the seeded frame undelivered
+    and make this a second copy of the never-delivered case above.
     """
     ticks = iter([0.0, 1.0, 40.0, 80.0, 92.0, 100.0])
     connection = FakePushConnection()
@@ -868,12 +858,13 @@ async def test_a_channel_that_delivered_and_then_went_quiet_raises() -> None:
 
 
 async def test_a_channel_inside_the_window_keeps_waiting() -> None:
-    """The mutation this rules out is a watchdog that fires on the first
-    tick, which turns every idle second into a reconnect and a gap-closing
-    delta walk against a server PRD 01 measures at 1-5 s per request.
+    """The mutation this rules out is a watchdog that fires on the first tick.
 
-    The clock is a clamped ramp rather than the plan's fixed list of seven
-    instants. `recv` here ignores its timeout and answers immediately, so
+    That turns every idle second into a reconnect and a gap-closing delta walk against
+    a server that answers slowly.
+
+    The clock is a clamped ramp rather than a fixed list of instants.
+    `recv` here ignores its timeout and answers immediately, so
     0.05 s of wall time is *thousands* of ticks -- a list is exhausted in
     microseconds and `next()` on a spent iterator inside an async generator
     surfaces as `RuntimeError`, not as the `TimeoutError` the case is
@@ -909,9 +900,10 @@ async def test_a_channel_inside_the_window_keeps_waiting() -> None:
 
 
 async def test_a_channel_that_keeps_delivering_is_never_torn_down() -> None:
-    """The watchdog measures from the *last message*, not from the open, and
-    that is only observable on a channel that has been up far longer than
-    `stale_after` and is still working.
+    """The watchdog measures from the *last message*.
+
+    Not from the open, and that is only observable on a channel that has been up far
+    longer than `stale_after` and is still working.
 
     Without it a lane on a healthy socket is torn down every 90 seconds for
     the rest of its life -- and every teardown costs `PushSupervisor` a
@@ -936,9 +928,9 @@ async def test_a_channel_that_keeps_delivering_is_never_torn_down() -> None:
         now = 500.0
         stream = aiter(events)
         await asyncio.wait_for(anext(stream), timeout=BOUND)  # last_message_at = 500.0
-        # 560 s past the open and 60 s past the last message. Measured from
+        # 560 s past the open and 60 s past the last message. Counted from
         # the open this channel is nine minutes silent and would be torn
-        # down; measured from the message it is well inside the window.
+        # down; counted from the message it is well inside the window.
         now = 560.0
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(anext(stream), timeout=0.05)
@@ -947,8 +939,9 @@ async def test_a_channel_that_keeps_delivering_is_never_torn_down() -> None:
 
 
 async def test_the_channel_polls_with_its_own_timeout() -> None:
-    """`FakePushConnection.recv` ignores its `timeout`'s *effect* -- that is
-    what makes a staleness test sub-millisecond instead of ninety seconds --
+    """`FakePushConnection.recv` ignores its `timeout`'s *effect*.
+
+    That is what makes a staleness test sub-millisecond instead of ninety seconds --
     so the value passed is observable only because the fake records it.
 
     Without this case nothing in the unit suite can tell a channel that
@@ -983,14 +976,11 @@ async def test_the_channel_polls_with_its_own_timeout() -> None:
 async def test_the_fake_connection_really_suspends_on_every_recv() -> None:
     """The fake's own load-bearing property, pinned directly.
 
-    "A test that never truly awaits is not a concurrency test" is this
-    project's most expensive lesson -- a deleted single-flight lock passed
-    five runs in a row against a transport that never suspended. The overlap
-    case above is the measurement, but it cannot be the *guard*: with this
-    suspension removed, a `while True` around `recv` never returns control
-    to the event loop, and `asyncio.wait_for` needs the loop to run in order
-    to fire, so the suite hangs rather than fails. Measured -- 35 cases in,
-    then nothing, killed at 45 s.
+    "A test that never truly awaits is not a concurrency test." The overlap
+    case above cannot be the *guard*: with this suspension removed, a
+    `while True` around `recv` never returns control to the event loop, and
+    `asyncio.wait_for` needs the loop to run in order to fire, so the suite
+    hangs rather than fails.
 
     So the property is observed from outside any channel, where a starved
     loop is impossible: `recv` must let another task make progress before it
@@ -1063,7 +1053,7 @@ def restored_logging() -> Iterator[None]:
 def test_the_stock_websockets_logger_really_does_print_the_token(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """**The bug, pinned as a test rather than described in a comment.**
+    """The leak, pinned as a test rather than described in a comment.
 
     This is the reproduction that justifies `socket_logger` existing at all,
     and it is a test so that the justification cannot quietly stop being
@@ -1087,27 +1077,7 @@ def test_the_stock_websockets_logger_really_does_print_the_token(
 def test_the_socket_logger_survives_a_later_configure_logging(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """**The order here is the assertion, and the plan had it backwards.**
-
-    A socket outlives the call that opened it. `socket_logger()` runs at
-    connect time; `configure_logging` runs whenever an app is built or the
-    CLI starts, which for a lane that has been up for hours is *afterwards*
-    -- and it clears `handlers` and re-forces `propagate = True` on every
-    logger it finds. So `propagate = False` and a `NullHandler` are both
-    undone while the connection they were protecting is still open.
-
-    The level is the half that survives: `configure_logging` never touches
-    it, `logging.basicConfig(level=0)` sets *root*'s rather than this
-    logger's, and `isEnabledFor` consults `getEffectiveLevel()`, which is
-    this logger's own because it is set. A record that is not enabled is
-    never formatted, so the token is not even interpolated.
-
-    The plan ordered this case `configure_logging` first and `socket_logger`
-    second, and then claimed that dropping the level would fail it. It would
-    not: in that order the `propagate = False` set second is never undone,
-    so the level is unobserved and the mutation survives. Measured both
-    ways.
-    """
+    """The order here is the assertion."""
     silenced = socket_logger()
     configure_logging(_logging_settings(level="DEBUG"))
     silenced.debug("> GET %s HTTP/1.1", LEAKY_PATH)
@@ -1124,9 +1094,10 @@ def test_the_socket_logger_survives_a_later_configure_logging(
 def test_the_socket_logger_is_silent_when_the_app_was_configured_first(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """The other order -- an app built before the lane started -- which is
-    the ordinary one. Both hold; only the case above distinguishes which
-    guard is doing the work."""
+    """The other order -- an app built before the lane started -- which is the ordinary one.
+
+    Both hold; only the case above distinguishes which guard is doing the work.
+    """
     configure_logging(_logging_settings(level="DEBUG"))
     silenced = socket_logger()
     silenced.debug("> GET %s HTTP/1.1", LEAKY_PATH)
@@ -1137,11 +1108,14 @@ def test_the_socket_logger_is_silent_when_the_app_was_configured_first(
 
 
 def test_the_socket_logger_is_re_silenced_on_every_call() -> None:
-    """`configure_logging` walks `logging.root.manager.loggerDict` and sets
-    `propagate = True` on everything it finds, so a `propagate = False` set
-    once at import is undone the next time an app is built -- and the test
-    suite alone builds dozens. Re-asserting per call is what makes the
-    guarantee hold in the order production actually runs in."""
+    """`configure_logging` sets `propagate = True` on every logger it can find.
+
+    A `propagate = False` set once at import is undone the next time an app is built
+    -- and the test suite alone builds dozens.
+
+    Re-asserting per call is what makes the guarantee hold in the order production
+    actually runs in.
+    """
     silenced = socket_logger()
     silenced.propagate = True
     silenced.setLevel(logging.DEBUG)
@@ -1154,23 +1128,24 @@ def test_the_socket_logger_is_re_silenced_on_every_call() -> None:
 
 
 def test_the_socket_logger_is_not_one_configure_logging_can_find_by_name() -> None:
-    """It is a `usher.*` name, so `USHER_LOG_LEVEL` and every loguru sink
-    are irrelevant to it -- but it is still an ordinary stdlib logger, and
-    the guarantee is that its *level* is what stops the record. Asserted on
-    the level rather than on the name, because renaming it is harmless and
-    lowering it is not."""
+    """It is a `usher.*` name, so `USHER_LOG_LEVEL` and every loguru sink are irrelevant to it.
+
+    It is still an ordinary stdlib logger, and the guarantee is that its *level* is
+    what stops the record.
+
+    Asserted on the level rather than on the name, because renaming it is harmless and
+    lowering it is not.
+    """
     assert socket_logger().level > logging.CRITICAL
 
 
 async def test_connect_websocket_hands_the_library_the_silenced_logger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one argument in `connect_websocket` that is a security control
-    rather than a tuning knob, pinned where it is passed.
+    """The one argument in `connect_websocket` that is a security control.
 
-    The plan's own mutation table records `logger=None` as having nothing in
-    the unit suite behind it and says "write the case". This is that case,
-    and the loopback one below is the same claim through the real library.
+    Not a tuning knob, and pinned where it is passed. The loopback case below is the
+    same claim through the real library.
     """
     captured: dict[str, Any] = {}
 
@@ -1198,12 +1173,11 @@ async def test_connect_websocket_hands_the_library_the_silenced_logger(
 async def test_a_real_websockets_handshake_prints_no_token(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """**The absence, proved against the real library rather than a
-    stand-in**: a real `websockets` client, a real `websockets` server on
-    `127.0.0.1`, a real upgrade, and `configure_logging` at DEBUG -- the
-    exact configuration that puts the token on stdout in
-    `test_the_stock_websockets_logger_really_does_print_the_token` above.
+    """The absence, proved against the real library rather than a stand-in.
 
+    A real `websockets` client, a real server on `127.0.0.1`, a real upgrade, and
+    `configure_logging` at DEBUG -- the exact configuration that puts the token on
+    stdout in `test_the_stock_websockets_logger_really_does_print_the_token` above.
     Loopback only, so the suite still makes no network request.
 
     **The test's own server is silenced too, and that is a finding rather
@@ -1211,12 +1185,10 @@ async def test_a_real_websockets_handshake_prints_no_token(
     HTTP/1.1` with the same path, so a loopback case that silenced only the
     client would fail on its harness rather than on the code under test --
     and the obvious repair is to weaken the assertion, which is how a real
-    leak gets ratified. Measured: with both stock loggers, one handshake
-    puts the token on stdout twice, once from each side.
+    leak gets ratified.
 
-    Task 12's `tests/integration/test_push_loopback.py` is the fuller
-    transport test (ping/pong, an abrupt close, a close code); this is the
-    credential half of it, kept here because it needs no Docker.
+    `tests/integration/test_push_loopback.py` is the fuller transport test;
+    this is the credential half of it, kept here because it needs no Docker.
     """
     from websockets.asyncio.server import serve
 
@@ -1250,11 +1222,12 @@ async def test_a_real_websockets_handshake_prints_no_token(
 async def test_the_real_connection_translates_a_closed_socket_by_type(
     restored_logging: None,
 ) -> None:
-    """`_WebsocketsConnection` exists so that **no `websockets` exception
-    ever crosses into `usher.ports.errors` carrying its own message**.
-    `InvalidURI.__str__` is `f"{self.uri} isn't a valid URI: ..."` -- read
-    from the installed library, not assumed -- and this channel's URI is the
-    token. Every translation names the exception's *type* and nothing else.
+    """`_WebsocketsConnection` exists so no `websockets` exception crosses the port.
+
+    None of them may reach `usher.ports.errors` carrying its own message.
+    `InvalidURI.__str__` is `f"{self.uri} isn't a valid URI: ..."` -- read from the
+    installed library, not assumed -- and this channel's URI is the token. Every
+    translation names the exception's *type* and nothing else.
 
     Driven against a real server that goes away, so the exception being
     translated is a real `ConnectionClosed` rather than one a test raised.
@@ -1283,10 +1256,12 @@ async def test_the_real_connection_translates_a_closed_socket_by_type(
 
 
 async def test_the_real_connection_never_raises_out_of_aclose() -> None:
-    """`aclose` runs in a `finally` that is itself often unwinding the
-    `PortUnavailable` that explains why the lane dropped. A close failure
-    replacing that reason is worse than a log line, so it is swallowed --
-    and the port already documents `aclose` as never raising."""
+    """`aclose` runs in a `finally` that is often unwinding a `PortUnavailable`.
+
+    That exception explains why the lane dropped, and a close failure replacing it is
+    worse than a log line -- so it is swallowed, and the port already documents
+    `aclose` as never raising.
+    """
 
     class _Exploding:
         async def close(self) -> None:
@@ -1311,16 +1286,13 @@ async def test_the_real_connection_times_out_on_a_silent_socket_rather_than_hang
     world can show that the real connection honours one. `websockets` has no
     deadline of its own on `recv()`; `asyncio.wait_for` is the mechanism its
     own documentation names, and without it a live-but-silent socket never
-    returns control to the loop that runs the watchdog. Which is exactly the
-    peer ADR-0004 measured.
+    returns control to the loop that runs the watchdog -- which is exactly
+    the peer this channel has to survive.
 
-    **The outer bound and the elapsed assertion are both load-bearing, and
-    the first draft of this case had neither.** Deleting the inner deadline
-    makes `recv` block forever against this server, so without
-    `asyncio.wait_for` the mutation *hangs the suite* instead of failing it
-    -- measured; the sweep sat on it until it was killed, and `timeout`
-    SIGTERMs Python without running `finally`, so it left the mutated file
-    behind. And with only the outer bound, that same mutation raises
+    **The outer bound and the elapsed assertion are both load-bearing.**
+    Deleting the inner deadline makes `recv` block forever against this
+    server, so without `asyncio.wait_for` the mutation *hangs the suite*
+    instead of failing it. And with only the outer bound, that same mutation raises
     `TimeoutError` from the *outer* `wait_for` and satisfies
     `pytest.raises`, so the elapsed window is what tells the two apart.
     """
@@ -1353,11 +1325,13 @@ async def test_the_real_connection_times_out_on_a_silent_socket_rather_than_hang
 async def test_the_real_connection_decodes_a_binary_frame_rather_than_raising(
     restored_logging: None,
 ) -> None:
-    """Emby sends text. A binary frame is still evidence the socket is
-    alive, which is the only thing the health ledger claims -- so it is
-    decoded and counted, and then fails to parse as JSON, which the channel
-    already drops-and-counts. Raising would cost a reconnect and a
-    gap-closing delta walk for one frame of the wrong opcode."""
+    """Emby sends text.
+
+    A binary frame is still evidence the socket is alive, which is the only thing the
+    health ledger claims -- so it is decoded and counted, and then fails to parse as
+    JSON, which the channel already drops-and-counts. Raising would cost a reconnect and
+    a gap-closing delta walk for one frame of the wrong opcode.
+    """
     from websockets.asyncio.server import serve
 
     async def handler(connection: Any) -> None:
@@ -1379,12 +1353,12 @@ async def test_the_real_connection_decodes_a_binary_frame_rather_than_raising(
 async def test_the_real_connection_translates_a_failed_send_by_type(
     restored_logging: None,
 ) -> None:
-    """`send`'s failure arm, which is the subscribe frame's arm: `open()`
-    sends `SUBSCRIBE_FRAME` immediately after `record_open`, so a peer that
+    """`send`'s failure arm, which is the subscribe frame's arm.
+
+    `open()` sends `SUBSCRIBE_FRAME` immediately after `record_open`, so a peer that
     goes away during the handshake reaches exactly this translation.
 
-    It had no case at all until a mutation sweep said so -- interpolating
-    `{exc}` here survived every other one of these fifty-odd tests. The
+    Interpolating `{exc}` here survives every other case in this file. The
     close exceptions do not happen to carry the URI today; `InvalidURI` and
     `InvalidProxy` do, and "today's exception type is harmless" is not a
     guarantee this module is allowed to rest on.

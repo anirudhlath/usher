@@ -1,23 +1,4 @@
-"""`usher.cache.hits`/`.misses` -- PRD 10, M9.
-
-**`services/rows/cache.py`'s own docstring said cache effectiveness is not
-observable in M7, and `services/home.py:329` says why a histogram cannot
-substitute**: a cache hit records no `usher.row.build.duration` point because
-the cache returns before the timer opens, so that histogram's population is
-misses only and a hit rate is not recoverable from it. These two counters are
-the fix, and the read is where the counter goes -- inside `RowCache.get_row`
-and `RowCache.get_screen` -- so every future *reader* is counted rather than
-every future caller remembering to.
-
-Driven through the real `HomeService`/`RowCache` pair rather than by calling
-`counter.add` directly, so an instrument created at import and never recorded
-to fails here -- same discipline as `test_telemetry_search.py`.
-
-`tests/conftest.py::reset_otel_meter_provider` (autouse) is what makes
-installing a fresh `MeterProvider` per case here work at all: `set_meter_
-provider` is set-once and every `usher` module's counter is a `_Proxy*` shell
-caching the first real instrument it is ever handed.
-"""
+"""`usher.cache.hits`/`.misses` -- PRD 10."""
 
 import datetime as dt
 import uuid
@@ -42,9 +23,11 @@ _START = dt.datetime(2026, 8, 11, 12, 0, tzinfo=dt.UTC)
 
 
 class _Clock:
-    """A clock that only moves when a case moves it -- `test_services_rows_
-    cache.py`'s own fixture, copied rather than imported so this file has no
-    cross-file coupling to a sibling suite's internals."""
+    """A clock that only moves when a case moves it.
+
+    `test_services_rows_ cache.py`'s own fixture, copied rather than imported so this
+    file has no cross-file coupling to a sibling suite's internals.
+    """
 
     def __init__(self) -> None:
         self.now = _START
@@ -137,8 +120,10 @@ def _kinds(reader: InMemoryMetricReader) -> dict[str, str]:
 async def test_a_warm_screen_records_a_hit_and_a_cold_one_records_a_miss(
     ctx: RowContext, clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """Compose twice through the real `HomeService`. The first call finds no
-    screen cached -- a miss -- and warms it; the second finds it -- a hit.
+    """Compose twice through the real `HomeService`.
+
+    The first call finds no screen cached -- a miss -- and warms it; the second finds it
+    -- a hit.
 
     The wrong implementations this rules out: a counter recorded on `put_*`
     instead of on the failed `get_*` (which double-counts a rebuild -- a miss
@@ -168,10 +153,12 @@ async def test_a_warm_screen_records_a_hit_and_a_cold_one_records_a_miss(
 async def test_a_cold_row_records_a_miss_labelled_row(
     ctx: RowContext, clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """The composer always checks the screen cache first, so the same compose
-    that misses `cache="screen"` also misses `cache="row"` once it reaches
-    `_build` -- this pins that the row half is labelled independently rather
-    than folded into the screen's count."""
+    """The composer always checks the screen cache first.
+
+    so the same compose that misses `cache="screen"` also misses `cache="row"` once it
+    reaches `_build` -- this pins that the row half is labelled independently rather
+    than folded into the screen's count.
+    """
     cache = RowCache(clock=clock)
     provider = _provider("recently-added")
     service = HomeService(providers=[provider], cache=cache)
@@ -186,12 +173,15 @@ async def test_a_cold_row_records_a_miss_labelled_row(
 async def test_a_row_that_outlives_its_screen_records_a_hit_labelled_row(
     ctx: RowContext, clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """PRD 06 caches at two layers because a row's own TTL can outlive the
-    ~30s screen -- `test_services_rows_cache.py`'s own
-    `test_a_row_survives_the_screen_expiring_because_its_own_ttl_is_longer`
-    is the composer-level proof; this is the metric-level one. The screen
-    expires, forcing a rebuild pass, and that pass finds the row still live:
-    a hit labelled `row`, alongside the second screen miss."""
+    """PRD 06 caches at two layers, and a row's own TTL can outlive the 30 s screen.
+
+    `test_services_rows_cache.py`'s own
+    `test_a_row_survives_the_screen_expiring_because_its_own_ttl_is_longer` is the
+    composer-level proof; this is the metric-level one.
+
+    The screen expires, forcing a rebuild pass, and that pass finds the row still live:
+    a hit labelled `row`, alongside the second screen miss.
+    """
     cache = RowCache(clock=clock)
     provider = _provider(
         "because-you-watched", family=RowFamily.SIMILARITY, ttl=dt.timedelta(hours=6)
@@ -216,10 +206,14 @@ async def test_a_row_that_outlives_its_screen_records_a_hit_labelled_row(
 def test_an_entry_exactly_at_its_expiry_records_a_miss(
     clock: _Clock, meter_reader: InMemoryMetricReader
 ) -> None:
-    """Stepped *onto* the boundary, not past it -- the habit M5's surviving
-    `stale_after` `<=` -> `<` mutation exists to teach: every case that steps
-    past the boundary leaves both spellings agreeing on every input offered.
-    An entry at its expiry is a rebuild, so it must count as a miss."""
+    """Stepped *onto* the boundary, not past it.
+
+    A surviving `stale_after` `<=` -> `<` mutation teaches the habit: every case
+    that steps past the boundary leaves both spellings agreeing on every input
+    offered.
+
+    An entry at its expiry is a rebuild, so it must count as a miss.
+    """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_screen(user, (), ttl=_TTL)
 
@@ -235,9 +229,11 @@ def test_an_entry_exactly_at_its_expiry_records_a_miss(
 
 
 def test_the_two_series_are_counters(meter_reader: InMemoryMetricReader) -> None:
-    """PRD 10 documents `usher.cache.hits`/`.misses` as counters, not gauges
-    or histograms -- the distinction is the question answered: "how many
-    reads landed" accumulates, it does not sample a current level."""
+    """PRD 10 documents `usher.cache.hits`/`.misses` as counters, not gauges or histograms.
+
+    the distinction is the question answered: "how many reads landed" accumulates, it
+    does not sample a current level.
+    """
     cache, user = RowCache(clock=lambda: _START), uuid.uuid4()
     cache.get_screen(user)
     cache.put_screen(user, (), ttl=_TTL)
@@ -249,10 +245,12 @@ def test_the_two_series_are_counters(meter_reader: InMemoryMetricReader) -> None
 
 
 def test_the_instruments_exist_at_import(meter_reader: InMemoryMetricReader) -> None:
-    """A rename in `src/` that leaves `CACHE_HITS`/`CACHE_MISSES` pointing
-    at a near-miss name is a dashboard panel that is permanently empty and
-    indistinguishable from a healthy zero -- caught here structurally rather
-    than only through a case that happens to record to it."""
+    """A rename in `src/` that leaves `CACHE_HITS`/`CACHE_MISSES` pointing at a near-miss name.
+
+    is a dashboard panel that is permanently empty and indistinguishable from a healthy
+    zero -- caught here structurally rather than only through a case that happens to
+    record to it.
+    """
     import usher.services.rows.cache as cache_module
 
     names = {

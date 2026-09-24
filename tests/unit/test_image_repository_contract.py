@@ -1,15 +1,6 @@
-"""The image contract against the in-memory double. No Docker.
+"""The image contract against the in-memory double.
 
-`tests/integration/test_image_repository.py` runs the identical assertions
-against Postgres, plus the cases only a real constraint and a real second
-session can demonstrate. See `tests/fakes/image_repository.py` for the five
-places this half is more forgiving.
-
-The one case below that is *not* in the shared contract is the statement count,
-and it is here rather than there for the reason `rows-and-genome.md` records:
-the claim is "one statement per shelf", and against an in-memory dict a
-**timing** assertion measures the dict. Counting is the only honest way to see
-it, and only the fake can be counted.
+No Docker.
 """
 
 import uuid
@@ -56,11 +47,12 @@ class TestFakeImageRepository(ImageRepositoryContract):
 
 
 async def test_a_whole_shelf_costs_one_statement() -> None:
-    """**Counted, not timed.** The port's promise is one statement per shelf
-    whatever the shelf's length, and it is the whole reason
-    `primary_for_titles` takes a sequence: a shelf is up to thirty cards and
-    `GET /home` composes ten of them, so the per-card shape is three hundred
-    round trips a screen.
+    """**Counted.
+
+    not timed.** The port's promise is one statement per shelf whatever the shelf's
+    length, and it is the whole reason `primary_for_titles` takes a sequence: a shelf is
+    up to thirty cards and `GET /home` composes ten of them, so the per-card shape is
+    three hundred round trips a screen.
 
     A timing assertion here would measure a Python dict —
     `rows-and-genome.md`'s four-reads finding — so the fake counts its own

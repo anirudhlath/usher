@@ -1,15 +1,4 @@
-"""The three job handlers, and the remote-search tier only one of them uses.
-
-`JobWorker` is a generic claim/run/park loop; these are the only place its
-vocabulary meets the pipeline's. Two properties carry most of the cases:
-
-- **a key that does not parse must be a `UsherPortError`.** `JobWorker` lets
-  anything else propagate on purpose, so a `ValueError` from `uuid.UUID`
-  would kill the worker instead of parking one job.
-- **work that has become impossible completes rather than parks.** PRD 08
-  reserves parking for work a human has to look at; an item the source
-  deleted is not that.
-"""
+"""The three job handlers, and the remote-search tier only one of them uses."""
 
 import uuid
 from datetime import UTC, datetime
@@ -124,9 +113,10 @@ async def test_the_enrich_handler_enriches_the_title_its_key_names() -> None:
 
 
 async def test_the_enrich_handler_hands_the_service_the_rung_its_job_was_claimed_at() -> None:
-    """The wiring that makes the clamp in `EnrichService._apply` reachable at
-    all: the rung lives on the claimed `Job` and this handler is the only
-    thing that can carry it across.
+    """The wiring that makes the clamp in `EnrichService._apply` reachable at all.
+
+    the rung lives on the claimed `Job` and this handler is the only thing that can
+    carry it across.
 
     Asserted on the **follow-up** rather than on a spy, because that is where
     the rung is observable to the rest of the system -- `DERIVE` is what
@@ -158,11 +148,14 @@ async def test_the_enrich_handler_hands_the_service_the_rung_its_job_was_claimed
 
 
 async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_worker() -> None:
-    """`uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
-    deliberately lets anything that is not a `UsherPortError` propagate --
-    "a bug in a handler is not an upstream failure". So without this
-    translation one corrupted key takes the whole worker process down instead
-    of parking its own job."""
+    """`uuid.UUID("not-a-uuid")` raises a `ValueError`.
+
+    and `JobWorker` deliberately lets anything that is not a `UsherPortError` propagate
+    -- "a bug in a handler is not an upstream failure".
+
+    So without this translation one corrupted key takes the whole worker process down
+    instead of parking its own job.
+    """
     service = EnrichService(
         FakeTitleRepository(),
         FakeEpisodeRepository(),
@@ -218,12 +211,11 @@ class _RecordingCuration(CurationService):
 
 
 async def test_the_curate_handler_generates_for_the_household_its_key_names() -> None:
-    """**The key is the household, and nothing else in this handler may
-    decide which one.**
+    """**The key is the household, and nothing else in this handler may decide which one.**.
 
     `watch_history_handler` one section down takes a `user_id` at
-    *construction*, because M4 has one user and a walk's job key is a
-    source's `external_id` with no household in it. Curate is the opposite
+    *construction*, because the deployment has one user and a walk's job key
+    is a source's `external_id` with no household in it. Curate is the opposite
     shape: `(kind, key)` is what makes two requests for one household buy one
     completion, so the household has to be in the key -- and a handler that
     took the composition root's default user instead would still dedup
@@ -328,9 +320,11 @@ async def test_the_match_handler_attaches_what_the_remote_search_resolved(
 async def test_the_match_handler_mints_a_stub_when_the_catalog_lacks_the_title(
     binding: SourceBinding, adapter: FakeSourceAdapter, source: Source
 ) -> None:
-    """The catalog holds 1,271,138 titles and only 291,737 carry a `tmdb_id`,
-    so a confident search result the catalog does not hold is the common case
-    -- the same reasoning that makes stub-on-sight load-bearing."""
+    """The catalog holds 1,271,138 titles and only 291,737 carry a `tmdb_id`.
+
+    so a confident search result the catalog does not hold is the common case -- the
+    same reasoning that makes stub-on-sight load-bearing.
+    """
     titles = FakeTitleRepository()
     provider = FakeMetadataProvider()
     provider.seed_candidates(
@@ -360,8 +354,10 @@ async def test_the_match_handler_mints_a_stub_when_the_catalog_lacks_the_title(
 async def test_the_match_handler_does_nothing_for_an_item_the_source_no_longer_has(
     binding: SourceBinding, source: Source
 ) -> None:
-    """Parking it would fill the review list with things that are simply
-    gone, and a parked job needs a human to release it."""
+    """Parking it would fill the review list with things that are simply gone.
+
+    and a parked job needs a human to release it.
+    """
     media_items = FakeMediaItemRepository()
     await media_items.upsert_many([_upsert(source.id, "emby-gone")])
     await match_handler(
@@ -373,9 +369,11 @@ async def test_the_match_handler_does_nothing_for_an_item_the_source_no_longer_h
 
 
 async def test_the_match_handler_does_nothing_when_no_configured_source_owns_the_key() -> None:
-    """`(kind, key)` is unique across sources (`usher.domain.jobs.Job`), so a
-    worker cannot assume the job it claimed belongs to the source it happens
-    to hold."""
+    """`(kind.
+
+    key)` is unique across sources (`usher.domain.jobs.Job`), so a worker cannot assume
+    the job it claimed belongs to the source it happens to hold.
+    """
     seen: list[str] = []
     await match_handler(
         _matcher(FakeTitleRepository()), FakeMediaItemRepository(), _resolver(None, seen)
@@ -387,9 +385,11 @@ async def test_the_match_handler_does_nothing_when_no_configured_source_owns_the
 
 
 async def test_an_ambiguous_search_resolves_to_nothing() -> None:
-    """PRD 03 stage 5: no *confident* match means the review queue, not a
-    coin flip. Two same-name, same-year candidates is what a search for a
-    film and its own remake looks like."""
+    """PRD 03's match ladder, step 6: no *confident* match means the review queue, not a coin flip.
+
+    Two same-name, same-year candidates is what a search for a film and its own remake
+    looks like.
+    """
     provider = FakeMetadataProvider()
     provider.seed_candidates(
         MetadataCandidate(
@@ -420,8 +420,10 @@ async def test_a_candidate_whose_year_is_far_off_is_not_confident() -> None:
 
 
 async def test_a_year_within_one_is_still_confident() -> None:
-    """PRD 03 stage 3's +/-1, applied to the remote tier too: a source and a
-    provider disagreeing by one year is common and is not ambiguity."""
+    """PRD 03's name + year +/-1, applied to the remote tier too.
+
+    a source and a provider disagreeing by one year is common and is not ambiguity.
+    """
     titles = FakeTitleRepository()
     provider = FakeMetadataProvider()
     provider.seed_candidates(
@@ -437,10 +439,12 @@ async def test_a_year_within_one_is_still_confident() -> None:
 
 
 async def test_the_search_is_scoped_to_the_items_own_kind() -> None:
-    """26,968 TMDb ids are live in both spaces. A series candidate answering
-    a movie's search resolves the item to an unrelated show -- and the search
-    endpoints are different, so the scoping is also one request instead of
-    two."""
+    """26,968 TMDb ids are live in both spaces.
+
+    A series candidate answering a movie's search resolves the item to an unrelated show
+    -- and the search endpoints are different, so the scoping is also one request
+    instead of two.
+    """
     provider = FakeMetadataProvider()
     provider.seed_candidates(
         MetadataCandidate(
@@ -454,8 +458,10 @@ async def test_the_search_is_scoped_to_the_items_own_kind() -> None:
 
 
 async def test_an_episode_is_never_remotely_searched() -> None:
-    """A TMDb title search for "Kissed by Fire" is not a resolution path, and
-    999,827 of this library's items are episodes."""
+    """A TMDb title search for "Kissed by Fire" is not a resolution path.
+
+    and 999,827 of this library's items are episodes.
+    """
     provider = FakeMetadataProvider()
     provider.seed_candidates(
         MetadataCandidate(
@@ -470,8 +476,10 @@ async def test_an_episode_is_never_remotely_searched() -> None:
 
 
 async def test_a_deployment_with_no_provider_configured_has_no_remote_tier() -> None:
-    """PRD 08: "TMDb key missing -> Bootstrap Phase 3 skipped". The same
-    degradation one stage over -- no key, no tier 4, and no crash."""
+    """PRD 08: with the TMDb key missing, "Bootstrap Phase 3 skipped".
+
+    The same degradation one stage over -- no key, no TMDb search tier, and no crash.
+    """
     outcome = await _matcher(FakeTitleRepository()).match_remote(
         SourceItem(external_id="e", name="A Film", kind=SourceItemKind.MOVIE, year=1999)
     )
@@ -532,8 +540,9 @@ async def test_the_watch_history_handler_does_nothing_for_an_unowned_key() -> No
 
 
 class _RecordingReconcile(ReconcileService):
-    """A `ReconcileService` that records **which source and lane** it was
-    asked to walk, without touching any of its five real collaborators.
+    """A `ReconcileService` that records **which source and lane** it was asked to walk.
+
+    without touching any of its five real collaborators.
 
     Same shape as `_RecordingCuration` above and for the same reason: there
     is no port between `sync_handler` and the service it drives, so what a
@@ -543,11 +552,24 @@ class _RecordingReconcile(ReconcileService):
 
     def __init__(self, log: list[str], *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[uuid.UUID, SyncRunKind]] = []
+        # The `max_items` each call was handed. `POST /admin/sources/{id}/sync`
+        # is an operator asking for the whole thing, so the handler must pass
+        # nothing and get the unlimited default -- and "0" is a claim a case
+        # can be wrong about in a way "the walk happened" is not.
+        self.ceilings: list[int] = []
         self._log = log
         self._boom = raises
 
-    async def reconcile(self, source: Source, kind: SyncRunKind, adapter: SourceAdapter) -> SyncRun:
+    async def reconcile(
+        self,
+        source: Source,
+        kind: SyncRunKind,
+        adapter: SourceAdapter,
+        *,
+        max_items: int = 0,
+    ) -> SyncRun:
         self.calls.append((source.id, kind))
+        self.ceilings.append(max_items)
         self._log.append("reconcile")
         if self._boom is not None:
             raise self._boom
@@ -593,9 +615,11 @@ class _Opener:
 async def test_the_sync_handler_walks_the_item_lane_then_the_watch_lane(
     source: Source, adapter: FakeSourceAdapter
 ) -> None:
-    """PRD 03's ordering, restated at the handler: a watch lane that ran
-    before the items existed would resolve every state against a
-    `MediaItem` that does not exist yet and count it unmatched."""
+    """PRD 03's ordering, restated at the handler.
+
+    a watch lane that ran before the items existed would resolve every state against a
+    `MediaItem` that does not exist yet and count it unmatched.
+    """
     sources = FakeSourceRepository()
     await sources.add(source)
     events: list[str] = []
@@ -616,9 +640,10 @@ async def test_the_sync_handler_walks_the_item_lane_then_the_watch_lane(
 async def test_the_lane_in_the_key_is_the_lane_reconcile_is_asked_for(
     source: Source, adapter: FakeSourceAdapter
 ) -> None:
-    """The composite key is the only channel lane selection reaches the
-    handler through -- a `delta` request and a `full` request differ in
-    nothing else."""
+    """The composite key is the only channel lane selection reaches the handler through.
+
+    a `delta` request and a `full` request differ in nothing else.
+    """
     sources = FakeSourceRepository()
     await sources.add(source)
     events: list[str] = []
@@ -630,14 +655,21 @@ async def test_the_lane_in_the_key_is_the_lane_reconcile_is_asked_for(
     )
 
     assert reconcile.calls == [(source.id, SyncRunKind.DELTA)]
+    assert reconcile.ceilings == [0], (
+        "M10 S6: `POST /admin/sources/{id}/sync` is an operator asking for the whole "
+        "delta, so the handler passes no `max_items` and gets the unlimited default. "
+        "The gap ceiling is `LaneSupervisor._close_gap`'s alone -- the one caller "
+        f"nobody typed a command for: {reconcile.ceilings}"
+    )
 
 
 async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
     source: Source, adapter: FakeSourceAdapter
 ) -> None:
-    """`aclose()` in a `finally`, the rule `usher.cli._sync` already
-    documents: one adapter is one connection pool, and a walk that raises
-    would otherwise leak it for the rest of the process.
+    """`aclose()` in a `finally`, the rule `usher.cli._sync` already documents.
+
+    one adapter is one connection pool, and a walk that raises would otherwise leak it
+    for the rest of the process.
 
     `ReconcileService.reconcile` itself "never raises a `UsherPortError`" --
     it records a `FAILED` run instead -- so the exception that reaches this
@@ -665,9 +697,11 @@ async def test_the_sync_handler_closes_the_adapter_even_when_reconcile_raises(
 
 
 async def test_a_sync_key_with_no_lane_parks_rather_than_killing_the_worker() -> None:
-    """`"{source_id}"` alone, with no `:lane` -- a plausible corruption from
-    something that dropped the separator -- must not reach `str.partition`
-    and silently resolve to an empty lane."""
+    """`"{source_id}"` alone, with no `:lane`.
+
+    a plausible corruption from something that dropped the separator -- must not reach
+    `str.partition` and silently resolve to an empty lane.
+    """
     with pytest.raises(PortDataMalformed):
         await sync_handler(
             FakeSourceRepository(),
@@ -681,8 +715,10 @@ async def test_a_sync_key_with_no_lane_parks_rather_than_killing_the_worker() ->
 async def test_a_sync_key_whose_source_id_does_not_parse_parks_rather_than_killing_the_worker() -> (
     None
 ):
-    """`uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
-    deliberately lets anything that is not a `UsherPortError` propagate."""
+    """`uuid.UUID("not-a-uuid")` raises a `ValueError`.
+
+    and `JobWorker` deliberately lets anything that is not a `UsherPortError` propagate.
+    """
     with pytest.raises(PortDataMalformed) as raised:
         await sync_handler(
             FakeSourceRepository(),
@@ -695,9 +731,11 @@ async def test_a_sync_key_whose_source_id_does_not_parse_parks_rather_than_killi
 
 
 async def test_a_sync_key_naming_watch_state_as_its_own_lane_is_malformed() -> None:
-    """`SyncRunKind.WATCH_STATE` parses as a `SyncRunKind` and is still not a
-    triggerable lane: the watch lane is never a thing an operator asks for on
-    its own, only the second half of every triggered sync."""
+    """`SyncRunKind.WATCH_STATE` parses as a `SyncRunKind` and is still not a triggerable lane.
+
+    the watch lane is never a thing an operator asks for on its own, only the second
+    half of every triggered sync.
+    """
     with pytest.raises(PortDataMalformed):
         await sync_handler(
             FakeSourceRepository(),
@@ -720,9 +758,11 @@ async def test_a_sync_key_naming_an_unknown_lane_is_malformed() -> None:
 
 
 async def test_the_sync_handler_completes_for_a_source_that_no_longer_exists() -> None:
-    """A job for work that has since become impossible completes rather than
-    parks -- PRD 08 reserves parking for work a human must look at, and a
-    source deleted between enqueue and claim is simply gone."""
+    """A job for work that has since become impossible completes rather than parks.
+
+    PRD 08: "Work that has become impossible completes, and does not park" -- and a
+    source deleted between enqueue and claim is simply gone.
+    """
     events: list[str] = []
     opener = _Opener(None)
 
@@ -739,13 +779,15 @@ async def test_the_sync_handler_completes_for_a_source_that_no_longer_exists() -
 
 
 async def test_the_sync_handler_completes_for_a_source_disabled_since_it_was_enqueued() -> None:
-    """The race the route's own 409 cannot close by itself: the queue can
-    hold this job behind a head-of-line-blocking walk for minutes, long
-    enough for an operator to disable the source after the healthy 202 and
-    before the worker ever claims the row. `SourceRegistry.resolve` already
-    makes this guard for `match` and `watch_history`
-    (`composition.py`); this is the same rule for the kind that reaches a
-    source by id instead of asking a resolver.
+    """The race the route's own 409 cannot close by itself.
+
+    the queue can hold this job behind a head-of-line-blocking walk for minutes, long
+    enough for an operator to disable the source after the healthy 202 and before the
+    worker ever claims the row.
+
+    `SourceRegistry.resolve` already makes this guard for `match` and `watch_history`
+    (`composition.py`); this is the same rule for the kind that reaches a source by id
+    instead of asking a resolver.
     """
     sources = FakeSourceRepository()
     await sources.add(
@@ -771,9 +813,11 @@ async def test_the_sync_handler_completes_for_a_source_disabled_since_it_was_enq
 
 
 async def test_the_sync_handler_completes_when_the_credential_row_has_gone(source: Source) -> None:
-    """`composition.open_adapter` answers `None` for exactly this and already
-    logs why -- an operator with three sources needs the second and third to
-    run when the first's credential has gone."""
+    """`composition.open_adapter` answers `None` for exactly this and already logs why.
+
+    an operator with three sources needs the second and third to run when the first's
+    credential has gone.
+    """
     sources = FakeSourceRepository()
     await sources.add(source)
     events: list[str] = []
@@ -878,9 +922,10 @@ async def test_a_write_back_pushes_the_state_the_row_holds_now_not_the_one_that_
 
 
 async def test_a_write_back_for_an_episode_sends_the_episodes_own_row(source: Source) -> None:
-    """An episode's `media_items` row carries its series' `title_id` *and*
-    its `episode_id`, and `watch_states` permits exactly one -- so the pair
-    has to collapse with the episode winning.
+    """An episode's `media_items` row carries its series' `title_id` *and* its `episode_id`.
+
+    and `watch_states` permits exactly one -- so the pair has to collapse with the
+    episode winning.
 
     Fails against a handler that reads `get_for_title`: it would push the
     series' progress, which on this library is one row standing in for up to
@@ -921,8 +966,10 @@ async def test_a_write_back_for_an_episode_sends_the_episodes_own_row(source: So
 async def test_a_write_back_completes_when_no_configured_source_addresses_its_key(
     source: Source,
 ) -> None:
-    """`(kind, key)` is unique across sources, so a worker cannot assume the
-    job it claimed belongs to a server this household still has.
+    """`(kind.
+
+    key)` is unique across sources, so a worker cannot assume the job it claimed belongs
+    to a server this household still has.
 
     Completing rather than parking: a removed server is not work a human has
     to look at. The assertion is that **nothing was written**, because "it
@@ -943,10 +990,10 @@ async def test_a_write_back_completes_when_no_configured_source_addresses_its_ke
 async def test_a_write_back_completes_for_an_item_the_source_no_longer_has(
     source: Source,
 ) -> None:
-    """`WatchWriteService` enqueues retracted copies on purpose -- an
-    unmounted drive is the common cause and the copy usually comes back -- and
-    that bargain only holds if the handler completes for one that has really
-    gone.
+    """`WatchWriteService` enqueues retracted copies on purpose.
+
+    an unmounted drive is the common cause and the copy usually comes back -- and that
+    bargain only holds if the handler completes for one that has really gone.
 
     Fails against a handler that pushes anyway: `EmbySession.ok` raises
     `PortUnavailable` for every status at or above 400, so a write at a
@@ -977,10 +1024,11 @@ async def test_a_write_back_completes_for_an_item_the_source_no_longer_has(
 async def test_a_write_back_with_no_local_row_sends_nothing_rather_than_zeroes(
     source: Source,
 ) -> None:
-    """`WatchStateUpdate` has no "leave it alone" spelling, so a push
-    assembled from an absent row reports position 0 and `Played: false` --
-    and Emby's `UserData` route applies that body verbatim, which is the
-    finding behind `Played` being named even when it is not changing.
+    """`WatchStateUpdate` has no "leave it alone" spelling.
+
+    so a push assembled from an absent row reports position 0 and `Played: false` -- and
+    Emby's `UserData` route applies that body verbatim, which is the finding behind
+    `Played` being named even when it is not changing.
 
     So the wrong implementation here does not fail loudly; it erases the
     household's progress on the server on behalf of a household that never
@@ -1004,9 +1052,11 @@ async def test_a_write_back_with_no_local_row_sends_nothing_rather_than_zeroes(
 
 
 async def test_a_write_back_for_an_unmatched_copy_sends_nothing(source: Source) -> None:
-    """`MediaItem.title_id` is deliberately nullable -- the review queue is
-    where unmatched copies sit -- so "matched to nothing" is an ordinary
-    state and there is no row to send."""
+    """`MediaItem.title_id` is deliberately nullable.
+
+    the review queue is where unmatched copies sit -- so "matched to nothing" is an
+    ordinary state and there is no row to send.
+    """
     adapter = _RecordingAdapter(source)
     adapter.seed(
         SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE), _OBSERVED
@@ -1035,13 +1085,13 @@ async def test_a_write_back_for_an_unmatched_copy_sends_nothing(source: Source) 
 async def test_a_failed_write_back_propagates_rather_than_being_swallowed(
     source: Source, failure: UsherPortError
 ) -> None:
-    """Nothing is caught in the handler, for the reason `curate_handler`'s
-    docstring gives: `JobWorker` parks `PortDataMalformed` and backs
-    everything else off, and it can only do either with an exception it is
-    allowed to see.
+    """Nothing is caught in the handler, for the reason `curate_handler`'s docstring gives.
+
+    `JobWorker` parks `PortDataMalformed` and backs everything else off, and it can only
+    do either with an exception it is allowed to see.
 
     A handler that absorbed one would `complete()` the job, delete its row
-    and lose the write silently -- which is what PRD 03's *"best effort"* is
+    and lose the write silently -- which is what PRD 03's *"best-effort"* is
     most often misread as licensing. Both arms, because a bare
     `except UsherPortError: return` swallows the two the worker treats
     differently and one arm alone cannot see that.
@@ -1104,7 +1154,7 @@ def _upsert(
 
 
 # ---------------------------------------------------------------------------
-# `bootstrap` -- the phase, and the key that is not a UUID (M9's E5).
+# `bootstrap` -- the phase, and the key that is not a UUID.
 # ---------------------------------------------------------------------------
 
 
@@ -1128,9 +1178,10 @@ async def test_a_bootstrap_job_runs_the_phase_its_key_names() -> None:
 
 
 async def test_a_bootstrap_key_outside_the_vocabulary_parks_rather_than_kills() -> None:
-    """`BootstrapPhase("embeddings")` is a `ValueError`, which `JobWorker`
-    lets propagate on purpose -- so an unparseable key would take the process
-    down instead of parking one row.
+    """`BootstrapPhase("embeddings")` is a `ValueError`.
+
+    which `JobWorker` lets propagate on purpose -- so an unparseable key would take the
+    process down instead of parking one row.
 
     The same argument `_uuid_key` makes for the four UUID-keyed kinds,
     arriving at the one key that is neither a UUID nor an opaque adapter
@@ -1157,9 +1208,10 @@ async def test_a_bootstrap_key_outside_the_vocabulary_parks_rather_than_kills() 
 
 
 async def test_a_bootstrap_handler_absorbs_nothing_its_runner_raises() -> None:
-    """`curate_handler`'s argument, one kind over: `JobWorker` parks a
-    `PortDataMalformed` and backs everything else off, and it can only do
-    that with an exception it is allowed to see.
+    """`curate_handler`'s argument, one kind over.
+
+    `JobWorker` parks a `PortDataMalformed` and backs everything else off, and it can
+    only do that with an exception it is allowed to see.
 
     A *failed phase* is a different thing and does not reach here at all --
     `BootstrapService.import_dataset` records a `FAILED` `ImportRun` and

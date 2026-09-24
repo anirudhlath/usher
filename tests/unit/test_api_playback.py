@@ -1,28 +1,4 @@
-"""The two `/play` routes and `GET /stream/{ticket}`, over port fakes.
-
-**Six providers are overridden and `get_playback_service` is not**, which is
-the whole design of this file. The service, the mint closure, the ticket
-cipher, `request.url_for`, `quote(ticket, safe="=")` and the redeem route's
-own path are all the shipped ones -- what is replaced is only the five ports
-underneath (`media_items`, `sources`, `credentials`, the adapter factory, and
-the two existence reads). So a case that mints a ticket and then follows it is
-exercising the real round trip rather than a stub of one, without a database
-or a socket anywhere.
-
-Three things here are load-bearing rather than incidental:
-
-- **The token is short and distinctive.** `TOKEN` is seven characters, for the
-  reason ADR-0012 records: loguru and pytest both truncate a rendered value
-  at ~128 characters, and a realistic Emby direct URL is long enough that its
-  trailing `api_key` falls off the end -- so a leak assertion built on a real
-  URL passes whether or not the leak exists.
-- **Every absence assertion has a positive control beside it.** A route that
-  returned nothing at all also has no token in its output; the cases below
-  assert what *is* there first.
-- **The expiry case asserts the header is absent**, not that it holds some
-  other value. A `Location` carrying the empty string is a redirect a client
-  follows to the current path.
-"""
+"""The two `/play` routes and `GET /stream/{ticket}`, over port fakes."""
 
 import re
 import uuid
@@ -89,7 +65,7 @@ from usher.services.titles import TitleReadService
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
 
-# Short and distinctive -- see the module docstring.
+# Short and distinctive, so an absence assertion against it proves something.
 TOKEN = "tok-Zq7"
 DIRECT_URL = f"https://e/a.mkv?api_key={TOKEN}"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
@@ -237,11 +213,10 @@ def app(household: _Household, settings: Settings, queries: FakeSearchQueryRepos
     percent-encoding are what several cases below are about, and a stubbed
     service would replace all four with a lambda.
 
-    Two more since M9's F3, both for `?search_id=`: `get_default_user_id`,
-    whose real provider writes a `users` row through `get_session` and would
-    open a socket here, and the `search_queries` repository. `get_search_id`
-    is deliberately not overridden -- the parse of the parameter is the
-    shipped one.
+    Two more are replaced for `?search_id=`: `get_default_user_id`, whose real provider
+    writes a `users` row through `get_session` and would open a socket here, and the
+    `search_queries` repository. `get_search_id` is deliberately not overridden -- the
+    parse of the parameter is the shipped one.
     """
     built = create_app(settings)
     built.dependency_overrides[get_title_repository] = lambda: household.titles
@@ -258,8 +233,10 @@ def app(household: _Household, settings: Settings, queries: FakeSearchQueryRepos
 async def _seed_search(
     queries: FakeSearchQueryRepository, *, user_id: uuid.UUID = USER_ID
 ) -> uuid.UUID:
-    """One answered search, through the port, and its id back -- the value
-    `GET /search` echoes as `search_id`."""
+    """One answered search, through the port, and its id back.
+
+    The value `GET /search` echoes as `search_id`.
+    """
     record = SearchQueryRecord(
         id=new_id(),
         at=SEARCHED_AT,
@@ -320,13 +297,11 @@ def assert_is_a_problem_document(
 async def test_an_unreachable_source_answers_503_source_unavailable_in_the_envelope(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """The plan's named first failing case, and the input `V1` designs against.
+    """A source that cannot be reached is a 503 in the problem envelope.
 
-    Driven through two reds. Before the route existed it failed
-    `assert 404 == 503`; against a route raising a bare `HTTPException(503)`
-    it failed `KeyError: 'code'`, because `api/errors.py`'s `_CODE_FOR_STATUS`
-    has no 503 member and hands an unmapped status to FastAPI's own handler
-    rather than inventing a name for it.
+    A route raising a bare `HTTPException(503)` fails on `code`: `api/errors.py`'s
+    `_CODE_FOR_STATUS` has no 503 member and hands an unmapped status to FastAPI's own
+    handler rather than inventing a name for it.
     """
     title_id = await household.add_title()
     source = await household.add_source("Living Room Emby")
@@ -436,11 +411,11 @@ async def test_an_owned_but_unplayable_title_is_a_409_in_the_same_envelope(
 async def test_a_title_nobody_owns_a_copy_of_is_the_409_and_not_the_404(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """The premise for the pair above: existence and playability are two
-    different reads, and the catalog is much larger than the library -- the
-    one measured household holds 1,126,789 items against 1,271,138 titles, so
-    "in the catalog, not in the house" is the ordinary case rather than the
-    edge one."""
+    """The premise for the pair above: existence and playability are two reads.
+
+    The catalog is much larger than the library, so "in the catalog, not in the house"
+    is the ordinary case rather than the edge one.
+    """
     title_id = await household.add_title()
     response = await client.post(f"/titles/{title_id}/play")
     assert response.status_code == 409
@@ -510,9 +485,11 @@ async def test_both_targets_of_one_copy_redeem_the_same_ticket(
 async def test_the_episode_route_answers_the_copy_of_the_episode(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """`list_for_episode`, not `list_for_title`: the latter carries
-    `AND episode_id IS NULL`, which excludes precisely the row this route is
-    about. A route wired to the title read answers 409 here."""
+    """`list_for_episode`, not `list_for_title`.
+
+    The latter carries `AND episode_id IS NULL`, which excludes precisely the row this
+    route is about. A route wired to the title read answers 409 here.
+    """
     title_id = await household.add_title()
     episode_id = await household.add_episode(title_id)
     source = await household.add_source("Living Room Emby")
@@ -525,26 +502,21 @@ async def test_the_episode_route_answers_the_copy_of_the_episode(
     assert [one["kind"] for one in response.json()["targets"]] == ["direct", "deep_link"]
 
 
-# -- PRD 10's `played`, the other half of F3's outcome attribution -----
+# -- PRD 10's `played`, the other half of outcome attribution ----------
 
 
 async def test_playing_a_result_of_a_search_records_the_play_against_that_row(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """**The `played` half of PRD 10's outcome attribution, end to end.**
-    `search_queries` exists to answer *"did they play anything"*, and this is
-    the only route that can say yes.
+    """The `played` half of PRD 10's outcome attribution, end to end.
 
-    The wrong implementation this kills: a `/play` route that declares
-    `?search_id=` and never reads it, leaving `played` `false` forever --
-    which is exactly what "the household searched, clicked, and played
-    nothing" looks like.
-
-    **`clicked_title_id` stays `NULL`, and that is asserted rather than
-    assumed.** This writer names no title on purpose: a play writer that
-    filled the click column would make it mean *"the last thing this
-    household did with this search"*, and the two columns would stop being
-    two facts.
+    `search_queries` exists to answer "did they play anything", and this is the only
+    route that can say yes. The wrong implementation it rules out is a `/play` route
+    that declares `?search_id=` and never reads it, leaving `played` false forever --
+    which is exactly what "the household searched, clicked, and played nothing" looks
+    like. `clicked_title_id` stays `NULL`, asserted rather than assumed: this writer
+    names no title on purpose, and one that filled the click column would make it mean
+    "the last thing this household did with this search".
     """
     title_id = await household.add_title()
     source = await household.add_source("Living Room Emby")
@@ -564,24 +536,16 @@ async def test_the_click_and_then_the_play_fill_the_two_columns_independently(
     household: _Household,
     queries: FakeSearchQueryRepository,
 ) -> None:
-    """**The funnel whole, through the two routes a client really drives**,
-    and the case that F1's corrected statement exists for.
+    """The funnel whole, through the two routes a client really drives.
 
-    `GET /titles/{id}?search_id=…` attributes the click and
-    `POST /titles/{id}/play` reports the play, at two different times against
-    the same row. The wrong implementation this kills: `record_outcome`
-    keyed off `clicked_title_id IS NULL`, which reads the second call as a
-    redelivery of the first and silently drops the one fact the table exists
-    to answer.
-
-    Both columns are asserted, and the click's assertion is what says the
-    play did not overwrite it -- the play passes `None`, so a `SET` without
-    `COALESCE` would blank an attribution that had already been earned.
-
-    **It lives here rather than in `test_api_titles.py` because this is the
-    file that wires the play routes**, and the click route is reachable from
-    it with one more override -- `TitleReadService` over the household's own
-    stores, so the two requests read and write the same titles.
+    `GET /titles/{id}?search_id=…` attributes the click and `POST /titles/{id}/play`
+    reports the play, at two different times against the same row. The wrong
+    implementation it rules out is a `record_outcome` keyed off
+    `clicked_title_id IS NULL`, which reads the second call as a redelivery of the first
+    and silently drops the one fact the table exists to answer. Both columns are
+    asserted, and the click's assertion is what says the play did not overwrite it --
+    the play passes `None`, so a `SET` without `COALESCE` would blank an attribution
+    already earned. It lives here because this is the file that wires the play routes.
     """
     title_id = await household.add_title()
     source = await household.add_source("Living Room Emby")
@@ -611,13 +575,12 @@ async def test_the_click_and_then_the_play_fill_the_two_columns_independently(
 async def test_the_episode_route_records_the_play_against_the_same_kind_of_row(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """The second play writer, which is a route of its own and would
-    otherwise be the one that quietly did not attribute.
+    """The second play writer, which would otherwise be the one that quietly did not.
 
-    `clicked_title_id` is still `NULL` and there is nothing awkward about
-    that: an episode is not a title, the column names a search *result*, and
-    a play writer that reached for the episode's series to have something to
-    put there would be inventing a click nobody made.
+    `clicked_title_id` is still `NULL` and there is nothing awkward about that: an
+    episode is not a title, the column names a search *result*, and a play writer that
+    reached for the episode's series to have something to put there would be inventing
+    a click nobody made.
     """
     title_id = await household.add_title()
     episode_id = await household.add_episode(title_id)
@@ -637,13 +600,12 @@ async def test_the_episode_route_records_the_play_against_the_same_kind_of_row(
 async def test_played_does_not_revert_when_a_later_play_fails(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """Monotonic, at the boundary. There is no route that means *"undo the
-    play"*, so a second attempt that could not resolve a target must leave
-    the fact the row already holds.
+    """Monotonic, at the boundary.
 
-    Its first half is also the positive control the second needs: a case
-    asserting only that a failed play changes nothing passes against a route
-    that never attributed anything.
+    There is no route that means "undo the play", so a second attempt that could not
+    resolve a target must leave the fact the row already holds. Its first half is also
+    the positive control the second needs: a case asserting only that a failed play
+    changes nothing passes against a route that never attributed anything.
     """
     title_id = await household.add_title()
     source = await household.add_source("Living Room Emby")
@@ -666,17 +628,14 @@ async def test_played_does_not_revert_when_a_later_play_fails(
 async def test_a_play_that_resolved_nothing_records_no_play(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """**A 409 and a 503 are not plays**, and the write sits after the branch
-    that raises them rather than before it.
+    """A 409 and a 503 are not plays, so the write sits after the branch that raises.
 
-    `played` is the closest thing this API can observe to a play -- a target
-    was handed out -- and a request that got no target got no closer to
-    playing anything than a request that was never made. The wrong
-    implementation this kills: the attribution written on the way in, which
-    would count every unreachable source and every unplayable copy as a
-    play and make the no-play rate PRD 10 exists to compute unreadable.
-
-    Two arms, because the two failures leave the route at two different
+    `played` is the closest thing this API can observe to a play -- a target was handed
+    out -- and a request that got no target got no closer to playing anything than a
+    request that was never made. The wrong implementation it rules out is the
+    attribution written on the way in, which would count every unreachable source and
+    every unplayable copy as a play and make PRD 10's search→play conversion
+    unreadable. Two arms, because the two failures leave the route at two different
     `raise`s.
     """
     unplayable = await household.add_title()
@@ -702,8 +661,10 @@ async def test_a_play_that_resolved_nothing_records_no_play(
 async def test_a_play_of_a_title_that_does_not_exist_records_nothing(
     client: httpx.AsyncClient, queries: FakeSearchQueryRepository
 ) -> None:
-    """The 404 is resolved first and the attribution sits behind it, exactly
-    as it does on `GET /titles/{id}`."""
+    """The 404 is resolved first and the attribution sits behind it.
+
+    Exactly as it does on `GET /titles/{id}`.
+    """
     search_id = await _seed_search(queries)
 
     response = await client.post(f"/titles/{new_id()}/play", params={"search_id": str(search_id)})
@@ -715,12 +676,11 @@ async def test_a_play_of_a_title_that_does_not_exist_records_nothing(
 async def test_another_households_search_id_is_not_marked_played(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """The same security boundary the click writer has, on the writer whose
-    column is the one PRD 10 is actually about.
+    """The same security boundary the click writer has, on the `played` writer.
 
-    **The positive control is the byte-identical call from the owning
-    household**, against the same route with the same title: without it a
-    route that stopped attributing altogether passes the first half.
+    The positive control is the byte-identical call from the owning household, against
+    the same route with the same title: without it a route that stopped attributing
+    altogether passes the first half.
     """
     title_id = await household.add_title()
     source = await household.add_source("Living Room Emby")
@@ -749,9 +709,10 @@ async def test_another_households_search_id_is_not_marked_played(
 async def test_a_malformed_or_absent_search_id_leaves_a_play_untouched(
     client: httpx.AsyncClient, household: _Household, queries: FakeSearchQueryRepository
 ) -> None:
-    """Neither is a 422. A client that truncated its `search_id`, or never
-    had one, is still entitled to play what it owns -- analytics may not
-    decide whether an action is performed.
+    """Neither is a 422.
+
+    A client that truncated its `search_id`, or never had one, is still entitled to play
+    what it owns -- analytics may not decide whether an action is performed.
 
     The third arm is the control that the parameter does anything at all,
     against the same route and the same title.
@@ -778,10 +739,11 @@ async def test_a_malformed_or_absent_search_id_leaves_a_play_untouched(
 
 
 async def test_both_play_routes_describe_the_search_id_parameter(app: FastAPI) -> None:
-    """A parameter a client is asked to send back and that `/openapi.json`
-    does not describe is a parameter no generated client will send -- and
-    the episode route is the one that would be missed, since it is a second
-    signature carrying the same three dependencies."""
+    """A parameter `/openapi.json` does not describe is one no client will send.
+
+    The episode route is the one that would be missed, since it is a second signature
+    carrying the same three dependencies.
+    """
     paths = app.openapi()["paths"]
     for path in ("/titles/{title_id}/play", "/episodes/{episode_id}/play"):
         declared = {one["name"] for one in paths[path]["post"]["parameters"]}
@@ -818,12 +780,11 @@ async def test_the_minted_url_is_the_redeem_routes_own_path(
 async def test_following_a_ticket_is_a_302_to_the_real_url_with_no_store(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """The whole round trip: mint through the real closure, redeem through
-    the real route, and the `Location` is the URL the adapter gave.
+    """The whole round trip: mint through the real closure, redeem through the route.
 
-    `Cache-Control: no-store` is asserted here rather than assumed: a proxy
-    that cached this `302` would answer a later, expired ticket with the real
-    URL out of its own memory.
+    The `Location` is the URL the adapter gave. `Cache-Control: no-store` is asserted
+    rather than assumed: a proxy that cached this `302` would answer a later, expired
+    ticket with the real URL out of its own memory.
     """
     minted = await _minted_direct_url(client, household)
     response = await client.get(minted)
@@ -837,14 +798,14 @@ async def test_following_a_ticket_is_a_302_to_the_real_url_with_no_store(
 async def test_a_ticket_carrying_base64_padding_survives_the_round_trip(
     client: httpx.AsyncClient, household: _Household
 ) -> None:
-    """D1's `quote(ticket, safe="=")` finding, at the path segment it lands at.
+    """The ticket survives the path segment it lands at.
 
-    A Fernet token's alphabet is url-safe base64 **plus `=`**, and `=` is an
-    RFC 3986 sub-delim, hence a legal `pchar`. `quote(ticket, safe="")` -- the
-    reflexive spelling -- re-encodes it to `%3D`, which Starlette then decodes
-    back, so that spelling happens to survive too; what it does not survive is
-    a `Location` built from the *encoded* form. The premise is asserted, not
-    hoped for: a padding-free ticket would make this case vacuous.
+    A Fernet token's alphabet is url-safe base64 **plus `=`**, and `=` is an RFC 3986
+    sub-delim, hence a legal `pchar`. `quote(ticket, safe="")` -- the reflexive spelling
+    -- re-encodes it to `%3D`, which Starlette then decodes back, so that spelling
+    happens to survive too; what does not survive is a `Location` built from the
+    *encoded* form. The premise is asserted, not hoped for: a padding-free ticket would
+    make this case vacuous.
     """
     cipher = build_ticket_cipher(SecretStr(SECRET_KEY))
     padded = next(
@@ -887,16 +848,14 @@ async def test_a_ticket_redeemed_after_its_ttl_answers_404_with_no_location_at_a
 async def test_a_ticket_one_second_inside_the_ttl_is_still_honoured(
     client: httpx.AsyncClient,
 ) -> None:
-    """The other side of the boundary, so the case above is evidence about
-    the TTL rather than about tickets being refused in general.
+    """The other side of the boundary, so the case above is evidence about the TTL.
 
-    Both offsets are **derived from `TICKET_TTL_SECONDS`**, which is what
-    these two cases are for: they pin that the constant is the number in
-    force, so a route hard-coding `ttl_seconds=300` beside a constant that
-    said something else would fail them. They deliberately cannot see the
-    constant's *value* -- widen it tenfold and both sides move together --
-    which is measured rather than reasoned: that mutation survived this file
-    until the case below was written.
+    Rather than about tickets being refused in general. Both offsets are derived from
+    `TICKET_TTL_SECONDS`, which is what these two cases are for: they pin that the
+    constant is the number in force, so a route hard-coding `ttl_seconds=300` beside a
+    constant saying something else would fail them. They deliberately cannot see the
+    constant's *value* -- widen it tenfold and both sides move together -- which is why
+    the case below exists.
     """
     cipher = build_ticket_cipher(SecretStr(SECRET_KEY))
     fresh = datetime.now(UTC) - timedelta(seconds=TICKET_TTL_SECONDS - 1)
@@ -912,21 +871,14 @@ async def test_a_ticket_one_second_inside_the_ttl_is_still_honoured(
 async def test_a_ticket_is_honoured_for_five_minutes_and_no_second_longer(
     client: httpx.AsyncClient, age_seconds: int, expected: int
 ) -> None:
-    """The TTL's *value*, pinned with literal seconds rather than with the
-    symbol -- the one number D4 owns, and the only case that can see it move.
+    """The TTL's *value*, pinned with literal seconds rather than with the symbol.
 
-    A boundary case whose offsets are derived from the constant is a premise
-    written against the thing under test: `TICKET_TTL_SECONDS = 3000`
-    **survived all 65 cases** of this file plus `test_playback_route.py`
-    before this one existed, because `now - (TTL + 1)` is still expired at
-    any TTL. Same family as "a premise guard written against a literal guards
-    the literal", arriving at a constant instead of a slice.
-
-    Five minutes is a bound rather than a measurement, and the module
-    constant's own comment argues both directions; M9's live run is what
-    turns it into a number. When it does, this case moves with it -- which is
-    the point: the value should not be changeable without somebody coming
-    here and saying so.
+    A boundary case whose offsets are derived from the constant is a premise written
+    against the thing under test: widening `TICKET_TTL_SECONDS` passes every other case
+    in this file, because `now - (TTL + 1)` is still expired at any TTL. Five minutes is
+    a bound rather than an observation, and the module constant's own comment argues
+    both directions; when it changes, this case moves with it, which is the point -- the
+    value should not be changeable without somebody coming here and saying so.
     """
     cipher = build_ticket_cipher(SecretStr(SECRET_KEY))
     ticket = mint_ticket(
@@ -967,13 +919,11 @@ async def test_a_credential_cipher_token_is_refused_exactly_as_garbage_is(
 async def test_a_non_ascii_path_segment_is_a_404_and_not_a_500(
     client: httpx.AsyncClient,
 ) -> None:
-    """D1's measured `ValueError`, at the route that can receive it.
+    """A percent-decoded path segment can be a non-ASCII `str`.
 
-    A percent-decoded path segment can be a non-ASCII `str`, which reaches
-    `str.encode("ascii")` inside Fernet **before** any signature check and
-    raises a bare `ValueError` rather than `InvalidToken`. `redeem` catches
-    both; a route that caught only `InvalidToken` would turn a hostile path
-    into a 500.
+    It reaches `str.encode("ascii")` inside Fernet **before** any signature check and
+    raises a bare `ValueError` rather than `InvalidToken`. `redeem` catches both; a
+    route that caught only `InvalidToken` would turn a hostile path into a 500.
     """
     response = await client.get(f"/stream/{quote('gAAAAAB-é中', safe='=')}")
     assert response.status_code == 404
@@ -1017,18 +967,17 @@ async def test_all_three_routes_are_in_the_openapi_document_with_real_shapes(
         schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
         assert schema["$ref"].endswith("/PlayResponse"), path
         assert set(operation["responses"]) >= {"200", "404", "409", "422", "503"}, path
-        # `PROBLEM_MEDIA_TYPE`, and it was `application/json` until issue #6
-        # was taken: FastAPI renders a `{"model": ProblemResponse}` declaration
-        # under the *route's* response media type and offers no per-response
-        # override, so the document described a right shape under a wrong name.
-        # `api/app.py`'s `UsherAPI.openapi` corrects it in a post-pass, and this
-        # assertion -- with its twin in `test_api_watch.py` -- is the fork H2
-        # named as the cost of the fix. Kept spelled out here rather than
-        # deferred to `tests/unit/test_api_openapi.py`'s enumeration, because a
-        # route's own file is where a client's generator would be read from.
+        # `PROBLEM_MEDIA_TYPE`: FastAPI renders a `{"model": ProblemResponse}`
+        # declaration under the *route's* response media type and offers no per-response
+        # override, so a plain `application/json` would describe a right shape under a
+        # wrong name.
         for failure in ("404", "409", "503"):
             failed = operation["responses"][failure]["content"][PROBLEM_MEDIA_TYPE]["schema"]
             assert failed["$ref"].endswith("/ProblemResponse"), (path, failure)
+            assert "application/json" not in operation["responses"][failure]["content"], (
+                path,
+                failure,
+            )
 
     redeem_operation = paths["/stream/{ticket}"]["get"]
     assert "302" in redeem_operation["responses"]

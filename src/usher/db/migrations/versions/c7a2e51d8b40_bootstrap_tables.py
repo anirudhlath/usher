@@ -1,14 +1,4 @@
-"""bootstrap tables
-
-Revision ID: c7a2e51d8b40
-Revises: b3f1c07d4a92
-Create Date: 2026-07-30
-
-The three tables the bulk importers need: import_runs (the checkpoint),
-tmdb_ids (Phase 1's crawl universe), id_crosswalk (Phase 2's Wikidata
-pairs). No BEFORE UPDATE trigger is created for any of them -- see
-db/models/bootstrap.py's module docstring.
-"""
+"""Bootstrap tables."""
 
 from collections.abc import Sequence
 
@@ -22,7 +12,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.create_table(
         "id_crosswalk",
         sa.Column("imdb_id", sa.String(length=16), nullable=False),
@@ -111,7 +100,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     op.drop_index(
         "ix_tmdb_ids_popularity", table_name="tmdb_ids", postgresql_where=sa.text("NOT adult")
     )

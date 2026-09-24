@@ -1,10 +1,6 @@
-"""`FakeSearchIndex` against the shared `SearchIndex` contract. No Docker.
+"""`FakeSearchIndex` against the shared `SearchIndex` contract.
 
-The integration half -- `PostgresSearchIndex`, real `tsquery`, real
-`ts_rank`, real HNSW -- runs the identical suite in
-`tests/integration/test_adapters_search_postgres.py`. A fake and a real
-implementation with matching signatures are not interchangeable; only the
-same assertions against both prove it.
+No Docker.
 """
 
 import pytest
@@ -16,8 +12,7 @@ from usher.ports.search import SearchDocument
 
 class TestFakeSearchIndex(SearchIndexContract):
     # It does dot products over `SearchDocument.vector`, so it expresses the
-    # four semantic and fusion cases -- which are the most delicate logic in
-    # this milestone, and would otherwise run only under Docker.
+    # four semantic and fusion cases, which would otherwise run only under Docker.
     supports_semantic = True
     # A dict of documents holds no `media_items` and no `enrichment_state`,
     # so `owned_only` and `min_enrichment` are genuinely inexpressible here.
@@ -29,6 +24,9 @@ class TestFakeSearchIndex(SearchIndexContract):
         return FakeSearchIndex()
 
     async def given_title_row(self, document: SearchDocument) -> None:
-        """Nothing to arrange: there is no foreign key onto a `titles` row
-        this dict has never heard of, and no generated column to seed."""
+        """Nothing to arrange.
+
+        there is no foreign key onto a `titles` row this dict has never heard of, and no
+        generated column to seed.
+        """
         return None

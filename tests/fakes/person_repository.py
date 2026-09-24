@@ -1,46 +1,4 @@
-"""In-memory `PersonRepository`.
-
-**Where this is more forgiving than Postgres, on purpose.** Six places, each
-of which the paired `tests/integration/test_person_repository.py` run is what
-actually closes:
-
-- **No foreign keys**, so `list_recurring_for_user` here reads dictionaries a
-  test seeded rather than a join Postgres planned. The real one's arm through
-  `episodes` is the half a fake cannot express structurally, which is why
-  `test_an_episode_watch_state_reaches_its_series_credits` is fully meaningful
-  only in the integration run -- here it passes if this module's own
-  `_title_of` reproduces the coalesce. A divergence that makes a case vacuous
-  is worse than one that makes it strict, so it is named first. It is
-  reproduced rather than shortcut deliberately: a fake that stored the answer
-  would make the case decorative on both sides.
-- **It is a `dict` keyed on `tmdb_id`**, so a duplicate inside one batch is
-  structurally last-wins. The real one raises `CardinalityViolationError`
-  unless its staging read is `SELECT DISTINCT ON (tmdb_id)`.
-- **A `None` `tmdb_id` is keyed on the person's own id**, not on `None`, which
-  is this fake's easiest bug and what
-  `test_two_people_with_no_tmdb_id_are_two_people` exists for. In Postgres the
-  same property comes free from the unique index being *partial*.
-- **The `COALESCE` rule is Python's `if value is not None`**, naturally that
-  shape. In SQL it is one `COALESCE(excluded.x, people.x)` per column and a
-  forgotten one is invisible until the field it guards is the one a pass
-  blanks.
-- **No CHECK constraints**: `ck_people_name_not_empty` and its sibling are
-  enforced here only by `Person`'s pydantic bounds, which fire at a different
-  moment with a different exception type.
-- **`xmax = 0` has no analogue.** `inserted`/`updated` are computed from dict
-  membership, which *is* the answer rather than a measurement of it. The real
-  repository can only tell the two apart through `RETURNING (xmax = 0)`, and
-  an implementation returning `(len(rows), 0)` passes every run here.
-
-`calls` and `reset_calls()` are test-double affordances rather than port
-methods, matching `FakeEpisodeRepository`: a case asserting a bounded number
-of *round trips* cannot express that through the answers this fake returns.
-
-`credits`, `watch_states` and `episode_titles` are the same kind of
-affordance. They hold what `list_recurring_for_user` joins across in
-Postgres, and `FakePersonHistorySeeder` is the only thing that writes them --
-the port itself never does.
-"""
+"""In-memory `PersonRepository`."""
 
 import uuid
 from collections.abc import Sequence
@@ -178,8 +136,7 @@ class FakePersonRepository(PersonRepository):
         }
 
     def _title_of(self, watch_state: SeededWatchState) -> uuid.UUID | None:
-        """`coalesce(w.title_id, e.title_id)`, reproduced rather than
-        shortcut.
+        """`coalesce(w.title_id, e.title_id)`, reproduced rather than shortcut.
 
         An episode's watch state carries `title_id IS NULL`; the series is on
         `episodes.title_id`. Storing the series id on the watch state instead
@@ -229,12 +186,7 @@ class FakePersonRepository(PersonRepository):
             for (person_id, kind, job), titles in grouped.items()
             if len(titles) >= min_titles
         ]
-        # `max(w.last_played_at)` DESC NULLS LAST, then person_id. Written as
-        # a three-part key rather than relied on: the tempting Python spelling
-        # sorts on the datetime directly and raises on a None, and the
-        # tempting repair -- a `datetime.min` sentinel -- sorts an undatable
-        # person *below* everyone, which is right, while `or now()` would sort
-        # them above. Two reads of one catalog must agree, hence the id tail.
+        # `max(w.last_played_at)` DESC NULLS LAST, then person_id.
         rows.sort(
             key=lambda row: (
                 -row.watched_title_count,

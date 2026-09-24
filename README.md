@@ -9,11 +9,13 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 
 ## Status
 
-Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
+Beta. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
 adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search),
-M7 (rows and recommendations), M8 (LLM curation) and M9 (the API surface) are
-complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
-[`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
+M7 (rows and recommendations), M8 (LLM curation), M9 (the API surface) and
+M10 (hardening) are complete, and the first release is `v0.1.0`
+([`CHANGELOG.md`](CHANGELOG.md)) — see [`docs/plans/`](docs/plans/) for the
+task breakdowns and [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for
+what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
 half against the live TMDb API. M5's run is the first in this repository to
@@ -21,9 +23,7 @@ have parsed a real `/embywebsocket` message. **M6's typo-tolerance gate ran on
 2026-08-03 against a real 1,271,138-title catalog and failed** — short names
 are the weak band and no configuration comes close to an as-you-type latency
 budget. The result is recorded with its numbers, and the follow-up it obliged —
-a two-tier suggest — **shipped in M9**
-([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md),
-[ADR-0031](docs/prd/decisions/0031-the-two-tier-suggest.md)).
+a two-tier suggest — **shipped in M9**.
 
 **M9's own live verification of playback and watch write-back ran on
 2026-08-12, and both halves passed.** `POST /titles/{id}/play` → a minted ticket
@@ -82,19 +82,14 @@ one error envelope:
 
 **Every failure is an RFC 9457 problem document** —
 `application/problem+json`, with a `code` from a **closed seven-member
-vocabulary** that [ADR-0030](docs/prd/decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
-encodes and a test parses back out of the ADR, so a route cannot invent an
-eighth. `/events` and `/health/ready` are the two exemptions, and both are
-asserted rather than skipped. Paging is **keyset only, never an offset**
-([ADR-0034](docs/prd/decisions/0034-the-cursor-carries-a-position.md)):
-`GET /home` still returns the whole screen in one response with no cursor at
-all, which is what
-[ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies.
-Playback hands back a short-lived opaque ticket that `302`s to the real target
-([ADR-0029](docs/prd/decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)),
-so the shareable artifact is opaque rather than a URL with somebody's session
-token in it. Everything the API does is also driven from the command line —
-see below.
+vocabulary** that `ProblemCode` holds and a test closes against every code the
+routes emit, so a route cannot invent an eighth. `/events` and `/health/ready`
+are the two exemptions, and both are asserted rather than skipped. Paging is
+**keyset only, never an offset**: `GET /home` still returns the whole screen in
+one response with no cursor at all. Playback hands back a short-lived opaque
+ticket that `302`s to the real target, so the shareable artifact is opaque
+rather than a URL with somebody's session token in it. Everything the API does
+is also driven from the command line — see below.
 
 ## Requirements
 
@@ -110,7 +105,252 @@ see below.
   `RuntimeError: Cannot send a request, as the client has been closed` — a
   message that names neither the network nor the cache.
 
+### ⚠️ Nothing here requires authentication
+
+**No route in this API checks a credential, and twelve of them are `/admin`.**
+There is no auth module, no token check and no `current_user` anywhere in the
+tree. Anyone who can reach the port can list your sources, resolve unmatched
+items, and start work.
+
+Two of those twelve are expensive rather than merely readable.
+`POST /admin/bootstrap/{phase}` and `POST /admin/sources/{id}/sync` put the two
+longest units of work in the system onto the single sequential worker lane —
+enrichment, indexing, derivation and curation are unavailable for the duration,
+which is hours in the sync case. `POST /admin/rows/regenerate` enqueues a
+curation job, which is where this project spends money on an LLM.
+
+**This is a posture, not an oversight.** Usher is a self-hosted backend whose
+threat model is a home network, and authorization designed against routes
+landing in the same milestone is a guess at a client that does not exist yet.
+It is a recorded boundary call, and
+[#18](https://github.com/anirudhlath/usher/issues/18) is where an auth mode for
+`POST /admin/sources` is tracked.
+
+**So: do not publish this port to the internet.** Bind it to your LAN, or put
+it behind whatever already fronts your other services — a reverse proxy with
+authentication, a VPN, or an SSH tunnel. That decision belongs before the
+`docker compose up` below, which is why this paragraph is above it.
+
+## Quickstart
+
+Seven steps from clone to the first rows on `/home`. The `usher` commands run
+inside the container through `docker compose exec`; the rest (`cp`, `openssl`,
+`mkdir`, `curl`) are plain host commands. None of them is shell-specific, so
+every line works as written in bash, zsh or fish.
+
+🔴 **Read this first: it is not a five-minute path, and the long poles are
+steps 5 and 6.** The times below were measured on 2026-09-23 and 2026-09-24.
+Steps 1 to 3 take ten to twenty-five minutes, most of it the crosswalk, whose
+time depends on how Wikidata's endpoint is doing.
+Syncing and enriching a real library take **hours**, because both are paced
+by somebody else's server rather than by yours. That run never reached an
+enriched home screen, so nothing below claims one.
+
+**1. Configure and start.** See [Running it](#running-it) for what each line is
+for — especially the `chown`, which has the best paragraph in this file.
+
+```
+cp .env.example .env
+openssl rand -hex 32          # paste into USHER_SECRET_KEY= in .env
+```
+
+⚠️ **Put your TMDb key in `.env` now, before `docker compose up`, on the
+`USHER_TMDB_API_KEY=` line it already has.** Compose reads `.env` when it
+creates the container, so a key added after `up` never reaches it — re-run
+`docker compose up -d` if you add or change it later. It is listed under
+[Requirements](#requirements) and it is easy to skip, because nothing fails
+without it. The server logs
+`no TMDb API key configured; enrich and derive jobs will not be claimed` once at
+startup, and step 6's `enrich` queue then never moves.
+
+⚠️ **Already running Usher on this host? Separate the second stack before its
+first `up`.** In the second checkout's `.env`, set these three keys, with names
+of your own:
+
+```dotenv
+COMPOSE_PROJECT_NAME=usher-scratch
+USHER_COMPOSE_NETWORK=usher-scratch_default
+USHER_COMPOSE_HOST_PORT=8101
+```
+
+`.env` already has the last two, copied from `.env.example`: **change those
+lines where they are, and add only the project name.** When a key appears twice,
+the later line wins, so a copy pasted above the originals is silently ignored.
+Read `8100` below as `8101`.
+
+All three matter. **The project name is the one that destroys things**:
+compose names a project after its directory, a
+clone left at `git clone`'s default is called `usher`, and an `up` from a
+second checkout with the same project name recreates the first stack's
+containers with the second one's config. The network name is pinned
+(`usher_default`), so a second stack that keeps it joins the first one's
+network, **both `postgres` containers answer to the alias `postgres`**, and the
+CLI reaches whichever DNS picks. The symptom is `database "usher" does not
+exist` from `usher bootstrap` while `psql -d usher` works fine. `-p <name>`
+separates the project too, but not the network, and it has to be on every
+compose command; `.env` is read by all of them.
+
+```
+mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
+docker compose up -d --build  # 26 s the first time, 8 s the second
+```
+
+**2. Check it is up.**
+
+```
+curl -sf http://localhost:8100/health/ready
+```
+
+**3. Load a catalog — three phases, and the third is not optional.**
+
+```
+docker compose exec usher usher bootstrap --phase imdb       # 93 s, 1,279,749 titles
+docker compose exec usher usher bootstrap --phase tmdb-ids   # 17 s
+docker compose exec usher usher bootstrap --phase crosswalk  # 491 s to 1,274 s, retries included
+```
+
+🔴 **`--phase imdb` alone is not enough, and the failure is silent until step
+6.** IMDb gives you titles with no TMDb id, and enrichment has nothing to
+enrich *from*: every job parks with `title carries no tmdb id to enrich from`,
+and `/home` never gets past the rows that need no enrichment (step 7).
+`tmdb-ids` and `crosswalk` are what make the catalog enrichable. Two complete
+crosswalks on 2026-09-24 took 491 s and 1,274 s, and each gave 293,665 titles
+a TMDb id, 55,590 of them series.
+
+⚠️ **Check that every phase finished.** The crosswalk reads Wikidata's public
+SPARQL endpoint page by page, and that endpoint times out and answers `502`
+often. A page that fails that way is retried from its checkpoint with backoff,
+up to five attempts and 15 minutes; each retry prints a line and the command
+carries on, and the two runs above retried four and eight times. A phase that still
+fails, or is skipped because an import it reads failed, makes the command exit
+1, and its line ends with the command that resumes it. Check that every row
+reads `completed`. A `completed` row that also shows `error=` is an attempt that
+failed after that import completed; the import still stands.
+
+```
+docker compose exec usher usher bootstrap-status
+```
+
+Re-run a phase whose row reads `failed` **before step 5**. If you run it
+afterwards, the enrichment jobs that already parked for want of an id stay
+parked, because nothing un-parks a job yet
+([#87](https://github.com/anirudhlath/usher/issues/87)).
+
+This still skips `credit-names`, `aliases` and `movielens`. `--phase all` runs
+all six phases in order, those three included, and they cost three more IMDb
+files (1.49 GiB) and the MovieLens archive — sized under
+[Command line](#command-line). **No `--phase` step crawls TMDb, `all`
+included.**
+
+The TMDb crawl — overviews, credits and artwork for the catalog's movies with
+at least 100 IMDb votes that carry a TMDb id, owned or not — is a separate step that nothing starts
+for you. `scripts/enqueue_tier_enrichment.py` writes one `enrich` job per title
+in that tier at background priority, below your library's own, and the
+server's worker lane (step 6) spends the TMDb budget on them. The script is not
+in the image, so feed it to the container:
+
+```
+docker compose exec -T usher python - < scripts/enqueue_tier_enrichment.py
+```
+
+It stops at 200,000 jobs; pass `--limit N` after the `-` to change that. It is
+paced by `USHER_TMDB_REQUESTS_PER_SECOND`, and
+[PRD 04](docs/prd/04-catalog-bootstrap.md)'s Phase 3 sizes it. Run
+`credit-names` first if you want it at all — see [Command line](#command-line)
+for why the order matters.
+
+**4. Register a source.** There is no CLI subcommand for this — it is the admin
+API, and the credentials are encrypted at rest with `USHER_SECRET_KEY`.
+
+```
+curl -sf -X POST http://localhost:8100/admin/sources \
+  -H 'content-type: application/json' \
+  -d '{"kind":"emby","name":"Living Room","base_url":"https://emby.example.com","username":"YOUR_USER","password":"YOUR_PASSWORD"}'
+```
+
+⚠️ That route requires no authentication, like every route here — read the
+posture under [Requirements](#requirements) before exposing this port.
+
+**5. Walk the source. This is the long pole.**
+
+```
+docker compose exec usher usher sync --source "Living Room"
+```
+
+🔴 **Budget hours, not minutes, and there is no bound flag.** Usher is a polite
+guest: outbound requests are rate-limited on purpose, so the walk is paced by
+your media server. Measured on 2026-09-23: about **25,000 items in the first
+10.5 minutes** and **81,000 in 35 minutes**, when the run was stopped, so it
+never timed a whole library. A small library is proportionally quicker. Run it
+in a terminal you can leave. If it is interrupted, it resumes rather than
+restarting.
+
+⚠️ **It prints nothing while it runs.** Watch it from a second terminal:
+
+```
+docker compose exec usher usher sync-status
+```
+
+`seen=` and `matched=` climb on the run marked `running`.
+
+**6. Let the server enrich what you ingested.** There is nothing to start. The
+server already runs a worker lane (`USHER_WORKER_ENABLED=true` is the default),
+and with the key from step 1 it has been matching and enriching since step 5
+began. Watch the queue drain:
+
+```
+docker compose exec usher usher sync-status
+```
+
+The `enrich` line's `pending=` falls as titles are enriched, at **one
+rate-limited TMDb call per title**, so this is hours on a large library too.
+Watch `parked jobs:` as well. A parked `enrich` whose error is
+`title carries no tmdb id to enrich from` belongs to a title step 3 did not
+link, and it stays parked (#87).
+
+⚠️ **Do not start `usher work` beside the server.** A second worker spends
+the per-process TMDb budget twice against a limit that is per client (see
+[Command line](#command-line)). `usher work --once` does not drain the queue
+either: it claims one batch and exits. On 2026-09-23 that was 20 jobs in 47 s.
+
+**7. Ask for a screen.**
+
+```
+curl -sf http://localhost:8100/home
+```
+
+**The first row back proves the source walk, not the whole path.** It can be
+**Recently Added**, which needs only a sync, a match and library items added in
+the last 30 days. It needs no TMDb key, no crosswalk and no
+enrichment, and its cards can be bare skeleton titles. On 2026-09-23 it was
+the only row, first seen 10½ minutes into step 5, with a skeleton series
+on it.
+
+**A working path looks like this:**
+
+- `bootstrap-status` shows every row `completed`.
+- `sync-status` shows the walk `completed`, and the `enrich` line's `pending=`
+  falling while `parked jobs:` stays small.
+- `/home`'s cards move from `"enrichment_state": "skeleton"` (a bulk-dataset
+  title with no overview or artwork) to `"enriched"`, which is step 6's work.
+
+The history-driven rows (Continue Watching, Next Up, Because You Watched) wait
+for the watch-state walk, which runs only after the item walk completes.
+
+An empty `rows` array with a `200` is not an error: no row has anything to
+show yet. Early on, the walk has usually matched nothing added in the last 30
+days and the watch-state walk has not run. Rows built from enriched metadata
+also wait on the TMDb key (step 1), a completed crosswalk (step 3) and step 6.
+The console is at <http://localhost:8100/console>.
+
 ## Running it
+
+Tagged releases publish a container image to
+`ghcr.io/anirudhlath/usher`, built and attested by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) on any `v*`
+tag. The image tag drops the `v`: `v0.1.0` publishes `:0.1.0` and `:0.1`.
+**`linux/amd64` only** — there is no arm64 machine to test on here, and
+publishing an emulated image nobody has ever started would be a guess.
 
 ```bash
 cp .env.example .env
@@ -118,7 +358,7 @@ openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
 mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
 docker compose up -d --build
 
-curl -sf http://localhost:8100/health        # {"status":"ok"}
+curl -sf http://localhost:8100/health        # {"status":"ok","version":"0.1.0"}
 curl -sf http://localhost:8100/health/ready  # adds database + migration state,
                                              # and reports the background lanes
 ```
@@ -200,9 +440,12 @@ take the first.
 
 `USHER_COMPOSE_HOST_PORT` defaults to `8100`. It is the *host*-side publish
 port, not a setting — compose substitutes it into the `ports:` mapping and the
-application never sees it. `USHER_COMPOSE_*` is the one namespace reserved for
-variables like that; every other `USHER_*` key is a real setting, and an
-unknown one is refused at startup rather than ignored, so a typo is loud.
+application never sees it. `USHER_COMPOSE_NETWORK` (default `usher_default`)
+is the same kind of variable, for the network's name. `USHER_COMPOSE_*` is the
+one namespace reserved for variables like that; every other `USHER_*` key is a
+real setting, and an unknown one is refused at startup rather than ignored, so
+a typo is loud. Compose's own `COMPOSE_*` variables, such as
+`COMPOSE_PROJECT_NAME`, are ignored the same way.
 
 The `chown` is the one line that is not obvious, and it is the image proxy's.
 `./data/images` is bind-mounted to `/data/images` and is where
@@ -217,17 +460,49 @@ re-fetch and nothing else.
 
 **Every key in `.env` reaches the container**, because compose hands it the
 whole file (`env_file:`). The five exceptions are marked `[compose-owned]` in
-`.env.example` and listed in `compose.yml`'s `environment:` block with the
-reason each belongs to the container topology rather than to you:
-`USHER_DATABASE_URL` (the hostname on the compose network),
-`USHER_HOST`/`USHER_PORT` (what the published port, the `EXPOSE` and the
-healthcheck all assume), `USHER_SECRET_KEY` (substituted so a missing one
-fails at `docker compose up` rather than in a container log) and
-`USHER_IMAGE_CACHE_DIR` (the container side of the bind mount above — the
-`.env` value is a relative path, which inside the container would put the
-cache in the image's own writable layer).
+`.env.example`, and `compose.yml`'s `environment:` block replaces each with the
+container topology's own value, saying why: `USHER_DATABASE_URL` (the hostname
+on the compose network), `USHER_HOST`/`USHER_PORT` (what the published port,
+the `EXPOSE` and the healthcheck all assume), and
+`USHER_IMAGE_CACHE_DIR`/`USHER_BULK_DATA_DIR` (the container side of the two
+bind mounts — the `.env` values are relative paths, which inside the container
+resolve under the root-owned `/app`). `USHER_SECRET_KEY` sits in that block too
+but is not an exception: it carries your own `.env` value, substituted there
+only so a missing one fails at `docker compose up` rather than in a container
+log.
 
 Migrations run automatically on container start.
+
+### Telemetry
+
+Usher exports traces and metrics over OTLP/gRPC when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set, and builds no exporter at all when it is
+empty, which is the shipped default. **Nothing in `compose.yml` needs a
+telemetry stack**, so a host without one starts with a plain `docker compose
+up`.
+
+A collector in another compose stack that publishes on `127.0.0.1` alone is
+unreachable from inside this container except over a shared docker network.
+`compose.observability.yml` joins the `usher` service to an existing network
+called `observability`. Opt in by setting two keys in `.env`:
+
+```
+COMPOSE_FILE=compose.yml:compose.observability.yml
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+```
+
+`COMPOSE_FILE` is a new line. **`OTEL_EXPORTER_OTLP_ENDPOINT` is already
+there, blank, from `.env.example`: fill in that line.** A second copy added
+above it loses to the blank one, and telemetry stays off without a word.
+
+The endpoint's host is the collector's service name on that network, and the
+network must already exist (`docker network create observability`, or the
+telemetry stack's own `up`). **Put `COMPOSE_FILE` in `.env` rather than
+passing `-f compose.yml -f compose.observability.yml`.** Every compose command
+reads `.env`, but an `up` that forgets `-f` recreates the container without
+the network, and nothing fails at startup to tell you. `Settings` ignores `COMPOSE_*`
+keys, so `.env` can carry them. The stack itself and the dashboards are in
+[PRD 10](docs/prd/10-telemetry-and-dashboards.md#where-the-stack-lives).
 
 ## Command line
 
@@ -260,14 +535,18 @@ reported by name without its value, because a setting may be a credential.
 
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
-Wikidata's SPARQL endpoint. About three minutes and 1.27M titles on a
-reasonable machine for those three; the two IMDb expansion phases below read
+Wikidata's SPARQL endpoint. Ten to twenty-five minutes and 1.28M titles for
+those three, most of it the crosswalk; the two IMDb expansion phases below read
 another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
-and it continues from its own checkpoint. See
+and it continues from its own checkpoint. **A phase that fails exits 1**, and
+so does one skipped because an import it reads is `failed`, `running` or being
+imported by another process, one refused because `titles` is empty, and one
+left to another process already importing the same dataset or running a phase
+that reads it; each prints a line ending with the command that resumes it. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash
-uv run usher bootstrap                       # every phase, in the order below
+uv run usher bootstrap                       # all six: imdb, credit-names, aliases, tmdb-ids, crosswalk, movielens
 uv run usher bootstrap --phase imdb          # one at a time: imdb | credit-names | aliases
 uv run usher bootstrap --phase credit-names  #     | tmdb-ids | crosswalk | movielens | ratings | all
 uv run usher bootstrap --phase aliases       # IMDb title.akas -> searchable aliases, ~487 MB
@@ -361,9 +640,20 @@ the item walk — it always runs *after* it, because each state has to resolve
 against a media item.
 
 `--allow-full-retraction` lifts the safety ceiling that refuses to mark a
-whole library unavailable in one run
-([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
+whole library unavailable in one run.
 Only use it for a library the operator really did remove.
+
+`usher sync` **exits non-zero if any run it performed recorded `FAILED`**, so a
+cron entry or a CI step sees a sync that did not work. Every source is still
+walked first — one source's failure does not skip the others.
+
+**Pointing Usher at a server you do not administer is an intended deployment,
+not a misuse** — it is the one this project is developed against. Two defaults
+assume otherwise and are documented rather than changed: the retraction ceiling
+above assumes removals are yours to authorise, and marking a title played writes
+to your account on that server. See
+[PRD 03](docs/prd/03-sources-and-sync.md) for the distinction between a library
+you own and a *view* of somebody else's.
 
 ⚠️ **A new source needs this command once, and that is deliberate.** With the
 push lane on (the default) the running server holds a channel per source and
@@ -419,7 +709,7 @@ uv run usher index --backfill  # enqueue the work; re-running writes zero rows
 ```
 
 `usher derive` re-derives people, credits and collections out of the provider
-payloads M4 already cached (ADR-0016) — **with no second network call**. Its
+payloads M4 already cached — **with no second network call**. Its
 bare form is five counts and no writes; `--backfill` walks the cache inline,
 which is where it deliberately differs from `usher index`: derivation needs no
 model, no request and no rate limit, so the queue would buy ordering, retry and
@@ -433,8 +723,7 @@ uv run usher derive             # cached payloads, titles with credits, people, 
 uv run usher derive --backfill  # walk the cache and re-derive inline; idempotent
 ```
 
-`usher genres` normalises `titles.genres` into Usher's own vocabulary
-([ADR-0039](docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md)).
+`usher genres` normalises `titles.genres` into Usher's own vocabulary.
 The column is written by two importers that share no alphabet — IMDb's bulk
 phase writes `Sci-Fi`, TMDb's enrichment writes `Science Fiction` — and
 `usher.domain.genres` is the map between them. `/browse` expands the two at
@@ -582,7 +871,7 @@ uv run usher home --repeat 5       # five *cold* compositions; the cache is clea
 ```
 
 It ships **alongside** the route rather than instead of it, which is the
-reverse of `usher search`: ADR-0006's claim — one request paints a screen — is
+reverse of `usher search`: the claim that one request paints a screen is
 a property of a request boundary that no command can exhibit, so there the
 route is the deliverable. What the command is for is the rule that every
 operator command works against an empty database, and the arithmetic that rule
@@ -743,9 +1032,8 @@ against a 16k-context model at the shipped defaults: **600 candidates works,
 arithmetic no endpoint can satisfy, not a promise that your endpoint will serve
 it.
 
-**Nothing schedules the nightly generation.** There is no scheduler in Usher —
-deliberately, the same call `usher similar --rebuild` gets — so it is a cron
-entry:
+**Nothing schedules the nightly generation.** It is not one of the
+scheduler's registered jobs, so it is a cron entry:
 
 ```cron
 # One curation generation a night, after the queue has drained.
@@ -809,6 +1097,94 @@ receives traffic, so "it connected" is not a health signal.
 Exit codes: `0` success, `1` a malformed id or an unhandled error, `2` any
 argument error (including `--resolve` without `--title`).
 
+## Backup
+
+**Most of this database is rebuildable and a little of it is not.** The short
+list is the one that matters.
+
+```bash
+uv run usher backup                       # writes usher-backup-<UTC>.jsonl.gz
+uv run usher restore <artifact>           # refuses in one transaction, or applies
+uv run usher restore <artifact> --dry-run # resolve everything, commit nothing
+```
+
+**Precious — nothing recomputes these:** `users`, `watch_states`, `sources`,
+`source_credentials`, `row_provider_settings`, `search_queries` and
+`llm_calls`. `usher backup` writes exactly this set, read from the manifest in
+`usher.db.backup_manifest` rather than from a list anybody maintains by hand.
+
+🔴 **`llm_calls` is the one to care about**, because it is the first thing in
+this project that is not rebuildable from anything, at any price. It is a spend
+ledger. It cannot be recomputed from the catalog, from `curated_rows` (replaced
+nightly), or from the provider — no OpenAI-compatible endpoint offers a per-key
+call history, and the price applied was a setting at the time of the call. It
+is also small and append-only, which makes it the cheapest thing here to keep
+and the most complete loss if you don't.
+
+**Rebuildable — but read the two footnotes.** The catalog, embeddings, the
+search index, neighbour tables, cached images and curated rows all come back
+from `usher bootstrap`, `usher index --backfill`, `usher work` and `usher
+similar --rebuild`. Two qualifications a reader would otherwise get wrong:
+
+- `genome_scores` and `genome_tags` rebuild **only from upstream** — re-download
+  `ml-latest.zip` and re-run the bootstrap — so they depend on GroupLens still
+  serving that file.
+- `curated_rows` rebuilds cheaply but **not to the same rows**. A curated row
+  has no oracle and is not deterministic above `temperature 0`, so
+  "rebuildable" there means *a screen appears*, not *your screen comes back*.
+
+**And one table is neither:** `media_items` is classified `partial`, because a
+sync re-derives the rows but not the manual unmatched resolutions somebody made
+by hand.
+
+Full procedures — including the restore drill this was verified against — are
+in [`docs/runbooks/`](docs/runbooks/README.md).
+
+## Building a client
+
+Three obligations a client takes on, and neither of the first two is obvious
+from an API that answers.
+
+### Playback hands you a token you must treat as a secret
+
+`POST /titles/{id}/play` returns an **opaque, short-lived ticket URL**
+(`/stream/{ticket}`) rather than a source URL. The ticket is stateless — a
+Fernet token over an HKDF-SHA256 subkey of `USHER_SECRET_KEY` — with a
+**300-second** TTL.
+
+**Redeeming it is a `302`, and the `Location` it sends you to carries the
+source's session token.** A client reads `Location` by definition, so that
+token reaches you. What the ticket changed is the **artifact, not the grant** —
+and that distinction matters, because three documents in this repository have
+claimed the opposite at one time or another and all three were wrong.
+
+So: that URL is the whole capability grant for whatever the configured source
+account can do. It is not minted per request, nothing about the response
+ending ends it, and there is no revocation before expiry — the coarse
+revocation that exists is rotating `USHER_SECRET_KEY`, which invalidates every
+outstanding ticket at once. **Never log it, never render it, never put it in a
+URL bar you screenshot.**
+
+⚠️ **The `deep_link` target is asymmetric and it is the case you will actually
+hit.** A deep link hands the ticket to a third-party player, which follows the
+redirect and then holds the real URL exactly as before — for that target the
+reduction is close to nil.
+
+### You must render the attribution, and the logo
+
+`GET /meta/attribution` returns four strings. Render all of them.
+
+**TMDb also requires their logo**, which is an image this project does not ship
+and cannot ship for you — a string cannot carry it. That obligation is yours,
+not Usher's, and it is a licensing condition rather than a courtesy. See
+[`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md) for the
+full table and the four hard rules, and [Attribution](#attribution) below for
+what the strings are and why the endpoint does not filter them.
+
+### Pin the minor version
+
+See [Versioning](#versioning). `0.x` means the wire contract may still move.
+
 ## Attribution
 
 This project ships importers, never data. Each deployment downloads its own
@@ -846,6 +1222,18 @@ The four, reproduced here for a reader who is not running the service:
 - **MovieLens** — F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens
   Datasets: History and Context. ACM Transactions on Interactive Intelligent
   Systems (TiiS) 5, 4: 19:1-19:19. https://doi.org/10.1145/2827872
+
+## Versioning
+
+**Releases are `0.x`, and the first is `v0.1.0`.** The roadmap's *"v1 — the
+abstraction works end to end"* names a **scope** milestone, which is met;
+`1.0.0` in semver would name a **compatibility promise**, which is not. There
+is no authentication anywhere, there is exactly one source adapter — so the
+port's shape has never been tested against a second media server — and six open
+feature issues each move a wire contract.
+
+**Pin the minor version.** `0.x` is where the wire contract may still move, and
+`1.0.0` stays available for the day it is meant.
 
 ## License
 

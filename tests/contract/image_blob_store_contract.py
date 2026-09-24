@@ -1,26 +1,4 @@
-"""The behavioural contract every `ImageBlobStore` implementation must satisfy.
-
-Run against `FakeImageBlobStore` (a dict, no filesystem) and against
-`DiskImageBlobStore` on `tmp_path` (a real filesystem, real renames, real
-`fsync`), both in `tests/unit/test_adapters_images.py`. The two arms fail for
-genuinely different reasons and the fake's docstring lists where it is the more
-forgiving of the pair — which is the direction that hides defects, so the real
-arm is the one that matters and it runs in the same file.
-
-**The three clauses this suite exists for**, each with the defect it stops:
-
-- **A stream that dies part-way leaves nothing.** Not a short entry, not a
-  zero-byte one. C5 serves these bytes with a very long `max-age`, so a
-  fragment is bytes a client keeps for a year, and every later request is a
-  cache *hit* on it — there is no revalidation that would notice.
-- **The key's three terms each separate entries.** Drop `provider` and two
-  providers spelling one path share bytes; drop `width` and every rung serves
-  the first one fetched; drop `provider_path` and a title's poster is its
-  backdrop.
-- **A media type the proxy will not cache is refused and writes nothing.** A
-  passthrough would put arbitrary content behind an origin that serves it back
-  with the type it was given.
-"""
+"""The behavioural contract every `ImageBlobStore` implementation must satisfy."""
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -61,8 +39,11 @@ class ImageBlobStoreContract(ABC):
         """An empty store."""
 
     async def test_a_miss_is_a_value_and_not_an_error(self) -> None:
-        """`None`, because a miss is the ordinary state of every entry exactly
-        once and a raise would make the cold path an exception path."""
+        """A miss is `None`, not a raise.
+
+        A miss is the ordinary state of every entry exactly once, and raising would
+        make the cold path an exception path.
+        """
         assert await self.store().get(_KEY) is None
 
     async def test_a_put_round_trips_the_bytes_and_the_media_type(self) -> None:
@@ -77,10 +58,12 @@ class ImageBlobStoreContract(ABC):
         assert read.content_type == "image/jpeg"
 
     async def test_the_answer_put_gives_back_is_the_answer_get_would_give(self) -> None:
-        """`put` returns the entry so a cold request costs one write and no
-        read — which is only sound if the two answers agree. An implementation
-        that returned what it *was handed* rather than what it *stored* would
-        diverge the first time the two differed."""
+        """`put` returns the entry so a cold request costs one write and no read.
+
+        That is only sound if the two answers agree: an implementation returning what
+        it *was handed* rather than what it *stored* would diverge the first time the
+        two differed.
+        """
         store = self.store()
 
         written = await store.put(_KEY, _fetched(b"one", b"two", b"three"))
@@ -100,10 +83,11 @@ class ImageBlobStoreContract(ABC):
         assert await store.get(_KEY) is None
 
     async def test_a_second_put_replaces_the_entry_rather_than_appending(self) -> None:
-        """Idempotence under redelivery, and the failure it rules out is
-        concatenation: an implementation opening the final path in `"ab"` mode
-        would double the bytes of every re-fetched image and still answer
-        every assertion about presence."""
+        """Rules out an implementation that concatenates on redelivery.
+
+        Opening the final path in `"ab"` mode would double the bytes of every
+        re-fetched image and still answer every assertion about presence.
+        """
         store = self.store()
 
         await store.put(_KEY, _fetched(b"first-bytes"))
@@ -122,9 +106,11 @@ class ImageBlobStoreContract(ABC):
         ],
     )
     async def test_each_term_of_the_key_separates_two_entries(self, other: ImageCacheKey) -> None:
-        """One case per term, and each differs from `_KEY` in exactly that
-        term — a single "different key" case is satisfied by a store keyed on
-        any one of the three."""
+        """One case per term, each differing from `_KEY` in exactly that term.
+
+        A single "different key" case is satisfied by a store keyed on any one of the
+        three.
+        """
         store = self.store()
         differing = [
             field
@@ -158,15 +144,12 @@ class ImageBlobStoreContract(ABC):
         assert await store.get(_KEY) is None
 
     async def test_a_declined_artwork_type_is_refused_as_its_own_kind(self) -> None:
-        """The SVG arm, and it is here rather than only at the fetcher because
-        this layer is the one that has to name a file.
+        """The SVG arm, here rather than at the fetcher because this layer names files.
 
-        Measured 2026-08-11: the CDN answers `image/svg+xml` at **every** rung,
-        `w342` byte for byte the size of `original` — so the clamp does not bound
-        this type and four rungs would cache four copies of one file. Roughly one
-        title in seventeen has such a logo, which is why it is
-        `MediaTypeNotServable` rather than a bare `PortDataMalformed`: the
-        commonest refusal this proxy makes must not be spelled like its most
+        The CDN answers `image/svg+xml` identically at every width rung, so the clamp
+        does not bound this type and four rungs would cache four copies of one file.
+        It is `MediaTypeNotServable` rather than a bare `PortDataMalformed` because
+        the commonest refusal this proxy makes must not be spelled like its most
         alarming one.
         """
         store = self.store()
@@ -177,8 +160,11 @@ class ImageBlobStoreContract(ABC):
         assert await store.get(_KEY) is None
 
     async def test_a_media_type_with_parameters_is_still_the_media_type(self) -> None:
-        """`image/jpeg; charset=binary` is a header a real server sends, and a
-        map lookup on the raw value would refuse it."""
+        """A media type carrying parameters is still that media type.
+
+        `image/jpeg; charset=binary` is a header a real server sends, and a map lookup
+        on the raw value would refuse it.
+        """
         store = self.store()
 
         await store.put(_KEY, _fetched(b"bytes", content_type="image/jpeg; charset=binary"))
@@ -188,13 +174,11 @@ class ImageBlobStoreContract(ABC):
         assert read.data == b"bytes"
 
     async def test_an_empty_body_is_stored_as_an_empty_entry_rather_than_a_miss(self) -> None:
-        """Stated so the next reader does not "fix" it.
+        """A zero-byte answer from the CDN is a real answer, recorded faithfully.
 
-        A zero-byte answer from the CDN is a real answer and this store records
-        it faithfully — the alternative is a store that silently turns one
-        upstream oddity into a permanent re-fetch loop on every request for
-        that image. Refusing it belongs to whoever can tell an empty image from
-        an empty file, which is not a byte store.
+        Treating it as a miss turns one upstream oddity into a permanent re-fetch loop
+        on every request for that image. Refusing it belongs to whoever can tell an
+        empty image from an empty file, which is not a byte store.
         """
         store = self.store()
 

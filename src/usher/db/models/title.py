@@ -27,28 +27,6 @@ from usher.db.base import Base, enum_column
 from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 
 #: Columns that exist on the row and deliberately have no `Title` field.
-#: A search document is not domain state -- it is an index artefact derived
-#: from domain state, and a `Title` carrying a `tsvector` would put a
-#: PostgreSQL full-text type in `usher.domain`, which imports nothing.
-#: Membership here is the deliberate act: a *bookkeeping* column added
-#: without being named here still breaks every read, loudly, which is the
-#: property the 1:1 rule exists for.
-#:
-#: Three call sites consume this, and the second is the one that gets missed
-#: -- `_to_domain` (a read), `update()`'s mutation loop (a *write*), and
-#: `test_title_and_title_row_have_matching_field_sets`. All three consume the
-#: set *generically*, which is the whole reason it is a set rather than a
-#: hardcoded name, and `credit_names` is the first time that is paid off:
-#: adding it needed no edit at any of the three. Confirmed by reading them,
-#: not by assuming.
-#:
-#: **`credit_names` is here for a different reason from `search_document`, and
-#: the asymmetry matters.** Postgres refuses to let anyone write a generated
-#: column, so membership there is belt-and-braces. `credit_names` is an
-#: ordinary column that something *must* write, so membership is the **only**
-#: thing stopping `TitleRepository.update()` from writing it -- and the only
-#: correct writer is the statement that also writes `credits`, because any
-#: other writer produces an array that disagrees with that table.
 DERIVED_COLUMNS: frozenset[str] = frozenset({"search_document", "credit_names"})
 
 
@@ -79,22 +57,9 @@ class TitleRow(Base):
         enum_column(ProductionStatus, length=32)
     )
 
-    # ARRAY(Text) accepts a Python tuple on write and always returns a list
-    # on read (verified against real Postgres) -- Mapped[list[str]] here is
-    # correct for both directions even though the domain model above these
-    # rows uses tuple[str, ...]. See the note above this class.
-    #
-    # server_default (not just the ORM-side default= below) so a raw INSERT
-    # or COPY that never mentions this column -- M2's entire bulk-load path,
-    # by construction -- gets '{}' instead of a NOT NULL violation. Verified:
-    # without it, `INSERT INTO titles (id, kind, name, sort_name) VALUES
-    # (...)` fails on "null value in column \"genres\"".
-    #
-    # No GIN index yet: M9's faceted /browse (07-client-api.md) needs one for
-    # facet counts at scale (measured: 78.7 ms/300k rows seq-scanned, ~3.3 s
-    # projected at 12.7M) but CREATE INDEX CONCURRENTLY can add it online
-    # with no table rewrite whenever M9 lands, so it is deferred, not
-    # designed away.
+    # ARRAY(Text) accepts a Python tuple on write and always returns a list on read
+    # (verified against real Postgres) -- Mapped[list[str]] here is correct for both
+    # directions even though the domain model above these rows uses tuple[str, ...].
     genres: Mapped[list[str]] = mapped_column(
         ARRAY(Text), default=list, server_default=text("'{}'")
     )
@@ -110,69 +75,22 @@ class TitleRow(Base):
     )
     content_rating: Mapped[str | None] = mapped_column(String(32))
 
-    # **Five columns where there were three, because three of them had two
-    # writers each and no way to say which one wrote a row.** `bulk/imdb.py`
-    # wrote IMDb's `numVotes`/`averageRating` here and `tmdb/mapping.py` wrote
-    # TMDb's `vote_count`/`vote_average` over the top, into the same column,
-    # counted over different electorates -- ~38x apart over one identified
-    # population counted both ways (the frozen tier's 130,647 enriched rows:
-    # median TMDb 15 against median frozen IMDb `numVotes` 576, S3). The
-    # load-bearing measurement is not that gap but the overlap: on the
-    # deployed catalog skeleton rows reached 2,656,080 while enriched movies
-    # topped out at 40,695, and among movies the two ranges *overlap* (40,518
-    # against 40,695) -- so nothing downstream could have separated them by
-    # magnitude, whatever the typical ratio. ADR-0040.
+    # **Five columns where there were three**, because IMDb's
+    # `numVotes`/`averageRating` and TMDb's `vote_count`/`vote_average` count
+    # different electorates and are orders of magnitude apart. Sharing a column
+    # left no way to say which writer wrote a row.
     tmdb_vote_average: Mapped[float | None] = mapped_column(Float)
     tmdb_vote_count: Mapped[int | None] = mapped_column(Integer)
     tmdb_popularity: Mapped[float | None] = mapped_column(Float)
     imdb_average_rating: Mapped[float | None] = mapped_column(Float)
     imdb_num_votes: Mapped[int | None] = mapped_column(Integer)
 
-    # The FK it has been waiting for since M1. PRD 02: "the one artefact that
-    # exists today is titles.collection_id, a bare nullable UUID with no
-    # foreign key that nothing in src/ ever writes; it is the column waiting
-    # for the table, not evidence of one." M7 lands the table.
-    #
-    # SET NULL, and the two refused alternatives are the argument. CASCADE
-    # would delete the *films* when a franchise grouping is deleted -- wrong
-    # in kind, against PRD 02's own "the catalog outlives the servers".
-    # RESTRICT would refuse every collection delete, because a collection with
-    # no members is never written, so the refusal fires unconditionally and is
-    # a table nothing can delete from. SET NULL is media_items.title_id's
-    # precedent verbatim: the row is worth keeping and it just loses the link,
-    # and DeriveService re-attaches it on the next pass, so a NULLed link is
-    # self-healing rather than lost.
     collection_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("collections.id", ondelete="SET NULL")
     )
 
     # Weight class B's input, denormalised onto `titles` because a stored
-    # generated expression cannot reach another table -- measured, three
-    # spellings, in migration fe1d40c8b7a3's docstring. This is `credits`
-    # projected to names and truncated to the top billed; `credits` is the
-    # fact, this is the search input.
-    #
-    # NOT NULL with a server_default, and **all three of the reasons are
-    # independently sufficient** -- which is why it is spelled this way rather
-    # than as a nullable column somebody later "tidies":
-    #
-    # 1. `_to_row` builds `TitleRow(**title.model_dump(...))` and this column
-    #    is not a `Title` field (see DERIVED_COLUMNS), so every INSERT through
-    #    the repository omits it. The same reason `genres` carries one.
-    # 2. `bulk.py` enumerates its columns by hand and names none of them here.
-    # 3. **`usher_array_text` is STRICT.** `usher_array_text(NULL)` is NULL,
-    #    `tsvector || NULL` is NULL, so one NULL in this column makes the whole
-    #    `search_document` NULL and the title vanishes from every full-text
-    #    search with no error anywhere. Measured directly on pg17.10 against
-    #    this schema's own wrapper: a row with `credit_names IS NULL` stored
-    #    `search_document IS NULL` while its name was populated, and the same
-    #    row with `'{}'` stored `'harbour':2A 'iron':1A`.
-    #
-    # No index. Nothing queries this column directly -- it exists to be read
-    # by the generated expression in the same row, and
-    # `ix_titles_search_document` is what serves the query. A GIN index here
-    # would be a second write cost on every derivation for a query nobody
-    # makes.
+    # generated expression cannot reach another table.
     credit_names: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, default=list, server_default=text("'{}'")
     )
@@ -184,37 +102,16 @@ class TitleRow(Base):
         server_default=text("'skeleton'"),
     )
     # Non-null => the last enrichment attempt failed; enrichment_state is
-    # left untouched either way. ADR-0008.
+    # left untouched either way.
     enrichment_error: Mapped[str | None] = mapped_column(Text)
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     field_provenance: Mapped[dict[str, str]] = mapped_column(
         JSONB, default=dict, server_default=text("'{}'::jsonb")
     )
 
-    # PostgreSQL recomputes this inside the same statement that writes any of
-    # its six inputs, so there is no code path -- not a bulk COPY, not a
-    # hand-written UPDATE, not a future migration -- that can write a title
-    # and skip its document. That is the whole reason it is a generated
-    # column rather than a trigger, a job, or a queue: half of M6's freshness
-    # problem is deleted rather than solved.
-    #
-    # `Computed(..., persisted=True)` is what tells SQLAlchemy the column is
-    # STORED rather than VIRTUAL and that it is not ours to write. It is
-    # **not** sufficient on its own: `update()`'s mutation loop assigns every
-    # column by name off `TitleRow.__table__.columns`, which reaches this one
-    # regardless -- see DERIVED_COLUMNS above and db/repositories/title.py.
-    #
-    # Typed `str | None` because that is what asyncpg hands back for a
-    # tsvector and because nothing in `src/` ever reads this attribute in
-    # Python -- every consumer references it in SQL. `_to_domain` filters it
-    # out by name before it can reach `Title`.
-    #
-    # The expression is duplicated between here and migration fa2b6c1e9d30
-    # rather than shared, because an Alembic migration must not import
-    # application code that can change under it. What keeps the two honest is
-    # `test_migration_matches_the_orm_metadata` plus
-    # `test_the_stored_document_equals_a_freshly_computed_one`, which reads
-    # the live expression out of `pg_attrdef`.
+    # PostgreSQL recomputes this inside the same statement that writes any of its six
+    # inputs, so there is no code path -- not a bulk COPY, not a hand-written UPDATE,
+    # not a future migration -- that can write a title and skip its document.
     search_document: Mapped[str | None] = mapped_column(
         TSVECTOR,
         Computed(
@@ -236,43 +133,18 @@ class TitleRow(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
-        # Kept as a fallback for plain ORM-session updates and as a signal
-        # of intent, but it is NOT what keeps this column correct for bulk
-        # writes -- SQLAlchemy's onupdate is a Core-side feature with no
-        # effect on raw SQL / COPY / ON CONFLICT DO UPDATE unless every
-        # caller remembers to list it explicitly (M2/M4's bulk ingest is
-        # ON CONFLICT DO UPDATE by definition). A BEFORE UPDATE trigger
-        # (see the initial migration) is what actually guarantees it.
+        # A fallback for plain ORM-session updates, NOT what keeps this column
+        # correct for bulk writes: SQLAlchemy's onupdate is Core-side and has no
+        # effect on raw SQL / COPY / ON CONFLICT DO UPDATE unless every caller
+        # lists it explicitly, and bulk ingest is ON CONFLICT DO UPDATE.
         nullable=False,
     )
 
     __table_args__ = (
-        # Partial unique indexes, not a plain UNIQUE constraint: NULL never
-        # collides with NULL under a normal unique index anyway, but making
-        # the WHERE explicit is what lets Postgres use this index for the
-        # lookup queries that already filter on "IS NOT NULL". It also means
-        # an upsert against this column must repeat the same predicate --
-        # `ON CONFLICT (tmdb_id, kind) WHERE tmdb_id IS NOT NULL DO UPDATE
-        # ...` -- or Postgres rejects the upsert with "no unique or
-        # exclusion constraint matching the ON CONFLICT specification".
-        # M2/M4's upsert loaders must do this for tmdb_id/imdb_id/tvdb_id.
-        #
-        # Composite and partial. `tmdb_id` alone is not unique in reality:
-        # TMDb keys movies and series in separate id spaces that both land
-        # in this column, and 26,968 of the 56,975 distinct TMDb series ids
-        # Wikidata knows are also live TMDb movie ids (measured 2026-07-30).
-        # A single-column unique index silently blocked 47.3% of TV from
-        # ever getting a tmdb_id during M2's Phase 2 crosswalk. See
-        # ADR-0011. Column order is (tmdb_id, kind), not (kind, tmdb_id),
-        # so the index also serves a bare `WHERE tmdb_id = ?` diagnostic
-        # scan; verified that `WHERE tmdb_id = 1 AND kind = 'movie'` plans
-        # as `Index Scan using ix_titles_tmdb_id_kind`.
-        #
-        # imdb_id keeps its single-column index: `tt` ids are one global
-        # namespace covering film and television alike. tvdb_id keeps its
-        # own for now -- M2 only ever writes TheTVDB *series* ids (Wikidata
-        # P4835), so the equivalent hazard is theoretical rather than
-        # measured; see ADR-0011's consequences.
+        # Partial unique indexes, not a plain UNIQUE constraint: NULL never collides
+        # with NULL under a normal unique index anyway, but making the WHERE explicit is
+        # what lets Postgres use this index for the lookup queries that already filter
+        # on "IS NOT NULL".
         Index(
             "ix_titles_tmdb_id_kind",
             "tmdb_id",
@@ -286,11 +158,9 @@ class TitleRow(Base):
             unique=True,
             postgresql_where=text("imdb_id IS NOT NULL"),
         ),
-        # PRD 02 (Identity) lists all three provider IDs as unique-indexed
-        # attributes; tvdb_id had no index at all until this pass. Adding it
-        # before any real tvdb_id data lands matters -- once duplicates
-        # exist, this unique index can't be added without a dedup pass
-        # first.
+        # PRD 02 (Identity) lists all three provider IDs as unique-indexed.
+        # Landing this one before any real tvdb_id data arrives matters: once
+        # duplicates exist, a unique index cannot be added without a dedup pass.
         Index(
             "ix_titles_tvdb_id",
             "tvdb_id",
@@ -298,180 +168,52 @@ class TitleRow(Base):
             postgresql_where=text("tvdb_id IS NOT NULL"),
         ),
         Index("ix_titles_sort_name", "sort_name"),
-        # Partial: excludes the majority 'skeleton' value. Postgres seq-scans
-        # for a majority value regardless of whether it's indexed, so a full
-        # index over enrichment_state is pure write cost during M2's bulk
-        # load of millions of skeleton rows for zero query benefit (measured
-        # 1,936 kB -> 40 kB at 300k rows, identical query plans either way).
+        # Partial: excludes the majority 'skeleton' value. Postgres seq-scans for
+        # a majority value whether or not it is indexed, so a full index over
+        # enrichment_state is pure write cost during a bulk load of millions of
+        # skeleton rows, for identical query plans.
         Index(
             "ix_titles_enrichment_state",
             "enrichment_state",
             postgresql_where=text("enrichment_state <> 'skeleton'"),
         ),
-        # **`ix_titles_popularity` was here and is dropped in `ffc`, because
-        # the reasoning that shaped it does not survive contact with the
-        # planner.** It read, in part: *"Excluding NULLs means there is
-        # nothing to place 'last' inside the index at all, so a backward scan
-        # is directly usable."* That is the load-bearing claim and it is
-        # **refuted**, measured on pg17.10 against 1,271,570 real titles with
-        # 291,584 popularities:
-        #
-        #   ORDER BY popularity DESC            -> Index Scan, cost 0.42..20.97
-        #   ORDER BY popularity DESC NULLS LAST -> Parallel Seq Scan + Sort,
-        #                                          cost 86,142
-        #
-        # Postgres matches pathkeys rather than reasoning that a partial index
-        # excluding NULLs makes the two orderings equivalent. Every consumer in
-        # `src/` writes `DESC NULLS LAST` -- correctly, since without it the
-        # whole unknown population sorts above every known one -- so the index
-        # could never serve a single shipped statement.
-        #
-        # Rebuilding it as `(popularity DESC NULLS LAST)` was measured too and
-        # does not rescue it: `list_owned_by_tag`, the one statement that
-        # orders by this column, keeps a byte-identical `Merge Semi Join` plus
-        # 2,569-row `top-N heapsort` plan either way, because it filters by
-        # ownership and genre first. See `ffc`'s docstring for the full table
-        # and for what would bring an index back.
-        #
-        # The ~340 MB this comment used to quote was for a hypothetical 12.7M
-        # rows; the real figure was **9,536 kB**, and 8,192 bytes on a
-        # bootstrap-only catalog where the partial predicate matches nothing.
-        # PRD 03 stage 3 matches bulk-imported titles on normalised name +
-        # year and calls this "why matching is fast and mostly offline" --
-        # but sort_name has an explicit no-normalisation contract (Title's
-        # own docstring) and ix_titles_sort_name is a plain btree on the raw
-        # column, so neither can serve that lookup. Measured: a name+year
-        # match seq-scanned at 14.6 ms at 300k rows, ~600 ms/item
-        # extrapolated to 12.7M -- an expression index on the same
-        # normalisation the matcher actually applies (lowercase; no
-        # whitespace/punctuation folding) is what a btree can use.
         Index("ix_titles_name_lower_year", text("lower(name)"), "year"),
-        # GIN over the tsvector, with the pending list turned off.
-        #
-        # `fastupdate` defaults to on, which defers index maintenance into an
-        # unsorted pending list that *every query then scans linearly* until
-        # autovacuum flushes it. That is exactly wrong for a table written in
-        # million-row bursts and queried during them. Verified with
-        # `pageinspect`: after 5,000 inserts, `fastupdate = off` had
-        # `n_pending_pages = 0 / n_pending_tuples = 0` against `50 / 5000`
-        # for the default, and on the read side a 1.6 MB pending list cost
-        # 231 buffers against 30 -- 7.7x read amplification on the index
-        # stage. `postgresql_with` is native Alembic here -- verified by
-        # compiling the DDL, not by reading the docs.
-        #
-        # **This index should be suspended during a first bootstrap and the
-        # edit is deliberately Task 7's**, not because the decision is
-        # unclear but because `bulk.py`'s `_SUSPENDABLE_INDEXES` holds
-        # literal `CREATE INDEX` strings: an entry whose text drifts from the
-        # migration silently rebuilds a *different* index, and splitting the
-        # dict's new entries across two tasks is how one of them drifts.
-        # Task 7 adds them together, with the round-trip test that pins each
-        # string against what Postgres actually built.
+        # `fastupdate` off: this document is rewritten by every enrichment pass,
+        # and a pending list turns those writes into unbounded read latency.
         Index(
             "ix_titles_search_document",
             "search_document",
             postgresql_using="gin",
             postgresql_with={"fastupdate": "off"},
         ),
-        # The type-ahead path's tier-2 index. Directly on `titles`, because
-        # M6 refused PRD 05's narrow `title_search_names(title_id, name, kind,
-        # popularity)` table (boundary call 3): its justification is aliases
-        # and people names, neither of which had a data source in M6, so it
-        # would have held exactly one row per title duplicating four columns
-        # of this one.
-        #
-        # **M9 builds that table (`m09a`), and this index stays exactly as it
-        # is.** The narrow table holds *aliases and people* -- the two things
-        # that finally have sources -- and deliberately no `primary` rows, so
-        # a canonical name is still answered from `titles` and nothing here is
-        # duplicated. `popularity` is refused there too, with the measurement:
-        # it is NULL on all 1,271,138 rows.
-        #
-        # GIN, not the GiST PRD 05 specifies -- but the two answer different
-        # questions and only one of them is settled. For "which rows are
-        # candidates" GIN is not close: at 2.08M names it is ~110x faster on
-        # the `%` path (1.671 ms vs 182.5 ms), builds in 7.5 s vs 23.1 s, and
-        # is 69 MB vs 244 MB. For "the N nearest in distance order" GIN has
-        # no operator class at all -- `ORDER BY name <-> q` seq-scans at
-        # 3,989.9 ms where GiST answers from the index. GIN is right here
-        # because the suggest path caps candidates before re-ranking, which
-        # removes GIN's only exposure; a path that ever needs KNN needs a
-        # GiST index rather than a tuning change. See the migration docstring.
-        #
-        # On the raw column: pg_trgm folds case while generating trigrams,
-        # unlike the btree two entries up. `original_name` gets no index of
-        # its own -- see the migration's docstring for the three reasons and
-        # for the measurement that would reverse it.
+        # The type-ahead path's tier-2 index.
         Index(
             "ix_titles_name_trgm",
             "name",
             postgresql_using="gin",
             postgresql_ops={"name": "gin_trgm_ops"},
         ),
-        # **Tier 1 of the two-tier suggest ADR-0002's failed gate obliges, and
-        # `ix_titles_name_lower_year` two entries up is NOT this index.** That
-        # one is `Index(..., text("lower(name)"), "year")` with the *default*
-        # opclass, which under this database's collation cannot answer
-        # `LIKE 'pre%'` at all -- measured on `pgvector/pgvector:pg17` at the
-        # pre-`m09a` schema: with `enable_seqscan = off`, the plan for
-        # `WHERE lower(name) LIKE 'pre%'` is still `Seq Scan on titles`. Two
-        # indexes that look like one, and the case that pins this proves the
-        # difference with a planner probe rather than asserting it.
-        #
-        # Measured on a real 1,271,138-title catalog
-        # (`.claude/rules/search-and-embeddings.md`): p50 **0.6 ms**, p95
-        # **1.0 ms**, max **10 ms**, **44 MB**, building in **0.559 s** --
-        # against the shipped GIN trigram path's 33.3 ms p50 and 734 ms max,
-        # which is 6x over the 50 ms as-you-type budget at the tail. The
-        # trigram index above stays: tier 1 answers a prefix on every
-        # keystroke and tier 2 is the debounced typo-tolerant path behind it.
-        #
-        # **The spelling is `func.lower(column("name")).label(...)` plus
-        # `postgresql_ops`, and the two obvious alternatives are each wrong in
-        # a different direction -- measured by compiling all three.**
-        #
-        #   Index(..., text("lower(name) text_pattern_ops"))
-        #       -> correct DDL, and alembic warns "Expression compare cannot
-        #          proceed" and *skips the index*, so
-        #          `test_migration_matches_the_orm_metadata` goes blind to it.
-        #   Index(..., text("lower(name)"),
-        #         postgresql_ops={"lower(name)": "text_pattern_ops"})
-        #       -> `CREATE INDEX ... (lower(name))`. The opclass is silently
-        #          dropped: `postgresql_ops` keys match a column name or an
-        #          expression's *label*, never its text, and an unmatched key
-        #          is not an error. That builds a default-opclass index which
-        #          is not an error either and simply cannot serve `LIKE 'pre%'`
-        #          -- the careless spelling of this defect, caught by nothing.
-        #   the spelling below
-        #       -> byte-identical DDL to the first, and alembic compares it.
-        #
-        # This index is in `_SUSPENDABLE_INDEXES`, whose entries are literal
-        # `CREATE INDEX` strings, so the drift hazard is real twice over.
+        # **Tier 1 of the two-tier suggest, and `ix_titles_name_lower_year` two
+        # entries up is NOT this index.** That one carries the *default* opclass,
+        # which under this database's collation cannot answer `LIKE 'pre%'` at
+        # all; `text_pattern_ops` is what makes a prefix match an index scan.
         Index(
             "ix_titles_name_lower_prefix",
             func.lower(column("name")).label("lower_name"),
             postgresql_ops={"lower_name": "text_pattern_ops"},
         ),
-        # FranchiseProvider's whole read (CollectionRepository.list_owned),
-        # and the referencing-side lookup collections' SET NULL performs on
-        # every delete -- Postgres implements SET NULL by finding referencing
-        # rows *by this column*, and nothing else here leads with it.
-        #
-        # PRD 02 deferred this index to M9 ("No index yet -- deferred for M9
-        # alongside media_items' added_at/last_seen_at/available"). M7 needs it
-        # now and the deferral is retracted with its reason in the same commit
-        # rather than silently overridden.
-        #
-        # Partial: NULL on all 371,310 series rows -- belongs_to_collection is
-        # movies-only -- and on the majority of the 899,828 movie rows. That
-        # is ix_titles_popularity's argument, one column over.
+        # FranchiseProvider's whole read (CollectionRepository.list_owned), and the
+        # referencing-side lookup collections' SET NULL performs on every delete --
+        # Postgres implements SET NULL by finding referencing rows *by this column*, and
+        # nothing else here leads with it.
         Index(
             "ix_titles_collection_id",
             "collection_id",
             postgresql_where=text("collection_id IS NOT NULL"),
         ),
         # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
-        # Field(min_length=1) constraints -- see the Title commit.
+        # Field(min_length=1) constraints: nothing stops a hand-written INSERT
+        # from bypassing Pydantic.
         CheckConstraint("year IS NULL OR year >= 0", name="ck_titles_year_non_negative"),
         CheckConstraint(
             "end_year IS NULL OR end_year >= 0", name="ck_titles_end_year_non_negative"

@@ -1,13 +1,4 @@
-"""source credentials
-
-Revision ID: d4c9b1e37a05
-Revises: c7a2e51d8b40
-Create Date: 2026-07-30
-
-The encrypted-at-rest table PRD 08 has specified since before M1 and that
-`Source.credentials_ref` has pointed at nothing until now. No BEFORE UPDATE
-trigger -- see db/models/source.py's SourceCredentialRow docstring.
-"""
+"""Source credentials."""
 
 from collections.abc import Sequence
 
@@ -21,7 +12,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
     op.create_table(
         "source_credentials",
         sa.Column("ref", sa.Text(), nullable=False),
@@ -54,6 +44,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
     op.drop_index("ix_source_credentials_source_id", table_name="source_credentials")
     op.drop_table("source_credentials")

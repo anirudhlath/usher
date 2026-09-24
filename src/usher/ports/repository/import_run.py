@@ -1,8 +1,4 @@
-"""Import runs -- the resumable checkpoint a bulk phase records against.
-
-Implemented by
-`usher.db.repositories.import_run.PostgresImportRunRepository`.
-"""
+"""Import runs -- the resumable checkpoint a bulk phase records against."""
 
 from abc import ABC, abstractmethod
 
@@ -21,41 +17,81 @@ class ImportRunRepository(ABC):
     too, and matters more: `save` must be flushed inside the *same*
     transaction as the batch it describes, or a crash between the two either
     loses work or claims work that was rolled back.
+
+    **A dataset has at most one holder, and only the holder writes its row.** The hold
+    is taken by `start()` or `hold()` and given up by `release()` or by the holder's
+    connection ending, so a dead holder's checkpoint can be taken over. A holder is
+    another process, or another repository of this one.
+
+    **A phase reading a dataset holds it too, shared** (`hold_for_reading()`): readers
+    share it with each other and exclude every holder, so no import of it starts while
+    a phase joins against it, and no phase starts reading it mid-import. A repository's
+    reads exclude its own holds as well -- the two are held on different connections.
     """
 
     @abstractmethod
     async def start(self, dataset: str, revision: str) -> ImportRun:
-        """Begin or resume a run for `dataset`.
+        """Hold `dataset` as `hold()` does, then begin or resume its run.
 
-        Returns the run with its cursor fields preserved when `revision`
-        matches what was stored, and reset to zero when it does not — an
-        upstream snapshot change restarts the import rather than splicing
-        two snapshots. Either way the returned run is `RUNNING` with `error`
-        and `finished_at` cleared, and it has already been persisted.
+        The returned run keeps the stored cursor when `revision` matches it and starts
+        from zero when it does not -- an upstream snapshot change restarts the import
+        rather than splicing two snapshots. It is `RUNNING`, with `error` and
+        `finished_at` cleared and a fresh `heartbeat_at`, and it has been persisted --
+        except over a `COMPLETED` checkpoint, which keeps its status, revision, cursor
+        and `finished_at` until the returned run is first saved, with only its `error`
+        cleared and its heartbeat moved. An attempt that saves no batch therefore leaves
+        the completed import standing.
+        """
+
+    @abstractmethod
+    async def hold(self, dataset: str) -> None:
+        """Hold `dataset`, or raise `RepositoryConflict` and touch nothing.
+
+        Refused while another holder has it, or any reader, this repository's own reads
+        included. A hold this repository already has is confirmed, and one found lost is
+        taken again.
+        """
+
+    @abstractmethod
+    async def release(self, dataset: str) -> None:
+        """Give up this repository's hold on `dataset`; a no-op when there is none.
+
+        A hold whose connection has ended went with it, so giving it back is no error.
+        """
+
+    @abstractmethod
+    async def hold_for_reading(self, dataset: str) -> bool:
+        """Hold `dataset` shared, for a phase that reads it; `False` while it is held.
+
+        Granted beside other readers and refused while any holder has it, this
+        repository's own included; a refused read takes nothing. Reading a dataset this
+        repository already reads is the one read. Kept until `release_reads()`.
+        """
+
+    @abstractmethod
+    async def release_reads(self) -> None:
+        """Give up every read this repository holds; a no-op when there are none.
+
+        Reads whose connection has ended went with it, so giving them back is no error.
+        """
+
+    @abstractmethod
+    async def touch(self, dataset: str) -> None:
+        """Confirm this repository still holds `dataset` and its reads, then move a heartbeat.
+
+        A hold or a read that is gone -- its connection ended, by `idle_session_timeout`,
+        a proxy's idle cut or a server restart -- raises `RepositoryConflict` and is
+        dropped, so the next `hold()` takes a fresh one; a read lost drops every read.
+        The reads are confirmed even when the hold is gone, and the hold's loss is the
+        one raised. Only a `RUNNING` row's `heartbeat_at` is written. Flushes, never
+        commits.
         """
 
     @abstractmethod
     async def save(self, run: ImportRun) -> None:
-        """Persist a run's progress. Flushes, never commits.
+        """Persist a run's progress.
 
-        Raises `RepositoryConflict` if another row already claims this
-        run's `dataset` — two processes bootstrapping the same dataset at
-        once is an operator mistake, and it must surface as a port error
-        rather than a raw storage exception (ADR-0009).
-
-        Whether the *session* remains usable for further work after a
-        caught `RepositoryConflict` is deliberately left to the
-        implementation, not promised here — contrast `TitleRepository.add`/
-        `update`, which use a `SAVEPOINT` specifically so it does.
-        `PostgresImportRunRepository` rolls back the whole transaction
-        instead of using a SAVEPOINT (see its own module docstring): unlike
-        `TitleRepository`'s general-purpose callers, its one caller,
-        `BootstrapService`, never has other work pending on the session at
-        this point worth a SAVEPOINT's extra round trip to protect. The
-        session *does* stay usable afterward, deliberately —
-        `BootstrapService.import_dataset`'s except handler continues on
-        this same session to record the failure as a durable `ImportRun`,
-        which is exactly why the rollback is there rather than skipped.
+        Flushes, never commits.
         """
 
     @abstractmethod
@@ -64,5 +100,4 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def list_runs(self) -> list[ImportRun]:
-        """Every stored run, most recent activity first — what the CLI's
-        `bootstrap-status` prints."""
+        """Every stored run, most recent activity first."""

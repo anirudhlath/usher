@@ -1,10 +1,4 @@
-"""`FranchiseProvider` -- one row per collection the household is collecting.
-
-The wrong implementations these cases rule out are all *populated*: a screen
-full of one-card franchise rows, a reason string stating a falsehood aloud, and
-a shelf of a series the household finished years ago. None raises and none is
-empty.
-"""
+"""`FranchiseProvider` -- one row per collection the household is collecting."""
 
 import pytest
 
@@ -17,11 +11,11 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_a_collection_with_one_owned_member_produces_no_row() -> None:
-    """**The front matter's distractor.** PRD 06 fires this row on ">= 2 owned
-    titles in a collection", and a collection the household owns *one* of is
-    very nearly every collection a catalog references -- so the naive
-    implementation fills the screen with franchise rows of one card each, every
-    one of them correctly shaped.
+    """**The front matter's distractor.** PRD 06 fires this row on ">= 2 owned titles in a.
+
+    collection", and a collection the household owns *one* of is very nearly every
+    collection a catalog references -- so the naive implementation fills the screen with
+    franchise rows of one card each, every one of them correctly shaped.
 
     The one-member collection is seeded **first**, so it is first in the
     catalog's own order and first by the id every fake and every statement
@@ -43,10 +37,11 @@ async def test_a_collection_with_one_owned_member_produces_no_row() -> None:
 
 
 async def test_the_reason_counts_owned_members_and_not_collection_size() -> None:
-    """`reason` is spoken aloud. A household owning two of twenty-seven Bond
-    films must not hear "You own 27 of the James Bond films" -- and the
-    sentence is generated from whichever number the implementation had to hand,
-    so this pins the number rather than the wording.
+    """`reason` is spoken aloud.
+
+    A household owning two of twenty-seven Bond films must not hear "You own 27 of the
+    James Bond films" -- and the sentence is generated from whichever number the
+    implementation had to hand, so this pins the number rather than the wording.
 
     TMDb reports the *whole* collection, so `title_ids` is genuinely longer
     than `owned_title_ids`; an implementation reading `len(title_ids)` is the
@@ -63,8 +58,7 @@ async def test_the_reason_counts_owned_members_and_not_collection_size() -> None
 
 
 async def test_a_fully_watched_franchise_produces_no_row() -> None:
-    """PRD 06's condition sharpened with a second clause: at least one member
-    unplayed.
+    """PRD 06's second clause: at least one member unplayed.
 
     A franchise row about a series the household has finished has nothing to
     offer -- every card is a rewatch, and the row is indistinguishable from a
@@ -89,11 +83,11 @@ async def test_a_fully_watched_franchise_produces_no_row() -> None:
 
 
 async def test_a_series_watched_only_through_its_episodes_counts_as_watched() -> None:
-    """**Trap 7 inside the unplayed clause.** An episode's watch state carries
-    `title_id IS NULL`, so a "has anything here been played" check keyed on
-    `watch_states.title_id` answers **films only** -- and a franchise whose
-    members the household watched episode-by-episode reads as entirely
-    unplayed, forever.
+    """**Trap 7 inside the unplayed clause.** An episode's watch state carries `title_id IS NULL`.
+
+    so a "has anything here been played" check keyed on `watch_states.title_id` answers
+    **films only** -- and a franchise whose members the household watched episode-by-
+    episode reads as entirely unplayed, forever.
 
     Collections hold only movies today, which is exactly why the case is
     written against the read rather than against TMDb's shape: the roll-up is
@@ -110,10 +104,12 @@ async def test_a_series_watched_only_through_its_episodes_counts_as_watched() ->
 
 
 async def test_a_television_only_library_gets_no_franchise_row() -> None:
-    """`belongs_to_collection` is a native top-level field of `/movie/{id}` and
-    **has no series equivalent in TMDb at all**, so `collections` contains only
-    movies by construction and a television household gets nothing. That is a
-    normal, permanent outcome rather than a gap.
+    """`belongs_to_collection` is a native top-level field of `/movie/{id}` and **has no series.
+
+    equivalent in TMDb at all**, so `collections` contains only movies by construction
+    and a television household gets nothing.
+
+    That is a normal, permanent outcome rather than a gap.
 
     Fails any name-prefix or shared-keyword substitution, which is the change
     someone makes on the reasonable-sounding grounds that a TV household should
@@ -129,10 +125,11 @@ async def test_a_television_only_library_gets_no_franchise_row() -> None:
 
 
 async def test_a_larger_owned_franchise_outscores_a_two_film_one() -> None:
-    """A two-film collection is a weaker franchise claim than a five-film one,
-    and the score says so -- up to a saturation point, because the difference
-    between eight owned and twelve owned is not a difference in how much the
-    household wants the row.
+    """A two-film collection is a weaker franchise claim than a five-film one.
+
+    and the score says so -- up to a saturation point, because the difference between
+    eight owned and twelve owned is not a difference in how much the household wants the
+    row.
 
     Asserted as an ordering *and* as a ceiling: `_SATURATION = 1` makes every
     franchise score the ceiling, which passes any assertion that only checks
@@ -154,10 +151,14 @@ async def test_a_larger_owned_franchise_outscores_a_two_film_one() -> None:
 
 
 async def test_no_more_than_two_franchise_rows_are_proposed() -> None:
-    """One row per collection, and a household collecting eight franchises
-    would otherwise claim most of a ten-row screen before the diversity pass
-    ever saw it. The cap is this provider's, like `BecauseYouWatched`'s seed
-    cap, because no one else can see how many rows it *could* have made."""
+    """One row per collection.
+
+    and a household collecting eight franchises would otherwise claim most of a ten-row
+    screen before the diversity pass ever saw it.
+
+    The cap is this provider's, like `BecauseYouWatched`'s seed cap, because no one else
+    can see how many rows it *could* have made.
+    """
     library = Library()
     for index in range(8):
         await library.collection(
@@ -171,10 +172,13 @@ async def test_no_more_than_two_franchise_rows_are_proposed() -> None:
 
 
 async def test_the_cards_are_every_owned_member_in_the_catalog_s_order() -> None:
-    """A franchise reads in order, so the row lists every owned member --
-    including the ones already watched -- rather than hiding them and breaking
-    the sequence. It is the **firing** condition that requires something left
-    to watch, not the card list.
+    """A franchise reads in order, so the row lists every owned member.
+
+    including the ones already watched -- rather than hiding them and breaking the
+    sequence.
+
+    It is the **firing** condition that requires something left to watch, not the card
+    list.
 
     The already-watched member is seeded **first**, so an implementation that
     filtered watched titles out would produce a row that is populated,
@@ -195,10 +199,11 @@ async def test_the_cards_are_every_owned_member_in_the_catalog_s_order() -> None
 
 
 async def test_an_empty_collections_table_names_the_command_that_fixes_it() -> None:
-    """`collections` is empty until `usher derive` has run, and a provider that
-    silently never fires is indistinguishable from a household that owns no
-    franchise -- the same shape `BecauseYouWatchedProvider` uses for a
-    never-built neighbour table, and for the same reason.
+    """`collections` is empty until `usher derive` has run.
+
+    and a provider that silently never fires is indistinguishable from a household that
+    owns no franchise -- the same shape `BecauseYouWatchedProvider` uses for a never-
+    built neighbour table, and for the same reason.
 
     The library is deliberately full of owned movies, so "nothing to say" here
     is a statement about the *derivation* rather than about the catalog.
@@ -237,15 +242,16 @@ async def test_a_household_that_has_watched_nothing_still_gets_its_franchise_row
 
 
 async def test_the_underived_warning_is_said_once_per_process_not_once_per_propose() -> None:
-    """**CLAUDE.md's "a per-process fact logged in a per-pass function" finding,
-    in a row provider.**
+    """**CLAUDE.md's "a per-process fact logged in a per-pass function" finding.
+
+    in a row provider.**.
 
     `propose` runs once per composed home screen. At the 30 s screen TTL that
     is ~2,880 screens a day per household, and with three providers each
     saying this it was ~8,640 warnings a day on a fresh install -- which trains
     an operator to ignore warnings, the exact failure a log level exists to
-    prevent. M5 hit this at `build_worker`'s 5 s poll and fixed it by moving
-    the line to where the *decision* is made rather than where the loop is.
+    prevent. `build_worker`'s 5 s poll hit this and was fixed by moving the
+    line to where the *decision* is made rather than where the loop is.
 
     **Three passes, not one.** A single pass cannot tell "once" from "once per
     pass": both spellings emit exactly one warning. That is the same reason

@@ -1,7 +1,11 @@
-"""TMDb daily ID export parsing. No network, no key, no real export."""
+"""TMDb daily ID export parsing.
+
+No network, no key, no real export.
+"""
 
 import datetime as dt
 import gzip
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -23,9 +27,11 @@ def _stage(tmp_path: Path, source: str, name: str) -> Path:
     return cache
 
 
-def _serving(cache: Path, available: set[str]) -> httpx.MockTransport:
-    """404s every export except the ones named in `available`, mirroring the
-    real host: today's export does not exist until ~08:00 UTC."""
+def _host(cache: Path, available: set[str]) -> Callable[[httpx.Request], httpx.Response]:
+    """404s every export except the ones named in `available`, mirroring the real host.
+
+    today's export does not exist until ~08:00 UTC.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         name = str(request.url).rsplit("/", 1)[-1]
@@ -36,7 +42,11 @@ def _serving(cache: Path, available: set[str]) -> httpx.MockTransport:
             200, content=(cache / name).read_bytes(), headers={"etag": '"fixture"'}
         )
 
-    return httpx.MockTransport(handler)
+    return handler
+
+
+def _serving(cache: Path, available: set[str]) -> httpx.MockTransport:
+    return httpx.MockTransport(_host(cache, available))
 
 
 async def test_parses_the_movie_export(tmp_path: Path) -> None:
@@ -54,8 +64,11 @@ async def test_parses_the_movie_export(tmp_path: Path) -> None:
 
 
 async def test_missing_popularity_defaults_to_zero(tmp_path: Path) -> None:
-    """Never None: `tmdb_ids.popularity` is NOT NULL, and a crawl queue
-    ordered by NULL has no ordering."""
+    """Never None.
+
+    `tmdb_ids.popularity` is NOT NULL, and a crawl queue ordered by NULL has no
+    ordering.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
     async with httpx.AsyncClient(
         transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
@@ -68,10 +81,13 @@ async def test_missing_popularity_defaults_to_zero(tmp_path: Path) -> None:
 async def test_the_tv_export_uses_original_name_and_has_no_adult_field(
     tmp_path: Path,
 ) -> None:
-    """Both asymmetries in one test, because both are real: the TV export
-    spells the name `original_name` and omits `adult` entirely (verified
-    against tv_series_ids_*.json.gz). A parser that read `original_title`
-    would raise on every TV row."""
+    """Both asymmetries in one test, because both are real.
+
+    the TV export spells the name `original_name` and omits `adult` entirely (verified
+    against tv_series_ids_*.json.gz).
+
+    A parser that read `original_title` would raise on every TV row.
+    """
     cache = _stage(tmp_path, "tv_series_ids.slice.jsonl", "tv_series_ids_07_30_2026.json.gz")
     async with httpx.AsyncClient(
         transport=_serving(cache, {"tv_series_ids_07_30_2026.json.gz"})
@@ -84,8 +100,10 @@ async def test_the_tv_export_uses_original_name_and_has_no_adult_field(
 
 
 async def test_walks_back_to_the_newest_export_that_exists(tmp_path: Path) -> None:
-    """Exports publish around 08:00 UTC, so today's 404s for part of the
-    day. A run that failed then would fail every morning."""
+    """Exports publish around 08:00 UTC, so today's 404s for part of the day.
+
+    A run that failed then would fail every morning.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_28_2026.json.gz")
     async with httpx.AsyncClient(
         transport=_serving(cache, {"movie_ids_07_28_2026.json.gz"})
@@ -94,13 +112,122 @@ async def test_walks_back_to_the_newest_export_that_exists(tmp_path: Path) -> No
         assert await dataset.revision() == "2026-07-28"
 
 
-async def test_no_export_within_the_window_is_unavailable(tmp_path: Path) -> None:
+async def test_no_export_within_the_window_is_malformed_after_one_probe_a_day(
+    tmp_path: Path,
+) -> None:
+    """Seven 404s is seven answers, and asking again in fifteen seconds changes none of them.
+
+    Unavailable, it was retried to the bound: 35 requests and 225 s of waiting.
+    """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
-    async with httpx.AsyncClient(transport=_serving(cache, set())) as client:
+    asked: list[str] = []
+    host = _host(cache, set())
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        asked.append(request.method)
+        return host(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(recording)) as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
-        with pytest.raises(PortUnavailable):
+        with pytest.raises(PortDataMalformed) as exc_info:
             await dataset.revision()
+    assert asked == ["HEAD"] * 7
+    assert str(exc_info.value) == (
+        "no TMDb movie_ids export found in the last 7 days under https://files.tmdb.org/p/exports/"
+    )
+
+
+async def test_a_403_reads_as_a_day_not_yet_published(tmp_path: Path) -> None:
+    """What an object store answers for an absent key the caller may not list."""
+    cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_29_2026.json.gz")
+    host = _host(cache, {"movie_ids_07_29_2026.json.gz"})
+
+    def forbidding_today(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("movie_ids_07_30_2026.json.gz"):
+            return httpx.Response(403)
+        return host(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidding_today)) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        assert await dataset.revision() == "2026-07-29"
+
+
+def _failing_transport(asked: list[str], *, status: int | None) -> httpx.MockTransport:
+    """Every request fails: unreachable when `status` is None, else answered `status`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url).rsplit("/", 1)[-1])
+        if status is None:
+            raise httpx.ConnectError("no route to host")
+        return httpx.Response(status)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (
+            None,
+            "HEAD https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz failed: "
+            "ConnectError",
+        ),
+        (503, "https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz returned HTTP 503"),
+    ],
+    ids=["unreachable", "503"],
+)
+async def test_a_failure_to_ask_is_not_read_as_a_day_that_is_not_published(
+    tmp_path: Path, status: int | None, message: str
+) -> None:
+    """An outage ends the walk at its first request and says what happened.
+
+    Read as "that day isn't published", it cost seven requests per attempt -- 35 under
+    the retry bound -- and reported that no export exists, which is false.
+    """
+    asked: list[str] = []
+    async with httpx.AsyncClient(transport=_failing_transport(asked, status=status)) as client:
+        dataset = TMDbIdDataset(
+            client, tmp_path / "bulk", kind=TitleKind.MOVIE, batch_size=10, today=_TODAY
+        )
+        with pytest.raises(PortUnavailable) as exc_info:
+            await dataset.revision()
+    assert asked == ["movie_ids_07_30_2026.json.gz"]
+    assert str(exc_info.value) == message
+
+
+_TODAYS_URL = "https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz"
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (410, f"{_TODAYS_URL} returned HTTP 410"),
+        (
+            200,
+            f"{_TODAYS_URL} supplied neither ETag nor Last-Modified, so no snapshot token "
+            "exists and a resumable import cannot tell one snapshot from another",
+        ),
+    ],
+    ids=["410", "200-no-token"],
+)
+async def test_an_unusable_answer_is_not_read_as_a_day_that_is_not_published(
+    tmp_path: Path, status: int, message: str
+) -> None:
+    """Only a 404 or 403 walks back; every other malformed answer ends the walk at today.
+
+    Both are `PortDataMalformed`, as a 404 is inside `revision()`, so a walk-back reading
+    that class as "not published" would ask six more days and report no export at all.
+    """
+    asked: list[str] = []
+    async with httpx.AsyncClient(transport=_failing_transport(asked, status=status)) as client:
+        dataset = TMDbIdDataset(
+            client, tmp_path / "bulk", kind=TitleKind.MOVIE, batch_size=10, today=_TODAY
+        )
+        with pytest.raises(PortDataMalformed) as exc_info:
+            await dataset.revision()
+    assert asked == ["movie_ids_07_30_2026.json.gz"]
+    assert str(exc_info.value) == message
 
 
 async def test_a_line_that_is_not_json_is_malformed(tmp_path: Path) -> None:
@@ -116,9 +243,11 @@ async def test_a_line_that_is_not_json_is_malformed(tmp_path: Path) -> None:
 
 
 async def test_a_line_missing_a_required_field_is_malformed(tmp_path: Path) -> None:
-    """Valid JSON, but missing `id` -- a different failure shape than
-    invalid JSON syntax (previous test), and one that must also raise
-    through batches(), not just be reachable in the standalone parser."""
+    """Valid JSON, but missing `id`.
+
+    a different failure shape than invalid JSON syntax (previous test), and one that
+    must also raise through batches(), not just be reachable in the standalone parser.
+    """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     body = b'{"adult":false,"original_title":"No Id Field","popularity":1.0}\n'
@@ -132,10 +261,12 @@ async def test_a_line_missing_a_required_field_is_malformed(tmp_path: Path) -> N
 
 
 async def test_rows_seen_accumulates_across_a_normal_resume(tmp_path: Path) -> None:
-    """Distinct from the same-day-republish test: an ordinary resume
-    against a file that has *not* changed must add to the stored
-    rows_seen, not reset or ignore it -- only a `LocalFile.replaced` body
-    change resets it."""
+    """Distinct from the same-day-republish test.
+
+    an ordinary resume against a file that has *not* changed must add to the stored
+    rows_seen, not reset or ignore it -- only a `LocalFile.replaced` body change resets
+    it.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
     async with httpx.AsyncClient(
         transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
@@ -152,8 +283,11 @@ async def test_rows_seen_accumulates_across_a_normal_resume(tmp_path: Path) -> N
 
 
 async def test_dataset_names_are_distinct_per_kind(tmp_path: Path) -> None:
-    """Two datasets, two checkpoints. A shared name would make the series
-    import resume from the movie import's line offset."""
+    """Two datasets, two checkpoints.
+
+    A shared name would make the series import resume from the movie import's line
+    offset.
+    """
     cache = tmp_path / "bulk"
     async with httpx.AsyncClient() as client:
         movies = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=1, today=_TODAY)
@@ -164,10 +298,14 @@ async def test_dataset_names_are_distinct_per_kind(tmp_path: Path) -> None:
 
 
 async def test_revision_none_does_not_double_head_the_winning_file(tmp_path: Path) -> None:
-    """`_newest_available`'s own scan already resolves the winning file's
-    ETag via the HEAD that proved it exists. Re-deriving that ETag with a
-    second HEAD to the identical URL right before `ensure_local` -- which an
-    earlier draft of this adapter did -- is pure waste on every run."""
+    """`_newest_available`'s own scan already resolves the winning file's ETag via the HEAD that.
+
+    proved it exists.
+
+    Re-deriving that ETag with a second HEAD to the identical URL right before
+    `ensure_local` -- which an earlier draft of this adapter did -- is pure waste on
+    every run.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
     methods: list[str] = []
 
@@ -188,11 +326,14 @@ async def test_revision_none_does_not_double_head_the_winning_file(tmp_path: Pat
 
 
 async def test_a_pre_resolved_revision_skips_the_backward_scan(tmp_path: Path) -> None:
-    """The port's `batches(revision=...)` parameter exists precisely for
-    this adapter: without it, a caller that already resolved this run's
-    revision via `revision()` forces `batches()` to redo the whole
-    multi-day backward walk. Passing it through must go straight to the
-    known day's file instead of re-probing 07-30 and 07-29 first."""
+    """The port's `batches(revision=...)` parameter exists precisely for this adapter.
+
+    without it, a caller that already resolved this run's revision via `revision()`
+    forces `batches()` to redo the whole multi-day backward walk.
+
+    Passing it through must go straight to the known day's file instead of re-probing
+    07-30 and 07-29 first.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_28_2026.json.gz")
     requests_seen: list[str] = []
 
@@ -217,15 +358,17 @@ async def test_a_pre_resolved_revision_skips_the_backward_scan(tmp_path: Path) -
 
 
 async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> None:
-    """A blank line is filtered (`_parse` returns None for it) but is still
-    a line the file offset has to account for. If `position` counted kept
-    rows instead of raw lines consumed, `skip=` on a resume would
-    desynchronise from what `lines(skip=...)` actually skips -- silently
-    replaying or dropping rows depending on how many filtered lines fall
-    before the resume point. IMDb's suite guards this same invariant with
-    its own titleType filtering; this is TMDb's equivalent, using a blank
-    line since TMDb's parser otherwise keeps everything it doesn't reject
-    outright."""
+    """A blank line is filtered (`_parse` returns None for it) but is still a line the file.
+
+    offset has to account for.
+
+    If `position` counted kept rows instead of raw lines consumed, `skip=` on a resume
+    would desynchronise from what `lines(skip=...)` actually skips -- silently replaying
+    or dropping rows depending on how many filtered lines fall before the resume point.
+    IMDb's suite guards this same invariant with its own titleType filtering; this is
+    TMDb's equivalent, using a blank line since TMDb's parser otherwise keeps everything
+    it doesn't reject outright.
+    """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     body = (
@@ -249,12 +392,16 @@ async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> N
 async def test_resuming_from_a_real_cursor_reproduces_no_gap_and_no_duplicate(
     tmp_path: Path,
 ) -> None:
-    """The end-to-end resume guarantee, chained through a real cursor rather
-    than a hand-constructed one: whatever a real first call's cursor claims
-    was consumed, resuming from exactly that cursor must continue without
-    re-yielding an already-committed row or skipping an uncommitted one.
-    Unlike a hardcoded `position=`, this cannot pass by coincidence if the
-    line-counting arithmetic is wrong."""
+    """The end-to-end resume guarantee.
+
+    chained through a real cursor rather than a hand-constructed one: whatever a real
+    first call's cursor claims was consumed, resuming from exactly that cursor must
+    continue without re-yielding an already-committed row or skipping an uncommitted
+    one.
+
+    Unlike a hardcoded `position=`, this cannot pass by coincidence if the line-counting
+    arithmetic is wrong.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
 
     async def _ids(resume_from: BulkCursor | None = None) -> list[int]:
@@ -282,16 +429,17 @@ async def test_resuming_from_a_real_cursor_reproduces_no_gap_and_no_duplicate(
 
 
 async def test_a_same_day_republish_does_not_silently_skip_records(tmp_path: Path) -> None:
-    """Critical-bug regression. The dataset revision is the export's date;
-    the file's real identity is its ETag. A same-day republish (a
-    correction, a re-run of TMDb's own export pipeline) changes the ETag
-    while the date-shaped checkpoint revision stays identical -- so a naive
-    resume, computed purely from the date matching a stored checkpoint,
-    would apply the OLD body's skip position to the NEW body and silently
-    drop however many records its opening lines actually contain. Mirrors
-    how BootstrapService really calls this: `resume_from` and `revision`
-    both passed, against a cache dir that persists across the two calls
-    the way a real on-disk cache would across two process runs."""
+    """Critical-bug regression.
+
+    The dataset revision is the export's date; the file's real identity is its ETag. A
+    same-day republish (a correction, a re-run of TMDb's own export pipeline) changes
+    the ETag while the date-shaped checkpoint revision stays identical -- so a naive
+    resume, computed purely from the date matching a stored checkpoint, would apply the
+    OLD body's skip position to the NEW body and silently drop however many records its
+    opening lines actually contain. Mirrors how BootstrapService really calls this:
+    `resume_from` and `revision` both passed, against a cache dir that persists across
+    the two calls the way a real on-disk cache would across two process runs.
+    """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     name = "movie_ids_07_30_2026.json.gz"
@@ -347,12 +495,15 @@ async def test_a_same_day_republish_does_not_silently_skip_records(tmp_path: Pat
 
 
 async def test_a_malformed_resume_revision_is_a_port_error(tmp_path: Path) -> None:
-    """`revision` is contractually always a value this dataset's own
-    `revision()` already produced -- a valid ISO date -- but it round-trips
-    through a caller and a stored checkpoint, so a corrupted or hand-edited
-    value must not crash the whole process with an unclassified
-    ValueError. Raises before any I/O, so a real (untouched) AsyncClient is
-    fine here -- no MockTransport needed."""
+    """`revision` is contractually always a value this dataset's own `revision()` already.
+
+    produced -- a valid ISO date -- but it round-trips through a caller and a stored
+    checkpoint, so a corrupted or hand-edited value must not crash the whole process
+    with an unclassified ValueError.
+
+    Raises before any I/O, so a real (untouched) AsyncClient is fine here -- no
+    MockTransport needed.
+    """
     cache = tmp_path / "bulk"
     async with httpx.AsyncClient() as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
@@ -363,9 +514,12 @@ async def test_a_malformed_resume_revision_is_a_port_error(tmp_path: Path) -> No
 async def test_a_cursor_from_a_different_revision_restarts_the_stream(
     tmp_path: Path,
 ) -> None:
-    """Position 2 of yesterday's export is not position 2 of today's --
-    restarting is slow, splicing two snapshots is wrong. IMDb's suite has
-    the equivalent of this test; the plan's TMDb suite omitted it."""
+    """Position 2 of yesterday's export is not position 2 of today's.
+
+    restarting is slow, splicing two snapshots is wrong.
+
+    IMDb's suite has the equivalent of this test; the plan's TMDb suite omitted it.
+    """
     cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
     async with httpx.AsyncClient(
         transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})

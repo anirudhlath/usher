@@ -1,50 +1,4 @@
-"""`EmbyPushChannel` over a real `websockets` client and a real server.
-
-**Why this is not a network test.** The server binds `127.0.0.1:0` and the
-client connects to it. CLAUDE.md's socket guard blocks anything that is not
-loopback and leaves loopback alone, which is the same allowance
-`testcontainers` runs under -- and the guard is re-run as part of this
-task's gate rather than trusted, because a green suite proves nothing about
-a `sitecustomize.py` that was never on `PYTHONPATH`.
-
-**What it closes that no unit test can.** `FakePushConnection` performs no
-handshake: a wrong scheme, a missing `Upgrade` header, a proxy answering
-404, a subprotocol mismatch, a real close code, a real ping/pong, real
-`max_queue` backpressure, and the library's own logging are every one of
-them invisible against it. All of those are real here, and the channel above
-them -- URL construction, the subscribe frame, the decode, the ledger, the
-translation of a closed socket -- is the real one too.
-
-**Where this sits relative to the rest of the suite.**
-`tests/unit/test_adapters_emby_push.py` already drives the real library on
-loopback at the *connection* level (`connect_websocket` and
-`_WebsocketsConnection`: a closed socket, a binary frame, a real deadline, a
-failed send, and the credential half of the logging). It is kept there
-because it needs no Docker. This file is the level above: `EmbyPushChannel`
-itself, end to end over a real socket, which is the only place the URL that
-goes on the wire, the frame that arrives at a peer, and a `SourceEvent` that
-came out of real bytes are all the real thing at once.
-
-**What it does not close.** This server is `websockets`, not Emby. It
-accepts any path, answers any subscription, and sends whatever this file
-tells it to -- so a wrong route, a wrong subscription frame, and a wrong
-message envelope all pass here exactly as they pass everywhere else in this
-repository. Only M5's live run closes those, and it is a named step of this
-milestone.
-
-**This file silences its own server, and that is a finding rather than
-tidiness.** `websockets/server.py:561` logs `< GET %s HTTP/1.1` at DEBUG
-with the request line, which for this channel carries `api_key=<token>`, and
-`usher.telemetry.configure_logging` forces `propagate = True` on every
-logger and installs a handler on root at level 0. Measured against this
-harness: with the stock server logger, one handshake puts the token on
-stdout **once** (the client's own copy is already silenced by
-`connect_websocket`). A loopback file that silenced only the client would
-fail on its own harness, and the obvious repair is to weaken the assertion
--- which is how a real leak gets ratified. `test_a_stock_server_logger_...`
-below is that measurement, kept as a case so the fixture's `logger=` cannot
-be "cleaned up".
-"""
+"""`EmbyPushChannel` over a real `websockets` client and a real server."""
 
 import asyncio
 import json
@@ -143,7 +97,7 @@ async def server() -> AsyncIterator[_Server]:
     """A real server on `127.0.0.1:0`, with its own logger silenced.
 
     `logger=socket_logger()` is not tidiness -- see the module docstring and
-    the case that measures what happens without it.
+    the case that shows what happens without it.
     """
     handler = _Server()
     async with serve(handler.handle, "127.0.0.1", 0, logger=socket_logger()) as running:
@@ -180,14 +134,7 @@ def _channel(base_url: str, *, stale_after: float = 90.0) -> EmbyPushChannel:
         base_url=base_url,
         device_id=DEVICE_ID,
         health=PushHealth(stale_after=stale_after),
-        # `proxy=None` on the real connector. `websockets` 16 resolves the
-        # proxy from the environment by default (`get_proxy` ->
-        # `urllib.request.getproxies()`), and `urllib`'s `proxy_bypass` does
-        # **not** exempt loopback unless `no_proxy` says so -- so a developer
-        # machine with `HTTP_PROXY` set would send this connection through
-        # it and every case in this file would fail somewhere unrelated. The
-        # connector's default is unchanged: a household behind a proxy is a
-        # real deployment and the env-var default serves it.
+        # `proxy=None` on the real connector.
         connect=lambda url: connect_websocket(url, proxy=None),
         poll_seconds=POLL_SECONDS,
     )
@@ -208,7 +155,7 @@ async def _consuming(channel: EmbyPushChannel) -> AsyncIterator[list[SourceEvent
 
     Nothing reads the socket until somebody calls `__anext__` -- `_events`
     is an async generator -- so a case that opened the channel and waited
-    would measure a socket nobody was reading. This is the consumer, and it
+    would be sitting on a socket nobody was reading. This is the consumer, and it
     is a separate task so the case itself can wait on the ledger.
     """
     received: list[SourceEvent] = []
@@ -252,7 +199,7 @@ async def test_a_real_handshake_carries_the_token_and_the_device_id(server: _Ser
 
 
 async def test_the_subscription_frame_arrives_verbatim(server: _Server) -> None:
-    """ADR-0004's own frame, byte for byte, as a real text frame.
+    """The subscription frame, byte for byte, as a real text frame.
 
     Without it Emby holds the socket open and sends nothing -- which is
     indistinguishable from every other upgraded-but-silent failure this
@@ -268,8 +215,10 @@ async def test_the_subscription_frame_arrives_verbatim(server: _Server) -> None:
 
 
 async def test_a_real_message_becomes_a_real_event(server: _Server) -> None:
-    """Bytes on a socket into a `SourceEvent`, with nothing faked in
-    between, and the ledger moving because a frame really arrived."""
+    """Bytes on a socket into a `SourceEvent`.
+
+    Nothing is faked in between, and the ledger moves because a frame really arrived.
+    """
     server.to_send = [_library_changed(str(FIRST_ITEM_ID))]
     channel = _channel(server.base_url)
     async with _consuming(channel) as received:
@@ -286,22 +235,17 @@ async def test_a_real_message_becomes_a_real_event(server: _Server) -> None:
 async def test_the_ledger_reports_delivering_only_once_a_real_frame_has_arrived(
     server: _Server,
 ) -> None:
-    """The milestone's central rule, over a socket that really upgraded.
+    """The central rule, over a socket that really upgraded.
 
     The handshake succeeds and `connected` is true the instant it does, so
     an implementation reading health off the connection object answers
     `True` here -- against a peer that has said nothing. Only the message
     clause makes that read `False`.
 
-    **And the silence is long enough to matter**, which makes this the push
-    lane's answer to the defect `GET /events` had: several `poll_seconds`
+    **And the silence is long enough to matter**: several `poll_seconds`
     elapse before the frame is sent, so the channel's `asyncio.wait_for`
     around `recv()` has cancelled and re-issued a pending receive at least
     three times, and the message that arrives afterwards still arrives.
-    `websockets` documents cancelling `recv` as safe ("the next invocation
-    will return the next message") and a coroutine method is not an async
-    generator's `__anext__`, so the failure the SSE route had is not
-    reachable here -- but that is an argument, and this is the measurement.
     """
     channel = _channel(server.base_url)
     async with _consuming(channel):
@@ -318,26 +262,9 @@ async def test_the_ledger_reports_delivering_only_once_a_real_frame_has_arrived(
 async def test_every_frame_sent_while_the_lane_was_not_reading_is_still_delivered(
     server: _Server,
 ) -> None:
-    """The premise `PushSupervisor`'s connect-then-walk ordering rests on:
-    a real socket loses nothing while the lane is somewhere else.
+    """The premise `PushSupervisor`'s connect-then-walk ordering rests on.
 
-    The supervisor runs its gap-closing delta reconcile **after**
-    connecting, with the socket already live, precisely so a change made
-    during the walk is buffered rather than missed. That is a claim about a
-    transport, and `FakePushConnection`'s unbounded in-process queue cannot
-    fail it -- here the frames go through a real receive buffer, real
-    framing and real `permessage-deflate`, and the assertion is on all 300
-    arriving **in order**.
-
-    **What this case does not prove, measured rather than assumed:
-    `max_queue=256`.** Reverting it to the library's default of 16 leaves
-    this case green. Nothing is *lost* at either setting -- 300 small frames
-    fit in the socket buffers long before the client's queue matters -- so
-    the difference between the two is buffered latency and memory, not
-    correctness, and no assertion at a volume a test suite can afford
-    distinguishes them. `connect_websocket`'s own docstring is where that
-    number's reason lives; this case pins the property the number exists to
-    protect.
+    A real socket loses nothing while the lane is somewhere else.
     """
     count = 300
     channel = _channel(server.base_url)
@@ -362,8 +289,7 @@ async def test_every_frame_sent_while_the_lane_was_not_reading_is_still_delivere
 async def test_a_real_server_close_raises_port_unavailable_out_of_the_iterator(
     server: _Server,
 ) -> None:
-    """A real close frame with a real code, translated, raised out of the
-    channel's own `async for`.
+    """A real close frame with a real code, translated out of the channel's `async for`.
 
     The unit suite arranges this with `FakePushConnection.drop`, which
     raises the exception the wrapper is *supposed* to produce -- so it can
@@ -387,27 +313,7 @@ async def test_a_real_server_close_raises_port_unavailable_out_of_the_iterator(
 async def test_a_real_ping_is_answered_while_the_poll_loop_is_cancelling_recv(
     server: _Server,
 ) -> None:
-    """A real ping, a real pong, through a poll loop that keeps cancelling
-    the receive underneath it.
-
-    This channel polls by wrapping `recv()` in `asyncio.wait_for`, so it
-    **cancels a pending receive several times a second** for the life of the
-    connection. `websockets` documents cancelling `recv` as safe ("there's
-    no risk of losing data"); this is that documentation measured against
-    the loop that depends on it, on the control-frame path rather than the
-    data path -- a keepalive that stopped being answered under a polling
-    consumer is a connection nginx closes at 60 s.
-
-    **It is not the assertion that pins PRD 03's heartbeat interval, and
-    that is measured rather than assumed.** `ping_interval=None` in
-    `connect_websocket` leaves this case green -- correctly, because a peer
-    answers pings whatever its own interval is. The requirement ("Emby sends
-    no keepalive of its own... the client must generate traffic") is pinned
-    by `tests/unit/test_adapters_emby_push.py::
-    test_connect_websocket_hands_the_library_the_silenced_logger`, which
-    asserts the two constants where they are passed. The two cases are
-    layered; neither substitutes for the other.
-    """
+    """A real ping, a real pong, through a poll loop that keeps cancelling `recv`."""
     channel = _channel(server.base_url)
     async with _consuming(channel):
         await _until(lambda: bool(server.received), what="the handshake to complete")
@@ -421,10 +327,10 @@ async def test_a_real_ping_is_answered_while_the_poll_loop_is_cancelling_recv(
 
 
 async def test_a_failed_connection_names_no_url(server: _Server) -> None:
-    """`websockets.exceptions.InvalidURI.__str__` contains the URI, and this
-    URI contains the token. Arranged against a port nothing is listening on,
-    which is a real `OSError` out of the real connector rather than a fake's
-    ready-made `PortUnavailable`.
+    """`websockets.exceptions.InvalidURI.__str__` contains the URI, and this URI the token.
+
+    Arranged against a port nothing is listening on, which is a real `OSError` out of
+    the real connector rather than a fake's ready-made `PortUnavailable`.
 
     Port 1 on loopback: reserved, never bound, and refused immediately, so
     this costs nothing and waits for nothing.
@@ -445,8 +351,7 @@ async def test_a_failed_connection_names_no_url(server: _Server) -> None:
 async def test_a_proxy_in_the_environment_does_not_capture_a_loopback_connection(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`connect_websocket(proxy=None)`, and the proof that the argument is
-    doing something.
+    """`connect_websocket(proxy=None)`, and the proof that the argument is doing something.
 
     `websockets` 16 resolves a proxy from the environment by default, and
     `urllib.request.proxy_bypass` does **not** exempt loopback unless
@@ -488,8 +393,7 @@ async def test_a_proxy_in_the_environment_does_not_capture_a_loopback_connection
 async def test_the_channel_cannot_log_the_token_at_debug(
     server: _Server, capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """The leak, closed and proved against the real library through the real
-    channel.
+    """The leak, closed and proved against the real library through the real channel.
 
     `websockets/client.py:294` debug-logs the request line, which for this
     channel carries `api_key=`, and `configure_logging` forces every logger
@@ -524,15 +428,12 @@ async def test_the_channel_cannot_log_the_token_at_debug(
 async def test_a_stock_server_logger_leaks_the_token_from_the_harness_side(
     capsys: pytest.CaptureFixture[str], restored_logging: None
 ) -> None:
-    """**Why the fixture above passes `logger=socket_logger()` to its own
-    server**, pinned as a measurement rather than left as a comment.
+    """**Why the fixture above passes `logger=socket_logger()` to its own server**.
 
     `websockets/server.py:561` is the mirror of the client's line and logs
     the same request line -- so a loopback file that silenced only the
     client fails on its own harness, at which point the tempting repair is
-    to weaken the assertion in the case above. Measured here: exactly one
-    occurrence, from the server, with `connect_websocket`'s own logger
-    already silenced.
+    to weaken the assertion in the case above.
 
     If this case ever *stops* leaking, the library has changed and the
     fixture's `logger=` argument should be re-read rather than deleted.

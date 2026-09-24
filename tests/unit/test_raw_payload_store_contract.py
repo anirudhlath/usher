@@ -1,10 +1,4 @@
-"""The shared contract, against the in-memory implementation.
-
-Half of a pair. This one stores Python objects rather than JSONB, so
-`test_a_payload_survives_nesting_and_nulls` proves the assertion is
-expressible and `tests/integration/test_raw_payload_store.py` proves it
-survives a real serialise/deserialise round trip.
-"""
+"""The shared contract, against the in-memory implementation."""
 
 import pytest
 

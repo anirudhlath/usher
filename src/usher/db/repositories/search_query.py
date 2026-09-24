@@ -1,51 +1,34 @@
-"""`search_queries` -- one row per answered search, then attributed by up to
-two later calls: a click, and separately a play.
-
-Implements `SearchQueryRepository` (`usher.ports.repository`). Two
-statements, both wrapped in the same SAVEPOINT-backed refusal translation
-`LLMCallRepository.record` and `CuratedRowRepository.replace_for_user` use, so
-a refused analytics write never poisons whatever else the caller's
-transaction is holding.
-
-Same session ownership as every other repository here: flushes, never
-commits.
-"""
+"""`search_queries` -- one row per answered search, attributed by up to two later calls."""
 
 import uuid
+from datetime import datetime
+from typing import Any, cast
 
-from sqlalchemy import DateTime, bindparam, text
+from pydantic import AwareDatetime
+from sqlalchemy import CursorResult, DateTime, bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.base import enum_column
 from usher.db.repositories._errors import refusals_as_conflict
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
-# **Nine columns named explicitly**, never `INSERT INTO search_queries VALUES
-# (...)`, for the reason `llm_calls`' identical comment gives: positional
-# values shift silently the moment a column is added, and this table gains
-# readers in a later milestone -- a reader is what would find such a shift,
-# possibly years later, in a dashboard.
-#
-# `clicked_title_id` and `played` are written as **literals** (`NULL`,
-# `false`) rather than as bind parameters: neither is a fact `record()`'s
-# caller (F2) has, and a column with no default (`played` is `NOT NULL` with
-# none at all) has to get its first value from somewhere. `record_outcome`
-# is the only thing that ever moves them.
-#
-# `result_count` and `latency_ms` are deliberately left with no explicit
-# `bindparam` type, following `curated_rows."position"`'s precedent
-# (`db/repositories/curation.py`): an untyped integer bind is exactly what
-# lets asyncpg's own binary encoder refuse an out-of-range value client-side,
-# which is the behaviour `record`'s docstring documents and
-# `test_a_latency_the_column_cannot_hold_is_a_port_error` (integration) pins.
+# Every column named explicitly, never `INSERT INTO search_queries VALUES
+# (...)`: positional values shift silently the moment a column is added, and
+# the reader that finds such a shift is a dashboard, years later.
+
+# `clicked_title_id` and `played` are literals rather than binds because
+# neither is a fact `record()`'s caller has. `result_count` and `latency_ms`
+# carry no `bindparam` type on purpose: an untyped integer bind is what lets
+# asyncpg refuse an out-of-range value client-side.
 _INSERT_QUERY = text(
     "INSERT INTO search_queries "
     "(id, at, user_id, query, mode, result_count, latency_ms, "
-    " clicked_title_id, played) "
+    " clicked_title_id, played, surface, tier) "
     "VALUES (:id, :at, :user_id, :query, :mode, :result_count, :latency_ms, "
-    "        NULL, false)"
+    "        NULL, false, :surface, :tier)"
 ).bindparams(
     # Typed rather than cast in the statement text -- `:id::uuid` is not an
     # option, `llm_calls`' comment records why: SQLAlchemy's bind-parameter
@@ -58,47 +41,19 @@ _INSERT_QUERY = text(
     # member-to-value conversion is one implementation rather than a `.value`
     # spelled by hand here and a `values_callable` spelled there.
     bindparam("mode", type_=enum_column(SearchMode, length=16)),
+    # Both widths are `SearchQueryRow`'s own, read off that model rather than
+    # counted by hand here, because two spellings of one width is how they stop
+    # agreeing. Typed for `mode`'s reason and for one more: `tier` binds `None`
+    # on every search row, and an untyped `NULL` is the shape asyncpg refuses
+    # with "could not determine data type of parameter".
+    bindparam("surface", type_=enum_column(SearchSurface, length=8)),
+    bindparam("tier", type_=enum_column(SuggestTier, length=6)),
 )
 
-# **Two columns, two different conditions, deliberately not one shared
-# guard.** A single `WHERE clicked_title_id IS NULL` was the first cut of
-# this statement and it was wrong: F3's own funnel calls `record_outcome`
-# *twice* on the same row at two different times --
-# `GET /titles/{id}?search_id=…` attributes the click, and
-# `POST /titles/{id}/play` reports the play -- and a
-# guard keyed on `clicked_title_id` alone silently drops the second call,
-# which is the only call in the whole funnel that could ever set `played`.
-# Reviewed and corrected before this shipped; see the port docstring for the
-# full argument and `tests/contract/search_query_repository_contract.py`'s
-# module docstring for the cases that pin it.
-#
-# `clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id)` is first
-# write wins **on that column specifically**: once a click is attributed, a
-# later, genuinely different click (someone else's redelivered event, or a
-# stale retry naming the wrong result) must not steal credit from the result
-# the household actually opened. It is also what lets the *play* writer pass
-# `NULL` -- `COALESCE(clicked_title_id, NULL)` is the column unchanged, so a
-# play reports `played` and touches nothing else, which is what keeps the two
-# writers from collapsing into one that sets both.
-#
-# `played = played OR :played` is monotonic and moves only toward `True`: a
-# call that has not itself observed a play carries `played=False`, and there
-# is no route in F3's design that means "actually, undo the play" -- so a
-# later `False` is stale information about a fact the row already has,
-# never a correction to write over it.
-#
-# **`AND user_id = :user_id` is a security boundary, not tidiness.** The
-# `id` half comes from a client, on `?search_id=`, and UUIDv7 is partially
-# time-ordered and therefore partially guessable; without this predicate one
-# household writes attribution onto another's row silently, with no error,
-# no log line and no metric. It is a predicate rather than a column written:
-# `record()` set `user_id` and nothing may move it.
-#
-# Zero rows affected is still a silent no-op either way -- no row named that
-# `id`, a row belonging to somebody else, or a row whose columns already hold
-# at least as much as this call would write -- because nothing distinguishes
-# those to a caller, and a caller that *could* tell "not yours" from "not
-# there" would have a household oracle.
+# **Two columns, two different conditions, deliberately not one shared guard.** The
+# funnel calls `record_outcome` *twice* on the same row at two different times --
+# `GET /titles/{id}?search_id=…` attributes the click, `POST /titles/{id}/play` reports
+# the play -- so a guard keyed on `clicked_title_id` alone would drop the second call.
 _RECORD_OUTCOME = text(
     "UPDATE search_queries "
     "SET clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id), "
@@ -114,6 +69,21 @@ _RECORD_OUTCOME = text(
     # `COALESCE` resolves against the column beside it.
     bindparam("clicked_title_id", type_=PGUUID(as_uuid=True)),
 )
+
+
+# **The one read on this port, and it is an aggregate rather than a row.**
+# `SearchQueryRetention.last_done()` answers "when were you last done" from the artefact
+# it maintains, and `ix_search_queries_at` makes this an Index Only Scan of the leftmost
+# leaf.
+_OLDEST_AT = text("SELECT min(at) FROM search_queries")
+
+# **`<`, not `<=`**: a row answered at exactly the cutoff is inside the window, which is
+# the boundary PRD 08's retention statement draws (`at < :cutoff`).
+_PRUNE = text(
+    "DELETE FROM search_queries WHERE id IN ("
+    "  SELECT id FROM search_queries WHERE at < :before ORDER BY at LIMIT :limit"
+    ")"
+).bindparams(bindparam("before", type_=DateTime(timezone=True)))
 
 
 class PostgresSearchQueryRepository(SearchQueryRepository):
@@ -147,15 +117,46 @@ class PostgresSearchQueryRepository(SearchQueryRepository):
                 },
             )
 
+    async def oldest(self) -> AwareDatetime | None:
+        found = await self._session.execute(_OLDEST_AT)
+        # `min()` over an empty table is one row holding `NULL`, not no row --
+        # so `scalar_one()` rather than `scalar_one_or_none()`, and `None`
+        # here means the table is empty rather than that the read found
+        # nothing to look at.
+        answered = found.scalar_one()
+        if answered is None:
+            return None
+        # Aware by the column's own type: `search_queries.at` is `TIMESTAMP WITH TIME
+        # ZONE`, and asyncpg hands a `timestamptz` back with a `tzinfo`.
+        if not isinstance(answered, datetime) or answered.tzinfo is None:
+            # `PortDataMalformed` rather than a bare `AssertionError`: this crosses a
+            # port boundary, where a raw exception must not, and the family is the right
+            # one -- the store answered something this port cannot use.
+            raise PortDataMalformed(
+                "min(search_queries.at) read back without a timezone; the column is "
+                "TIMESTAMP WITH TIME ZONE and ScheduledJob.last_done requires an aware value"
+            )
+        return answered
+
+    async def prune(self, *, before: datetime, limit: int) -> int:
+        result = await self._session.execute(_PRUNE, {"before": before, "limit": limit})
+        # `rowcount` lives on `CursorResult`, not on the `Result[Any]`
+        # `session.execute` is annotated to return -- `bulk.py:_rowcount` and
+        # `PostgresCollectionRepository.link_title` both already record the
+        # cast. It is the loop's only terminator, so it is the rows actually
+        # removed and never the limit that was asked for.
+        return int(cast("CursorResult[Any]", result).rowcount)
+
 
 def _parameters(record: SearchQueryRecord) -> dict[str, object]:
-    """The seven F2 columns, spelled out.
+    """The nine columns the INSERT binds, spelled out.
 
-    A `dataclasses.asdict()` would be shorter and would couple the
-    statement's parameter names to the record's field names, so a field
-    renamed on `SearchQueryRecord` would reach Postgres as an unbound
-    parameter rather than as a type error here -- `llm_calls`' identical
-    argument.
+    `surface` is derived by the record rather than bound from a field, which is
+    what stops the statement from writing `'search'` onto a keystroke.
+
+    A `dataclasses.asdict()` would couple the statement's parameter names to
+    the record's field names, so a renamed field would reach Postgres as an
+    unbound parameter rather than as a type error here.
     """
     return {
         "id": record.id,
@@ -165,4 +166,6 @@ def _parameters(record: SearchQueryRecord) -> dict[str, object]:
         "mode": record.mode,
         "result_count": record.result_count,
         "latency_ms": record.latency_ms,
+        "surface": record.surface,
+        "tier": record.tier,
     }

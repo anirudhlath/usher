@@ -1,12 +1,17 @@
-import { describe, expect, it } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { delay, http, HttpResponse } from 'msw'
 import { renderApp, screen, waitFor, within } from '@/test/render'
 import { server } from '@/test/server'
 import { degradedReadiness } from '@/test/handlers'
 import { expectNoViolations } from '@/test/axe'
 import {
   bootstrapStatus,
+  bootstrapStatusCompletedWithError,
   bootstrapStatusEmpty,
+  importCompleted,
+  importCompletedWithError,
+  importFailed,
+  importRunning,
   problemHandler,
   readinessNotADocument,
   sourceUnavailable,
@@ -42,6 +47,25 @@ function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
   }
 }
 
+/** An arbitrary instant for the pinned clock. */
+const T0 = Date.parse('2026-08-18T03:10:00Z')
+
+/**
+ * `Date` pinned at `at`, and nothing else faked, so MSW, React Query's
+ * scheduling and `findBy*` behave as they do everywhere else. The clock stands
+ * still until the test moves it with `vi.setSystemTime`: a clock that merely
+ * shifts keeps running, and a rate over two polls then carries whatever real
+ * time passed between them — 1,000 rows over 10.08 s is 99 a second.
+ */
+function pinClock(at: number): void {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(at)
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 describe('Overview', () => {
   it('renders readiness, the running cursor and the sources table when everything answers', async () => {
     server.use(http.get('/admin/bootstrap/status', () => HttpResponse.json(statusWithHeartbeat(4))))
@@ -59,6 +83,55 @@ describe('Overview', () => {
 
     // The sources table, from `/admin/sources` alone.
     expect(await screen.findByText('Loft Emby')).toBeInTheDocument()
+  })
+
+  it('re-reads the heartbeat age on every poll, so a run that dies while the page is open turns "Stalled?"', async () => {
+    pinClock(T0)
+    // One body for every poll: the importer has died, so nothing on the wire changes.
+    const body = statusWithHeartbeat(100)
+    let polls = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        polls += 1
+        return HttpResponse.json(body)
+      }),
+    )
+    const { queryClient } = render()
+
+    await screen.findByText('No completion estimate — the server reports a cursor, not a percentage.')
+    expect(screen.queryByText('Stalled?')).toBeNull()
+
+    vi.setSystemTime(T0 + 30_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(polls).toBe(2)
+    expect(await screen.findByText('Stalled?')).toBeInTheDocument()
+  })
+
+  it('derives rows/sec from every poll, so a run that stops writing reads 0 rather than its last rate', async () => {
+    pinClock(T0)
+    const first = statusWithHeartbeat(4)
+    // Ten seconds later, 1,000 more rows on the running run; then a poll that finds nothing new.
+    const moved: BootstrapStatusResponse = {
+      ...first,
+      runs: first.runs.map((run) =>
+        run.status === 'running' ? { ...run, rows_seen: run.rows_seen + 1_000 } : run,
+      ),
+    }
+    const bodies = [first, moved, moved]
+    server.use(http.get('/admin/bootstrap/status', () => HttpResponse.json(bodies.shift() ?? moved)))
+    const { queryClient } = render()
+
+    const label = await screen.findByText('rows / sec')
+    expect(label.nextElementSibling?.textContent).toBe('—')
+
+    vi.setSystemTime(T0 + 10_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
+
+    vi.setSystemTime(T0 + 20_000)
+    await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+    expect(bodies).toHaveLength(0)
+    await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
   })
 
   it('shows the loading state as a skeleton with a busy region, never a spinner', () => {
@@ -137,11 +210,97 @@ describe('Overview', () => {
 
     // Computed and empty — a different fact, drawn differently.
     expect(await screen.findByText('Nothing is waiting on a person')).toBeInTheDocument()
-    expect(screen.getByText('unmatched: 0 loaded · runs: none failed')).toBeInTheDocument()
+    expect(screen.getByText('unmatched: 0 loaded · runs: none failed, every error null')).toBeInTheDocument()
 
     expect(
       screen.getByText(/No media server is connected\. The catalog is still browsable/),
     ).toBeInTheDocument()
+  })
+
+  describe('an import that recorded an error', () => {
+    /** The item's glyph carries its tone; the button is the item. */
+    function glyphOf(item: HTMLElement): Element | null {
+      return item.firstElementChild
+    }
+
+    function renderCompletedWithError() {
+      server.use(
+        http.get('/admin/bootstrap/status', () => HttpResponse.json(bootstrapStatusCompletedWithError)),
+      )
+      return render()
+    }
+
+    it('raises a warn item for a completed run carrying an error, with the error verbatim', async () => {
+      renderCompletedWithError()
+
+      // True of a refresh that landed no batch and of a vocabulary that failed to load
+      // after the vectors completed; the old wording claimed the first alone.
+      const item = await screen.findByRole('button', {
+        name: /^The completed movielens import stands; the last attempt recorded an error/,
+      })
+      expect(within(item).getByText(importCompletedWithError.error ?? '')).toBeInTheDocument()
+      expect(glyphOf(item)).toHaveStyle({ color: 'var(--warn-text)' })
+    })
+
+    it('keeps a failed run beside it, in the bad tone', async () => {
+      renderCompletedWithError()
+
+      const item = await screen.findByRole('button', { name: /^The crosswalk import failed/ })
+      expect(within(item).getByText(importFailed.error ?? '')).toBeInTheDocument()
+      expect(glyphOf(item)).toHaveStyle({ color: 'var(--bad-text)' })
+    })
+
+    it('claims a completed import stands only when the run says completed', async () => {
+      // `start()` clears `error`, so the server should never send this; the
+      // type allows it, and the copy must not borrow the completed case's claim.
+      server.use(
+        http.get('/admin/bootstrap/status', () =>
+          HttpResponse.json({ ...bootstrapStatus, runs: [{ ...importRunning, error: 'left over' }] }),
+        ),
+      )
+      render()
+
+      const item = await screen.findByRole('button', { name: /^The imdb import recorded an error/ })
+      expect(within(item).getByText('left over')).toBeInTheDocument()
+      expect(screen.queryByText(/the completed import stands/)).toBeNull()
+    })
+
+    it('raises nothing for a completed run with no error', async () => {
+      server.use(
+        http.get('/admin/bootstrap/status', () =>
+          HttpResponse.json({ ...bootstrapStatus, runs: [importCompleted] }),
+        ),
+        http.get('/admin/unmatched', () => HttpResponse.json(unmatchedEmpty)),
+      )
+      render()
+
+      // The runs have arrived: "Running now" is built from the same response.
+      expect(await screen.findByText('Nothing is running')).toBeInTheDocument()
+      expect(screen.getByText('Nothing is waiting on a person')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /movielens/ })).toBeNull()
+    })
+
+    it('claims nothing is waiting only once the runs that claim is built from have arrived', async () => {
+      server.use(
+        http.get('/admin/bootstrap/status', async () => {
+          await delay('infinite')
+          return HttpResponse.json(bootstrapStatus)
+        }),
+        http.get('/admin/unmatched', () => HttpResponse.json(unmatchedEmpty)),
+      )
+      const { queryClient } = render()
+
+      await waitFor(() => expect(queryClient.getQueryState(['unmatched', null, 50])?.status).toBe('success'))
+      expect(screen.queryByText('Nothing is waiting on a person')).toBeNull()
+    })
+
+    it('has no accessibility violations', async () => {
+      const { container } = renderCompletedWithError()
+
+      await screen.findByText(importCompletedWithError.error ?? '')
+      await waitFor(() => expect(screen.getByText('Loft Emby')).toBeInTheDocument())
+      await expectNoViolations(container)
+    })
   })
 
   it('counts what is loaded and never quotes a total for the review queue', async () => {

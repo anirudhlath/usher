@@ -1,11 +1,4 @@
-"""In-memory SourceRepository.
-
-Stamps `created_at`/`updated_at` itself rather than honouring the caller's,
-because Postgres does -- the same divergence the title fake had to be
-corrected for, where "the fake preserved caller timestamps and the real
-repository never did" made a round-trip assertion pass against the fake
-alone.
-"""
+"""In-memory SourceRepository."""
 
 import uuid
 from datetime import UTC, datetime
@@ -21,12 +14,15 @@ class FakeSourceRepository(SourceRepository):
         self.calls = 0
 
     def reset_calls(self) -> None:
-        """A test-double affordance, not a port method -- the same shape
-        `FakeMediaItemRepository.reset_calls` is, and here for the same
-        reason: "one batched read serves every availability badge" is a
-        round-trip property, and the response is byte-identical whether the
-        names came from one `list_all` or from a `get` per copy. Only a
-        counter can tell them apart."""
+        """A test-double affordance, not a port method.
+
+        the same shape `FakeMediaItemRepository.reset_calls` is, and here for the same
+        reason: "one batched read serves every availability badge" is a round-trip
+        property, and the response is byte-identical whether the names came from one
+        `list_all` or from a `get` per copy.
+
+        Only a counter can tell them apart.
+        """
         self.calls = 0
 
     async def add(self, source: Source) -> None:

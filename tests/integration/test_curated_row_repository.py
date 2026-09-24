@@ -1,23 +1,4 @@
-"""`PostgresCuratedRowRepository` against the real database.
-
-The shared contract runs here unchanged, and this is the arm where several of
-its cases are load-bearing rather than structural — see
-`tests/fakes/curated_row_repository.py` for the enumerated list. Chiefly the
-delete's *scope*, which against a Python list cannot be got wrong by accident.
-**Which two cases see a wrongly-scoped delete, and through which assertion
-each one sees it, is stated once in the contract's module docstring**; it is
-not restated here, because two of the three copies that fact used to have
-drifted in opposite directions.
-
-Plus the four things a list cannot express: a foreign key, a CHECK constraint,
-the SAVEPOINT that makes a failed generation leave the previous screen whole,
-and a session that survives being handed a generation the database refuses.
-
-The seeder writes through a raw `INSERT` rather than through the port, because
-the port deliberately cannot store two generations for one household: that is
-what `replace_for_user` *means*, so a second generation has to arrive from
-outside it or the newest-generation read is untestable.
-"""
+"""`PostgresCuratedRowRepository` against the real database."""
 
 import json
 import uuid
@@ -96,10 +77,9 @@ class PostgresCuratedRowSeeder(CuratedRowSeeder):
 def _relations_scanned(node: dict[str, Any]) -> list[str]:
     """Every relation the plan tree touches, one entry per scan node.
 
-    Recursive over `Plans`, which is where Postgres nests an `InitPlan` and a
-    `SubPlan` as well as ordinary children -- so a table probed once by an
-    uncorrelated subquery and once by the outer scan appears twice, which is
-    the whole measurement.
+    Recursive over `Plans`, where Postgres nests an `InitPlan` and a `SubPlan` as
+    well as ordinary children, so a table probed once by an uncorrelated subquery
+    and once by the outer scan appears twice.
     """
     found = [node["Relation Name"]] if "Relation Name" in node else []
     for child in node.get("Plans", []):
@@ -125,29 +105,9 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         session: AsyncSession,
         user_id: uuid.UUID,
     ) -> None:
-        """**One read of one household's shelves should be one look at the
-        table, and the correlated-subquery spelling is two.**
+        """One read of one household's shelves is one look at the table.
 
-        `list_for_user` runs on every home build, and the statement it shipped
-        asked `curated_rows` for the newest `generation_id` and then asked
-        `curated_rows` again for the rows carrying it. The second probe is the
-        one that does not have an index to sit on: `ix_curated_rows_user_newest`
-        is `(user_id, generated_at DESC)` and the outer scan's second predicate
-        is `generation_id`, which the index does not carry, so it is a filter
-        over everything the household has ever been given.
-
-        Asserted on the plan rather than on the text, because the claim is
-        about what Postgres does: a rewrite that merely moved the subquery into
-        a CTE reads differently and probes the same table twice, and a `WITH …
-        AS MATERIALIZED` would too.
-
-        Two generations are seeded so the read has something to choose
-        between -- with one generation stored, a wrong statement and a right
-        one plan the same and answer the same. What the *choice* must be is
-        `test_only_the_newest_generation_reaches_the_screen`'s, on both arms;
-        this case asserts the cost of making it, and re-reads through the port
-        afterwards so a plan measured against a statement nobody executes
-        cannot pass.
+        The correlated-subquery spelling probes it twice.
         """
         # One `generation_id` per generation, not per row: a generation is what
         # `replace_for_user` writes in one call, and a comprehension minting one
@@ -179,11 +139,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_a_generation_for_a_household_that_does_not_exist_is_a_port_error(
         self, repository: PostgresCuratedRowRepository
     ) -> None:
-        """Postgres-only: the fake is a list and has nothing to violate.
+        """Postgres-only: the fake is a list with no `fk_curated_rows_user_id_users`.
 
-        `fk_curated_rows_user_id_users`. A raw `IntegrityError` escaping here
-        is the one thing ADR-0009 says must never happen -- the only way a
-        caller could handle it is to import sqlalchemy itself.
+        A raw `IntegrityError` escaping here would leave a caller no handling short
+        of importing sqlalchemy itself.
         """
         orphan = new_id()
         with pytest.raises(RepositoryConflict) as raised:
@@ -197,16 +156,11 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         repository: PostgresCuratedRowRepository,
         user_id: uuid.UUID,
     ) -> None:
-        """`ck_curated_rows_cards_not_empty`, reached through the repository
-        rather than through raw SQL.
+        """`ck_curated_rows_cards_not_empty`, reached through the repository.
 
-        Constructed with `model_construct`, because `CuratedRow`'s own
-        `min_length=1` refuses it first -- which is exactly why the CHECK
-        exists: a heading with no shelf under it is a validator that ran and
-        kept nothing, and the row is discarded whole rather than padded from
-        the pool. `tests/integration/test_curation_schema.py` owns the
-        constraint; this owns the translation, which is the half a caller
-        sees.
+        `model_construct` is needed because `CuratedRow`'s own `min_length=1` refuses
+        the empty row first; the CHECK is what catches a writer that bypasses the
+        model. This case owns the translation, not the constraint itself.
         """
         valid = curated_row(user_id, position=0, generation_id=new_id())
         empty = valid.model_construct(**{**valid.model_dump(), "card_title_ids": ()})
@@ -218,21 +172,12 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_one_row_id_twice_in_a_batch_is_a_port_error(
         self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """`pk_curated_rows`, and it is here because the enumeration beside the
-        `except` clause said "a CHECK or a foreign key" and was wrong by a
-        whole class of constraint.
+        """`pk_curated_rows`, translated rather than raised raw.
 
-        Postgres-only: the fake is a list and has no primary key, so a batch
-        naming one id twice is stored twice there. Reachable as a
-        caller-assembly mistake -- an id reused across two shelves of one
-        generation, which nothing else in this port refuses, since
-        `replace_for_user`'s two `ValueError`s are about the household and the
-        generation rather than about the ids.
-
-        Also pins that it is *translated*: a raw `IntegrityError` out of here
-        is the one thing ADR-0009 says must never happen, and the constraint
-        name is what tells a caller this was its own duplicate rather than a
-        conflict with somebody else's row.
+        Postgres-only: the fake is a list with no primary key, so a batch naming one
+        id twice is stored twice there. An id reused across two shelves of one
+        generation is a caller-assembly mistake nothing else in this port refuses,
+        and the constraint name is what tells the caller the duplicate was its own.
         """
         generation, reused = new_id(), new_id()
         with pytest.raises(RepositoryConflict) as raised:
@@ -248,30 +193,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     async def test_a_position_wider_than_the_column_is_a_port_error(
         self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
     ) -> None:
-        """**The refusal that is not a constraint**, and the one that crossed
-        this port boundary raw until the `except` clause widened.
+        """The refusal that is not a constraint, translated all the same.
 
-        `curated_rows."position"` is `integer` and `CuratedRow.position` is
-        `Field(ge=0)` with **no ceiling**, so this row is a *validly
-        constructed* domain model -- no `model_construct`, nothing bypassed --
-        that the column cannot hold. `LLMCall.cost_usd` against `NUMERIC(12,
-        8)` is the sibling shape, found one task earlier and server-side;
-        this one is refused **client-side** by asyncpg's own binary encoder
-        before a byte is sent, and arrives as a bare
-        `sqlalchemy.exc.DBAPIError` with cause `asyncpg.exceptions.DataError`
-        and SQLSTATE `22000`. Measured, and it is why `except IntegrityError`
-        -- which every other repository in this package still uses, correctly,
-        for tables whose refusals are all constraints -- is not what this one
-        catches.
-
-        The wrong implementation this kills is therefore the *obvious* one,
-        and it was shipped: `except IntegrityError` lets this through
-        untranslated, so a caller would have to import sqlalchemy to handle
-        it.
-
-        `constraint` is `None` here rather than a name, which is the honest
-        answer: a column's declared width refusing a value is not a named
-        constraint firing.
+        A too-wide position is a driver-level error, not a named constraint, so
+        `RepositoryConflict.constraint` is None and nothing raw escapes the port.
         """
         wide = curated_row(user_id, position=2**31, generation_id=new_id())
 
@@ -291,32 +216,10 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         user_id: uuid.UUID,
         seeder: PostgresCuratedRowSeeder,
     ) -> None:
-        """**The SAVEPOINT, and the reason `replace_for_user` is one
-        transaction rather than two statements.**
+        """The SAVEPOINT, and why `replace_for_user` is one transaction.
 
-        The wrong implementation this kills: a delete and an insert with no
-        transaction between them. The delete lands, the insert raises, and the
-        household is left with *no* screen -- which is not a legibly short
-        generation, it is indistinguishable from a household the LLM has never
-        run for. `CurationService` catches the conflict and still has a ledger
-        entry to write, so it commits, and the empty screen commits with it.
-
-        **The `DELETE` is what makes this reachable, not a partially-applied
-        insert.** asyncpg documents `executemany` as atomic, so whether the
-        valid row of this batch ever landed is unobservable -- and that is
-        exactly why the SAVEPOINT has to cover *both* statements rather than
-        leaning on the insert being all-or-nothing: by the time the second row
-        violates `ck_curated_rows_cards_not_empty`, the delete has already
-        run. The batch is still written valid-row-first so that an
-        implementation which validated only the first row of a generation
-        fails here too. Both halves are asserted: the previous generation is
-        still on the screen, and the refused generation is not in the table at
-        all.
-
-        The last assertion is the other half of the SAVEPOINT's job: without
-        it the session is poisoned, and the next unrelated call raises
-        `PendingRollbackError` with the failure attributed to whatever ran
-        next.
+        A delete-then-insert pair would leave the household with no screen at all
+        when the insert half fails.
         """
         survivor = [curated_row(user_id, position=0, generation_id=new_id())]
         await repository.replace_for_user(user_id, survivor)

@@ -1,21 +1,4 @@
-"""`PostgresPersonRepository` against the real database.
-
-The contract suite runs here unchanged -- that is the point of it -- plus the
-cases `FakePersonRepository` documents itself as unable to express:
-
-- **Foreign keys.** A credit naming a `person_id` no row carries is a
-  `RepositoryConflict` here and silently fine in a dict.
-- **`xmax = 0`.** `test_upsert_reports_inserts_and_updates_separately` is a
-  real assertion only here; the fake computes the answer from dict membership.
-- **`SELECT DISTINCT ON`.** `test_a_duplicate_person_inside_one_batch_is_tolerated`
-  passes in the fake because a dict is structurally last-wins, and passes here
-  only if the staging read deduplicates.
-- **The join through `episodes`.**
-  `test_an_episode_watch_state_reaches_its_series_credits` is a real join here
-  and a reproduced one there.
-- **CHECK constraints**, which fire at the `INSERT ... SELECT` rather than
-  during the `COPY`, because the staging table carries none.
-"""
+"""`PostgresPersonRepository` against the real database."""
 
 import uuid
 from datetime import datetime
@@ -190,13 +173,12 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_upsert_reports_inserts_and_updates_separately(
         self, repository: PostgresPersonRepository
     ) -> None:
-        """`xmax = 0` in `RETURNING` is the only way to tell an insert from an
-        update -- rowcount reports their sum.
+        """Only `xmax = 0` in `RETURNING` separates inserts from updates.
 
-        The wrong implementation this kills: `RETURNING true`, or returning
-        `(len(rows), 0)`. **This is the one property the fake cannot express
-        at all**: it computes the split from dict membership, which *is* the
-        answer rather than a measurement of it.
+        `rowcount` reports their sum and nothing more. The wrong implementation this
+        kills: `RETURNING true`, or returning `(len(rows), 0)`. The fake cannot
+        express the property at all -- it computes the split from dict membership,
+        which *is* the answer rather than an observation of it.
 
         A mixed batch rather than two calls, because the split is only
         interesting when both arms fire in one statement.
@@ -210,12 +192,12 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_a_person_whose_name_violates_the_check_is_a_port_error(
         self, repository: PostgresPersonRepository
     ) -> None:
-        """`ck_people_name_not_empty` fires at the `INSERT ... SELECT`, not
-        during the `COPY`: the staging table deliberately carries no
-        constraints, so a bad value reaches Postgres and fails one statement
-        later -- which goes through SQLAlchemy and is therefore translatable.
-        `copy_records_to_table` runs on the raw asyncpg connection, outside
-        SQLAlchemy's error translation, and would raise
+        """`ck_people_name_not_empty` fires where SQLAlchemy can translate it.
+
+        The violation surfaces at the `INSERT ... SELECT`, not during the `COPY`: the
+        staging table deliberately carries no constraints, so a bad value reaches
+        Postgres one statement later, through SQLAlchemy. `copy_records_to_table` runs
+        on the raw asyncpg connection, outside error translation, and would raise
         `asyncpg.exceptions.CheckViolationError` straight through.
 
         Constructed by bypassing the model's own validation rather than
@@ -236,12 +218,12 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_the_session_survives_a_conflicting_batch(
         self, repository: PostgresPersonRepository
     ) -> None:
-        """The SAVEPOINT, asserted rather than assumed. `DeriveService`
-        commits a batch of people together with its job checkpoint, so a
-        caught conflict must leave the session usable -- without
-        `begin_nested()` the next unrelated call raises
-        `PendingRollbackError` and the failure is attributed to whatever ran
-        next.
+        """The SAVEPOINT, asserted rather than assumed.
+
+        `DeriveService` commits a batch of people together with its job checkpoint, so a
+        caught conflict must leave the session usable -- without `begin_nested()` the
+        next unrelated call raises `PendingRollbackError` and the failure is attributed
+        to whatever ran next.
         """
         broken = Person.model_construct(
             id=new_id(),
@@ -259,15 +241,12 @@ class TestPostgresPersonRepository(PersonRepositoryContract):
     async def test_a_batch_of_five_hundred_costs_a_bounded_number_of_statements(
         self, repository: PostgresPersonRepository, session: AsyncSession
     ) -> None:
-        """The fake's `calls` counter cannot express this and this case counts
-        real statements instead -- `FakeEpisodeRepository` records the same
-        split.
+        """Real statements counted, because the fake's `calls` counter cannot express it.
 
         Bounded and independent of batch size: the DDL, the `COPY` (which
         asyncpg issues on the raw connection and SQLAlchemy therefore never
         sees) and one `INSERT ... SELECT`. A per-row ORM write here is the
-        ~19 minutes of pure repository overhead `PostgresEpisodeRepository`
-        measured one table over.
+        repository overhead `PostgresEpisodeRepository` carries one table over.
         """
         from sqlalchemy import event
 

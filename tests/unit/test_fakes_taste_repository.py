@@ -1,11 +1,4 @@
-"""`TasteRepositoryContract` against `FakeTasteRepository`.
-
-The fake arm of the pair. It has real teeth on the staleness predicate --
-`FakeTasteRepository.get` re-evaluates all three disjuncts rather than looking
-a row up -- and none at all on the two things only a database has: `halfvec`
-quantisation, and a `BEFORE UPDATE` trigger owning `updated_at`. Both are
-listed on the fake itself and both are the integration arm's.
-"""
+"""`TasteRepositoryContract` against `FakeTasteRepository`."""
 
 import uuid
 from datetime import UTC, datetime
@@ -128,10 +121,12 @@ class TestFakeTasteRepository(TasteRepositoryContract):
 
 
 async def test_the_fake_watermark_is_timezone_aware_like_the_real_one() -> None:
-    """A naive datetime out of the fake and an aware one out of asyncpg
-    compare unequal by raising, not by answering `False` -- so a contract case
-    would fail on the *fake* arm for a reason that has nothing to do with the
-    port. Normalised at the fake rather than papered over in the suite.
+    """A naive datetime out of the fake and an aware one out of asyncpg compare unequal by.
+
+    raising, not by answering `False` -- so a contract case would fail on the *fake* arm
+    for a reason that has nothing to do with the port.
+
+    Normalised at the fake rather than papered over in the suite.
     """
     watch_states = FakeWatchStateRepository()
     repository = FakeTasteRepository(watch_states)

@@ -1,33 +1,11 @@
-"""The row DTOs, and the three things about them that are load-bearing.
+"""The row DTOs, and the three things about them that are load-bearing."""
 
-One of the cases below asserts on the *absence* of a field. That reads as a
-style test until you notice what the absence is standing in for: a `progress`
-float is a division by an unknown runtime. It is the kind of field that gets
-added in a five-line diff by someone who read PRD 06's "artwork refs, year,
-rating, progress" and treated it as a schema.
-
-**`artwork` used to be the second such case and is now the first field on the
-card.** M7 refused it rather than shipping it null, with the day it would be
-filled named in the refusal; M9's C2/C3 built the table and the derivation, so
-the case that asserted its absence became the case that asserts its shape. The
-`None` arm is still the common one -- a catalog that has never been derived has
-no artwork at all -- which is why the default is asserted beside the value.
-
-One case pins a *name* rather than a behaviour, which is unusual enough to
-say why: the milestone plan calls the diversity key `RowKind` in Task 1's
-body and `RowFamily` in its own cross-group handoff and file structure, for
-one concept. Two spellings of one vocabulary is a second source of truth,
-and the composer that has to read it is twenty-eight tasks away.
-"""
-
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
-import usher.domain.rows
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.taste import Centroid
@@ -49,26 +27,10 @@ def _card(**overrides: object) -> RowCard:
 
 
 def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
-    """**Boundary call 3's other day.** M7 refused this field rather than
-    shipping it null, on the grounds that there was no `Image` table, no
-    `images` column and no `poster_path` on `titles`. M9's C2 and C3 build all
-    three, so the field arrives *populated* and its `None` is a fact rather
-    than a placeholder for a table that does not exist.
+    """A card carries one artwork reference and defaults to `None`.
 
-    **One id, not a list and not a URL.** A list would put the poster/backdrop
-    choice back on the client, which is the composition ADR-0006 puts on the
-    server -- and the choice is per *row*, keyed on `display_hint`, which no
-    client can make because no client knows the row's hint means a 2:3 slot. A
-    URL would bake the CDN base and the ladder rung into a cached screen;
-    `GET /images/{id}` is the one place either is decided.
-
-    Kills `artwork: str` (a path, which is provider vocabulary a client would
-    have to build a URL from) and `artwork: uuid.UUID` with no default, which
-    would make a household whose catalog has never been derived unrenderable.
-
-    The last assertion is the one that survives: `extra="forbid"` still holds,
-    so a *second* artwork spelling arriving beside this one is a runtime
-    refusal rather than a field pydantic silently drops.
+    Nothing fills it yet -- no `Image` table, no `images` column and no
+    `poster_path` on `titles` -- so `None` is the honest default.
     """
     assert RowCard.model_fields["artwork"].annotation == uuid.UUID | None
     assert _card().artwork is None
@@ -80,53 +42,14 @@ def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
         _card(poster_path="/a.jpg")
 
 
-def test_the_adr_0014_enumeration_is_numbered_against_itself() -> None:
-    """**The list is the count, and an ordinal read out of a plan is not.**
-
-    `usher.domain.rows`' module docstring enumerates ADR-0014's sites, and it
-    exists because the ordinals were being incremented by guesswork -- a list
-    that can only grow is a list that lies the first time something is deleted,
-    which is exactly what happened when `RowContext.taste` was removed and
-    every ordinal below it moved up.
-
-    So the numbering is checked against itself: contiguous from 1, in order,
-    with no gaps. Kills a site inserted mid-list without renumbering, and kills
-    a `10.` appended after a deletion left the list at eight.
-
-    **`artwork` is deliberately not on it**, and the reason is worth stating
-    where somebody will look for it. ADR-0014 is *absence is not zero*: a site
-    is a field where a falsy value would be read as a measurement. `artwork`
-    has no zero -- there is no UUID that means "no artwork" -- so `None` is the
-    only spelling available and nothing is standing in for anything. The
-    sharpest site on the list (`NeighborCandidate.tags`) is there precisely
-    because `0.0` is a value real data cannot produce; artwork's absence
-    produces no value at all.
-    """
-    enumeration = usher.domain.rows.__doc__ or ""
-    ordinals = [int(one) for one in re.findall(r"^(\d+)\. ", enumeration, re.MULTILINE)]
-    entries = re.split(r"^\d+\. ", enumeration, flags=re.MULTILINE)[1:]
-
-    assert ordinals, "the enumeration scan found nothing, so it proves nothing"
-    assert ordinals == list(range(1, len(ordinals) + 1)), (
-        f"the ADR-0014 enumeration is not numbered against itself: {ordinals}"
-    )
-    assert not [one for one in entries if "artwork" in one.lower()], (
-        "artwork was added to the ADR-0014 site list; it has no zero to be mistaken for"
-    )
-
-
 def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> None:
-    """`watch_states.runtime_seconds` is nullable, so a progress *fraction*
-    is best-effort dressed as arithmetic.
+    """`watch_states.runtime_seconds` is nullable, so a progress *fraction* is best-effort.
 
-    Kills `progress: float`, which divides by `None` or by a COALESCE'd zero,
-    and kills `progress: float | None`, which is correct but relocates the
-    three-way branch into every client -- the dead-arm problem boundary call
-    3 refuses for artwork, one field over.
-
-    `position_seconds=1800, runtime_seconds=None` is two true facts: half an
-    hour in, of an unknown total. No client is forced to render a bar it
-    cannot size.
+    Kills `progress: float`, which divides by `None` or by a COALESCE'd zero, and
+    kills `progress: float | None`, which is correct but relocates the three-way
+    branch into every client. `position_seconds=1800, runtime_seconds=None` is two
+    true facts -- half an hour in, of an unknown total -- so no client is forced to
+    render a bar it cannot size.
     """
     assert "progress" not in RowCard.model_fields
     assert {"position_seconds", "runtime_seconds"} <= set(RowCard.model_fields)
@@ -134,27 +57,24 @@ def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> No
 
 
 def test_an_unknown_runtime_stays_unknown_on_a_card() -> None:
-    """**ADR-0014, seventh site** (see the module docstring of
-    `usher.domain.rows` for the enumeration).
+    """Absence is not zero.
 
-    Kills `runtime_seconds: int = 0`. A zero runtime is not "no progress" --
-    it is a divisor that makes every partially-watched title read as
-    complete, on every client that computes the fraction the card declined
-    to compute for it.
+    Kills `runtime_seconds: int = 0`. A zero runtime is not "no progress" -- it is a
+    divisor that makes every partially-watched title read as complete, on every
+    client that computes the fraction the card declined to compute for it.
     """
     card = _card(runtime_seconds=None)
     assert card.runtime_seconds is None
     assert card.position_seconds == 1800
 
 
-def test_the_display_hint_vocabulary_is_adr_0006s_four_and_no_others() -> None:
-    """ADR-0006's only concrete client vocabulary: "Rows carry a display
-    *hint* (`portrait | landscape | wide | square`) but never a layout."
+def test_the_display_hint_vocabulary_is_four_names_and_no_others() -> None:
+    """The only concrete client vocabulary: a display *hint*, never a layout.
 
-    Kills a fifth member. The realistic fifth is `HERO` or `GRID_3_COLUMN`,
-    and `GRID_3_COLUMN` is a layout wearing a hint's name -- the exact thing
-    the ADR's "never a layout" clause exists to refuse, arriving as an
-    enum member that no reviewer reads as an architecture change.
+    Kills a fifth member. The realistic fifth is `HERO` or `GRID_3_COLUMN`, and
+    `GRID_3_COLUMN` is a layout wearing a hint's name -- the exact thing the "never a
+    layout" clause refuses, arriving as an enum member no reviewer reads as an
+    architecture change.
     """
     assert {hint.value for hint in DisplayHint} == {"portrait", "landscape", "wide", "square"}
 
@@ -162,23 +82,22 @@ def test_the_display_hint_vocabulary_is_adr_0006s_four_and_no_others() -> None:
 def test_a_display_hint_belongs_to_the_row_and_not_to_a_card() -> None:
     """A hint describes the shelf: a row of portraits is a portrait row.
 
-    Kills moving `display_hint` onto `RowCard`, which lets one row disagree
-    with itself about its own shape -- a per-item layout instruction, which
-    is what ADR-0006 declines to send, arriving by a second route.
+    Kills moving `display_hint` onto `RowCard`, which lets one row disagree with
+    itself about its own shape -- a per-item layout instruction arriving by a second
+    route.
     """
     assert "display_hint" in BuiltRow.model_fields
     assert "display_hint" not in RowCard.model_fields
 
 
 def test_a_built_row_with_no_cards_is_constructible() -> None:
-    """**An empty row and an absent row are different states.**
+    """An empty row and an absent row are different states.
 
-    Kills `min_length=1` on `cards`, and kills a `model_validator` that
-    raises on an empty tuple. Either one forces `Row.build()` to return
-    `BuiltRow | None`, and then "built and had nothing to show" collapses
-    into the same `None` as "never proposed" -- which are a quiet household
-    and a dead provider respectively, and Group I's metrics have to tell
-    them apart.
+    Kills `min_length=1` on `cards`, and kills a `model_validator` that raises on an
+    empty tuple. Either one forces `Row.build()` to return `BuiltRow | None`, and
+    then "built and had nothing to show" collapses into the same `None` as "never
+    proposed" -- a quiet household and a dead provider, which the metrics have to
+    tell apart.
     """
     row = BuiltRow(
         slug="continue-watching",
@@ -191,64 +110,36 @@ def test_a_built_row_with_no_cards_is_constructible() -> None:
 
 
 def test_a_built_row_carries_its_own_ttl_so_a_cached_row_is_self_describing() -> None:
-    """PRD 06 puts `ttl` on the `Row` class. It is on the value instead.
+    """PRD 06 puts `ttl` on the `Row` class; it is on the value instead.
 
-    A cache stores a built row, not its producer. With the TTL on the class,
-    the cache needs a reference back to the object that built it to know
-    when to drop it, and the two disagree after any deploy that changes the
-    number: a row written under 60 s judged by 300 s. ADR-0020's argument
-    for fingerprints, on a shorter-lived derivative.
-
-    Kills removing the field, and kills defaulting it -- a default TTL is a
-    number nobody chose that every row silently inherits.
+    A cache stores a built row, not its producer. With the TTL on the class the cache
+    needs a reference back to the object that built it to know when to drop it, and
+    the two disagree after any deploy that changes the number: a row written under
+    60 s judged by 300 s. Kills removing the field, and kills defaulting it -- a
+    default TTL is a number nobody chose that every row silently inherits.
     """
     assert "ttl" in BuiltRow.model_fields
     assert BuiltRow.model_fields["ttl"].is_required()
 
 
 def test_the_row_family_vocabulary_is_prd_06s_three_and_no_others() -> None:
-    """PRD 06's family table, as a set rather than a `<=`: a fourth member
-    fails here and a deleted third one does too.
+    """PRD 06's family table, as a set rather than a `<=`.
 
-    **Named for what it asserts.** It was
-    `test_every_row_family_has_something_that_emits_it` through M8 task 14,
-    and nothing in this body links a family to a class that emits it -- this
-    module imports only `usher.domain`, which imports nothing, so the emitters
-    are not reachable from here at all. The assertion that name promised is
-    `test_rows_invariants.py::test_every_row_family_is_emitted_by_a_registered_
-    provider`, which became possible only when M8 task 15 registered
-    `CuratedProvider`; the two are different checks and both are worth having.
-
-    `CURATED` was deliberately *not* pre-declared in M7 -- a diversity rule
-    capping a family with no members is a branch nothing can reach, so the
-    first thing M8 would have discovered is whether that branch was ever
-    right. It costs one line in the diff that adds `LLMRow` (M8 task 14), and
-    that diff is what this assertion moved in.
-
-    The realistic fourth is a family invented to express Continue Watching's
-    pin -- `ports/rows.py` argues that one down at length, because "always
-    ranked first" is a *positional* guarantee and a family is the key the
-    "cap per family" rule **counts**, so a one-member family for the pin puts
-    a position inside a rule about crowding. `ScoredRow.pinned` is where that
-    lives.
+    A fourth member fails here and a deleted third one does too.
     """
     assert {family.value for family in RowFamily} == {"source", "similarity", "curated"}
 
 
 def test_a_built_row_names_its_family_and_there_is_only_one_spelling_of_it() -> None:
-    """The diversity constraints are stated in families -- "no three
-    consecutive similarity rows; cap per family" -- so the composer needs a
-    typed key to state them in, and needs exactly one.
+    """The diversity constraints are stated in families, so the key has to be typed.
 
-    Kills shipping `RowKind` and `RowFamily` as two enums with the same
-    members, which is what the plan's task body and its own cross-group
-    handoff each asked for separately. Two vocabularies for one concept is
-    a second source of truth, and the composer twenty-eight tasks away
-    would have to pick one and leave the other reachable.
-
-    Also kills naming the field `kind`: `RowCard.kind` is already a
-    `TitleKind` in this same module, so `BuiltRow.kind: RowKind` puts two
-    unrelated "kind"s one field apart.
+    "No three consecutive similarity rows; cap per family" needs exactly one
+    vocabulary to state it in. Kills shipping `RowKind` and `RowFamily` as two enums
+    with the same members: two vocabularies for one concept is a second source of
+    truth, and a composer would have to pick one and leave the other reachable. Also
+    kills naming the field `kind` -- `RowCard.kind` is already a `TitleKind` in this
+    same module, so `BuiltRow.kind: RowKind` puts two unrelated "kind"s one field
+    apart.
     """
     assert BuiltRow.model_fields["family"].annotation is RowFamily
     assert "kind" not in BuiltRow.model_fields
@@ -272,21 +163,15 @@ def test_a_centroid_records_the_embedder_that_produced_it() -> None:
 
 
 def test_a_centroid_over_no_titles_is_not_constructible() -> None:
-    """ADR-0014 on the taste signal itself.
+    """Absence is not zero, on the taste signal itself.
 
-    Kills `title_count: int = 0`. A centroid averaged over nothing is not
-    "neutral taste", it is a point equidistant from every title in the
-    catalog, which makes every genre equally "affine" and every seed equally
-    close. The honest value for a household that has watched nothing is
-    `RowContext.taste = None`, and this constraint is what stops a
-    zero-vector stand-in being constructible in the first place.
-
-    The vector is deliberately **non-empty** here. An earlier version of
-    this case passed `vector=()` alongside `title_count=0` and mutation
-    survived it: `Field(min_length=1)` on the vector raised the same
-    `ValidationError`, so the case proved nothing about the count. Two
-    constraints, two cases -- the same reason the artwork case carries two
-    assertions.
+    Kills `title_count: int = 0`. A centroid averaged over nothing is not "neutral
+    taste", it is a point equidistant from every title in the catalog, which makes
+    every genre equally "affine" and every seed equally close. The honest value for a
+    household that has watched nothing is `RowContext.taste = None`. The vector is
+    deliberately **non-empty** here: with `vector=()` alongside `title_count=0`,
+    `Field(min_length=1)` on the vector raises the same `ValidationError` and the
+    case proves nothing about the count.
     """
     with pytest.raises(ValidationError):
         Centroid(
@@ -299,8 +184,7 @@ def test_a_centroid_over_no_titles_is_not_constructible() -> None:
 
 
 def test_a_centroid_with_an_empty_vector_is_not_constructible() -> None:
-    """The other half of the refusal above, and the one that matters at the
-    reader.
+    """The other half of the refusal above, and the one that matters at the reader.
 
     Kills `vector: tuple[float, ...] = ()`. An empty vector is not a
     centroid at all, and every whitespace-only document already embeds to

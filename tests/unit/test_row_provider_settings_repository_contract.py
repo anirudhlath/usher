@@ -1,8 +1,6 @@
-"""The row-provider-settings contract against the in-memory double. No Docker.
+"""The row-provider-settings contract against the in-memory double.
 
-tests/integration/test_row_provider_settings_repository.py runs the identical
-assertions against Postgres, plus the two cases only a real session and a real
-row count can demonstrate.
+No Docker.
 """
 
 import pytest

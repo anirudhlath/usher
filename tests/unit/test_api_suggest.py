@@ -1,28 +1,6 @@
-"""`GET /search/suggest` -- two tiers on one route, the tier that answered, and
-the prefix length below which tier 1 does not run.
+"""`GET /search/suggest`: two tiers on one route.
 
-**The real `SearchService` over two scripted indexes, never a stubbed
-service.** M5's correction, restated by `tests/unit/test_api_home.py` and by
-`tests/unit/test_api_search.py` one route over: a stub would make every case
-here an assertion about `SuggestResponse.of` alone, and the mutation this file
-exists to kill -- the tier parameter selecting the same index for both values
--- lives in the seam between the parameter and the collaborator it picks.
-
-**The two doubles disagree on a typo and agree on a prefix, which is the whole
-of the two-armed case's teeth.** `FakePrefixSuggestIndex` is `startswith` and
-`FakeSuggestIndex` is Levenshtein-over-the-head; a route serving both tiers
-from one index answers the same list twice, and only an arm asserting the
-*absence* of the typo hit can see it.
-
-**Both doubles record their calls**, because half of what this route does is
-*not* reach the database: a `q` below the answering tier's minimum, and a blank
-one, are 200s that must issue no query at all. An assertion on the empty
-`results` list cannot tell that from a query that ran and matched nothing --
-which is the whole cost this route exists to avoid, since at one character it
-is 2,707 ms of it.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
+The tier that answered, and the prefix length below which tier 1 is not asked.
 """
 
 import uuid
@@ -37,15 +15,17 @@ from fastapi import FastAPI
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.search_index import FakePrefixSuggestIndex, FakeSuggestIndex
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_search_service, get_visibility_service
+from usher.api.deps import get_household, get_search_service, get_visibility_service
 from usher.config import Settings
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
+from usher.ports.repository import SearchQueryRecord
 from usher.ports.search import (
     SearchDocument,
     SearchFilters,
@@ -53,9 +33,11 @@ from usher.ports.search import (
     SearchIndex,
     SearchOutcome,
     SearchRequest,
+    SearchSurface,
     SuggestIndex,
+    SuggestTier,
 )
-from usher.services.search import SearchService, SuggestTier
+from usher.services.search import SearchAnalytics, SearchService
 from usher.services.visibility import VisibilityService
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
@@ -72,11 +54,12 @@ _TYPO = "kestrek"
 
 
 class _DeadIndex(SearchIndex):
-    """Present because `SearchService` takes one. `GET /search/suggest` never
-    reaches it -- the suggest path has no `SearchIndex` in it at all, which is
-    ADR-0021's port split showing up as an object this file never asks
-    anything. It raises rather than answering `SearchOutcome()`, because an
-    empty answer is what a wrongly-wired route would also produce."""
+    """Present because `SearchService` takes one.
+
+    `GET /search/suggest` never reaches it -- the suggest path has no `SearchIndex` in
+    it at all. It raises rather than answering `SearchOutcome()`, because an empty
+    answer is what a wrongly-wired route would also produce.
+    """
 
     async def index_many(self, documents: Sequence[SearchDocument]) -> None:
         return None
@@ -88,12 +71,10 @@ class _DeadIndex(SearchIndex):
         raise AssertionError("the suggest route must not reach the search index")
 
     async def semantic_coverage(self, filters: SearchFilters) -> float:
-        # Dead on the same terms as `search`, and it carries a claim of its own
-        # rather than only satisfying the ABC: since #16 the coverage probe is
-        # bought by a search that is about to expand, and type-ahead has no
-        # embed for an expansion to sit in front of. An expansion factored to
-        # the top of `SearchService` -- the tidy-looking version -- reaches
-        # this line before it reaches anything else.
+        # Dead on the same terms as `search`, and it carries a claim of its own rather
+        # than only satisfying the ABC: the coverage probe is bought by a search that
+        # is about to expand, and type-ahead has no embed for an expansion to sit in
+        # front of.
         raise AssertionError("the suggest route must not measure semantic coverage")
 
 
@@ -127,16 +108,22 @@ class _Kit:
     prefix_tier: _RecordingPrefix
     fuzzy_tier: _RecordingFuzzy
     titles: FakeTitleRepository = field(default_factory=FakeTitleRepository)
+    queries: FakeSearchQueryRepository = field(default_factory=FakeSearchQueryRepository)
 
     def calls(self, tier: SuggestTier) -> list[tuple[str, int]]:
         return self.prefix_tier.calls if tier is SuggestTier.PREFIX else self.fuzzy_tier.calls
 
+    @property
+    def rows(self) -> list[SearchQueryRecord]:
+        return list(self.queries.rows.values())
 
-async def _kit(*, result_limit: int = 50) -> _Kit:
-    """One catalog, three readers of it: both tiers and the hydration."""
+
+async def _kit(*, result_limit: int = 50, suggest_analytics: bool = True) -> _Kit:
+    """One catalog, four readers of it: both tiers, the hydration, and `search_queries`."""
     titles = FakeTitleRepository()
     prefix_tier = _RecordingPrefix()
     fuzzy_tier = _RecordingFuzzy()
+    queries = FakeSearchQueryRepository()
     await titles.add(
         Title(
             id=_KESTREL,
@@ -158,8 +145,27 @@ async def _kit(*, result_limit: int = 50) -> _Kit:
         FakeTasteRepository(),
         FakeTitleEmbeddingRepository(),
         result_limit=result_limit,
+        # **Wired, because the route's household is only observable through
+        # it.** Without a `SearchAnalytics` the `user_id` this route now
+        # resolves would reach `SearchService.suggest` and be dropped on the
+        # floor, so a route that had stopped passing one would look identical.
+        # The fake never touches a database, so this stays a unit file.
+        analytics=SearchAnalytics(queries=queries, commit=_nothing),
+        # Stated rather than defaulted, so a case that turns it off is
+        # varying this fixture rather than relying on a shipped default.
+        suggest_analytics=suggest_analytics,
     )
-    return _Kit(service=service, prefix_tier=prefix_tier, fuzzy_tier=fuzzy_tier, titles=titles)
+    return _Kit(
+        service=service,
+        prefix_tier=prefix_tier,
+        fuzzy_tier=fuzzy_tier,
+        titles=titles,
+        queries=queries,
+    )
+
+
+async def _nothing() -> None:
+    """`SearchAnalytics.commit` over a store with no transaction."""
 
 
 def _settings() -> Settings:
@@ -173,14 +179,41 @@ def _settings() -> Settings:
     )
 
 
-def _app(service: SearchService) -> FastAPI:
+#: The household this file's requests carry. Invented, and it never reaches a
+#: database: `get_household` is overridden below.
+_HOUSEHOLD = uuid.UUID(int=0xD1)
+
+
+class _Household:
+    """The `users` read, counted rather than performed.
+
+    The route pays a real `SELECT` for this, so what a case asserts is how many
+    times it asked -- not what it got back.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> uuid.UUID:
+        self.calls += 1
+        return _HOUSEHOLD
+
+
+def _app(service: SearchService, *, household: _Household | None = None) -> FastAPI:
     built = create_app(_settings())
     built.dependency_overrides[get_search_service] = lambda: service
-    # Since #73 this route promotes the skeletons it offered, so the queue and
-    # the catalog are on its path and `UNREACHABLE_DSN` is exactly what the
-    # name says. What this route *promotes* is asserted in
-    # `test_api_search.py::test_type_ahead_promotes_what_it_offered`; here it
-    # only has to not be the real one.
+    # Overridden, because this app points at a database nothing listens on:
+    # left alone, every case here would 500 on a connection refused and say
+    # nothing about the tier selector this file exists to pin. The route's
+    # *use* of it is asserted separately, because an override is exactly what
+    # would hide a route that had quietly stopped reading one.
+    resolve = household if household is not None else _Household()
+    built.dependency_overrides[get_household] = lambda: resolve
+    # This route promotes the skeletons it offered, so the queue and the catalog
+    # are on its path and `UNREACHABLE_DSN` is exactly what the name says. What it
+    # *promotes* is asserted in
+    # `test_api_search.py::test_type_ahead_promotes_what_it_offered`; here it only
+    # has to not be the real one.
     built.dependency_overrides[get_visibility_service] = lambda: VisibilityService(
         FakeJobQueue(), FakeTitleRepository()
     )
@@ -211,19 +244,16 @@ async def client(kit: _Kit) -> AsyncIterator[httpx.AsyncClient]:
 async def test_the_prefix_tier_finds_the_prefix_and_only_the_fuzzy_tier_finds_the_typo(
     client: httpx.AsyncClient,
 ) -> None:
-    """**Both arms in one case, because either alone is green against a route
-    that serves both tiers from one index.**
+    """**Both arms in one case**, because either alone is green against a one-index route.
 
-    `?tier=prefix` asked for a true prefix finds the title and asked for a
-    one-character substitution of that same prefix finds nothing -- that is
-    tier 1's 1.9% measured typo recall as a property rather than as a number.
-    `?tier=fuzzy` finds it both times, which is the tolerance the trigram +
-    `levenshtein_less_equal` path carries and the whole reason two tiers
-    exist.
+    `?tier=prefix` asked for a true prefix finds the title, and asked for a
+    one-character substitution of that same prefix finds nothing -- tier 1's typo
+    recall as a property rather than as a number. `?tier=fuzzy` finds it both times,
+    which is the tolerance the trigram + `levenshtein_less_equal` path carries and the
+    whole reason two tiers exist.
 
-    Fails with 404 before the route exists (observed). Fails on the second
-    assertion against a route whose `?tier=` selects the same collaborator for
-    both values, which is this task's headline mutation.
+    Fails on the second assertion against a route whose `?tier=` selects the same
+    collaborator for both values.
     """
     prefix_hit = await client.get("/search/suggest", params={"q": _TYPED, "tier": "prefix"})
     prefix_typo = await client.get("/search/suggest", params={"q": _TYPO, "tier": "prefix"})
@@ -257,13 +287,11 @@ async def test_the_response_says_which_tier_answered(client: httpx.AsyncClient, 
 
 
 async def test_the_default_tier_is_the_prefix_tier(client: httpx.AsyncClient, kit: _Kit) -> None:
-    """The keystroke tier is the default, which is the whole point of the
-    split: the trigram path is 33.6 ms p50 and is meant to be debounced behind
-    this one.
+    """The keystroke tier is the default, which is the whole point of the split.
 
-    Both halves asserted -- the echo *and* which collaborator was actually
-    consulted -- because a route that echoed `prefix` while asking tier 2
-    passes the first alone.
+    The trigram path is the slower one and is meant to be debounced behind this one.
+    Both halves asserted -- the echo *and* which collaborator was actually consulted --
+    because a route that echoed `prefix` while asking tier 2 passes the first alone.
     """
     response = await client.get("/search/suggest", params={"q": _TYPED})
     assert response.json()["tier"] == "prefix"
@@ -274,10 +302,11 @@ async def test_the_default_tier_is_the_prefix_tier(client: httpx.AsyncClient, ki
 async def test_the_tier_reaches_the_openapi_document_as_an_enum_defaulting_to_prefix(
     client: httpx.AsyncClient,
 ) -> None:
-    """`/openapi.json` describes the vocabulary, so a client generator writes
-    two named values rather than a free string. Fails: `tier: str`, which
-    accepts `?tier=fuzy` and answers a 200 from whichever branch the `if`
-    happened to fall through to.
+    """`/openapi.json` describes the vocabulary.
+
+    A client generator then writes two named values rather than a free string. Fails:
+    `tier: str`, which accepts `?tier=fuzy` and answers a 200 from whichever branch the
+    `if` happened to fall through to.
     """
     document = (await client.get("/openapi.json")).json()
     parameters = {
@@ -293,9 +322,11 @@ async def test_the_tier_reaches_the_openapi_document_as_an_enum_defaulting_to_pr
 async def test_an_unknown_tier_is_refused_rather_than_served_by_a_default(
     client: httpx.AsyncClient,
 ) -> None:
-    """A 422 through A2's envelope, and it is the enum doing it. Fails: a
-    `tier: str` parameter with an `else` arm -- a typo would then be served
-    silently by one tier while the response echoed the other."""
+    """A 422 through the shared error envelope, and it is the enum doing it.
+
+    Fails: a `tier: str` parameter with an `else` arm -- a typo would then be served
+    silently by one tier while the response echoed the other.
+    """
     response = await client.get("/search/suggest", params={"q": _TYPED, "tier": "fuzy"})
     assert response.status_code == 422
     assert response.json()["code"] == "validation_failed"
@@ -307,16 +338,15 @@ async def test_an_unknown_tier_is_refused_rather_than_served_by_a_default(
 async def test_a_prefix_below_the_minimum_never_reaches_the_index_at_all(
     client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """**The saving is a query not issued, so the assertion is on the port
-    call and not on the empty list.**
+    """**The saving is a query not issued**, so the assertion is on the port call.
 
-    An empty `results` is also what a query that ran and matched nothing
-    produces, and running it is precisely the 2,707 ms p95 this bound exists
-    to avoid. Fails: a bound applied to the *answer* rather than in front of
-    the call, which reads identically from the body.
+    An empty `results` is also what a query that ran and matched nothing produces, and
+    running it is precisely the cost this bound exists to avoid. Fails: a bound applied
+    to the *answer* rather than in front of the call, which reads identically from the
+    body.
 
-    The prefix used here is a genuine prefix of the seeded title, so the only
-    reason the box is empty is the bound.
+    The prefix used here is a genuine prefix of the seeded title, so the only reason the
+    box is empty is the bound.
     """
     response = await client.get("/search/suggest", params={"q": "kes", "tier": "prefix"})
     assert response.status_code == 200
@@ -329,15 +359,14 @@ async def test_the_minimum_is_four_characters_and_not_the_number_the_index_could
 ) -> None:
     """**Every number here is a literal**, which is the point.
 
-    D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT` both shipped a case whose
-    fixture was derived from the constant under test -- so widening the
-    constant moved the fixture and the expectation together and the case could
-    not see it. `kes` (3) and `kest` (4) are both true prefixes of the seeded
-    title, so a bound at any other value fails one of these two arms.
+    A fixture derived from the constant under test moves with it, so widening the
+    constant would move the fixture and the expectation together and the case could not
+    see it. `kes` (3) and `kest` (4) are both true prefixes of the seeded title, so a
+    bound at any other value fails one of these two arms.
 
-    Also pins the reported number, because a route that refused correctly and
-    reported `min_query_length: 1` would leave a client unable to implement
-    the same rule -- and the whole saving is the request never sent.
+    Also pins the reported number, because a route that refused correctly and reported
+    `min_query_length: 1` would leave a client unable to implement the same rule -- and
+    the whole saving is the request never sent.
     """
     refused = await client.get("/search/suggest", params={"q": "kes", "tier": "prefix"})
     served = await client.get("/search/suggest", params={"q": "kest", "tier": "prefix"})
@@ -353,12 +382,11 @@ async def test_the_length_is_measured_after_stripping_so_padding_cannot_buy_a_pr
 ) -> None:
     """Fails: `len(q)` instead of `len(q.strip())`.
 
-    Four spaces and one character is four characters and one character of
-    selectivity, and `LIKE '    k%'` is not the cheap query the bound was
-    measured for -- leading whitespace contributes nothing to the index range
-    condition. The port-call assertion is what sees it: under the wrong
-    spelling the query runs and matches nothing, which looks identical in the
-    body.
+    Four spaces and one character is four characters and one character of selectivity,
+    and `LIKE '    k%'` is not the cheap query the bound is for -- leading whitespace
+    contributes nothing to the index range condition. The port-call assertion is what
+    sees it: under the wrong spelling the query runs and matches nothing, which looks
+    identical in the body.
     """
     response = await client.get("/search/suggest", params={"q": "   k", "tier": "prefix"})
     assert response.status_code == 200
@@ -369,15 +397,13 @@ async def test_the_length_is_measured_after_stripping_so_padding_cannot_buy_a_pr
 async def test_the_fuzzy_tier_is_not_held_to_the_prefix_tiers_minimum(
     client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """**The asymmetry is deliberate and is a statement about evidence.**
+    """The asymmetry is deliberate, and it is a statement about evidence.
 
-    B3 measured tier 1 per prefix length and nobody has measured tier 2 that
-    way, so a four-character bound there would be a refusal with no
-    measurement under it. Tier 2's defence is the client's debounce. Fails: a
-    single module-level minimum applied to both tiers, which silently takes
-    the typo-tolerant tier away from every short query -- exactly the 2-4
-    character band ADR-0002's gate failed on and the band a two-tier design
-    exists to serve.
+    Tier 1's bound rests on per-prefix-length evidence that tier 2 has none of, so a
+    four-character bound there would be a refusal with nothing under it; tier 2's
+    defence is the client's debounce. Fails: a single module-level minimum applied to
+    both tiers, which silently takes the typo-tolerant tier away from every short query
+    -- exactly the two-to-four character band a two-tier design exists to serve.
     """
     response = await client.get("/search/suggest", params={"q": "k", "tier": "fuzzy"})
     assert response.status_code == 200
@@ -390,20 +416,20 @@ async def test_the_fuzzy_tier_is_not_held_to_the_prefix_tiers_minimum(
 async def test_a_blank_q_is_two_hundred_with_no_results_on_both_tiers(
     client: httpx.AsyncClient, kit: _Kit, tier: str, blank: str
 ) -> None:
-    """Not a 422: a search box sends this between keystrokes and on every
-    backspace to zero, and rejecting it would put an error on the wire for
-    every viewer who selected their query and typed over it. `GET /search`
-    makes the identical call one route over.
+    """Not a 422.
 
-    **Both tiers, because the two are bounded by different numbers** -- four
-    characters and one -- and only the blank case is answered by the same rule
-    on both. A spelling that special-cased the blank inside one tier's branch
-    would leave the other forwarding whitespace to a `LIKE '%'` over 1.27M
-    rows.
+    A search box sends this between keystrokes and on every backspace to zero, and
+    rejecting it would put an error on the wire for every viewer who selected their
+    query and typed over it. `GET /search` makes the identical call one route over.
+
+    **Both tiers, because the two are bounded by different numbers** -- four characters
+    and one -- and only the blank case is answered by the same rule on both. A spelling
+    that special-cased the blank inside one tier's branch would leave the other
+    forwarding whitespace to a `LIKE '%'` over the whole catalog.
 
     The `calls` assertion is the one with teeth: the service carries its own
-    `if not prefix.strip()` guard, so a route that forwarded a blank would
-    still answer `results: []` and look correct.
+    `if not prefix.strip()` guard, so a route that forwarded a blank would still answer
+    `results: []` and look correct.
     """
     response = await client.get("/search/suggest", params={"q": blank, "tier": tier})
     assert response.status_code == 200
@@ -416,10 +442,12 @@ async def test_a_blank_q_is_two_hundred_with_no_results_on_both_tiers(
 
 @pytest.mark.parametrize("tier", [tier.value for tier in SuggestTier])
 async def test_the_query_is_echoed_as_typed(client: httpx.AsyncClient, tier: str) -> None:
-    """Not stripped, not lower-cased: it is what the pattern was built from,
-    and a client rendering "no matches for ..." needs the string the server
-    used. Fails: an echo of the normalised form, which would report a query
-    the viewer did not type."""
+    """Not stripped, not lower-cased.
+
+    It is what the pattern was built from, and a client rendering "no matches for ..."
+    needs the string the server used. Fails: an echo of the normalised form, which would
+    report a query the viewer did not type.
+    """
     response = await client.get("/search/suggest", params={"q": "  KesTrel ", "tier": tier})
     assert response.json()["query"] == "  KesTrel "
 
@@ -427,10 +455,12 @@ async def test_the_query_is_echoed_as_typed(client: httpx.AsyncClient, tier: str
 async def test_a_hydrated_candidate_carries_the_title_fields_a_box_renders(
     client: httpx.AsyncClient,
 ) -> None:
-    """PRD 05 wants unowned results surfaced "clearly marked", and a
-    type-ahead row is a result -- a client that had to ask a second question
-    per row to render the badge would not render it. Fails: a DTO that carries
-    the id and nothing else, which is a box of UUIDs."""
+    """PRD 05 wants unowned results surfaced "clearly marked", and a row is a result.
+
+    A client that had to ask a second question per row to render the badge would not
+    render it. Fails: a DTO that carries the id and nothing else, which is a box of
+    UUIDs.
+    """
     row = (await client.get("/search/suggest", params={"q": _TYPED})).json()["results"][0]
     assert row == {
         "title_id": str(_KESTREL),
@@ -444,10 +474,12 @@ async def test_a_hydrated_candidate_carries_the_title_fields_a_box_renders(
 
 
 async def test_the_limit_reaches_the_tier_that_runs() -> None:
-    """Clamped once, at the service, exactly as `GET /search` is: the ceiling
-    lives beside the `Settings` field and this route declares only a floor.
-    Fails: a `le=` here, which is the same number spelled twice, or a route
-    that drops `limit` and always asks for ten."""
+    """Clamped once, at the service, exactly as `GET /search` is.
+
+    The ceiling lives beside the `Settings` field and this route declares only a floor.
+    Fails: a `le=` here, which is the same number spelled twice, or a route that drops
+    `limit` and always asks for ten.
+    """
     kit = await _kit(result_limit=20)
     async for client in _client(_app(kit.service)):
         await client.get("/search/suggest", params={"q": _TYPED, "limit": 10_000})
@@ -455,46 +487,87 @@ async def test_the_limit_reaches_the_tier_that_runs() -> None:
 
 
 async def test_a_limit_of_zero_is_refused(client: httpx.AsyncClient) -> None:
-    """`ge=1`, the same floor `GET /search` declares. A zero-result box is a
-    request nobody meant to make."""
+    """`ge=1`, the same floor `GET /search` declares.
+
+    A zero-result box is a request nobody meant to make.
+    """
     response = await client.get("/search/suggest", params={"q": _TYPED, "limit": 0})
     assert response.status_code == 422
 
 
-async def test_the_suggest_route_holds_no_household_and_no_embedder(
-    client: httpx.AsyncClient,
+async def test_the_household_is_a_dependency_and_never_a_query_parameter(
+    client: httpx.AsyncClient, kit: _Kit
 ) -> None:
-    """**A `DefaultUserIdDep` here would be a `SELECT` per keystroke** to
-    resolve an id nothing downstream reads -- `SearchService.suggest` runs no
-    blend, so there is no watch-state term and no taste term for a household
-    to change. And no embedder: `?mode=semantic`'s 422 has no analogue here
-    because there is no lane to be missing.
+    """This route resolves a household, and does it the way `GET /search` does.
 
-    Asserted on `/openapi.json` rather than on behaviour, because the defect
-    is a parameter or a failure response that *exists*: this app points at a
-    database nothing listens on, so a household read would 500 rather than
-    quietly cost a round trip, and a case asserting a 200 would pass against a
-    version that had wired one on a reachable database.
+    **The wire is unchanged and that is a claim, not a side effect.** *"Whose search
+    history is this"* is not a client's to choose, so the id arrives through
+    `DefaultUserIdDep` and `/openapi.json` still declares exactly `q`, `tier` and
+    `limit`. A `?user_id=` would be a household any caller could claim to be, on the one
+    route a browser drives per keystroke.
+
+    **And it reaches the row rather than stopping at the handler**, asserted against the
+    id the override supplies: a route that resolved a household and passed it nowhere
+    would write a row with no household -- which is to say no row at all -- and satisfy
+    every parameter assertion above.
+
+    Still no embedder and still no failure of its own: the only non-200 remains a `422`
+    from parameter validation.
     """
     operation = (await client.get("/openapi.json")).json()["paths"]["/search/suggest"]["get"]
     assert {one["name"] for one in operation["parameters"]} == {"q", "tier", "limit"}
     assert set(operation["responses"]) == {"200", "422"}
+
+    assert (await client.get("/search/suggest", params={"q": _TYPED})).status_code == 200
+    assert [(row.user_id, row.surface, row.tier) for row in kit.rows] == [
+        (_HOUSEHOLD, SearchSurface.SUGGEST, SuggestTier.PREFIX)
+    ]
+
+
+async def test_the_household_is_resolved_only_for_a_request_that_writes_a_row() -> None:
+    """One `users` SELECT per keystroke is what a dependency costs.
+
+    This route pays it where the row is written and nowhere else.
+
+    Three arms, because a route that simply stopped resolving one would satisfy the
+    first two: a `q` below the tier's minimum returns before the service and writes
+    nothing; a deployment with the writer off writes nothing on any `q`; and an answered
+    keystroke on a deployment that records resolves exactly one household, which reaches
+    the row.
+    """
+    short = _Household()
+    kit = await _kit()
+    async for client in _client(_app(kit.service, household=short)):
+        assert (await client.get("/search/suggest", params={"q": "kes"})).status_code == 200
+    assert (short.calls, kit.rows) == (0, [])
+
+    off = _Household()
+    quiet = await _kit(suggest_analytics=False)
+    async for client in _client(_app(quiet.service, household=off)):
+        assert (await client.get("/search/suggest", params={"q": _TYPED})).status_code == 200
+    assert (off.calls, quiet.rows) == (0, [])
+
+    recorded = _Household()
+    writing = await _kit()
+    async for client in _client(_app(writing.service, household=recorded)):
+        assert (await client.get("/search/suggest", params={"q": _TYPED})).status_code == 200
+    assert recorded.calls == 1
+    assert [row.user_id for row in writing.rows] == [_HOUSEHOLD]
 
 
 # --- the service's own seam ------------------------------------------------
 
 
 async def test_a_tier_the_service_cannot_serve_is_not_reachable_from_the_route() -> None:
-    """**A coverage assertion over the enum, and it needs its own premise.**
+    """A coverage assertion over the enum, and it needs its own premise.
 
-    The service selects its collaborator out of a `dict` keyed by
-    `SuggestTier`, so a member added to the enum and not to that map is a
-    `KeyError` inside a request -- a 500 on a type-ahead box, on the tier
-    somebody added and nobody wired. Behaviourally invisible today, because
-    both of the two members are wired.
+    The service selects its collaborator out of a `dict` keyed by `SuggestTier`, so a
+    member added to the enum and not to that map is a `KeyError` inside a request -- a
+    500 on a type-ahead box, on the tier somebody added and nobody wired. Behaviourally
+    invisible today, because both of the two members are wired.
 
-    Fails: a third member of `SuggestTier`, or a map built from a literal pair
-    that stopped matching it.
+    Fails: a third member of `SuggestTier`, or a map built from a literal pair that
+    stopped matching it.
     """
     kit = await _kit()
     wired: dict[SuggestTier, SuggestIndex] = kit.service._tiers

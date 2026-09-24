@@ -1,21 +1,4 @@
-"""A `JobScope` factory over fakes, for cases that are not about the scope.
-
-`JobWorker` takes a factory rather than a queue and a commit since M9's W1:
-`AsyncSession` is not concurrency-safe, so concurrent jobs need a session, a
-commit, a handler set and an event buffer each, and the worker opens one scope
-per claim and one per job. Most cases in this suite are about something else
-entirely -- a span, a metric, a handler -- and would otherwise each carry six
-lines of context-manager boilerplate.
-
-**What this helper cannot say, stated where a reader will meet it.** Every
-scope it opens shares one `FakeJobQueue`, because the fake *is* the store: one
-dict behind one event loop, with no second session to model. So "each job got
-its own session" is not a property expressible here at all, and it is asserted
-in `tests/integration/test_services_jobs.py` against a real engine, where two
-concurrent jobs' connections can be read back and compared. What *is* per-scope
-here is what is per-session in production: the commit callable, the handler map
-and the `DeferredEventPublisher`.
-"""
+"""A `JobScope` factory over fakes, for cases that are not about the scope."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager

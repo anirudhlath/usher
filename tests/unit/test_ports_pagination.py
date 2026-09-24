@@ -1,27 +1,4 @@
-"""**No port takes a cursor**, as a test rather than as a convention.
-
-The cursor is `usher.api`'s artefact and the decode stays at the edge. A port
-that accepted one would have to decode it, which means knowing the sort
-vocabulary of the layer above it -- and a cursor a port accepts is a cursor
-that has leaked into the domain, which is the thing ADR-0034's design exists
-to prevent. Repositories keep taking typed keyset values, exactly as
-`RawPayloadStore.iterate` and `TitleEmbeddingRepository.list_stale` already
-do with `after: uuid.UUID`.
-
-**Half of that is already structural and this file is the other half.**
-import-linter's "hexagonal layering" contract puts `usher.api` above
-`usher.ports`, so a port cannot *import* the codec at all. What it cannot see
-is the spelling that needs no import: a string annotation, or a parameter
-called `cursor` typed `str`. Three groups add paged routes this milestone and
-each will be holding a cursor when it writes its port method; the cheap
-mistake is passing it straight through.
-
-So the walk reads annotations as **text**, not as resolved objects. That is
-not fastidiousness: `usher.ports.repository.sync` carries `from __future__
-import annotations`, so its signatures already hand back strings while every
-other module hands back types, and a walk that only understood one of those
-would silently cover part of the package.
-"""
+"""**No port takes a cursor**, as a test rather than as a convention."""
 
 import importlib
 import inspect
@@ -51,7 +28,7 @@ FORBIDDEN_TYPE_NAMES: frozenset[str] = frozenset({*CODEC_NAMES, Page.__name__})
 UPSTREAM_CURSORS: Mapping[str, str] = MappingProxyType(
     {
         "MetadataProvider.changed_since": (
-            "ADR-0017's cursor travels the other way. It is TMDb's own page token -- minted "
+            "The provider's cursor travels the other way. It is TMDb's own page token -- minted "
             "by the provider, handed back to the provider, never rendered to an Usher client "
             "and never decoded by anything here. `usher.api.cursor`'s cursor is minted by "
             "Usher for an Usher client; the two share a noun and no direction."
@@ -110,17 +87,21 @@ def _annotation_text(annotation: Any) -> str:
 
 
 def _names_a_codec_type(text: str) -> list[str]:
-    """Word-boundary matching, because `BulkCursor` and `ChangedPage` are not
-    this codec's types and a substring test would call both of them
-    violations."""
+    """Word-boundary matching.
+
+    because `BulkCursor` and `ChangedPage` are not this codec's types and a substring
+    test would call both of them violations.
+    """
     return [name for name in sorted(FORBIDDEN_TYPE_NAMES) if re.search(rf"\b{name}\b", text)]
 
 
 def test_the_walk_finds_the_ports_it_is_a_claim_about() -> None:
-    """The premise for every assertion below. An empty walk -- or one that
-    descended into `usher.ports` but not into `usher.ports.repository` --
-    passes identically to a clean sweep, which is the failure mode this repo
-    has now hit twice."""
+    """The premise for every assertion below.
+
+    An empty walk -- or one that descended into `usher.ports` but not into
+    `usher.ports.repository` -- passes identically to a clean sweep, which is the
+    failure mode this repo has now hit twice.
+    """
     walked = _abstract_methods()
     assert len(walked) >= 100, f"the walk found only {len(walked)} abstract methods"
     ports = {port for port, _, _ in walked}
@@ -130,8 +111,9 @@ def test_the_walk_finds_the_ports_it_is_a_claim_about() -> None:
 
 
 def test_the_keyset_habit_the_cursor_replaces_is_still_there() -> None:
-    """The positive control, and it is the whole reason this file is not a
-    vacuous "assert nothing matches".
+    """The positive control.
+
+    and it is the whole reason this file is not a vacuous "assert nothing matches".
 
     `TitleEmbeddingRepository.list_stale` is the shape a paged port keeps
     having: a typed `after`, not an opaque token. If this walk ever stops
@@ -145,10 +127,11 @@ def test_the_keyset_habit_the_cursor_replaces_is_still_there() -> None:
 
 
 def test_no_port_takes_a_parameter_named_cursor() -> None:
-    """The name is checked as well as the type because the cheap mistake has
-    no type: `cursor: str | None = None` passed straight from a route through
-    a service into a repository, which type-checks, imports nothing, and
-    breaks no contract."""
+    """The name is checked as well as the type because the cheap mistake has no type.
+
+    `cursor: str | None = None` passed straight from a route through a service into a
+    repository, which type-checks, imports nothing, and breaks no contract.
+    """
     offending = [
         f"{port}.{method}({parameter})"
         for port, method, signature in _abstract_methods()
@@ -160,10 +143,13 @@ def test_no_port_takes_a_parameter_named_cursor() -> None:
 
 
 def test_no_port_names_the_codecs_types() -> None:
-    """Parameters *and* the return annotation. A port that returned a `Page`
-    or a `CursorSpec` has leaked the wire contract downward just as surely as
-    one that accepted a cursor -- and it is the likelier half, because a
-    service assembling a page is the thing that wants somewhere to put it."""
+    """Parameters *and* the return annotation.
+
+    A port that returned a `Page` or a `CursorSpec` has leaked the wire contract
+    downward just as surely as one that accepted a cursor -- and it is the likelier
+    half, because a service assembling a page is the thing that wants somewhere to put
+    it.
+    """
     offending: list[str] = []
     for port, method, signature in _abstract_methods():
         for name, parameter in signature.parameters.items():
@@ -175,10 +161,14 @@ def test_no_port_names_the_codecs_types() -> None:
 
 
 def test_the_word_boundary_is_what_keeps_the_upstream_types_legal() -> None:
-    """`BulkCursor` and `ChangedPage` are the two names a substring test would
-    convict, and both are correct code: one is a bulk importer's resume token
-    and the other is a provider's change feed. This is the case that would
-    notice the day `_names_a_codec_type` is loosened to `in`."""
+    """`BulkCursor` and `ChangedPage` are the two names a substring test would convict.
+
+    and both are correct code: one is a bulk importer's resume token and the other is a
+    provider's change feed.
+
+    This is the case that would notice the day `_names_a_codec_type` is loosened to
+    `in`.
+    """
     assert not _names_a_codec_type("BulkCursor | None")
     assert not _names_a_codec_type("ChangedPage")
     assert _names_a_codec_type("CursorSpec") == ["CursorSpec"]

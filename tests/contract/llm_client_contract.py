@@ -1,40 +1,4 @@
-"""The behavioural contract every `LLMClient` implementation must satisfy.
-
-Run against `FakeLLMClient` (`tests/unit/`) and against
-`OpenAICompatibleClient` over `httpx.MockTransport` (`tests/unit/`, because
-`MockTransport` needs no container). A third subclass driving a **live**
-endpoint lives in `tests/integration/` and skips itself unless one is
-configured -- a contract suite that passes because nothing ran is the
-`sitecustomize.py` trap, so that subclass asserts it actually reached
-something before it believes its own result.
-
-**What this suite deliberately does not assert.** Anything about the
-*content* of a completion. A contract case that expected particular rows
-would be a test of a model, and every implementation here is free to be
-driven by a script, a fixture or a real endpoint. What is shared is the
-shape of the answer, the shape of the failure, and the fact that usage comes
-back at all -- which is the half `usher.db.repositories.curation` writes to a
-ledger and which an implementation returning only the parsed object would
-pass every content assertion without.
-
-**And `latency_ms` is the second thing it does not assert, decided rather than
-overlooked.** M8's final sweep found the number unpinned everywhere -- the only
-assertion in the repository was `latency_ms >= 0`, which
-`OpenAICompatibleClient`'s `max(0, ...)` clamp makes unfalsifiable -- and the
-obvious repair is to pin it here, where all three implementations meet. It
-belongs in `tests/unit/test_adapters_llm.py` instead, for a reason that is
-about what each arm *is*: latency is the one field of `LLMUsage` that is
-**measured** rather than reported, and only one of the three implementations
-measures it. `FakeLLMClient` hands back whatever `usage()` was scripted with,
-so a green assertion there would be a test of the script, and green on 2 of 3
-arms for the wrong reason reads as coverage of the adapter. The live subclass
-cannot hold a fixture clock at all -- its latency is a real network -- which is
-why its own control asserts `latency_ms > 0` and stops. Pinning the number
-would mean requiring an injected clock of every `LLMClient`, i.e. writing an
-implementation detail into a port contract. So the exact millisecond is pinned
-once, against the one class that computes it, by
-`tests/unit/test_adapters_llm.py::test_the_latency_is_the_whole_send_and_not_what_was_left_after_it`.
-"""
+"""The behavioural contract every `LLMClient` implementation must satisfy."""
 
 from abc import ABC, abstractmethod
 from decimal import Decimal
@@ -59,8 +23,7 @@ class LLMClientContract(ABC):
 
     @abstractmethod
     def client(self) -> LLMClient:
-        """A client whose next `complete_json` succeeds and returns an
-        object with an `ok` key."""
+        """A client whose next `complete_json` succeeds and returns an object with an `ok` key."""
 
     async def test_a_completion_returns_the_object_and_its_usage(self) -> None:
         """Kills an implementation that returns only the parsed object.
@@ -100,8 +63,7 @@ class LLMClientContract(ABC):
         assert usage.latency_ms >= 0
 
     async def test_cost_is_a_decimal_and_never_a_float(self) -> None:
-        """Kills `cost_usd = tokens * price` computed in binary floating
-        point.
+        """Kills `cost_usd = tokens * price` computed in binary floating point.
 
         Pinned on the port too (`test_llm_usage_cost_is_decimal_not_float`),
         and again here because that case constructs an `LLMUsage` by hand and
@@ -116,8 +78,7 @@ class LLMClientContract(ABC):
 
     @pytest.mark.parametrize("purpose", list(LLMPurpose))
     async def test_every_purpose_in_the_vocabulary_is_accepted(self, purpose: LLMPurpose) -> None:
-        """Kills an implementation that branches on `purpose` and handles one
-        member.
+        """Kills an implementation that branches on `purpose` and handles one member.
 
         `LLMPurpose` is closed precisely so it stays a usable telemetry
         dimension; parametrising over the enum means a member added without a

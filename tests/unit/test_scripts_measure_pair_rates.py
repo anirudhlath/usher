@@ -1,25 +1,4 @@
-"""`scripts/measure_pair_rates.py`'s accumulator, against the counter it must agree with.
-
-**The one fatal spelling this file exists to kill.** `/tmp/m9-gate/BAR.md` asks
-for the **candidate-pair** rate — of all `(seed, candidate)` pairs a real
-neighbour rebuild *considers*, the fraction carrying the signal on both sides —
-and the plausible wrong answer is a rate over the pairs a rebuild *stores*.
-`_CANDIDATE_POOL` is 100 and `_NEIGHBORS_PER_TITLE` is 25, so the two
-denominators differ by four, and by the time a row is stored the blend has
-sorted the pool **by the very signal being measured**. A stored-row accumulator
-therefore produces a different, plausible, wrong — and specifically
-*inflated* — ratio while every other assertion still passes, which is why the
-comparison here is against `NeighborRebuild`'s own two fields rather than
-against a literal.
-
-**The import mechanism is `test_scripts_enqueue_tier_enrichment.py`'s, for its
-reasons**, restated because they are load-bearing rather than incidental:
-`scripts/` has no `__init__.py`, `[tool.mypy] files = ["src", "tests"]` means
-**mypy does not check `scripts/` at all**, and so the script gets `ruff`, this
-file, and no type checking. Every name reached for is bound once, at module
-scope, through a typed local, so a rename in the script fails at import rather
-than as an `AttributeError` three cases deep.
-"""
+"""`scripts/measure_pair_rates.py`'s accumulator, against the counter it must agree with."""
 
 import importlib.util
 import math
@@ -57,10 +36,9 @@ _MODULE = _load()
 class _Rates(Protocol):
     """The shape `walk` promises, restated here because mypy cannot see it.
 
-    `ADR-0001`'s "ports are ABCs" is about `usher.ports`; this is a *test's*
-    description of an unchecked script's return value, which is the one place a
-    structural type is the honest spelling — the script is not imported by the
-    package and cannot inherit from anything here.
+    A structural type is the honest spelling for a test's description of an
+    unchecked script's return value: the script is not imported by the package
+    and cannot inherit from anything here.
     """
 
     seeds: int
@@ -139,7 +117,7 @@ async def test_the_genome_pair_rate_is_the_one_the_shipped_rebuild_reports() -> 
 
     # The case's own premise. The two spellings are only distinguishable when
     # the pool is strictly larger than what is stored, and with 40 titles the
-    # pool is 39 a seed against a stored 25.
+    # pool is 39 per seed against a stored 25.
     assert _CANDIDATE_POOL > _NEIGHBORS_PER_TITLE
     assert rebuild.candidate_pairs == 40 * 39
     assert rebuild.rows == 40 * _NEIGHBORS_PER_TITLE
@@ -156,13 +134,13 @@ async def test_the_genome_pair_rate_is_the_one_the_shipped_rebuild_reports() -> 
 
 
 async def test_the_rate_over_stored_rows_is_a_different_and_higher_number() -> None:
-    """The wrong answer is measured here rather than merely described.
+    """The wrong answer is computed here rather than merely described.
 
     The stored rows are the pool sorted by a blend that gives the genome cosine
     a weight of 0.25 and then truncated, so the signal's density in the top 25
-    is higher than in the pool it came from. This case computes both and
-    asserts they disagree — without it, "counted over the pool" is a claim in a
-    docstring and the two accumulators are indistinguishable on this fixture.
+    is higher than in the pool it came from. This case computes both and asserts
+    they disagree; without it the two accumulators are indistinguishable on this
+    fixture.
     """
     service, embeddings, neighbors = await _population(count=40, genome_every=3)
     rebuild = await service.rebuild(page_size=500)
@@ -189,11 +167,11 @@ async def test_the_rate_over_stored_rows_is_a_different_and_higher_number() -> N
 async def test_a_pair_with_tags_on_only_the_seed_side_is_not_counted() -> None:
     """Single-side coverage decides nothing, so it must not reach the numerator.
 
-    BAR.md: *"of all (seed, candidate) pairs a real neighbour rebuild
-    considers, the fraction with the signal on **both** sides"*. A population
-    where exactly one title is tagged has that title on a side of ten of the
-    thirty ordered pairs and **zero** both-sides pairs, so an accumulator
-    spelled `seed in tagged or candidate in tagged` answers ten.
+    The rate is the fraction of the ordered (seed, candidate) pairs a real
+    neighbour rebuild considers that carry the signal on *both* sides. Where
+    exactly one title is tagged, it sits on a side of ten of the thirty ordered
+    pairs and on zero both-sides pairs, so an accumulator spelled
+    `seed in tagged or candidate in tagged` answers ten.
     """
     _, embeddings, _ = await _population(count=6, genome_every=99)
     tagged_only_one: Mapping[uuid.UUID, int] = {_id(1): 7}
@@ -227,10 +205,9 @@ async def test_both_sides_over_the_threshold_is_what_counts_and_the_bar_moves() 
 async def test_a_seed_bound_stops_the_walk_reading_rather_than_stops_it_counting() -> None:
     """`--seeds` bounds the iterator, and the denominator is the bound's own.
 
-    CLAUDE.md's rule about a live run — *"the bound has to be in the iterator,
-    not in `max_pages`"* — applies to a walk whose cost is one brute-force
-    distance scan per seed: a bound applied after the read would spend the full
-    walk and report a fraction of it.
+    The bound has to be in the iterator rather than in `max_pages`: this walk
+    costs one brute-force distance scan per seed, so a bound applied after the
+    read would spend the full walk and report a fraction of it.
     """
     _, embeddings, _ = await _population(count=40, genome_every=3)
 

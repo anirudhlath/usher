@@ -1,76 +1,11 @@
-"""Exception handlers that hold across every route, present and future.
-
-Two handlers live here. The first is a security control rather than a
-formatting choice, and the second wraps PRD 07's RFC 9457 envelope around
-it -- *around*, not over: the envelope composes with the stripping, and
-nothing below may undo it.
-
-**A 422 may not echo the request body.** FastAPI's default
-`request_validation_exception_handler` answers with
-`jsonable_encoder(exc.errors())`, and a pydantic error carries an `input`
-field holding the value that failed. For a `missing` error that value is
-the *whole unparsed body dict* -- every sibling field, as submitted, before
-any of them became a `SecretStr`. `POST /admin/sources` (PRD 07) is the one
-route in Usher that takes a source credential, so omitting any single field
-from an otherwise well-formed request made FastAPI reply with the plaintext
-password. Reproduced directly against FastAPI 0.140 before this module
-existed:
-
-    {"type": "missing", "loc": ["body", "base_url"], "msg": "Field required",
-     "input": {"kind": "emby", "name": "n", "username": "…", "password": "…"}}
-
-That is PRD 08's "credentials are never returned by any API, including
-admin" and "never logged, including in error paths and request dumps",
-both, in one response.
-
-**Registered app-wide, not on the sources router**, deliberately. Starlette
-resolves exception handlers per application, so there is no narrower place
-to put it -- and a narrower place would be the wrong shape anyway: the next
-route that accepts a secret would have to remember to opt in, which is
-exactly the class of "safety property held by convention" this project has
-already been bitten by. Stripping `input` everywhere costs a debugging
-convenience on routes that carry nothing sensitive; keeping it costs a
-credential on the one route that does.
-
-`loc`, `msg`, `type`, and `ctx` all survive, so a client still learns which
-field was wrong and why. `ctx` carries the *constraint* (`{"min_length":
-1}`), never the value. In the envelope they ride as RFC 9457's `errors`
-extension member, and `detail` is a **fixed sentence** that interpolates
-nothing a client submitted -- the moment `detail` renders a value, this
-module's whole reason for existing is undone one field to the left.
-
-**The envelope is adopted by a route in one line.** `raise
-ProblemException(status_code=…, code=ProblemCode.…, detail="…")` names its
-own code; an ordinary `HTTPException` -- including the 404 and 405 Starlette
-raises from the router itself, before any handler runs -- is translated
-through `_CODE_FOR_STATUS`. A status with no member in that table is handed
-to FastAPI's own handler untranslated rather than given an invented code:
-ADR-0030 owns the vocabulary, and a handler that guessed would be the
-seventeen-code sprawl the two-pass split exists to prevent.
-
-**Adopting the *status* is not enough, and the cost is named rather than
-hidden.** A route raising a bare `HTTPException(503)` is delegated below and
-answers `{"detail": …}` at `application/json`, which is indistinguishable
-from the pre-envelope shape -- measured while the playback route was being
-built, where it presented as `KeyError: 'code'`. ADR-0030 ruling 4 decides
-that the answer is *not* to widen `_CODE_FOR_STATUS`; it is group H's "every
-route that can fail declares its problem responses" scan.
-
-**The schema half of the same fact lives here too, because FastAPI cannot
-state it at the declaration site.** `problem_responses_carry_their_media_type`
-is the counterpart to `problem_response`'s `media_type=PROBLEM_MEDIA_TYPE`
-below: the wire has sent `application/problem+json` since the envelope
-landed, and until issue #6 `/openapi.json` described **56** of those
-responses, across 35 operations, at `application/json`. The two are
-deliberately adjacent -- the media type is a contract with a generated client,
-and a contract written in two files that do not mention each other is the
-drift this module already exists to prevent.
-"""
+"""Exception handlers that hold across every route, present and future."""
 
 from collections.abc import Mapping, MutableMapping
+from math import ceil
 from typing import Any, Final
 
 from fastapi import HTTPException, Request
+from fastapi import status as http_status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -78,9 +13,9 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode, ProblemResponse
+from usher.ports.errors import PortAuthFailed, PortRateLimited
 
-# The key pydantic puts the offending value under. Named once so the
-# stripping below reads as what it is.
+# The key pydantic puts the offending value under.
 _ECHOED_INPUT = "input"
 
 # Never a submitted value, and never a count either -- "3 fields were
@@ -90,20 +25,8 @@ _VALIDATION_DETAIL: Final = (
     "The request did not pass validation. See the errors member for the fields that were rejected."
 )
 
-# **Three entries, and ADR-0030 ruling 4 is the rule that decides which:**
-# this table exists for statuses raised by machinery Usher does not control.
-# Starlette's router raises 404 for an unrouted path and 405 for a method a
-# route does not have; FastAPI raises 422 for a rejected request. Every
-# status Usher's own code raises names its code at the raise site through
-# `ProblemException`.
-#
-# So `400 invalid_cursor`, `409 not_playable` and `503 source_unavailable`
-# are all absent on purpose, and not because nobody got round to them. An
-# entry for one of them would be a member of a lookup nothing looks up --
-# and worse, a guess about intent from a status alone, so the next 503 that
-# is not "the source is down" would silently answer `source_unavailable`.
-# `tests/unit/test_api_problem_vocabulary.py` pins the key set with that
-# reason attached.
+# Three entries, and that is the rule that decides which: this table exists for
+# statuses raised by machinery Usher does not control.
 _CODE_FOR_STATUS: Final[Mapping[int, ProblemCode]] = {
     404: ProblemCode.NOT_FOUND,
     405: ProblemCode.METHOD_NOT_ALLOWED,
@@ -111,11 +34,6 @@ _CODE_FOR_STATUS: Final[Mapping[int, ProblemCode]] = {
 }
 
 # The `$ref` every problem response in the generated document points at.
-# Derived from the model rather than typed out, so the rename this project
-# has already argued about once -- `ProblemDetail` -> `ProblemResponse`, for
-# `test_api_dto.py`'s credential scan -- cannot leave the relabelling below
-# quietly matching nothing. `#/components/` is OpenAPI 3.1's own prefix and
-# is FastAPI's `REF_TEMPLATE`, not a Usher choice.
 _PROBLEM_SCHEMA_REF: Final = f"#/components/schemas/{ProblemResponse.__name__}"
 
 # The key FastAPI puts a `{"model": …}` declaration's schema under: the
@@ -178,36 +96,7 @@ def problem_response(
 
 
 def problem_responses_carry_their_media_type(document: dict[str, Any]) -> dict[str, Any]:
-    """Move every `ProblemResponse` in `/openapi.json` to
-    `application/problem+json`, in place.
-
-    **A post-pass rather than a declaration, because FastAPI has no
-    declaration for it.** `openapi/utils.py` renders an additional response's
-    model under ``route_response_media_type or "application/json"`` -- the
-    *route's* own media type, read off its `response_class` -- and there is no
-    per-response override: spelling `content` into the `responses=` dict adds
-    a second entry beside the generated one rather than replacing it, so a
-    route would declare its 404 twice, once truthfully. Read from FastAPI
-    0.140's source and measured against it.
-
-    So the choice is a post-pass or a hand-written `$ref` per response with no
-    model behind it, and the second is worse in the way that matters here: with
-    no `model=` on any route, `ProblemResponse` stops being a component at all
-    and every one of those refs dangles. This walk keeps the declarations
-    exactly as they are and corrects the one thing FastAPI gets wrong about
-    them.
-
-    **Keyed off the schema, never off the status.** A route added later, a
-    status nobody has minted a code for, a 4xx a future group invents -- all of
-    them are covered by declaring `ProblemResponse`, which is the same act that
-    adopts the envelope. Nothing here enumerates statuses, so nothing here goes
-    stale.
-
-    **Idempotent, and that is load-bearing rather than tidy.** `app.openapi()`
-    caches into `app.openapi_schema` and invalidates on a route change, so this
-    runs again over a document it has already corrected; a second pass finds no
-    `application/json` problem body and changes nothing.
-    """
+    """Move every `ProblemResponse` in `/openapi.json` to `application/problem+json`, in place."""
     for item in document.get("paths", {}).values():
         for operation in item.values():
             if not isinstance(operation, MutableMapping):
@@ -271,10 +160,9 @@ async def http_error_as_a_problem_document(request: Request, exc: Exception) -> 
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
     code = exc.code if isinstance(exc, ProblemException) else _CODE_FOR_STATUS.get(exc.status_code)
     if code is None:
-        # No member for this status, and inventing one here is precisely
-        # what ADR-0030 exists to stop. FastAPI's default shape, unchanged,
-        # until the vocabulary grows a name for it -- which is an amendment
-        # to a decision record, not an edit here.
+        # No member for this status, and inventing one here is exactly what the
+        # problem vocabulary exists to stop. FastAPI's default shape, unchanged,
+        # until the vocabulary grows a name for it.
         return await http_exception_handler(request, exc)
     return problem_response(
         request,
@@ -283,3 +171,65 @@ async def http_error_as_a_problem_document(request: Request, exc: Exception) -> 
         detail=str(exc.detail),
         headers=exc.headers,
     )
+
+
+#: How long a client is asked to wait after a transient upstream failure that
+#: gave no hint of its own. Short, because the failure it follows is an
+#: upstream that did not answer and the client is a screen with a hole in it --
+#: not a rate limit this service knows anything about.
+RETRY_AFTER_SECONDS: Final = 5
+
+#: Fixed sentences, never interpolated from the exception. A port error's
+#: message may carry a URL, a host or a provider path; these ride to a client
+#: that has no business with any of them.
+_RATE_LIMITED_DETAIL: Final = "an upstream asked this server to slow down"
+_AUTH_FAILED_DETAIL: Final = "an upstream refused this server's credentials"
+
+
+def _retry_after(exc: PortRateLimited) -> int:
+    """The upstream's own hint in whole seconds, or this module's default.
+
+    A fixed number would tell a client to come back before the window the
+    upstream named has closed, which is how a proxy earns a longer ban. RFC
+    9110's `delay-seconds` is an integer and a sub-second hint still has to
+    mean *wait*, so it rounds up rather than to zero.
+    """
+    hint = exc.retry_after
+    return RETRY_AFTER_SECONDS if hint is None else max(1, ceil(hint))
+
+
+async def port_error_as_a_problem_document(request: Request, exc: Exception) -> Response:
+    """`PortRateLimited` and `PortAuthFailed` as the envelope, on every route.
+
+    **Registered for those two exactly, and not for `UsherPortError`.** What a
+    route should answer for an unreachable *upstream* is the route's own
+    decision: `api/routers/rows.py` lets `PortUnavailable` become a 500, because
+    the thing it could not reach is Postgres and a 503 there would claim one
+    endpoint is degraded in a deployment where every one is. These two have no
+    second reading -- nothing here rate-limits or authenticates against its own
+    database -- so the answer is the same wherever they are raised.
+
+    **No new `ProblemCode`.** The vocabulary already gives `source_unavailable`
+    to a transient upstream at 503, and both of these are that: a 429 is the most
+    transient failure there is, and a credential the upstream refused is a 503
+    without a `Retry-After` -- asking again produces the same answer.
+    """
+    if isinstance(exc, PortRateLimited):
+        problem = ProblemException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            code=ProblemCode.SOURCE_UNAVAILABLE,
+            detail=_RATE_LIMITED_DETAIL,
+            headers={"Retry-After": str(_retry_after(exc))},
+        )
+    elif isinstance(exc, PortAuthFailed):
+        problem = ProblemException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            code=ProblemCode.SOURCE_UNAVAILABLE,
+            detail=_AUTH_FAILED_DETAIL,
+        )
+    else:
+        # Same obligation as the two handlers above: an error path must not
+        # raise a second exception. Unreachable while the registration matches
+        # the branches, which is what this arm exists to survive.
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    return await http_error_as_a_problem_document(request, problem)

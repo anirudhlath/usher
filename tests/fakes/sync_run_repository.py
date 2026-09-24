@@ -1,29 +1,4 @@
-"""In-memory `SyncRunRepository`.
-
-**Where this is more forgiving than Postgres, on purpose.** Four places, each
-of which the paired `tests/integration/test_sync_run_repository.py` run is
-what actually closes:
-
-- **No foreign key on `source_id`**, so a run here can name a source no row
-  carries. The real one raises `fk_sync_runs_source_id_sources` and
-  `PostgresSyncRunRepository` translates it.
-- **No CHECK constraints**, so a negative `items_seen` is stored happily --
-  and `SyncRun`'s own pydantic bounds fire on the way *in*, at a different
-  moment and with a different exception type than
-  `ck_sync_runs_items_seen_non_negative` does.
-- **A tie on `started_at` is decided here and arbitrary in Postgres.** Python's
-  ordering primitives all define what equal keys do -- `sorted` is stable, so
-  `list_for_source` keeps insertion order, and `max` returns the first maximal
-  element, which is what `latest_incomplete_run` would otherwise get. Postgres
-  promises nothing for equal sort keys. So this fake is *deterministic where
-  the real one is not*, and a defect that turns on a tie can pass here and be
-  a coin toss there. Both methods therefore break the tie on `id`
-  explicitly, in both implementations, which is what makes the two arms
-  comparable at all; the real one's index is `(source_id, kind, started_at
-  DESC)` and supplies only the leading key.
-- **No transaction and no autoflush**, so nothing here can leave a session
-  poisoned and nothing exercises the SAVEPOINT a caught conflict needs.
-"""
+"""In-memory `SyncRunRepository`."""
 
 import uuid
 
@@ -50,14 +25,8 @@ class FakeSyncRunRepository(SyncRunRepository):
         stored = self._runs.get(run.id)
         if stored is None:
             raise RepositoryNotFound(f"no existing sync run {run.id} to update")
-        # The two non-destructive rules, in Python because that is all this
-        # arm has and spelled to answer the same as the SQL. `completed` is
-        # absorbing -- an overtaken walk may not un-complete the walk that
-        # overtook it -- and `position` may advance and never regress. This
-        # arm cannot demonstrate *why* the rules belong in the statement:
-        # nothing here has a second transaction to lose an update to, so a
-        # read-modify-write is as sound as an atomic one, which is the whole
-        # of what `tests/integration/test_sync_run_repository.py` is for.
+        # The two non-destructive rules, in Python because that is all this arm has and
+        # spelled to answer the same as the SQL.
         if stored.status is SyncRunStatus.COMPLETED:
             return
         self._runs[run.id] = run.evolve(position=max(stored.position, run.position))

@@ -1,0 +1,19 @@
+# Opt-in: joins `usher` to the shared telemetry stack's network, the only route to
+# an OTel collector whose stack publishes on 127.0.0.1 alone. Apply it to every
+# compose command, most simply with `COMPOSE_FILE=compose.yml:compose.observability.yml`
+# in `.env` rather than `-f` on each. Then set `.env`'s existing
+# OTEL_EXPORTER_OTLP_ENDPOINT to the collector's name on that network.
+services:
+  usher:
+    networks:
+      # `default` must be named: once a service lists any network, compose stops
+      # adding the implicit one, and `usher` would lose `postgres`.
+      - default
+      - observability
+
+networks:
+  # Created by the telemetry stack (`docker network create observability`).
+  # External, so a `docker compose down` here cannot remove a network that stack
+  # is on.
+  observability:
+    external: true

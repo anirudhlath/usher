@@ -1,69 +1,4 @@
-"""`LLMRow` -- the one shelf whose *order* is the product, and the one whose
-cards can go missing between the write and the render.
-
-**The wrong implementations this file's cases rule out:**
-
-1. **Hydrates in the repository's order.** `TitleRepository.list_by_ids` is a
-   single `IN (...)` and promises no order at all -- physical order against
-   Postgres, insertion order against the fake -- so a `build` that returned
-   what the read returned produces a correctly-populated shelf in the wrong
-   sequence, on every generation, forever. For the other nine rows that is a
-   defect; here it is the *whole* defect, because a curated row **is** an
-   ordering and it is the only judgement the completion was bought for
-   (`CuratedRow`'s own docstring says a case must pin it). Every ordering case
-   below therefore reads the store's answer back through the port and asserts
-   it disagrees with the row's, rather than asserting membership -- `assert
-   title_id in {...}` is satisfied by returning the catalog in physical order.
-2. **Sorts.** `sorted(...)` by id, by name or by anything else. The fixture's
-   curated order is neither the store's order nor its reverse, which is what
-   makes a re-sort visible; the ids are UUIDv7, so store order, insertion order
-   and id order are one order here and one guard covers all three.
-3. **Raises on a title that vanished.** `curated_rows.card_title_ids` is a
-   `uuid[]` with no foreign key -- Postgres has no `FOREIGN KEY EACH ELEMENT`
-   -- so deleting a title leaves a dangling id in every curated row that
-   mentioned it, for up to one generation. A `KeyError` there is a 500 on a
-   home screen because one film was merged away overnight.
-4. **Truncates at the first missing title** rather than skipping it. The
-   fixture puts the vanished id in the *middle* for exactly that reason: a
-   shelf that stops at the gap is populated, plausible, and silently short.
-5. **Mints its own slug.** A constant `"curated"` collides in `RowCache`, whose
-   key is `(user_id, slug)`, so five shelves become one -- and the composer
-   breaks score ties on the slug, which is where the stored positional slug
-   makes the model's own ordering the tiebreak.
-6. **Invents a runtime** from `titles.runtime_minutes`. This row reads no watch
-   state, so the honest card is nought seconds into an unknown total
-   (ADR-0014); a runtime it did not read is a runtime it does not know.
-
-**And the wrong `CuratedProvider`s the second half of this file rules out:**
-
-7. **Reads the table rather than the household.** `list_for_user(ctx.user.id)`
-   is the whole of the scope, and the one predicate `PostgresCuratedRowRepository`
-   actually got wrong (`testing-discipline.md`, 2026-08-06). A provider passing
-   anything but `ctx.user.id` puts one household's shelves, headings and
-   reasons on another's screen, and every fixture that mints a fresh
-   `generation_id` per household hides it.
-8. **Proposes all of them.** `curation_validate` deliberately caps nothing --
-   *"every card in a hundredth row is still a title the household could
-   watch"* -- so the `0-5 rows` bound is PRD 06's, is a product bound, and
-   lives here. Without it a nine-row generation paints nine shelves.
-9. **Takes the wrong five.** `stored[-5:]`, or the five that sort first by
-   heading: the model's ordering is the only judgement the completion was
-   bought for, so the five that survive the cap are its first five.
-10. **Scores them apart.** A per-row decrement is a *second* spelling of the
-    model's ordering, and the composer already has the first: it breaks score
-    ties on `slug`, and a curated slug is positional and zero-padded to the
-    generation's width. Two spellings of one order eventually disagree, and
-    `domain/curation.py`'s `SLUG_PREFIX` comment already assumes there is
-    only one ("every curated row carries the same base score").
-    `BecauseYouWatchedProvider` needs `_SEED_STEP` for the *opposite* reason --
-    its slugs carry a seed id, so its tie alphabetises.
-11. **Generates.** A provider holding an `LLMClient` would put a paid network
-    round trip inside `GET /home`. Asserted structurally on the module's
-    imports and its own source, the way
-    `test_the_home_service_and_every_provider_hold_no_source_adapter` is --
-    `test_no_provider_reaches_a_port_the_context_does_not_carry` cannot see it,
-    because `usher.ports.llm` is under `usher.ports` and passes that scan.
-"""
+"""`LLMRow` -- the shelf whose *order* is the product and whose cards can go missing."""
 
 import ast
 import inspect
@@ -138,8 +73,10 @@ def _stored(
 
 
 async def _four(library: Library) -> list[uuid.UUID]:
-    """Four titles whose insertion order, id order and alphabetical order all
-    agree -- so a fixture that disagrees with one disagrees with all three."""
+    """Four titles whose insertion, id and alphabetical orders all agree.
+
+    So a fixture that disagrees with one disagrees with all three.
+    """
     return [
         await library.title("Aardvark"),
         await library.title("Blue Velvet"),
@@ -149,13 +86,11 @@ async def _four(library: Library) -> list[uuid.UUID]:
 
 
 async def test_the_shelf_is_hydrated_in_the_order_the_model_chose() -> None:
-    """**The load-bearing property, and the reason `CuratedRow` says a case
-    must pin it.**
+    """A curated row *is* an ordering, and nothing downstream may re-sort it.
 
-    A curated row *is* an ordering: it is the only judgement the completion was
-    bought for, so nothing downstream may re-sort it. The hydration path is
-    shared with nine providers that legitimately *do* sort, which is what makes
-    this worth its own case rather than an inherited assurance.
+    It is the only judgement the completion was bought for. The hydration path is
+    shared with nine providers that legitimately *do* sort, which is what makes this
+    worth its own case rather than an inherited assurance.
 
     Kills a `build` that answers in the repository's order and kills one that
     sorts -- by id, by name, or by reversing. The premises are read back
@@ -176,14 +111,12 @@ async def test_the_shelf_is_hydrated_in_the_order_the_model_chose() -> None:
 
 
 async def test_a_title_that_vanished_since_the_generation_loses_its_card_not_the_shelf() -> None:
-    """`card_title_ids` is a `uuid[]` and Postgres has no foreign key over
-    array elements, so a merged-away title leaves a dangling id here for up to
-    one generation -- `db/models/curation.py` names this case as the place that
-    handles it.
+    """`card_title_ids` is a `uuid[]` and Postgres has no foreign key over array elements.
 
-    Dropped, never raised: a `KeyError` here is a 500 on a home screen because
-    one film went away between two statements of one request. The heading and
-    the reason stay, and the survivors keep the model's order.
+    A merged-away title leaves a dangling id here for up to one generation. Dropped,
+    never raised: a `KeyError` here is a 500 on a home screen because one film went
+    away between two statements of one request. The heading and the reason stay, and
+    the survivors keep the model's order.
 
     The vanished id sits in the **middle**, which is what kills a hydration
     that stops at the first miss -- that shelf is populated, plausible and
@@ -202,23 +135,21 @@ async def test_a_title_that_vanished_since_the_generation_loses_its_card_not_the
 
 
 async def test_a_shelf_whose_every_title_vanished_builds_empty_rather_than_raising() -> None:
-    """**Empty is a legal value and a different state from absent** (ADR-0023),
-    which is the whole reason `BuiltRow` is constructible with no cards.
+    """Empty is a legal value and a different state from absent.
 
-    A curated row cannot be *stored* empty -- `CuratedRow.card_title_ids`
-    carries `min_length=1`, because a stored row with no cards is a validator
-    that kept nothing and would paint a heading with no shelf under it. It can
-    still *build* empty, on the day the catalog loses every title it named, and
-    the composer is what drops it: "this row built and had nothing to show" and
-    "this row was never proposed" are a quiet catalog and a dead provider, and
-    `HomeService` has to tell them apart.
+    Which is the whole reason `BuiltRow` is constructible with no cards. A curated row
+    cannot be *stored* empty -- `CuratedRow.card_title_ids` carries `min_length=1`,
+    because a stored row with no cards is a validator that kept nothing and would
+    paint a heading with no shelf under it. It can still *build* empty, on the day the
+    catalog loses every title it named, and the composer is what drops it: "this row
+    built and had nothing to show" and "this row was never proposed" are a quiet
+    catalog and a dead provider, and `HomeService` has to tell them apart.
 
-    `== row.empty()` rather than only `cards == ()`, and the weaker assertion is
-    *not* kept alongside it: `Row.empty()` constructs `cards=()`, so
-    `built.cards == ()` is implied by the line below it and cannot fail on its
-    own. The stronger form also pins that the losing shelf is the *same value*
-    as the empty one -- a `build` that quietly changed the heading or the TTL on
-    its way to nothing would pass the weaker assertion.
+    `== row.empty()` rather than only `cards == ()`: `Row.empty()` constructs
+    `cards=()`, so the weaker assertion is implied and cannot fail on its own. The
+    stronger form also pins that the losing shelf is the *same value* as the empty one
+    -- a `build` that quietly changed the heading or the TTL on its way to nothing
+    would pass the weaker one.
     """
     library = Library()
     await _four(library)
@@ -253,11 +184,10 @@ async def test_the_row_takes_its_slug_heading_and_reason_from_the_stored_record(
 
 
 async def test_a_row_the_model_gave_no_reason_for_has_no_subtitle_not_an_empty_one() -> None:
-    """**The first row in this project that can reach `reason=None`.**
+    """The first row in this project that can reach `reason=None`.
 
-    All nine M7 providers return a sentence, so `BuiltRow.reason`'s null arm is
-    a shape the wire promises and nothing reached -- `test_api_home.py` records
-    that and names `CuratedProvider` as the first plausible one.
+    Every other provider returns a sentence, so `BuiltRow.reason`'s null arm is a
+    shape the wire promises and nothing reached.
     `curation_validate` turns a blank reason into `None` rather than `""`,
     because an empty string is a subtitle a client renders as a blank line and
     cannot tell from a row that had something to say and said nothing.
@@ -274,23 +204,20 @@ async def test_a_row_the_model_gave_no_reason_for_has_no_subtitle_not_an_empty_o
 
 
 async def test_the_row_names_the_curated_family_and_carries_its_own_ttl() -> None:
-    """**`RowFamily.CURATED` exists because this row emits it**, which is the
-    argument `domain/rows.py` made for not pre-declaring it: a cap on a family
-    with no members is a branch nothing can reach.
+    """`RowFamily.CURATED` exists because this row emits it.
 
-    The TTL is five minutes and it is not "until regenerated", which is PRD
-    06's phrase for the *artefact*'s lifetime and is the wrong reading for a
-    cache. The stored row is immutable until a generation replaces it -- and a
-    replacement is the only event that matters, because `RowCache` holds the
-    whole built row under `(user_id, slug)` and a generation of the same width
-    re-uses the same slugs. Nothing invalidates that entry: the curation job
-    runs in `usher work`, a different process from the API that holds the cache,
-    and cross-process invalidation is M9's. So this number is not "how long the
-    row stays fresh", it is **how long a household keeps seeing last night's
-    shelf after tonight's replaced it** -- which `POST /admin/rows/regenerate`
-    turns into an operator staring at a screen. Five minutes matches
-    `RecentlyAddedProvider`'s, the other row whose content moves on an event
-    this process never observes.
+    A cap on a family with no members is a branch nothing can reach.
+
+    The TTL is five minutes, and PRD 06 says what it bounds: *"staleness, not the
+    artefact's lifetime."* The stored row is immutable until a generation replaces it --
+    and a replacement is the only event that matters, because `RowCache` holds the whole
+    built row under `(user_id, slug)` and a generation of the same width re-uses the
+    same slugs. Nothing invalidates that entry: the curation job runs in `usher work`, a
+    different process from the API that holds the cache. So this number is **how long a
+    household keeps seeing last night's shelf after tonight's replaced it** -- which
+    `POST /admin/rows/regenerate` turns into an operator staring at a screen. Five
+    minutes matches `RecentlyAddedProvider`'s, the other row whose content moves on an
+    event this process never observes.
     """
     library = Library()
     aardvark, _blue, _crimson, _dune = await _four(library)
@@ -303,14 +230,14 @@ async def test_the_row_names_the_curated_family_and_carries_its_own_ttl() -> Non
 
 
 async def test_a_copy_retracted_since_the_generation_is_marked_unowned_not_dropped() -> None:
-    """The pool is drawn from titles the household **owns**, so an unowned
-    curated card means a copy went away between the generation and the render.
+    """The pool is drawn from titles the household **owns**.
 
-    Kills a hydration that filters to owned. PRD 05 requires an unowned result
-    to be *"clearly marked"*, not hidden, and dropping it here would shorten the
-    shelf for a state the badge already describes -- while `RowCard.owned` is
-    exactly the field a client renders it from. Ordered, so the badge is
-    asserted per card rather than as a set.
+    An unowned curated card means a copy went away between the generation and the
+    render. Kills a hydration that filters to owned: PRD 05 requires an unowned result
+    to be *"clearly marked"*, not hidden, and dropping it here would shorten the shelf
+    for a state the badge already describes -- while `RowCard.owned` is exactly the
+    field a client renders it from. Ordered, so the badge is asserted per card rather
+    than as a set.
     """
     library = Library()
     owned = await library.title("A Film Still Owned")
@@ -325,9 +252,10 @@ async def test_a_copy_retracted_since_the_generation_is_marked_unowned_not_dropp
 
 
 async def test_the_row_claims_nothing_about_where_the_household_is_in_a_title() -> None:
-    """**ADR-0014 at the card.** This row reads no watch state -- the pool is
-    unwatched candidates -- so every card carries the honest zero-and-`None`:
-    nought seconds into a total this provider did not read.
+    """This row reads no watch state, so every card carries the honest zero-and-`None`.
+
+    The pool is unwatched candidates: nought seconds into a total this provider did
+    not read.
 
     Kills filling `runtime_seconds` from `titles.runtime_minutes`, which is the
     tempting spelling and is a different fact: `WatchState.runtime_seconds` is
@@ -356,12 +284,8 @@ async def test_the_row_claims_nothing_about_where_the_household_is_in_a_title() 
 
 # -- the provider ---------------------------------------------------------
 
-# Headings whose alphabetical order is neither the model's order nor its
-# reverse, indexed by position. A generation whose headings happened to sort
-# into the model's order would ratify a provider that sorted by heading, which
-# is wrong implementation 9 and the one a fixture is most likely to hide --
-# `curation_validate` puts no constraint on prose at all, so nothing upstream
-# makes these agree or disagree.
+# Headings whose alphabetical order is neither the model's order nor its reverse,
+# indexed by position.
 _HEADINGS = ("Dust", "Bells", "Glass", "Anvils", "Fog", "Cranes", "Embers")
 
 # The order the seeder writes positions in, which is deliberately not
@@ -405,8 +329,7 @@ async def _generation(
 
 
 async def test_the_provider_proposes_one_shelf_per_stored_record_over_the_stored_record() -> None:
-    """**A provider that is not registered is dead code, and a provider that
-    re-derives what it was handed is dead storage.**
+    """An unregistered provider is dead code, and one that re-derives is dead storage.
 
     Three shelves in, three proposals out, each an `LLMRow` over its own record
     -- asserted by *building* one rather than by an `isinstance`, so a provider
@@ -433,7 +356,7 @@ async def test_the_provider_proposes_one_shelf_per_stored_record_over_the_stored
 
 
 async def test_a_generation_longer_than_the_budget_is_cut_to_the_models_first_five() -> None:
-    """**The row cap is this provider's, and it is a product bound.**
+    """The row cap is this provider's, and it is a product bound.
 
     `curation_validate` deliberately caps nothing -- *"every card in a
     hundredth row is still a title the household could watch"*, so a cap is not
@@ -474,7 +397,7 @@ async def test_a_generation_longer_than_the_budget_is_cut_to_the_models_first_fi
 
 
 def test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for() -> None:
-    """**The one direction in which two numbers in two files fail silently.**
+    """The one direction in which two numbers in two files fail silently.
 
     `curation_prompt.MAX_ROWS` is a *request* -- "return between 3 and 5 rows"
     -- and `MAX_CURATED_ROWS` is a *bound* on what a household is shown. They
@@ -500,34 +423,7 @@ def test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for() -> No
     ("generated", "discarded"), [(3, 0), (MAX_CURATED_ROWS, 0), (MAX_CURATED_ROWS + 2, 2)]
 )
 async def test_the_shelves_the_budget_discards_are_counted(generated: int, discarded: int) -> None:
-    """**The one drop on this screen `ProviderReport` structurally cannot see.**
-
-    That report splits `proposed`/`selected`/`built` precisely because PRD 06's
-    "drops any that build empty" is otherwise invisible, so the composer's
-    family-cap drop of curated row #5 is legible as `proposed 5, selected 4`.
-    `ProviderReport.proposed` is `len(provider.propose(ctx))` -- the **post**-cut
-    number -- so a seven-shelf generation prints `curated 5` and the two
-    bought, validated and stored shelves this provider threw away are recorded
-    nowhere at all. Same argument as the one that split that dataclass into
-    three fields, applied to the third drop.
-
-    `test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for`
-    guards the *prompt* direction, which cannot happen without somebody editing
-    a constant. This is the direction that happens at runtime with no code
-    change: `curation_validate` deliberately caps nothing, so a model ignoring
-    `MIN_ROWS`/`MAX_ROWS` is stored at whatever length it returned.
-
-    **Three arms, and the two zeros are not padding.** An implementation that
-    records the count only when it is non-zero passes the third arm alone, and
-    a value absent from an export is indistinguishable from a value nobody
-    records -- which is the argument `usher.curation.dropped` already rests on
-    one layer down. `MAX_CURATED_ROWS` exactly is the boundary, so the middle
-    arm is where an off-by-one in the slice would show.
-
-    A local `TracerProvider` rather than the global one, so this case neither
-    reads nor leaves state that `tests/unit/test_services_home_sequential.py`
-    and `tests/unit/test_telemetry.py` also touch.
-    """
+    """The one drop on this screen `ProviderReport` structurally cannot see."""
     library = Library()
     await _generation(library, generated)
     assert len(await library.curated_rows.list_for_user(USER.id)) == generated, (
@@ -548,69 +444,14 @@ async def test_the_shelves_the_budget_discards_are_counted(generated: int, disca
 
 
 def test_this_provider_takes_no_constructor_argument() -> None:
-    """**The class docstring says so three lines above `__init__`, and for one
-    commit `__init__` said otherwise.**
-
-    It shipped as `def __init__(self, *, limit: int = MAX_CURATED_ROWS)` under a
-    docstring reading *"It has no constructor argument"* -- the restated-fact
-    failure `row_providers`' own docstring spends a paragraph retiring, in a new
-    module, at three lines' distance. Nothing ever passed it, so nothing
-    observed the contradiction.
-
-    Two facts, and they are different in kind. **No deployment fact** is the one
-    the docstring argues: a household with `USHER_LLM_ENABLED=false` and a
-    household whose first generation has not run get the same empty answer
-    through the same code path, and an `llm_enabled` flag here would make two
-    states two branches with one observable outcome. **No tuning dial** is the
-    second: eight siblings take a `limit`, and theirs are card counts and
-    candidate pool sizes while this one is PRD 06's `0-5 rows` product bound --
-    a per-instance override of which is a sixth curated shelf nobody decided to
-    paint.
-
-    Asserted on the signature because both defects are additions to it, and
-    because a behavioural assertion cannot see an argument nothing passes.
-    """
+    """The class docstring's promise, asserted against `__init__`'s own signature."""
     assert list(inspect.signature(CuratedProvider).parameters) == []
 
 
 async def test_every_curated_shelf_is_scored_alike_so_the_slug_tiebreak_is_the_models_order() -> (
     None
 ):
-    """**One score for the whole generation, and that is a decision.**
-
-    The composer ranks on `(-score, slug)`, and a curated slug is positional
-    and zero-padded to the width of its generation -- so the *tie* is the
-    model's own ordering, already, exactly once.
-    `domain/curation.py`'s `SLUG_PREFIX` comment says so ("every curated row
-    carries the same base score"), and this is the case that makes that
-    sentence true rather than aspirational. The citation read
-    `curation_validate.SLUG_PREFIX` for one commit -- the same commit that
-    moved the constant out of the validator, so the drift and its correction
-    shipped together.
-
-    Kills a per-row decrement. `BecauseYouWatchedProvider` has one
-    (`_SEED_STEP`) and needs it for the *opposite* reason: its slugs carry a
-    seed id, so its tie alphabetises "Because you watched Arrival" above
-    "Because you watched Zodiac" regardless of which was watched last night.
-    Here a decrement would be a second spelling of an order the slug already
-    carries, and two spellings of one order are two things that can disagree.
-
-    Seeded at ten shelves so the width is two and the padding is load-bearing:
-    unpadded, `curated-10` sorts between `curated-1` and `curated-2` and the
-    composer's tiebreak alphabetises the judgement the completion was bought
-    for. Five proposals is what makes a decrement observable at all -- a
-    one-row generation ties with itself.
-
-    **The ordering is `usher.services.home._ranking` itself, imported.** This
-    case re-spelled it as `key=lambda one: (-one.score, one.row.slug)` for one
-    commit, which is the exact objection the paragraph above raises against a
-    per-row decrement: two spellings of one order are two things that can
-    disagree, and a re-spelled composer here would pass against a composer that
-    had changed. `_ranking` takes a `_Candidate`, so the pairing this file has
-    to build is the one the composer builds -- which is also the shape
-    `_Candidate`'s own docstring argues for, a pairing carried rather than
-    reconstructed.
-    """
+    """One score for the whole generation, and that is a decision."""
     library = Library()
     for position in range(10):
         card = await library.title(f"A Card At {position}")
@@ -632,23 +473,17 @@ async def test_every_curated_shelf_is_scored_alike_so_the_slug_tiebreak_is_the_m
 
 
 async def test_a_household_with_no_generation_of_its_own_gets_no_curated_shelves() -> None:
-    """**The scope is `ctx.user.id`, and it is the one predicate this
-    subsystem's Postgres read actually got wrong** -- deleting the `user_id`
-    half of `list_for_user`'s `WHERE` passed all fourteen integration cases,
-    because every fixture minted a fresh `generation_id` per household and the
-    two predicates were then exactly as selective as one another.
+    """The scope is `ctx.user.id`, which is the predicate a household's privacy rests on.
 
     One layer up the same mistake is `list_for_user(<anything else>)`, and it
     is worse here than in the repository: what crosses is not a count but a
     *screen* -- another household's headings, their reasons, and a shelf of
     films this one has already watched, rendered as a personal recommendation.
 
-    The premise is read back through the port, so a fixture that silently
-    stopped storing the other household's generation fails on its own line
-    instead of making the assertion below vacuous. The empty-table arm is the
-    registry sweep's (`test_every_provider_returns_nothing_against_an_empty_
-    database`), which runs this provider against a `Library()` with nothing in
-    it at all.
+    The premise is read back through the port, so a fixture that silently stopped
+    storing the other household's generation fails on its own line instead of making
+    the assertion below vacuous. The empty-table arm is the registry sweep's, which
+    runs this provider against a `Library()` with nothing in it at all.
     """
     library = Library()
     somebody_else = new_id()
@@ -662,25 +497,21 @@ async def test_a_household_with_no_generation_of_its_own_gets_no_curated_shelves
 
 
 async def test_a_slug_is_read_not_remembered_so_a_width_change_renames_every_shelf() -> None:
-    """**A curated slug is unique within one generation and is not a stable
-    name across two**, because the padding width is a property of the
-    generation: ten rows mint `curated-01` and nine mint `curated-1`. The one
-    copy of that argument is `domain/curation.py`'s `slug` comment, beside the
-    `RowCache` key it is about.
+    """A curated slug is unique within one generation and is not stable across two.
 
-    This provider is allowed not to care, and this is the case that says so:
-    it reads the slug it was handed and compares it to nothing, so the whole
-    of the instability's reach is `RowCache`, where the old width's entry is
-    *orphaned* rather than overwritten -- a guaranteed miss, a rebuild, and a
-    dead entry its own TTL reclaims. It is harmless only because
-    `replace_for_user` is delete-then-insert; an upsert keyed on
-    `(user_id, slug)` would leave last night's nine beside tonight's ten and
-    paint nineteen shelves.
+    The padding width is a property of the generation: ten rows mint `curated-01` and
+    nine mint `curated-1`.
 
-    Kills a provider that keyed anything on the slug across generations -- a
-    memo, a dedupe, a "have I proposed this before". The premise asserts the
-    two nights share no slug at all, which is what makes the second read's
-    answer a statement about the second generation rather than a coincidence.
+    This provider is allowed not to care, and this is the case that says so: it reads
+    the slug it was handed and compares it to nothing, so the whole of the
+    instability's reach is `RowCache`, where the old width's entry is *orphaned*
+    rather than overwritten -- a guaranteed miss, a rebuild, and a dead entry its own
+    TTL reclaims. It is harmless only because `replace_for_user` is
+    delete-then-insert; an upsert keyed on `(user_id, slug)` would leave last night's
+    nine beside tonight's ten and paint nineteen shelves.
+
+    Kills a provider that keyed anything on the slug across generations -- a memo, a
+    dedupe, a "have I proposed this before".
     """
     library = Library()
     for position in range(10):
@@ -702,21 +533,18 @@ async def test_a_slug_is_read_not_remembered_so_a_width_change_renames_every_she
 
 
 async def test_every_proposed_shelf_carries_the_providers_own_slug_prefix() -> None:
-    """**The property that makes `usher.row.build.duration`'s `provider` label
-    provably about the rows it measures**, and the one member of the registry
-    for which the registry's own sweep cannot check it: that sweep seeds a rich
-    household with no watch states, and a curated generation is not something a
-    household *has* -- it is something a nightly job left, so `_populated()`
-    has none and `CuratedProvider` correctly proposes nothing there.
+    """What makes `usher.row.build.duration`'s `provider` label provably about these rows.
 
-    The prefix is `domain/curation.py`'s `SLUG_PREFIX`, imported rather than
-    restated, because `services.curation_validate` is the only thing that mints
-    a curated slug and a provider may not import it (it is `usher.services.*`
-    outside `usher.services.rows`, which
-    `test_no_provider_reaches_a_port_the_context_does_not_carry` forbids). Two
-    copies of that string would drift into a dashboard panel labelled `curated`
-    charting nothing, beside `shelf-3` rows nobody can find, with no error
-    anywhere.
+    The registry's own sweep cannot check it for this member: that sweep seeds a rich
+    household with no watch states, and a curated generation is not something a
+    household *has* -- it is something a nightly job left, so `_populated()` has none
+    and `CuratedProvider` correctly proposes nothing there.
+
+    The prefix is `domain/curation.py`'s `SLUG_PREFIX`, imported rather than restated,
+    because `services.curation_validate` is the only thing that mints a curated slug
+    and a provider may not import it. Two copies of that string would drift into a
+    dashboard panel labelled `curated` charting nothing, beside `shelf-3` rows nobody
+    can find, with no error anywhere.
     """
     library = Library()
     await _generation(library, 3)
@@ -733,30 +561,10 @@ async def test_every_proposed_shelf_carries_the_providers_own_slug_prefix() -> N
 
 
 def test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything() -> None:
-    """**PRD 06 states this as a constraint on the class** -- *"`LLMRow.build()`
-    only hydrates stored output. Generation happens in a background job --
-    never in the request path"* -- and "it did not raise" is also what a
-    provider that swallowed everything produces, so it is asserted
-    structurally.
+    """`LLMRow.build()` only hydrates stored output; generation happens in a job.
 
-    `test_no_provider_reaches_a_port_the_context_does_not_carry` does **not**
-    cover this: `usher.ports.llm` is under `usher.ports`, so an `LLMClient` on
-    this module passes that scan whole. Same shape as
-    `test_the_home_service_and_every_provider_hold_no_source_adapter` one file
-    over, and the same two misses it learned: the scan walks `ast.Import` as
-    well as `ast.ImportFrom`, because `import usher.ports.llm` is invisible to
-    an ImportFrom-only walk, and the name check reads the **source text**,
-    because a string annotation needs no import at all.
-
-    What would ship without it is a paid network round trip inside `GET /home`,
-    behind a 30 s cache, once per household per miss -- and it would work.
-
-    **The name scan runs over the module with its docstrings removed**, which
-    is not fastidiousness: this module's own prose argues at length about the
-    `LLMClient` it must not hold, so a raw `"LLMClient" not in source` is an
-    assertion that fails on the *explanation* and would be "fixed" by deleting
-    the sentence. `ast.unparse` of a docstring-stripped tree keeps every
-    identifier and every string annotation and drops only the prose.
+    "It did not raise" is also what a provider that swallowed everything produces, so
+    this is asserted structurally.
     """
     source = pathlib.Path(inspect.getfile(CuratedProvider)).read_text()
     tree = ast.parse(source)
@@ -837,27 +645,7 @@ async def _shelf(library: Library, position: int, cards: int) -> CuratedRow:
 
 
 async def test_a_family_of_shelves_hydrates_in_two_statements_rather_than_two_per_shelf() -> None:
-    """**One generation, one read of each kind -- the finding, as a count.**
-
-    `propose` returns up to five shelves from a *single* `list_for_user`, so
-    every card id in the family is already in hand before anything builds; and
-    `HomeService._MAX_PER_FAMILY` is 4, so four of them are built. Each
-    `BaseRow.build` issued its own `list_by_ids` and its own `owned_title_ids`
-    -- **eight round trips for the ~22 distinct ids one generation names**, all
-    of them inside one request, on a screen whose whole budget is 400 ms.
-
-    Measured before the shared read landed: `catalog_reads == 4` and
-    `ownership_reads == 4`.
-
-    **The count is not the whole assertion, and the other half is the one that
-    could go silently wrong.** A shared read hands every shelf the *union*, so
-    the failure mode a count cannot see is a shelf rendering the family's cards
-    instead of its own -- twenty-two cards on a four-card shelf, ordered by
-    whatever the union was read in, which is a populated row nobody would call
-    broken by looking at it. So each row's cards are asserted to be exactly its
-    own stored ids, in its own stored order, which is the property this whole
-    module exists for: the ordering *is* the artefact.
-    """
+    """One generation costs one read of each kind."""
     library, catalog, copies = await _counted()
     stored = [await _shelf(library, position, cards=4) for position in range(4)]
     by_position = sorted(stored, key=lambda one: one.position)
@@ -876,27 +664,7 @@ async def test_a_family_of_shelves_hydrates_in_two_statements_rather_than_two_pe
 
 
 async def test_a_family_of_shelves_reads_artwork_once_rather_than_once_per_shelf() -> None:
-    """**The third read of the same shape, and the third `4 -> 1`.**
-
-    M9's C6 gives every card an `artwork` id, read once per shelf off
-    `ImageRepository.primary_for_titles`. Four curated shelves come out of one
-    `list_for_user`, so without `LLMRow._artwork` the family would issue four
-    `primary_for_titles` for one set of ~22 ids -- and, with the catalog and
-    ownership reads beside it, take one generation from three statements to
-    twelve.
-
-    **This is the plant the plan predicted would survive the suite and be
-    caught by the gate.** Deleting `LLMRow._artwork` is behaviourally
-    invisible: every card gets the same id, in the same order, because
-    `_Family` holds the *union* and `hydrate` looks each id up. Only a count
-    can see it, which is what this case is. Recorded here rather than in a
-    commit message because "the suite holds it" and "the gate holds it" are
-    different claims and this is the case that makes the first one true.
-
-    The second half is the one a count alone cannot make: each shelf's cards
-    must carry *its own* titles' artwork. A family memo handed to the wrong
-    shelf is a populated row nobody would call broken by looking at it.
-    """
+    """The third read of the same shape, and the third `4 -> 1`."""
     library, _, _ = await _counted()
     stored = [await _shelf(library, position, cards=4) for position in range(4)]
     by_position = sorted(stored, key=lambda one: one.position)
@@ -920,26 +688,11 @@ async def test_a_family_of_shelves_reads_artwork_once_rather_than_once_per_shelf
 
 
 async def test_a_generation_whose_titles_have_no_artwork_is_still_read_only_once() -> None:
-    """**A memo that tests its answer for truth re-reads whenever the answer is
-    empty**, and empty is the *common* answer here: a catalog that has been
-    synced and never derived holds no `images` row at all, so the households
-    this memo saves the most for are exactly the ones a falsy check would
-    charge four times.
+    """A memo that tests its answer for truth re-reads whenever the answer is empty.
 
-    `_Family.owned` states the same rule one read over (`is None`, never
-    falsiness) because a household owning none of a generation reads back
-    `set()`. Artwork is worse, because `{}` is not an edge case there -- it is
-    the default state of the whole table before `usher derive` runs.
-
-    Found by planting `if not self._artwork.get(kind)` in place of the
-    membership test and watching it survive all 3,497 cases: every other
-    artwork case seeds a poster for every card, so the empty answer was a state
-    the suite had never been in. Nearest relative is *"has any fixture,
-    anywhere, ever set this to the other value?"*.
-
-    The premise is the second half: the same fixture with artwork seeded, which
-    must also read once. Without it `== 1` is satisfied by a family that never
-    consults the memo at all.
+    And empty is the *common* answer here: a catalog that has been synced and never
+    derived holds no `images` row at all, so the households this memo saves the most
+    for are exactly the ones a falsy check would charge four times.
     """
     library, _, _ = await _counted()
     for position in range(4):
@@ -955,18 +708,13 @@ async def test_a_generation_whose_titles_have_no_artwork_is_still_read_only_once
 
 
 async def test_the_family_memo_is_keyed_by_kind_and_not_by_whether_it_has_read() -> None:
-    """`_Family.artwork` answers the kind it is *asked* for, and the memo has
-    one slot per kind rather than one slot.
+    """`_Family.artwork` answers the kind it is *asked* for, one memo slot per kind.
 
-    **Unreachable through `LLMRow` today and pinned anyway**, which is the
-    distinction worth stating rather than hiding: `LLMRow.display_hint` is a
-    hard-coded `PORTRAIT`, so every shelf in a family asks the same question and
-    a single-slot memo is behaviourally identical -- measured, that mutation
-    survives all 3,497 cases through the provider. What makes it a gap rather
-    than an equivalent mutant is that `kind` is a **parameter**: the
-    collaborator that falsifies the promise is already injected, so the case
-    costs four lines, which is this repository's own test for when a survivor is
-    coverage (`.claude/rules/mutation-sweeps.md`).
+    **Unreachable through `LLMRow` today and pinned anyway**: `LLMRow.display_hint` is
+    a hard-coded `PORTRAIT`, so every shelf in a family asks the same question and a
+    single-slot memo is behaviourally identical. What makes it a gap rather than an
+    equivalent is that `kind` is a **parameter**: the collaborator that falsifies the
+    promise is already injected, so the case costs four lines.
 
     The damage a single slot does is the one artwork defect that renders
     perfectly: the day any curated shelf carries a `landscape` hint, every shelf
@@ -996,14 +744,13 @@ async def test_the_family_memo_is_keyed_by_kind_and_not_by_whether_it_has_read()
 
 
 async def test_a_shelf_the_composer_never_builds_costs_nothing() -> None:
-    """**At build time, not at propose time**, which is the difference between
-    a shared read and a read for rows nobody sees.
+    """The family read happens at build time, not at propose time.
 
-    `propose` is the cheap phase (`services/home.py`), and the composer builds
-    at most `_MAX_PER_FAMILY` of the five shelves this provider may return --
-    so a family read taken while proposing would hydrate a shelf the per-family
-    cap is about to discard, every time a generation produced five. That is the
-    one-phase design ADR-0023 rejected, arriving inside one provider.
+    That is the difference between a shared read and a read for rows nobody sees.
+    `propose` is the cheap phase (`services/home.py`), and the composer builds at most
+    `_MAX_PER_FAMILY` of the five shelves this provider may return -- so a family read
+    taken while proposing would hydrate a shelf the per-family cap is about to
+    discard, every time a generation produced five.
 
     The premise is the second half: the same fixture, one shelf built, and the
     reads appear. Without it `0 == 0` is also what a provider that never reads
@@ -1027,7 +774,7 @@ async def test_a_shelf_the_composer_never_builds_costs_nothing() -> None:
 
 
 async def test_a_shelf_served_from_the_row_cache_reads_nothing_at_all() -> None:
-    """**A cached row skips the shared read, because it skips `build`.**
+    """A cached row skips the shared read, because it skips `build`.
 
     `HomeService._build` returns `RowCache.get_row`'s hit *before* touching the
     row, so the family memo is never consulted -- it is per-`propose`, and a

@@ -96,6 +96,17 @@ planted), `BROKEN-MUTATION` (it did not compile, or it collected an error),
   in the repo invalidates it — disjoint file sets are not enough.** A sweep is
   sound only if the *only* difference between the green and red runs is the
   plant. Serialise.
+- **The interferer is as likely to be the supervisor as another author, and a
+  sweep outlives the session that started it.** *"That agent was stopped"* is a
+  claim about an agent, not about a process. Measured here: an integrator told
+  the run had ended read the plant in `release.yml` as a leftover and restored
+  it **mid-run**; the case asserting the original value then ran against the
+  original value and scored the mutation **SURVIVED** — a false survivor, the
+  direction that makes a reviewer delete a guard as untested. Tidying a tree you
+  believe is idle is an edit. `pgrep -af` the harness and stat the results file
+  before touching anything; a halted run has stopped writing, a live one has not.
+  The tell in the record is a `SURVIVED` carrying `failing_nodes: []` against a
+  guard that cannot miss — and a pass count from *before* the tree moved.
 - **Sweeping in a `cp -a` copy silently sweeps the *original*.** `cp -a` copies
   `.venv/bin/pytest`, whose shebang is an absolute path to the source venv's
   interpreter, so the copy imports the **unmutated** module and every mutation
@@ -103,6 +114,17 @@ planted), `BROKEN-MUTATION` (it did not compile, or it collected an error),
   module's `__file__` resolves under the copy before every run** — that check
   also survives `rsync`, a container mount or a worktree. An in-place sweep gets
   it for free.
+- **Predict against the assertion's input, not against its claim.** A case
+  asserting the same words as the mutated line is not a case that *reads the
+  mutated file*: where an artefact is a transcription of another — a PRD's SQL
+  fence and the dashboard JSON that deploys it — the guard usually grades the
+  source while the plant edits the copy. Grep the guard for the path being
+  mutated before writing KILLED.
+- **A restored file whose mtime moved reads as ` M`** in `git status
+  --porcelain` until the index is refreshed, so a harness halting on a non-empty
+  status can halt on a byte-identical tree. Compare content — `git diff
+  --quiet`, or `git hash-object` against `git rev-parse HEAD:<path>` — before
+  calling it a leak.
 - **The shell here is zsh and it does not word-split an unquoted `$VAR`.** A
   selection passed as one variable holding two paths reaches pytest as one bogus
   path: nothing runs, the exit code is non-zero, and a naive harness records a
@@ -124,8 +146,6 @@ gets**: a one-file sweep at 0.1–0.3 s a run is exactly where runs collide, and
 - **It can score a mutant SURVIVED**, the more dangerous direction: a false
   survivor is what makes a reviewer write "no case covers this" and then add a
   redundant test, weaken an assertion, or delete a guard as untested.
-- **It crosses file boundaries** — a plant in `src/` scored by a run executing a
-  *test* file's stale bytecode — so sweep `__pycache__` under **both** trees.
 - **`PYTHONDONTWRITEBYTECODE=1` alone closed it, measured 9/9** over four
   regimes. Sweeping `__pycache__` is a cheap brace, argued not measured: the env
   var stops new `.pyc` files appearing but CPython still *reads* a valid
@@ -158,6 +178,23 @@ every control against **each** gate step separately — `ruff check`, `ruff form
 - **When a plant dies on a linter it is `ruff check`, never `ruff format`** —
   `I` is a lint rule and the formatter leaves import order alone. Re-spell the
   plant without the lint error before writing anything down.
+
+## A `HUNG` is a verdict about the harness, not about the suite
+
+**Bound every run, and treat a hang as unmeasured rather than as a kill.** A
+mutation that makes a loop non-terminating produces no summary line, so a
+harness scoring on "did the run fail" waits forever and one scoring on exit
+code records whatever the timeout did. Set the ceiling from the *measured green
+baseline* (8x it), never a fixed number: a fixed one either stalls the sweep or
+invents a hang for a slow selection.
+
+**Converting `HUNG` into `KILLED` takes a deadline at every driver, and the
+call site is rarely the only one.** J5 bounded `job.run()` and still hung,
+because 35 cases reach the same code through `Scheduler.tick()`, which awaits
+the job with no deadline of its own. Grep for every path into the mutated
+function before concluding the deadline is in place — **and if production has
+no bound either, that is a finding about the component, not about the tests**
+(#83).
 
 ## Reading a survivor before writing it up as a gap
 

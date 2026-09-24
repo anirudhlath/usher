@@ -1,11 +1,4 @@
-"""What a search and a "more like this" hand back, once ranked.
-
-`domain/` imports nothing -- not `ports/`, which imports *it*. So these carry
-no `SearchMode`, no `SearchHit` and no engine vocabulary: they are what a row
-renders and what a CLI prints. The service-side envelope that *does* carry a
-`SearchMode` lives in `services/search.py`, beside the service, exactly as
-`TitleDetail` lives beside `TitleReadService`.
-"""
+"""What a search and a "more like this" hand back, once ranked."""
 
 import uuid
 
@@ -40,8 +33,8 @@ class SimilarTitle(DomainModel):
 
     `score` is `SimilarityService`'s blend at the instant the batch ran, not a
     live computation -- which is the whole point of `title_neighbors` (PRD 05:
-    "item vectors are static, so this is a cheap batch artifact that makes
-    'more like this' instant and engine-independent").
+    neighbours are precomputed offline, "so 'more like this' is instant and
+    engine-independent").
     """
 
     title_id: uuid.UUID

@@ -1,28 +1,4 @@
-"""`scripts/enqueue_tier_enrichment.py`'s three properties, over the shipped fakes.
-
-**The import mechanism is decided here rather than discovered.** Nothing else
-in `tests/` imports from `scripts/`, `scripts/` has no `__init__.py`, and
-`[tool.mypy] files = ["src", "tests"]` with `mypy_path = "src"` — so **mypy
-does not check `scripts/` at all**, which is exactly the status
-`scripts/measure_rows.py` has held since M7. Naming it is the point: the
-script gets `ruff` (whose config has no such narrowing) and this file, and it
-gets no type checking, so anything this file does not assert is unchecked by
-everything.
-
-The module is therefore loaded by path with
-`importlib.util.spec_from_file_location`. The alternatives were weighed and
-both are worse: adding `scripts/__init__.py` makes an operations directory an
-importable package that `mypy` would then have to be told about explicitly,
-and moving the walk into `src/usher/` invents the `usher enrich --backfill`
-subcommand M9 group S deliberately does not build.
-
-**Every name this file reaches for is bound once, at module scope, through a
-typed local.** An attribute read off a `ModuleType` is `Any` to mypy, so a
-rename in the script would otherwise reach the assertions as an
-`AttributeError` inside a case rather than as a load failure — and the arms
-below would then all fail for the same uninformative reason whatever went
-wrong.
-"""
+"""`scripts/enqueue_tier_enrichment.py`'s three properties, over the shipped fakes."""
 
 import importlib.util
 import uuid
@@ -145,8 +121,7 @@ def _enqueued_keys(queue: FakeJobQueue) -> set[str]:
 
 
 async def test_the_tier_is_movies_with_a_hundred_votes_and_a_tmdb_id() -> None:
-    """The predicate, one arm per conjunct, and the NULL `tmdb_id` arm named
-    for its reason.
+    """The predicate, one arm per conjunct, and the NULL `tmdb_id` arm named for its reason.
 
     `EnrichService._ref_for` raises `PortDataMalformed` for a title carrying
     no id the provider understands, and `PortDataMalformed`'s contract in

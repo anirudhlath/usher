@@ -1,43 +1,7 @@
 # scripts/capture_tmdb_fixture.py
-"""Re-derive a scrubbed TMDb *shape* from the live API. NOT a test.
+"""Re-derive a scrubbed TMDb *shape* from the live API.
 
-`tests/fixtures/tmdb/*.json` are shape-recorded and value-synthetic: the
-field names, nesting and types were transcribed from TMDb's published API
-reference, and every human-readable value is invented. This script is how an
-operator checks whether the real API's shape has drifted from what the mapper
-expects.
-
-Its output is deliberately not committed, and deliberately not a payload: a
-real response *is* TMDb metadata, which TMDb's terms forbid redistributing
-and which CLAUDE.md's "ship importers, never data" already forbids
-committing. What it prints instead keeps every key and replaces every leaf
-value with its *type name*, so a diff against a committed fixture is a diff
-of shape.
-
-That matters more here than it did for Emby, and for a reason worth stating:
-the Emby fixtures were transcribed from real captures, while these were
-transcribed from **documentation**. Nobody has run these requests. Every
-field name in `usher.adapters.tmdb.mapping`'s divergence table is a reading
-of TMDb's reference pages, not an observation — so a shape diff from this
-script is the first evidence any of it is right.
-
-    export USHER_TMDB_API_KEY=...
-    uv run python scripts/capture_tmdb_fixture.py --kind movie  --id <a real TMDb movie id>
-    uv run python scripts/capture_tmdb_fixture.py --kind series --id <a real TMDb series id>
-    uv run python scripts/capture_tmdb_fixture.py --kind season --id <that series id> --season 1
-    uv run python scripts/capture_tmdb_fixture.py --kind search \
-        --query <a real title> --year <its year>
-    uv run python scripts/capture_tmdb_fixture.py --kind changes
-
-`--id` and `--query` have no defaults, deliberately. They name a *live*
-entity, so a default would be a real third-party identifier committed to
-this repository -- which `tests/fixtures/README.md` forbids and
-`tests/unit/test_no_third_party_data.py` enforces. It would also be a trap:
-a default silently captures the shape of whichever entity that id happens to
-be, in a script whose entire output is read as evidence.
-
-One request per run (a series detail plus nothing -- seasons are asked for
-separately), because a shape diff needs one entity, not a catalog.
+NOT a test.
 """
 
 import argparse

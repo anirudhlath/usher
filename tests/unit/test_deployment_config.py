@@ -1,39 +1,4 @@
-"""`.env.example`, `compose.yml` and `Settings`, checked against each other.
-
-These three files are one deployment surface and nothing before M5 held them
-together. Two defects lived in the gap, both invisible to a suite that passes
-2,098 times, because both only appear *outside* a dev machine:
-
-1. **`.env` has two readers with different vocabularies.** Docker Compose
-   substitutes `${...}` out of it into `compose.yml`; pydantic-settings reads
-   the same file as a settings source with `extra="forbid"`. So a compose
-   variable is an *extra* input to `Settings`, and `USHER_HOST_PORT` -- the
-   host-side publish port, shipped in `.env.example` since M1 -- made
-   `cp .env.example .env`, the README's own first step, fail every entry
-   point with `ValidationError: usher_host_port`. `usher.config` now reserves
-   `USHER_COMPOSE_` for compose's half of the file, and the two cases below
-   named `..._is_a_setting_or_compose_reserved` are what fails if a future
-   compose variable is added outside that namespace.
-
-2. **A documented setting that never reaches the container is dead config
-   that looks like a control.** `compose.yml` used to forward five of the
-   thirty documented keys through `environment:`, so
-   `USHER_WORKER_ENABLED=false` in `.env` -- the only place the README points
-   an operator at -- was silently ignored, leaving `worker: true` on a server
-   that an operator had just told to stop working. It is `env_file:` now, and
-   the tests below pin both halves: the file is handed to the container
-   whole, and `environment:` overrides only what the compose topology
-   genuinely owns.
-
-Every case here deliberately opts out of `tests/conftest.py`'s
-`clean_environment` fixture for the *file* half of its isolation, by passing
-`_env_file=` explicitly. That fixture neutralises `Settings.model_config`'s
-`env_file` precisely so a developer's own `.env` cannot fail the suite -- and
-it is why the suite stayed green against a `.env.example` that broke every
-entry point. A case written without the explicit `_env_file` would prove
-nothing at all. The `USHER_*`/`OTEL_*` variables the same fixture strips from
-`os.environ` are still stripped, so each file below is the only source.
-"""
+"""`.env.example`, `compose.yml` and `Settings`, checked against each other."""
 
 import re
 from pathlib import Path
@@ -48,6 +13,9 @@ from usher.config import COMPOSE_ONLY_PREFIX, Settings
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_EXAMPLE = _REPO_ROOT / ".env.example"
 _COMPOSE = _REPO_ROOT / "compose.yml"
+_COMPOSE_OBSERVABILITY = _REPO_ROOT / "compose.observability.yml"
+_README = _REPO_ROOT / "README.md"
+_PRD_08 = _REPO_ROOT / "docs" / "prd" / "08-operations.md"
 
 # Obviously synthetic, and long enough for `secret_key`'s `min_length=32`.
 # `.env.example` ships the key blank, so every case that builds a real
@@ -56,65 +24,9 @@ _COMPOSE = _REPO_ROOT / "compose.yml"
 _SECRET_KEY = "0" * 64
 _DATABASE_URL = "postgresql+asyncpg://usher:usher@localhost:5432/usher"
 
-# The only variables `compose.yml` may set through `environment:`, each
-# because the compose *topology* owns it rather than the operator:
-#
-#   USHER_DATABASE_URL  the service's hostname on the compose network.
-#                       `.env`'s `localhost` is right for a dev shell and
-#                       wrong inside the container.
-#   USHER_HOST          bind-all, or the published port reaches nothing.
-#   USHER_PORT          8000 -- what `ports:`, the Dockerfile's `EXPOSE` and
-#                       usher's own healthcheck all assume.
-#   USHER_SECRET_KEY    passed as `${...:?}` so a missing key fails at
-#                       `docker compose up` with a sentence, rather than as a
-#                       container that starts and crashes on validation.
-#
-# **The fifth entry arrived in M9 and this list grew deliberately rather than
-# silently**, which is the whole reason `test_compose_overrides_only_what_the_
-# topology_owns` is written to fail when it changes:
-#
-#   USHER_IMAGE_CACHE_DIR  the container side of `volumes:`'s
-#                          `./data/images:/data/images`. A bind-mount path is
-#                          a topology fact in exactly the way the four above
-#                          are -- `.env`'s `data/images` is right for a dev
-#                          shell and inside a container whose WORKDIR is
-#                          `/app` it would put the image cache in the image's
-#                          own writable layer, where it survives no rebuild
-#                          and appears in no `du` against the mount. The other
-#                          three `USHER_IMAGE_*` settings (the byte ceiling,
-#                          the fetch timeout and the CDN base URL) are the
-#                          operator's and are deliberately not here.
-#
-# **The sixth arrived on 2026-08-26, and it arrived as a production incident
-# rather than as a design**, which is the part worth keeping:
-#
-#   USHER_BULK_DATA_DIR    the container side of `volumes:`'s
-#                          `./data/bulk:/data/bulk`, and the same fact as the
-#                          fifth -- except that this one was *missing* for
-#                          five milestones. `.env`'s `data/bulk` resolves
-#                          against WORKDIR `/app`, and `/app` is root-owned
-#                          while the process is uid 1000, so `bootstrap` did
-#                          not merely cache in the wrong place: it died on
-#                          `mkdir` with `PermissionError(13)` before reading a
-#                          byte. Nothing caught it because every bootstrap
-#                          this project has ever run was `uv run usher
-#                          bootstrap` from a dev shell, where the relative
-#                          path is correct -- the defect needed
-#                          `USHER_WORKER_ENABLED=true` *and* a queued
-#                          `bootstrap` job to appear at all. The other two
-#                          `USHER_BULK_*` settings (the batch size and the
-#                          user agent) are the operator's and are not here.
-#
-# **The two entries are the same shape and only one of them was ever
-# checked**, which is the finding this list should carry: `test_every_
-# variable_compose_substitutes_is_a_setting_or_compose_reserved` scans
-# `compose.yml` for `${...}`, and neither of these is written that way, so
-# nothing here relates a *relative* default in `.env.example` to a WORKDIR the
-# container actually has. `test_a_relative_path_setting_is_overridden_for_the_
-# container` below is that check, derived from the settings rather than from a
-# list, so a seventh path setting is a red rather than a silent repeat.
-#
-# Anything else an operator sets in `.env` must reach the container unaltered.
+# The only variables `compose.yml` may set through `environment:`, each because the
+# compose *topology* owns it rather than the operator: USHER_DATABASE_URL the service's
+# hostname on the compose network.
 _TOPOLOGY_OWNED = frozenset(
     {
         "USHER_DATABASE_URL",
@@ -135,8 +47,10 @@ def _env_file(directory: Path, body: str) -> Path:
 
 
 def _env_example_entries() -> dict[str, str]:
-    """`.env.example` as compose's own dotenv parser reads it: `KEY=value`
-    lines, full-line `#` comments skipped, the value taken verbatim."""
+    """`.env.example` as compose's own dotenv parser reads it.
+
+    `KEY=value` lines, full-line `#` comments skipped, the value taken verbatim.
+    """
     entries: dict[str, str] = {}
     for line in _ENV_EXAMPLE.read_text().splitlines():
         stripped = line.strip()
@@ -162,9 +76,9 @@ def _settings_variables() -> set[str]:
     return names
 
 
-def _compose_document() -> dict[str, Any]:
-    loaded = yaml.safe_load(_COMPOSE.read_text())
-    assert isinstance(loaded, dict), "compose.yml did not parse as a mapping"
+def _compose_document(path: Path = _COMPOSE) -> dict[str, Any]:
+    loaded = yaml.safe_load(path.read_text())
+    assert isinstance(loaded, dict), f"{path.name} did not parse as a mapping"
     return loaded
 
 
@@ -176,17 +90,21 @@ def _usher_service() -> dict[str, Any]:
 
 
 def _compose_env_files() -> list[str]:
-    """The paths under the `usher` service's `env_file:`, in either the short
-    form (a bare string) or the long one (`{path, required}`)."""
+    """The paths under the `usher` service's `env_file:`.
+
+    in either the short form (a bare string) or the long one (`{path, required}`).
+    """
     declared = _usher_service().get("env_file", [])
     entries = [declared] if isinstance(declared, str) else declared
     return [entry if isinstance(entry, str) else str(entry["path"]) for entry in entries]
 
 
 def _compose_substitutions() -> set[str]:
-    """Every `${VAR}` in the whole file, not just the ones under a key this
-    test knows to look at -- a compose variable added to a `volumes:` or an
-    `image:` line is the same hazard as one added to `ports:`."""
+    """Every `${VAR}` in the whole file, not just the ones under a key this test knows to look at.
+
+    a compose variable added to a `volumes:` or an `image:` line is the same hazard as
+    one added to `ports:`.
+    """
     return set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", _COMPOSE.read_text()))
 
 
@@ -194,8 +112,9 @@ def _compose_substitutions() -> set[str]:
 
 
 def test_the_readmes_first_step_produces_working_settings(tmp_path: Path) -> None:
-    """`cp .env.example .env` and fill in the secret key -- verbatim from
-    `README.md` -- and every entry point must still start.
+    """`cp .env.example .env` and fill in the secret key.
+
+    verbatim from `README.md` -- and every entry point must still start.
 
     Before `USHER_COMPOSE_` existed this raised
     `ValidationError: usher_host_port -- Extra inputs are not permitted`, out
@@ -232,8 +151,9 @@ def test_a_compose_only_variable_does_not_break_the_application(tmp_path: Path) 
 
 
 def test_a_misspelled_setting_is_still_refused(tmp_path: Path) -> None:
-    """The other half, and the reason the fix is a reserved namespace rather
-    than `extra="ignore"`.
+    """The other half.
+
+    and the reason the fix is a reserved namespace rather than `extra="ignore"`.
 
     `extra="forbid"` is what turns `USHER_LOG_LEVL=DEBUG` into a startup
     failure instead of a line in `.env` that silently does nothing -- the
@@ -254,8 +174,10 @@ def test_a_misspelled_setting_is_still_refused(tmp_path: Path) -> None:
 
 
 def test_no_setting_hides_inside_the_reserved_namespace() -> None:
-    """A field named `compose_*` would be dropped before validation and would
-    then read as a setting that validates and influences nothing."""
+    """A field named `compose_*` would be dropped before validation and would then read as a.
+
+    setting that validates and influences nothing.
+    """
     offenders = sorted(
         name for name in _settings_variables() if name.startswith(COMPOSE_ONLY_PREFIX)
     )
@@ -266,8 +188,10 @@ def test_no_setting_hides_inside_the_reserved_namespace() -> None:
 
 
 def test_every_usher_variable_in_env_example_is_a_setting_or_compose_reserved() -> None:
-    """The guard that fails if a future compose variable is added to
-    `.env.example` in the application's own namespace."""
+    """The guard that fails if a future compose variable is added to `.env.example` in the.
+
+    application's own namespace.
+    """
     known = _settings_variables()
     offenders = sorted(
         key
@@ -284,8 +208,8 @@ def test_every_usher_variable_in_env_example_is_a_setting_or_compose_reserved() 
 def test_every_variable_compose_substitutes_is_a_setting_or_compose_reserved() -> None:
     """The same guard from `compose.yml`'s side, over the whole file.
 
-    `.env.example` and `compose.yml` are edited independently -- the M1
-    commit that introduced `USHER_HOST_PORT` touched both -- so checking one
+    `.env.example` and `compose.yml` are edited independently -- the commit
+    that introduced `USHER_HOST_PORT` touched both -- so checking one
     of them would leave the other free to reintroduce the failure.
     """
     known = _settings_variables()
@@ -359,14 +283,15 @@ def test_the_container_is_given_the_env_file_whole() -> None:
     time and compose substitutes each from `.env`; `env_file:` hands the file
     to the container. The first is why 24 of 30 documented settings were
     unreachable -- every one of them needed a line somebody had to remember
-    to write, and twelve of the missing were M5's own.
+    to write.
     """
     assert _compose_env_files() == [".env"]
 
 
 def test_compose_overrides_only_what_the_topology_owns() -> None:
-    """`environment:` wins over `env_file:`, so anything left in it is a
-    setting an operator cannot change from `.env`.
+    """`environment:` wins over `env_file:`.
+
+    so anything left in it is a setting an operator cannot change from `.env`.
 
     Keeping that list to the six the compose topology genuinely owns is what
     stops `environment:` quietly becoming the dead-config list again -- each
@@ -377,30 +302,22 @@ def test_compose_overrides_only_what_the_topology_owns() -> None:
     assert declared == set(_TOPOLOGY_OWNED)
 
 
-# A relative `Path` default that the image ships at the same place under
-# `/app`, so the container agrees with a dev shell and no override is wanted.
-# `console_dist_dir` is the only one: the Dockerfile copies the console
-# stage's output to `/app/web/dist`, and `config.py` names `image_cache_dir`
-# as its counterexample in the same comment.
-#
-# A *writable* directory can never be on this list -- `/app` is root-owned and
-# the process is uid 1000, so anything the container has to create under it
-# fails with `PermissionError(13)`, which is what `bulk_data_dir` did in
-# production on 2026-08-26.
+# A relative `Path` default that the image ships at the same place under `/app`, so the
+# container agrees with a dev shell and no override is wanted.
 _SHIPPED_IN_THE_IMAGE = frozenset({"console_dist_dir"})
 
 
 def test_a_relative_path_setting_is_overridden_for_the_container() -> None:
-    """A relative default is right for a dev shell and resolves against the
-    container's `WORKDIR` of `/app` -- so every one of them is either
-    overridden here or shipped there, and a new one is a decision rather than
-    a silent repeat.
+    """A relative default is right for a dev shell and resolves against the container's.
+
+    `WORKDIR` of `/app` -- so every one of them is either overridden here or shipped
+    there, and a new one is a decision rather than a silent repeat.
 
     This is the check that did not exist when `bulk_data_dir` was added.
-    `image_cache_dir` got its override in M9 and `bulk_data_dir` did not, and
-    nothing related the two: the compose scan reads `${...}` substitutions and
-    neither is written that way, so a second relative writable path was
-    invisible for five milestones. It surfaced as `PermissionError(13)` from
+    `image_cache_dir` got its override and `bulk_data_dir` did not, and nothing
+    related the two: the compose scan reads `${...}` substitutions and neither
+    is written that way, so a second relative writable path was invisible. It
+    surfaced as `PermissionError(13)` from
     `adapters/bulk/download.py` on the first bootstrap the *container* ever
     ran -- every earlier one was a dev shell, where the path is correct.
 
@@ -441,7 +358,7 @@ def test_the_worker_switch_reaches_the_container() -> None:
     so an operator following the README leaves `worker: true` and then starts
     `usher work` in a second container: the double-worker state where
     `JobWorker.startup()` requeued everything `running` and each stole the
-    other's live claims. *(M9's W1 closed that consequence -- recovery is a
+    other's live claims. *(That consequence is closed -- recovery is a
     lease now -- and the setting still matters, because two workers spend
     `USHER_JOB_CONCURRENCY` and `USHER_TMDB_REQUESTS_PER_SECOND` twice against
     limits that are per process.)*
@@ -449,3 +366,152 @@ def test_the_worker_switch_reaches_the_container() -> None:
     assert "USHER_WORKER_ENABLED" not in _usher_service().get("environment", {})
     assert "USHER_WORKER_ENABLED" in _env_example_entries()
     assert _compose_env_files() == [".env"]
+
+
+# -- the quickstart on a host that is not this one --------------------------
+
+
+def _usher_networks(document: dict[str, Any]) -> set[str]:
+    """The networks the `usher` service names, in either compose spelling.
+
+    A list (`- default`) or a mapping (`default: {aliases: ...}`); absent means
+    compose's implicit `default` alone.
+    """
+    declared = document["services"]["usher"].get("networks")
+    if declared is None:
+        return {"default"}
+    return set(declared)
+
+
+def test_the_default_stack_joins_no_external_network() -> None:
+    """A stranger's `docker compose up` must not need a network somebody else created.
+
+    `external: true` makes compose refuse to start when the network is absent:
+    `network observability declared as external, but could not be found`, at
+    the README's first step, on every host but the one that has the telemetry
+    stack. Joining it is the opt-in in `compose.observability.yml`.
+    """
+    document = _compose_document()
+    declared = document.get("networks") or {}
+    external = sorted(
+        name for name, spec in declared.items() if isinstance(spec, dict) and spec.get("external")
+    )
+    assert external == [], (
+        f"compose.yml declares {external} external, so `docker compose up` fails on any host "
+        "that has not created them; move the join into an override file"
+    )
+    undeclared = sorted(_usher_networks(document) - {"default"} - set(declared))
+    assert undeclared == [], (
+        f"the usher service joins {undeclared}, which compose.yml never declares"
+    )
+
+
+def test_the_observability_override_still_joins_the_telemetry_network() -> None:
+    """This host's route to the OTel collector survives, behind a file named for it.
+
+    The collector's stack publishes on 127.0.0.1 alone, so the shared docker
+    network is the container's only route to 4317. `default` has to be named
+    beside it: once a service lists any network, compose stops adding the
+    implicit one, and `usher` would lose `postgres`.
+    """
+    assert _COMPOSE_OBSERVABILITY.is_file(), (
+        "compose.observability.yml is the opt-in and is missing"
+    )
+    override = _compose_document(_COMPOSE_OBSERVABILITY)
+
+    assert _usher_networks(override) == {"default", "observability"}
+    network = (override.get("networks") or {}).get("observability")
+    assert isinstance(network, dict), "the override joins `observability` without declaring it"
+    assert network.get("external") is True, (
+        "`observability` must stay external: a `docker compose down` here must not remove "
+        "a network the telemetry stack owns"
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "COMPOSE_PROJECT_NAME=usher-scratch",
+        "COMPOSE_FILE=compose.yml:compose.observability.yml",
+    ],
+)
+def test_compose_s_own_variables_in_env_do_not_break_the_application(
+    tmp_path: Path, line: str
+) -> None:
+    """The README puts compose's own `COMPOSE_*` variables in `.env`, which `Settings` reads too.
+
+    `extra="forbid"` refuses an unknown key from the dotenv source whatever its
+    prefix (`RANDOM_THING=x` is refused), so these are accepted only because
+    `_is_compose_only` drops the stripped `compose_` spelling as well as
+    `usher_compose_`. That branch is what the README's second-stack and
+    observability instructions stand on.
+    """
+    body = f"USHER_DATABASE_URL={_DATABASE_URL}\nUSHER_SECRET_KEY={_SECRET_KEY}\n{line}\n"
+
+    settings = Settings(_env_file=str(_env_file(tmp_path, body)))
+
+    assert settings.port == 8000
+
+
+def test_an_unrelated_unprefixed_key_in_env_is_still_refused(tmp_path: Path) -> None:
+    """The other half: the `COMPOSE_` allowance must not become `extra="ignore"`."""
+    body = f"USHER_DATABASE_URL={_DATABASE_URL}\nUSHER_SECRET_KEY={_SECRET_KEY}\nRANDOM_THING=x\n"
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=str(_env_file(tmp_path, body)))
+
+    assert "random_thing" in str(caught.value)
+
+
+def _topology_overrides() -> set[str]:
+    """The `environment:` keys whose value is compose's rather than the operator's.
+
+    `USHER_SECRET_KEY` sits in `environment:` too, but as `${USHER_SECRET_KEY:?...}`:
+    the operator's own `.env` value, passed through a guard. Every other key there
+    replaces what `.env` says.
+    """
+    environment = _usher_service()["environment"]
+    return {
+        key
+        for key, value in environment.items()
+        if not re.fullmatch(rf"\$\{{{re.escape(key)}(?::?[-?].*)?\}}", str(value))
+    }
+
+
+def _section(text: str, start: str, end: str) -> str:
+    begin = text.index(start)
+    return text[begin : text.index(end, begin + len(start))]
+
+
+_NUMBER_WORDS = {"four": 4, "five": 5, "six": 6, "seven": 7}
+
+
+def test_the_readme_names_every_key_compose_overrides() -> None:
+    """The count and the list in the README's `env_file:` paragraph, against compose.yml.
+
+    It said "the five exceptions", listed `USHER_SECRET_KEY` (which carries the
+    operator's value) and omitted `USHER_BULK_DATA_DIR` (which does not).
+    """
+    overrides = _topology_overrides()
+    assert "USHER_BULK_DATA_DIR" in overrides, "the override scan missed a known override"
+    assert "USHER_SECRET_KEY" not in overrides, "the scan read the secret's guard as an override"
+
+    paragraph = _section(
+        _README.read_text(), "**Every key in `.env` reaches the container**", "\n\n"
+    )
+    counted = re.search(r"\bThe (\w+) exceptions\b", paragraph)
+    assert counted, f"the paragraph no longer states a count: {paragraph!r}"
+    assert _NUMBER_WORDS.get(counted.group(1)) == len(overrides), (
+        f"the README says {counted.group(1)} exceptions; compose.yml overrides {sorted(overrides)}"
+    )
+    missing = sorted(key for key in overrides if f"`{key}`" not in paragraph)
+    assert missing == [], f"the README's list of compose-owned keys omits {missing}"
+
+
+def test_prd_08_names_every_key_compose_overrides() -> None:
+    """The same list, in the PRD section that states it."""
+    section = _section(
+        _PRD_08.read_text(), "### A documented setting has to reach the container", "\n### "
+    )
+    missing = sorted(key for key in _topology_overrides() if f"`{key}`" not in section)
+    assert missing == [], f"PRD 08's list of compose-owned keys omits {missing}"

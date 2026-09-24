@@ -9,9 +9,9 @@ paths:
 
 # TMDb and the enrichment stage
 
-Rules for this subsystem; the ADRs and docstrings named below hold the detail.
+Rules for this subsystem; the docstrings named below hold the detail.
 
-## Rating columns name their source (`m10a`, [ADR-0040](../../docs/prd/decisions/0040-rating-columns-name-their-source.md))
+## Rating columns name their source (`m10a`)
 
 Never write a bare `vote_count`, `community_rating` or `popularity` — those
 columns are gone (`db/migrations/versions/m10a_rating_provenance.py`).
@@ -97,8 +97,7 @@ a v4 JWT and `_is_v4_token` picks header vs query form; `tmdb_requests_per_secon
   answer. **404 is the case that fires in production**, the catalog holding
   bulk-export ids that age. **408 stays retryable** for the proxy case above,
   and **5xx is `PortUnavailable`**.
-- **A kind-less TMDb reference is `PortDataMalformed`, never a guess**
-  ([ADR-0011](../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md)):
+- **A kind-less TMDb reference is `PortDataMalformed`, never a guess**:
   tens of thousands of ids are live in *both* id spaces and name unrelated works,
   so `GET /movie/{id}` for a ref that meant a series writes an unrelated film on
   as enriched metadata, no error anywhere. `kind_of_payload` discriminates on
@@ -180,7 +179,7 @@ falls back to read order by design.
   `JobKind` with **no default**, so a new kind fails `tests/unit/test_config.py`
   rather than inheriting someone else's number.
 
-## Enrichment may delete only genres its provider can express ([ADR-0039](../../docs/prd/decisions/0039-the-genre-vocabulary-is-usher-owned.md))
+## Enrichment may delete only genres its provider can express
 
 `genres` is in `_ENRICHABLE`, so a provider supplying any genre replaces the
 whole array — and `titles.genres` unions IMDb's vocabulary with TMDb's, disjoint
@@ -200,4 +199,6 @@ never been fed by TMDb; `_is_v4_token`'s positive branch has never met a real v4
 token; no season TMDb lists has been refused by its own route, so the reconcile's
 arbitrary-season branch is unexercised; nothing has run beyond three workers or a
 non-`US` `tmdb_region`; and whether `MissingGreenlet` in a long `usher work` run
-is *caused* by the `ix_titles_imdb_id` conflict path is open.
+is *caused* by the `ix_titles_imdb_id` conflict path is open — **the conflict
+path alone does not do it**, and the number is in PRD 09's carried debt. The
+crash is still unexplained; both roots now record its frames.

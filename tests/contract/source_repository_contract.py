@@ -1,11 +1,4 @@
-"""Behaviour every `SourceRepository` implementation must satisfy.
-
-The load-bearing case is `test_update_writes_the_device_id_it_is_given`:
-`device_id` is what makes Usher one durable Emby client instead of an
-accumulating pile of sessions (PRD 03), and an `update()` that quietly
-dropped the column from its SET clause would make a deliberate rotation a
-silent no-op with nothing to notice.
-"""
+"""Behaviour every `SourceRepository` implementation must satisfy."""
 
 from datetime import UTC, datetime
 
@@ -43,9 +36,11 @@ class SourceRepositoryContract:
         )
 
     async def test_created_at_is_not_taken_from_the_caller(self, repo: SourceRepository) -> None:
-        """Same rule the title repository already holds: the database is the
-        authoritative clock. Pinned here too, because the fake had to be
-        written to match and the two would otherwise drift."""
+        """Same rule the title repository already holds: the database is the authoritative clock.
+
+        Pinned here too, because the fake had to be written to match and the two would
+        otherwise drift.
+        """
         backdated = datetime(2020, 1, 1, tzinfo=UTC)
         source = _source(created_at=backdated, updated_at=backdated)
         await repo.add(source)
@@ -73,11 +68,13 @@ class SourceRepositoryContract:
         assert fetched.supports_push is True
 
     async def test_update_writes_the_device_id_it_is_given(self, repo: SourceRepository) -> None:
-        """Deliberately tampers rather than leaving the field alone: an
-        `update()` that omitted `device_id` from its SET clause would pass a
-        leave-it-alone assertion and silently turn a rotation into a no-op.
-        Asserting the *new* value landed is the only version of this that
-        can fail."""
+        """Deliberately tampers rather than leaving the field alone.
+
+        an `update()` that omitted `device_id` from its SET clause would pass a leave-
+        it-alone assertion and silently turn a rotation into a no-op.
+
+        Asserting the *new* value landed is the only version of this that can fail.
+        """
         source = _source()
         await repo.add(source)
         await repo.update(source.evolve(device_id="rotated-0000-7000-8000-000000000002"))
@@ -90,9 +87,10 @@ class SourceRepositoryContract:
             await repo.update(_source())
 
     async def test_list_all_is_ordered_by_name(self, repo: SourceRepository) -> None:
-        """The admin listing is rendered in the order this returns; a set
-        comparison could not tell an unordered implementation from an
-        ordered one."""
+        """The admin listing is rendered in the order this returns.
+
+        a set comparison could not tell an unordered implementation from an ordered one.
+        """
         await repo.add(_source("Zeta"))
         await repo.add(_source("Alpha"))
         await repo.add(_source("Mid"))
@@ -102,10 +100,13 @@ class SourceRepositoryContract:
         assert await repo.list_all() == []
 
     async def test_delete_reports_whether_it_removed_anything(self, repo: SourceRepository) -> None:
-        """`DELETE /admin/sources/{id}` returns 404 for an unknown id and 204
-        otherwise, so the bool is the endpoint's whole branch. An
-        implementation that always returned True would make the endpoint
-        claim it deleted something that never existed."""
+        """`DELETE /admin/sources/{id}` returns 404 for an unknown id and 204 otherwise.
+
+        so the bool is the endpoint's whole branch.
+
+        An implementation that always returned True would make the endpoint claim it
+        deleted something that never existed.
+        """
         source = _source()
         await repo.add(source)
         assert await repo.delete(source.id) is True

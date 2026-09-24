@@ -1,16 +1,6 @@
-"""`RediscoverProvider`, and the distractor that is a timestamp on the wrong
-column -- in the other direction from Recently Added's.
+"""`RediscoverProvider`, and the distractor that is a timestamp on the wrong column.
 
-The nightly walk touches `updated_at` on up to **1,126,789** rows, so an
-implementation filtering on it turns "watched more than two years ago" into
-"merged more than two years ago", which is true of nothing. **The failure is a
-row that is simply always absent**, and no assertion about a row's contents can
-see it -- which is why the cases here assert both that the old title is present
-*and* that last week's is not.
-
-`RediscoverProvider` also substitutes for a rating column that does not exist,
-and its docstring says so out loud rather than leaving the substitution in the
-query.
+in the other direction from Recently Added's.
 """
 
 import uuid
@@ -35,9 +25,10 @@ async def _finished(library: Library, name: str, *, days: float, play_count: int
 
 
 async def test_a_title_watched_last_week_is_absent_from_rediscover() -> None:
-    """**The distractor.** It is `played`, it has the most recent
-    `last_played_at` in the household, and it appears in the row under any
-    implementation that forgets the age bound or applies it to the wrong
+    """**The distractor.** It is `played`.
+
+    it has the most recent `last_played_at` in the household, and it appears in the row
+    under any implementation that forgets the age bound or applies it to the wrong
     column.
 
     Under an `updated_at` filter the whole row is last week's viewing, which is
@@ -80,10 +71,10 @@ async def test_a_title_abandoned_two_years_ago_is_absent_from_rediscover() -> No
 
 
 async def test_the_most_rewatched_title_comes_first() -> None:
-    """PRD 06 says *"rated highly"* and there is no rating. The substitute is
-    the **ordering**, never the filter: `play_count DESC`, because a rewatch is
-    a revealed preference and is the only thing in this table a household
-    writes more than once.
+    """PRD 06 orders Rediscover by engagement, `play_count DESC`, and never filters on it.
+
+    There is no rating. A rewatch is a revealed preference, and the only thing in this
+    table a household writes more than once.
 
     Seeded so the most-rewatched title is the *oldest*, which is where a
     recency-only ordering puts it last.
@@ -99,9 +90,9 @@ async def test_the_most_rewatched_title_comes_first() -> None:
 
 
 async def test_play_count_is_never_a_filter_so_an_unbackfilled_household_still_fires() -> None:
-    """`played AND play_count = 0` is how "history unknown" is spelled while
-    the backfill drains -- Emby's *listing* reports `PlayCount: 0` for an item
-    played twice.
+    """`played AND play_count = 0` is how "history unknown" is spelled while the backfill drains.
+
+    Emby's *listing* reports `PlayCount: 0` for an item played twice.
 
     So `play_count >= 2` as a **filter** returns nothing on a freshly-walked
     deployment and an arbitrary subset on a half-backfilled one. As an ordering
@@ -124,7 +115,9 @@ async def test_play_count_is_never_a_filter_so_an_unbackfilled_household_still_f
 
 
 async def test_rediscover_proposes_nothing_when_the_row_would_be_too_thin() -> None:
-    """`_MIN_CARDS`. Two qualifying titles is a list, not a shelf.
+    """`_MIN_CARDS`.
+
+    Two qualifying titles is a list, not a shelf.
 
     Fails the implementation that emits whatever it found, which on a household
     three months old is a one-card row saying "Rediscover" about something
@@ -170,8 +163,10 @@ async def test_an_unowned_title_is_omitted_from_a_row_that_still_stands() -> Non
 
 
 async def test_a_household_younger_than_the_threshold_gets_no_row() -> None:
-    """**The expected state for most of a deployment's first two years**, and
-    not a fault. Ten finished titles, none of them old enough."""
+    """**The expected state for most of a deployment's first two years**, and not a fault.
+
+    Ten finished titles, none of them old enough.
+    """
     library = Library()
     for index in range(10):
         await _finished(library, f"Watched This Year #{index}", days=30 + index)
@@ -194,9 +189,10 @@ async def test_an_empty_catalog_gets_no_row_rather_than_raising() -> None:
 
 
 async def test_every_card_is_marked_played_so_the_shelf_reads_correctly() -> None:
-    """Without the badge a "Rediscover" shelf renders identically to a "you
-    have not seen these" one -- which is the same catalog with the opposite
-    claim attached."""
+    """Without the badge a "Rediscover" shelf renders identically to a "you have not seen these".
+
+    one -- which is the same catalog with the opposite claim attached.
+    """
     library = Library()
     await _long_ago(library)
 
@@ -210,9 +206,11 @@ async def test_every_card_is_marked_played_so_the_shelf_reads_correctly() -> Non
 
 
 async def test_the_row_describes_itself_and_scores_low_on_purpose() -> None:
-    """0.35, and deliberately low: a household with a deep back catalog has
-    hundreds of qualifying titles, and any score scaling with that count would
-    put a row about 2019 above rows about tonight."""
+    """0.35, and deliberately low.
+
+    a household with a deep back catalog has hundreds of qualifying titles, and any
+    score scaling with that count would put a row about 2019 above rows about tonight.
+    """
     library = Library()
     await _long_ago(library)
 

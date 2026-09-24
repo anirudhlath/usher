@@ -1,27 +1,18 @@
-"""Ports for persistence: one module per aggregate, plus the bulk-load path.
+"""Ports for persistence: one module per aggregate, plus the bulk-load path."""
 
-Repositories are driven ports, the same as `SourceAdapter` or
-`MetadataProvider` -- port named for the role, implementation named for the
-technology (ADR-0009). Everything here is an ABC; `usher.db.repositories.*`
-holds the Postgres implementations.
-
-**This package mirrors `usher.db.repositories` module for module**, so a port
-belongs in the module named for its aggregate and nowhere else --
-`PostgresThingRepository` in `usher.db.repositories.thing` implements
-`ThingRepository` in `usher.ports.repository.thing`. It was one 3,434-line
-module holding 19 ABCs and 107 abstract methods until M9 split it; the mirror
-is what stops the twentieth port being appended to whichever module its author
-opened, and `tests/unit/test_ports_repository_package.py` is what makes the
-mirror a failing test rather than a convention.
-
-`__all__` below is the compatibility surface: 99 files import from this
-package by name and none of them changed for the split. A new port is a new
-module, one import block here and one `__all__` entry -- never an edit to a
-shared body.
-"""
-
+from usher.ports.repository._references import (
+    EpisodeReference,
+    TitleReference,
+)
 from usher.ports.repository._results import (
     BulkWriteResult,
+)
+from usher.ports.repository.backup import (
+    BackupRepository,
+    CarriedRow,
+    RestoreRefusal,
+    RestoreRepository,
+    TableOutcome,
 )
 from usher.ports.repository.bulk import (
     AliasWriteResult,
@@ -114,12 +105,14 @@ from usher.ports.repository.watch_state import (
 __all__ = [
     "AddedTitle",
     "AliasWriteResult",
+    "BackupRepository",
     "BrowseCursorPosition",
     "BrowseFacets",
     "BrowseSort",
     "BulkCatalogRepository",
     "BulkWriteResult",
     "CachedPayload",
+    "CarriedRow",
     "CollectionRepository",
     "CreditNamesFillResult",
     "CreditRepository",
@@ -127,6 +120,7 @@ __all__ = [
     "CrosswalkLinkResult",
     "CuratedRowRepository",
     "EpisodeCursorPosition",
+    "EpisodeReference",
     "EpisodeRepository",
     "GenomeCoverage",
     "GenomeRepository",
@@ -145,6 +139,8 @@ __all__ = [
     "RawPayloadStore",
     "RecentWatch",
     "RecurringPerson",
+    "RestoreRefusal",
+    "RestoreRepository",
     "RowProviderSettingsRepository",
     "ScoredNeighbor",
     "SearchQueryRecord",
@@ -153,12 +149,14 @@ __all__ = [
     "StoredEmbedding",
     "StoredTaste",
     "SyncRunRepository",
+    "TableOutcome",
     "TasteRepository",
     "TitleEmbeddingRepository",
     "TitleEmbeddingUpsert",
     "TitleGenres",
     "TitleMatchRepository",
     "TitleNeighborRepository",
+    "TitleReference",
     "TitleRepository",
     "UnmatchedCursorPosition",
     "WatchStateRepository",

@@ -1,19 +1,4 @@
-"""A rule about the whole `api/dto/` package, not about one model.
-
-PRD 08: "Credentials are never returned by any API, including admin.
-Write-only." The admin routes satisfy that today because `SourceResponse`
-has no field to put one in -- but "today" is the weak part. This module
-turns it into a property every present and future response DTO has to keep:
-it enumerates the package rather than naming models, so a response type
-added in M5 or M9 is covered the moment it is written, without anyone
-remembering this file exists.
-
-Two independent checks, because they fail differently. A field *named*
-`password` is the obvious mistake; a field *typed* `SecretStr` is the
-subtle one -- it renders as `**********` in a log line and serializes to
-the real value in a response body, so it is precisely the shape that looks
-safe while shipping the secret.
-"""
+"""A rule about the whole `api/dto/` package, not about one model."""
 
 import importlib
 import pkgutil
@@ -46,10 +31,12 @@ def _response_models() -> list[type[BaseModel]]:
 
 
 def test_the_package_actually_has_response_models() -> None:
-    """Positive control. Without it, a broken discovery walk (a renamed
-    package, a changed suffix convention) would make every assertion below
-    vacuously true -- the failure mode of every "assert nothing matches"
-    test."""
+    """Positive control.
+
+    Without it, a broken discovery walk (a renamed package, a changed suffix convention)
+    would make every assertion below vacuously true -- the failure mode of every "assert
+    nothing matches" test.
+    """
     names = {model.__name__ for model in _response_models()}
     assert {"LivenessResponse", "ReadinessResponse", "SourceResponse"} <= names
 
@@ -61,9 +48,11 @@ def test_no_response_dto_declares_a_credential_field() -> None:
 
 
 def test_no_response_dto_declares_a_secret_typed_field() -> None:
-    """A `SecretStr` on a *request* model is right (it is what keeps a
-    parsed credential out of a log line); on a response model it is a
-    credential on the wire that merely looks redacted in a traceback."""
+    """A `SecretStr` on a *request* model is right (it is what keeps a parsed credential out of.
+
+    a log line); on a response model it is a credential on the wire that merely looks
+    redacted in a traceback.
+    """
     for model in _response_models():
         for field_name, field in model.model_fields.items():
             annotations = (field.annotation, *get_args(field.annotation))

@@ -1,41 +1,4 @@
-"""The season/episode hierarchy, on the staged-`COPY` path.
-
-Implements `EpisodeRepository` (`usher.ports.repository`). One batch is one
-`COPY` into an `UNLOGGED` staging table plus exactly one
-`INSERT ... SELECT ... ON CONFLICT`, the path `usher.db.staging` documents.
-999,827 of the one measured source's 1,126,674 items are episodes, so a
-per-row ORM write here is ~19 minutes of pure repository overhead per full
-walk before a byte of upstream I/O.
-
-Three details worth not re-deriving:
-
-1. **`SELECT DISTINCT ON` is required, not defensive.** A batch of episodes
-   from one season names that season once *per episode*, so `upsert_seasons`
-   sees the same `(title_id, season_number)` a dozen times in the common case
-   -- and `list_items`' own contract permits the same episode twice. Without
-   it Postgres answers `CardinalityViolationError: ON CONFLICT DO UPDATE
-   command cannot affect row a second time`.
-2. **`COALESCE(excluded.x, <table>.x)` on every enrichable column.** Ingest
-   creates a season or an episode from a source's own numbers alone -- no
-   name, no overview, no air date -- and enrichment fills the rest in. An
-   unconditional `SET name = excluded.name` blanks what enrichment wrote, on
-   the next nightly walk, across 999,827 rows, silently. `season_id` is the
-   one deliberate exception: it is `NOT NULL` and always supplied, so
-   preserving a stored one would make a re-parented episode unfixable.
-3. **The natural key is not the id.** Ingest mints a fresh UUIDv7 per
-   sighting, so an upsert keyed on `Season.id`/`Episode.id` inserts a
-   duplicate row per walk and the series grows a season a night. The conflict
-   targets are `uq_seasons_title_season_number` and
-   `uq_episodes_title_season_episode`, both plain `UniqueConstraint`s rather
-   than partial indexes -- so the "repeat a partial index's predicate in
-   `ON CONFLICT`" trap does not apply here, named because its absence is
-   otherwise indistinguishable from having forgotten it.
-
-`updated_at` is owned by `trg_seasons_set_updated_at` /
-`trg_episodes_set_updated_at`, both `BEFORE UPDATE` assigning `now()`
-unconditionally. That is exactly why they exist: this path never goes through
-the ORM, so SQLAlchemy's `onupdate=` never fires.
-"""
+"""The season/episode hierarchy, on the staged-`COPY` path."""
 
 import uuid
 from collections.abc import Sequence
@@ -48,14 +11,16 @@ from usher.db.repositories._errors import constraint_name
 from usher.db.staging import stage_records
 from usher.domain.episode import Episode, Season
 from usher.ports.errors import RepositoryConflict
-from usher.ports.repository import BulkWriteResult, EpisodeCursorPosition, EpisodeRepository
+from usher.ports.repository import (
+    BulkWriteResult,
+    EpisodeCursorPosition,
+    EpisodeReference,
+    EpisodeRepository,
+)
 
-# `ordinal` is the row's index within the batch, and it is what makes
-# deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
-# last-wins, the rule the port documents. Ordering on `id` instead would make
-# that depend on UUIDv7 generation being monotonic within a millisecond --
-# true of `uuid6.uuid7()` today, but a property of a dependency rather than of
-# this statement.
+# `ordinal` is the row's index within the batch, and it is what makes deduplication
+# deterministic: `ORDER BY ..., ordinal DESC` is literally last-wins, the rule the port
+# documents.
 _SEASON_DDL = """
 CREATE TEMP TABLE stg_seasons (
     ordinal integer, id uuid, title_id uuid, season_number integer,
@@ -155,17 +120,36 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 FROM upserted
 """
 
-# Both resolves unnest the *whole* batch, `title_id` included, rather than
-# taking one title and a list of numbers. A page of 1,000 episodes off a walk
-# sorted by creation date spans hundreds of series -- an episode arrives the
-# week it airs, not with its siblings -- so a per-title signature is one round
-# trip per series, which is the same defect batching exists to remove.
-# `uq_seasons_title_season_number` / `uq_episodes_title_season_episode` both
-# lead with `title_id`, so each is a single index scan over the join.
+# Both resolves unnest the *whole* batch, `title_id` included, rather than taking one
+# title and a list of numbers.
 _RESOLVE_SEASONS = """
 SELECT sn.title_id AS title_id, sn.season_number AS season_number, sn.id AS id
 FROM unnest(CAST(:titles AS uuid[]), CAST(:seasons AS integer[])) AS p(pt, ps)
 JOIN seasons sn ON sn.title_id = p.pt AND sn.season_number = p.ps
+"""
+
+# The same shape one layer out, for a caller that holds no `title_id` because it is
+# reading a backup artifact: `TitleReference`'s ladder and the two numbers, in **one**
+# statement.
+_RESOLVE_EPISODE_NATURAL_KEYS = """
+SELECT p.ord AS ord, e.id AS id
+FROM unnest(
+    CAST(:imdb_ids AS text[]),
+    CAST(:kinds AS text[]),
+    CAST(:tmdb_ids AS integer[]),
+    CAST(:raw_ids AS uuid[]),
+    CAST(:season_numbers AS integer[]),
+    CAST(:episode_numbers AS integer[])
+) WITH ORDINALITY AS p(imdb_id, kind, tmdb_id, raw_id, season_number, episode_number, ord)
+JOIN episodes e
+  ON e.title_id = COALESCE(
+         (SELECT by_imdb.id FROM titles AS by_imdb WHERE by_imdb.imdb_id = p.imdb_id),
+         (SELECT by_tmdb.id FROM titles AS by_tmdb
+           WHERE by_tmdb.tmdb_id = p.tmdb_id AND by_tmdb.kind = p.kind),
+         (SELECT by_raw.id FROM titles AS by_raw WHERE by_raw.id = p.raw_id)
+     )
+ AND e.season_number = p.season_number
+ AND e.episode_number = p.episode_number
 """
 
 _RESOLVE_EPISODES = """
@@ -178,62 +162,7 @@ JOIN episodes e ON e.title_id = p.pt AND e.season_number = p.ps AND e.episode_nu
 """
 
 
-# The first join from `watch_states` to `episodes` anywhere in `src/`. Not a
-# new caller of an old statement: `list_for_title` returns the entire tree --
-# 20,000 rows for the one measured pathological series -- and `NextUpProvider`
-# asks about every series the household has started, so a loop over it reads
-# four million rows to produce two hundred cards.
-#
-# Five things here are load-bearing, each with its own contract case:
-#
-#   The mark is a POSITION, not an instant: `ORDER BY e.season_number DESC,
-#   e.episode_number DESC`, never `ws.last_played_at DESC`. A household that
-#   finishes season three and rewatches the pilot is not asking for S01E02,
-#   and `last_played_at` is NULL on nearly every walk-sourced row (ADR-0014),
-#   which makes a recency-keyed mark arbitrary rather than merely wrong.
-#
-#   `DISTINCT ON` rather than `GROUP BY`, because `max()` over a composite
-#   does not exist in Postgres. Two of them: one picks each series' mark, the
-#   other picks the first candidate after it.
-#
-#   The ROW COMPARISON `(a, b) > (c, d)` is lexicographic by definition, and
-#   the hand-expanded `season_number > ... OR (season_number = ... AND
-#   episode_number > ...)` is the same thing written three ways to get wrong.
-#   It is also what keeps this indexable: a btree row comparison against
-#   `(title_id, season_number, episode_number)` is pushed down as an index
-#   condition, and that index already exists as
-#   `uq_episodes_title_season_episode`. Both spellings return identical rows,
-#   so only the EXPLAIN case can tell them apart.
-#
-#   `e.season_number > 0` on BOTH sides. Season 0 is TMDb's specials
-#   namespace and the CHECK allows it, so one watched Christmas special would
-#   otherwise set a mark of (0, 1) and Next Up would present starting a show
-#   as continuing it. Named because its absence is otherwise indistinguishable
-#   from having forgotten it.
-#
-#   The CANDIDATE-side copy of that predicate is an EQUIVALENT MUTANT and is
-#   kept anyway, which is the same treatment `_ENQUEUE`'s `GREATEST` gets.
-#   Deleting it survives the whole suite, and not for want of a case: with the
-#   mark side filtered, every mark has `season_number >= 1`, and `(0, n) >
-#   (>= 1, m)` is false for every n and m -- so no season-0 row can ever
-#   satisfy the row comparison and the predicate is unreachable. The plan's
-#   suggested cover (a mark of (0, 1) with a special at (0, 2)) cannot be
-#   written for exactly that reason: the mark side is what makes a season-0
-#   mark impossible. Kept because it stops being unreachable the day anyone
-#   loosens the mark side, and a reader who finds only one copy will assume
-#   the other was forgotten.
-#
-#   `ws.episode_id = e.id`, never `ws.title_id`. A series' own title-keyed
-#   row is the whole show and a source can write one (Emby's "mark series
-#   watched"); it carries no season or episode number at all. The equality
-#   join excludes such rows structurally rather than by predicate, since
-#   `uq_watch_states_user_episode` treats NULLs as distinct and an equality
-#   comparison never matches one.
-#
-# `CAST(:x AS uuid)`, never a colon-name followed by a double colon, and no
-# colon-prefixed word in any comment in this module -- SQLAlchemy's bind
-# regex skips the first spelling and silently creates a parameter for the
-# second.
+# The first join from `watch_states` to `episodes` anywhere in `src/`.
 _NEXT_UP = """
 WITH mark AS (
     SELECT DISTINCT ON (e.title_id)
@@ -257,14 +186,9 @@ ORDER BY e.title_id, e.season_number, e.episode_number
 """
 
 
-# The two bounded reads the series hierarchy routes take, and the reason they
-# are not `list_for_title`: that method returns the whole tree, measured at
-# 20,001 rows / 22.901 ms / 402 buffers for one pathological series.
-#
-# `_LIST_SEASONS` is unpaged on measurement -- 32,409 series at a median of 9
-# seasons, and a client renders all of them -- and is served by
-# `uq_seasons_title_season_number`, which leads with `title_id` and continues
-# with `season_number`, so the ORDER BY is the index order.
+# The two bounded reads the series hierarchy routes take, and the reason they are not
+# `list_for_title`: that method returns the whole tree, which for a long-running series
+# is tens of thousands of rows.
 _LIST_SEASONS = """
 SELECT * FROM seasons
 WHERE title_id = CAST(:title_id AS uuid)
@@ -273,33 +197,7 @@ ORDER BY season_number
 
 _GET_SEASON = "SELECT * FROM seasons WHERE id = CAST(:season_id AS uuid)"
 
-# ADR-0034's keyset, and the arm it does not carry is the point.
-#
-# That record's predicate has THREE arms -- `key IS NULL`, `key > :after_key`,
-# `key = :after_key AND id > :after_id` -- because a nullable sort column lets
-# a page boundary land inside the unkeyed group, and because the row-comparison
-# spelling it originally shipped evaluates to NULL rather than false there and
-# silently drops the whole unkeyed tail with every page still full. Three of
-# browse's four sorts are nullable, so `db/repositories/title.py`'s
-# `_browse_after` needs all three.
-#
-# Here `episodes.episode_number` and `episodes.season_number` are both
-# `nullable=False` (`db/models/episode.py`), so no row can be in the unkeyed
-# group and the first arm is unreachable rather than forgotten. The same fact
-# is spelled at the type level by `EpisodeCursorPosition.episode_number` being
-# `int` and not `int | None`: the position the missing arm would resume from
-# cannot be constructed. Named because "we did not need it" and "we forgot it"
-# look identical in a diff.
-#
-# The two arms that remain are hand-expanded rather than written as the row
-# comparison `(episode_number, id) > (:n, :i)`. Both are correct on
-# NOT NULL columns and `_NEXT_UP` above deliberately uses the row form for its
-# indexability -- but this statement's ORDER BY is not served by an index
-# anyway (`ix_episodes_season_id` covers `season_id` alone, and a season is a
-# few dozen rows), so the spelling that buys nothing here is the one that
-# reads arm for arm against the record it comes from. The `id` tail is
-# STRICT: relaxed to `>=` the walk re-serves its boundary row at every page
-# break.
+# A keyset page, and the arm it does not carry is the point.
 _SEASON_EPISODES = """
 SELECT * FROM episodes
 WHERE season_id = CAST(:season_id AS uuid)
@@ -386,13 +284,10 @@ class PostgresEpisodeRepository(EpisodeRepository):
         what: str,
     ) -> BulkWriteResult:
         try:
-            # A SAVEPOINT for the same reason PostgresMediaItemRepository has
-            # one: IngestService commits a batch of episodes together with its
-            # sync-run checkpoint, so a caught conflict must not leave the
-            # session raising PendingRollbackError on the next unrelated call.
-            # The staging DDL is inside it too -- Postgres DDL is
-            # transactional, so a failed batch leaves no half-populated
-            # staging table for the next one to inherit.
+            # A SAVEPOINT for the same reason PostgresMediaItemRepository has one:
+            # IngestService commits a batch of episodes together with its sync-run
+            # checkpoint, so a caught conflict must not leave the session raising
+            # PendingRollbackError on the next unrelated call.
             with self._session.no_autoflush:
                 async with self._session.begin_nested():
                     await stage_records(
@@ -400,13 +295,8 @@ class PostgresEpisodeRepository(EpisodeRepository):
                     )
                     inserted, updated = (await self._session.execute(text(statement))).one()
         except IntegrityError as exc:
-            # A `title_id`/`season_id` naming a row that does not exist, or a
-            # CHECK violation. The CHECK fires here rather than during the
-            # COPY: the staging tables above are declared without constraints,
-            # so a bad value reaches Postgres and fails at the
-            # `INSERT ... SELECT`, which goes through SQLAlchemy and is
-            # therefore translatable. `copy_records_to_table` runs on the raw
-            # asyncpg connection, outside SQLAlchemy's error translation.
+            # A `title_id`/`season_id` naming a row that does not exist, or a CHECK
+            # violation.
             raise RepositoryConflict(
                 f"{what} conflicts with the catalog", constraint=constraint_name(exc)
             ) from exc
@@ -449,11 +339,38 @@ class PostgresEpisodeRepository(EpisodeRepository):
             ).all()
         return {(row.title_id, row.season_number, row.episode_number): row.id for row in rows}
 
+    async def resolve_natural_keys(
+        self, references: Sequence[EpisodeReference]
+    ) -> dict[EpisodeReference, uuid.UUID]:
+        if not references:
+            return {}
+        # Deduplicated before the bind, as `resolve_episodes` above does and
+        # for the same reason -- and `EpisodeReference` is a frozen dataclass
+        # over a frozen dataclass, so `dict.fromkeys` both dedupes and fixes
+        # the order the ordinal counts in.
+        unique = list(dict.fromkeys(references))
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_RESOLVE_EPISODE_NATURAL_KEYS),
+                    {
+                        "imdb_ids": [one.title.imdb_id for one in unique],
+                        "kinds": [one.title.kind.value for one in unique],
+                        "tmdb_ids": [one.title.tmdb_id for one in unique],
+                        "raw_ids": [one.title.id for one in unique],
+                        "season_numbers": [one.season_number for one in unique],
+                        "episode_numbers": [one.episode_number for one in unique],
+                    },
+                )
+            ).all()
+        # An inner join, so an unresolved reference is simply not in the
+        # answer -- never a key mapped to `None`, which a caller would have to
+        # tell apart from "not asked".
+        return {unique[row.ord - 1]: row.id for row in rows}
+
     async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
-        # One statement for the whole page. The alternative already on this
-        # port is `list_for_title`, which returns the entire tree -- measured
-        # at 20,001 rows / 22.901 ms / 402 buffers for one pathological series,
-        # to find one episode.
+        # One statement for the whole page, rather than `list_for_title`, which
+        # returns the entire tree to find one episode.
         if not episode_ids:
             # `= ANY('{}')` is a valid empty answer rather than a syntax error,
             # so this guard is a round trip saved rather than a correctness
@@ -523,11 +440,10 @@ class PostgresEpisodeRepository(EpisodeRepository):
         limit: int,
         after: EpisodeCursorPosition | None = None,
     ) -> list[Episode]:
-        # One statement for the page, whatever the page holds. The branch is
-        # on whether there is a position to resume from, which the caller
-        # knows before the statement is built -- the same two-branch rendering
-        # ADR-0034 sanctions for `_browse_after`, minus the arm this schema
-        # makes unreachable.
+        # One statement for the page, whatever the page holds. The branch is on
+        # whether there is a position to resume from, which the caller knows before
+        # the statement is built -- `_browse_after`'s two-branch rendering, minus the
+        # arm this schema makes unreachable.
         parameters: dict[str, object] = {"season_id": season_id, "limit": limit}
         if after is None:
             statement = _SEASON_EPISODES

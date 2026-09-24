@@ -1,23 +1,6 @@
-"""In-memory `ImageFetcher`. Opens no socket and cannot.
+"""In-memory `ImageFetcher`.
 
-**The constraint has to be structural, and this is half of how it is kept.**
-`.claude/rules/fixtures-and-fakes.md` is explicit that the `sitecustomize.py`
-network guard *"lives outside the tree — it is a check to re-run, not a
-dependency to add"*, so nothing in a default `uv run pytest` stops a unit case
-reaching the real CDN. Every unit case therefore drives either this class or
-`httpx.MockTransport`; the guard is evidence after the fact and only counts
-when `[netguard] installed` is printed in the same run.
-
-**Where this is more forgiving than `ProviderCdnImageFetcher`.** It has no byte
-ceiling — the ceiling is a property of a *response*, and the whole point of
-this class is that there is no response — and it composes no URL, so nothing
-here can catch a base URL that has lost its rung. Both are covered on the real
-arm, over `MockTransport`, in `tests/unit/test_adapters_images.py`.
-
-**The off-ladder refusal is *not* one of those divergences**, and that is
-deliberate: it is in the port's contract, both arms enforce it, and
-`ImageFetcherContract` asserts it against both. A fake that accepted any width
-would let the clamp rot with the contract suite still green.
+Opens no socket and cannot.
 """
 
 from collections.abc import AsyncIterator, Sequence

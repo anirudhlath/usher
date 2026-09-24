@@ -1,7 +1,7 @@
 /**
  * Usher's error model, as something a component can switch on.
  *
- * The API's failure set is **closed at seven codes** (ADR-0030), and that is
+ * The API's failure set is **closed at seven codes**, and that is
  * the fact the whole `Problem` component rests on: recovery is a *lookup*, not
  * a judgement, and never an inference from `detail`. `detail` is prose the
  * server may reword at any release — patterns.md §3 requires it shown verbatim
@@ -15,7 +15,7 @@
 import type { components } from './schema'
 
 /**
- * Usher's `code` vocabulary. Closed at seven members by ADR-0030, and read off
+ * Usher's `code` vocabulary. Closed at seven members, and read off
  * the generated schema rather than restated — an eighth member added to the API
  * becomes a compile error in `RECOVERY` below instead of an unhandled case at
  * runtime.

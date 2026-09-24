@@ -6,11 +6,11 @@ paths:
 
 # What each milestone delivered, verified, and did not build
 
-A decisions register, loaded when planning or reading a milestone. **The value
-here is the refusals** — each was stated with its reason in that milestone's plan
-and in [PRD 09](../../docs/prd/09-roadmap.md), and is repeated here so a later
-reader does not re-open a settled call. Live-verification *evidence* goes in the
-subsystem rules file, not here.
+An index of milestone calls, loaded when planning or reading a milestone. **The
+value here is the refusals** — each was stated with its reason in that
+milestone's plan and in [PRD 09](../../docs/prd/09-roadmap.md), and is repeated
+here so a later reader does not re-open a settled call. Live-verification
+*evidence* goes in the subsystem rules file, not here.
 
 ## Delivered, and live-verified against
 
@@ -25,6 +25,7 @@ subsystem rules file, not here.
 | **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1.27M-title catalog |
 | **M8** | LLM curation end to end — `OpenAICompatibleClient`, `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider`, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM over a real 1.27M-title catalog |
 | **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, two-tier suggest, browse, similarity, the series hierarchy; the image proxy and `RowCard` artwork; `/play` with the playback ticket and watch write-back; the admin completion; `search_queries`; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names expansion, the priority-tier TMDb crawl | live TMDb v3, the real IMDb dumps, Emby 4.9.5.0 (the Emby half ran after the gate) |
+| **M10** | hardening — OTLP export to a separate Grafana/Prometheus/Loki/Tempo stack, semantic-convention names pinned; a per-source outbound limiter, a ceiling on the gap-closing delta, `KIND_CONCURRENCY` measured, the retraction guard's histogram, drift probe and stated default for a library the household does not own, the leaked `EmbyAdapter` released; `m10c` (the plan's `m10a`) and the suggest writer; the scheduler, off by default, with `search_queries` retention and the neighbour rebuild registered; `usher backup`, `restore` and `rotate-secret` with their runbooks; the suggest metric, the `propose` span, five provisioned dashboards and the alert file; `/health/ready`'s orphaned claims, the problem media type in `/openapi.json`, #10's bounded-column decision, #8 diagnosed; `--version`, `CHANGELOG.md`, the community files, the release workflow and the quickstart; after the clean-clone run, the crosswalk's paged reads and checkpoint retry, bootstrap's exit 1 on a failed, skipped or refused phase, and the telemetry network made opt-in | Phase 0: the live catalog, one `GET /search` read back from that stack as a trace, a log line and a metric sample. Phase 1: the live shared Emby, bounded, no walk. Phase 2: every committed panel on real data, and the restore drill into a scratch `pgvector/pgvector:pg17`. J7: the neighbour rebuild on a clone of the live catalog, the scheduler driving only its refusal arm. Phase 3: a clean clone of the public remote against the real Emby, sync bounded at 35 minutes — `/home` returned one row, Recently Added from skeleton titles; an enriched home screen was never observed. After it, the crosswalk re-run into a scratch database against live WDQS, which completed with its retries firing |
 
 ## M9's eight boundary calls
 
@@ -32,8 +33,8 @@ subsystem rules file, not here.
    singleton default user and there is no `current_user` symbol anywhere in the
    tree. Designing authorization against routes landing in the same milestone is
    the mistake PRD 07 avoided four times with the error envelope.
-2. **The GIN → GiST swap for tier-2 suggest is deferred, not rejected**
-   (ADR-0031). The 2.8-point recall gain was measured against synthetic mutations
+2. **The GIN → GiST swap for tier-2 suggest is deferred, not rejected.**
+   The 2.8-point recall gain was measured against synthetic mutations
    of real titles; `search_queries` is the evidence that would settle it and has
    no rows until M9 ships. The two indexes also **cannot coexist** — a GiST
    trigram index beside the GIN one makes the planner take GiST for `%` and costs
@@ -42,7 +43,7 @@ subsystem rules file, not here.
 4. **No byte proxying for playback** — the ticket is a `302`. **Images *are*
    proxied**: an image is small, cacheable and reusable across households; a
    video stream is none of the three.
-5. **No per-client scoped tokens** — ADR-0012's option 2 needs a client identity
+5. **No per-client scoped tokens** — a scoped token needs a client identity
    that does not exist until authentication does (call 1).
 6. **No scheduler.** The write-back retry rides the existing job queue with
    `run_after`. M8's call 8, unchanged.
@@ -58,26 +59,24 @@ playback and watch write-back — was closed 2026-08-12. It was a gap, not a cal
 
 ## M9 Track 2 — the IMDb bulk expansion
 
-🔴 **Superseded by [ADR-0036](../../docs/prd/decisions/0036-the-imdb-tmdb-provenance-rule.md);
-read it before acting here.** Two of the three original reasons do not survive:
-the 2.0 GB ceiling was derived from a PRD 08 *resource envelope* row no code or
-policy reads, and "people cannot be merged across the two sources" overstated a
-qualified fact (`GET /person/{id}/external_ids` answers a person's `nconst`).
+🔴 **Superseded by the provenance rule T4 shipped.** Two of the three original
+reasons do not survive: the 2.0 GB ceiling was derived from a PRD 08 *resource
+envelope* row no code or policy reads, and "people cannot be merged across the
+two sources" overstated a qualified fact (`GET /person/{id}/external_ids` answers a person's `nconst`).
 What survives is that `credits` could not dedupe an IMDb load — now closed by
 `m09d`'s natural key. **T4's provenance rule is built; the `m09b` withdrawal
 stands, because `m09c` took its position, not because the design failed.**
 
 **What shipped is the names-only design, not a shrunken bulk people/credits
 load** — that option measured 2.702 GB (2.395 GB for the five-column variant)
-against a ceiling ADR-0036 has since retired, so read `m09d`'s docstring for why
+against a ceiling since retired, so read `m09d`'s docstring for why
 `m09b` does not exist: the id was never minted and `m09c` took its position.
 `titles.credit_names` is filled from `title.principals` × `name.basics` with the
 join resolved **in the importer**; **no person row and no credit row is written
 from IMDb at all**, so the two bulk sources never own one entity. `title.akas`
 lands in `m09a`'s `title_search_names`. Four of the IMDb people files' six
 columns are dropped — they have nowhere to land, and a TMDb credit entry carries
-no `nconst`, so the only shared merge key is a name, which by ADR-0003 is not
-identity. Measurements are in `bootstrap-and-datasets.md`.
+no `nconst`, so the only shared merge key is a name, which is not identity. Measurements are in `bootstrap-and-datasets.md`.
 
 ## After M9, on `main`
 
@@ -86,15 +85,15 @@ see. This is the index, so none is re-litigated as "not built" from a plan that
 predates it. Re-derive with
 `gh pr list --repo anirudhlath/usher --state merged --json number,title,mergedAt`.
 
-- **The bounded worker pool** — ADR-0037, PR #4. `JobWorker` takes a scope
+- **The bounded worker pool** — PR #4. `JobWorker` takes a scope
   *factory* (one `UnitOfWork`, one event buffer, one source resolver per job) and
   `KIND_CONCURRENCY` resolves against `USHER_JOB_CONCURRENCY` (default 12);
   recovery is a lease with a heartbeat, not one `requeue_running()` at start.
   **It corrects two PRD sections a plan may still quote** — PRD 01's concurrency
   table and PRD 08's recovery rule. `api-telemetry-and-lanes.md` is the record.
 - **`m09e`/`m09f`** — `halfvec(384)` → `halfvec(1024)`, deleting every embedding,
-  centroid and neighbour row (ADR-0038), then every `halfvec` column to `PLAIN`.
-- **The rating-provenance split** — `m10a` (ADR-0040). **Two of the three renames
+  centroid and neighbour row, then every `halfvec` column to `PLAIN`.
+- **The rating-provenance split** — `m10a`. **Two of the three renames
   take a `tmdb_` prefix and the first does not, so "renamed to `tmdb_*`" is not
   derivable**: `community_rating` → **`tmdb_vote_average`**, `vote_count` →
   `tmdb_vote_count`, `popularity` → `tmdb_popularity`. No rating value was
@@ -107,7 +106,7 @@ predates it. Re-derive with
 - **E1, the quality-eval harness** — `src/usher/eval/`, the `eval` extra, `usher
   eval`, two more import contracts. One surface (`suggest`); E2–E4 are not
   planned. Three `fuzzy recall_at_5` bars are `pending` on #39. `evals.md`.
-- **The resumable watch lane** — `m10b`, ADR-0042. Two behaviours came from
+- **The resumable watch lane** — `m10b`. Two behaviours came from
   review rather than the plan and are the ones a later reader will want to undo:
   `SyncRunRepository.save` is non-destructive (`completed` absorbs), and a
   resumed walk stamps its merges with the attempt's instant, not the original
@@ -121,10 +120,10 @@ predates it. Re-derive with
   serving the pre-enrichment card until TTL. PRD 06 amended; `rows-and-genome.md`.
 
 **Still not built** (re-verify against the tree, not this list): no auth module
-and no `current_user`; no scheduler; `query_expansion_enabled` is `False`; no
-GiST trigram index; `curation_pool_size` defaults to 200, capped at 1000; no
-`usher.llm.*` metric (those names are span attributes); `copy_records_to_table`
-is still on the raw driver.
+and no `current_user`; `query_expansion_enabled` is `False`; no GiST trigram
+index; `curation_pool_size` defaults to 200, capped at 1000; no `usher.llm.*`
+metric (those names are span attributes); `copy_records_to_table` is still on
+the raw driver.
 
 ## M8's eight boundary calls
 
@@ -132,7 +131,7 @@ is still on the raw driver.
 /v1/chat/completions` over the httpx stack already here, because `base_url` *is*
 the provider abstraction; litellm priced at **+146 MB and 29 distributions
 against +0 and 0**, and three PRD sections naming it since M1 are corrected
-rather than implemented (ADR-0027). **Generation is a job**; `POST
+rather than implemented. **Generation is a job**; `POST
 /admin/rows/regenerate` enqueues and returns 202, because a synchronous route
 would be the first whose honest answer is *"the upstream is down"* and would
 force PRD 07's envelope a milestone early. **The prompt addresses candidates by
@@ -155,8 +154,8 @@ already produces from a `SELECT`. Evidence in `curation-and-llm.md`.
 ## M7's nine boundary calls
 
 **`GET /home` IS built** (the first client-facing route since M5, because
-ADR-0006's *"one request paints a screen"* is a property of a request boundary no
-CLI can exhibit); **the `curated_rows`/`LLMRow`/`CuratedProvider` family is M8's
+*"one request paints a screen"* is a property of a request boundary no CLI can
+exhibit); **the `curated_rows`/`LLMRow`/`CuratedProvider` family is M8's
 whole**, so `RowFamily` ships with two members rather than a `CURATED` nobody can
 emit; **`RowCard` carries no artwork field**, absent rather than null — ✅
 discharged by M9, which is the outcome the call named and not a reversal, so do
@@ -185,12 +184,12 @@ cosine plus genre/keyword Jaccard); and **the `usher.db.staging` shared-table
 lock is fixed here**, because M6's per-title `index` enqueue is what makes it
 hurt.
 
-**ADR-0002's typo-tolerance gate FAILED** on both halves of a bar written down
+**M6's typo-tolerance gate FAILED** on both halves of a bar written down
 before the numbers were known: 27.8% for a 2–4-character name against 0.75,
 68.3% for 5–7 against 0.85, transposition at 2–4 characters **0.0%**, and no
 configuration within **6×** of a 50 ms budget. **Above 8 characters it needs
 nothing** (91% of the catalog by row count). The deliverable was the recorded
-failure, ADR-0002 amended, one shipped default changed, and the two-tier suggest
+failure, one shipped default changed, and the two-tier suggest
 scoped to M9. Table in `search-and-embeddings.md`.
 
 ## M4's four boundary calls

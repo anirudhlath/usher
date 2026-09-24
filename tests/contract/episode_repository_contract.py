@@ -1,15 +1,4 @@
-"""Behaviour every `EpisodeRepository` implementation must satisfy.
-
-999,827 of the one measured source's 1,126,674 items are episodes, so this is
-the port the ingest walk spends most of its writes in. Everything here is a
-batch, and every case that names a "COALESCE rule" is about the same failure
-the media-item upsert has: a nightly walk carries a source's numbers and
-nothing else, and must not blank what enrichment wrote.
-
-Subclass and provide `repository`, `title_id` and `season_id`, where the last
-two must name rows that actually exist for an implementation with foreign
-keys.
-"""
+"""Behaviour every `EpisodeRepository` implementation must satisfy."""
 
 import uuid
 from collections.abc import Sequence
@@ -18,7 +7,12 @@ from typing import Protocol
 
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
-from usher.ports.repository import EpisodeCursorPosition, EpisodeRepository
+from usher.ports.repository import (
+    EpisodeCursorPosition,
+    EpisodeReference,
+    EpisodeRepository,
+    TitleReference,
+)
 
 AIR_DATE = date(2011, 4, 17)
 
@@ -71,9 +65,11 @@ class EpisodeRepositoryContract:
     async def test_season_zero_is_a_real_season(
         self, repository: EpisodeRepository, title_id: uuid.UUID
     ) -> None:
-        """TMDb numbers a series' specials as season 0 and Emby emits
-        `ParentIndexNumber: 0`. A `ge=1` bound anywhere on this path silently
-        drops every special in the library."""
+        """TMDb numbers a series' specials as season 0 and Emby emits `ParentIndexNumber: 0`.
+
+        A `ge=1` bound anywhere on this path silently drops every special in the
+        library.
+        """
         await repository.upsert_seasons([season(title_id, 0, name="Specials")])
         seasons, _ = await repository.list_for_title(title_id)
         assert [one.season_number for one in seasons] == [0]
@@ -89,9 +85,11 @@ class EpisodeRepositoryContract:
     async def test_upsert_seasons_is_keyed_on_title_and_number(
         self, repository: EpisodeRepository, title_id: uuid.UUID
     ) -> None:
-        """Not on `Season.id`. Ingest mints a fresh UUIDv7 for every season it
-        sees, so an upsert keyed on the id inserts a duplicate row per walk and
-        the series grows a season a night."""
+        """Not on `Season.id`.
+
+        Ingest mints a fresh UUIDv7 for every season it sees, so an upsert keyed on the
+        id inserts a duplicate row per walk and the series grows a season a night.
+        """
         await repository.upsert_seasons([season(title_id, 1, name="First")])
         await repository.upsert_seasons([season(title_id, 1, name="Renamed")])
         seasons, _ = await repository.list_for_title(title_id)
@@ -101,8 +99,10 @@ class EpisodeRepositoryContract:
     async def test_upsert_seasons_never_blanks_an_enriched_field(
         self, repository: EpisodeRepository, title_id: uuid.UUID
     ) -> None:
-        """Enrichment wrote the name and the air date; the next nightly walk
-        knows only the number."""
+        """Enrichment wrote the name and the air date.
+
+        The next nightly walk knows only the number.
+        """
         await repository.upsert_seasons(
             [season(title_id, 1, name="Season 1", overview="Winter", air_date=AIR_DATE)]
         )
@@ -115,8 +115,10 @@ class EpisodeRepositoryContract:
     async def test_a_duplicate_season_inside_one_batch_is_tolerated(
         self, repository: EpisodeRepository, title_id: uuid.UUID
     ) -> None:
-        """A batch of episodes from one season names that season once per
-        episode, so this is the common case rather than the odd one."""
+        """A batch of episodes from one season names that season once per episode.
+
+        So this is the common case rather than the odd one.
+        """
         result = await repository.upsert_seasons(
             [season(title_id, 1, name="First"), season(title_id, 1, name="Last")]
         )
@@ -151,8 +153,10 @@ class EpisodeRepositoryContract:
     async def test_upsert_episodes_is_keyed_on_title_season_and_number(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """Ingest mints a fresh id per sighting, so an upsert keyed on
-        `Episode.id` adds 999,827 rows a night."""
+        """Ingest mints a fresh id per sighting.
+
+        An upsert keyed on `Episode.id` would add the whole library again every night.
+        """
         await repository.upsert_episodes([episode(title_id, season_id, 1, name="First")])
         await repository.upsert_episodes([episode(title_id, season_id, 1, name="Renamed")])
         _, episodes = await repository.list_for_title(title_id)
@@ -174,8 +178,10 @@ class EpisodeRepositoryContract:
     async def test_the_same_episode_number_in_two_seasons_is_two_episodes(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """The key is `(title_id, season_number, episode_number)`. Dropping
-        `season_number` from it collapses every S02E01 onto its S01E01."""
+        """The key is `(title_id, season_number, episode_number)`.
+
+        Dropping `season_number` from it collapses every S02E01 onto its S01E01.
+        """
         await repository.upsert_seasons([season(title_id, 2)])
         await repository.upsert_episodes(
             [
@@ -189,9 +195,11 @@ class EpisodeRepositoryContract:
     async def test_upsert_episodes_never_blanks_an_enriched_field(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """The whole reason this rule exists: a source gives ingest numbers and
-        nothing else, and the enriched name and air date are what a client
-        actually renders."""
+        """The whole reason this rule exists.
+
+        A source gives ingest numbers and nothing else, and the enriched name and air
+        date are what a client actually renders.
+        """
         await repository.upsert_episodes(
             [
                 episode(
@@ -239,11 +247,12 @@ class EpisodeRepositoryContract:
     async def test_resolve_seasons_answers_a_batch(
         self, repository: EpisodeRepository, title_id: uuid.UUID
     ) -> None:
-        """`upsert_seasons` reports counts, not ids, and it cannot report the
-        caller's: ingest mints a fresh UUIDv7 per sighting and a season the
-        catalog already holds keeps the id it was inserted with. Reading them
-        back is the only way an episode's `season_id` can be right on the
-        second walk."""
+        """`upsert_seasons` reports counts, not ids, and it cannot report the caller's.
+
+        Ingest mints a fresh UUIDv7 per sighting and a season the catalog already holds
+        keeps the id it was inserted with, so reading them back is the only way an
+        episode's `season_id` can be right on the second walk.
+        """
         await repository.upsert_seasons([season(title_id, 1), season(title_id, 2)])
         seasons, _ = await repository.list_for_title(title_id)
         by_number = {one.season_number: one.id for one in seasons}
@@ -258,12 +267,13 @@ class EpisodeRepositoryContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """The reason the key carries `title_id` rather than the signature
-        taking one. A page of 1,000 episodes off a walk sorted by creation
-        date spans hundreds of series -- an episode arrives the week it airs,
-        not with its siblings -- so a per-title resolve is one round trip per
-        series and 999,827 episodes makes that the design defect batching
-        exists to remove."""
+        """The reason the key carries `title_id` rather than the signature taking one.
+
+        A page of 1,000 episodes off a walk sorted by creation date spans hundreds of
+        series -- an episode arrives the week it airs, not with its siblings -- so a
+        per-title resolve is one round trip per series, which is the design defect
+        batching exists to remove.
+        """
         await repository.upsert_seasons([season(title_id, 1), season(other_title_id, 1)])
         resolved = await repository.resolve_seasons([(title_id, 1), (other_title_id, 1)])
         assert set(resolved) == {(title_id, 1), (other_title_id, 1)}
@@ -298,9 +308,11 @@ class EpisodeRepositoryContract:
     async def test_resolve_episodes_omits_numbers_it_does_not_have(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """Absent means "no such episode", not "not asked" -- a caller that
-        cannot tell the two apart leaves an item silently unmatched instead of
-        enqueuing a re-match."""
+        """Absent means "no such episode", not "not asked".
+
+        A caller that cannot tell the two apart leaves an item silently unmatched
+        instead of enqueuing a re-match.
+        """
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
         assert (title_id, 1, 99) not in await repository.resolve_episodes(
             [(title_id, 1, 1), (title_id, 1, 99)]
@@ -313,9 +325,11 @@ class EpisodeRepositoryContract:
         season_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """Every series has an S01E01. A resolve that forgot `title_id` hangs
-        one show's episodes off another's, and 32,409 series makes that a
-        certainty rather than a risk."""
+        """Every series has an S01E01.
+
+        A resolve that forgot `title_id` hangs one show's episodes off another's, and
+        a catalog of thousands of series makes that a certainty rather than a risk.
+        """
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
         assert await repository.resolve_episodes([(other_title_id, 1, 1)]) == {}
 
@@ -328,8 +342,10 @@ class EpisodeRepositoryContract:
         other_title_id: uuid.UUID,
     ) -> None:
         """Two series' S01E01 in one batch, both answered and not confused.
-        The single-title form cannot express this at all, and it is what every
-        real page of a walk looks like."""
+
+        The single-title form cannot express this at all, and it is what every real page
+        of a walk looks like.
+        """
         await repository.upsert_episodes(
             [episode(title_id, season_id, 1), episode(other_title_id, other_season_id, 1)]
         )
@@ -345,8 +361,10 @@ class EpisodeRepositoryContract:
     async def test_list_for_title_orders_by_number(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """A CLI report and an enrichment diff both read this, and both are
-        wrong against an arbitrary order."""
+        """A CLI report and an enrichment diff both read this.
+
+        Both are wrong against an arbitrary order.
+        """
         await repository.upsert_seasons([season(title_id, 2), season(title_id, 1)])
         await repository.upsert_episodes(
             [
@@ -370,18 +388,9 @@ class EpisodeRepositoryContract:
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
         assert await repository.list_for_title(other_title_id) == ([], [])
 
-    # ------------------------------------------------------------------
-    # The two bounded reads `GET /series/{id}/seasons` and
-    # `GET /seasons/{id}/episodes` are built on.
-    #
-    # `list_for_title` above answers the same questions and **no route may use
-    # it**: it returns the whole tree, measured at 20,001 rows / 22.901 ms /
-    # 402 buffers for one pathological series. It exists for enrichment's
-    # change detection and the CLI's report, where the whole tree is the
-    # answer. A route needs a *bounded* read on both sides -- the seasons of a
-    # series (few, and a client renders all of them) and one page of one
-    # season's episodes.
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # The two bounded reads behind `GET /series/{id}/seasons` and
+    # `GET /seasons/{id}/episodes`.
 
     async def test_the_seasons_of_a_series_are_ordered_and_scoped_to_it(
         self,
@@ -389,13 +398,11 @@ class EpisodeRepositoryContract:
         title_id: uuid.UUID,
         other_title_id: uuid.UUID,
     ) -> None:
-        """Season 0 first, then 1, then 2 -- and another series' season 1 is
-        not in the answer.
+        """Season 0 first, then 1, then 2 -- and another series' season 1 is not in the answer.
 
-        Seeded in descending order so the minted UUIDv7s descend with it,
-        which is what makes `ORDER BY season_number` observable at all: a
-        UUIDv7 primary key otherwise makes `ORDER BY id` agree with the real
-        key by accident, and that cost M7 five untested orderings.
+        Seeded in descending order so the minted UUIDv7s descend with it, which is
+        what makes `ORDER BY season_number` observable at all: a UUIDv7 primary key
+        otherwise makes `ORDER BY id` agree with the real key by accident.
         """
         built = [season(title_id, 2), season(title_id, 1), season(title_id, 0)]
         await repository.upsert_seasons([*built, season(other_title_id, 1)])
@@ -412,12 +419,14 @@ class EpisodeRepositoryContract:
     async def test_a_title_with_no_seasons_lists_none_rather_than_refusing(
         self, repository: EpisodeRepository, other_title_id: uuid.UUID
     ) -> None:
-        """A movie has no seasons, and that is a fact about the title rather
-        than a missing row: `GET /series/{id}/seasons` answers `200` with an
-        empty list for it and reserves `404` for an id no title carries. This
-        read cannot tell the two apart -- it is scoped to `seasons` -- so the
-        route asks `TitleRepository` first, and this case is what says the
-        empty answer is the port's contract rather than an accident.
+        """A movie has no seasons, and that is a fact about the title rather than a missing row.
+
+        `GET /series/{id}/seasons` answers `200` with an empty list for it and reserves
+        `404` for an id no title carries.
+
+        This read cannot tell the two apart -- it is scoped to `seasons` -- so the route
+        asks `TitleRepository` first, and this case is what says the empty answer is the
+        port's contract rather than an accident.
         """
         assert await repository.list_seasons(other_title_id) == []
 
@@ -440,30 +449,28 @@ class EpisodeRepositoryContract:
     async def test_a_season_id_no_season_carries_is_absent_rather_than_empty(
         self, repository: EpisodeRepository
     ) -> None:
-        """`None`, never a `Season` with no fields and never an empty episode
-        list. `GET /seasons/{id}/episodes` answers `404` for this and `200`
-        with an empty list for a season that exists and holds nothing, and the
-        route can only tell them apart if this read does."""
+        """`None`, never a `Season` with no fields and never an empty episode list.
+
+        `GET /seasons/{id}/episodes` answers `404` for this and `200` with an empty list
+        for a season that exists and holds nothing, and the route can only tell them
+        apart if this read does.
+        """
         assert await repository.get_season(new_id()) is None
 
     async def test_a_seasons_episodes_page_excludes_another_seasons(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """Two seasons of **one** series, and the read for season 1 answers
-        with season 1's episodes, in `episode_number` order.
+        """Two seasons of **one** series.
 
-        The distractor is deliberate and is seeded twice over. An
-        implementation that forgets the season scope returns the whole table in
-        physical order and satisfies every membership assertion in this file --
-        so the assertion is positional, and season 2's episodes carry the same
-        numbers as season 1's, which is the ordinary shape of a series rather
-        than a contrived one.
+        The read for season 1 answers with season 1's episodes, in `episode_number`
+        order. The distractor is seeded twice over: an implementation that forgets the
+        season scope returns the whole table in physical order and satisfies every
+        membership assertion in this file, so the assertion is positional and season
+        2's episodes carry the same numbers as season 1's.
 
         The ids descend as the episode numbers ascend, and the premise says so:
-        without that, `ORDER BY id` and `ORDER BY episode_number` return the
-        same list and the ordering is untested. `other_season_id` is a second
-        *title's* season and would not do -- it makes "scoped to a season"
-        indistinguishable from "scoped to a title".
+        without that, `ORDER BY id` and `ORDER BY episode_number` return the same list
+        and the ordering is untested.
         """
         second = await _second_season(repository, title_id)
         built = [
@@ -490,23 +497,19 @@ class EpisodeRepositoryContract:
     ) -> None:
         """An empty episode list is a **real state**, not a bug.
 
-        Since M9's T1 the TMDb path fetches a series and its seasons in one
-        `append_to_response` request, and an invalid or refused namespace is
-        answered with the **same 200 and the key silently absent**
-        (`.claude/rules/tmdb-and-enrichment.md`) -- so a season the show does
-        not have and a season TMDb declined to serve are indistinguishable at
-        the request layer, and a listed season whose block never arrived now
-        yields a `Season` row with no episodes rather than a parked job. This
-        route has to be able to represent that honestly, which means an empty
-        page here and `404` reserved for a season id that does not exist.
+        The TMDb path fetches a series and its seasons in one `append_to_response`
+        request, and an invalid or refused namespace is answered with the **same 200
+        and the key silently absent**, so a season the show does not have and a season
+        TMDb declined to serve are indistinguishable at the request layer, and a
+        listed season whose block never arrived yields a `Season` row with no
+        episodes. This route has to represent that honestly, which means an empty page
+        here and `404` reserved for a season id that does not exist.
 
-        The season is minted through the port and read back rather than taken
-        from the `season_id` fixture, and that is not fussiness: the Postgres
-        subclass inserts a real `seasons` row for that fixture because
-        `episodes.season_id` is a foreign key, and the fake -- which has none
-        -- hands out a bare `new_id()`. So `get_season(season_id)` is a real
-        row on one arm and `None` on the other, and a case resting on it would
-        pass for different reasons on each.
+        The season is minted through the port and read back rather than taken from the
+        `season_id` fixture: the Postgres subclass inserts a real `seasons` row for
+        that fixture because `episodes.season_id` is a foreign key, while the fake
+        hands out a bare `new_id()`, so a case resting on it would pass for different
+        reasons on each arm.
         """
         await repository.upsert_seasons([season(title_id, 1, episode_count=10)])
         stored = (await repository.list_seasons(title_id))[0]
@@ -518,14 +521,12 @@ class EpisodeRepositoryContract:
     async def test_a_season_page_resumes_exactly_after_its_cursor(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """Five episodes at `limit=2`, walked to exhaustion, and the pages
-        abut.
+        """Five episodes at `limit=2`, walked to exhaustion, and the pages abut.
 
-        The comparison on the id tail is **strict**: relaxed from `>` to `>=`
-        the walk re-serves its boundary row at every page break (ADR-0034), and
-        a test whose pages do not abut cannot see it. The final resume asks
-        from the last row's own position and must answer with nothing --
-        exhaustion is the case the off-by-one hides in.
+        The comparison on the id tail is **strict**: relaxed from `>` to `>=` the walk
+        re-serves its boundary row at every page break, and a test whose pages do not
+        abut cannot see it. The final resume asks from the last row's own position and
+        must answer with nothing -- exhaustion is the case the off-by-one hides in.
         """
         await repository.upsert_episodes(
             [episode(title_id, season_id, number) for number in range(1, 6)]
@@ -545,24 +546,20 @@ class EpisodeRepositoryContract:
     async def test_an_episode_inserted_before_the_cursor_neither_duplicates_nor_drops(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
-        """B6's concurrent-insert case, inside a season.
+        """The concurrent-insert case, inside a season.
 
-        PRD 07 rules out offset paging because it *"produces duplicates under
-        concurrent writes"*, and the mirror property is what a keyset buys.
-        Page 1 is 10/20/30; episode **15** then lands, which sorts into the
-        window already served -- under `OFFSET 3` every later row moves down
-        one place and 30 is served a second time. The premise is asserted: the
-        insert has to sort *before* the cursor, or the comparison is vacuous.
+        PRD 07 pages by cursor only. Offset paging serves a row twice when a
+        concurrent insert sorts before it, and not doing so is what a keyset buys.
+        Page 1 is 10/20/30; episode **15** then lands, which sorts into the window
+        already served -- under `OFFSET 3` every later row moves down one place and
+        30 is served a second time. The premise is asserted: the insert has to sort
+        *before* the cursor, or the comparison is vacuous.
 
-        **ADR-0034's `IS NOT NULL` leg does not appear in this read, and that
-        is a fact about the schema rather than an omission.**
-        `episodes.episode_number` and `episodes.season_number` are both
-        `nullable=False` (`db/models/episode.py:85-86`), so the unkeyed group
-        the third arm exists for is provably empty here -- and
-        `EpisodeCursorPosition.episode_number` is typed `int` rather than
-        `int | None` to say so where a type checker holds it. Written down
-        because *"we did not need it"* and *"we forgot it"* look identical in
-        a diff.
+        The keyset's `IS NOT NULL` leg does not appear in this read, and that is a
+        fact about the schema rather than an omission: `episodes.episode_number` and
+        `episodes.season_number` are both `nullable=False`, so the unkeyed group is
+        provably empty here, and `EpisodeCursorPosition.episode_number` is typed `int`
+        rather than `int | None` to say so where a type checker holds it.
         """
         await repository.upsert_episodes(
             [episode(title_id, season_id, number) for number in (10, 20, 30, 40, 50)]
@@ -635,20 +632,21 @@ class MarkPlayed(Protocol):
 
 
 class MarkSeriesPlayed(Protocol):
-    """A watch state keyed on the *series'* `title_id` rather than on an
-    episode -- which is what Emby writes when a user marks a whole show
-    watched, and which `next_up` must not read."""
+    """A watch state keyed on the *series'* `title_id` rather than on an episode.
+
+    Emby writes this when a user marks a whole show watched, and `next_up` must not
+    read it.
+    """
 
     async def __call__(self, series_id: uuid.UUID) -> None: ...
 
 
 class EpisodeRepositoryNextUpContract:
-    """`next_up`, and the wrong implementations that each return a valid,
-    populated, correctly-shaped row forever.
+    """`next_up`, and the wrong implementations that each return a valid row forever.
 
-    Every case here seeds a **distractor a broken implementation ranks
-    first**, per the milestone's rule 1. `assert result[series].id == wanted`
-    without one is satisfied by an eight-episode fixture in physical order.
+    Every case here seeds a **distractor a broken implementation ranks first**;
+    `assert result[series].id == wanted` without one is satisfied by an eight-episode
+    fixture in physical order.
 
     Subclasses provide `repository`, `user_id`, `series_id`,
     `other_series_id`, `seeded`, `other_seeded`, `mark_played` and
@@ -697,12 +695,11 @@ class EpisodeRepositoryNextUpContract:
         `last_played_at` says S01E01; the series position says S02E02. The
         answer is S02E03.
 
-        The wrong implementation this kills: `ORDER BY ws.last_played_at DESC
-        LIMIT 1` as the mark, which is the natural reading of "the last
-        played episode" and is wrong in English as well as in SQL. It also
-        fails silently on a walk-sourced library, where `last_played_at` is
-        NULL on nearly every row (ADR-0014) and the mark is therefore
-        arbitrary.
+        The wrong implementation this kills: `ORDER BY ws.last_played_at DESC LIMIT 1`
+        as the mark, which is the natural reading of "the last played episode" and is
+        wrong in English as well as in SQL. It also fails silently on a walk-sourced
+        library, where `last_played_at` is NULL on nearly every row and the mark is
+        therefore arbitrary.
         """
         await mark_played(seeded[(2, 2)], last_played_at=LAST_PLAYED)
         await mark_played(seeded[(1, 1)], last_played_at=LATER)
@@ -719,8 +716,9 @@ class EpisodeRepositoryNextUpContract:
         mark_played: MarkPlayed,
         seeded: dict[tuple[int, int], uuid.UUID],
     ) -> None:
-        """S01E01 and S01E03 played, S01E02 skipped. The answer is S02E01,
-        not S01E02.
+        """S01E01 and S01E03 played, S01E02 skipped.
+
+        The answer is S02E01, not S01E02.
 
         This is the high-water-mark semantic asserted directly, and it is the
         case that decides the design rather than merely reflecting it.
@@ -745,11 +743,10 @@ class EpisodeRepositoryNextUpContract:
     ) -> None:
         """Every episode played; the mark is the finale.
 
-        The wrong implementation this kills is the front matter's own
-        headline example -- a provider that returns S01E01 instead of the next
-        episode, "forever, silently, for every series in the library". A
-        wrapped result is a valid Episode, correctly hydrated, from the right
-        series; nothing but this assertion can tell it from a right answer.
+        The wrong implementation this kills returns S01E01 instead of the next
+        episode, forever and silently, for every series in the library. A wrapped
+        result is a valid `Episode`, correctly hydrated, from the right series;
+        nothing but this assertion can tell it from a right answer.
 
         `assert series_id not in result`, not `assert result[series_id] is
         None`: an absent key and a null value are different states, and the
@@ -769,15 +766,13 @@ class EpisodeRepositoryNextUpContract:
         series_id: uuid.UUID,
         seeded: dict[tuple[int, int], uuid.UUID],
     ) -> None:
-        """PRD 06 fires this provider on "series with an unwatched **next**
-        episode". A series never started has a *first* episode, not a next
-        one.
+        """PRD 06 fires this provider on "series with an unwatched **next** episode".
 
-        The arithmetic decides it independently of the wording: at 32,409
-        series, "S01E01 of everything unstarted" is a Next Up row holding the
-        household's whole unwatched television library -- a generic row
-        wearing a personalised row's title, which is the failure mode rule 2
-        names.
+        A series never started has a *first* episode, not a next one. The arithmetic
+        decides it independently of the wording: across a whole catalog, "S01E01 of
+        everything unstarted" is a Next Up row holding the household's entire
+        unwatched television library -- a generic row wearing a personalised row's
+        title.
         """
         result = await repository.next_up(user_id, [series_id])
 
@@ -791,8 +786,7 @@ class EpisodeRepositoryNextUpContract:
         mark_played: MarkPlayed,
         seeded: dict[tuple[int, int], uuid.UUID],
     ) -> None:
-        """Season 0 is TMDb's specials namespace and the CHECK allows it
-        (`season_number >= 0`).
+        """Season 0 is TMDb's specials namespace and the CHECK allows it (`season_number >= 0`).
 
         Watching one special must not make Next Up say "continue" about a
         show nobody has started -- `(0, 1) < (1, 1)`, so an unfiltered
@@ -823,15 +817,15 @@ class EpisodeRepositoryNextUpContract:
     ) -> None:
         """`NextUpProvider` asks about every series the household has started.
 
-        The correctness half: every series has an S01E01, and 32,409 of them
-        means a statement that drops `title_id` from either the mark or the
-        candidate join hangs one show's episodes off another's -- the
-        identical argument `resolve_episodes`' docstring already makes.
+        The correctness half: every series has an S01E01, so a statement that drops
+        `title_id` from either the mark or the candidate join hangs one show's
+        episodes off another's -- the identical argument `resolve_episodes`' docstring
+        already makes.
 
-        The N+1 half cannot be asserted from the result, because a per-series
-        loop returns exactly the same mapping. Each subclass asserts it
-        separately -- the fake through its `calls` counter, the Postgres
-        subclass through a `before_cursor_execute` listener.
+        The N+1 half cannot be asserted from the result, because a per-series loop
+        returns exactly the same mapping. Each subclass asserts it separately -- the
+        fake through its `calls` counter, the Postgres subclass through a
+        `before_cursor_execute` listener.
         """
         await mark_played(seeded[(1, 1)])
         await mark_played(other_seeded[(1, 2)])
@@ -851,13 +845,11 @@ class EpisodeRepositoryNextUpContract:
         seeded: dict[tuple[int, int], uuid.UUID],
         other_seeded: dict[tuple[int, int], uuid.UUID],
     ) -> None:
-        """The scope is `title_ids`, and dropping it answers about the whole
-        library.
+        """The scope is `title_ids`, and dropping it answers about the whole library.
 
-        `NextUpProvider` proposes a row from what this returns, so an
-        unscoped statement at 32,409 series builds a Next Up row about shows
-        the provider never asked about -- populated, plausible, and unbounded
-        by anything the caller controls.
+        `NextUpProvider` proposes a row from what this returns, so an unscoped
+        statement builds a Next Up row about shows the provider never asked about --
+        populated, plausible, and unbounded by anything the caller controls.
         """
         await mark_played(seeded[(1, 1)])
         await mark_played(other_seeded[(1, 1)])
@@ -875,10 +867,12 @@ class EpisodeRepositoryNextUpContract:
         mark_played: MarkPlayed,
         seeded: dict[tuple[int, int], uuid.UUID],
     ) -> None:
-        """One household member's position is not another's. On a
-        single-user deployment -- every deployment during development -- a
-        lost `user_id` predicate is undetectable, and on a real household it
-        tells one person to watch the episode after someone else's."""
+        """One household member's position is not another's.
+
+        On a single-user deployment -- every deployment during development -- a lost
+        `user_id` predicate is undetectable, and on a real household it tells one person
+        to watch the episode after someone else's.
+        """
         await mark_played(seeded[(2, 1)])
 
         result = await repository.next_up(other_user_id, [series_id])
@@ -921,21 +915,15 @@ class EpisodeRepositoryNextUpContract:
         seeded: dict[tuple[int, int], uuid.UUID],
         mark_played: MarkPlayed,
     ) -> None:
-        """`watch_states` keyed on `title_id` is the *whole show*; keyed on
-        `episode_id` it is one episode. Emby lets a user mark a series
-        watched, which writes the first.
+        """`watch_states` keyed on `title_id` is the *whole show*; on `episode_id`, one.
 
-        An implementation that reads `watch_states` by `title_id` reads that
-        one row as a position in the series and answers from it -- and
-        because a title-keyed row has no `(season, episode)` at all, what it
-        answers is whatever the join degenerates to. Here the household has
-        genuinely watched S01E01, so the honest answer is S01E02, and any
-        implementation reading the series-level row instead gives something
-        else.
-
-        `media_item.py` records the mirror image of this ("an episode's row
-        carries its series' `title_id` too"). Same table, opposite direction,
-        and this is the case that pins the direction this statement needs.
+        Emby lets a user mark a series watched, which writes the first. An
+        implementation that reads `watch_states` by `title_id` reads that one row as a
+        position in the series and answers from it -- and because a title-keyed row
+        has no `(season, episode)` at all, what it answers is whatever the join
+        degenerates to. Here the household has genuinely watched S01E01, so the honest
+        answer is S01E02, and any implementation reading the series-level row gives
+        something else.
         """
         await mark_played(seeded[(1, 1)])
         await mark_series_played(series_id)
@@ -952,18 +940,14 @@ class EpisodeRepositoryNextUpContract:
         mark_played: MarkPlayed,
         seeded: dict[tuple[int, int], uuid.UUID],
     ) -> None:
-        """The one place the hierarchy reads and `next_up` **deliberately
-        disagree**, pinned in a single case so that "fixing" either half to
-        match the other fails here.
+        """The one place the hierarchy reads and `next_up` **deliberately disagree**.
 
-        `next_up`'s docstring is explicit: *"Season 0 is excluded on both
-        sides... `(0, n) < (1, 1)` is an artefact of the numbering rather than
-        a claim about viewing order"* -- and that argument is about **"what do
-        I watch next"**. `GET /series/{id}/seasons` asks a different question:
-        *"show me this series"*, and a show's specials are perfectly ordinary
-        in it. TMDb numbers specials as season 0 and Emby emits
-        `ParentIndexNumber: 0`, so excluding them here would hide a whole
-        shelf of real rows the catalog holds.
+        Pinned in a single case so that "fixing" either half to match the other fails
+        here. `next_up` excludes season 0 because `(0, n) < (1, 1)` is an artefact of
+        the numbering rather than a claim about viewing order, and that argument is
+        about **"what do I watch next"**. `GET /series/{id}/seasons` asks *"show me
+        this series"*, and a show's specials are perfectly ordinary in it: excluding
+        them here would hide a whole shelf of real rows the catalog holds.
 
         The household has watched S01E01, so `next_up` has a live answer to
         get wrong: an implementation that dropped the season-0 filter would
@@ -987,7 +971,153 @@ class EpisodeRepositoryNextUpContract:
     async def test_next_up_of_nothing_is_empty(
         self, repository: EpisodeRepository, user_id: uuid.UUID
     ) -> None:
-        """`NextUpProvider` on a household that has started no series at all
-        asks about nothing, and a statement built around `= ANY(ARRAY[])`
-        is a round trip whose answer is known before it is sent."""
+        """`NextUpProvider` on a household that has started no series asks about nothing.
+
+        A statement built around `= ANY(ARRAY[])` is a round trip whose answer is known
+        before it is sent.
+        """
         assert await repository.next_up(user_id, []) == {}
+
+
+class EpisodeRepositoryNaturalKeyContract:
+    """`resolve_natural_keys`: an episode named the way a backup artifact names one.
+
+    Resolved against whatever ids *this* catalog minted.
+    Subclass and provide `repository`, `title_id`, `season_id`,
+    `other_title_id`, `other_season_id`, `series_reference` and
+    `other_series_reference`, where the last two must be true of rows the
+    implementation really holds — a `titles` row on the Postgres arm, a
+    `title_keys` entry on the fake's.
+    """
+
+    @staticmethod
+    def _reference(
+        series: TitleReference, season_number: int, episode_number: int
+    ) -> EpisodeReference:
+        return EpisodeReference(
+            title=series, season_number=season_number, episode_number=episode_number
+        )
+
+    async def test_an_episode_resolves_through_its_series_natural_key(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """The artifact holds no id this catalog agrees with.
+
+        Neither the series' nor the episode's -- so the series is resolved by its
+        natural key and the episode by `uq_episodes_title_season_episode`.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        _, stored = await repository.list_for_title(title_id)
+        assert len(stored) == 1, "the premise: exactly one episode was seeded"
+
+        carried = self._reference(
+            TitleReference(
+                kind=series_reference.kind,
+                id=new_id(),
+                imdb_id=series_reference.imdb_id,
+                tmdb_id=series_reference.tmdb_id,
+            ),
+            1,
+            1,
+        )
+        assert carried.title.id != title_id, "the premise: the artifact carries a foreign id"
+
+        assert await repository.resolve_natural_keys([carried]) == {carried: stored[0].id}
+
+    async def test_the_series_is_part_of_the_key_and_not_a_filter(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        other_season_id: uuid.UUID,
+        series_reference: TitleReference,
+        other_series_reference: TitleReference,
+    ) -> None:
+        """Every series has an S01E01.
+
+        A resolution that lost the series scope is therefore a certainty rather than a
+        risk. Both series' S01E01 are seeded and both references asked in one call, so
+        an implementation that dropped the series cannot pass by answering one of them.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        await repository.upsert_episodes([episode(other_title_id, other_season_id, 1)])
+        _, mine = await repository.list_for_title(title_id)
+        _, theirs = await repository.list_for_title(other_title_id)
+        assert mine[0].id != theirs[0].id, "the premise: two S01E01s, two rows"
+
+        carried = [
+            self._reference(series_reference, 1, 1),
+            self._reference(other_series_reference, 1, 1),
+        ]
+
+        assert await repository.resolve_natural_keys(carried) == {
+            carried[0]: mine[0].id,
+            carried[1]: theirs[0].id,
+        }
+
+    async def test_a_number_this_series_does_not_carry_is_absent(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """Absent, never mapped to `None`.
+
+        The premise is the sibling that resolves in the same call, so this cannot pass
+        against an implementation that resolves nothing.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        _, stored = await repository.list_for_title(title_id)
+
+        found = self._reference(series_reference, 1, 1)
+        no_such_episode = self._reference(series_reference, 1, 99)
+        no_such_season = self._reference(series_reference, 99, 1)
+
+        answers = await repository.resolve_natural_keys([found, no_such_episode, no_such_season])
+
+        assert answers == {found: stored[0].id}
+
+    async def test_a_series_this_catalog_does_not_hold_resolves_nothing(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """The title rung failing and the episode rung failing are one answer, deliberately.
+
+        The port says so, and an operator needs the refused list rather than which half
+        of the key was missing.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        stranger = TitleReference(kind=series_reference.kind, id=new_id())
+
+        assert await repository.resolve_natural_keys([self._reference(stranger, 1, 1)]) == {}
+
+    async def test_an_empty_batch_asks_nothing(self, repository: EpisodeRepository) -> None:
+        """`unnest` over an empty array is a round trip to learn nothing."""
+        assert await repository.resolve_natural_keys([]) == {}
+
+    async def test_a_repeated_reference_is_answered_once(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        series_reference: TitleReference,
+    ) -> None:
+        """A household resumes one episode once per state.
+
+        So a batch carrying the same reference twice is ordinary. Two probes for one
+        reference would put the ordinal out of step with the caller's list.
+        """
+        await repository.upsert_episodes([episode(title_id, season_id, 1)])
+        _, stored = await repository.list_for_title(title_id)
+        carried = self._reference(series_reference, 1, 1)
+
+        assert await repository.resolve_natural_keys([carried, carried]) == {carried: stored[0].id}

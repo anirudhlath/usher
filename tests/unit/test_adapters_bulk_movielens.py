@@ -1,12 +1,6 @@
-"""MovieLens tag-genome parsing and assembly, over a synthetic zip built
-in this file. No network, no Docker, no real archive.
+"""MovieLens tag-genome parsing and assembly, over a synthetic zip built in this file.
 
-Every value here is invented. The fixture is Python literals rather than a
-committed .csv or .zip because none of the four checks in
-tests/unit/test_no_third_party_data.py can recognise a MovieLens row by
-shape -- a genome row is three integers and a float, and links.csv is three
-integers, both indistinguishable from any CSV ever written. See that module
-and tests/fixtures/bulk/README.md.
+No network, no Docker, no real archive.
 """
 
 import zipfile
@@ -28,16 +22,7 @@ from usher.ports.errors import PortDataMalformed
 
 _ROOT = "ml-latest/"
 
-# Four movies. 90000101 is in links and in the genome (the ordinary path).
-# 90000102 is in links with an imdb id the catalog will not hold (the
-# repository drops it; the dataset must still yield it). 90000103 is in the
-# genome and *absent from links* -- it advances `position` and not
-# `rows_seen`. 90000104 is in links and absent from the genome.
-#
-# The imdb ids are 8 digits beginning 99, which is the reserved synthetic
-# band `tests/unit/test_no_third_party_data.py` enforces once the `tt`
-# prefix is applied. A *padded* id cannot be written here at all -- see
-# `test_a_short_imdb_id_is_left_padded_to_seven_digits`.
+# Four movies.
 _LINKS = "\n".join(
     [
         "movieId,imdbId,tmdbId",
@@ -58,8 +43,10 @@ _SCORES = "\n".join(
 
 
 def _archive(tmp_path: Path, **members: str) -> Path:
-    """Write a zip into a scratch cache directory, so the adapter reads
-    exactly the shape it reads in production."""
+    """Write a zip into a scratch cache directory.
+
+    So the adapter reads exactly the shape it reads in production.
+    """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(cache / "ml-latest.zip", "w", zipfile.ZIP_DEFLATED) as archive:
@@ -73,10 +60,11 @@ def _default(tmp_path: Path) -> Path:
 
 
 def _local(cache: Path) -> httpx.MockTransport:
-    """Serves whatever is already in `cache`, so `ensure_local` short-circuits
-    on the revision stamp and no bytes are ever transferred. The same helper
-    shape `tests/unit/test_adapters_bulk_imdb.py` uses; two copies is not yet
-    duplication worth a module."""
+    """Serves whatever is already in `cache`.
+
+    So `ensure_local` short-circuits on the revision stamp and no bytes are ever
+    transferred.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         name = str(request.url).rsplit("/", 1)[-1]
@@ -93,28 +81,29 @@ def _dataset(client: httpx.AsyncClient, cache: Path) -> MovieLensGenomeDataset:
 
 
 def test_a_short_imdb_id_is_left_padded_to_seven_digits() -> None:
-    """`lpad(imdbId, 7, '0')`, not bare concatenation. 79,978 of 86,537 rows
-    are 7 wide and 6,559 are 8, so concatenation is correct against today's
-    file and silently depends on a padding convention the file documents
-    nowhere -- one unpadded row would join to nothing rather than raise.
+    """`lpad(imdbId, 7, '0')`, not bare concatenation.
 
-    Asserted on the digits with the prefix applied separately: a padded id
-    begins `tt00`, and `tests/unit/test_no_third_party_data.py` reserves
-    only the `tt99` band, so the padded value cannot appear as a literal in
-    this repository at all. Kills `f"tt{raw}"`.
+    Concatenation is correct against today's file and silently depends on a
+    padding convention the file documents nowhere -- one unpadded row would join
+    to nothing rather than raise. Asserted on the digits with the prefix applied
+    separately: a padded id begins `tt00`, and
+    `tests/unit/test_no_third_party_data.py` reserves only the `tt99` band, so
+    the padded value cannot appear as a literal in this repository. Kills
+    `f"tt{raw}"`.
     """
     assert _imdb_id("99000") == "tt" + "0099000"
     assert _imdb_id("99000001") == "tt" + "99000001"
 
 
 def test_an_unusable_imdb_id_is_malformed_rather_than_skipped() -> None:
-    """Measured over all 86,537 rows: none is empty, none is non-numeric,
-    none is wider than 8. So any of those is an upstream format change and
-    not a row to drop -- dropping it would silently shrink the join by an
-    unreported amount, which is the shape of defect this whole task's
-    coverage report exists to make visible. `imdb_id` is also the join key,
-    so an empty one cannot be carried through as a filtered row the way a
-    missing links row is."""
+    """An unusable `imdb_id` is malformed, never a row to drop.
+
+    No row of the real file is empty, non-numeric or wider than eight, so any of
+    those is an upstream format change. Dropping it would silently shrink the
+    join by an unreported amount, and `imdb_id` is also the join key, so an empty
+    one cannot be carried through as a filtered row the way a missing links row
+    is.
+    """
     for unusable in ("", "not-a-number", "990000001"):
         with pytest.raises(PortDataMalformed):
             _imdb_id(unusable)
@@ -123,9 +112,12 @@ def test_an_unusable_imdb_id_is_malformed_rather_than_skipped() -> None:
 async def test_yields_one_dense_vector_per_movie_not_one_row_per_score(
     tmp_path: Path,
 ) -> None:
-    """Boundary call 7. Kills an implementation that yields a record per
-    line of genome-scores.csv -- which is the shape PRD 02 implies and which
-    measures at 2,106 MB against 45 MB for this one."""
+    """One dense vector per movie, never one record per score row.
+
+    Kills an implementation that yields a record per line of
+    `genome-scores.csv`, which is the file's own shape and which costs tens of
+    times the storage of the one dense vector per title PRD 02 stores.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         rows = [row async for batch in _dataset(client, cache).batches() for row in batch.rows]
@@ -134,10 +126,12 @@ async def test_yields_one_dense_vector_per_movie_not_one_row_per_score(
 
 
 async def test_the_vector_is_ordered_by_tag_id_not_by_file_order(tmp_path: Path) -> None:
-    """The only thing that makes two vectors comparable. Kills an
-    implementation that appends in the order rows arrive: with the tags of
-    one movie shuffled, an append-based build produces a vector that is
-    wrong at every position and raises nothing."""
+    """The only thing that makes two vectors comparable.
+
+    Kills an implementation that appends in the order rows arrive: with the tags of one
+    movie shuffled, an append-based build produces a vector that is wrong at every
+    position and raises nothing.
+    """
     shuffled = "\n".join(
         ["movieId,tagId,relevance"] + [f"90000101,{tag},{tag / 10}" for tag in (3, 1, 2)]
     )
@@ -150,16 +144,13 @@ async def test_the_vector_is_ordered_by_tag_id_not_by_file_order(tmp_path: Path)
 async def test_the_stored_relevance_is_the_archives_own_value_untransformed(
     tmp_path: Path,
 ) -> None:
-    """Measured, not assumed: over all 268,157,000 off-diagonal pairs the
-    raw vectors score mean 0.6101 / sd 0.0913 / p1 0.4075 with a
-    top-10-neighbour gap of 0.2456, which clears the saturation bar written
-    before that run. So the values ship as the archive supplies them.
+    """The values ship as the archive supplies them.
 
     Kills an importer that mean-centres anyway -- per-vector centring
-    (`v - mean(v)`) would turn the middle lane of this fixture into 0.0 and
-    is the single most likely "improvement" a later reader makes, because
-    the saturation argument is persuasive and the measurement is not in
-    front of them. It is recorded in `usher.adapters.bulk.movielens`.
+    (`v - mean(v)`) would turn the middle lane of this fixture into 0.0 and is
+    the single most likely "improvement" a later reader makes, because the
+    saturation argument is persuasive. The reasoning is recorded in
+    `usher.adapters.bulk.movielens`.
     """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
@@ -171,12 +162,13 @@ async def test_the_stored_relevance_is_the_archives_own_value_untransformed(
 async def test_a_movie_absent_from_links_advances_position_but_not_rows_seen(
     tmp_path: Path,
 ) -> None:
-    """A genome movie with no `links.csv` row has no imdb_id and cannot be
-    joined to anything, so it is filtered, not malformed. Kills an
-    implementation that raises on it (which would abort the import on one
-    unmatchable movie) and one that yields it with an empty imdb_id (which
-    would then join to every skeleton title with a null id or to none, and
-    either is silent)."""
+    """A genome movie with no `links.csv` row is filtered, not malformed.
+
+    It has no imdb_id and cannot be joined to anything. Kills an implementation
+    that raises on it, aborting the import over one unmatchable movie, and one
+    that yields it with an empty imdb_id, which would then join to every skeleton
+    title with a null id or to none, either of them silently.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         batches = [batch async for batch in _dataset(client, cache).batches()]
@@ -189,10 +181,12 @@ async def test_a_movie_absent_from_links_advances_position_but_not_rows_seen(
 async def test_a_links_row_the_catalog_will_not_hold_is_still_yielded(
     tmp_path: Path,
 ) -> None:
-    """The dataset does not know what the catalog holds -- it never touches
-    a database, which is what lets it be unit-tested with no Docker. Kills
-    an implementation that tries to pre-filter, which would need a
-    repository and would break the port's layering."""
+    """The dataset does not know what the catalog holds.
+
+    It never touches a database, which is what lets it be unit-tested with no
+    Docker. Kills an implementation that tries to pre-filter, which would need a
+    repository and would break the port's layering.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         rows = [row async for batch in _dataset(client, cache).batches() for row in batch.rows]
@@ -203,9 +197,11 @@ async def test_a_links_row_the_catalog_will_not_hold_is_still_yielded(
 async def test_a_movie_in_links_but_absent_from_the_genome_yields_nothing(
     tmp_path: Path,
 ) -> None:
-    """links.csv holds 86,537 movies and the genome holds 16,376 of them.
-    Kills an implementation that iterates links and looks up scores, which
-    would emit 70,161 zero vectors -- ADR-0014 at dataset scale."""
+    """Links.csv holds far more movies than the genome covers.
+
+    Kills an implementation that iterates links and looks up scores, which would
+    emit a zero vector for every movie the genome says nothing about.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         rows = [row async for batch in _dataset(client, cache).batches() for row in batch.rows]
@@ -213,10 +209,12 @@ async def test_a_movie_in_links_but_absent_from_the_genome_yields_nothing(
 
 
 async def test_a_short_run_is_malformed_and_names_the_movie(tmp_path: Path) -> None:
-    """Every movie carries a value for every tag -- verified by counting, and
-    it is what makes the dense shape correct. A run of the wrong length is
-    an upstream format change, and continuing past it would store a vector
-    that is wrong from the missing tag onward while raising nothing."""
+    """Every movie carries a value for every tag, which is what makes it dense.
+
+    A run of the wrong length is an upstream format change, and continuing past
+    it would store a vector that is wrong from the missing tag onward while
+    raising nothing.
+    """
     short = "\n".join(["movieId,tagId,relevance", "90000101,1,0.5", "90000101,2,0.5"])
     cache = _archive(tmp_path, links=_LINKS, genome_tags=_TAGS, genome_scores=short)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
@@ -226,11 +224,12 @@ async def test_a_short_run_is_malformed_and_names_the_movie(tmp_path: Path) -> N
 
 
 async def test_a_run_whose_tags_are_not_one_to_n_is_malformed(tmp_path: Path) -> None:
-    """A run of the right *length* whose tag ids are wrong. Kills an
-    implementation that checks only the count and then builds by index:
-    a duplicated tag plus a missing one is length-1128 and leaves one lane
-    holding another lane's value and one lane holding whatever the buffer
-    was initialised to."""
+    """A run of the right *length* whose tag ids are wrong.
+
+    Kills an implementation that checks only the count and then builds by index: a
+    duplicated tag plus a missing one is length-1128 and leaves one lane holding another
+    lane's value and one lane holding whatever the buffer was initialised to.
+    """
     duplicated = "\n".join(
         ["movieId,tagId,relevance", "90000101,1,0.5", "90000101,2,0.5", "90000101,2,0.5"]
     )
@@ -242,10 +241,12 @@ async def test_a_run_whose_tags_are_not_one_to_n_is_malformed(tmp_path: Path) ->
 
 
 async def test_a_movie_that_reappears_after_its_run_is_malformed(tmp_path: Path) -> None:
-    """This is what turns "the file is sorted by movieId" from an assumption
-    into an enforced property. Kills the version that keeps a one-movie
-    buffer and no seen-set: on an unsorted file it would emit one truncated
-    vector per fragment, all of them wrong, all of them silent."""
+    """Sortedness by `movieId` is enforced here rather than assumed.
+
+    Kills the version that keeps a one-movie buffer and no seen-set: on an
+    unsorted file it would emit one truncated vector per fragment, all of them
+    wrong, all of them silent.
+    """
     interleaved = "\n".join(
         ["movieId,tagId,relevance"]
         + [f"90000101,{t},0.5" for t in (1, 2, 3)]
@@ -261,10 +262,12 @@ async def test_a_movie_that_reappears_after_its_run_is_malformed(tmp_path: Path)
 async def test_a_non_contiguous_tag_vocabulary_is_malformed_before_any_score_is_read(
     tmp_path: Path,
 ) -> None:
-    """`tagId` is 1...1128 contiguous, and the vector is built by index from
-    that. A gap means every position after it is off by one, in every vector,
-    for the whole import -- and the resulting table is indistinguishable from
-    a correct one until somebody compares two releases."""
+    """`tagId` is 1...1128 contiguous, and the vector is built by index from that.
+
+    A gap means every position after it is off by one, in every vector, for the whole
+    import -- and the resulting table is indistinguishable from a correct one until
+    somebody compares two releases.
+    """
     gapped = "\n".join(["tagId,tag", "1,a synthetic tag", "2,another", "4,a fourth"])
     cache = _archive(tmp_path, links=_LINKS, genome_tags=gapped, genome_scores=_SCORES)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
@@ -273,10 +276,12 @@ async def test_a_non_contiguous_tag_vocabulary_is_malformed_before_any_score_is_
 
 
 async def test_a_vocabulary_of_the_wrong_width_is_malformed(tmp_path: Path) -> None:
-    """The schema declares `halfvec(1128)`. A release whose vocabulary grew
-    must fail here, naming both widths, rather than 16,376 rows later inside
-    a COPY with a dimension error naming neither the dataset nor the
-    release."""
+    """The schema declares `halfvec(1128)`.
+
+    A release whose vocabulary grew must fail here, naming both widths, rather
+    than many rows later inside a COPY with a dimension error naming neither the
+    dataset nor the release.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         dataset = MovieLensGenomeDataset(client, cache, batch_size=10)  # expects 1128
@@ -285,10 +290,12 @@ async def test_a_vocabulary_of_the_wrong_width_is_malformed(tmp_path: Path) -> N
 
 
 async def test_a_missing_member_names_the_member(tmp_path: Path) -> None:
-    """Task 18's translation, exercised end to end. The member names carry
-    the `ml-latest/` root, so a future release that renames it fails on the
-    first read with the name it looked for -- not with an empty import that
-    reports success."""
+    """The member-name translation, exercised end to end.
+
+    The member names carry the `ml-latest/` root, so a future release that
+    renames it fails on the first read with the name it looked for, not with an
+    empty import that reports success.
+    """
     cache = _archive(tmp_path, genome_tags=_TAGS, genome_scores=_SCORES)  # no links.csv
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         with pytest.raises(PortDataMalformed) as exc_info:
@@ -297,10 +304,11 @@ async def test_a_missing_member_names_the_member(tmp_path: Path) -> None:
 
 
 async def test_resuming_from_a_cursor_skips_completed_movies(tmp_path: Path) -> None:
-    """`position` counts *completed movie runs consumed*, so a resume never
-    lands mid-run. Kills a line-number cursor: resuming from line N of
-    genome-scores.csv would restart inside a movie's 1,128 rows and emit a
-    truncated first vector."""
+    """`position` counts *completed movie runs consumed*, so a resume never lands mid-run.
+
+    Kills a line-number cursor: resuming from line N of genome-scores.csv would restart
+    inside a movie's 1,128 rows and emit a truncated first vector.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         dataset = _dataset(client, cache)
@@ -318,8 +326,10 @@ async def test_resuming_from_a_cursor_skips_completed_movies(tmp_path: Path) -> 
 async def test_a_cursor_from_a_different_revision_restarts_the_stream(
     tmp_path: Path,
 ) -> None:
-    """Movie 400 of one release is not movie 400 of the next, and the tag
-    vocabulary may have changed underneath it too."""
+    """Movie 400 of one release is not movie 400 of the next.
+
+    And the tag vocabulary may have changed underneath it too.
+    """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         batches = [
@@ -332,10 +342,12 @@ async def test_a_cursor_from_a_different_revision_restarts_the_stream(
 
 
 async def test_a_pre_resolved_revision_skips_the_head_entirely(tmp_path: Path) -> None:
-    """The dataset revision *is* the archive's ETag, like IMDb and unlike
-    TMDb -- so a caller that already paid for `revision()` this run needs no
-    second HEAD, and `LocalFile.replaced` needs no reconciliation. Kills an
-    implementation that resolves the revision again regardless."""
+    """The dataset revision *is* the archive's ETag, like IMDb and unlike TMDb.
+
+    So a caller that already paid for `revision()` this run needs no second HEAD
+    and `LocalFile.replaced` needs no reconciliation. Kills an implementation
+    that resolves the revision again regardless.
+    """
     cache = _default(tmp_path)
     methods: list[str] = []
 
@@ -358,17 +370,15 @@ async def test_a_pre_resolved_revision_skips_the_head_entirely(tmp_path: Path) -
 async def test_the_tag_vocabulary_is_read_from_the_member_the_width_check_already_reads(
     tmp_path: Path,
 ) -> None:
-    """`genome-tags.csv` is 18,103 bytes of the 350,896,731-byte archive and
-    the importer has always opened it -- to check that `tagId` is contiguous
-    and that the vocabulary is the width `halfvec(1128)` declares -- and then
-    thrown the *names* away. This is the whole of what Task 19 adds to the
-    adapter: it keeps the second field.
+    """`genome-tags.csv` is opened for the width check, and its names kept.
 
-    Kills an implementation that reads only the id (the shipped `_tag_count`),
-    one that returns the names unpaired with their ids, and one that returns
-    them in file order rather than by `tagId` -- the last of which is the same
-    defect `test_the_vector_is_ordered_by_tag_id_not_by_file_order` rules out
-    one member over, and it is why the fixture's names are asymmetric.
+    The member is already read to check that `tagId` is contiguous and that the
+    vocabulary is the width `halfvec(1128)` declares; keeping the second field is
+    all this adds. Kills an implementation that reads only the id, one that
+    returns the names unpaired with their ids, and one that returns them in file
+    order rather than by `tagId` -- the last being the same defect
+    `test_the_vector_is_ordered_by_tag_id_not_by_file_order` rules out one member
+    over, which is why the fixture's names are asymmetric.
     """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
@@ -402,20 +412,15 @@ def _counted_member_reads(dataset: MovieLensGenomeDataset) -> Counter[str]:
 async def test_the_tag_member_is_parsed_once_however_many_doors_it_is_read_through(
     tmp_path: Path,
 ) -> None:
-    """One parse of `genome-tags.csv` per dataset per revision, across **both**
-    readers of it.
+    """One parse of `genome-tags.csv` per dataset per revision, across both readers.
 
     `_batches` needs the vocabulary's *width* and its contiguity guarantee and
-    throws the names away; `tag_vocabulary` needs the names. Both went through
+    throws the names away; `tag_vocabulary` needs the names. Both go through
     `_vocabulary`, which is what makes a gapped release refuse identically
-    whichever door it is read through -- and a bootstrap calls both, so the
-    18,103-byte member was inflated twice and 1,128 `GenomeTag` objects were
-    built and sorted a second time to be measured with `len()` and discarded.
-
-    **The premise is the half that matters**, because `reads == 1` is also what
-    a run that never reached one of the two doors produces. Both artefacts are
-    asserted: the vocabulary came back with its names, and the vectors came
-    back the width the vocabulary declares.
+    whichever door it is read through, and a bootstrap calls both. The premise is
+    the half that matters, because `reads == 1` is also what a run that never
+    reached one of the two doors produces: the vocabulary came back with its
+    names, and the vectors came back the width the vocabulary declares.
     """
     cache = _default(tmp_path)
     async with httpx.AsyncClient(transport=_local(cache)) as client:
@@ -437,14 +442,14 @@ async def test_the_tag_member_is_parsed_once_however_many_doors_it_is_read_throu
 async def test_the_tag_vocabulary_is_ordered_by_tag_id_not_by_file_order(
     tmp_path: Path,
 ) -> None:
-    """The measured file lists its tags in ascending `tagId`, so file order
-    and lane order agree in production and a case that read the shipped file
-    could not tell an implementation that sorts from one that does not.
+    """The real file lists its tags in ascending `tagId`.
 
-    Same shape as the UUIDv7 `ORDER BY` trap: the fixture's own order is the
-    identity element, so the property has to be tested against a fixture where
-    it is not. Kills `tuple(rows)` in place of a sort, which would hand lane 0
-    the name of tag 3.
+    So file order and lane order agree in production, and a case that read the
+    shipped file could not tell an implementation that sorts from one that does
+    not. Same shape as the UUIDv7 `ORDER BY` trap: the fixture's own order is the
+    identity element, so the property has to be tested against a fixture where it
+    is not. Kills `tuple(rows)` in place of a sort, which would hand lane 0 the
+    name of tag 3.
     """
     reversed_tags = "\n".join(["tagId,tag", "3,a third", "2,another synthetic tag", "1,first"])
     cache = _archive(tmp_path, links=_LINKS, genome_tags=reversed_tags, genome_scores=_SCORES)
@@ -457,10 +462,11 @@ async def test_the_tag_vocabulary_is_ordered_by_tag_id_not_by_file_order(
 async def test_the_tag_vocabulary_refuses_the_same_two_things_the_width_check_does(
     tmp_path: Path,
 ) -> None:
-    """One parse, one pair of checks, whichever door the vocabulary is read
-    through. Kills an implementation that reads the names on a separate,
-    unchecked path -- which would store a gapped vocabulary explaining vectors
-    the same archive's contiguity check had already refused to build.
+    """One parse, one pair of checks, whichever door the vocabulary is read through.
+
+    Kills an implementation that reads the names on a separate, unchecked path -- which
+    would store a gapped vocabulary explaining vectors the same archive's contiguity
+    check had already refused to build.
     """
     gapped = "\n".join(["tagId,tag", "1,a synthetic tag", "2,another", "4,a fourth"])
     cache = _archive(tmp_path, links=_LINKS, genome_tags=gapped, genome_scores=_SCORES)
@@ -473,20 +479,16 @@ async def test_the_tag_vocabulary_refuses_the_same_two_things_the_width_check_do
 
 
 async def test_a_tag_row_with_no_name_is_malformed(tmp_path: Path) -> None:
-    """Measured over all 1,128 rows of the real member: every one carries a
-    non-empty name, none carries a comma, and the longest is 65 characters. So
-    a nameless row is an upstream format change rather than a row to store --
-    and storing one puts an empty string on a lane whose vector position is
-    still fully populated, which is a vocabulary that *looks* complete.
+    """A nameless tag row is an upstream format change, not a row to store.
 
-    Three shapes: a row with no comma at all (`split(",", 1)` gives one field
-    and the shipped `[0]`-only reader is blind to it), a row whose name is the
-    empty string, and a row whose name is **only whitespace** -- which `not
-    name` accepts and `ck_genome_tags_tag_not_empty`'s `tag <> ''` accepts
-    too, so nothing below this parser would refuse it. It is unreachable in
-    the measured file (all 1,128 names are `strip()`-stable) and the refusal's
-    own argument applies to it verbatim: a lane named `"   "` reads as
-    labelled and says nothing.
+    Storing one puts an empty string on a lane whose vector position is still
+    fully populated, which is a vocabulary that *looks* complete. Three shapes: a
+    row with no comma at all (`split(",", 1)` gives one field and a `[0]`-only
+    reader is blind to it), a row whose name is the empty string, and a row whose
+    name is only whitespace -- which `not name` accepts and
+    `ck_genome_tags_tag_not_empty`'s `tag <> ''` accepts too, so nothing below
+    this parser would refuse it. A lane named `"   "` reads as labelled and says
+    nothing.
     """
     for body in (
         "1,a synthetic tag\n2\n3,a third",
@@ -505,22 +507,17 @@ async def test_a_tag_row_with_no_name_is_malformed(tmp_path: Path) -> None:
 async def test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name(
     tmp_path: Path,
 ) -> None:
-    """The real member is **CRLF**-terminated -- 1,129 CRLF, 0 bare LF, 0 bare
-    CR, measured 2026-08-07 -- and every other fixture in this file is built
-    with `"\\n".join(...)`, so the whole fixture population is blind to the
-    one property that makes them representative.
+    r"""The real member is CRLF-terminated and every other fixture here is not.
 
-    `CachedDatasetFile.member_lines` decodes through `io.TextIOWrapper` in
-    universal-newline mode, so the `\\r` is gone before its `rstrip("\\n")`
-    runs. Three source files assert that in prose and nothing asserted it in
-    a test: spelled `newline=""` -- the one-word change a reader makes to
-    "keep the bytes as they are" -- every one of the 1,128 stored names would
-    end in a `\\r`, on the table whose whole purpose is to say what a lane
-    means, and the failure would surface as a rendered sentence rather than
-    as an error.
-
-    The scores member is left `\\n`-bodied deliberately: this case is about
-    the names, which are what a `\\r` becomes visible in.
+    Every other fixture in this file is built with `"\n".join(...)`, so the
+    fixture population is blind to the one property that makes them
+    representative. `CachedDatasetFile.member_lines` decodes through
+    `io.TextIOWrapper` in universal-newline mode, so the `\r` is gone before its
+    `rstrip("\n")` runs. Spelled `newline=""` -- the one-word change a reader
+    makes to "keep the bytes as they are" -- every stored name would end in a
+    `\r`, on the table whose whole purpose is to say what a lane means, and the
+    failure would surface as a rendered sentence rather than as an error. The
+    scores member is left `\n`-bodied deliberately: this case is about the names.
     """
     crlf = "".join(
         f"{line}\r\n"
@@ -539,22 +536,15 @@ async def test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name(
 async def test_a_second_release_is_read_again_rather_than_answered_from_the_first(
     tmp_path: Path,
 ) -> None:
-    """The memo behind the case above is keyed on the **revision**, and this is
-    the case that makes the key more than decoration.
+    """The memo behind the case above is keyed on the revision.
 
-    `tag_vocabulary` takes a revision rather than resolving one precisely
-    because `genome_tags.genome_revision` and `genome_scores.genome_revision`
-    must come from a single resolution -- two `HEAD`s straddling an upstream
-    re-upload would stamp release B's vectors with release A's words. A memo
-    that answered across releases would put that mislabelling back, from a
-    cache, with no request to notice it in: the same instance would hand out
-    release A's vocabulary under release B's revision **permanently**, which is
-    the exact failure `ensure_local`'s two separate stamp files exist to make
-    impossible one layer down.
-
-    Two archives, two ETags, one dataset. The second release renames lane 1,
-    which is what a vocabulary change looks like and is the thing that ends up
-    in `genome_tags.tag`.
+    `tag_vocabulary` takes a revision rather than resolving one precisely because
+    `genome_tags.genome_revision` and `genome_scores.genome_revision` must come
+    from a single resolution -- two `HEAD`s straddling an upstream re-upload would
+    stamp release B's vectors with release A's words. A memo that answered across
+    releases would put that mislabelling back from a cache, permanently, with no
+    request to notice it in. Two archives, two ETags, one dataset: the second
+    release renames lane 1, which is what a vocabulary change looks like.
     """
     renamed = "\n".join(["tagId,tag", "1,a renamed tag", "2,another synthetic tag", "3,a third"])
     releases = [
@@ -616,13 +606,12 @@ async def test_the_tag_vocabulary_fetches_the_archive_when_it_is_not_already_cac
 async def test_the_tag_vocabulary_takes_the_revision_it_is_stored_under(
     tmp_path: Path,
 ) -> None:
-    """`revision` is required rather than resolved here, for
-    `BootstrapService.import_dataset`'s reason one layer up: the caller has
-    already resolved it, `genome_tags.genome_revision` and
+    """`revision` is required rather than resolved here.
+
+    The caller has already resolved it, `genome_tags.genome_revision` and
     `genome_scores.genome_revision` have to agree, and two independent `HEAD`s
     can disagree across an upstream re-upload. Kills a signature that resolves
-    its own -- which is observable here as a second `HEAD` for a body the
-    caller has already pinned.
+    its own, observable here as a second `HEAD` for a body the caller has pinned.
     """
     cache = _default(tmp_path)
     methods: list[str] = []
@@ -642,8 +631,10 @@ async def test_the_tag_vocabulary_takes_the_revision_it_is_stored_under(
 
 async def test_name_and_attribution(tmp_path: Path) -> None:
     """`name` is the `import_runs` key -- changing it orphans the checkpoint.
-    `attribution` is never empty by contract, and MovieLens' licence
-    requires a citation rather than a fixed disclaimer (PRD 04)."""
+
+    `attribution` is never empty by contract, and MovieLens' licence requires a citation
+    rather than a fixed disclaimer (PRD 04).
+    """
     cache = tmp_path / "bulk"
     async with httpx.AsyncClient() as client:
         dataset = MovieLensGenomeDataset(client, cache, batch_size=1)

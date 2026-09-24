@@ -1,11 +1,5 @@
 # tests/unit/test_adapters_emby_mapping.py
-"""Emby's JSON -> the port's DTOs, against the committed fixtures.
-
-No HTTP and no fake server: this is the test that makes the fixtures a real
-drift guard rather than decoration. If `FakeEmbyServer` and the mapper both
-got a field name wrong in the same way, the contract suite would still
-pass; this would not.
-"""
+"""Emby's JSON -> the port's DTOs, against the committed fixtures."""
 
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -30,15 +24,13 @@ from usher.ports.source import SourceItemKind
 
 
 def test_a_movie_maps_every_field_the_port_promises() -> None:
-    """The audio assertions here are the recorded-payload half of the
-    commentary trap: `movie_item.json`'s *first* audio stream is a
-    two-channel AAC director's commentary and its second is the default
-    TrueHD track, exactly as a real remux is laid out. Deleting
-    `IsDefault` from that fixture -- or taking `MediaStreams[0]` -- turns
-    `truehd`/8 into `aac`/2 right here, which the hand-built
-    `test_the_default_audio_stream_is_preferred_over_the_first` below
-    cannot do, because a hand-built dict is written by the same person
-    who is asserting on it."""
+    """The recorded-payload half of the commentary trap.
+
+    `movie_item.json`'s first audio stream is a two-channel AAC director's commentary
+    and its second is the default TrueHD track, as a real remux is laid out. Taking
+    `MediaStreams[0]` turns `truehd`/8 into `aac`/2 here, which a hand-built dict cannot
+    show, being written by the same person asserting on it.
+    """
     item = to_source_item(load_emby_fixture("movie_item"))
     assert item is not None
     assert item.external_id == "0000000000000000000000000000a001"
@@ -60,26 +52,24 @@ def test_a_movie_maps_every_field_the_port_promises() -> None:
 
 
 def test_provider_id_keys_are_lowercased() -> None:
-    """Emby spells them `Tmdb`/`Imdb`/`Tvdb`. M4's matcher reads
-    `provider_ids["tmdb"]` and must not know that."""
+    """Emby spells them `Tmdb`/`Imdb`/`Tvdb`, and the matcher must not know that.
+
+    It reads `provider_ids["tmdb"]`.
+    """
     item = to_source_item(load_emby_fixture("series_item"))
     assert item is not None
     assert item.provider_ids == {"tmdb": "90001399", "imdb": "tt99000030", "tvdb": "91000030"}
 
 
 def test_dolby_vision_wins_over_the_hdr10_fallback_layer() -> None:
-    """The movie fixture carries the shape a real Dolby Vision file has on
-    Emby 4.9.5.0, transcribed from the live server on 2026-07-31:
-    `VideoRange: "DolbyVision"`, `ExtendedVideoType: "DolbyVision"`, and
-    `ExtendedVideoSubType: "DoviProfile81"` -- Profile 8.1, whose HDR10 base
-    layer is genuinely there and genuinely not what the file is. Ordering
-    the checks the other way round catalogues every DV file as HDR10.
+    """The fixture carries the shape a real Dolby Vision file has on Emby 4.9.5.0.
 
-    It used to carry `VideoRangeType: "DOVI"` and `DvProfile: 8`, which the
-    live run showed this server emits nowhere at all. Those spellings are
-    still supported -- older Emby builds and Jellyfin do send them -- and
-    are still covered, by hand-built streams rather than by a fixture
-    claiming to be a recording of something it is not.
+    `VideoRange: "DolbyVision"`, `ExtendedVideoType: "DolbyVision"` and
+    `ExtendedVideoSubType: "DoviProfile81"` — Profile 8.1, whose HDR10 base layer is
+    genuinely there and genuinely not what the file is. Ordering the checks the other
+    way round catalogues every DV file as HDR10. The older `VideoRangeType`/`DvProfile`
+    spellings that Jellyfin and earlier Emby builds send are covered by hand-built
+    streams instead.
     """
     item = to_source_item(load_emby_fixture("movie_item"))
     assert item is not None
@@ -107,9 +97,11 @@ def test_sdr_maps_to_no_hdr_format_at_all() -> None:
     ],
 )
 def test_hdr_vocabulary(stream: dict[str, object], expected: HdrFormat | None) -> None:
-    """`HdrFormat` has no HDR10+ member, so HDR10Plus deliberately maps to
-    HDR10 -- lossy, but true (HDR10+ carries an HDR10 base layer), and
-    better than dropping the fact that the file is HDR at all."""
+    """`HdrFormat` has no HDR10+ member, so HDR10Plus deliberately maps to HDR10.
+
+    Lossy but true, since HDR10+ carries an HDR10 base layer, and better than dropping
+    the fact that the file is HDR at all.
+    """
     assert hdr_format(stream) is expected
 
 
@@ -118,21 +110,13 @@ def test_hdr_vocabulary(stream: dict[str, object], expected: HdrFormat | None) -
     ["DOVI", "DOVIWithHDR10", "DOVIWithHLG", "DOVIWithSDR", "DOVIWithEL", "DolbyVision", "DV"],
 )
 def test_every_dolby_vision_spelling_maps_to_dolby_vision(video_range_type: str) -> None:
-    """Emby does not spell DV one way. `VideoRangeType` names the *base
-    layer* alongside the DV marker -- `DOVIWithHDR10`, `DOVIWithHLG`,
-    `DOVIWithSDR`, `DOVIWithEL` -- and only the bare `DOVI` is a value an
-    exact-match table would ever be written for.
+    """Emby does not spell DV one way, so an exact-match table is not enough.
 
-    Every compound spelling here is paired with the `VideoRange` a real
-    file of that shape carries, which is exactly what makes this test
-    sharp: a mapper that misses `DOVIWithHDR10` does not fail loudly, it
-    falls through to `VideoRange: "HDR"` and catalogues the file as HDR10
-    -- and `DOVIWithSDR` falls all the way through to SDR. That is the
-    trap this module's docstring says it exists to close, arrived at from
-    the spelling side rather than the ordering side.
-
-    `DolbyVision` is the exact string `usher.domain.enums.HdrFormat`'s own
-    docstring names as the source vocabulary this translation exists for.
+    `VideoRangeType` names the base layer alongside the DV marker — `DOVIWithHDR10`,
+    `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL` — and every compound spelling here is
+    paired with the `VideoRange` a real file of that shape carries. A mapper that misses
+    `DOVIWithHDR10` does not fail loudly: it falls through to `VideoRange: "HDR"` and
+    catalogues the file as HDR10, and `DOVIWithSDR` falls all the way to SDR.
     """
     video_range = "SDR" if video_range_type == "DOVIWithSDR" else "HDR"
     assert (
@@ -173,30 +157,21 @@ def test_every_dolby_vision_spelling_maps_to_dolby_vision(video_range_type: str)
 def test_the_four_shapes_emby_495_actually_emits(
     stream: dict[str, object], expected: HdrFormat | None
 ) -> None:
-    """Transcribed from the live server on 2026-07-31, and these four are
-    the *whole* vocabulary it produced: every video stream of 200 movies
-    (the newest 100 4K and the newest 100 HD, out of 94,438) fell into one
-    of them. Note `"HDR 10"` with a space -- the `_NON_ALNUM` strip is what
-    makes that reach the `HDR10` entry rather than falling through to SDR,
-    and nothing else in this file exercises a range token with a space in
-    it.
+    """The four range tokens a live Emby server actually produces.
+
+    Note `"HDR 10"` with a space: the `_NON_ALNUM` strip is what makes that reach the
+    `HDR10` entry rather than falling through to SDR, and nothing else in this file
+    exercises a range token with a space in it.
     """
     assert hdr_format(stream) is expected
 
 
 def test_a_dolby_vision_marker_in_the_extended_fields_wins_over_the_base_layer() -> None:
-    """**Emby 4.9.5.0 emits neither `VideoRangeType` nor `DvProfile`** --
-    not once across those 200 movies, including all 34 Dolby Vision files.
-    What it emits is `ExtendedVideoType`/`ExtendedVideoSubType`, and neither
-    was read here at all: the two fields the server actually populates were
-    not in the vote.
+    """Emby 4.9.5.0 emits neither `VideoRangeType` nor `DvProfile`, so both are read.
 
-    Nothing was mis-catalogued in practice, because every DV file observed
-    also carried `VideoRange: "DolbyVision"`. But a single field carrying
-    the whole signal is precisely the fragility this function was written
-    against -- its rule is that *any* DV marker wins outright over a base
-    layer named elsewhere, and a rule that only consults fields the server
-    never sends is not a rule.
+    What it emits is `ExtendedVideoType`/`ExtendedVideoSubType`, and a rule that only
+    consults fields the server never sends is not a rule: any DV marker has to win
+    outright over a base layer named elsewhere, whichever field carries it.
     """
     assert (
         hdr_format(
@@ -211,26 +186,23 @@ def test_a_dolby_vision_marker_in_the_extended_fields_wins_over_the_base_layer()
 
 
 def test_the_literal_string_none_is_not_a_video_range() -> None:
-    """`ExtendedVideoType` and `ExtendedVideoSubType` carry the **string**
-    `"None"` for an SDR file, not JSON `null` -- verified live. So they are
-    always truthy, and a check written as `if video.get("ExtendedVideoType")`
-    would treat every SDR file in the library as carrying an HDR marker.
-    Falling through a token table is what makes the string harmless.
+    """The extended fields carry the string `"None"` for an SDR file, not JSON `null`.
+
+    They are therefore always truthy, and `if video.get("ExtendedVideoType")` would
+    treat every SDR file in the library as carrying an HDR marker. Falling through a
+    token table is what makes the string harmless.
     """
     assert hdr_format({"ExtendedVideoType": "None", "ExtendedVideoSubType": "None"}) is None
     assert hdr_format({"ExtendedVideoSubType": "Hdr10"}) is HdrFormat.HDR10
 
 
 def test_a_dv_profile_wins_even_when_the_range_tokens_say_hdr10() -> None:
-    """The `DvProfile` disjunct, on its own. Emby builds predating
-    `VideoRangeType` describe a DV file as plain `VideoRange: "HDR"` and
-    expose the Dolby Vision configuration only as `DvProfile`/`DvLevel`;
-    without this check such a file is catalogued as HDR10, which is the
-    HDR10 base layer that is genuinely present and genuinely not the point.
+    """The `DvProfile` disjunct, on its own.
 
-    Deliberately paired with range tokens that map to something *else*, so
-    the assertion cannot be satisfied by the token table -- deleting the
-    `DvProfile` check turns this into HDR10.
+    Emby builds predating `VideoRangeType` describe a DV file as plain `VideoRange:
+    "HDR"` and expose the configuration only as `DvProfile`/`DvLevel`; without this
+    check such a file is catalogued as HDR10. Paired with range tokens that map to
+    something else, so the token table cannot satisfy the assertion.
     """
     assert (
         hdr_format({"VideoRange": "HDR", "VideoRangeType": "HDR10", "DvProfile": 8})
@@ -257,21 +229,17 @@ def test_a_dv_profile_wins_even_when_the_range_tokens_say_hdr10() -> None:
     ],
 )
 def test_audio_token_vocabulary(stream: dict[str, object], expected: str | None) -> None:
-    """PRD 07's example value is exactly `truehd_atmos_7_1`, and this is
-    where "the deep-link construction currently done by hand in the Home
-    Assistant card moves here, where it is testable" becomes literally
-    true."""
+    """The audio token is spelled `truehd_atmos_7_1`, built here rather than by a client."""
     assert audio_token(stream) == expected
 
 
 def test_the_atmos_marker_is_read_from_the_stream_title_too() -> None:
-    """Emby puts the feature vocabulary in whichever of `Profile` and
-    `Title` the file happened to carry it in -- a TrueHD track routinely
-    has `Profile: "TrueHD"` and `Title: "Surround 7.1 Atmos"`, with the
-    one word that decides whether a client can play it losslessly only in
-    the title. Reading only `Profile` reports that track as plain
-    `truehd_7_1`, which is PRD 07's `truehd_atmos_7_1` example silently
-    downgraded."""
+    """The feature vocabulary is in whichever of `Profile` and `Title` carries it.
+
+    A TrueHD track routinely has `Profile: "TrueHD"` and `Title: "Surround 7.1 Atmos"`,
+    with the word that decides whether a client can play it losslessly only in the
+    title. Reading only `Profile` reports that track as plain `truehd_7_1`.
+    """
     assert (
         audio_token({"Codec": "truehd", "Profile": "TrueHD", "Title": "Surround 7.1 Atmos"})
         == "truehd_atmos"
@@ -279,11 +247,11 @@ def test_the_atmos_marker_is_read_from_the_stream_title_too() -> None:
 
 
 def test_only_the_first_matching_feature_is_appended() -> None:
-    """`DTS-HD Master Audio` contains both `dts-hd ma` and `master audio`,
-    and both rows of the feature table map to the same token -- so without
-    the first-match-wins break the token is `dts_hd_ma_hd_ma_7_1`. Emby
-    emits exactly this string as an audio `Profile`, so this is a real
-    payload, not a constructed one."""
+    """`DTS-HD Master Audio` matches two rows of the feature table, and first match wins.
+
+    Both map to the same token, so without the break the token is `dts_hd_ma_hd_ma_7_1`.
+    Emby emits exactly this string as an audio `Profile`.
+    """
     assert (
         audio_token({"Codec": "dts", "Profile": "DTS-HD Master Audio", "Channels": 8})
         == "dts_hd_ma_7_1"
@@ -300,9 +268,11 @@ def test_an_episode_carries_its_place_in_the_series() -> None:
 
 
 def test_a_series_has_no_media_and_no_runtime() -> None:
-    """`RunTimeTicks` is literally `null` in the fixture, and there is no
-    `MediaSources` key at all -- both are how Emby describes a folder, and
-    both are places a mapper that assumed a value would raise."""
+    """`RunTimeTicks` is `null` and there is no `MediaSources` key at all.
+
+    Both are how Emby describes a folder, and both are places a mapper that assumed a
+    value would raise.
+    """
     item = to_source_item(load_emby_fixture("series_item"))
     assert item is not None
     assert item.kind is SourceItemKind.SERIES
@@ -313,16 +283,20 @@ def test_a_series_has_no_media_and_no_runtime() -> None:
 
 
 def test_an_unmodelled_item_type_is_skipped_not_raised() -> None:
-    """Seasons, box sets, and playlists come back from a server that
-    ignores `IncludeItemTypes`. Skipping keeps the walk going; raising
-    would abort a 94,395-item reconcile over a box set."""
+    """Seasons, box sets and playlists come back from a server ignoring `IncludeItemTypes`.
+
+    Skipping keeps the walk going; raising would abort a whole library reconcile over a
+    box set.
+    """
     assert to_source_item({"Id": "x", "Type": "BoxSet", "Name": "Franchise"}) is None
 
 
 def test_an_item_with_no_id_is_malformed() -> None:
-    """Distinct from an unmodelled type: an item with no id cannot be
-    upserted on `(source_id, external_id)`, so silently skipping it would
-    lose a real item with no trace."""
+    """An item with no id raises rather than being skipped like an unmodelled type.
+
+    It cannot be upserted on `(source_id, external_id)`, so skipping it would lose a
+    real item with no trace.
+    """
     with pytest.raises(PortDataMalformed):
         to_source_item({"Type": "Movie", "Name": "Nameless"})
 
@@ -349,9 +323,11 @@ def test_watch_state_reads_a_played_flag() -> None:
 
 
 def test_missing_user_data_is_not_a_zero_state() -> None:
-    """A zero state and an absent one are different claims. `UserData` is
-    absent when the field was not requested; emitting a zero state for that
-    would push "unwatched" over whatever Usher already knows."""
+    """A zero state and an absent one are different claims.
+
+    `UserData` is absent when the field was not requested, and emitting a zero state for
+    that would push "unwatched" over whatever Usher already knows.
+    """
     assert (
         to_watch_state(
             {"Id": "x", "Type": "Movie"}, source_user_id="user-1", play_history_is_trustworthy=True
@@ -361,11 +337,12 @@ def test_missing_user_data_is_not_a_zero_state() -> None:
 
 
 def test_a_timestamp_without_an_offset_is_still_aware() -> None:
-    """Verified on Python 3.13: `fromisoformat` returns a *naive* datetime
-    for a value with no offset, and `SourceItem` is a plain dataclass that
-    would carry it happily all the way to a TIMESTAMPTZ insert. Emby's
-    timestamps are UTC, so the offset is attached rather than the value
-    rejected."""
+    """`fromisoformat` returns a naive datetime for a value with no offset.
+
+    `SourceItem` is a plain dataclass that would carry it happily all the way to a
+    TIMESTAMPTZ insert. Emby's timestamps are UTC, so the offset is attached rather than
+    the value rejected.
+    """
     parsed = parse_datetime("2024-03-01T18:22:11.0000000")
     assert parsed is not None
     assert parsed.tzinfo is not None
@@ -378,54 +355,53 @@ def test_unparseable_timestamps_become_none(value: object) -> None:
 
 
 def test_a_cursor_is_widened_by_one_second() -> None:
-    """The port promises `since` is inclusive; whether Emby's own
-    comparison is `>=` or `>` is unverified. Sending one second earlier is
-    correct under either, and the port explicitly permits a superset."""
+    """The port promises `since` is inclusive, and Emby's own comparison is unknown.
+
+    Sending one second earlier is correct under either, and the port explicitly permits
+    a superset.
+    """
     assert emby_datetime(datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)) == "2026-07-20T11:59:59Z"
 
 
 def test_a_sub_second_cursor_widens_by_up_to_two_seconds_not_one() -> None:
-    """The widening is one second *plus* whatever sub-second part is
-    truncated by the whole-second format Emby's date parameters take, so
-    the real bound is one to two seconds -- 1.9 s here. Stated rather than
-    fixed: the direction is the safe one (a wider window returns a
-    superset, which the port permits), and the cursors this is called with
-    come from `SourceItem.added_at`, which carries Emby's own sub-second
-    precision. Neither the fake server nor a real one can expose this,
-    because both compare these strings at whole-second resolution."""
+    """The widening is one second plus whatever sub-second part the format truncates.
+
+    The direction is the safe one, since a wider window returns a superset and the port
+    permits that, and the cursors this is called with carry Emby's own sub-second
+    precision. Neither the fake server nor a real one can expose it, because both
+    compare these strings at whole-second resolution.
+    """
     cursor = datetime(2026, 7, 20, 12, 0, 0, 900_000, tzinfo=UTC)
     assert emby_datetime(cursor) == "2026-07-20T11:59:59Z"
 
 
 def test_a_cursor_is_normalised_to_utc() -> None:
-    """A caller's cursor may carry any offset -- `AwareDatetime` only
-    promises it has one. Sending a local-time string to a server that reads
-    it as UTC shifts the whole delta window."""
+    """A caller's cursor may carry any offset -- `AwareDatetime` only promises it has one.
+
+    Sending a local-time string to a server that reads it as UTC shifts the whole delta
+    window.
+    """
     local = datetime(2026, 7, 20, 14, 0, 0, tzinfo=timezone(timedelta(hours=2)))
     assert emby_datetime(local) == "2026-07-20T11:59:59Z"
 
 
 def test_a_naive_cursor_is_refused_rather_than_silently_shifted() -> None:
-    """`AwareDatetime` is a bare annotation on a plain function pydantic
-    never validates, so a naive datetime went straight through -- and
-    `astimezone` then reads it in the *host's* local zone. Measured on this
-    machine (UTC-5): a naive `12:00` became
-    `MinDateLastSaved=2026-07-20T16:59:59Z`. Five hours of changes skipped,
-    in exactly the direction the deliberate one-second widening above
-    exists to avoid, and eighteen thousand times its size.
+    """A naive cursor is refused, because the annotation alone does not validate it.
 
-    Refused rather than assumed-UTC: a caller that meant UTC can say so,
-    and one that did not has a bug that a silent five-hour hole in a delta
-    walk would never surface.
+    `astimezone` would read it in the host's local zone, so a delta walk on a host west
+    of UTC skips hours of changes in exactly the direction the one-second widening
+    exists to avoid. Refused rather than assumed-UTC: a caller that meant UTC can say
+    so, and one that did not has a bug a silent hole in a walk would never surface.
     """
     with pytest.raises(ValueError, match="timezone-aware"):
         emby_datetime(datetime(2026, 7, 20, 12, 0, 0))
 
 
 def test_the_default_audio_stream_is_preferred_over_the_first() -> None:
-    """A file whose first audio track is a commentary and whose default is
-    the feature audio is normal. Taking `[0]` would report the commentary's
-    codec and channel layout as the item's."""
+    """A first track that is a commentary, with the feature audio flagged default, is normal.
+
+    Taking `[0]` would report the commentary's codec and channel layout as the item's.
+    """
     media_source = {
         "MediaStreams": [
             {"Type": "Audio", "Codec": "aac", "Channels": 2, "IsDefault": False},
@@ -438,10 +414,11 @@ def test_the_default_audio_stream_is_preferred_over_the_first() -> None:
 
 
 def test_with_no_default_flag_anywhere_the_first_stream_is_used() -> None:
-    """Plenty of files flag no stream as default at all -- a remux whose
-    muxer never wrote the disposition bit. Returning `None` there would
-    report a perfectly ordinary file as having no audio; the first stream
-    is the same choice every player makes."""
+    """Plenty of files flag no stream as default at all, so the first stream is taken.
+
+    Returning `None` would report a perfectly ordinary file as having no audio, and the
+    first stream is the same choice every player makes.
+    """
     media_source = {
         "MediaStreams": [
             {"Type": "Audio", "Codec": "eac3", "Channels": 6},
@@ -483,28 +460,33 @@ def test_as_int_refuses_booleans_and_truncates_floats(value: object, expected: i
 
 
 def test_a_boolean_in_a_numeric_field_does_not_become_a_year() -> None:
-    """The consequence `as_int`'s bool guard exists for, at the payload
-    level: `ProductionYear: true` is catalogued as the year 1 without it,
-    and a title released in year 1 sorts and renders as a real fact."""
+    """The `as_int` bool guard, at the payload level.
+
+    `ProductionYear: true` is catalogued as the year 1 without it, and a title released
+    in year 1 sorts and renders as a real fact.
+    """
     item = to_source_item({"Id": "x", "Type": "Movie", "Name": "Odd", "ProductionYear": True})
     assert item is not None
     assert item.year is None
 
 
 def test_an_item_with_no_name_falls_back_to_its_external_id() -> None:
-    """`SourceItem.name` is not optional, and Emby will answer with an item
-    whose `Name` is absent or empty (a stub row for a file it has not yet
-    probed). The id is a poor name and a perfectly good one to render in a
-    dashboard; `None` would fail much later, at a NOT NULL column."""
+    """`SourceItem.name` is not optional, and Emby sends items with no `Name`.
+
+    A stub row for a file it has not yet probed. The id is a poor name and a perfectly
+    good one to render in a dashboard; `None` would fail much later, at a NOT NULL
+    column.
+    """
     item = to_source_item({"Id": "abc", "Type": "Movie"})
     assert item is not None
     assert item.name == "abc"
 
 
 def test_item_level_dimensions_are_the_fallback_when_the_stream_has_none() -> None:
-    """Emby sets `Width`/`Height` on the item for some libraries and only
-    on the video stream for others -- which of the two a given server uses
-    is not something this adapter gets to choose."""
+    """Emby sets `Width`/`Height` on the item for some libraries and on the stream for others.
+
+    Which of the two a given server uses is not something this adapter gets to choose.
+    """
     payload = load_emby_fixture("movie_item")
     video = payload["MediaSources"][0]["MediaStreams"][0]
     del video["Width"]
@@ -517,11 +499,11 @@ def test_item_level_dimensions_are_the_fallback_when_the_stream_has_none() -> No
 
 
 def test_a_malformed_item_reports_a_truncated_name_not_a_payload_dump() -> None:
-    """`PortDataMalformed.detail` "must never carry a credential or a whole
-    payload". An Emby item name is operator-controlled and unbounded, and
-    this string is built to be logged -- the same log-hygiene control as
-    the credential guards in `EmbySession`, applied to the one field here
-    that a payload can make arbitrarily long."""
+    """`PortDataMalformed.detail` never carries a credential or a whole payload.
+
+    An Emby item name is operator-controlled and unbounded, and this string is built to
+    be logged — the same log hygiene as the credential guards in `EmbySession`.
+    """
     with pytest.raises(PortDataMalformed) as exc_info:
         to_source_item({"Type": "Movie", "Name": "A" * 200})
     assert exc_info.value.detail is not None
@@ -529,14 +511,12 @@ def test_a_malformed_item_reports_a_truncated_name_not_a_payload_dump() -> None:
 
 
 def test_a_multi_version_item_is_catalogued_at_its_best_playable_version() -> None:
-    """`multi_version_movie.json` lists transcode-only, 2160p, 1080p, in
-    that order: "first wins" catalogues a version with no container at all,
-    "last wins" catalogues the 1080p one.
+    """`multi_version_movie.json` lists transcode-only, 2160p, 1080p, in that order.
 
-    The same rule as `build_stream_targets` uses, because it is literally
-    the same call -- an item whose catalogued facts and whose playback URL
-    were chosen separately would advertise one version's codecs and stream
-    another's bytes.
+    "First wins" catalogues a version with no container at all and "last wins"
+    catalogues the 1080p one. The same call `build_stream_targets` makes, because an
+    item whose catalogued facts and playback URL were chosen separately would advertise
+    one version's codecs and stream another's bytes.
     """
     item = to_source_item(load_emby_fixture("multi_version_movie"))
     assert item is not None
@@ -550,10 +530,11 @@ def test_a_multi_version_item_is_catalogued_at_its_best_playable_version() -> No
 
 
 def test_a_transcode_only_item_is_still_catalogued() -> None:
-    """The fallback half of the rule. An item Emby can only transcode has
-    no container, so there is no direct URL to build for it -- but it still
-    has a real codec, resolution and runtime, and reporting `None` for all
-    of them would put a hole in the catalogue over a playback limitation.
+    """The fallback half of the rule: a transcode-only item is still catalogued.
+
+    It has no container and so no direct URL, but it has a real codec, resolution and
+    runtime, and reporting `None` for all of them would put a hole in the catalogue over
+    a playback limitation.
     """
     payload = load_emby_fixture("multi_version_movie")
     payload["MediaSources"] = payload["MediaSources"][:1]
@@ -565,10 +546,12 @@ def test_a_transcode_only_item_is_still_catalogued() -> None:
 
 
 def test_a_media_sources_entry_that_is_not_an_object_is_skipped() -> None:
-    """`MediaSources` is a list of objects, until a server answers with a
-    list of something else. Indexing `[0]` blindly hands a string to code
-    that calls `.get` on it, and an `AttributeError` is not an error any
-    caller written against `usher.ports.errors` can catch."""
+    """`MediaSources` is a list of objects until a server answers with something else.
+
+    Indexing `[0]` blindly hands a string to code that calls `.get` on it, and an
+    `AttributeError` is not an error any caller written against `usher.ports.errors` can
+    catch.
+    """
     assert primary_media_source({"MediaSources": ["not-an-object", {"Container": "mkv"}]}) == {
         "Container": "mkv"
     }
@@ -577,20 +560,22 @@ def test_a_media_sources_entry_that_is_not_an_object_is_skipped() -> None:
 
 
 def test_provider_ids_drops_entries_with_nothing_in_them() -> None:
-    """An empty `Tmdb` is Emby saying "no id", not "the id is the empty
-    string" -- and M4's matcher looks titles up by `provider_ids["tmdb"]`,
-    so an empty value that survives here becomes a lookup for the empty
-    id rather than a fallback to name matching."""
+    """An empty `Tmdb` is Emby saying "no id", not "the id is the empty string".
+
+    The matcher looks titles up by `provider_ids["tmdb"]`, so an empty value surviving
+    here becomes a lookup for the empty id rather than a fallback to name matching.
+    """
     assert provider_ids({"Tmdb": "90000100", "Imdb": "", "Tvdb": None}) == {"tmdb": "90000100"}
     assert provider_ids("not-a-mapping") == {}
 
 
 def test_a_negative_playback_position_and_play_count_are_clamped() -> None:
-    """Floor division makes a negative worse, not better: `-1 // 10_000_000`
-    is `-1`, so an out-of-range tick count arrives as a negative
-    `position_seconds` in a `SourceWatchState` -- a plain dataclass that
-    validates nothing -- and fails at a CHECK constraint several layers
-    later, where nothing left in scope says which item it came from."""
+    """Floor division makes a negative tick count worse, not better.
+
+    `-1 // 10_000_000` is `-1`, so it arrives as a negative `position_seconds` in a
+    `SourceWatchState` — a plain dataclass that validates nothing — and fails at a CHECK
+    constraint several layers later, where nothing says which item it came from.
+    """
     state = to_watch_state(
         {"Id": "x", "UserData": {"PlaybackPositionTicks": -10_000_000, "PlayCount": -3}},
         source_user_id=None,
@@ -602,16 +587,12 @@ def test_a_negative_playback_position_and_play_count_are_clamped() -> None:
 
 
 def test_raw_shares_no_object_with_the_payload_it_was_parsed_from() -> None:
-    """PRD 03 stores `raw` verbatim in `raw_payloads`. It is the one field
-    that crosses the adapter boundary uninterpreted, so it must not be a
-    live view of a buffer the adapter is still reading: `get_item` parses
-    one payload and passes it to *both* `to_source_item` and
-    `build_stream_targets`.
+    """`raw` is stored verbatim, so it must not alias a buffer the adapter still reads.
 
-    A shallow `dict(payload)` satisfies a top-level assertion and leaves
-    `raw["UserData"]` and every entry of `raw["MediaSources"]` aliased, so
-    this asserts the nested case specifically -- the only one where the
-    difference shows.
+    `get_item` parses one payload and passes it to both `to_source_item` and
+    `build_stream_targets`. A shallow `dict(payload)` satisfies a top-level assertion
+    and leaves `raw["UserData"]` and every entry of `raw["MediaSources"]` aliased, so
+    the nested case is the one asserted.
     """
     payload = load_emby_fixture("movie_item")
     item = to_source_item(payload)
@@ -626,10 +607,11 @@ def test_raw_shares_no_object_with_the_payload_it_was_parsed_from() -> None:
 
 
 def test_a_listing_payload_yields_absent_play_history() -> None:
-    """Emby 4.9.5.0's listing route reports `PlayCount: 0` and omits
-    `LastPlayedDate` for items that have genuinely been played (verified
-    2026-07-31). Passing that `0` through as a number is how M4 would write
-    zero over real history, so the mapper must report absence instead."""
+    """The listing route reports `PlayCount: 0` for items that have genuinely been played.
+
+    It omits `LastPlayedDate` too, so passing that `0` through as a number writes zero
+    over real history and the mapper must report absence instead.
+    """
     payload = {
         "Id": "movie-1",
         "Name": "Example Movie",
@@ -645,15 +627,12 @@ def test_a_listing_payload_yields_absent_play_history() -> None:
 
 
 def test_a_listing_payload_discards_play_history_even_when_it_carries_some() -> None:
-    """The untrusted route is untrusted, not merely lossy. A build (or a
-    reverse proxy, or a future Emby) whose listing did carry `PlayCount`
-    would still be read through a caller that cannot tell whether the number
-    is real -- and the measured server hands out a `0` that looks exactly
-    like a count. Discarding is the only rule that is safe for both, and
-    `get_watch_state` is what recovers the truth.
+    """The untrusted route is untrusted, not merely lossy.
 
-    Without this case the mapper could satisfy the one above by reading the
-    keys and happening to find a zero.
+    A build, reverse proxy or future Emby whose listing did carry `PlayCount` would
+    still be read through a caller that cannot tell whether the number is real, and a
+    server that hands out `0` looks exactly the same. Discarding is the only rule safe
+    for both, and `get_watch_state` recovers the truth.
     """
     payload = {
         "Id": "movie-1",
@@ -672,8 +651,7 @@ def test_a_listing_payload_discards_play_history_even_when_it_carries_some() -> 
 
 
 def test_an_item_payload_yields_real_play_history() -> None:
-    """The single-item route does carry both, and that is the whole reason
-    `get_watch_state` exists."""
+    """The single-item route does carry both, which is why `get_watch_state` exists."""
     payload = {
         "Id": "movie-1",
         "Name": "Example Movie",
@@ -692,8 +670,10 @@ def test_an_item_payload_yields_real_play_history() -> None:
 
 
 def test_a_trusted_payload_that_omits_play_count_still_reports_absence() -> None:
-    """Trusting the route is not the same as inventing a value. A single-item
-    payload with no `PlayCount` key at all has not told us zero."""
+    """Trusting the route is not the same as inventing a value.
+
+    A single-item payload with no `PlayCount` key at all has not told us zero.
+    """
     payload = {
         "Id": "movie-1",
         "Name": "Example Movie",
@@ -706,10 +686,11 @@ def test_a_trusted_payload_that_omits_play_count_still_reports_absence() -> None
 
 
 def test_a_trusted_payload_that_reports_zero_plays_is_believed() -> None:
-    """The other half of ADR-0014: `0` from a route that can count is a
-    positive claim -- an item whose play history was reset -- and turning it
-    into `None` would make a reset impossible to propagate, which is the
-    same correctness bug as filtering all-zero states out of a walk."""
+    """A `0` from a route that can count is a positive claim, not an absence.
+
+    It is an item whose play history was reset, and turning it into `None` would make a
+    reset impossible to propagate.
+    """
     payload = {
         "Id": "movie-1",
         "Type": "Movie",

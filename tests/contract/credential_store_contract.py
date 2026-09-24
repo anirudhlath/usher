@@ -1,25 +1,4 @@
-"""Behaviour every `CredentialStore` implementation must satisfy.
-
-Deliberately silent about *how* the secret is stored. "Encrypted at rest"
-is a property of a persistent store and cannot be asserted against an
-in-memory dict, so it is pinned directly against Postgres in
-tests/integration/test_credential_store.py (three cases: the raw column is
-not the plaintext, a different key cannot read it, and deleting the owning
-source removes it). Asserting it here would either force the in-memory fake
-to carry a cipher it has no reason to have, or -- worse -- be written so
-loosely that both implementations pass it while only one is actually
-encrypting.
-
-Subclass and provide a `store` fixture plus an `owner` hook:
-
-    class TestFakeCredentialStore(CredentialStoreContract):
-        @pytest.fixture
-        def store(self) -> FakeCredentialStore:
-            return FakeCredentialStore()
-
-        async def owner(self, store: CredentialStore) -> uuid.UUID:
-            return new_id()
-"""
+"""Behaviour every `CredentialStore` implementation must satisfy."""
 
 import uuid
 
@@ -55,10 +34,12 @@ class CredentialStoreContract:
         assert await store.get("never-stored") is None
 
     async def test_put_replaces_an_existing_secret(self, store: CredentialStore) -> None:
-        """Both re-registering a source with a corrected password and PRD
-        08's key rotation land here. A store that inserted instead of
-        upserting would raise on the second call, or -- worse -- keep
-        serving the old secret."""
+        """Re-registering a source with a corrected password lands here.
+
+        A store that inserted instead of upserting would raise on the second call, or --
+        worse -- keep serving the old secret. Key rotation does not come through `put`:
+        it rewrites each row's ciphertext in place, under the same ref.
+        """
         owner = await self.owner(store)
         await store.put("ref-1", WRONG, owner_id=owner)
         await store.put("ref-1", RIGHT, owner_id=owner)
@@ -67,10 +48,11 @@ class CredentialStoreContract:
         assert fetched.password.get_secret_value() == "correct-horse-battery"
 
     async def test_refs_are_independent(self, store: CredentialStore) -> None:
-        """Rules out a store keyed on the owner rather than the ref, which
-        would make PRD 08's rotation (write under a new ref, flip
-        `Source.credentials_ref`, delete the old) overwrite the very secret
-        it is meant to be replacing."""
+        """Rules out a store keyed on the owner rather than the ref.
+
+        Two refs under one owner are two secrets; a store keyed on the owner would serve
+        whichever was written last for both.
+        """
         owner = await self.owner(store)
         await store.put("ref-old", WRONG, owner_id=owner)
         await store.put("ref-new", RIGHT, owner_id=owner)
@@ -86,9 +68,11 @@ class CredentialStoreContract:
         assert await store.get("ref-1") is None
 
     async def test_delete_is_idempotent(self, store: CredentialStore) -> None:
-        """`DELETE /admin/sources/{id}` removes a source and its credentials
-        in two steps; a retry after a partial failure must not fail on the
-        step that already succeeded."""
+        """`DELETE /admin/sources/{id}` removes a source and its credentials in two steps.
+
+        a retry after a partial failure must not fail on the step that already
+        succeeded.
+        """
         await store.delete("never-stored")
         owner = await self.owner(store)
         await store.put("ref-1", RIGHT, owner_id=owner)

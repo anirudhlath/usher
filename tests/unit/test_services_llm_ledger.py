@@ -1,23 +1,6 @@
-"""`LLMLedger` -- the one home for *record on every path that attempted a call,
-and commit what you recorded.*
+"""`LLMLedger`.
 
-**Why this module exists at all**, and it is this repository's own finding
-applied one level up. `.claude/rules/testing-discipline.md` records that the
-rule *"record **and** commit"* was spelled verbatim at three exits of
-`CurationService.generate`, that deleting the commit from one of them passed
-all 42 cases, and that the repair had to be structural as well as behavioural:
-*"a rule spelled three times is a rule one deletion is invisible in ... N copies
-means N chances for one to go quiet."*
-
-That argument was then applied **inside** one service and not **across** the
-two that spend money. `CurationService` and `QueryExpansionService` each
-carried their own `_settle` / `_ledger_row` / `_record`, identical but for the
-purpose constant and the generation id, so five invariants -- `ok` derived
-rather than passed, `str(exc) or type(exc).__name__`, the `usage is None`
-fallback, `except UsherPortError` and not `except Exception`, and
-record-then-commit -- were each argued and pinned twice. This file is the one
-place they are now pinned once, and `test_no_service_mints_its_own_ledger_row`
-is what stops a third copy appearing.
+the one home for *record on every path that attempted a call, and commit what you
 """
 
 import ast
@@ -49,8 +32,11 @@ _ELAPSED_MS = 1_500
 
 
 class _RecordingLedger:
-    """Appends, and refuses on demand the way `PostgresLLMCallRepository` does
-    for a `cost_usd` the column cannot hold."""
+    """Appends.
+
+    and refuses on demand the way `PostgresLLMCallRepository` does for a `cost_usd` the
+    column cannot hold.
+    """
 
     def __init__(self, events: list[str], *, refuse_with: Exception | None = None) -> None:
         self.events = events
@@ -110,10 +96,12 @@ def _ledger(
 
 
 async def test_a_settled_success_derives_ok_from_the_absence_of_an_error() -> None:
-    """`ok` is derived rather than passed, so the contradiction
-    `LLMCall._ok_and_error_must_agree` and `ck_llm_calls_ok_error_agree` both
-    refuse is unspellable on the path least able to afford a
-    `ValidationError`."""
+    """`ok` is derived rather than passed.
+
+    so the contradiction `LLMCall._ok_and_error_must_agree` and
+    `ck_llm_calls_ok_error_agree` both refuse is unspellable on the path least able to
+    afford a `ValidationError`.
+    """
     ledger, repo, _events = _ledger()
     await ledger.settle(_T0, usage=_usage(), error=None)
     assert repo.calls[0].ok is True
@@ -128,8 +116,10 @@ async def test_a_settled_failure_derives_ok_from_the_presence_of_an_error() -> N
 
 
 async def test_an_upstream_failure_bills_zero_against_the_model_this_deployment_asked_for() -> None:
-    """`usage is None` is the upstream-failure path and nothing else: there is
-    no answer to bill, and `ANSWERED` is a string that never came back."""
+    """`usage is None` is the upstream-failure path and nothing else.
+
+    there is no answer to bill, and `ANSWERED` is a string that never came back.
+    """
     ledger, repo, _events = _ledger()
     await ledger.settle(_T0, usage=None, error="timed out")
     call = repo.calls[0]
@@ -139,18 +129,23 @@ async def test_an_upstream_failure_bills_zero_against_the_model_this_deployment_
 
 
 async def test_an_upstream_failure_records_the_latency_this_ledger_measured() -> None:
-    """The path the injected clock exists for: a 120-second timeout has no
-    `LLMUsage` to read a latency from, and it is the most expensive thing
-    either service can do."""
+    """The path the injected clock exists for.
+
+    a 120-second timeout has no `LLMUsage` to read a latency from, and it is the most
+    expensive thing either service can do.
+    """
     ledger, repo, _events = _ledger()
     await ledger.settle(_T0, usage=None, error="timed out")
     assert repo.calls[0].latency_ms == _ELAPSED_MS
 
 
 async def test_a_completion_prefers_the_latency_the_adapter_measured() -> None:
-    """Kills a ledger that always uses its own clock. The adapter's number is
-    the send window; this service's is the send window *plus* validation, and
-    PRD 10's latency panel plots the former on every ordinary night."""
+    """Kills a ledger that always uses its own clock.
+
+    The adapter's number is the send window; this service's is the send window *plus*
+    validation, and PRD 10's `llm_calls.latency_ms` records the former on every ordinary
+    night.
+    """
     ledger, repo, _events = _ledger()
     await ledger.settle(_T0, usage=_usage(latency_ms=99), error=None)
     assert repo.calls[0].latency_ms == 99
@@ -173,9 +168,11 @@ async def test_the_purpose_is_the_one_this_ledger_was_built_for() -> None:
 
 
 async def test_a_generation_id_is_none_unless_the_caller_names_one() -> None:
-    """Query expansion produces no `curated_rows` at all, so an id minted for
-    it would be a join key pointing at nothing -- and PRD 10's dashboard 5 is
-    `llm_calls JOIN curated_rows USING (generation_id)`."""
+    """Query expansion produces no `curated_rows` at all.
+
+    so an id minted for it would be a join key pointing at nothing -- and PRD 10's
+    dashboard 5 is `llm_calls JOIN curated_rows USING (generation_id)`.
+    """
     ledger, repo, _events = _ledger(purpose=LLMPurpose.QUERY_EXPANSION)
     await ledger.settle(_T0, usage=_usage(), error=None)
     assert repo.calls[0].generation_id is None
@@ -190,27 +187,32 @@ async def test_a_generation_id_is_none_unless_the_caller_names_one() -> None:
 
 
 async def test_the_row_is_recorded_and_then_committed_in_that_order() -> None:
-    """`events.count("ledger") == 1` is satisfied by a service that never
-    commits, which is exactly how the deleted commit survived 42 cases."""
+    """`events.count("ledger") == 1` is satisfied by a service that never commits.
+
+    which is exactly how the deleted commit survived 42 cases.
+    """
     ledger, _repo, events = _ledger()
     await ledger.settle(_T0, usage=_usage(), error=None)
     assert events == ["ledger", "commit"]
 
 
 async def test_a_refused_ledger_row_never_changes_the_outcome() -> None:
-    """The completion is already paid for and the cause is a configured price,
-    not anything a retry fixes -- so raising here would either cost the
-    household the screen it just earned or replace the upstream failure
-    `JobWorker` needs to classify with a repository error it would classify
-    differently."""
+    """The completion is already paid for and the cause is a configured price.
+
+    not anything a retry fixes -- so raising here would either cost the household the
+    screen it just earned or replace the upstream failure `JobWorker` needs to classify
+    with a repository error it would classify differently.
+    """
     ledger, _repo, events = _ledger(refuse_with=PortUnavailable("the ledger is unreachable"))
     await ledger.settle(_T0, usage=_usage(), error=None)
     assert events == ["ledger", "commit"]
 
 
 async def test_a_bug_in_this_module_is_not_swallowed_as_an_upstream_failure() -> None:
-    """`UsherPortError` and not `Exception`: a `TypeError` here is a bug, and a
-    bug in a service is not an upstream failure."""
+    """`UsherPortError` and not `Exception`.
+
+    a `TypeError` here is a bug, and a bug in a service is not an upstream failure.
+    """
     ledger, _repo, _events = _ledger(refuse_with=TypeError("a bug, not an outage"))
     with pytest.raises(TypeError):
         await ledger.settle(_T0, usage=_usage(), error=None)

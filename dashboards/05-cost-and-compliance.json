@@ -1,0 +1,258 @@
+{
+  "uid": "usher-cost-compliance",
+  "title": "Usher \u2014 5 Cost & Compliance",
+  "description": "LLM spend, embedding compute, bulk-dataset freshness, disk headroom, and the TMDb cache-age panel that is a licence term rather than a metric.",
+  "tags": [
+    "usher"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "TMDb cache age against the 6-month ceiling",
+      "type": "stat",
+      "description": "\ud83d\udd34 **The one panel here whose failure is a licence breach, and the reason it is not trimmed.** Every other panel on this dashboard is a blind spot when it breaks; this one is a term of TMDb's licence. `tests/unit/test_no_third_party_data.py` enforces the redistribution half of that licence mechanically; **nothing enforces the retention half**, and this panel plus its threshold is the whole of it.\n\nReads `raw_payloads.fetched_at` \u2014 when the payload was cached \u2014 and deliberately **not** `titles.enriched_at`, which records when Usher enriched a title and does not move when a cached payload is re-read. Spelled `interval '6 months'` and never `'180 days'`: the two are never equal and 180 days matches *more* rows, so it over-reports a breach that has not happened.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 6
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT min(raw_payloads.fetched_at) AS oldest_fetched_at,\n       now() - interval '6 months' AS ceiling\nFROM raw_payloads\nWHERE raw_payloads.provider = 'tmdb';",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "TMDb entries past the ceiling",
+      "type": "stat",
+      "description": "The breach count itself. **`<`, never `<=`** \u2014 TMDb's term is *no more than 6 months*, so a payload cached exactly six months ago is still in term.\n\nMeasured 2026-09-07 on the live catalog: **0 past the ceiling** over 133,631 cached payloads, oldest 2026-08-11. That was the first time anyone had looked.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 6
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS past_ceiling\nFROM raw_payloads\nWHERE raw_payloads.provider = 'tmdb'\n  AND raw_payloads.fetched_at < now() - interval '6 months';",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Past-ceiling share of the cache",
+      "type": "stat",
+      "description": "The count as a share of the cache, and the denominator beside it. `NULLIF` guards the empty cache, where the honest answer is NULL rather than a division by zero.\n\n\u26a0\ufe0f **Three statements and not one.** `count(*)` reads every row, so folding the three together costs the other two their index: measured, separately 0.48 / 4.46 ms with `ix_raw_payloads_fetched_at`, combined one `Parallel Seq Scan` with the index unused.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 6
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS cached,\n       count(*) FILTER (WHERE raw_payloads.fetched_at < now() - interval '6 months')::numeric\n         / NULLIF(count(*), 0) AS past_ceiling_share\nFROM raw_payloads\nWHERE raw_payloads.provider = 'tmdb';",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "LLM spend by model and purpose",
+      "type": "barchart",
+      "description": "\u26a0\ufe0f **A dashboard reading $0.00 is not evidence of a free deployment.** `cost_usd` defaults to `0`, which is the honest value against a local model and the **wrong** value for a hosted model an operator forgot to price. The mitigation is that `tokens_in` and `tokens_out` are exact, so spend is recomputable after the fact \u2014 which is why this panel plots the tokens beside the money rather than the money alone.\n\nVerified live 2026-08-07: `0.00000000` against a local model, and `0.01658700` with prices 3/15 per Mtok configured \u2014 exactly `Decimal((4359\u00d73 + 234\u00d715) / 1e6)`, the column `numeric` and `SUM()` agreeing to 8 decimal places.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT llm_calls.model, llm_calls.purpose,\n       sum(llm_calls.cost_usd)   AS cost_usd,\n       sum(llm_calls.tokens_in)  AS tokens_in,\n       sum(llm_calls.tokens_out) AS tokens_out,\n       count(*) AS calls\nFROM llm_calls\nGROUP BY llm_calls.model, llm_calls.purpose\nORDER BY cost_usd DESC;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cost per curated row",
+      "type": "table",
+      "description": "`llm_calls \u22c8 curated_rows USING (generation_id)` **and nothing else** \u2014 one join wide.\n\n\u26a0\ufe0f **Which population this reads depends on a setting.** `ix_llm_calls_generation_id` is partial (`WHERE generation_id IS NOT NULL`) because query expansion writes `NULL` there. On the shipped default \u2014 `USHER_QUERY_EXPANSION_ENABLED=false` even where the LLM is on \u2014 the table is 100% `curation` and the partial index degenerates to a full one. The panel is correct under both, but the same panel over an expansion-enabled deployment is reading a minority of rows.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT curated_rows.generation_id,\n       count(DISTINCT curated_rows.id) AS rows_generated,\n       sum(llm_calls.cost_usd) AS cost_usd,\n       sum(llm_calls.cost_usd) / NULLIF(count(DISTINCT curated_rows.id), 0) AS cost_per_row\nFROM llm_calls\nJOIN curated_rows USING (generation_id)\nGROUP BY curated_rows.generation_id\nORDER BY curated_rows.generation_id DESC\nLIMIT 50;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Embedding compute time",
+      "type": "timeseries",
+      "description": "The one Prometheus panel on this dashboard. `usher.embedding.duration` carries no labels.\n\n\u26a0\ufe0f **Plotted as a mean (`rate(_sum)/rate(_count)`) and not a quantile**, for issue #86's reason: this instrument declares no `explicit_bucket_boundaries_advisory` and `configure_metrics` installs no `View`, so it takes the SDK's default second-scale boundaries. A `histogram_quantile` over those answers a flat plausible number rather than failing \u2014 measured at 2.5000 s against a true 35.20 ms.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "editorMode": "code",
+          "refId": "A",
+          "expr": "rate(usher_embedding_duration_seconds_sum[5m]) / rate(usher_embedding_duration_seconds_count[5m])",
+          "legendFormat": "mean embedding latency"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Bulk dataset freshness",
+      "type": "table",
+      "description": "One row per bulk dataset, from `import_runs`. `heartbeat_at` is what distinguishes a run that is still working from one that died \u2014 `finished_at` alone cannot.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT import_runs.dataset, import_runs.status,\n       import_runs.started_at, import_runs.heartbeat_at, import_runs.finished_at,\n       now() - coalesce(import_runs.finished_at, import_runs.heartbeat_at,\n                        import_runs.started_at) AS age\nFROM import_runs\nORDER BY coalesce(import_runs.finished_at, import_runs.heartbeat_at,\n                  import_runs.started_at) DESC\nLIMIT 20;",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Table size, and headroom against measured free disk",
+      "type": "table",
+      "description": "\ud83d\udd34 **Plotted against *measured* free disk, never against PRD 08's resource table.** That table says of itself that it is *\"sizing estimates for an operator provisioning a disk \u2026 Nothing reads them, no host enforces them, and no threshold or policy is derived from them\"* \u2014 and M9's Track 2 treated one row as a budget, derived a 2.0 GB ceiling from it, and **withdrew a design** measured at 2.702 GB against a number with no forcing function. A number nothing enforces is not a threshold.\n\nThis is the panel D13's disk-projection alert is drawn from, and **the window is the same in both: a 7-day least-squares fit extrapolated 14 days** (`predict_linear(system_filesystem_usage_bytes{state=\"free\"}[7d], 14 * 86400) < 0`). Not a shorter one: this deployment's growth is dominated by events days apart \u2014 a bootstrap, a crawl, a `similar --rebuild` \u2014 and an hour extrapolated to a fortnight would page on every `VACUUM`.\n\n\u26a0\ufe0f **The free-disk denominator is not in this table and cannot be.** This panel is the numerator; the Postgres datasource has no portable way to read a filesystem's free space, so the denominator is `system_filesystem_usage_bytes{state=\"free\"}` \u2014 produced by the OTel collector's `hostmetrics` receiver, which the shared stack does not run today, which is why D13's rule ships with an `absent()` companion. Measured 2026-09-11: `pg_database_size('usher_catalog')` **8,384,394,931 B (7,996 MB)** at 1,276,268 titles with 133,576 enriched, against **677,427,249,152 B free** on `/`.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 8
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT pg_class.relname AS table_name,\n       pg_total_relation_size(pg_class.oid) AS total_bytes,\n       pg_size_pretty(pg_total_relation_size(pg_class.oid)) AS total_pretty\nFROM pg_class\nJOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace\nWHERE pg_namespace.nspname = 'public' AND pg_class.relkind = 'r'\nORDER BY pg_total_relation_size(pg_class.oid) DESC\nLIMIT 25;",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -1,24 +1,4 @@
-"""The singleton default user, for the composition roots that need one.
-
-PRD 01 leaves authentication as a seam and `usher.domain.watch.User` says
-what stands in it until then: "a singleton default user (`is_default=True`)".
-Nothing had ever created that row, because nothing before M4 wrote a
-`watch_state` -- and `watch_states.user_id` is a real foreign key, so the
-watch-state lane is unrunnable without it.
-
-**Deliberately not a repository port.** A port exists so `services/` can
-depend on behaviour without depending on `db/` (ADR-0009), and no service
-needs this: `WatchStateSyncService` takes a `user_id` per call precisely
-because deciding *which* user a source's history belongs to is M5's
-question, not a service's. The two composition roots are the only callers,
-and they are already allowed to import `db/`. Adding an ABC, a fake, and a
-contract suite for one `SELECT` would be a port with nothing on the other
-side of it.
-
-Replaced, not extended, when real authentication lands: at that point
-"which user" comes from a request rather than from a row flagged
-`is_default`, and this module's whole reason to exist goes with it.
-"""
+"""The singleton default user, for the composition roots that need one."""
 
 import uuid
 
@@ -40,23 +20,10 @@ INSERT INTO users (id, name, is_default) VALUES (:id, :name, true)
 ON CONFLICT (name) DO NOTHING
 """
 
-# `ORDER BY is_default DESC, created_at, id` rather than a bare `LIMIT 1`:
-# nothing constrains `is_default` to one row (it is a plain boolean column,
-# not a partial unique index), so "the default user" has to be a *stable*
-# choice or two runs of the same command could write history to two
-# different users. The `name` half of the predicate is what makes this
-# terminate when a user already exists under that name without the flag --
-# the insert below conflicts on `name`, so without it the second read would
-# find nothing and the caller would be handed no id at all.
-#
-# **All four columns, not just the id**, since M7: `RowContext` carries a
-# `User` and not a `user_id`, and `User.id` is `default_factory=new_id` -- so a
-# caller that built one from the name alone would compose a screen for a
-# household that has never existed. Every read would return nothing and it
-# would render as an empty household rather than as a bug, which is this
-# milestone's headline failure arriving through a constructor default.
-# `scalar_one_or_none()` still takes the first column, so widening this is
-# transparent to `ensure_default_user`.
+# `ORDER BY is_default DESC, created_at, id` rather than a bare `LIMIT 1`: nothing
+# constrains `is_default` to one row (it is a plain boolean column, not a partial unique
+# index), so "the default user" has to be a *stable* choice or two runs of the same
+# command could write history to two different users.
 _SELECT_DEFAULT = """
 SELECT id, name, is_default, created_at FROM users WHERE is_default OR name = :name
 ORDER BY is_default DESC, created_at, id LIMIT 1
@@ -83,13 +50,11 @@ async def ensure_default_user(session: AsyncSession, *, name: str = DEFAULT_USER
 
 
 async def default_user(session: AsyncSession, *, name: str = DEFAULT_USER_NAME) -> User:
-    """The same row as a domain model, for the one caller that needs the whole
-    thing: `RowContext.user`.
+    """The same row as a domain model, for the one caller that needs it whole.
 
-    One statement, not two. The alternative -- `ensure_default_user` followed
-    by a read of the row it just resolved -- is a second round trip per home
-    request for a `created_at` nothing reads, and this way the id and the name
-    cannot disagree about which row they came from.
+    One statement, not two: no home request pays a second round trip for a
+    `created_at` nothing reads, and the id and the name cannot disagree about
+    which row they came from.
     """
     row = await _resolve(session, name)
     return User(

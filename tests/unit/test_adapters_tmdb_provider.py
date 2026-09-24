@@ -1,11 +1,6 @@
-"""`TmdbMetadataProvider` over `httpx.MockTransport`. No network.
+"""`TmdbMetadataProvider` over `httpx.MockTransport`.
 
-Every case here is about **which requests are issued**, which is the half
-`test_adapters_tmdb_mapping.py` cannot see. TMDb's movie/TV divergence is not
-only a field-name divergence: the two spaces have different endpoints and
-different `append_to_response` vocabularies, so a provider that treated them
-as one shape would ask for a namespace that does not exist rather than
-producing an obviously wrong answer.
+No network.
 """
 
 import datetime as dt
@@ -42,8 +37,8 @@ _SERIES_REF = ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERI
 _FIXTURE_SEASON_NUMBERS = (0, 1)
 _SEASON_TMDB_ID = 96000000
 
-# The body shape TMDb really answers a missing resource with, recorded live
-# 2026-08-01 on `/movie`, `/tv` and `/tv/{id}/season/{n}` alike.
+# The body shape TMDb answers a missing resource with, on `/movie`, `/tv` and
+# `/tv/{id}/season/{n}` alike.
 _NOT_FOUND = {
     "success": False,
     "status_code": 34,
@@ -52,8 +47,7 @@ _NOT_FOUND = {
 
 
 def _season_summary(number: int) -> dict[str, Any]:
-    """One `seasons[]` entry for a season the committed fixture does not
-    carry, shaped exactly like the two it does."""
+    """One `seasons[]` entry, shaped exactly like the two the fixture carries."""
     entry = dict(load_tmdb_fixture("series")["seasons"][1])
     entry["season_number"] = number
     entry["id"] = _SEASON_TMDB_ID + number
@@ -64,20 +58,15 @@ def _season_summary(number: int) -> dict[str, Any]:
 def _season_detail(number: int) -> dict[str, Any]:
     """What `GET /tv/{id}/season/{n}` answers for this series.
 
-    `id` is re-keyed off the season number because the live run measured the
-    season route's own `id` **byte-identical** to the one the series'
-    `seasons[]` summary carries (3627/3624/107971 on Game of Thrones). Without
-    that this fake would manufacture a disagreement the real API does not
-    have, and the identity case below would fail on the fake rather than on
-    the provider.
-
-    Everything else stays as the one committed `season.json` spells it,
-    whatever the number is -- so this response disagrees with the summary's
-    `name`, `overview`, `air_date`, `poster_path` and `vote_average` for every
-    number but 1. That is a deliberate affordance rather than fidelity, it is
-    the only thing in the suite that can see the *direction* of the merge, and
-    `_assert_the_merge_direction_is_observable` is what stops it being an
-    unstated coincidence.
+    `id` is re-keyed off the season number because the season route's own `id` is
+    byte-identical to the one the series' `seasons[]` summary carries. Without that
+    this fake would manufacture a disagreement the real API does not have, and the
+    identity case below would fail on the fake rather than on the provider.
+    Everything else stays as the one committed `season.json` spells it, so this
+    response disagrees with the summary's `name`, `overview`, `air_date`,
+    `poster_path` and `vote_average` for every number but 1 -- a deliberate
+    affordance, and the only thing in the suite that can see the *direction* of the
+    merge.
     """
     season = load_tmdb_fixture("season")
     season["season_number"] = number
@@ -87,30 +76,21 @@ def _season_detail(number: int) -> dict[str, Any]:
 
 # Every key a season block and its `seasons[]` summary both carry *and* that
 # the two fixtures deliberately disagree on. `id` and `season_number` are
-# excluded because the fake makes those two agree on purpose -- `id` because
-# the live run measured the season route's own id byte-identical to the
-# summary's.
+# excluded because the fake makes those two agree on purpose: the season
+# route's own id is byte-identical to the summary's.
 _MERGE_DIRECTION_PROBES = ("air_date", "name", "overview", "poster_path", "vote_average")
 
 
 def _assert_the_merge_direction_is_observable() -> None:
     """The premise every merge-direction assertion here rests on.
 
-    **On faithful data a block and its summary agree on every shared key**, so
-    block-over-summary and summary-over-block produce the identical dict and
-    no assertion anywhere can tell them apart. The only thing that makes the
-    direction visible is that `season.json` keeps its own prose whatever the
-    season number, so it disagrees with the Specials summary in `series.json`.
-
-    That disagreement is a property of two fixtures, and until 2026-08-11
-    nothing asserted it. Demonstrated by execution: with an inverted merge
-    planted, editing *only* `series.json`'s season-0 entry to agree with
-    `season.json` -- a plausible "make the fixtures internally consistent"
-    cleanup, no code change at all -- took this file from one red to **32
-    green**. So a tidy-up nobody would review as a test change silently
-    disarmed the only guard between a correct merge and a `seasons[]` written
-    wrong on every enriched series in the catalog, across the ~130,806 detail
-    fetches the enrichment crawl makes.
+    On faithful data a block and its summary agree on every shared key, so
+    block-over-summary and summary-over-block produce the identical dict and no
+    assertion anywhere can tell them apart. What makes the direction visible is
+    that `season.json` keeps its own prose whatever the season number, so it
+    disagrees with the Specials summary in `series.json`. That disagreement is a
+    property of two fixtures, so editing either of them into agreement would disarm
+    every merge-direction guard in this file without touching a line of code.
     """
     summary = load_tmdb_fixture("series")["seasons"][0]
     block = _season_detail(0)
@@ -128,12 +108,8 @@ class _Server:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.status_for: dict[str, int] = {}
-        # TMDb's `primary_release_year`/`first_air_date_year` are *exact*
-        # filters -- measured live 2026-08-01, where all 294 candidates
-        # returned across 320 probes carried the year that was asked for and
-        # 26 probes came back completely empty. Setting this reproduces that
-        # one behaviour: a year one off the provider's own date is not a
-        # lower-ranked result, it is no result.
+        # TMDb's `primary_release_year`/`first_air_date_year` are *exact* filters: a
+        # candidate carries the year that was asked for, or it is not returned at all.
         self.year_filter_is_exact = False
         # And this one is the same endpoint simply knowing nothing, with or
         # without a year.
@@ -147,9 +123,8 @@ class _Server:
         self.serves_the_season_route = True
         self.serves_appended_seasons = True
         # A season the series lists whose block never arrives on either
-        # transport. Guess 8 of the 2026-08-01 run -- still unverified live,
-        # zero occurrences in 320 listed seasons -- so this is the branch
-        # standing in for it.
+        # transport. Not a shape TMDb has been seen to produce, so this is
+        # the branch standing in for it.
         self.season_blocks_withheld: frozenset[int] = frozenset()
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -197,8 +172,8 @@ class _Server:
             return series
         for number in self._season_slots(request):
             if not self._holds(number):
-                # Live 2026-08-01: a season number the series does not have
-                # is **silently omitted**, not an error.
+                # A season number the series does not have is silently
+                # omitted, not an error.
                 continue
             block = _season_detail(number)
             # "...identical to the season's own detail response but for a
@@ -247,13 +222,10 @@ def _provider(server: _Server, **kwargs: Any) -> tuple[TmdbMetadataProvider, htt
 async def _per_season_composition(server: _Server, ref: ProviderRef) -> dict[str, Any]:
     """The `1+N` spelling, kept here as a reference implementation.
 
-    This is what `TmdbMetadataProvider.fetch` did until the appended spelling
-    replaced it, transcribed rather than imported because the shipped copy is
-    gone. `mapping.seasons_and_episodes`, `EnrichService._store_hierarchy` and
-    `DeriveService` all read payloads written months before they run, so
-    **identity with this output is the contract and the request count is only
-    the benefit** -- a divergence here is invisible until a derivation months
-    later returns nothing.
+    `mapping.seasons_and_episodes`, `EnrichService._store_hierarchy` and
+    `DeriveService` all read payloads written months before they run, so identity
+    with this output is the contract and the request count is only the benefit --
+    a divergence is invisible until a derivation months later returns nothing.
     """
     http = httpx.AsyncClient(transport=httpx.MockTransport(server))
     client = TmdbClient(http, _KEY, requests_per_second=1000.0)
@@ -270,9 +242,11 @@ async def _per_season_composition(server: _Server, ref: ProviderRef) -> dict[str
 
 
 async def test_a_movie_is_one_request_carrying_the_documented_append_list() -> None:
-    """PRD 03 names the exact list. A provider that made six requests
-    instead of one burns the rate limit six times as fast, on the stage that
-    runs once per title across a 1,271,138-row catalog."""
+    """One request per title, carrying the exact append list PRD 03 names.
+
+    A provider that made six requests instead of one burns the rate limit six times
+    as fast, on the stage that runs once per title across the whole catalog.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -291,10 +265,12 @@ async def test_a_movie_is_one_request_carrying_the_documented_append_list() -> N
 
 
 async def test_a_series_asks_for_content_ratings_and_never_release_dates() -> None:
-    """The divergence that would not merely produce a wrong value: TMDb's TV
-    namespace has no `release_dates` endpoint at all, and it does have
-    `content_ratings`, which the movie namespace does not. One shared append
-    list is a request for something that does not exist."""
+    """The two namespaces need different append lists.
+
+    TMDb's TV namespace has no `release_dates` endpoint at all, and it does have
+    `content_ratings`, which the movie namespace does not, so one shared list is a
+    request for something that does not exist.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -307,10 +283,12 @@ async def test_a_series_asks_for_content_ratings_and_never_release_dates() -> No
 
 
 async def test_a_series_fetch_composes_its_seasons_own_responses() -> None:
-    """TMDb's series detail lists seasons and carries no episodes, so the
-    hierarchy has to be composed into the detail payload -- `to_result` is a
-    pure function of one document, so a season response fetched later has
-    nowhere to go."""
+    """TMDb's series detail lists seasons and carries no episodes.
+
+    The hierarchy has to be composed into the detail payload, because `to_result` is
+    a pure function of one document and a season response fetched later has nowhere
+    to go.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -325,20 +303,14 @@ async def test_a_series_fetch_composes_its_seasons_own_responses() -> None:
 async def test_the_composed_payload_equals_what_the_per_season_path_produced() -> None:
     """The contract, and the request count is only the benefit.
 
-    Verified live 2026-08-01: an appended `season/N` block is identical to
-    the season route's own response **but for a missing top-level `id`**, and
-    the series' `seasons[]` summary carries that same id byte-identically
-    (3627/3624/107971 on Game of Thrones), so merging the block over the
-    summary loses nothing. Everything downstream --
-    `mapping.seasons_and_episodes`, `EnrichService._store_hierarchy`,
-    `DeriveService` -- reads `raw_payloads` rows written months earlier, so a
-    difference here surfaces as a derivation that quietly returns nothing.
-
-    Each server serves exactly one of the two transports, so the equality is
-    between two genuinely different request shapes rather than between one
-    request shape and itself. And the merge direction it pins is only visible
-    while the two fixtures disagree, which is asserted rather than assumed --
-    see `_assert_the_merge_direction_is_observable`.
+    An appended `season/N` block is identical to the season route's own response but
+    for a missing top-level `id`, and the series' `seasons[]` summary carries that
+    same id byte-identically, so merging the block over the summary loses nothing.
+    Everything downstream -- `mapping.seasons_and_episodes`,
+    `EnrichService._store_hierarchy`, `DeriveService` -- reads `raw_payloads` rows
+    written months earlier, so a difference here surfaces as a derivation that
+    quietly returns nothing. Each server serves exactly one of the two transports,
+    so the equality is between two genuinely different request shapes.
     """
     _assert_the_merge_direction_is_observable()
     per_season = _Server()
@@ -363,20 +335,15 @@ async def test_the_composed_payload_equals_what_the_per_season_path_produced() -
 
 
 async def test_a_season_block_is_merged_over_its_summary_and_never_under_it() -> None:
-    """The direction, asserted on the payload directly rather than only as a
-    side effect of the identity case's `==`.
+    """The merge direction, asserted on the payload rather than via an identity.
 
-    The season's own response is the authoritative one and the `1+N` spelling
-    took it with `dict.update`. Reversing that writes the summary's thinner
-    copy back over it, and every enriched season and episode row in the
-    catalog then carries the wrong `name`, `overview`, `air_date` and
-    `air_date`-derived ordering with **no error anywhere** -- the failure
-    ADR-0016's cached payloads make invisible until a derivation months later
-    reads them.
-
-    Two cases assert this now rather than one, and deliberately: the identity
-    case is the contract, and this one survives the identity case being
-    deleted, narrowed, or quietly disarmed by a fixture edit.
+    The season's own response is the authoritative one and the `1+N` spelling took
+    it with `dict.update`. Reversing that writes the summary's thinner copy back
+    over it, and every enriched season and episode row in the catalog then carries
+    the wrong `name`, `overview`, `air_date` and `air_date`-derived ordering with no
+    error anywhere -- cached payloads keep it invisible until a derivation months
+    later reads them. Two cases assert this rather than one, so it survives the
+    identity case being deleted, narrowed, or disarmed by a fixture edit.
     """
     _assert_the_merge_direction_is_observable()
     server = _Server()
@@ -399,11 +366,10 @@ async def test_a_season_block_is_merged_over_its_summary_and_never_under_it() ->
 def test_the_blind_window_is_what_the_twenty_item_ceiling_leaves() -> None:
     """Derived, never a literal 14.
 
-    The ceiling is enforced -- 21 items is a **400** carrying
-    `status_code: 27`, *"the maximum number of remote calls is 20"*, measured
-    live 2026-08-01. Six namespaces already appended leave exactly fourteen
-    season slots, so a seventh namespace has to cost a season slot rather
-    than silently cost the whole request.
+    The ceiling is enforced: 21 items is a 400 carrying `status_code: 27`, *"the
+    maximum number of remote calls is 20"*. Six namespaces already appended leave
+    exactly fourteen season slots, so a seventh namespace has to cost a season slot
+    rather than silently cost the whole request.
     """
     namespaces = SERIES_APPEND_TO_RESPONSE.split(",")
     assert APPEND_TO_RESPONSE_CEILING == 20
@@ -415,10 +381,8 @@ def test_the_blind_window_is_what_the_twenty_item_ceiling_leaves() -> None:
 async def test_a_series_costs_one_request_carrying_fourteen_season_slots() -> None:
     """Nine seasons cost ten requests before this change and one after it.
 
-    At 32,409 series and a median of 9 listed seasons -- 320 seasons over the
-    30 series the 2026-08-01 run walked, a popular-skewed sample and so an
-    upper bound on the measurement rather than a prediction -- that is ~324k
-    requests against ~32k on the series half of the enrichment crawl.
+    Across a catalog of series that is an order of magnitude fewer requests on the
+    series half of the enrichment crawl, which is what the append spelling buys.
     """
     server = _Server()
     server.season_numbers = tuple(range(9))
@@ -479,8 +443,10 @@ async def test_a_season_listed_outside_the_blind_window_is_fetched_by_a_follow_u
 
 
 async def test_a_window_number_the_series_does_not_have_is_absent_and_not_an_error() -> None:
-    """Measured live 2026-08-01: an unlisted season number appends nothing
-    and the response is still a 200. That is what lets the window be blind."""
+    """An unlisted season number appends nothing and still answers 200.
+
+    That is what lets the window be blind.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -513,10 +479,12 @@ async def test_a_season_whose_block_never_arrives_still_produces_its_row() -> No
 
 
 async def test_the_composed_payload_still_carries_what_later_milestones_read() -> None:
-    """ADR-0016: `raw_payloads` exists so M7 and M9 re-derive
-    `Person`/`Credit`/`Collection`/`Image` with no second network call. A
-    fetch that returned only the fields M4 maps would make that impossible
-    without anybody noticing until M7."""
+    """The whole payload is stored, not only the fields this provider maps.
+
+    `raw_payloads` exists so `Person`, `Credit`, `Collection` and `Image` can be
+    re-derived later with no second network call, and a fetch that kept only the
+    mapped fields would make that impossible with nothing to notice at the time.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -542,8 +510,10 @@ async def test_a_payload_with_no_id_is_malformed() -> None:
 
 
 async def test_a_404_from_the_detail_route_reaches_the_caller_as_malformed_data() -> None:
-    """Straight through from the client, and it is the branch that makes
-    `JobWorker` park rather than retry."""
+    """The client's error passes straight through.
+
+    It is the branch that makes `JobWorker` park rather than retry.
+    """
     server = _Server()
     server.status_for["/3/movie/90000550"] = 404
     provider, http = _provider(server)
@@ -565,10 +535,12 @@ async def test_a_ref_for_another_provider_is_malformed_not_a_request() -> None:
 
 
 async def test_a_kindless_tmdb_ref_is_malformed_rather_than_guessed() -> None:
-    """ADR-0011 at the request layer: 26,968 ids are live in both TMDb
-    spaces, so `GET /movie/{id}` for a ref that meant a series returns a real
-    payload for an unrelated film. Guessing here writes one title's metadata
-    onto another and nothing ever reports an error."""
+    """A ref whose kind this provider cannot serve is refused, not guessed.
+
+    Many ids are live in both TMDb spaces, so `GET /movie/{id}` for a ref that meant
+    a series returns a real payload for an unrelated film. Guessing writes one
+    title's metadata onto another and nothing ever reports an error.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -615,10 +587,12 @@ async def test_to_result_produces_the_hierarchy_for_a_series() -> None:
 
 
 async def test_to_result_never_sets_the_enrichment_tier() -> None:
-    """`EnrichService` owns the tier and only ever raises it through
-    `ENRICHMENT_RANK` (ADR-0008). A provider that stamped `ENRICHED` here
-    could promote a title on a payload carrying nothing but an id -- and one
-    that stamped `SKELETON` would demote a title another provider enriched."""
+    """`EnrichService` owns the tier and raises it only through `ENRICHMENT_RANK`.
+
+    A provider that stamped `ENRICHED` here could promote a title on a payload
+    carrying nothing but an id, and one that stamped `SKELETON` would demote a title
+    another provider enriched.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -629,19 +603,15 @@ async def test_to_result_never_sets_the_enrichment_tier() -> None:
 
 
 async def test_to_derivation_carries_the_artwork_the_fetch_already_paid_for() -> None:
-    """M4's boundary call 2 for the fourth entity, asserted at the seam where
-    a second request would have to be issued.
+    """Images are derived from the payload in hand, with no second request.
 
-    `to_derivation` is synchronous and the whole payload is already in hand --
-    `images` is one of the six namespaces `MOVIE_APPEND_TO_RESPONSE` asks for,
-    so the rows come out of the response the enrichment crawl already made.
-    The provider is under a `MockTransport` that counts requests, and the
-    derivation happens **outside** the `async with`, so a `to_derivation` that
-    reached the network could not even open a connection.
-
-    `provider` is `PROVIDER_NAME` rather than a display string, because it is
-    half of the natural key: two providers that both spell a path `/abc.jpg`
-    must not collide onto one row.
+    `to_derivation` is synchronous and `images` is one of the six namespaces
+    `MOVIE_APPEND_TO_RESPONSE` asks for, so the rows come out of the response the
+    enrichment crawl already made. The provider is under a `MockTransport` that
+    counts requests and the derivation happens *outside* the `async with`, so a
+    `to_derivation` that reached the network could not even open a connection.
+    `provider` is `PROVIDER_NAME` rather than a display string, because it is half
+    of the natural key: two providers spelling a path `/abc.jpg` must not collide.
     """
     server = _Server()
     provider, http = _provider(server)
@@ -662,11 +632,13 @@ async def test_to_derivation_carries_the_artwork_the_fetch_already_paid_for() ->
 
 
 async def test_a_series_derivation_carries_its_primaries_and_no_credits_confusion() -> None:
-    """The per-kind control. `series.json` carries three empty image arrays
-    and a `created_by`, so a derivation that read images out of the same place
-    it reads creators, or that treated an empty array as "no artwork", would
-    leave every series in the catalog with no poster at all -- while the movie
-    case above stayed green."""
+    """The per-kind control, because a series payload is shaped differently.
+
+    `series.json` carries three empty image arrays and a `created_by`, so a
+    derivation that read images out of the same place it reads creators, or that
+    treated an empty array as "no artwork", would leave every series in the catalog
+    with no poster while the movie case above stayed green.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -696,11 +668,13 @@ async def test_a_movie_search_uses_the_movie_endpoint_and_its_own_year_parameter
 
 
 async def test_a_series_search_uses_the_tv_endpoint_and_first_air_date_year() -> None:
-    """`primary_release_year` is not a `/search/tv` parameter and
-    `first_air_date_year` is not a `/search/movie` one. Sending the wrong one
-    is silently unfiltered rather than an error, so half the catalog would
-    search unfiltered and the caller's ambiguity rule would then reject every
-    result."""
+    """Each search namespace takes its own year parameter.
+
+    `primary_release_year` is not a `/search/tv` parameter and `first_air_date_year`
+    is not a `/search/movie` one. Sending the wrong one is silently unfiltered rather
+    than an error, so half the catalog would search unfiltered and the caller's
+    ambiguity rule would then reject every result.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -711,9 +685,11 @@ async def test_a_series_search_uses_the_tv_endpoint_and_first_air_date_year() ->
 
 
 async def test_an_unscoped_search_asks_both_spaces() -> None:
-    """`/search/multi` labels its results but supports neither year filter,
-    so a caller that does not know the kind pays two requests. That is the
-    cost the port's optional `kind` exists to let a caller avoid."""
+    """A caller that does not know the kind pays two requests.
+
+    `/search/multi` labels its results but supports neither year filter, which is the
+    cost the port's optional `kind` exists to let a caller avoid.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -740,15 +716,13 @@ async def test_a_search_with_no_year_sends_no_year_parameter() -> None:
 async def test_an_empty_year_filtered_search_is_retried_without_the_year(
     kind: TitleKind, path: str, parameter: str
 ) -> None:
-    """TMDb's year filter is exact; the caller's rule is +/-1. Without this
-    retry the tighter of the two silently wins.
+    """TMDb's year filter is exact; the caller's rule is +/-1.
 
-    Measured live 2026-08-01 over 320 names: every one of the 294 candidates
-    TMDb returned carried *exactly* the year asked for, so `_confident`'s
-    own `abs(candidate.year - item.year) <= 1` is unreachable and tier 4
-    runs at +/-0 while tier 3 runs at +/-1. 26 of the 320 came back empty,
-    and re-asking those 26 without the year resolved 13 of them confidently
-    -- every one a title whose TMDb date is one year off the source's.
+    Without this retry the tighter of the two silently wins: every candidate TMDb
+    returns carries exactly the year asked for, so `_confident`'s own
+    `abs(candidate.year - item.year) <= 1` is unreachable and the TMDb search tier
+    runs at +/-0 while the local name + year step runs at +/-1. Re-asking without the
+    year resolves the titles whose TMDb date is one year off the source's.
     """
     server = _Server()
     server.year_filter_is_exact = True
@@ -762,13 +736,14 @@ async def test_an_empty_year_filtered_search_is_retried_without_the_year(
 
 
 async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> None:
-    """The retry is a fallback, not a widening. Dropping the year filter
-    outright was measured too and is *worse*: of 133 names that already
-    resolved with it, 6 stopped resolving without it, because "exactly one
-    survivor" across every year at once is harder than within one. So the
-    second request happens only when the first found nothing, which can add
-    matches and cannot remove any -- and costs an extra request on the 8%
-    of probes that came back empty rather than on all of them."""
+    """The retry is a fallback, not a widening.
+
+    Dropping the year filter outright is *worse*: some names that resolve with it
+    stop resolving without it, because "exactly one survivor" across every year at
+    once is harder than within one. So the second request happens only when the
+    first found nothing, which can add matches and cannot remove any, and costs an
+    extra request only on the probes that came back empty.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -777,9 +752,11 @@ async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> N
 
 
 async def test_an_empty_search_with_no_year_is_not_retried() -> None:
-    """There is nothing to drop, so a retry would be the identical request
-    twice -- one wasted rate-limited call per unmatched item, on the tier
-    PRD 03 already calls a last resort."""
+    """With no year to drop, a retry would be the identical request twice.
+
+    That is one wasted rate-limited call per unmatched item, on the only match tier
+    in PRD 03 that spends a TMDb request at all.
+    """
     server = _Server()
     server.search_finds_nothing = True
     provider, http = _provider(server)
@@ -790,9 +767,11 @@ async def test_an_empty_search_with_no_year_is_not_retried() -> None:
 
 
 async def test_a_search_that_finds_nothing_either_way_asks_exactly_twice() -> None:
-    """The fallback is bounded at one extra request. A provider that kept
-    re-asking would turn every genuinely unknown title into an unbounded
-    loop against a rate-limited API."""
+    """The fallback is bounded at one extra request.
+
+    A provider that kept re-asking would turn every genuinely unknown title into an
+    unbounded loop against a rate-limited API.
+    """
     server = _Server()
     server.search_finds_nothing = True
     provider, http = _provider(server)
@@ -806,9 +785,10 @@ async def test_a_search_that_finds_nothing_either_way_asks_exactly_twice() -> No
 
 
 async def test_the_change_feed_is_resumable_and_walks_both_id_spaces() -> None:
-    """A catalog holding 371,310 series that only re-enriched movies would
-    be half stale, and a page of bare integers could not say which space an
-    id belongs to."""
+    """Both spaces are walked, because a page of bare integers names neither.
+
+    A change feed that only re-enriched movies would leave every series stale.
+    """
     server = _Server()
     provider, http = _provider(server)
     since = dt.datetime(2026, 7, 25, tzinfo=dt.UTC)
@@ -829,9 +809,11 @@ async def test_the_change_feed_is_resumable_and_walks_both_id_spaces() -> None:
 
 
 async def test_the_change_window_is_clamped_to_fourteen_days() -> None:
-    """TMDb's own documentation: "You can query this method up to 14 days at
-    a time." A `since` from before an outage would otherwise be rejected by
-    TMDb on the one call the recovery path makes."""
+    """The window is clamped to the fourteen days TMDb documents.
+
+    A `since` from before an outage would otherwise be rejected on the one call the
+    recovery path makes.
+    """
     server = _Server()
     provider, http = _provider(server, today=dt.date(2026, 7, 31))
     async with http:
@@ -850,9 +832,11 @@ async def test_a_window_within_the_cap_is_sent_as_asked() -> None:
 
 
 async def test_the_provider_names_itself_the_way_a_provider_ref_spells_it() -> None:
-    """`MetadataProvider.name` is the `provider` half of every ref this
-    adapter produces, and `TitleMatchRepository` matches on that exact
-    string. A display name here silently matches nothing."""
+    """`MetadataProvider.name` is the `provider` half of every ref produced here.
+
+    `TitleMatchRepository` matches on that exact string, so a display name here
+    silently matches nothing.
+    """
     server = _Server()
     provider, http = _provider(server)
     async with http:
@@ -860,19 +844,14 @@ async def test_the_provider_names_itself_the_way_a_provider_ref_spells_it() -> N
 
 
 async def test_the_genre_vocabulary_is_every_tmdb_name_as_a_canonical_concept() -> None:
-    """**Which concepts enrichment is entitled to delete** (ADR-0039).
+    """Which concepts enrichment is entitled to delete.
 
-    `genres` is in `EnrichService`'s replace list, so this set decides whether
-    an IMDb-only label is re-spelled or destroyed — and it is the half
-    `FakeMetadataProvider` cannot speak to, because that fake transcribes the
-    same set rather than deriving it.
-
-    Both directions are asserted and only the second one fails against the
-    defect. That TMDb names `Science Fiction` is uninteresting; that it names
-    **none** of the seven concepts IMDb has to itself is the whole subject, and
-    the live catalog is what says these seven are real rather than theoretical:
-    `Biography` 24,552 titles, `Sport` 19,918, `Musical` 13,546, `Game-Show`
-    10,729, `Short` 6,248, `Film-Noir` 49 (2026-08-19).
+    `genres` is in `EnrichService`'s replace list, so this set decides whether an
+    IMDb-only label is re-spelled or destroyed — and it is the half
+    `FakeMetadataProvider` cannot speak to, because that fake transcribes the same
+    set rather than deriving it. Both directions are asserted and only the second
+    fails against the defect: that TMDb names `Science Fiction` is uninteresting,
+    that it names none of the concepts IMDb has to itself is the whole subject.
     """
     server = _Server()
     provider, http = _provider(server)

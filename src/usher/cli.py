@@ -1,32 +1,28 @@
-"""Command-line composition root: `python -m usher <command>`.
-
-The second composition root alongside `api/`. It is the only module allowed
-to construct adapters, repositories, and services together, which is why
-`pyproject.toml` carries a contract forbidding anything from importing it.
-
-PRD 08 says first run "offers bootstrap through the admin API -- it does not
-start a multi-hour download unprompted". The admin API arrives with the rest
-of the HTTP surface in M9; this CLI is that trigger until then, and it has
-the same property: nothing downloads unless an operator asks.
-"""
+"""Command-line composition root: `python -m usher <command>`."""
 
 import argparse
 import asyncio
+import os
+import re
 import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Final
 
 import httpx
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher import __version__
 from usher.api.lanes import LaneSupervisor
 from usher.composition import (
     NO_CREDENTIALS,
+    BootstrapOutcome,
     DefaultUserId,
     Pipeline,
     QueueGauges,
@@ -35,6 +31,7 @@ from usher.composition import (
     build_curation_service,
     build_derive_service,
     build_pipeline,
+    build_scheduler,
     build_worker,
     embedder,
     llm_client,
@@ -47,7 +44,9 @@ from usher.composition import (
 )
 from usher.config import Settings, get_settings, settings_rejection
 from usher.db.base import build_engine, build_session_factory
+from usher.db.repositories.backup import PostgresBackupRepository, PostgresRestoreRepository
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.credentials import PostgresCredentialRotationStore, build_cipher
 from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.users import default_user, ensure_default_user
@@ -55,7 +54,7 @@ from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
-from usher.domain.sync import SyncRunKind
+from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.eval.errors import EvalDependencyMissing
 from usher.eval.goldens.suggest import GATE_SEED
 from usher.ports.errors import (
@@ -67,8 +66,13 @@ from usher.ports.errors import (
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
 from usher.ports.rows import RowContext
-from usher.ports.search import SearchFilters, SearchMode
+from usher.ports.search import SearchFilters, SearchMode, SuggestTier
 from usher.ports.source import SourceAdapter
+from usher.services.backup import (
+    CREDENTIAL_KEY_WARNING,
+    BackupReport,
+    BackupService,
+)
 from usher.services.bootstrap import (
     VocabularyState,
     VocabularyVerdict,
@@ -78,38 +82,23 @@ from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.genres import GenreNormalisationService
 from usher.services.home import ComposeReport, HomeService
+from usher.services.jobs import JobWorker, WorkerLoop
+from usher.services.reconcile import RETRACTION_ERROR_CODE
+from usher.services.restore import RestoreRefused, RestoreReport, RestoreService
+from usher.services.rotation import RotationReport, RotationService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
-from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
+from usher.services.search import SearchAnswer, SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
+    register_scheduler_gauges,
     register_search_gauges,
 )
 
 # `--phase all` runs `FULL_SEQUENCE` in order -- the six members of
-# `BootstrapPhase` that are *steps* -- and three of its edges are measured
-# rather than stylistic; `usher.domain.bootstrap.BootstrapPhase` carries the
-# argument and the numbers.
-#
-# ⚠️ **The enum is not the execution order, and this comment said it was until
-# ADR-0040.** Two members are aliases rather than steps (`PHASE_ALIASES`):
-# `all`, and `ratings`, which is declared immediately after `imdb` because
-# that is the phase whose second half it re-runs. `PHASES` is derived from the
-# enum, so `--help` lists `ratings` second -- and the sentence this replaces
-# told an operator reading that list that `--phase all` therefore runs it
-# second. It does not dispatch it at all; a full run reaches those rows inside
-# the `imdb` arm. The steps' own order is still the measured one and
-# `tests/unit/test_composition.py` asserts the enum's declaration order and
-# `FULL_SEQUENCE` agree, so this list cannot advertise an order the dispatch
-# does not run.
-#
-# **Derived, never restated.** This was a literal tuple until M9's E5, when
-# `POST /admin/bootstrap/{phase}` gave the set a second reader: two
-# spellings would let the CLI accept a phase the route rejects, and
-# `/openapi.json` would describe a bare string. `argparse` compares a
-# `choices=` member with `==`, and a `StrEnum` member equals its own wire
-# value, so the tuple is spelled as values and `_dispatch` converts once.
+# `BootstrapPhase` that are *steps*. Three of its edges are required ordering
+# rather than style.
 PHASES = tuple(phase.value for phase in BootstrapPhase)
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
 # real `SyncRunKind` and is deliberately absent: `sync` always runs it after
@@ -122,70 +111,14 @@ SYNC_KINDS = ("full", "delta")
 # answer, and a knob would invite tuning a number that is about to stop
 # mattering.
 _IDLE_SLEEP_SECONDS = 5.0
-# The failures that are the *operator's* to fix, and so the ones `main`
-# answers with a message instead of a stack. Public because the boundary's
-# whole design lives in what is and is not in this tuple, and a test asserts
-# on it directly.
-#
-# **`Exception` is deliberately absent, and that is the decision rather than
-# an oversight.** Catching it would also collapse every `AttributeError` and
-# `TypeError` -- the bugs -- to one line, which trades a cosmetic wart for a
-# lost bug report. So a family is added here only when an operator can act on
-# it: start the database, fix the URL, reconnect the network.
-#
-# `OSError` rather than a SQLAlchemy type alone because asyncpg lets a refused
-# TCP connection out **unwrapped** -- the exact failure M7's smoke test hit
-# was a bare `ConnectionRefusedError`, and a handler keyed on
-# `SQLAlchemyError` would have missed the one case this boundary exists for.
-#
-# **Three of `UsherPortError`'s nine subclasses are here and six are not**, and
-# that split is the whole of what M8 added (ADR-0026's Amendment, 2026-08-07).
-# `httpx.HTTPError` cannot fire for anything behind a port: an adapter's job is
-# to translate its transport's failures *before* they cross, so `httpx` never
-# reaches this line from `adapters/llm`, `adapters/emby` or `adapters/tmdb` --
-# which left `usher curate` against an unreachable `USHER_LLM_BASE_URL`
-# answering with a stack, ADR-0026's own motivating defect in a family it did
-# not name.
-#
-# The line drawn is *reaching* an upstream against everything else. The three
-# below are conditions an operator acts on. `RepositoryConflict`,
-# `RepositoryNotFound` and `PortDataMalformed` stay out because several of
-# their raise sites are deliberate tripwires for bugs in this project's own
-# code (`title_neighbors`' bounds, the credits delete's scope, a curated batch
-# this project assembled wrong), and a one-line message is exactly what those
-# must not become. `SourceNotSupported`, `FilterNotSupported` and
-# `AvailabilitySweepRefused` -- the three that live beside their own port
-# rather than in `ports/errors.py`, which is why nobody counts them -- stay out
-# for the opposite reason: no measured path reaches this boundary with one, and
-# ADR-0026 asks for evidence per family before the tuple grows.
-#
-# `tests/unit/test_cli_errors.py::
-# test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`
-# reads the set off `__subclasses__()`, so a tenth member cannot arrive
-# without a decision about it.
+# The failures that are the *operator's* to fix, and so the ones `main` answers with a
+# message instead of a stack.
 OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # A refused connection, a name that does not resolve, a full disk, a
     # bulk dataset that is not where it was left.
     OSError,
-    # Everything the driver does wrap: a missing table (`alembic upgrade
-    # head` never ran), a dead pool, a permission the role does not have.
-    #
-    # **`DBAPIError`, not `SQLAlchemyError`, and the narrowing is issue #8's
-    # measured half.** This line read `SQLAlchemyError` until 2026-08-19, and
-    # `SQLAlchemyError` is also the base of `InvalidRequestError` -- which is
-    # `MissingGreenlet`, `PendingRollbackError`, `ObjectDeletedError`,
-    # `ArgumentError`, `CompileError`: every one of them a bug in this project
-    # rather than a condition an operator can act on. M9's S3 measured the
-    # cost. One of three `usher work` daemons died 78 minutes into a
-    # 130,334-request enrichment crawl on an unhandled `MissingGreenlet`, and
-    # the entire record it left in `w1.log` was the two lines
-    # `_operator_problem` prints. The stack that would have diagnosed it was
-    # caught here and discarded, and the issue was filed reading "the run used
-    # bare `usher work`, so no stack was recorded" -- which put the fault on
-    # the operator for not passing `--traceback` when the fault was this
-    # tuple. `DBAPIError` is what the comment above already claims to admit:
-    # errors *the driver raised*, which is where a missing table, a dead pool
-    # and a rejected permission all arrive.
+    # Everything the driver does wrap: a missing table (`alembic upgrade head` never
+    # ran), a dead pool, a permission the role does not have.
     DBAPIError,
     # TMDb, Emby, and every bulk download that is *not* behind a port -- and
     # every one of them is behind a port today, which is why the three below
@@ -197,9 +130,7 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # the model to load. Also the embedding runtime, whose own adapter says a
     # restart fixes every case it raises this for.
     PortUnavailable,
-    # The credential was rejected. `USHER_LLM_API_KEY`, `USHER_TMDB_API_KEY`,
-    # a source's stored password -- an operator fixes all three, and none of
-    # them is worth sixty frames.
+    # The credential was rejected.
     PortAuthFailed,
     # The upstream asked to be backed off. A CLI has no backoff schedule to
     # apply, so the honest answer at a terminal is the sentence and exit 1.
@@ -211,28 +142,7 @@ _INTERRUPTED_EXIT_CODE = 130
 
 
 async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
-    """One command's session and engine, wrapped around the dispatch both
-    roots share.
-
-    **The phases themselves are `composition.run_bootstrap`'s** since M9's E5,
-    because `POST /admin/bootstrap/{phase}` needs the same seven arms in the
-    same order and a handler that re-implemented them would be a second
-    dispatch that drifts. What stays here is what a *command* owns and a
-    worker does not: an engine of its own, one session for the run, and
-    `print` as the report sink.
-
-    The engine is disposed in a `finally` for the reason it always was -- a
-    phase that raises must still give its connection pool back -- and the
-    client's own `finally` is one layer down, in `run_bootstrap`, where the
-    client is built.
-
-    **`NullEventPublisher()` is a real deployment, not a test double.** M5's
-    bus is in-process, so a `bootstrap.progress` frame raised in *this*
-    process has no SSE client on the other side of it -- the same answer
-    `usher work` has given for `title.updated` since M5, and the same
-    degradation PRD 07 and PRD 08 record for a split deployment. A client
-    that wants these frames watches the server that ran the phase.
-    """
+    """One command's session and engine, wrapped around the dispatch both roots share."""
     engine = build_engine(
         settings.database_url.get_secret_value(),
         pool_size=settings.db_pool_size,
@@ -241,7 +151,7 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
     factory = build_session_factory(engine)
     try:
         async with factory() as session:
-            await run_bootstrap(
+            outcome = await run_bootstrap(
                 PostgresBulkCatalogRepository(session),
                 PostgresImportRunRepository(session),
                 session.commit,
@@ -252,6 +162,39 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
             )
     finally:
         await engine.dispose()
+    if not outcome.succeeded:
+        raise SystemExit(_bootstrap_failed(outcome))
+
+
+def _bootstrap_failed(outcome: BootstrapOutcome) -> str:
+    """The exit line for a bootstrap that left anything unfinished.
+
+    Exit 1, on stderr, the way `_sync_failed` ends a sync: each one's own line -- what
+    stopped, where, why, and the commands that continue it -- is already on stdout,
+    printed by `run_bootstrap`, so this names *which* and stops the command claiming
+    success.
+    """
+    parts: list[str] = []
+    if failed := outcome.failed:
+        noun = "import" if len(failed) == 1 else "imports"
+        names = ", ".join(one.run.dataset for one in failed)
+        parts.append(f"{len(failed)} {noun} failed: {names}")
+    if conceded := outcome.conceded:
+        noun = "import" if len(conceded) == 1 else "imports"
+        names = ", ".join(one.run.dataset for one in conceded)
+        parts.append(f"{len(conceded)} {noun} left to another process: {names}")
+    if skipped := outcome.skipped:
+        noun = "phase" if len(skipped) == 1 else "phases"
+        names = ", ".join(one.phase.value for one in skipped)
+        parts.append(f"{len(skipped)} {noun} skipped: {names}")
+    if refused := outcome.refused:
+        noun = "phase" if len(refused) == 1 else "phases"
+        names = ", ".join(one.phase.value for one in refused)
+        parts.append(f"{len(refused)} {noun} refused: {names}")
+    return (
+        f"usher bootstrap: {'; '.join(parts)}; each line above ends with the command that "
+        "resumes it, and `usher bootstrap-status` shows the checkpoints"
+    )
 
 
 def _vocabulary_line(verdict: VocabularyVerdict) -> str:
@@ -265,12 +208,10 @@ def _vocabulary_line(verdict: VocabularyVerdict) -> str:
     the_cli_report_the_same_vocabulary_verdict` feeds the route's own document
     back through this function and requires the byte-identical line.
 
-    Pure and synchronous — every read it used to make is `vocabulary_verdict`'s
-    now. It sits beside the `MIXED RELEASES` line
-    `composition._report_coverage` prints for the sibling condition on
-    `genome_scores`, and the reason the mixed case
-    reads *"not checked"* rather than a verdict is recorded on
-    `VocabularyState` itself.
+    Pure and synchronous: every read belongs to `vocabulary_verdict`. It sits
+    beside the `MIXED RELEASES` line `composition._report_coverage` prints for
+    the sibling condition on `genome_scores`, and why the mixed case reads *"not
+    checked"* rather than a verdict is recorded on `VocabularyState` itself.
     """
     if verdict.state is VocabularyState.NO_VECTORS:
         return "genome vocabulary: no vectors to name"
@@ -357,14 +298,7 @@ async def _session_for(settings: Settings) -> AsyncIterator[AsyncSession]:
 async def _sync(
     settings: Settings, *, source_name: str | None, kind: str, allow_full_retraction: bool
 ) -> None:
-    """Walk each selected source: items first, then watch state.
-
-    The two lanes are one command because they are one operator intention
-    ("bring this server up to date") and because the item walk has to run
-    first -- `WatchStateSyncService` resolves each state against a
-    `MediaItem`, so a watch lane that ran before the items existed would
-    count every state unmatched and merge nothing.
-    """
+    """Walk each selected source: items first, then watch state."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(
             session, settings, max_retract_fraction=1.0 if allow_full_retraction else None
@@ -375,6 +309,7 @@ async def _sync(
             return
         user_id = await ensure_default_user(session)
         await session.commit()
+        failed: list[SyncRun] = []
         for source in sources:
             adapter = await _open_adapter(pipeline, source)
             if adapter is None:
@@ -398,8 +333,37 @@ async def _sync(
                     f"unmatched={watch.items_unmatched}"
                     + (f" error={watch.error}" if watch.error else "")
                 )
+                failed.extend(one for one in (run, watch) if one.status is SyncRunStatus.FAILED)
             finally:
                 await adapter.aclose()
+        if failed:
+            raise SystemExit(_sync_failed(failed))
+
+
+def _sync_failed(runs: Sequence[SyncRun]) -> str:
+    """The exit line for a sync in which at least one run recorded `FAILED`.
+
+    The per-run detail is already on stdout above -- including each `error`,
+    which for a refusal is the two numbers and the ceiling. This says *which*
+    lanes failed and stops the command claiming success, rather than repeating
+    what was printed a line earlier.
+
+    **`--allow-full-retraction` is named only when a refusal is among them**,
+    and that is the whole reason `RETRACTION_ERROR_CODE` exists. It is the one
+    failure here an operator has a command for; a read timeout is not, and an
+    escape hatch offered for every failure is one people learn to paste
+    without reading. `error_code` is what is matched rather than the refusal's
+    English, because that sentence is built from three numbers in
+    `ports/ingest.py` and is a standing candidate for rewording.
+    """
+    lanes = ", ".join(f"{one.kind.value}" for one in runs)
+    line = f"{len(runs)} sync run(s) failed: {lanes}; see the lines above and `usher sync-status`"
+    if any(one.error_code == RETRACTION_ERROR_CODE for one in runs):
+        line += (
+            "\nthe availability sweep refused: if the removal was intended, "
+            "re-run with `usher sync --allow-full-retraction`"
+        )
+    return line
 
 
 async def _sync_status(settings: Settings) -> None:
@@ -441,37 +405,20 @@ async def _sync_status(settings: Settings) -> None:
 async def _unmatched(
     settings: Settings, *, limit: int, offset: int, resolve: str | None, title: str | None
 ) -> None:
-    """The review queue (PRD 02: "unmatched items are never dropped").
-
-    Listing and resolving are one command rather than two because they are
-    one loop: an operator reads a page, resolves one line of it, and reads
-    the next.
-
-    **Both ids are checked before anything is written, and only one of them
-    needs a lookup to do it.** `--resolve` naming no row is `attach_title`'s
-    boolean -- the `UPDATE` matches nothing, so nothing is written and there
-    is nothing to undo. `--title` naming no row is not symmetric: the
-    `UPDATE` matches, `fk_media_items_title_id_titles` fires, and the
-    repository translates it into a `RepositoryConflict` whose message names
-    the *media item* -- the id that was fine. That family is deliberately
-    outside `OPERATOR_ERRORS`, because its other raise sites are tripwires
-    for bugs in this project's own code, so the operator got sixty frames
-    for a typo. The guard is a `SELECT` in front of the write, which is the
-    order `POST /admin/unmatched/{id}/resolve` already keeps for the reason
-    it documents: `attach_title` writes what it is given, so a refusal that
-    arrived after the write would be a refusal that had already happened.
-
-    Both refusals print and return rather than raising `SystemExit` the way
-    `_as_uuid` does. One command naming two things that do not exist owes
-    them one exit code, and `no such media item` has had this one since M4.
-    """
+    """The review queue (PRD 02: "unmatched items are never dropped")."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if resolve is not None and title is not None:
-            # Parsed in argument order, so a command that misspells both is
-            # still told about `--resolve` first.
+            # Both conversions before the read, in the order the arguments
+            # were written, so a run with two malformed ids still names the
+            # first one rather than the one the new check happens to want.
+            # Pinned by `test_two_malformed_ids_name_the_media_item_first`,
+            # because swapping these two lines is otherwise a silent mutant.
             media_item_id = _as_uuid(resolve, "media item id")
             title_id = _as_uuid(title, "title id")
+            # One extra round trip per hand resolution -- `PostgresTitle Repository.get`
+            # is a `session.get` on the primary key, so it is one indexed `SELECT` on a
+            # command an operator runs by hand, one line at a time.
             if await pipeline.titles.get(title_id) is None:
                 print(f"no such title: {title_id}")
                 return
@@ -496,23 +443,7 @@ async def _unmatched(
 
 
 async def _work(settings: Settings, *, once: bool) -> None:
-    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`, `derive`,
-    `curate`.
-
-    Owns the one `httpx.AsyncClient` behind `TmdbClient`, because the token
-    bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
-    the client. A client per job would give every job its own budget, which
-    is a rate limiter that limits nothing.
-
-    **Publishes to `NullEventPublisher`, and that is a stated consequence
-    rather than an oversight.** `usher work` is a separate process and M5's
-    bus is in-memory, so an enrichment finished here reaches no SSE client;
-    a client that refetches still gets the enriched title, which is PRD 08's
-    own degradation rather than breakage. The server process runs the same
-    worker as a lane (`usher.api.lanes`) so PRD 03's read-through loop
-    closes there, and `EventPublisher` is a port precisely so the fix for
-    the split deployment is a second implementation rather than a branch.
-    """
+    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`, `derive`, `curate`."""
     engine = build_engine(
         settings.database_url.get_secret_value(),
         pool_size=settings.db_pool_size,
@@ -540,11 +471,10 @@ async def _work(settings: Settings, *, once: bool) -> None:
     # jobs for one that has, and the backlog is the number that says so.
     backlog = SearchGauges()
     register_search_gauges(backlog.read)
-    # **A session factory, not a session.** This command held exactly one
-    # `AsyncSession` for the life of the process until M9's W1, which is what
-    # bound the whole lane to one job at a time: `AsyncSession` is not
-    # concurrency-safe, so the worker now opens one per claim and one per job
-    # through the same `unit_of_work` the server's lanes use.
+    # **A session factory, not a session.** `AsyncSession` is not
+    # concurrency-safe, and one held for the life of the process binds the
+    # whole lane to one job at a time. The worker opens one per claim and one
+    # per job through the same `unit_of_work` the server's lanes use.
     work = unit_of_work(sessions, settings, events=NullEventPublisher(), provider=provider)
     try:
         async with sessions() as bootstrap_session:
@@ -560,36 +490,62 @@ async def _work(settings: Settings, *, once: bool) -> None:
             user_id=user_id,
         )
 
-        recovered_at = 0.0
+        # What this process has taken back from workers that stopped
+        # heartbeating. `recover()` returns it, and a caller that discards it
+        # leaves a lost worker's claims traceable only through a WARNING; this
+        # command has no readiness route, so the total goes in the pass line it
+        # already prints rather than growing a surface.
+        recovered = 0
+        # `None` is *nothing printed yet*, which is the state that makes the
+        # startup line unconditional. An `int | None` on `LaneReport` means
+        # something else entirely -- *this process runs no worker* -- and
+        # `usher work` has no such state.
+        printed: int | None = None
 
-        async def _measure() -> int:
-            # PRD 08's recovery, on the lease rather than on "everything
-            # running". Before the first claim, so a dead process's abandoned
-            # claims are this one's work rather than nobody's -- and it is now
-            # safe to run beside another live worker, which is the whole
-            # difference from the `startup()` it replaces. Throttled to half
-            # the lease for `api/lanes.py`'s reason: it is an `UPDATE` scanning
-            # `status = 'running'`, and between leases there is nothing to
-            # find.
-            nonlocal recovered_at
-            now = time.monotonic()
-            if now - recovered_at >= settings.job_lease_seconds / 2:
-                await worker.recover()
-                recovered_at = now
-            done = await worker.run_once()
+        def _took(claims: int) -> None:
+            nonlocal recovered
+            recovered += claims
+
+        def _report(ran: int) -> None:
+            """Print the pass line at startup, then only when the total moves.
+
+            A line per pass is ~17,280 a day at the idle floor, which is the
+            rate that trains an operator to ignore output; a line only at
+            startup reports a total that is almost always zero, hiding every
+            later recovery.
+            """
+            nonlocal printed
+            if printed != recovered:
+                print(f"{ran} jobs, {recovered} recovered claims")
+                printed = recovered
+
+        async def _refresh() -> None:
             async with work() as pipeline:
                 await gauges.refresh(pipeline.queue)
                 await backlog.refresh(
                     pipeline.embeddings, pipeline.neighbors, settings.embedding_model
                 )
-            return done
 
-        ran = await _measure()
-        print(f"{ran} jobs")
-        while not once:
-            if ran == 0:
-                await asyncio.sleep(_IDLE_SLEEP_SECONDS)
-            ran = await _measure()
+        async def _built() -> JobWorker:
+            return worker
+
+        loop = WorkerLoop(
+            _built,
+            lease_seconds=settings.job_lease_seconds,
+            idle_seconds=_IDLE_SLEEP_SECONDS,
+            refresh=_refresh,
+            recovered=_took,
+            failure="the worker pass failed; the daemon continues: {error}",
+        )
+        if once:
+            # ⚠️ **`--once` is outside the daemon's guard**, which is why it
+            # calls the unguarded pass. A cron entry reads the *exit code*, and
+            # a guard here would answer a crashed pass with `0` -- so the thing
+            # that exists to notice would be the last to. The daemon has no
+            # exit code and its survival is the property instead.
+            _report(await loop.pass_once())
+        else:
+            await loop.run(after=_report)
     finally:
         await registry.aclose()
         await aclose()
@@ -598,37 +554,32 @@ async def _work(settings: Settings, *, once: bool) -> None:
         await engine.dispose()
 
 
+async def _schedule(settings: Settings, *, once: bool) -> None:
+    """Run the scheduled-work loop, or one tick of it."""
+    engine = build_engine(
+        settings.database_url.get_secret_value(),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
+    try:
+        scheduler = build_scheduler(settings, sessions=build_session_factory(engine))
+        register_scheduler_gauges(scheduler.read)
+        registered = len(scheduler.jobs)
+        if once:
+            ran = await scheduler.tick()
+            # Both numbers, because `ran` alone cannot distinguish "nothing
+            # was due" from "nothing is registered", and the second reads as a
+            # healthy night on a deployment whose scheduler can do nothing.
+            print(f"{ran} of {registered} scheduled jobs ran")
+            return
+        print(f"scheduling {registered} jobs every {settings.scheduler_tick_seconds:g}s")
+        await scheduler.run()
+    finally:
+        await engine.dispose()
+
+
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
-    """Report derivation coverage, or re-derive people, credits, collections
-    and artwork inline.
-
-    **The bare form only reads** -- five counts, no writes -- so it is safe on
-    a production box while diagnosing something, which is the same bargain
-    `usher index`'s bare form takes.
-
-    **`--backfill` walks the cache inline rather than enqueueing, and that is
-    the one place this command deliberately does not follow `index`.**
-    `_index`'s backfill enqueues because the worker owns the model and a CLI
-    that embedded would load 65 MB of ONNX in a process whose job is to print
-    two numbers. Derivation needs none of that: no model, no network call, no
-    rate limit -- it is a JSONB read and three writes. So the queue would buy
-    ordering, retry and backoff for work that needs none of the three, and
-    enqueueing over the enriched tier instead would write 2k-10k `jobs` rows,
-    claim them one at a time, and issue one `get` per row to do what `iterate`
-    does in a page-walk reading the same payloads in one pass.
-
-    **The one-shot backfill exists because M7 arrives after a catalog is
-    already enriched.** Those titles were enriched by M4/M5/M6, their payloads
-    are in the cache, and *nothing will ever re-enrich them* -- so nothing
-    will ever enqueue a `derive` job for them. The steady state is the job
-    kind, enqueued alongside `index` after each enrichment commits.
-
-    **On an empty database every line reads 0 and the command exits 0.** PRD
-    08: *"every one of them has to work against an empty database"*. The
-    arithmetic hazard here is the coverage ratio, which is why the report
-    prints two counts and no percentage: `titles_with_credits /
-    cached_payloads` is `0/0` on exactly the deployment that rule exists for.
-    """
+    """Report derivation coverage, or re-derive people, credits, collections and artwork inline."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if not backfill:
@@ -665,35 +616,7 @@ async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: 
 
 
 async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
-    """Report the search index's freshness, or enqueue the work that fixes it.
-
-    **The bare form only reads**, so it is safe on a production box while
-    diagnosing something. `--backfill` is the writing form and it is one
-    `enqueue` per stale title, never an inline embed: the worker owns the
-    model (`composition.embedder`), and a CLI that embedded would load 65 MB
-    of ONNX in a process whose job is to print two numbers.
-
-    **The model is not loaded here at all**, and `settings.embedding_model`
-    below is what says so: staleness is a question about a *name*, which is
-    exactly what recording `model_name` on the row bought. This command works
-    on a deployment that has no embedding extra installed -- it will report
-    what is stale and enqueue it for a worker that does.
-
-    **Sized in tokens, because throughput is linear in tokens and not in
-    texts.** CPU holds ~8,000-10,700 tokens/s across the whole range and a
-    realistic `name + overview + genres + keywords` document is ~100-130
-    tokens, so the enriched tier boundary call 4 embeds (2k-10k titles) is
-    ~25 seconds to 2 minutes of worker time. Over all 1,271,138 titles it
-    would be 4-6 hours, which is the number that boundary call avoids paying.
-    A rate in texts/s would hide that a document twice as long costs twice as
-    much.
-
-    **Re-running is free.** `enqueue`'s upsert carries `WHERE jobs.status <>
-    'parked' AND jobs.priority < excluded.priority`, so a second sweep over
-    jobs already at BACKFILL costs one index probe per row and writes nothing.
-    The reported count is rows *written*, which is the honest number and is 0
-    on a second run.
-    """
+    """Report the search index's freshness, or enqueue the work that fixes it."""
     gauges = SearchGauges()
     # Registered even in the bare read form, so the two numbers this prints and
     # the two PRD 10 exports are the same read rather than two reads that agree
@@ -710,19 +633,7 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
             print(f"model: {model}")
             print(f"stale embeddings: {snapshot.stale}")
             print(f"refused (no content to embed): {snapshot.refused}")
-            # ~135 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
-            # derived from the invariant rather than from a texts/s rate.
-            #
-            # **135 and not the ~115 M6 measured**, because M7's weight class
-            # B added a seventh segment: `credit_names` holds up to ten names
-            # at ~2 tokens each, so a credited document is ~20 tokens longer.
-            # The 100-130 range in this function's docstring was measured for
-            # a `name + overview + genres + keywords` document and is left
-            # standing as what it is -- a measurement of a different document
-            # shape -- rather than quietly restated for this one. Uncredited
-            # titles, which are most of the catalog, still sit inside it; the
-            # estimate is deliberately the pessimistic end, because an
-            # operator reading it is deciding whether to start a backfill now.
+            # ~135 tokens a document at ~8,000-10,700 tokens/s on CPU.
             print(
                 f"estimated worker time: {snapshot.stale * 135 / 10700:.0f}-"
                 f"{snapshot.stale * 135 / 8000:.0f}s"
@@ -732,12 +643,7 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         written = seen = 0
         after: uuid.UUID | None = None
         while True:
-            # Task 9's cursor, imported rather than re-derived. The predicate
-            # it walks is the one `count_stale` above and the
-            # `usher.search.embeddings.stale` gauge evaluate -- a backfill
-            # with its own copy of a staleness rule is how a sweep and the
-            # dashboard that reports on it come to disagree about what they
-            # are counting.
+            # Task 9's cursor, imported rather than re-derived.
             page = await pipeline.embeddings.list_stale(model, limit=page_size, after=after)
             if not page:
                 break
@@ -749,13 +655,8 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
             )
             await session.commit()
             seen += len(page)
-            # **The cursor advances on the last id of the page, always** --
-            # never on "how many were still stale afterwards". A loop that
-            # re-asked the predicate would not terminate against a row the
-            # predicate cannot clear, and this repository has shipped exactly
-            # that non-convergence once, in the watch-history repair. A keyset
-            # cursor cannot loop, because each pass starts strictly after the
-            # last id it saw, whatever the predicate did.
+            # **The cursor advances on the last id of the page, always** -- never on
+            # "how many were still stale afterwards".
             after = page[-1].id
             if limit and seen >= limit:
                 break
@@ -775,37 +676,7 @@ async def _genres(
     limit: int,
     after: uuid.UUID | None,
 ) -> None:
-    """Report how much of `titles.genres` is written in a source's spelling,
-    or rewrite it into Usher's own vocabulary.
-
-    **Its own subcommand rather than a flag on `index` or `derive`, and the
-    two rejections are the argument.** `usher index` is about
-    `title_embeddings` — its `--backfill` enqueues jobs for a worker that owns
-    a model, and folding a `titles` rewrite into it would make the command that
-    reports search freshness also a writer of the catalog. `usher derive`
-    re-derives people, credits, collections and artwork *from cached TMDb
-    payloads*: it needs a `MetadataProvider` to exist and declines to run
-    without one, reads `raw_payloads`, and writes four other tables. This
-    reads no payload, needs no provider and no model, and writes one column.
-    Three commands, three artefacts —
-    [ADR-0026](../../docs/prd/decisions/0026-the-cli-boundary-names-families.md)'s
-    family rule applied to what a command *is about* rather than to what it
-    happens to be near.
-
-    **The bare form only reads**, which is the bargain `index` and `derive`
-    already take, so it is safe on a production box while diagnosing
-    something. It is a full page-walk rather than a `count(*)` because the
-    only definition of "this row needs rewriting" is `canonicalise_genres`,
-    and a `WHERE` clause naming the alias spellings would be a second one
-    living in SQL. See `TitleRepository.list_genres_page`.
-
-    **`--after` is what makes an interrupt cheap rather than merely safe.**
-    Re-running from the start is already correct — the map is idempotent and
-    the write is guarded by `IS DISTINCT FROM`, so an already-normalised
-    prefix costs one index probe per row and writes nothing — but on 1.27M
-    rows that is a scan an operator need not repeat, so every run prints the
-    cursor to resume from.
-    """
+    """Report `titles.genres`' spelling, or rewrite it into Usher's vocabulary."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         service = GenreNormalisationService(
@@ -827,12 +698,9 @@ async def _genres(
         return
     print(f"rows rewritten: {report.rows_rewritten:,}")
     print(f"rows unchanged: {report.rows_unchanged:,}")
-    # **Expect this to be far smaller than the rewrite count, and that is the
-    # finding rather than a defect**: the embedded population is the enriched
-    # tier and the source spellings are almost entirely on skeletons. Measured
-    # on the live catalog 2026-08-19, 79,913 rows move and 304 embeddings go
-    # stale. A skeleton whose genre moved is not stale because it was never
-    # embedded, not because the fingerprint missed it.
+    # **Expect this to be far smaller than the rewrite count, and that is the finding
+    # rather than a defect**: the embedded population is the enriched tier and the
+    # source spellings are almost entirely on skeletons.
     print(f"embeddings staled: {report.embeddings_staled:,}")
     if report.last_id is not None:
         print(f"resume after: {report.last_id}")
@@ -869,86 +737,19 @@ def _filters_from(args: argparse.Namespace) -> SearchFilters:
 async def _search(
     settings: Settings, *, query: str, mode: str, limit: int, filters: SearchFilters
 ) -> None:
-    """PRD 05's search, at a terminal.
-
-    **Reports coverage on every run, which is the point of this command having
-    a human-readable mode at all.** A `FUSED` search against a catalog with no
-    embeddings degrades to full-text -- correctly, because a title with no
-    vector is *absent from the semantic candidate list* rather than ranked
-    last -- and the result looks exactly like a working hybrid search. No
-    error, no empty result, no log line. This milestone's headline failure
-    mode, arriving at the CLI.
-
-    **This command writes a `search_queries` row and it is the root that
-    proves the commit is the service's.** `_session_for` yields a session and
-    disposes the engine **without ever committing**, so a row left for the
-    caller would be rolled back here and nowhere else -- `api/deps.get_session`
-    commits when a handler returns and would have hidden it. Nothing below
-    commits; `SearchService` does (F2).
-
-    **Two different problems present identically and get different sentences**,
-    which is what `SearchAnswer` carrying `requested_mode` beside `mode` is
-    for. `degraded` means the deployment has no model at all and the fix is an
-    extra plus a setting; `semantic_coverage == 0.0` on an undegraded FUSED
-    search means the model is there and nothing has been embedded yet, and the
-    fix is `usher index --backfill`. A single warning for both would send an
-    operator to the wrong one half the time.
-
-    **The embedder is built here and closed in the same `finally`**, and only
-    when a non-full-text mode asks for one. It is a once-per-process resource
-    (`composition.embedder`), which for a command is once; `build_pipeline`
-    deliberately never builds one, so a full-text search costs no model load
-    at all. `SearchRequest.__post_init__` refuses a `SEMANTIC` or `FUSED`
-    request with no vector, so the only object that can construct one is the
-    object holding the model -- which is why this passes primitives to
-    `SearchService.search` and never a `SearchRequest`.
-
-    **The completion client is built only when a rewrite could actually be
-    bought, and that condition has three parts because the cost has three ways
-    of being wasted.** Query expansion sits in front of the embed, so: a mode
-    with no embed has no call to put in front of one; a deployment whose
-    embedder did not load has no embed either, and `SearchService` narrows to
-    full-text before it ever reaches an expander; and
-    `USHER_QUERY_EXPANSION_ENABLED` is `false` by default even where the LLM is
-    on, so `build_pipeline` would decline to build the expander anyway. In each
-    of the three an `httpx.AsyncClient` and its pool would be opened and closed
-    for nothing -- which is verbatim the cost the `full_text` guard exists for,
-    and the middle one was live until 2026-08-07: `embedder(...)` answering
-    `(None, nothing)` on the line above did not stop the client below it.
-
-    **Spelled as two conjuncts rather than three**, because `model` is built
-    only for a non-`full_text` mode, so `model is not None` already answers the
-    first part -- and a third clause restating it would be a condition no
-    configuration can make false on its own, i.e. exactly the unobservable code
-    this project keeps finding in mutation sweeps.
-
-    The pair reads as one question -- *is there an embed for a completion to
-    sit in front of, and does this deployment want one?* -- and it mirrors
-    `build_pipeline`'s `llm is None or not settings.query_expansion_enabled`
-    rather than duplicating it: that decides whether the *service* exists, this
-    decides whether the *pool* is opened, and only this side can be asked
-    before a pipeline exists.
-    """
+    """PRD 05's search, at a terminal."""
     requested = SearchMode(mode)
     model, aclose_model = (
-        # `report=False`: that factory's warning is about a *lane* ("index jobs
-        # will not be claimed"), which is right for `usher work` and wrong
-        # twice over here -- it advises about work this process does not do,
-        # and `cli.py`'s printed-not-logged rule makes it a JSON envelope in
-        # front of the results. The line printed below says the same thing
-        # better, naming the setting and the extra.
+        # `report=False`: that factory's warning is about a *lane* ("index jobs will not
+        # be claimed"), which is right for `usher work` and wrong twice over here -- it
+        # advises about work this process does not do, and `cli.py`'s printed-not-logged
+        # rule makes it a JSON envelope in front of the results.
         await embedder(settings, report=False)
         if requested is not SearchMode.FULL_TEXT
         else (None, nothing)
     )
-    # After the embedder, and reading its answer: `model is None` is the
-    # narrowed deployment, and there is nothing to expand for. `llm_client` is
-    # pure construction and cannot raise, `embedder` is the one that can, so
-    # this order also keeps a failed model load from leaking a pool.
-    # `report=False` for the reason above -- that factory's line is *"curate
-    # jobs will not be claimed"*, which is about a lane this process does not
-    # run. `query_expansion_enabled` implies `llm_enabled` (`config.py` refuses
-    # the other pairing), so the switch is asked about once here.
+    # After the embedder, and reading its answer: `model is None` is the narrowed
+    # deployment, and there is nothing to expand for.
     client, aclose_client = (
         await llm_client(settings, report=False)
         if model is not None and settings.query_expansion_enabled
@@ -963,22 +764,10 @@ async def _search(
                     mode=requested,
                     limit=limit,
                     filters=filters,
-                    # `ensure_default_user`, not `default_user`: this command
-                    # needs an id and nothing else, exactly as `usher curate`
-                    # does, and PRD 01's authentication seam is a singleton row
-                    # until a request has one to carry.
-                    #
-                    # **Not committed *here*, and since F2 that is no longer
-                    # the same as "not committed".** This command commits
-                    # nothing of its own -- `_session_for` yields a session and
-                    # disposes the engine -- but `SearchService` now writes a
-                    # `search_queries` row and commits it, and the household
-                    # row is in that same transaction. So on a first run the
-                    # user this line created lands durably, which is what makes
-                    # the row's `NOT NULL` foreign key satisfiable at all: the
-                    # analytics write is the only writer on this path, and a
-                    # commit that carried the row without its household would
-                    # be refused rather than silently partial.
+                    # `ensure_default_user`, not `default_user`: this command needs an
+                    # id and nothing else, exactly as `usher curate` does, and PRD 01's
+                    # authentication seam is a singleton row until a request has one to
+                    # carry.
                     user_id=await ensure_default_user(session),
                 )
             except SemanticSearchUnavailable as exc:
@@ -996,9 +785,10 @@ async def _search(
 
 
 def _print_search_answer(answer: SearchAnswer) -> None:
-    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
-    and `_print_curation_report`'s split, and the same reason: a command's
-    answer is stdout.
+    """The operator's answer.
+
+    `print`, never `logger` -- `_print_home_report`'s and `_print_curation_report`'s
+    split, and the same reason: a command's answer is stdout.
 
     A function of its own rather than a tail of `_search`, for
     `_print_curation_report`'s reason: everything above it needs a database and
@@ -1006,17 +796,11 @@ def _print_search_answer(answer: SearchAnswer) -> None:
     one report in this milestone whose *absence* is the defect.
     """
     if answer.expanded_query is not None:
-        # **Before the results, because it is the question they answer.**
-        # Reported on every search that bought a rewrite, not only when it
-        # looks surprising: a viewer who searched for one thing and got results
-        # for another cannot tell a good expansion from a bad one without
-        # seeing it, and neither can an operator reading their bug report.
-        # `expanded_query` is `None` on every path that embedded the query as
-        # typed, so this line never appears on a deployment with expansion off.
-        # **It is not a spend report and must not be read as one**: a call that
-        # answered with the wrong key is billed in full and still leaves this
-        # `None`, so no line here means the query was embedded as typed, never
-        # that nothing was bought. `llm_calls` is where spend is legible.
+        # **Before the results, because it is the question they answer.** Reported on
+        # every search that bought a rewrite, not only when it looks surprising: a
+        # viewer who searched for one thing and got results for another cannot tell a
+        # good expansion from a bad one without seeing it, and neither can an operator
+        # reading their bug report.
         print(f"expanded: {answer.expanded_query}")
     for rank, result in enumerate(answer.results, start=1):
         year = f" ({result.year})" if result.year else ""
@@ -1024,17 +808,8 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         print(f"{rank:>3} {owned} {result.score:6.4f}  {result.name}{year}  {result.title_id}")
     if not answer.results:
         print("no match")
-    # Always, not only when it is low: a number an operator sees only when
-    # something is wrong is a number they have no baseline for.
-    #
-    # ⚠️ **Its denominator is the *enriched* tier, not the catalog**, so
-    # `1.000` says the backfill has drained and not that the vector lane can
-    # see everything this search matched -- skeletons are never embedded and
-    # the lexical lane searches them anyway. On the catalog this project
-    # measures the two differ by an order of magnitude. `SearchOutcome` carries
-    # the argument; the label is left as the field's own name because that is
-    # what PRD 07 and the route call it, and a second name here would be a
-    # second thing to keep in step.
+    # Always, not only when it is low: a number an operator sees only when something is
+    # wrong is a number they have no baseline for.
     print(
         f"mode={answer.mode.value} results={len(answer.results)} "
         f"semantic_coverage={answer.semantic_coverage:.3f}"
@@ -1058,37 +833,15 @@ def _print_search_answer(answer: SearchAnswer) -> None:
 
 
 async def _suggest(settings: Settings, *, prefix: str, limit: int, tier: str) -> None:
-    """Type-ahead, at a terminal, from whichever of the two tiers is asked for.
-
-    **No embedder in either direction.** `SuggestIndex` is its own port
-    (🔶 2) and neither implementation loads a model -- one queries `titles`
-    through a trigram index and the other through a btree, and both write
-    nothing -- so this command starts in 0.13 s on any deployment, including
-    one with no embedding extra installed at all, which is PRD 05's
-    catalog-lookup tier serving all 1.27M titles with no model.
-
-    No coverage line, and that is not an omission: there is no semantic lane
-    here to have degraded.
-
-    **`--tier` defaults to `fuzzy` where `GET /search/suggest?tier=` defaults
-    to `prefix`, and the two defaults disagree on purpose** (ADR-0031). This
-    command has been the typo-tolerant one since M6 and CLAUDE.md documents it
-    as such; a route is driven per keystroke and a command is typed once, so
-    the number that decides the route's default -- 2,707 ms p95 at one
-    character -- is a cost this caller pays once and can afford. Making them
-    agree would have to break one of the two, and `SearchService.suggest`
-    therefore takes `tier` as a **required keyword with no default at all**, so
-    neither boundary can inherit the other's answer by accident.
-
-    **And no minimum prefix length here, for the same reason.** The route
-    refuses tier 1 below four characters because a keystroke path cannot afford
-    the short end of B3's curve; refusing it here would take a capability away
-    from the one caller that can, and diagnosing tier 1 at one character is
-    exactly what an operator would open this command to do.
-    """
+    """Type-ahead, at a terminal, from whichever of the two tiers is asked for."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
-        results = await pipeline.search.suggest(prefix, limit=limit, tier=SuggestTier(tier))
+        results = await pipeline.search.suggest(
+            prefix,
+            limit=limit,
+            tier=SuggestTier(tier),
+            user_id=await ensure_default_user(session),
+        )
     for result in results:
         year = f" ({result.year})" if result.year else ""
         print(f"{result.score:6.4f}  {result.name}{year}  {result.title_id}")
@@ -1126,56 +879,46 @@ async def _eval(
     raise SystemExit(exit_code_for(report.verdict))
 
 
+async def _similar_status(pipeline: Pipeline) -> None:
+    """How old `title_neighbors` is, and how much of it disagrees with the blend."""
+    computed_at = await pipeline.similar.computed_at()
+    if computed_at is None:
+        print("no neighbours have ever been computed -- run `usher similar --rebuild`")
+    else:
+        age = datetime.now(UTC) - computed_at
+        # Hours: a day-resolution line cannot distinguish "finished an hour
+        # ago" from "finished this morning", which is the comparison an
+        # operator makes.
+        print(
+            f"neighbour table's oldest row: {computed_at.isoformat()} "
+            f"({age.total_seconds() / 3600:.1f}h old)"
+        )
+    stale = await pipeline.similar.stale_neighbors()
+    if stale:
+        print(f"{stale} neighbour rows were computed under a different blend -- rebuild to clear")
+    elif computed_at is not None:
+        print("no neighbour row disagrees with the running blend")
+
+
 async def _similar(
-    settings: Settings, *, title_id: uuid.UUID | None, limit: int, rebuild: bool
+    settings: Settings,
+    *,
+    title_id: uuid.UUID | None,
+    limit: int,
+    rebuild: bool,
+    resume: bool = False,
+    max_seeds: int | None = None,
 ) -> None:
-    """Read one title's precomputed neighbours, or recompute the whole table.
-
-    **No model is loaded in either form**, and that is a property of the
-    design rather than an optimisation: the rebuild reads stored vectors and
-    never embeds anything, so this command starts in 0.13 s instead of paying
-    a 4.84 s cold ONNX load. A deployment with no embedding extra installed can
-    still rebuild neighbours over whatever a worker elsewhere indexed.
-
-    **`--rebuild` is not a job kind, and the argument is about the unit of
-    work.** Re-embedding one title changes the neighbour lists of every title
-    it is near, and no per-seed job can know which those are without doing the
-    whole computation anyway -- so a `JobKind.SIMILAR` keyed on a title id
-    would update the seed's own row and leave every list that should now
-    contain it untouched, producing a table that is never coherent and whose
-    incoherence is invisible from any single row.
-
-    **And the cost of that decision, stated rather than hidden: nothing in M6
-    re-runs this.** It is an operator's command or a cron entry, run after
-    `usher index --backfill`. PRD 06's "TTL: hours" is a statement about how
-    long M7 may cache what it read, not a promise that this table is hours
-    fresh.
-    """
+    """Report the table's age, read one title's neighbours, or recompute it."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         if rebuild:
-            report = await pipeline.similar.rebuild()
+            report = await pipeline.similar.rebuild(resume=resume, max_seeds=max_seeds)
             print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
-            # **The genome's coverage, with its denominators, printed by the
-            # path that reads the vectors.** PRD 05 promised "~7%" since
-            # before an importer existed and never said of what; these are the
-            # two numbers that answer it, and the second is the one that
-            # decided whether the term could promote anything.
-            #
-            # **Past tense, since M9's S7: the genome is no longer a term in
-            # the blend** -- 2.4746% of candidate pairs carried one on both
-            # sides over an enriched population, against the 10% floor the 0.25
-            # weight assumed, so the weight came out and the *measurement*
-            # stayed. This report is now the only consumer of the pair read,
-            # and it is what a later milestone would re-open the decision on,
-            # which is why the wording says a pair *carried* a vector rather
-            # than that it scored anything.
-            #
-            # The pair rate is *measured*, never squared: genome membership
-            # and candidate-pool membership both correlate with popularity and
-            # with enrichment, so `coverage ** 2` is wrong in an unknown
-            # direction -- S5 measured the correction factor at **1.75x** for
-            # the genome over 13,064,700 pairs.
+            # **The genome's coverage, with its denominators, printed by the path that
+            # reads the vectors.** A coverage figure without its denominator says
+            # nothing; these are the two numbers that give it one, and the second is
+            # the one that decides whether the term can promote anything.
             if report.seeds:
                 share = 100.0 * report.seeds_with_genome / report.seeds
                 print(
@@ -1199,8 +942,11 @@ async def _similar(
                 )
             return
 
-        if title_id is None:  # pragma: no cover - `parse_args` refuses this
-            raise SystemExit("give a title id, or --rebuild, but not both")
+        if title_id is None:
+            # The whole-table form. After the rebuild branch above, `None`
+            # here can only mean "no arguments at all".
+            await _similar_status(pipeline)
+            return
         rows = await pipeline.similar.neighbors_of(title_id, limit=limit)
         for row in rows:
             year = f" ({row.year})" if row.year else ""
@@ -1225,70 +971,13 @@ async def _similar(
 
 
 async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
-    """Compose the home screen, and time it.
-
-    **Ships alongside `GET /home` rather than instead of it**, which is the
-    reverse of `usher search` and `usher similar`. ADR-0006's claim -- one
-    request paints a screen -- is a property of a request boundary that no
-    command can exhibit, so there the route is the deliverable. What this
-    command is for is PRD 08's rule that every operator command works against
-    an empty database, and the arithmetic that rule is hunting: **the taste
-    centroid is a mean, and the mean of zero embeddings is 0/0.**
-
-    **And it is where boundary call 8's promise is kept.** The rows build
-    sequentially because `AsyncSession` is not safe for concurrent use; whether
-    that is *fast enough* is a measurement rather than an argument, and this is
-    the measurement. Revisit the sequential build when
-    `usher.home.compose.duration` p95 exceeds **400 ms** *and* no single
-    provider accounts for **50%** or more of the total build time -- over
-    budget with a dominant provider is a query to fix, not a build to
-    parallelise, and under budget is neither. If both hold, the redesign is a
-    session per row behind a bounded pool, i.e. a lane, and PRD 01's
-    concurrency table grows the row boundary call 8 says it does not have.
-    Both numbers are printed, so the rule is read off the output rather than
-    recomputed.
-
-    **Every registered provider gets a line, including the ones that proposed
-    nothing.** An absent provider and a silent one are the two states this
-    milestone exists to distinguish, so the report iterates the *registry* and
-    never the proposals -- `HomeService.compose_report` is what makes that
-    possible without a second loop describing a composition that never
-    happened.
-
-    **`--repeat` measures N *cold* compositions**, clearing the cache before
-    each. A repeat that measured cache hits would report a number near zero and
-    mean nothing. The warm read is timed once, separately, and labelled.
-
-    **The two numbers still mean what they meant before M9 added serve-stale**,
-    and that is a property of the composer this command builds rather than of
-    the arithmetic below: it passes no refresher, so its screen cache is
-    fresh-or-miss exactly as it was in M7. See the call site.
-    """
+    """Compose the home screen, and time it."""
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         user = await default_user(session)
-        # The same wiring `api/deps.py` builds per request, minus the request:
-        # `taste` and `affinities` are values the composer hands over, because
-        # a provider may import only `domain/` and `ports/`.
-        #
-        # **`affinities` is a callable here for the reason it is one there**
-        # (`ports/rows.py` argues it): the read behind it is three statements,
-        # and only `GenreAffinityProvider` awaits them.
-        #
-        # One consequence is specific to this command and worth naming, since
-        # `--repeat` exists to produce a number somebody quotes. The affinity
-        # read used to happen *once*, before the timed loop, so no repeat paid
-        # for it; it is now inside every run that reaches the provider. Two of
-        # its three statements -- `list_recent` and the library-wide genre
-        # aggregate -- are memoised on `TasteService`, which is one object for
-        # this whole command, so run 1 pays them and runs 2..N do not; the
-        # `list_by_ids` over the window is paid by each. Deliberately *not*
-        # wrapped in the route's per-request memo (`api/deps.py:_Affinities`):
-        # a repeat that skipped the read entirely would report a cold compose
-        # that never happens on the route.
-        #
-        # No lambda-in-a-loop hazard: this closes over `pipeline` and `user`,
-        # both bound once above.
+        # The same wiring `api/deps.py` builds per request, minus the request: `taste`
+        # and `affinities` are values the composer hands over, because a provider may
+        # import only `domain/` and `ports/`.
         ctx = RowContext(
             user=user,
             now=lambda: datetime.now(UTC),
@@ -1305,29 +994,18 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             images=pipeline.images,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
-        # **The same table `GET /home` filters against, read by the same join.**
-        # A setting honoured by one composition root and not the other is two
-        # different products, and this is the root an operator reaches for when
-        # a shelf is missing -- so it must not be the one that still shows it.
-        # Both halves come out of one read: the providers to compose, and the
-        # slugs to report as switched off.
+        # **The same table `GET /home` filters against, read by the same join.** A
+        # setting honoured by one composition root and not the other is two different
+        # products, and this is the root an operator reaches for when a shelf is missing
+        # -- so it must not be the one that still shows it.
         provider_settings = row_provider_settings(
             await pipeline.row_provider_settings.overrides(), pipeline.row_providers
         )
         disabled = [one.slug for one in provider_settings if not one.enabled]
-        # **No refresher, and the `None` is the decision rather than an
-        # omission.** `HomeService` gates its stale-serve grace window on
-        # having one, so this composer is M7's fresh-or-miss cache exactly as
-        # before -- which is what keeps the cold/warm pair below meaning what
-        # it has always meant.
-        #
-        # A refresher here would have nothing to run it: the process ends when
-        # the command does, so a scheduled refresh is a task cancelled
-        # mid-flight, and `GET /home`'s lane lives in a server this command is
-        # not. A *no-op* refresher would be worse than none -- it would open
-        # the grace window with nothing behind it, so a screen 31 s old would
-        # be served stale and never replaced, which is the one state PRD 06's
-        # sentence must not produce.
+        # **No refresher, and the `None` is the decision rather than an omission.**
+        # `HomeService` gates its stale-serve grace window on having one, so this
+        # composer is M7's fresh-or-miss cache exactly as before -- which is what keeps
+        # the cold/warm pair below meaning what it has always meant.
         service = HomeService(
             enabled_row_providers(provider_settings), cache=cache, refresh=None, max_rows=limit
         )
@@ -1337,9 +1015,8 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
         # `--repeat 0`, and `assert` is not available in shipped code.
         reports: list[ComposeReport] = []
         for _ in range(repeat):
-            # Cleared *before* each run, so every one of them is cold. Without
-            # this the second run is a cache hit and the measurement silently
-            # becomes a benchmark of a dict.
+            # Cleared *before* each run, so every one is cold: otherwise the
+            # second run is a cache hit and the number times a dict lookup.
             cache.clear()
             reports.append(await service.compose_report(ctx))
         report = reports[-1]
@@ -1355,10 +1032,11 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
 def _print_home_report(
     report: ComposeReport, *, cold: Sequence[float], warm: float, disabled: Sequence[str]
 ) -> None:
-    """The operator's table. `print`, never `logger` -- the split every command
-    in this module makes: loguru output is operational and goes to a sink an
-    operator may not be reading, and a command's answer is stdout, which is
-    what gets piped.
+    """The operator's table.
+
+    `print`, never `logger` -- the split every command in this module makes: loguru
+    output is operational and goes to a sink an operator may not be reading, and a
+    command's answer is stdout, which is what gets piped.
 
     **`disabled` is printed unconditionally**, on exactly the argument the
     revisit rule below is printed unconditionally for. A disabled provider has
@@ -1428,121 +1106,7 @@ def _print_home_report(
 
 
 async def _curate(settings: Settings) -> None:
-    """One generation for the default household, at a terminal.
-
-    **Ships alongside `POST /admin/rows/regenerate` and `JobKind.CURATE`
-    rather than instead of them**, which is `usher home`'s relationship to
-    `GET /home`: the route promises a 202 and says nothing about when the
-    work runs, and the job is claimed by whichever worker has a client. This
-    command is the one surface where an operator gets the *answer* -- what
-    the pool was, what survived, what it cost -- in the same breath as the
-    request. PRD 06's "one modest completion per user per day" is a budget
-    this command spends one of, so it prints what it bought.
-
-    ## The disabled deployment answers before anything is opened
-
-    **There is no `CurationService` to build.** `composition.llm_client`
-    answers `(None, no-op)` for `USHER_LLM_ENABLED=false` and
-    `CurationService` spells its client `LLMClient`, never
-    `LLMClient | None`, so "no client, no curation" is a `mypy` fact at the
-    composition root rather than a branch inside the service. Every other
-    surface in this milestone degrades around that: `GET /home` is a shorter
-    screen because nine of ten providers need no model, and `usher work`
-    keeps five job kinds because `build_worker` registers `CURATE` under the
-    same guard `INDEX` sits behind. **This command has exactly one job**, so
-    there is nothing to narrow to, and a run that printed an empty report
-    and exited 0 would tell a cron entry that curation is running.
-
-    So it is `SystemExit` with a sentence -- the convention `_as_uuid`, the
-    semantic-search guard and `similar`'s cross-argument rule already use,
-    and which `main`'s boundary passes through untouched because
-    `SystemExit` is a `BaseException`. Not a new exception type and not a
-    second handler: a deployment configured without a model has not
-    *failed*, it said so once, at startup.
-
-    `report=False` for `usher search`'s reason. `llm_client`'s own warning is
-    *"curate jobs will not be claimed"*, which is right for `usher work` and
-    wrong twice over here -- this process claims no jobs, and
-    `_print_home_report`'s printed-not-logged rule would put a JSON envelope
-    in front of the answer.
-    The sentence below names the two settings instead, which is better
-    information rather than the same information.
-
-    **It took a second fix for that to be true of the run that succeeds**, and
-    the first one was defending an outcome it could not deliver. `report=False`
-    silences Usher's own line; `httpx` was writing one of its own, at INFO,
-    once per request, through `_InterceptHandler` and onto the same stdout --
-    so on the shipped defaults the report opened with a ~900-character JSON
-    envelope about its own completion. Measured 2026-08-07, quieted in
-    `configure_telemetry`, pinned by
-    `test_httpxs_per_request_info_line_does_not_reach_the_sink`. Worth stating
-    here because the equivalent case for this command cannot catch it: the
-    integration fixture substitutes `FakeLLMClient`, which opens no socket, so
-    a `sink == []` assertion over it would be green against a shipped path
-    that logs.
-
-    ## The two conditions that raise, and why one arm covers both
-
-    `generate()` raises `PortDataMalformed` for an **empty candidate pool**
-    (PRD 08's "every command works against an empty database"; the one path
-    that attempts no call and so writes no `llm_calls` row) and for a
-    **generation that validated to zero rows** (ADR-0028's rule 3, carrying
-    `CurationRejected.error`, which is numbers and label names only). The
-    adapter raises the same type for a completion this endpoint could not
-    produce -- a truncated answer, a schema it will not accept, a prompt over
-    the context length -- and every one of those messages is a written
-    sentence that names its own fix.
-
-    **That family is exactly the one `JobWorker` parks**: retrying does not
-    help, so a human has to act, which is ADR-0026's own test for what an
-    operator-facing message is. The CLI's equivalent of parking is a sentence
-    and exit 1. Everything else keeps its stack, exactly as `OPERATOR_ERRORS`
-    leaves everything it does not name.
-
-    **An endpoint that is down, rate-limiting or refusing the key is not this
-    arm's**, and since ADR-0026's 2026-08-07 amendment it is not a stack
-    either -- `PortUnavailable`, `PortRateLimited` and `PortAuthFailed` are in
-    `OPERATOR_ERRORS`, so `main`'s one boundary answers them, one layer out,
-    with the same sentence-and-exit-1 every other command gets. This arm is
-    deliberately not widened to meet them: the boundary already has the
-    families whose fix is "start it, wait, fix the key", and a second handler
-    here would be the per-command shape ADR-0026 exists to refuse. It costs
-    them the screen clause below, which is the honest trade -- `replace_for_user`
-    is unreached on those paths too, but the message an operator needs first is
-    the endpoint's.
-
-    **The arm does not branch on which of the three it was**, and that is a
-    decision rather than an omission. The service's own message is the
-    diagnosis in each case and they read nothing alike; a CLI that wanted to
-    add a per-case next step would have to tell them apart by sniffing the
-    message or by reading `PortDataMalformed.detail`, which is coupling to a
-    field whose documented job is naming an offending record. What the arm
-    *does* add is the one fact none of the three messages carries and every
-    operator asks first: **last night's screen still stands** -- PRD 08's
-    degradation row, true on all three paths because `replace_for_user` is
-    reached on exactly one.
-
-    **It says that and not "nothing was written", and the difference is the
-    money.** Only the empty pool attempts no call. The other two reach
-    `CurationService._settle`, which writes a **committed** `llm_calls` row
-    with `ok = false` and the real token counts -- deliberately, because a
-    failure with zeroed tokens is indistinguishable from a call that never
-    happened. So "nothing was written" was false on two of the three paths,
-    and false in the direction that matters: on a generation that validated
-    to zero rows the operator has been *charged*, which is the exact state
-    ADR-0028's rule 3 exists to make visible. This command's own integration
-    case asserts the contradiction --
-    `test_curate_says_what_it_dropped_when_nothing_survived` requires
-    `len(ledger) == 1`, "the call was billed and the ledger has to say so".
-    The screen is what this sentence is about; the spend is what `llm_calls`
-    is for, and the tokens and cost this command prints on the path that
-    succeeds.
-
-    `--traceback` does not reopen it, for `_settings_problem`'s reason
-    rather than its own: these stacks are this project's own frames raising
-    a message that is already complete, so re-raising adds lines and no
-    diagnosis.
-    """
+    """One generation for the default household, at a terminal."""
     # Built before the session and released in the same `finally` as
     # `usher search`'s embedder: it is a once-per-process resource
     # (`composition.llm_client` opens an `httpx.AsyncClient` with its own
@@ -1561,9 +1125,9 @@ async def _curate(settings: Settings) -> None:
         async with _session_for(settings) as session:
             pipeline = build_pipeline(session, settings)
             service = build_curation_service(pipeline, settings, client)
-            # `ensure_default_user`, not `default_user`: this command needs an
-            # id and nothing else, and PRD 01's authentication seam is a
-            # singleton row until M9 gives it a request to come from.
+            # `ensure_default_user`, not `default_user`: this command needs
+            # an id and nothing else, and PRD 01's authentication seam is a
+            # singleton row with no request to derive one from.
             user_id = await ensure_default_user(session)
             try:
                 report = await service.generate(user_id)
@@ -1577,8 +1141,10 @@ async def _curate(settings: Settings) -> None:
 
 
 def _print_curation_report(report: CurationReport) -> None:
-    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
-    split, and the same reason: a command's answer is stdout.
+    """The operator's answer.
+
+    `print`, never `logger` -- `_print_home_report`'s split, and the same reason: a
+    command's answer is stdout.
 
     Every number here comes off the `CurationReport` rather than being
     re-derived. **The pool size is the one that could not be re-derived
@@ -1651,20 +1217,305 @@ def _unit(noun: str, count: int) -> str:
     return noun if count == 1 else f"{noun}s"
 
 
+async def _backup(settings: Settings, *, output: Path | None) -> None:
+    """Write one artifact holding everything nothing else can rebuild."""
+    async with _session_for(settings) as session:
+        service = BackupService(repository=PostgresBackupRepository(session))
+        report = await service.write(output)
+    _print_backup_report(report)
+
+
+#: How many refused rows `_print_restore_report` names before it summarises.
+_REFUSALS_NAMED: Final = 20
+
+
+async def _restore(
+    settings: Settings, *, artifact: Path, dry_run: bool, skip_unresolvable: bool
+) -> None:
+    """Merge one artifact into this database, in one transaction, or refuse it."""
+    async with _session_for(settings) as session:
+        service = RestoreService(
+            repository=PostgresRestoreRepository(session),
+            commit=session.commit,
+            rollback=session.rollback,
+        )
+        try:
+            report = await service.restore(
+                artifact, dry_run=dry_run, skip_unresolvable=skip_unresolvable
+            )
+        except RestoreRefused as exc:
+            raise SystemExit(f"usher restore: {exc}") from exc
+    _print_restore_report(report)
+    if report.refused:
+        raise SystemExit(_restore_refused(report))
+
+
+def _restore_refused(report: RestoreReport) -> str:
+    """The exit line for a run that refused, and what an operator can do next.
+
+    Two kinds of refusal, and only one is an errand: a reference naming a
+    provider id is something an importer fixes, and one naming only a raw id is
+    not. The ladder's third rung is a check on the target rather than a key, so
+    a title reaches it only by carrying neither provider id -- an unmatched stub
+    that is in no IMDb dump, has no TMDb id to enrich by, and gets a new UUID on
+    every rebuild. The second case names the flag rather than an errand.
+    """
+    refused = len(report.refused)
+    unfindable = sum(1 for one in report.refused if all(key.startswith("id=") for key in one.keys))
+    line = (
+        f"{refused:,} {_unit('row', refused)} could not be restored, so nothing was. "
+        f"Per table: {dict(report.refused_by_table())}"
+    )
+    if unfindable:
+        line += (
+            f"\n{unfindable:,} of them name only a raw id, which **no importer can "
+            "supply**: the title carried neither an imdb_id nor a tmdb_id when the "
+            "backup was written, so it is in no dump and a rebuild mints it a new one. "
+            "Re-run with `--skip-unresolvable` to drop those rows and restore the rest "
+            "-- the next `usher sync` re-derives the links among them."
+        )
+    if unfindable < refused:
+        line += (
+            "\nThe rest name a provider id: import or enrich what the lines above "
+            "name, then run it again."
+        )
+    return line
+
+
+def _print_restore_report(report: RestoreReport) -> None:
+    """Five counts per table, then the refusals by name up to a cap, then one summary."""
+    for table, outcome in sorted(report.outcomes.items()):
+        counts = (
+            f"{outcome.written:>9,} written"
+            f"{outcome.present:>10,} present"
+            f"{outcome.absent:>10,} nothing to write onto"
+        )
+        if outcome.unresolved:
+            counts += f"{outcome.unresolved:>10,} skipped as unresolvable"
+        if outcome.refused:
+            counts += f"{len(outcome.refused):>10,} refused"
+        print(f"  {table:<24}{counts}")
+    for refusal in report.refused[:_REFUSALS_NAMED]:
+        print(f"  refused {refusal.table:<16}{', '.join(refusal.keys)} -- {refusal.reason}")
+    if len(report.refused) > _REFUSALS_NAMED:
+        rest = len(report.refused) - _REFUSALS_NAMED
+        print(
+            f"  … and {rest:,} more refused, not named here. The per-table counts "
+            "above are exact; `--dry-run` reports the same list without holding a "
+            "transaction open."
+        )
+    if report.total_unresolved:
+        print(
+            f"{report.total_unresolved:,} "
+            f"{_unit('row', report.total_unresolved)} skipped as unresolvable "
+            "(--skip-unresolvable): every one names a title or episode this catalog "
+            "does not hold, and the next `usher sync` re-derives the links among them"
+        )
+    ending = (
+        "nothing was committed (--dry-run)"
+        if report.dry_run
+        else ("committed" if report.committed else "nothing was committed")
+    )
+    print(
+        f"{report.total_written:,} {_unit('row', report.total_written)} written, "
+        f"{report.total_present:,} already present, "
+        f"{report.total_absent:,} with nothing to write onto, "
+        f"{report.total_unresolved:,} skipped as unresolvable, "
+        f"{len(report.refused)} refused, from {report.path} "
+        f"at schema {report.schema_revision}: {ending}"
+    )
+
+
+def _print_backup_report(report: BackupReport) -> None:
+    """One line per table, one summary line, one sentence about the key.
+
+    **Every carried table, zeros included**, for `_print_curation_report`'s
+    reason one function down: a table absent from the report and a table
+    nobody carries read the same, and at a terminal there is no second export
+    to compare against. That matters most for `llm_calls`, which is 0 rows on
+    this deployment and is the table PRD 08 calls *"the only record that money
+    was spent"* -- a spend ledger silently dropped would be reported by nothing
+    else.
+
+    The size is `stat()` on the written file rather than a sum of what was
+    encoded: gzip's ratio over JSON is the whole reason the format is
+    affordable, and a number an operator can check with `ls -l` is worth more
+    than one only this command can produce.
+    """
+    for table, count in report.rows.items():
+        print(f"  {table:<24}{count:>9,} {_unit('row', count)}")
+    print(
+        f"wrote {report.total_rows:,} {_unit('row', report.total_rows)} "
+        f"from {len(report.rows)} {_unit('table', len(report.rows))} "
+        f"to {report.path} ({report.bytes_written:,} bytes), "
+        f"schema {report.schema_revision}"
+    )
+    print(CREDENTIAL_KEY_WARNING)
+
+
+#: What POSIX calls an environment variable name, and what `--new-key-env`
+#: will accept as one. Anything else is refused **without being printed**:
+#: `usher rotate-secret --new-key-env <the key>` is the mistake this exists
+#: for, and a base64 key (`+/=`) or a hyphenated one fails here.
+_ENVIRONMENT_VARIABLE_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+class _RefuseAKeyOnTheCommandLine(argparse.Action):
+    """`--new-key` exists so that typing it is a refusal rather than a leak."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        # `parser.error`: exit 2 with usage on stderr, the way every other
+        # argument failure in this CLI exits. The value is not interpolated.
+        parser.error(
+            "--new-key is not an argument of this command, and the value after it is not "
+            "repeated here because it is probably your new key. A key in argv is in your "
+            "shell history and in `ps` output for every user on this box. Export it and "
+            "pass the variable's NAME: --new-key-env USHER_NEW_SECRET_KEY"
+        )
+
+
+def _new_secret_key(settings: Settings, variable: str) -> SecretStr:
+    """Read the new key out of the environment, and refuse it here or nowhere."""
+    if not _ENVIRONMENT_VARIABLE_NAME.fullmatch(variable):
+        raise SystemExit(
+            "usher rotate-secret: --new-key-env takes the NAME of an exported environment "
+            "variable ([A-Za-z_][A-Za-z0-9_]*), and what it was given is not one. It is not "
+            "repeated here, because the commonest way to reach this message is to have "
+            "passed the key itself -- export the key into a variable and name the variable"
+        )
+    if isinstance(_key_or_rejection(settings, variable), SecretStr):
+        raise SystemExit(
+            "usher rotate-secret: what --new-key-env was given is a value this deployment "
+            "would accept as a secret key, so it is treated as one and not repeated here. "
+            "Pass the NAME of an exported variable instead. (If it really is a variable "
+            "name, rename it: a name long enough to be a key cannot be told from one.)"
+        )
+    raw = os.environ.get(variable, "")
+    if not raw:
+        raise SystemExit(
+            f"usher rotate-secret: ${variable} is not set -- export the new key into it "
+            f"(e.g. `export {variable}=$(openssl rand -hex 32)`) rather than passing it "
+            "as an argument, and do not add it to .env"
+        )
+    key = _key_or_rejection(settings, raw)
+    if isinstance(key, ValidationError):
+        # `settings_rejection`, not `str(exc)`: pydantic renders the rejected
+        # *input*, so the naive spelling prints the new secret key at the one
+        # command whose entire subject is secret keys.
+        raise SystemExit(
+            settings_rejection(key, entry_point=f"usher rotate-secret (${variable})")
+        ) from key
+    return key
+
+
+def _key_or_rejection(settings: Settings, candidate: str) -> SecretStr | ValidationError:
+    """The `SecretStr` `Settings` would hold for `candidate`, or why it would not.
+
+    One construction with two readers, which is what keeps *"is this a key?"*
+    and *"is this key acceptable?"* the same question asked twice rather than
+    two rules that can drift. `database_url` is passed through so the
+    construction cannot fail for a reason that has nothing to do with the key.
+    """
+    try:
+        return Settings(
+            database_url=settings.database_url, secret_key=SecretStr(candidate)
+        ).secret_key
+    except ValidationError as exc:
+        return exc
+
+
+async def _rotate(settings: Settings, *, new_key_env: str) -> None:
+    """Re-encrypt every stored credential under a new `USHER_SECRET_KEY`."""
+    new_key = _new_secret_key(settings, new_key_env)
+    async with _session_for(settings) as session:
+        service = RotationService(
+            store=PostgresCredentialRotationStore(session),
+            old_cipher=build_cipher(settings.secret_key),
+            new_cipher=build_cipher(new_key),
+            commit=session.commit,
+        )
+        report = await service.rotate()
+    _print_rotation_report(report, new_key_env=new_key_env)
+    if report.refused:
+        raise SystemExit(_rotation_refusal(report))
+
+
+def _rotation_refusal(report: RotationReport) -> str:
+    """Two diagnoses behind one counter, and only one of them is destructive."""
+    count = len(report.refused)
+    if count == report.rows:
+        return (
+            f"usher rotate-secret: all {count} stored "
+            f"{_unit('credential', count)} could not be decrypted by either key. That "
+            "almost always means the OLD key is wrong rather than that the rows are "
+            "corrupt -- nothing was written and no credential was lost. USHER_SECRET_KEY "
+            "must still hold the key these rows were encrypted under while this command "
+            "runs; changing it first is what produces exactly this result. Put the "
+            "previous key back and run this again."
+        )
+    return (
+        f"usher rotate-secret: {count} "
+        f"{_unit('credential', count)} could not be decrypted by either key "
+        "and must be re-entered -- re-register those sources with "
+        "`POST /admin/sources` once the new key is in place"
+    )
+
+
+def _print_rotation_report(report: RotationReport, *, new_key_env: str) -> None:
+    """Three counts, the refused refs named, and the sentence about tickets.
+
+    **Refs and no credential**, which is `RotationReport`'s own guarantee
+    rather than this function's discretion -- the report has nowhere to carry
+    one. The refused refs are named in full and not capped the way
+    `_print_restore_report` caps its refusals at `_REFUSALS_NAMED`: that cap
+    exists because a restore can refuse 14,166 rows, and this table is one
+    row per configured source.
+
+    **The ticket sentence is one line and the command does nothing about
+    it.** `services/playback_ticket.py` derives a second subkey from the same
+    `USHER_SECRET_KEY`, and rotating invalidates every outstanding ticket --
+    which is correct rather than a bug, because a ticket is short-lived and
+    never stored, and the alternative is a window in which a superseded key
+    still mints working redirects. A client meets it as a `404
+    ticket_invalid` and answers by asking `/play` again. Said here because an
+    operator watching a dashboard for the next minute should know why.
+    """
+    print(f"rotated  {len(report.rotated):>4}")
+    print(f"already  {len(report.already):>4}")
+    print(f"refused  {len(report.refused):>4}")
+    for ref in report.refused:
+        print(f"  refused: {ref}")
+    print(
+        f"{report.rows} {_unit('stored credential', report.rows)} considered; "
+        f"outstanding playback tickets are invalidated by any key change and "
+        f"clients recover by asking /play again"
+    )
+    if report.rotated:
+        print(
+            f"set USHER_SECRET_KEY to ${new_key_env}'s value and restart, "
+            "or the next start cannot read what this run just wrote"
+        )
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
-    `--probe` is the operator-facing form of ADR-0004's caveat: it reports
-    the **messages and events that arrived**, never that the handshake
-    succeeded, because a handshake against a nonexistent path also upgrades
+    `--probe` reports the **messages and events that arrived**, never that the
+    handshake succeeded: a handshake against a nonexistent path also upgrades
     and also receives `Sessions`. It is the one thing in this project that
     opens a socket on purpose to answer a question, which is why `verify()`
     does not have to.
 
     Bare `usher push` runs exactly the lanes `create_app` would, honouring
     `USHER_PUSH_ENABLED`/`USHER_WORKER_ENABLED`, with no HTTP server -- the
-    other side of PRD 01's "`--worker` entrypoint flag ... so lanes can be
-    moved to a separate container later by editing compose". It publishes to
+    second container of PRD 01's split, where the server has those lanes
+    turned off. It publishes to
     a `NullEventPublisher` for the reason `usher work` does: the bus is
     in-memory and there is no SSE client in this process.
     """
@@ -1720,6 +1571,7 @@ async def _run_lanes(settings: Settings) -> None:
         user_id=DefaultUserId(sessions),
         provider=provider,
         embedder=model,
+        sessions=sessions,
     )
     await lanes.start()
     try:
@@ -1743,16 +1595,21 @@ def _as_uuid(value: str, what: str) -> uuid.UUID:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="usher")
-    # The error boundary's own escape hatch, and the reason the boundary is
-    # allowed to swallow a stack at all. Top-level rather than per-command
-    # (`usher --traceback bootstrap-status`) because the boundary is
-    # top-level; it is **not** a `Settings` field, since a knob that turns
-    # off a presentation choice for one invocation is not deployment
-    # configuration.
+    # The error boundary's own escape hatch, and the reason the boundary is allowed to
+    # swallow a stack at all.
     parser.add_argument(
         "--traceback",
         action="store_true",
         help="show the full stack instead of a one-line message",
+    )
+    # **`action="version"`, and the placement is load-bearing.** `main` parses before it
+    # opens the error boundary, so argparse raises `SystemExit(0)` here -- before
+    # `get_settings()` runs and before anything reaches a database.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"usher {__version__}",
+        help="print the version and exit, without reading any settings",
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the HTTP server (the default with no arguments)")
@@ -1761,25 +1618,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--phase",
         choices=PHASES,
         default=BootstrapPhase.ALL.value,
-        # The ordering warning is on the *option*, not only in the report,
-        # because an operator scheduling `credit-names` reads `--help` before
-        # they ever see a report -- and getting this order wrong is not
-        # recoverable by re-running the phase. `PHASES` is `BootstrapPhase`'s
-        # own order and that enum's docstring carries the measurement.
-        #
-        # **The help text says "a full run walks them in this order" and not
-        # "the choices are in execution order", because two of the choices are
-        # not steps.** `all` and `ratings` are aliases
-        # (`domain.bootstrap.PHASE_ALIASES`), and `ratings` is declared beside
-        # the phase whose second half it is -- so `--help` renders it second,
-        # where the older sentence told an operator `--phase all` runs it
-        # second. It runs it inside `imdb` and never dispatches it.
-        #
-        # `%%`, not `%`: argparse interpolates a help string against its own
-        # parameter dict, so a bare `%` raises `TypeError` from `--help` and
-        # from nothing else. Found by running it -- ruff, mypy and every
-        # existing case pass against the broken spelling, because none of them
-        # renders help.
+        # The ordering warning is on the *option*, not only in the report, because an
+        # operator scheduling `credit-names` reads `--help` before they ever see a
+        # report -- and getting this order wrong is not recoverable by re-running the
+        # phase.
         help=(
             "which bulk datasets to import; a full run walks the steps in the "
             "order listed, and ratings is not one of them -- it re-imports IMDb "
@@ -1799,7 +1641,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "let this run mark the whole source unavailable "
-            "(ADR-0015; only for a library the operator really did remove)"
+            "(only for a library the operator really did remove)"
         ),
     )
     sub.add_parser("sync-status", help="report recent sync runs, queue depth, and parked jobs")
@@ -1815,6 +1657,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     work = sub.add_parser("work", help="run queued jobs")
     work.add_argument("--once", action="store_true", help="one pass, then exit")
+
+    # `usher work`'s shape exactly, because they are the same bargain one
+    # abstraction apart: a daemon form for a deployment, and a `--once` form
+    # for an operator's own crontab, which is the supported path for a
+    # wall-clock schedule a `ScheduledJob.period` cannot express.
+    schedule = sub.add_parser("schedule", help="run scheduled batches whose period has elapsed")
+    schedule.add_argument("--once", action="store_true", help="one tick, then exit")
 
     index = sub.add_parser("index", help="report search-index freshness, or enqueue the work")
     index.add_argument(
@@ -1836,7 +1685,7 @@ def build_parser() -> argparse.ArgumentParser:
     derive.add_argument("--limit", type=int, default=0, help="stop after N payloads; 0 drains")
     # 500 rather than `index`'s 1000: a page here carries whole JSONB payloads
     # rather than title ids, and 500 TMDb detail responses at ~8 kB is ~4 MB in
-    # flight. A number to keep in mind, not a measured optimum.
+    # flight. A number to keep in mind, not an optimum.
     derive.add_argument("--page-size", type=int, default=500)
 
     genres = sub.add_parser(
@@ -1860,19 +1709,12 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query", help="what to search for")
     # `SearchMode`'s values, taken from the enum rather than retyped: a
     # hand-copied list drifts silently and offers an operator a mode the
-    # service cannot serve -- or, worse, omits the one ADR-0002's whole design
-    # is about.
+    # service cannot serve -- or, worse, omits the fused one.
     search.add_argument(
         "--mode", choices=[mode.value for mode in SearchMode], default=SearchMode.FUSED.value
     )
     search.add_argument("--limit", type=int, default=20)
-    # `SearchFilters`' closed vocabulary, one flag per field and no more. The
-    # vocabulary being closed is 🔶 1's settlement -- a `dict[str, Any]` let
-    # two backends invent different keys, and a backend that cannot express a
-    # filter must raise rather than ignore it, because an ignored filter
-    # returns *more* results and reads as working. So this is not "the useful
-    # ones"; it is all of them, and a new filter is a port change before it is
-    # a flag.
+    # `SearchFilters`' closed vocabulary, one flag per field and no more.
     search.add_argument(
         "--kind", action="append", dest="kinds", choices=[kind.value for kind in TitleKind]
     )
@@ -1889,10 +1731,8 @@ def build_parser() -> argparse.ArgumentParser:
     suggest = sub.add_parser("suggest", help="type-ahead over titles")
     suggest.add_argument("prefix")
     suggest.add_argument("--limit", type=int, default=10)
-    # **Defaults to `fuzzy`, where the route defaults to `prefix`.** Stated in
-    # `_suggest`'s docstring and in ADR-0031: this command has been the
-    # typo-tolerant one since M6, and a command typed once can afford a cost a
-    # keystroke path cannot.
+    # **Defaults to `fuzzy`, where the route defaults to `prefix`.** A command
+    # typed once can afford a cost a keystroke path cannot.
     suggest.add_argument(
         "--tier",
         choices=[tier.value for tier in SuggestTier],
@@ -1916,7 +1756,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed",
         type=int,
         default=GATE_SEED,
-        help=f"the golden-set seed (default {GATE_SEED}, ADR-0002's own)",
+        help=f"the golden-set seed (default {GATE_SEED}, the typo-tolerance gate's own)",
     )
     evaluate.add_argument(
         "--sample",
@@ -1925,7 +1765,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="cases per surface in quick mode; ignored with --full",
     )
 
-    similar = sub.add_parser("similar", help="titles like this one, or rebuild the table")
+    similar = sub.add_parser(
+        "similar", help="how old the neighbour table is, one title's neighbours, or a rebuild"
+    )
     # Optional because `--rebuild` is the write form of the same command. Two
     # subcommands for one artefact is how `usher index` and its backfill would
     # have drifted; the cross-argument rule in `parse_args` is what argparse
@@ -1937,6 +1779,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="recompute title_neighbors for the whole embedded population",
     )
+    similar.add_argument(
+        "--resume",
+        action="store_true",
+        help="with --rebuild: start after the last seed already stamped with the running blend",
+    )
+    similar.add_argument(
+        "--max-seeds",
+        type=int,
+        default=None,
+        help="with --rebuild: stop after this many seeds; the rest stay stale for --resume",
+    )
 
     home = sub.add_parser("home", help="compose the home screen, and time it")
     home.add_argument("--limit", type=int, default=10, help="rows to compose")
@@ -1947,12 +1800,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="cold compositions to time; the cache is cleared before each",
     )
 
-    # **No arguments at all**, and `--user` is the one deliberately absent:
-    # PRD 01 leaves authentication as a seam and `usher.db.users` is what
-    # stands in it, a singleton `is_default` row. A flag naming a household
-    # would be an id an operator has no way to look up on a deployment that
-    # has exactly one -- it lands with the request that carries a user, which
-    # is M9's.
+    # **No arguments at all**, and `--user` is the one deliberately absent: PRD 01
+    # leaves authentication as a seam and `usher.db.users` is what stands in it, a
+    # singleton `is_default` row.
     sub.add_parser("curate", help="run one LLM generation for the default user")
 
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
@@ -1962,12 +1812,96 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="connect, wait, and report what arrived, then exit",
     )
+
+    # The eighteenth subcommand.
+    backup = sub.add_parser("backup", help="write everything nothing else can rebuild to one file")
+    # `type=Path` rather than `str` plus a conversion in `_dispatch`: argparse is where
+    # the surface is described, and a `--output` that is a string here and a `Path`
+    # there is two spellings of one argument.
+    backup.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="where to write it; default usher-backup-<UTC>.jsonl.gz here",
+    )
+
+    restore = sub.add_parser("restore", help="merge one backup artifact into this database")
+    # **Positional and required**, unlike `backup --output`, and the asymmetry
+    # is the point: a backup with no destination has an obvious default (a
+    # timestamped name here), and a restore with no source has none at all --
+    # picking the newest file in the working directory is exactly the kind of
+    # guess a command that overwrites a household's history must not make.
+    restore.add_argument(
+        "artifact",
+        type=Path,
+        help="the .jsonl.gz `usher backup` wrote",
+    )
+    restore.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="resolve everything, print the identical report, and commit nothing",
+    )
+    # **`--skip-unresolvable`, not `--allow-unresolvable`**, and the verb is the
+    # decision.
+    restore.add_argument(
+        "--skip-unresolvable",
+        action="store_true",
+        help=(
+            "drop rows naming a title or episode this catalog cannot resolve, "
+            "instead of refusing the file; the next `usher sync` re-derives them"
+        ),
+    )
+
+    rotate = sub.add_parser(
+        "rotate-secret",
+        help="re-encrypt stored credentials under a new USHER_SECRET_KEY",
+        allow_abbrev=False,
+    )
+    # The tripwire, before the real argument so a reader meets the refusal first.
+    rotate.add_argument(
+        "--new-key",
+        nargs="?",
+        action=_RefuseAKeyOnTheCommandLine,
+        dest=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    # **A variable name, never a key**, and it is required rather than defaulted.
+    rotate.add_argument(
+        "--new-key-env",
+        required=True,
+        metavar="VAR",
+        help=(
+            "NAME of an exported environment variable holding the new key "
+            "(e.g. USHER_NEW_SECRET_KEY) -- the name, not the key; "
+            "export it, do not put it in .env"
+        ),
+    )
     return parser
 
 
+def _parse_without_echoing_unknown_values(
+    parser: argparse.ArgumentParser, argv: list[str]
+) -> argparse.Namespace:
+    """`parser.parse_args`, without echoing `rotate-secret`'s unrecognised values."""
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        if getattr(args, "command", None) == "rotate-secret":
+            parser.error(
+                f"unrecognized arguments for rotate-secret ({len(unknown)}, not shown -- on "
+                "this command an unrecognized value is most likely your new key). The only "
+                "way to name a key here is --new-key-env, which takes the NAME of an "
+                "exported environment variable"
+            )
+        # argparse's own wording, kept byte-for-byte so every other command's
+        # refusal reads exactly as it did before this function existed. (Its
+        # `%`-formatting is spelled as an f-string here only because ruff's
+        # UP031 refuses the original.)
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+    return args
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    """`build_parser().parse_args`, plus the cross-argument rules argparse
-    has no vocabulary for.
+    """`build_parser().parse_args`, plus the cross-argument rules argparse has no vocabulary for.
 
     A separate function rather than a `build_parser` that validates, so the
     parser stays a pure description of the surface -- and a *public* one
@@ -1977,7 +1911,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     one, and a rule with no reachable test is a comment.
     """
     parser = build_parser()
-    args = parser.parse_args(list(argv))
+    args = _parse_without_echoing_unknown_values(parser, list(argv))
     if args.command == "unmatched" and (args.resolve is None) != (args.title is None):
         # `parser.error`, not a raise: it exits 2 with usage on stderr, the
         # same way every other argument failure does.
@@ -2009,11 +1943,23 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             parser.error("--limit must be at least 1")
         if args.repeat < 1:
             parser.error("--repeat must be at least 1")
-    if args.command == "similar" and bool(args.title_id) == bool(args.rebuild):
-        # Both spellings refused: no arguments is a read of nothing, and both
-        # together is a read and a write in one command. `parser.error` again
-        # -- exit 2 with usage rather than exit 1 with a traceback.
-        parser.error("give a title id, or --rebuild, but not both")
+    if args.command == "similar":
+        # **No arguments is the whole-table report rather than an error**: the
+        # per-title form prints two of the three staleness facts and has no
+        # whole-table spelling, which is what issue #17 asks for.
+        if args.title_id and args.rebuild:
+            # `parser.error` again -- exit 2 with usage rather than exit 1 with
+            # a traceback.
+            parser.error("give a title id, or --rebuild, but not both")
+        # The two rebuild-only flags, refused rather than ignored where they
+        # cannot mean anything. A `--max-seeds` silently dropped on a read is
+        # an operator who believes they capped a walk that never started.
+        if not args.rebuild and (args.resume or args.max_seeds is not None):
+            parser.error("--resume and --max-seeds need --rebuild")
+        if args.max_seeds is not None and args.max_seeds < 1:
+            # Zero is not a smaller run, it is a run that reads a page and
+            # writes nothing while reporting a successful rebuild.
+            parser.error("--max-seeds must be at least 1")
     return args
 
 
@@ -2043,68 +1989,15 @@ def _operator_problem(command: str, exc: BaseException) -> str:
 
 
 def _settings_problem(command: str, exc: ValidationError) -> str:
-    """pydantic's diagnosis with every rejected value stripped out.
-
-    **This is a security control, not formatting.** A pydantic v2
-    `ValidationError` renders as
-
-        ... [type=value_error, input_value='mysql://admin:hunter2@db/usher', ...]
-
-    so `USHER_DATABASE_URL` with the wrong driver printed the whole DSN, and
-    a truncated `USHER_SECRET_KEY` printed the key. Both fields are
-    `SecretStr` in `Settings` for exactly that reason; this CLI was the one
-    reader that unwrapped them, and it did it on the surface an operator is
-    most likely to paste into an issue.
-
-    **The rendering moved to `usher.config.settings_rejection` on 2026-08-13
-    and this is now the CLI's name for it.** It had to move because
-    `alembic upgrade head` was leaking the same way and an import-linter
-    contract forbids anything importing `usher.cli` -- so the control could
-    not be reached from the second entry point that needed it. The evidence,
-    the failure it prevents and why `msg` is scrubbed as well as `input`
-    dropped all live on that function now; this wrapper exists so the CLI's
-    prefix stays `usher <command>:` and so every caller here keeps one name.
-    """
+    """Pydantic's diagnosis with every rejected value stripped out."""
     return settings_rejection(exc, entry_point=f"usher {command}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Every entry point's single door: `python -m usher`, the `usher`
-    console script (`[project.scripts]`), and the container's `CMD`.
+    """Every entry point's single door.
 
-    **`argv is None` means "read `sys.argv`", not "no arguments".** A
-    console script is called as `main()` with nothing passed, so a `None`
-    that fell through to the no-arguments branch made `usher sync-status`
-    silently start the HTTP server -- an entry point that ignores everything
-    it is given and looks like it works, because the server does start.
-    `tests/unit/test_main.py` pins both halves.
-
-    `argv or ["serve"]` after that: no arguments *at all* must keep starting
-    the server, because that is exactly what the container's CMD runs
-    (`alembic upgrade head && exec python -m usher`). Adding subcommands
-    must not change it, and neither must adding an entry point.
-
-    **The `try` is the whole error boundary for the CLI, and it is one
-    `try` deliberately.** M7's smoke test found `bootstrap-status` and
-    `sync-status` answering an unreachable database with sixty lines of
-    asyncpg and greenlet frames; the operator's actual information was the
-    last line. Per-command handling is the shape that rots -- the next
-    command is written by copying an arm, not the handler -- so the
-    boundary wraps `_dispatch` rather than living inside it, and
-    `tests/unit/test_cli_errors.py` asserts that shape by AST as well as
-    asserting the behaviour.
-
-    Reading the settings is inside it too. A `.env` that fails validation is
-    the same kind of failure as a database that is down, it reaches the
-    operator through the same command, and it is the case that was leaking a
-    credential (see `_settings_problem`).
-
-    `SystemExit` is untouched by all of it: it is a `BaseException`, the
-    handlers below name only `Exception` subclasses, and five places in
-    this module already exit with a message chosen for the failure it
-    describes -- `_as_uuid`, the semantic-search guard, `similar`'s
-    cross-argument rule, and both of `curate`'s (no LLM configured, and a
-    generation that did not happen).
+    `python -m usher`, the `usher` console script (`[project.scripts]`), and the
+    container's `CMD`.
     """
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
@@ -2133,8 +2026,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
-    """The command table, lifted out of `main` so the boundary there is one
-    `try` around all of it rather than one per arm."""
+    """The command table, lifted out of `main` so one `try` there wraps every arm."""
     if args.command == "bootstrap":
         asyncio.run(_bootstrap(settings, BootstrapPhase(args.phase)))
     elif args.command == "bootstrap-status":
@@ -2162,6 +2054,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         )
     elif args.command == "work":
         asyncio.run(_work(settings, once=args.once))
+    elif args.command == "schedule":
+        asyncio.run(_schedule(settings, once=args.once))
     elif args.command == "index":
         asyncio.run(
             _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
@@ -2209,6 +2103,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
                 title_id=None if args.title_id is None else _as_uuid(args.title_id, "title id"),
                 limit=args.limit,
                 rebuild=args.rebuild,
+                resume=args.resume,
+                max_seeds=args.max_seeds,
             )
         )
     elif args.command == "home":
@@ -2217,6 +2113,22 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         asyncio.run(_curate(settings))
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
+    elif args.command == "backup":
+        asyncio.run(_backup(settings, output=args.output))
+    elif args.command == "restore":
+        asyncio.run(
+            _restore(
+                settings,
+                artifact=args.artifact,
+                dry_run=args.dry_run,
+                skip_unresolvable=args.skip_unresolvable,
+            )
+        )
+    elif args.command == "rotate-secret":
+        # The **name** crosses this line and the value never does: the
+        # environment read is inside `_rotate`, so nothing between argparse
+        # and the store ever holds a key in a frame a traceback would print.
+        asyncio.run(_rotate(settings, new_key_env=args.new_key_env))
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

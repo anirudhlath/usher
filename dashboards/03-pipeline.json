@@ -1,0 +1,674 @@
+{
+  "uid": "usher-pipeline",
+  "title": "Usher \u2014 3 Pipeline",
+  "description": "Ten panels, mixed by design: Prometheus for rates and depths, Postgres for the queue's and the reconciler's own breakdowns. Two of these panels read a series whose label is not the one a reader of the title assumes \u2014 the queue-depth pair is two panels because usher.jobs.queued is labelled kind and a priority band exists only in the jobs table, and the enrichment panel splits on outcome because the demand/background split does not exist on that histogram at all.",
+  "tags": [
+    "usher",
+    "pipeline"
+  ],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Queue depth by priority band",
+      "description": "Postgres over jobs.priority, and it is a separate panel from the by-kind gauge beside it rather than the same panel with another datasource. PRD 10's metric table labels usher.jobs.queued with kind and nothing else, so a priority band only exists in the table. The four rungs are written out as a spine and LEFT/FULL joined, because a GROUP BY alone returns nothing for an empty queue and an empty rectangle is indistinguishable from a healthy zero. jobs.priority is a free integer (0..100) that promotion moves with GREATEST, so any value off the four rungs still appears, labelled 'off-rung'.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "SELECT coalesce(band.name, 'off-rung ' || pending.priority::text) AS priority_band,\n       coalesce(band.priority, pending.priority) AS priority,\n       coalesce(pending.pending, 0) AS pending\nFROM (VALUES ('DEMAND', 100), ('VISIBLE', 80), ('NEW', 50), ('BACKFILL', 20))\n         AS band(name, priority)\nFULL OUTER JOIN (\n    SELECT jobs.priority AS priority, count(*) AS pending\n    FROM jobs\n    WHERE jobs.status = 'pending'\n    GROUP BY jobs.priority\n) AS pending ON pending.priority = band.priority\nORDER BY coalesce(band.priority, pending.priority) DESC"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Queue depth by kind",
+      "description": "usher.jobs.queued, which reaches Prometheus as usher_jobs_queued_ratio \u2014 the exporter puts the instrument's unit (1) in the name. Its only attribute is kind (telemetry.py's _by_kind emits Observation(count, {\"kind\": kind})), so this is 'which lane is backed up' and the panel to its left is 'which band is waiting'. Two questions, two panels. The reader is a held snapshot the worker refreshes after each pass, so the value is stale and never wrong; a process with no worker lane reports no observation rather than a zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (kind) (usher_jobs_queued_ratio)",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Parked jobs by kind",
+      "description": "usher.jobs.parked, as usher_jobs_parked_ratio, labelled kind.\n\n\u26a0\ufe0f This series saturates. composition.py's QueueGauges.refresh builds the parked counts from `await queue.parked(limit=1000)` and tallies the returned rows in Python, so the gauge can never sum past 1,000 across all kinds \u2014 it is a floor on the parked population and not a count of it. Measured 2026-09-07: the gauge read enrich 890 + index 110 = exactly 1,000 while `SELECT kind, count(*) FROM jobs WHERE status = 'parked' GROUP BY kind` returned enrich 1,890 + index 110 = 2,000. Read this panel as 'at least', and read the table for the number.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (kind) (usher_jobs_parked_ratio)",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Enrichment throughput and mean latency",
+      "description": "usher.enrichment.latency, as usher_enrichment_latency_seconds, labelled outcome and trigger. **This panel splits on outcome** \u2014 enriched against failed \u2014 because a failure's latency and a success's are genuinely different populations, and it sums over trigger.\n\n\u26a0\ufe0f So the demand-versus-background split a reader of this title may expect is not drawn here. trigger (enrich.py's _trigger_for: demand or background, from the job's rung) is the dimension the Enrichment SLA missed alert selects on; splitting this panel that way is a different legend, not a different series.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none \u2014 Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*p(50|99).*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(usher_enrichment_latency_seconds_count[5m]))",
+          "legendFormat": "{{outcome}} \u00b7 attempts/s",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(usher_enrichment_latency_seconds_sum[5m])) / sum by (outcome) (rate(usher_enrichment_latency_seconds_count[5m]))",
+          "legendFormat": "{{outcome}} \u00b7 mean latency",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Promotion latency against the 5 s read-through target",
+      "description": "Every job promoted to VISIBLE or DEMAND, with the seconds between the promoting enqueue and its last transition, and the traceparent the requesting span put on the row \u2014 which is what makes this a join to the trace rather than an estimate.\n\n\u26a0\ufe0f Its population is promotions that did not complete. A completed job's row is DELETED (JobStatus has no DONE member), so a promotion that met the target leaves nothing here. Read this as the miss list, never as a distribution over all promotions.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seconds_since_promotion"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "SELECT jobs.kind AS kind,\n       jobs.priority AS priority,\n       jobs.status AS status,\n       round(extract(epoch FROM (jobs.updated_at - jobs.created_at))::numeric, 3)\n           AS seconds_since_promotion,\n       jobs.key AS title_id,\n       jobs.traceparent AS traceparent\nFROM jobs\nWHERE jobs.priority >= 80\nORDER BY jobs.updated_at DESC\nLIMIT 50"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Sync run outcomes and duration",
+      "description": "sync_runs, which is where the outcome breakdown lives: usher.sync.run.duration carries a status label too, but the histogram only holds runs the *current* process recorded, and this deployment's failures predate it.\n\nNo $__timeFilter, deliberately. sync_runs holds this deployment's entire recorded history in ~123 rows, and a window would hide exactly the failed and never-finished runs the panel exists to show. A run still 'running' has no finished_at, so its duration columns are NULL rather than zero.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "usher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "usher-postgres"
+          },
+          "rawSql": "SELECT sync_runs.kind AS kind,\n       sync_runs.status AS status,\n       count(*) AS runs,\n       sum(sync_runs.items_seen) AS items_seen,\n       sum(sync_runs.items_unmatched) AS items_unmatched,\n       round(avg(extract(epoch FROM\n           (sync_runs.finished_at - sync_runs.started_at)))::numeric, 1)\n           AS avg_seconds,\n       round(max(extract(epoch FROM\n           (sync_runs.finished_at - sync_runs.started_at)))::numeric, 1)\n           AS max_seconds\nFROM sync_runs\nGROUP BY sync_runs.kind, sync_runs.status\nORDER BY sync_runs.kind, sync_runs.status"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Emby request latency by op",
+      "description": "usher.source.request.duration, as usher_source_request_duration_seconds, labelled source and op. Two targets on purpose: p95 over the selected window is the live question, and the lifetime mean per op is the reference that keeps the panel readable when the window holds no requests at all \u2014 this deployment talks to Emby only while a sync, a watch-state pass or a push lane is running, so an idle window is the ordinary case rather than an outage.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none \u2014 Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (op) (rate(usher_source_request_duration_seconds_sum[5m])) / sum by (op) (rate(usher_source_request_duration_seconds_count[5m]))",
+          "legendFormat": "{{op}} \u00b7 mean latency",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (op) (usher_source_request_duration_seconds_sum) / sum by (op) (usher_source_request_duration_seconds_count)",
+          "legendFormat": "{{op}} \u00b7 lifetime mean",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Push connection uptime",
+      "description": "usher.source.push.connected, as usher_source_push_connected_ratio. **1 means delivering, not connected.** PushSnapshot is fed from PushHealth.is_delivering \u2014 connection, at least one message, and a recent one \u2014 because a gauge fed by the socket's state would read 1 for a handshake that upgraded against a nonexistent path and was held open.\n\n**The `source` label is the operator-typed source name** ('Shared Emby'), not a UUID: api/lanes.py's push_snapshots builds the reader as {self._names[source_id]: PushSnapshot(...)} over self._open_adapters.\n\n\u26a0\ufe0f **A source with no open lane produces no series at all** \u2014 not a zero. It is simply absent from that comprehension, and telemetry.py's _ReaderSlot observes nothing with no reader. A disabled source, or one that does not support push, is therefore invisible here rather than reported down. So the Push-down alert condition is `usher_source_push_connected_ratio == 0` for 15m; `absent(...)` would page about every source nobody configured.\n\nThe left axis is soft-capped at 1 because the series is 0 or 1: without it Grafana auto-scales a flat zero to 0-100 and a reader has to check the legend to learn the range. Reconnects are cumulative and sit on the right axis.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisSoftMax": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*reconnects.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "max by (source) (usher_source_push_connected_ratio)",
+          "legendFormat": "{{source}} \u00b7 delivering",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "max by (source) (usher_source_push_reconnects_total)",
+          "legendFormat": "{{source}} \u00b7 reconnects (cumulative)",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Push events applied, by kind",
+      "description": "usher.source.push.events, as usher_source_push_events_total, labelled source and kind. This is what separates 'the lane is up' from 'the lane is doing anything': the cumulative counter is plotted rather than its rate, so a flat line is legible as an idle lane and a missing line as a lane that never delivered that kind.\n\n**The `source` label is the same operator-typed source name the uptime panel carries, and a source with no open lane produces no series here either** \u2014 the counter is registered by the same lane. The Push-down alert reads the uptime gauge with `== 0` rather than `absent(...)` for that reason.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum by (kind) (usher_source_push_events_total)",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "TMDb requests/sec against the ceiling, with 429 count",
+      "description": "usher.provider.requests, as usher_provider_requests_total, labelled provider and status. **status is the HTTP status code as a string** (adapters/tmdb/client.py: `status = str(response.status_code)`) **or the literal \"error\"** for a transport failure that never reached a status line. Both are recorded from a `finally`, so the rate target selects on provider only and its denominator includes status=\"error\": a denominator that omitted the failures would read low exactly during an outage.\n\nThe ceiling is a named series \u2014 `vector(30)` \u2014 and not a threshold line. Measured 2026-09-07: as a threshold Grafana drew it against the *right* axis's scale, so a red line labelled nothing appeared at 0.14 req/s on a left axis that had auto-scaled to 0.46. A series carries its own legend entry and pulls the axis to the ceiling, which is what makes headroom the readable quantity. 30 rps is what USHER_TMDB_REQUESTS_PER_SECOND holds \u2014 Settings' default is 30.0 and .env.example sets 30. TMDb's own guidance is 'somewhere in the 40 requests per second range' (PRD 04); the line drawn is Usher's limiter beneath it, which is the setting PRD 10's Dashboard 3 names.\n\n`or vector(0)` on the 429 target is what makes 'no 429s' render as a zero instead of an empty panel \u2014 at the cost that a metric that stopped existing would read the same, which the requests/sec series beside it is what distinguishes.\n\nThe rate window is the literal [5m] and not $__rate_interval, which is a portability decision measured on this stack: $__rate_interval is derived from the datasource's configured scrape interval, and a Prometheus fed by remote write from an OTel collector has none \u2014 Grafana fell back to 1m15s against a 60 s push interval, which is one sample, and rate() over one sample is empty. Observed 2026-09-07: every rate target on this dashboard returned zero frames until the window was written out.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "usher-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "429 responses (cumulative)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum(rate(usher_provider_requests_total{provider=\"tmdb\"}[5m]))",
+          "legendFormat": "requests/sec (every status, error included)",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "sum(usher_provider_requests_total{provider=\"tmdb\", status=\"429\"}) or vector(0)",
+          "legendFormat": "429 responses (cumulative)",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "usher-prometheus"
+          },
+          "expr": "vector(30)",
+          "legendFormat": "ceiling \u00b7 USHER_TMDB_REQUESTS_PER_SECOND",
+          "range": true,
+          "instant": false
+        }
+      ]
+    }
+  ]
+}

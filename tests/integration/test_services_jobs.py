@@ -1,28 +1,4 @@
-"""`JobWorker` against real Postgres, for the two things `FakeJobQueue`
-cannot model at all.
-
-Its own module docstring puts `SKIP LOCKED` first among them, and the worker
-is the code that depends on it most: `test_two_workers_never_claim_the_same_job`
-is *skipped* for the fake rather than passed, so every unit case about
-claiming runs against a store where contention is structurally impossible.
-
-1. **The claim is durable, not merely ordered.** The unit suite asserts that
-   a commit happened before the first handler; nothing there can tell that
-   from a no-op, because a dict has no transaction. Here a second Postgres
-   backend reads the row *while the handler is still running* and has to see
-   `running`. Move the worker's commit after the loop and it reads `pending`
-   -- which is what a restart's `requeue_running` would find, and what makes
-   "a killed worker's claims are recoverable" false.
-2. **Two workers split a batch.** Released through an `asyncio.Barrier` and
-   asserted on measured overlap rather than on a count -- "each worker ran
-   two jobs" is also what a serialised pair produces, which is the M3 failure
-   this project already had once.
-
-Every claim is bounded by `asyncio.wait_for`, for the reason
-`tests/integration/test_job_queue.py` states: the wrong spellings of the
-claim do not answer wrongly, they block forever, and a test that hangs
-reports nothing.
-"""
+"""`JobWorker` against real Postgres, for the two things `FakeJobQueue` cannot model at all."""
 
 import asyncio
 import time
@@ -50,22 +26,13 @@ CLAIM_TIMEOUT = 5.0
 
 @pytest_asyncio.fixture
 async def factory(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Engine-bound sessions, because these cases need genuinely separate
-    Postgres backends.
+    """Engine-bound sessions, because these cases need genuinely separate backends.
 
-    The shared `session` fixture is one connection inside one externally
-    managed transaction that is rolled back afterwards, so two workers over
-    it would be *one* backend and could not contend for a row lock even in
-    principle. These commit, so they clean up after themselves.
-
-    **No `DROP TABLE IF EXISTS stg_jobs` any more.** It used to be here
-    because Postgres DDL is transactional and a committing test was the one
-    shape that left a staging table behind, which surfaced as schema drift in
-    `test_migration_matches_the_orm_metadata` in a *later* file. M6 made
-    `usher.db.staging` create `CREATE TEMP TABLE ... ON COMMIT DROP`, so the
-    commit below is what removes the table rather than what persists it, and
-    a cleanup that can no longer fire is indistinguishable from one still
-    needed.
+    The shared `session` fixture is one connection inside one externally managed
+    transaction that is rolled back afterwards, so two workers over it would be *one*
+    backend and could not contend for a row lock even in principle. These commit, so
+    they clean up after themselves -- `usher.db.staging` creates its table
+    `ON COMMIT DROP`, so the commit is what removes it.
     """
     engine = build_engine(postgres_url)
     make = build_session_factory(engine)
@@ -90,7 +57,7 @@ def _worker(
     batch_size: int = 20,
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
 ) -> JobWorker:
-    """A worker in the shape a composition root builds: **a session per scope.**
+    """A worker in the shape a composition root builds: **a session per scope.**.
 
     This is the production wiring rather than a convenience. `AsyncSession` is
     not concurrency-safe, so `JobWorker` opens one scope for the claim and one
@@ -174,9 +141,8 @@ async def test_two_workers_split_one_batch_and_never_run_a_job_twice(
     The overlap assertion is the one with teeth: "each worker ran two of the
     four" is also what a serialised pair produces, and a claim that
     serialises (bare `FOR UPDATE`) or duplicates (no locking clause at all)
-    is a correctness failure the counts alone would ratify. The M3 failure
-    this project already had was exactly that shape -- a deleted
-    single-flight lock whose concurrency test passed five runs in a row.
+    is a correctness failure the counts alone would ratify: a deleted single-flight
+    lock passes a concurrency test that only counts.
     """
     await _enqueue(factory, "t1", "t2", "t3", "t4")
     barrier = asyncio.Barrier(2)
@@ -237,9 +203,10 @@ async def test_a_parked_job_stays_parked_across_a_restart(
 async def test_recover_takes_back_a_claim_a_killed_worker_committed(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The other half of "the claim is durable": the recovery that durability
-    is *for*. A worker claims, commits, and its process dies before the
-    handler returns; the next start has to find the row and hand it back.
+    """The other half of "the claim is durable": the recovery that durability is *for*.
+
+    A worker claims, commits, and its process dies before the handler returns; the next
+    start has to find the row and hand it back.
     """
     await _enqueue(factory, "t1")
     async with factory() as dying:
@@ -249,13 +216,9 @@ async def test_recover_takes_back_a_claim_a_killed_worker_committed(
     assert await _status_of(factory, "t1") == "running"
 
     handled: list[str] = []
-    # `lease_seconds=0.0` because the claim above was made milliseconds ago and
-    # the shipped 300 s lease is what stops a worker recovering work somebody
-    # is still doing. The *other* arm -- that a claim inside its lease is left
-    # alone -- is
-    # `test_a_live_workers_claim_survives_another_workers_recovery` below, and
-    # it is the one with teeth: "an abandoned claim comes back" is satisfied by
-    # requeueing everything, which is exactly what this replaced.
+    # `lease_seconds=0.0` because the claim above was made milliseconds ago and the
+    # shipped 300 s lease is what stops a worker recovering work somebody is still
+    # doing.
     restarted = _worker(factory, {JobKind.ENRICH: _recorder(handled)}, lease_seconds=0.0)
     assert await restarted.recover() == 1
     assert await restarted.run_once() == 1
@@ -291,25 +254,21 @@ async def test_a_transient_failure_is_not_re_claimable_by_a_second_worker_either
 async def test_the_newest_kind_stores_claims_and_completes_with_no_migration_behind_it(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """`JobKind.WATCH_WRITEBACK` shipped without a migration, and this is that
-    claim measured rather than argued.
+    """`JobKind.WATCH_WRITEBACK` needs no migration, shown against a real database.
 
-    `db/models/jobs.py` declares `kind` through `enum_column(JobKind,
-    length=32)`, whose `native_enum=False` compiles to a plain `VARCHAR(32)`
-    and whose `create_constraint` defaults to `False` in SQLAlchemy 2.0 -- so
-    the database holds no membership CHECK and no native enum type, and
-    Pydantic owns membership. Nothing in the unit suite can see any of that:
-    `FakeJobQueue` is a dict keyed by `(kind, key)` and would accept a member
-    Postgres refuses, whichever way the column had really been declared.
+    `db/models/jobs.py` declares `kind` through `enum_column(JobKind, length=32)`,
+    whose `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
+    `create_constraint` defaults to `False` -- so the database holds no membership
+    CHECK and no native enum type, and Pydantic owns membership. `FakeJobQueue` is a
+    dict keyed by `(kind, key)` and would accept a member Postgres refuses, whichever
+    way the column had been declared.
 
-    Three separate things could each have needed a migration and none did:
-    the value has to be **storable** (a CHECK would refuse it), **round-trip**
-    (a native enum type would need an `ALTER TYPE` and the string would come
-    back as something else), and be **claimable** by
-    `kind = ANY(:kinds)`. So the assertions are the stored spelling read back
-    as raw SQL, the claim, and the deletion -- `watch_writeback` is fifteen
-    characters against a bound of thirty-two, which is the other thing a
-    silent truncation would break.
+    Three things could each have needed one: the value has to be **storable** (a CHECK
+    would refuse it), **round-trip** (a native enum type would need an `ALTER TYPE`),
+    and be **claimable** by `kind = ANY(:kinds)`. So the assertions are the stored
+    spelling read back as raw SQL, the claim, and the deletion -- `watch_writeback` is
+    fifteen characters against a bound of thirty-two, which is the other thing a silent
+    truncation would break.
     """
     async with factory() as writer:
         await _queue(writer).enqueue(
@@ -348,7 +307,7 @@ def _raising(exc: BaseException) -> Callable[[Job], Awaitable[None]]:
 async def test_two_jobs_in_flight_at_once_hold_different_connections(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """**The claim W1 rests on, measured rather than argued.**
+    """Two jobs in flight at once hold different connections.
 
     `AsyncSession` is not concurrency-safe and every repository a handler holds
     is bound to one, so "the worker runs jobs concurrently" is only safe if each
@@ -407,22 +366,11 @@ async def test_two_jobs_in_flight_at_once_hold_different_connections(
 async def test_two_concurrent_jobs_on_one_shared_session_really_do_break(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The positive control for the case above, and the honest limit of what
-    this task can claim about `MissingGreenlet`.
+    """The positive control for the case above: the hazard is real, not theoretical.
 
-    M9's S3 lost a worker to an unhandled
-    `MissingGreenlet: greenlet_spawn has not been called`, and the hypothesis
-    W1 was dispatched with is that it was an `AsyncSession` touched from the
-    wrong context. **This case does not reproduce that crash and is not
-    evidence that it is fixed** -- see the write-up in
-    `.claude/rules/tmdb-and-enrichment.md`, which records why the shape of that
-    run refutes the shared-session explanation outright. What it does establish
-    is that the hazard the per-job scope removes is real and not theoretical:
-    with one session behind two concurrent jobs, SQLAlchemy raises rather than
-    silently interleaving, and it raises from the same family.
-
-    The failure is recorded rather than asserted by name, because which member
-    of the family arrives depends on which of the two coroutines gets there
+    With one session behind two concurrent jobs, SQLAlchemy raises rather than silently
+    interleaving. The failure is recorded rather than asserted by name, because which
+    member of the family arrives depends on which of the two coroutines gets there
     first, and a case pinned to one spelling would be flaky by construction.
     """
     await _enqueue(factory, "a", "b")
@@ -462,18 +410,12 @@ async def test_two_concurrent_jobs_on_one_shared_session_really_do_break(
 async def test_a_live_workers_claim_survives_another_workers_recovery(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """**The arm that makes recovery a lease rather than a theft**, against
-    two real backends.
+    """The arm that makes recovery a lease rather than a theft, over two real backends.
 
-    M9's S3: one of three workers died holding twenty claims, and the only
-    recovery lever was `requeue_running(older_than_seconds=0.0)` -- which would
-    have taken the other two workers' live claims with it. *"A genuine dead end
-    at N > 1"*, and the twenty were written off.
-
-    So the property is the negative one: a second worker recovering orphans
-    must leave a claim somebody is still working on exactly where it is. The
-    premise is asserted first -- a `running` row has to exist for the recovery
-    to have had the chance to steal it.
+    `requeue_running(older_than_seconds=0.0)` takes every live claim with it, so the
+    property is the negative one: a second worker recovering orphans must leave a claim
+    somebody is still working on exactly where it is. The premise is asserted first --
+    a `running` row has to exist for the recovery to have had the chance to steal it.
     """
     await _enqueue(factory, "held")
     async with factory() as live:
@@ -504,8 +446,7 @@ async def test_a_live_workers_claim_survives_another_workers_recovery(
 async def test_a_touch_does_not_resurrect_a_job_another_worker_recovered(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """`_TOUCH`'s `status = 'running'` predicate, which is the half that is
-    easy to leave out.
+    """`_TOUCH`'s `status = 'running'` predicate, which is the half that is easy to leave out.
 
     A beat is sent for everything a worker holds in flight, and by the time it
     lands a peer may already have recovered the claim (the row is `pending`

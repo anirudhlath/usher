@@ -1,22 +1,4 @@
-"""`curated_rows` — one household's screen, replaced whole or not at all.
-
-Implements `CuratedRowRepository` (`usher.ports.repository`). Two statements
-and one transaction: this is `PostgresTitleNeighborRepository.replace`'s shape
-arriving at a third table, and the scope argument it turns on is written out
-beside the `DELETE` below rather than left to be rediscovered.
-
-**`llm_calls` is deliberately not here** — it is `repositories/llm_call.py`,
-and M8's plan named this module for both. The two tables share a migration
-because one service writes both in one transaction, and they share nothing
-else — no column, no foreign key, no lifetime. `LLMCallRepository` is
-append-only with no read at all, so a module holding both would be one class
-that replaces and one that only ever inserts, sharing an import list.
-
-Same session ownership as every other repository: flushes, never commits. The
-service commits the rows together with the ledger entry that paid for them,
-which is what makes PRD 10's "cost per curated row" a join rather than a
-correlation on timestamps.
-"""
+"""`curated_rows` — one household's screen, replaced whole or not at all."""
 
 import uuid
 from collections.abc import Sequence
@@ -30,32 +12,14 @@ from usher.db.repositories._errors import refusals_as_conflict
 from usher.domain.curation import CuratedRow
 from usher.ports.repository import CuratedRowRepository
 
-# **Scoped to `user_id`, never to the rows being written.** A generation that
-# validated to zero rows contributes nothing to a scope derived from the rows
-# -- by their ids, or by their `generation_id` -- so such a delete removes
-# nothing and last night's shelves stay on the screen through every future
-# generation, which makes it the one row shape a re-generation cannot repair.
-# `_DELETE_NEIGHBORS` and `_DELETE_CREDITS` carry the identical argument for
-# their own scopes; here the artefact is a screen a household reads, so the
-# stale row is a heading somebody believes rather than a number nobody sees.
-#
-# Served by `ix_curated_rows_user_newest`, whose leading column this is.
+# **Scoped to `user_id`, never to the rows being written.** A generation that validated
+# to zero rows contributes nothing to a scope derived from the rows -- by their ids, or
+# by their `generation_id` -- so such a delete removes nothing and last night's shelves
+# stay on the screen through every future generation, which makes it the one row shape a
+# re-generation cannot repair.
 _DELETE_ROWS = "DELETE FROM curated_rows WHERE user_id = CAST(:user_id AS uuid)"
 
-# One parameter set per row, executed as one `executemany`. **Not `unnest` of
-# parallel arrays**, which is how every other set-based write in this package
-# is spelled, and the reason is the column: `card_title_ids` is itself a
-# `uuid[]`, so the parallel-array spelling would need a `uuid[][]` -- and
-# Postgres multidimensional arrays must be rectangular, so a generation whose
-# shelves hold different numbers of cards cannot be expressed at all, while
-# one where they happen to match would be silently flattened by `unnest` into
-# a single stream of ids paired with the wrong rows. `db/models/curation.py`
-# records that trap for the two-column case; this is the same edge arriving on
-# one column. A generation is three to five rows, so there is nothing for a
-# staging table or a `COPY` to buy here either.
-#
-# `"position"` is quoted because it is a Postgres keyword. The bind parameter
-# is not, and does not need to be.
+# One parameter set per row, executed as one `executemany`.
 _INSERT_ROW = text(
     "INSERT INTO curated_rows "
     '(id, user_id, slug, title, reason, card_title_ids, "position", '
@@ -74,76 +38,10 @@ _INSERT_ROW = text(
     bindparam("generated_at", type_=DateTime(timezone=True)),
 )
 
-# **The newest generation, resolved to one `generation_id` rather than to one
-# instant.** The two agree whenever the writer stamped a single `generated_at`
-# onto a whole generation -- which is what that column carrying no
-# `server_default` exists to guarantee -- and they diverge exactly when it did
-# not, where `= max(generated_at)` would hand back a mixture of two nights and
-# this returns whichever generation the newest row belongs to, whole.
-#
-# `generation_id DESC` breaks a tie between two generations stamped in the
-# same instant. Two `LIMIT 1` rows could otherwise come back in either order
-# on two reads of one table, which would show a household two different
-# screens without anything changing.
-#
-# **The filter is not defending against this repository's own writes.**
-# `replace_for_user` is delete-then-insert in one transaction, so one writer
-# leaves exactly one generation. It defends against two: under READ COMMITTED
-# a second generation's `DELETE` cannot see rows the first has not committed
-# yet, and M8 gives this table two call sites (the nightly job and the admin
-# route). See the port for the other two reasons it is kept.
-#
-# `SELECT *` into an `extra="forbid"` model, which is this schema's house
-# shape -- `watch_state.py`, `sync.py`, `media_item.py`, `jobs.py` and
-# `episode.py` all read `.mappings()` into `Model.model_validate(dict(row))`
-# -- and one of the three arguments for `card_title_ids` being a column rather
-# than a child table.
-#
-# **The projection is the statement's, and that is what makes the 1:1 rule
-# enforce itself**: every column the *table* has reaches the model, so one
-# `CuratedRow` does not declare raises here rather than being silently
-# dropped. Spelled instead as `row._mapping[name]` over
-# `CuratedRowRow.__table__.columns` -- which is how this shipped -- the read
-# is 1:1 with the *ORM class* and filters, so a column on the table that the
-# class does not carry reads back clean. Measured both ways against a column
-# added to `curated_rows` inside a transaction: the house spelling raises
-# `ValidationError`, the filtered one returns rows. `compare_metadata` closes
-# that drift at a distance; this closes it at the read.
-#
-# `ORDER BY "position"` is the product (`CuratedRow`: the model's ordering is
-# the only judgement the completion was bought for). `id` after it makes the
-# order total so two reads agree; it is a tiebreak and never the key --
-# a UUIDv7 primary key agrees with insertion order, so an `ORDER BY id` alone
-# is right on any fixture seeded in order and wrong on a shuffled generation.
-#
-# **One pass, and it used to be two.** The obvious spelling of "the rows
-# carrying the newest generation" is a self-subquery -- `AND generation_id =
-# (SELECT ... ORDER BY generated_at DESC LIMIT 1)` -- which asks `curated_rows`
-# for the id and then asks `curated_rows` again for the rows, on every home
-# build. The second ask is the one with no index behind it:
-# `ix_curated_rows_user_newest` is `(user_id, generated_at DESC)` and the outer
-# predicate is `generation_id`, which the index does not carry, so it is a
-# filter over everything the household has ever been given. A window over the
-# same single scan answers with the same rows in the same order;
-# `test_the_newest_generation_costs_one_pass_over_the_table` asserts it on the
-# plan, because a spelling that merely moved the subquery into a CTE reads
-# differently and still probes twice.
-#
-# `first_value` rather than `rank() = 1` or a `DISTINCT ON` join: the default
-# frame of a window carrying an `ORDER BY` starts at UNBOUNDED PRECEDING, so
-# `first_value` is the partition's first row whatever the frame's end does,
-# and that is precisely the `LIMIT 1` this replaces.
-#
-# **Both predicates are kept and neither is redundant**, which is a coverage
-# question rather than a style one: `PARTITION BY user_id` decides *whose*
-# newest generation each row is measured against, and `WHERE user_id` decides
-# whose rows come back at all. Deleting the second passed all fourteen cases
-# when the statement was a subquery, because a `generation_id` is minted per
-# generation and every fixture gave each household a fresh one -- and the state
-# where it does not (one nightly run, one id, `replace_for_user` per household)
-# is reachable through this port with no seeder and puts one household's
-# shelves on another's screen. `test_two_households_curated_in_one_run_do_not_
-# share_a_screen` is the case that pins it, on both arms.
+# **The newest generation, resolved to one `generation_id` rather than to one instant.**
+# The two agree whenever the writer stamped a single `generated_at` onto a whole
+# generation, and diverge exactly when it did not -- where `= max(generated_at)` would
+# hand back a mixture of two nights and this returns one whole generation.
 _LIST_FOR_USER = """
 SELECT * FROM (
     SELECT curated_rows.*,
@@ -158,13 +56,9 @@ WHERE generation_id = newest_generation_id
 ORDER BY "position", id
 """
 
-#: The one name in a `list_for_user` row that is the *statement's* and not the
-#: table's, removed by `del` before the model sees it -- so a rewrite that stops
-#: producing it raises here rather than passing an unexpected key to an
-#: `extra="forbid"` model two lines later. Removing this one label by name is
-#: not the filtered spelling the comment above rejects: every *column*
-#: `curated_rows` gains still reaches `model_validate` and still raises there,
-#: which is the whole of what the `SELECT *` buys.
+#: The one name in a `list_for_user` row that is the *statement's* and not the table's,
+#: removed by `del` before the model sees it -- so a rewrite that stops producing it
+#: raises here rather than passing an unexpected key to an `extra="forbid"` model.
 _WINDOW_LABEL = "newest_generation_id"
 
 
@@ -173,17 +67,8 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
         self._session = session
 
     async def replace_for_user(self, user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> int:
-        # Before the DELETE, and before the SAVEPOINT -- but the reason is not
-        # the obvious one, and the sweep is what corrected it. Moving this
-        # call *after* the delete, inside the nested block, **survives the
-        # whole suite**: the SAVEPOINT rolls the delete back with the raise,
-        # so the previous screen is intact either way. It is here because a
-        # call that cannot mean anything should not reach Postgres at all, and
-        # because an implementation with no transaction -- which is what
-        # `FakeCuratedRowRepository` is, and what a careless rewrite of this
-        # method would be -- really does empty the screen and then decline to
-        # fill it. That is the arm where the ordering is observable, and it is
-        # observable there: the same mutation fails two of its cases.
+        # Before the DELETE and before the SAVEPOINT: an incoherent batch must not
+        # clear a household's screen on its way to being refused.
         _refuse_disagreement(user_id, rows)
         records = [
             {
@@ -204,39 +89,14 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
             }
             for row in rows
         ]
-        # **What this table can refuse: any constraint on `curated_rows`, and
-        # one refusal that is not a constraint at all.** A `user_id` naming no
-        # household (`fk_curated_rows_user_id_users`); an empty or NULL-carrying
-        # card array, a negative position, an empty slug/title/model name (the
-        # six CHECKs); and a batch carrying one row id twice
-        # (`pk_curated_rows`), which is neither a CHECK nor a foreign key and is
-        # a reachable caller-assembly mistake -- the enumeration said "a CHECK
-        # or a foreign key" and was wrong by one whole class of constraint.
-        #
-        # The one that is not a constraint is `"position"`: it is `integer`,
-        # `CuratedRow.position` is `Field(ge=0)` with no ceiling, and `2**31` is
-        # refused by asyncpg's own binary encoder **before a byte is sent** -- a
-        # bare `sqlalchemy.exc.DBAPIError`, cause `asyncpg.exceptions.DataError`,
-        # SQLSTATE `22000`, measured. `except IntegrityError` does not catch it,
-        # so a raw SQLAlchemy exception crossed this port boundary until the
-        # translation widened. `_errors.py` holds both measurements and the one
-        # copy of the machinery; `llm_calls.cost_usd` is the sibling, found
-        # first and server-side rather than client-side. `constraint` comes back
-        # `None` for the encoder's refusal, which is a column's width rejecting
-        # a value rather than a named constraint firing.
+        # **What this table can refuse:** a `user_id` naming no household
+        # (`fk_curated_rows_user_id_users`); an empty or NULL-carrying card array, a
+        # negative position, an empty slug/title/model name (the six CHECKs); and a
+        # batch carrying one row id twice (`pk_curated_rows`).
         async with refusals_as_conflict(
             self._session, "a curated generation violates the screen's own bounds"
         ):
-            # Delete first, and inside the same SAVEPOINT as the insert. Both
-            # halves matter and for different reasons: the *order* is what makes
-            # a redelivered generation answer instead of meeting
-            # `pk_curated_rows` on the very rows it is about to remove (PRD 08's
-            # redelivery rule -- `JobWorker.recover()` requeues a claim its worker
-            # stopped heartbeating), and the *SAVEPOINT* is what makes a generation that
-            # fails part-way leave the previous screen whole rather than an
-            # empty one. Without it the delete has already landed in the
-            # caller's transaction, and a service that catches the conflict and
-            # commits its ledger entry commits the empty screen with it.
+            # Delete first, and inside the same SAVEPOINT as the insert.
             await self._session.execute(text(_DELETE_ROWS), {"user_id": user_id})
             if records:
                 await self._session.execute(_INSERT_ROW, records)
@@ -255,12 +115,11 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
 def _to_domain(row: RowMapping) -> CuratedRow:
     """One stored shelf, with the window label the statement carries removed.
 
-    `del` rather than a filter, and it is the difference between this and the
-    `row._mapping[name]` spelling `_LIST_FOR_USER`'s comment rejects: this
-    removes one name the *statement* added and refuses to run if the statement
-    stops adding it, where a filter removes whatever the model does not happen
-    to declare -- including a column somebody added to `curated_rows` and to
-    nothing else, which is the drift the `SELECT *` exists to make loud.
+    `del` rather than a filter: this removes one name the *statement* added and
+    refuses to run if the statement stops adding it, where a filter removes
+    whatever the model does not happen to declare -- including a column somebody
+    added to `curated_rows` and nowhere else, which is the drift the `SELECT *`
+    exists to make loud.
     """
     fields = dict(row)
     del fields[_WINDOW_LABEL]
@@ -268,8 +127,7 @@ def _to_domain(row: RowMapping) -> CuratedRow:
 
 
 def _refuse_disagreement(user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> None:
-    """The two disagreements `replace_for_user` can be handed, refused before
-    anything is written.
+    """The two disagreements `replace_for_user` can be handed, refused before any write.
 
     Both exist because the signature takes no `generation_id`: every
     `CuratedRow` carries one, so a parameter could only restate it, and what a

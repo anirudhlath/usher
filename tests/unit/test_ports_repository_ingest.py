@@ -1,10 +1,4 @@
-"""Shape of the ingest pipeline's persistence ports.
-
-The same check `test_ports_repository_bulk.py` makes for M2's two: a port is
-an ABC that cannot be instantiated, and its abstract surface is pinned by
-name so silently dropping a method from the ABC -- which would let every
-implementation stop providing it and still type-check -- fails here.
-"""
+"""Shape of the ingest pipeline's persistence ports."""
 
 from abc import ABC
 from typing import get_args
@@ -30,48 +24,28 @@ def test_media_item_repository_surface() -> None:
             "resolve_series_titles",
             "resolve_targets",
             "resolve_external_ids",
-            # M5's read-through surface: PRD 07's `availability` array. Named
+            # The read-through surface: PRD 07's `availability` array. Named
             # here as well as on the ABC because dropping it from the port
             # would let a stale implementation type-check while
             # `GET /titles/{id}` lost its badges.
             "list_for_title",
-            # M9's episode-keyed counterpart (D2), for `POST /episodes/{id}
-            # /play`: `list_for_title` carries `AND episode_id IS NULL`,
-            # which is exactly what makes it useless for an episode's own
-            # copies. Named here for the same reason `list_for_title` is --
-            # dropped from the ABC, every implementation could stop
-            # providing it and still type-check, and the episode play route
-            # would silently rank against zero targets forever.
+            # The episode-keyed counterpart, for `POST /episodes/{id}/play`:
+            # `list_for_title` carries `AND episode_id IS NULL`, which is exactly what
+            # makes it useless for an episode's own copies.
             "list_for_episode",
             "list_unmatched",
-            # M9's keyset form of the queue (E4), for `GET /admin/unmatched`.
-            # It sits **beside** the offset one rather than replacing it --
-            # `usher unmatched --offset` is an operator typing a number at a
-            # terminal, a cursor is a client following a token -- and it is
-            # named here for the same reason every read above is: dropped from
-            # the ABC, an implementation could stop providing it, type-check,
-            # and leave the route paging by the `OFFSET` measured at 388.9 ms
-            # at offset 1,126,574.
+            # The keyset form of the queue, for `GET /admin/unmatched`.
             "list_unmatched_page",
             "attach_title",
-            # M7's episode-keyed ownership read, and it is named here rather
-            # than folded in beside `owned_title_ids` because the two look
-            # interchangeable and are not: that one bounds itself to
-            # `episode_id IS NULL` so a series reads as one row, so asking it
-            # about an episode answers about the *series'* own row and reports
-            # a missing episode file as owned. Dropped from the ABC,
-            # `NextUpProvider` would silently show cards nothing can play, on
-            # the 89% of a real library that is episodes.
+            # The episode-keyed ownership read, named here rather than folded
+            # in beside `owned_title_ids` because the two look interchangeable and are
+            # not: that one bounds itself to `episode_id IS NULL` so a series reads as
+            # one row, so asking it about an episode answers about the *series'* own row
+            # and reports a missing episode file as owned.
             "owned_episode_ids",
-            # M6's ranking surface. Named here for the same reason
-            # `list_for_title` is: dropped from the ABC, every implementation
-            # could stop providing it and still type-check, and the owned
-            # boost would silently become a term that is always zero -- which
-            # is exactly the "declared and never applied" failure
-            # `test_an_owned_title_outranks_an_unowned_one_at_equal_relevance`
-            # exists to catch one layer up.
+            # The ranking surface.
             "owned_title_ids",
-            # M7's Recently Added surface. Same argument again: dropped from
+            # The Recently Added surface. Same argument again: dropped from
             # the ABC, every implementation could stop providing it and still
             # type-check, and the row would be permanently empty -- which
             # renders identically to a household that added nothing this
@@ -86,42 +60,33 @@ def test_watch_state_repository_surface() -> None:
     assert WatchStateRepository.__abstractmethods__ == frozenset(
         {
             "merge_from_source",
-            # M9's local watch write, and the reason it is named here rather
-            # than trusted to the type checker alone: dropped from the ABC,
-            # every implementation could stop providing it and still
-            # type-check, and the four action routes D7 builds on top of it
-            # would have nothing to call -- a silent absence, not a wrong
-            # answer.
+            # The local watch write, and the reason it is named here rather than
+            # trusted to the type checker alone: dropped from the ABC, every
+            # implementation could stop providing it and still type-check, and the four
+            # action routes built on top of it would have nothing to call -- a
+            # silent absence, not a wrong answer.
             "set_from_client",
             "list_needing_history",
             "get_for_title",
             "get_for_episode",
-            # M7's row-read surface. Named here for the same reason
-            # `list_for_title` is on the port above: dropped from the ABC,
-            # every implementation could stop providing it and still
-            # type-check, and Continue Watching would be a row that is
-            # always empty -- which renders identically to a household with
-            # nothing in progress and is the failure this milestone opens by
-            # describing.
+            # The row-read surface.
             "list_in_progress",
             "list_recent",
             "list_rediscoverable",
-            # And the subtraction half of that surface, which three providers
-            # need to *drop* what the household has already seen. Dropping it
-            # from the ABC is worse than the reads above rather than the same:
-            # a provider would then show a shelf of titles the household
-            # already watched, which is populated and plausible, where an
-            # absent `list_in_progress` at least renders as nothing.
+            # And the subtraction half of that surface, which three providers need to
+            # *drop* what the household has already seen.
             "played_title_ids",
         }
     )
 
 
 def test_the_merge_dto_and_the_port_agree_that_absence_is_representable() -> None:
-    """ADR-0014 reaching storage. `merge_from_source`'s whole correctness
-    argument rests on `play_count` being able to say "I do not know", which
-    is a property of `WatchStateMerge` rather than of the ABC -- so it is
-    checked where the two meet, not only where the DTO is defined."""
+    """`play_count` can say "I do not know", and the port agrees.
+
+    `merge_from_source`'s correctness rests on that absence being representable,
+    which is a property of `WatchStateMerge` rather than of the ABC -- so it is
+    checked where the two meet, not only where the DTO is defined.
+    """
     from usher.ports.ingest import WatchStateMerge
 
     annotations = WatchStateMerge.__annotations__

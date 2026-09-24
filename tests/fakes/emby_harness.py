@@ -1,30 +1,4 @@
-"""Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite.
-
-Page size two, deliberately: the contract seeds seven items for its paging
-cases, so the walk crosses four page boundaries rather than trivially
-fitting in one.
-
-The `httpx.AsyncClient` is injected, so `EmbyAdapter.aclose()` leaves it
-open -- the contract closes the adapter itself in two of its cases, and this
-harness's own `aclose()` is what finally disposes of the client.
-
-**The transport really awaits, and that is not a detail.** This runs on
-`tests/fakes/slow_transport.py` rather than the bare `httpx.MockTransport`
-the fake server hands out, so `observed_overlap` below can return a real
-number and `test_operations_recover_from_an_expired_credential` can mean
-what it looks like it means. Measured directly: over `MockTransport`, four
-`asyncio.gather`-ed calls against an expired session produce exactly one
-authentication *even with both of `EmbySession`'s locks deleted and the
-generation short-circuit removed*, because nothing in that transport ever
-awaits on the way to its handler -- so the event loop runs one gathered call
-all the way through its own re-auth before starting the next, and the other
-three read an already-fresh token without racing for it. The contract's
-`<= 1` assertion never discriminates there. Over this transport it does.
-
-The cost is ~20 ms per upstream request, which is why it is worth saying
-what it buys: without it this whole run would inherit a vacuous
-single-flight claim from a case that reads like one and is not.
-"""
+"""Binds a real `EmbyAdapter` to `FakeEmbyServer` for the contract suite."""
 
 import httpx
 from pydantic import AwareDatetime, SecretStr
@@ -62,23 +36,13 @@ class EmbyHarness(SourceHarness):
         )
         self._transport = SlowTransport(self._server.handle)
         self._client = httpx.AsyncClient(transport=self._transport, base_url=self._source.base_url)
-        # A fake connector, because from M5 `events()` really opens
-        # something. Without it the contract's push case resolves
-        # `emby.invalid` for real -- measured, it reached DNS and came back
-        # `gaierror` -- which is both a network call the suite forbids and a
-        # `PortUnavailable` where the case expected either a channel or
-        # `SourceNotSupported`. A connection is queued rather than left to
-        # the connector's own mint-on-demand so that `push_event` works
-        # before the channel has been opened; `_live_push` below prefers
-        # whatever was handed out most recently, so a reconnect is followed
-        # rather than arranged against a dead object.
+        # A fake connector, because `events()` really opens something.
         self._push = FakePushConnection()
         self._push_connector = FakePushConnector([self._push])
         # Frozen at zero and moved only by `advance_push_clock`. This is the
-        # adapter's *push* clock and nothing else reads it: `PushHealth`'s
-        # three instants are the only consumers, so freezing it costs the
-        # rest of the contract nothing and buys a ninety-second staleness
-        # window in under a millisecond, twice per run.
+        # adapter's *push* clock and nothing else reads it: `PushHealth`'s three
+        # instants are the only consumers, so freezing it costs the rest of the
+        # contract nothing and makes a staleness window instant to open.
         self._push_now = 0.0
         self._adapter = EmbyAdapter(
             self._source,
@@ -171,14 +135,6 @@ class EmbyHarness(SourceHarness):
         against the first object would silently stop affecting the channel
         the moment anything reconnected -- a `push_drop` that dropped
         nothing, which reads as a passing case.
-
-        **A known equivalent mutant against the contract suite as it stands,
-        and kept anyway**, the way `jobs.py` keeps its `GREATEST` alongside
-        its `WHERE`. Measured: collapsing this to `return self._push` leaves
-        all 49 cases green on both subclasses, because no case opens
-        `events()` twice, so the queued connection *is* the one handed out.
-        What it buys is the first reconnect case (`services/push.py`) not
-        having to discover this, and it costs one indexing expression.
         """
         return (
             self._push_connector.handed_out[-1] if self._push_connector.handed_out else self._push
@@ -187,7 +143,7 @@ class EmbyHarness(SourceHarness):
     async def push_event(self, event: SourceEvent) -> None:
         """Render a `SourceEvent` into the message Emby would have sent.
 
-        The translation ADR-0013 exists for: the contract speaks
+        The translation the harness seam exists for: the contract speaks
         `SourceEvent` and this turns it into a wire frame, so the same
         assertions run against a second source by writing a second harness
         rather than a second suite.

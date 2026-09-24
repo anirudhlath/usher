@@ -16,7 +16,7 @@ type CollectionMember = Schemas['CollectionMemberResponse']
  * denominator it was actually computed over. The rule is not "percentages are
  * ugly" — it is that a percentage is a claim about a whole, and almost nothing
  * in this API knows its whole. `GET /browse` has no total by construction
- * (keyset, ADR-0034), `GET /admin/bootstrap/status` returns a cursor and
+ * (keyset), `GET /admin/bootstrap/status` returns a cursor and
  * deliberately no total, and a rail is a sample rather than a population.
  *
  * `CollectionResponse` is the exception because it hands over **both**

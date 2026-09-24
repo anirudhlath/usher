@@ -1,20 +1,4 @@
-"""The series hierarchy through real requests against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_series.py` drives the
-three routes over `FakeEpisodeRepository`, whose ordering is Python's `sorted`
-and whose keyset is a tuple comparison -- so the statement this milestone
-actually ships, its `ORDER BY`, and its two-arm `WHERE`, are never executed
-there. Here they are, against `pgvector/pgvector:pg17`, and the cost of a page
-is counted off the statements the repositories really issued rather than off a
-fake's call counter.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request even when the handler only read, and CLAUDE.md records
-what leaving `titles` behind did to four tests in three other files, each of
-which passed in isolation. `seasons` and `episodes` cascade from `titles`, so
-deleting this file's own titles is enough -- and the delete is bound to this
-file's marker rather than emptying a table another committing file is using.
-"""
+"""The series hierarchy through real requests against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
@@ -29,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import TitleKind
@@ -55,21 +38,6 @@ def settings(postgres_url: str) -> Settings:
         push_enabled=False,
         worker_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one.
-
-    The app reads from its own session in its own transaction, so a fixture
-    that seeded through the shared rolled-back one would be handing the route
-    rows it cannot see.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -101,12 +69,11 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, from every engine in the process
-    -- including the app's own, which is the one under measurement.
+    """Every SQL statement SQLAlchemy issues, from every engine in the process.
 
-    Captured off `before_cursor_execute` rather than transcribed: M4 replaced
-    two tasks that asserted on a hand-copied lookalike of a query, because the
-    copy drifts from the repository and then reads like coverage.
+    Including the app's own, which is the one being counted. Captured off
+    `before_cursor_execute` rather than transcribed, because a hand-copied lookalike of
+    a query drifts from the repository and then reads like coverage.
     """
     seen: list[str] = []
 
@@ -140,8 +107,7 @@ async def _given_title(
 async def _given_seasons(
     sessions: async_sessionmaker[AsyncSession], title_id: uuid.UUID, numbers: Sequence[int]
 ) -> dict[int, uuid.UUID]:
-    """Seeded in the order given, so a caller can make the minted UUIDv7s
-    disagree with the season numbers on purpose."""
+    """Seeded in the order given, so minted UUIDv7s can disagree with season numbers."""
     async with sessions() as session:
         repository = PostgresEpisodeRepository(session)
         await repository.upsert_seasons(
@@ -178,8 +144,7 @@ async def _given_episodes(
 async def test_a_series_answers_its_seasons_ordered_by_postgres(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The `ORDER BY season_number` is the real statement's, not a `sorted`
-    call in a fake.
+    """The `ORDER BY season_number` is the real statement's, not a `sorted` call in a fake.
 
     Seeded in descending order so the minted UUIDv7s descend with the season
     numbers, and the premise says so: without that, `ORDER BY id` returns the
@@ -205,12 +170,12 @@ async def test_a_series_answers_its_seasons_ordered_by_postgres(
 async def test_a_season_pages_through_postgres_and_the_pages_abut(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The keyset `WHERE` this milestone ships, executed.
+    """The keyset `WHERE`, executed against Postgres.
 
-    Nine episodes at `limit=4` -- deliberately not a divisor of nine, so the
-    walk ends on a short page -- and then a second walk at `limit=3`, which
-    exhausts the season exactly and must still carry no cursor. That second
-    case is the one ADR-0034 says is invisible outside `count % limit == 0`.
+    Nine episodes at `limit=4` -- deliberately not a divisor of nine, so the walk ends
+    on a short page -- and then a second walk at `limit=3`, which exhausts the season
+    exactly and must still carry no cursor. Only a walk whose last page is exactly full
+    can catch a cursor minted past the end.
     """
     series = await _given_title(sessions, "Paged Series")
     seasons = await _given_seasons(sessions, series.id, [1])
@@ -276,9 +241,11 @@ async def test_an_episode_reads_back_with_the_ids_a_client_climbs_with(
 async def test_a_movie_answers_200_and_an_id_no_title_carries_answers_404(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The distinguishability case, against a real `titles` table -- the fake
-    arm cannot tell a missing row from a title with no seasons any better than
-    this one, but only here is the existence read a real statement."""
+    """The distinguishability case, against a real `titles` table.
+
+    The fake arm cannot tell a missing row from a title with no seasons any better than
+    this one, but only here is the existence read a real statement.
+    """
     movie = await _given_title(sessions, "A Film", kind=TitleKind.MOVIE)
 
     empty = await client.get(f"/series/{movie.id}/seasons")
@@ -332,10 +299,9 @@ async def test_the_episodes_route_costs_one_statement_for_the_page_however_big(
     """Two statements per page, fixed: the season's existence, and the page.
 
     The page size varies and the season is held fixed. This is the N+1 that
-    `resolve_episodes` and `next_up` both exist to prevent, arriving at a
-    route -- and 999,827 of the one measured source's 1,126,674 items are
-    episodes, so a per-row read here is the defect batching exists to remove
-    wearing a paged response.
+    `resolve_episodes` and `next_up` both exist to prevent, arriving at a route -- and
+    on a television-heavy source nearly every item is an episode, so a per-row read here
+    is the defect batching exists to remove, wearing a paged response.
     """
     series = await _given_title(sessions, "Counted Series")
     seasons = await _given_seasons(sessions, series.id, [1])
@@ -362,8 +328,10 @@ async def test_the_episode_route_costs_one_statement(
     sessions: async_sessionmaker[AsyncSession],
     statement_counter: list[str],
 ) -> None:
-    """`list_by_ids([id])` in one round trip, and never `list_for_title`,
-    which would read 20,000 rows to find one."""
+    """`list_by_ids([id])` in one round trip.
+
+    Never `list_for_title`, which reads a title's whole tree to find one episode.
+    """
     series = await _given_title(sessions, "Single Episode Series")
     seasons = await _given_seasons(sessions, series.id, [1])
     await _given_episodes(sessions, series.id, seasons[1], 1, list(range(1, 21)))

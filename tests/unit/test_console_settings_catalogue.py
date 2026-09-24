@@ -1,30 +1,12 @@
-"""The console's Configuration screen lists every setting, and only real ones.
-
-`web/src/features/operator/Config.settings.ts` is a **catalogue**: a row per
-`Settings` field carrying its name, subsystem, default and what it controls.
-None of that needs a request — they are properties of the software — which is
-why the screen can exist at all when no route returns the running configuration.
-
-The cost of that design is drift, and it is one-directional and silent. Adding a
-field to `Settings` does not fail anything on the TypeScript side; the screen
-just quietly stops listing it, and an operator reading a page headed "every
-setting" is reading a page that is not. **This has already happened once**: four
-console settings landed in `Settings` on 2026-08-19 and the screen went on
-saying `69` in six places, every one of them wrong.
-
-So the catalogue is pinned here rather than there. This test lives on the Python
-side because that is where the fact it checks lives — `Settings.model_fields` is
-the authority, and a TypeScript test asserting a number would be the same
-written-down constant one language over.
-
-Its sibling is `test_console.py::test_the_client_knows_every_root_segment_the_api_owns`,
-which pins the same kind of cross-language vocabulary for routers.
-"""
+"""The console's Configuration screen lists every setting, and only real ones."""
 
 import re
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr, ValidationError
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 from usher.config import Settings
 
@@ -41,6 +23,21 @@ _CATALOGUE = (
 #: the start of a row. Anchored to the object literal so a key *mentioned* in an
 #: `about` sentence is not counted as a catalogued row.
 _ROW_KEY = re.compile(r"^\s*key: '([A-Z][A-Z0-9_]*)',$", re.MULTILINE)
+
+#: A row's key paired with the default it prints, lazily so the `def:` matched
+#: is the one inside that row's own object literal. The `def: string` on the
+#: interface declaration is never reached: this only ever scans *forward* from
+#: a `key:`, and the declaration precedes every row.
+_ROW_DEFAULT = re.compile(
+    r"^\s*key: '([A-Z][A-Z0-9_]*)',\n(?:.*\n)*?\s*def: '([^']*)',", re.MULTILINE
+)
+
+#: What the catalogue prints for the three defaults that have no literal.
+#: Spelled out here so the mapping is a decision rather than a coincidence a
+#: normalising helper would hide.
+_NO_DEFAULT = "required"
+_NONE = "unset"
+_BLANK = "empty"
 
 
 def _environment_names() -> set[str]:
@@ -90,7 +87,7 @@ def test_every_setting_is_on_the_configuration_screen(catalogued: set[str]) -> N
 
 
 def test_the_configuration_screen_invents_no_settings(catalogued: set[str]) -> None:
-    """And the other direction, which is worse when it happens.
+    """A catalogued row for a variable Usher does not read fails here.
 
     A row for a variable Usher does not read is a screen telling an operator to
     set something that will be refused at startup -- `Settings` is
@@ -129,3 +126,87 @@ def test_every_secret_is_marked_as_one(catalogued: set[str]) -> None:
             f"{key} is a SecretStr in Settings and the console does not mark it `secret: true` -- "
             "it would render its value"
         )
+
+
+def _printed_default(field: FieldInfo) -> str:
+    """What the catalogue's `def:` must read for one `Settings` field.
+
+    Three spellings carry no literal and the console prints a word instead:
+    a field with no default at all is `required`, a `None` default is `unset`,
+    and an empty string -- including an empty `SecretStr` -- is `empty`. A
+    secret's default is unwrapped rather than `str()`ed, because
+    `SecretStr.__str__` is `**********` for anything non-empty and would let a
+    wrong default read as correct.
+    """
+    default = field.default
+    if default is PydanticUndefined:
+        return _NO_DEFAULT
+    if default is None:
+        return _NONE
+    if isinstance(default, SecretStr):
+        default = default.get_secret_value()
+    if isinstance(default, bool):
+        # Before the `str()` below: `str(True)` is `'True'`, and the catalogue
+        # prints the TypeScript spelling an operator would type into `.env`.
+        return "true" if default else "false"
+    return _BLANK if default == "" else str(default)
+
+
+def test_every_catalogued_default_is_the_default_usher_actually_ships(
+    catalogued: set[str],
+) -> None:
+    """The catalogue's `def:` must be the default `Settings` actually ships.
+
+    It is the field on this screen an operator acts on.
+    """
+    paired = dict(_ROW_DEFAULT.findall(_CATALOGUE.read_text()))
+    assert set(paired) == catalogued, (
+        "the key/default pairing regex no longer matches one row per key -- rows without a "
+        f"paired `def:`: {sorted(catalogued - set(paired))}"
+    )
+
+    prefix = str(Settings.model_config.get("env_prefix", ""))
+    expected = {
+        (field.alias if field.alias else f"{prefix}{name}".upper()): _printed_default(field)
+        for name, field in Settings.model_fields.items()
+    }
+    wrong = {
+        key: (printed, expected[key])
+        for key, printed in sorted(paired.items())
+        if key in expected and printed != expected[key]
+    }
+    assert not wrong, (
+        "the console's Configuration screen prints a default Usher does not ship "
+        f"(key: printed vs actual): {wrong}"
+    )
+
+
+#: `Config.settings.ts`'s pool arithmetic, which the pool row's sentence is built from.
+_POOL_RULE = re.compile(
+    r"^const POOL_RULE = \{ jobs: (\d+), worker: (\d+), bootstrap: (\d+), pool: (\d+) \} as const$",
+    re.MULTILINE,
+)
+
+
+def test_the_pool_sentence_is_built_from_the_rule_settings_refuses_a_pool_by(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Written out, it said 12 jobs plus a claim and a heartbeat made 14.
+
+    It went on saying so after a bootstrap import took connections of its own. The
+    console now builds it from `POOL_RULE`, held here to the defaults it restates and
+    to the connection count `Settings` refuses a pool with.
+    """
+    match = _POOL_RULE.search(_CATALOGUE.read_text())
+    assert match is not None, "Config.settings.ts no longer spells POOL_RULE on one line"
+    jobs, worker, bootstrap, pool = (int(one) for one in match.groups())
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    defaults = Settings()
+    assert (jobs, pool) == (defaults.job_concurrency, defaults.db_pool_size)
+
+    monkeypatch.setenv("USHER_DB_POOL_SIZE", "1")
+    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", "0")
+    with pytest.raises(ValidationError) as refused:
+        Settings()
+    assert f"needs {jobs + worker + bootstrap} connections" in str(refused.value)

@@ -1,9 +1,4 @@
-"""The `eval` schema against a real Postgres, and its idempotence.
-
-The unit arm cannot see any of this: `CREATE SCHEMA IF NOT EXISTS`, a
-`jsonb` cast, an `ON DELETE CASCADE` and a view are all statements only a
-database can answer for.
-"""
+"""The `eval` schema against a real Postgres, and its idempotence."""
 
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -51,9 +46,11 @@ def _record(verdict: str = "pass") -> RunRecord:
 
 
 async def test_the_schema_applies_twice_without_error(session: AsyncSession) -> None:
-    """It runs at the start of every eval run, not once. A statement that is
-    not idempotent fails on the second run of the day, which is the run
-    nobody is watching."""
+    """It runs at the start of every eval run, not once.
+
+    A statement that is not idempotent fails on the second run of the day, which is the
+    run nobody is watching.
+    """
     await ensure_schema(session)
     await ensure_schema(session)
     present = (
@@ -96,8 +93,11 @@ async def test_a_run_and_its_scores_round_trip(session: AsyncSession) -> None:
 async def test_the_inputs_are_queryable_as_jsonb_not_stored_as_text(
     session: AsyncSession,
 ) -> None:
-    """The whole reason `inputs` is jsonb: a Grafana panel filtering on the
-    catalog's title count must not have to parse a string."""
+    """The whole reason `inputs` is jsonb.
+
+    a Grafana panel filtering on the catalog's title count must not have to parse a
+    string.
+    """
     await ensure_schema(session)
     run_id = await write_postgres(session, _record(), started_at=_STARTED_AT)
     value = (
@@ -130,8 +130,10 @@ async def test_deleting_a_run_takes_its_scores(session: AsyncSession) -> None:
 async def test_the_trend_view_shows_full_runs_and_hides_quick_ones(
     session: AsyncSession,
 ) -> None:
-    """A quick run is a seeded sample that enforced no bar. Plotting it beside
-    a full run compares two populations on one axis."""
+    """A quick run is a seeded sample that enforced no bar.
+
+    Plotting it beside a full run compares two populations on one axis.
+    """
     await ensure_schema(session)
     await write_postgres(session, _record(), started_at=_STARTED_AT)
     quick = replace(_record(verdict="fail"), mode="quick")

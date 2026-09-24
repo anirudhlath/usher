@@ -1,10 +1,4 @@
-"""The shared contract, against the in-memory implementation.
-
-Half of a pair. Every conflict case here raises because the fake checks a
-dict key, not because a constraint fired, so nothing here can catch a real
-repository that leaves its session poisoned after one --
-`tests/integration/test_sync_run_repository.py` is where that is closed.
-"""
+"""The shared contract, against the in-memory implementation."""
 
 import uuid
 

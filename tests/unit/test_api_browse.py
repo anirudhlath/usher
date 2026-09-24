@@ -1,19 +1,4 @@
-"""`GET /browse` on the wire: the keyset walk, and the facet key the
-measurement decided.
-
-Driven through a real `create_app()` with one dependency overridden -- the
-title repository -- so the router, the DTOs, A3's cursor codec, V1's problem
-vocabulary and FastAPI's own query parsing all sit on the path a request
-takes. Only the Postgres read is stood in for;
-`tests/integration/test_browse_route.py` is what runs that.
-
-**The ordering cases seed a population whose name order is the reverse of its
-id order, and each asserts that premise for itself.** UUIDv7 makes `ORDER BY
-id` and `ORDER BY sort_name` agree by accident whenever rows are seeded in
-alphabetical order, so a walk over such a fixture is green against a route
-that ignores `sort` entirely. `assert far_id < near_id` is the assertion that
-makes the rest of the case mean something.
-"""
+"""`GET /browse` on the wire: the keyset walk, the facet gate and the demand lane."""
 
 import ast
 import inspect
@@ -49,12 +34,9 @@ def titles() -> FakeTitleRepository:
 def queue() -> FakeJobQueue:
     """Overridden for every case in this file, not only the demand-lane ones.
 
-    `/browse` promotes the skeletons it draws (issue #73), so the queue is on
-    this route's path now and the real `PostgresJobQueue` points at the
-    unreachable database in `Settings` below -- which is deliberate for the
-    *read* half and fatal for the write. Same treatment the nine fixtures
-    passing `push_enabled=False` get: when a dependency becomes real, the
-    fixture says so rather than leaving it to fail.
+    `/browse` promotes the skeletons it draws, so the queue is on this route's path and
+    the real `PostgresJobQueue` would point at the unreachable database in `Settings`
+    below -- deliberate for the read half and fatal for the write.
     """
     return FakeJobQueue()
 
@@ -99,14 +81,12 @@ async def _seed(titles: FakeTitleRepository, name: str, **changes: object) -> Ti
 async def test_a_second_page_follows_the_cursor_the_first_returned(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """Page 2 is disjoint from page 1 and the two concatenated are the whole
-    seeded population, in the order that was asked for.
+    """Two pages are disjoint and together are the whole population, in sort order.
 
-    Seeded **backwards** -- "Zulu" first, "Alpha" last -- so that `ORDER BY id`
-    and `ORDER BY sort_name` disagree, and the disagreement is asserted as this
-    case's own premise before anything else is read. Without it the case passes
-    against a route that pages the table in physical order and never looks at
-    `sort` at all.
+    Seeded backwards -- "Zulu" first, "Alpha" last -- so `ORDER BY id` and
+    `ORDER BY sort_name` disagree, and the disagreement is asserted as this case's own
+    premise. Without it the case passes against a route that pages the table in
+    physical order and never looks at `sort` at all.
     """
     seeded = [await _seed(titles, name) for name in ("Zulu", "Mike", "Foxtrot", "Alpha")]
     far, near = seeded[0], seeded[-1]
@@ -135,8 +115,7 @@ async def test_a_second_page_follows_the_cursor_the_first_returned(
 async def test_an_empty_screen_is_a_two_hundred_and_never_a_404(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """A filter nothing matches is a fact about the catalog, not a missing
-    resource.
+    """A filter nothing matches is a fact about the catalog, not a missing resource.
 
     The catalog is deliberately **not** empty -- one title that the filter
     excludes -- so this is "the screen is empty" rather than "the database
@@ -156,31 +135,7 @@ async def test_an_empty_screen_is_a_two_hundred_and_never_a_404(
 async def test_the_walk_terminates_and_the_last_page_carries_a_null_cursor(
     client: httpx.AsyncClient, titles: FakeTitleRepository, seeded: int
 ) -> None:
-    """Walked to exhaustion, and the off-by-one is invisible outside
-    `count % limit == 0`.
-
-    At `limit=2`, **4 and 6 are both exact exhaustion and 5 is the partition
-    case** -- which is a correction the plant round made to this docstring
-    rather than a claim about arithmetic: it read *"at 5 and 6 the last page is
-    short"* until the mutation was measured and failed `[4]` and `[6]` while
-    leaving `[5]` green. 5 is in the parametrisation to show that a partition
-    walk *cannot* see the defect, not because it adds coverage.
-
-    The bound on the loop is not a timeout dressed up -- a cursor that never
-    nulls is an infinite client loop, and every finite test passes against one
-    unless the test says how many pages it was willing to fetch.
-
-    🔴 **`assert body["items"]` is the assertion the off-by-one dies on, and
-    without it this case could not see the defect it is named for.** Measured:
-    planted in full -- `over_fetch` dropped here *and* `paginate`'s
-    `len(fetched) <= limit` relaxed to `<` -- the walk still terminates, still
-    collects all four rows and still collects them once, because the surplus
-    cursor's page is simply **empty**. Termination and contents are both intact
-    and the only observable damage is one wasted round trip per exhausted
-    walk, which is exactly the promise the acceptance makes: *the last page
-    returns a null cursor rather than a cursor that yields an empty page*.
-    Those are two claims and the loop above only makes the first.
-    """
+    """Walked to exhaustion, and the off-by-one is invisible outside `count % limit == 0`."""
     for index in range(seeded):
         await _seed(titles, f"Title {index:02d}")
 
@@ -212,20 +167,15 @@ async def test_the_walk_terminates_and_the_last_page_carries_a_null_cursor(
 async def test_a_cursor_minted_under_another_sort_is_refused_rather_than_reinterpreted(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """A cursor read under the wrong ordering is a plausible, complete, wrong
-    page, so it is a `400 invalid_cursor` rather than a page.
+    """A cursor read under the wrong ordering is a plausible, complete, wrong page.
 
-    The refusal is A3's codec at the router and never the port -- the digest is
-    over the sort name and the filter state, both values this client sent.
+    So it is a `400 invalid_cursor`, refused by the codec at the router rather than by
+    the port, over a digest covering the sort name and the filter state.
 
-    🔴 **The pair is `year` -> `vote_count` and the obvious pair would have
-    proved nothing.** `name` -> `year` is refused by the *codec's type check*
-    (`STR` where an `INT` was declared), which is a different mechanism and one
-    that would still fire with the sort name dropped from the digest entirely.
-    `year` and `vote_count` are the two members sharing `(INT, UUID)`, so their
-    cursors decode cleanly against each other's spec and the **digest is the
-    only thing left** -- which is why that identity is asserted here as this
-    case's own premise rather than left to be true by accident.
+    The pair is `year` -> `vote_count` because those are the two members sharing
+    `(INT, UUID)`: their cursors decode cleanly against each other's spec, so the
+    digest is the only thing left to refuse them. `name` -> `year` would be caught by
+    the codec's type check instead and would prove nothing about the digest.
     """
     assert _KEYSET_TYPES[BrowseSort.YEAR] == _KEYSET_TYPES[BrowseSort.VOTE_COUNT], (
         "the premise: these two sorts share a keyset type, so only the digest can tell them apart"
@@ -252,12 +202,11 @@ async def test_a_cursor_minted_under_another_sort_is_refused_rather_than_reinter
 async def test_a_cursor_minted_under_another_filter_is_refused_too(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """The same refusal one parameter over, because the digest covers the
-    filters and not only the sort.
+    """The same refusal one parameter over: the digest covers the filters too.
 
-    Without this the sort case alone is satisfied by a digest over `sort`, and
-    a cursor minted over `genre=horror` would resume a page of comedies from a
-    horror film's position -- full, ordered and wrong.
+    Without this, a digest over `sort` alone satisfies the case above, and a cursor
+    minted over `genre=horror` would resume a page of comedies from a horror film's
+    position -- full, ordered and wrong.
     """
     for index in range(4):
         await _seed(titles, f"Title {index:02d}", genres=("Horror",))
@@ -275,14 +224,11 @@ async def test_a_cursor_minted_under_another_filter_is_refused_too(
 async def test_facets_are_absent_and_say_so_rather_than_answering_an_empty_map(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """The default request computes no counts, and the response says which of
-    the two reasons applies.
+    """The default request computes no counts, and the response says why.
 
-    **An empty map and "nobody counted" are two different facts**, so the maps
-    are absent rather than `{}`: a client reading `genres` gets a `KeyError` it
-    can act on instead of a zero it cannot distinguish from a real answer. The
-    bar this implements failed at **330.81 ms p95** against 200 ms over
-    1,272,367 titles.
+    An empty map and "nobody counted" are two different facts, so the maps are absent
+    rather than `{}`: a client reading `genres` gets a `KeyError` it can act on instead
+    of a zero it cannot distinguish from a real answer.
     """
     await _seed(titles, "Alpha", genres=("Horror",), year=1999)
 
@@ -299,12 +245,11 @@ async def test_facets_are_absent_and_say_so_rather_than_answering_an_empty_map(
 async def test_an_unpredicated_request_for_facets_is_refused_by_its_own_reason(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """Asking for facets over the whole catalog is the 330.81 ms request, so it
-    is declined -- and declined with a *different* reason from "you did not
-    ask", because the two have different fixes.
+    """Facets over the whole catalog are too expensive to compute, so they are declined.
 
-    One reason for both would make `facets=true` over an unfiltered browse
-    indistinguishable from a client that forgot the parameter.
+    Declined with a *different* reason from "you did not ask", because the two have
+    different fixes: one reason for both would make `facets=true` over an unfiltered
+    browse indistinguishable from a client that forgot the parameter.
     """
     await _seed(titles, "Alpha", genres=("Horror",), year=1999)
 
@@ -374,8 +319,7 @@ async def test_a_computed_facet_map_that_is_empty_is_present_and_empty(
 async def test_every_sort_pages_and_every_sort_has_a_cursor_type(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """All four sorts mint a decodable cursor, and the type table is
-    exhaustive.
+    """All four sorts mint a decodable cursor, and the type table is exhaustive.
 
     The structural half is not decoration: a fifth `BrowseSort` member with no
     `_KEYSET_TYPES` entry is a `KeyError` **inside a route**, i.e. a 500 for a
@@ -410,12 +354,11 @@ async def test_a_page_boundary_inside_the_unkeyed_group_resumes_from_it(
 ) -> None:
     """A NULL sort key is a position, and a cursor has to be able to carry one.
 
-    Three of the four sorts are nullable and `popularity` was NULL on
-    **980,523 of 1,272,367** rows of the catalog this route was measured
-    against, so the unkeyed group is not an edge case -- it is most of the
-    screen. `CursorType.NULL` is a tag a *value* may take, so the codec has to
-    round-trip it; a route that refused it would end the walk at the first
-    unkeyed row with every page it served looking full.
+    Three of the four sorts are nullable and most of the catalog has no `popularity`,
+    so the unkeyed group is not an edge case -- it is most of the screen.
+    `CursorType.NULL` is a tag a *value* may take, so the codec has to round-trip it; a
+    route that refused it would end the walk at the first unkeyed row with every page
+    it served looking full.
     """
     await _seed(titles, "Keyed", tmdb_popularity=9.0)
     await _seed(titles, "Unkeyed One", tmdb_popularity=None)
@@ -440,12 +383,10 @@ async def test_a_page_boundary_inside_the_unkeyed_group_resumes_from_it(
 async def test_the_openapi_document_describes_the_cursor_as_an_opaque_string(
     client: httpx.AsyncClient,
 ) -> None:
-    """Nothing client-side can be built on decoding the cursor, so the schema
-    says `string` and nothing else.
+    """Nothing client-side can be built on decoding the cursor, so the schema says `string`.
 
-    A documented structure is a contract: the day a keyset gains a component,
-    a client that read the shape out of `/openapi.json` breaks, and ADR-0034's
-    version bump exists precisely so that it does not have to.
+    A documented structure is a contract: the day a keyset gains a component, a client
+    that read the shape out of `/openapi.json` breaks.
     """
     document = (await client.get("/openapi.json")).json()
     parameters = {one["name"]: one for one in document["paths"]["/browse"]["get"]["parameters"]}
@@ -461,13 +402,11 @@ async def test_the_openapi_document_describes_the_cursor_as_an_opaque_string(
 
 
 def test_the_facet_response_carries_every_field_of_its_own_model() -> None:
-    """`response_model_exclude_unset=True` is a rule about **every** field, so
-    a field added to the model and forgotten in a constructor silently vanishes
-    from the wire rather than failing.
+    """`response_model_exclude_unset=True` is a rule about every field.
 
-    B9 paid for this once already on `GET /titles/{id}`. The expected key set
-    is derived from `model_fields` rather than written out, so it grows with
-    the model and there is nothing to keep in step.
+    A field added to the model and forgotten in a constructor silently vanishes from
+    the wire rather than failing. The expected key set is derived from `model_fields`
+    rather than written out, so it grows with the model.
     """
     computed = BrowseFacetsResponse.of(BrowseFacets(genres={"Horror": 1}, years={1999: 1}))
     omitted = BrowseFacetsResponse.omitted(FacetsOmitted.UNPREDICATED)
@@ -488,12 +427,10 @@ def test_the_facet_response_carries_every_field_of_its_own_model() -> None:
 def test_the_browse_router_holds_no_composition_root_and_no_llm() -> None:
     """The router names neither the wiring nor curation nor the LLM port.
 
-    `lint-imports`' ninth contract is the graph property and this is the name
-    property; neither subsumes the other -- the contract cannot see a string
-    annotation and a scan cannot see a router nobody pointed it at. Scanned
-    over `ast.unparse` of a docstring-stripped tree, because this module's own
-    prose names `browse_facets`, measurements and ADRs at length and a raw
-    substring scan would read the explanation.
+    `lint-imports` gives the graph property and this gives the name property; neither
+    subsumes the other, since the contract cannot see a string annotation. Scanned over
+    a docstring-stripped tree, so a router explaining itself in prose is not read as a
+    router naming these.
     """
     tree = ast.parse(pathlib.Path(inspect.getfile(browse_router)).read_text())
     for node in ast.walk(tree):
@@ -538,15 +475,12 @@ def _without_prose(tree: ast.Module) -> ast.Module:
 async def test_browsing_a_page_of_skeletons_promotes_them_to_visible(
     client: httpx.AsyncClient, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """`/browse` is the screen with the most to gain and had nothing wired:
-    1,139,982 of 1,273,313 titles were `skeleton` on 2026-08-26, so ~89% of
-    what this route can return is a name and a year, and paging past it was the
-    one interaction guaranteed never to improve it.
+    """Browsing a skeleton title is what puts it in the enrichment queue.
 
-    Asserted through a real `create_app()` with the queue overridden rather
-    than on a service in isolation, because the defect this closes is a route
-    that never *called* the service -- and a unit case on `VisibilityService`
-    is green against a router that does not import it.
+    Most of what this route can return is a name and a year, so paging past it would
+    otherwise be the one interaction guaranteed never to improve it. Asserted through a
+    real `create_app()` rather than on a service in isolation, because the defect is a
+    route that never *called* the service.
     """
     skeleton = await _seed(titles, "A skeleton")
     await _seed(titles, "Already done", enrichment_state=EnrichmentState.ENRICHED)
@@ -561,10 +495,11 @@ async def test_browsing_a_page_of_skeletons_promotes_them_to_visible(
 async def test_browsing_a_fully_enriched_page_enqueues_nothing(
     client: httpx.AsyncClient, titles: FakeTitleRepository, queue: FakeJobQueue
 ) -> None:
-    """The premise the case above rests on, asserted rather than assumed: the
-    promotion is a statement about the *tier* of what was drawn, not something
-    the route does on every request. Without this, a router that promoted every
-    row it returned passes the case above unchanged."""
+    """The promotion is about the tier of what was drawn, not every row returned.
+
+    Without this, a router that promoted everything it served passes the case above
+    unchanged.
+    """
     await _seed(titles, "Already done", enrichment_state=EnrichmentState.ENRICHED)
 
     response = await client.get("/browse")

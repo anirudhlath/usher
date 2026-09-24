@@ -1,9 +1,6 @@
-"""`TmdbClient` over `httpx.MockTransport`. No network, no real clock.
+"""`TmdbClient` over `httpx.MockTransport`.
 
-The three things a fixture-serving fake provider can never show: the
-throttle, the status-code translation, and that the API key never reaches a
-message. `tests/fakes/metadata_provider.py`'s own docstring names all three
-as its divergences and points here.
+No network, no real clock.
 """
 
 import asyncio
@@ -78,11 +75,12 @@ async def test_a_v3_key_is_sent_as_the_api_key_query_parameter() -> None:
 
 
 async def test_a_v4_read_access_token_is_sent_as_a_bearer_header_instead() -> None:
-    """Not cosmetic. A query-parameter credential lands in every URL, and
-    `HTTPXClientInstrumentor` records the full URL as a span attribute, so
-    the v3 form writes the key into telemetry on every request. TMDb accepts
-    the bearer token on v3 endpoints, so an operator who configures one gets
-    that leak closed with no code change."""
+    """A v4 token travels in the header, never as a query parameter.
+
+    A query-parameter credential lands in every URL, and `HTTPXClientInstrumentor`
+    records the full URL as a span attribute, so the v3 form writes the key into
+    telemetry on every request.
+    """
     transport = _transport()
     client, http = _client(transport, api_key=_V4_TOKEN)
     async with http:
@@ -93,10 +91,11 @@ async def test_a_v4_read_access_token_is_sent_as_a_bearer_header_instead() -> No
 
 
 async def test_the_key_never_reaches_a_transport_failure_message() -> None:
-    """PRD 08's "credentials are never logged", enforced rather than
-    asserted. `EmbySession` interpolates the httpx exception into its own
-    message safely because an Emby URL carries no credential; a TMDb v3 URL
-    does, so this client may not."""
+    """PRD 08's "credentials are never logged", enforced rather than asserted.
+
+    `EmbySession` interpolates the httpx exception into its own message safely because
+    an Emby URL carries no credential; a TMDb v3 URL does, so this client may not.
+    """
 
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
@@ -113,11 +112,12 @@ async def test_the_key_never_reaches_a_transport_failure_message() -> None:
 
 
 async def test_a_404_is_malformed_data_not_an_outage() -> None:
-    """The branch that makes `JobWorker`'s park-immediately path fire in
-    production. A TMDb id the catalog holds that TMDb no longer serves is a
-    wrong answer, not an outage -- and the catalog holds 291,737 TMDb ids
-    from a bulk export that ages. Translating it to `PortUnavailable` spends
-    five rate-limited retries before parking with the wrong reason."""
+    """The branch that makes `JobWorker`'s park-immediately path fire in production.
+
+    A TMDb id the catalog holds from an ageing bulk export, which TMDb no longer serves,
+    is a wrong answer and not an outage. Translating it to `PortUnavailable` spends five
+    rate-limited retries before parking with the wrong reason.
+    """
     client, http = _client(
         _transport(status=404, body={"success": False, "status_code": 34, "status_message": "x"})
     )
@@ -144,8 +144,9 @@ async def test_a_429_carries_the_retry_after_hint() -> None:
 
 async def test_a_429_with_an_http_date_retry_after_is_still_a_hint() -> None:
     """RFC 9110 permits either form and `float(value)` raises on the second.
-    `usher.adapters.http.retry_after_seconds` is shared for exactly this;
-    the bug it fixes existed in two places."""
+
+    `usher.adapters.http.retry_after_seconds` is shared for exactly this.
+    """
     client, http = _client(
         _transport(status=429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})
     )
@@ -173,7 +174,7 @@ async def test_a_server_error_is_an_outage() -> None:
 @pytest.mark.parametrize(
     ("status", "body"),
     [
-        # Live 2026-08-01: `/movie/changes` with a 15-day window.
+        # What TMDb answers `/movie/changes` with a 15-day window.
         (
             422,
             {
@@ -182,7 +183,7 @@ async def test_a_server_error_is_an_outage() -> None:
                 "status_message": "Invalid date range: Should be a range no longer than 14 days.",
             },
         ),
-        # Live 2026-08-01: 21 `append_to_response` items.
+        # What TMDb answers a request carrying 21 `append_to_response` items.
         (
             400,
             {
@@ -198,14 +199,10 @@ async def test_a_server_error_is_an_outage() -> None:
 async def test_a_rejected_request_is_malformed_data_not_an_outage(status: int, body: Any) -> None:
     """A 4xx that is not a 429 cannot become an answer by being sent again.
 
-    Both bodies are the ones TMDb really returned on 2026-08-01, and both
-    are permanent properties of the *request*: a 15-day change window and a
-    21-item `append_to_response`. Translated as `PortUnavailable` they are
-    retryable, so `JobWorker` spends five rate-limited attempts and a
-    backoff schedule on a request that can never succeed, then parks with
-    "upstream unavailable" rather than with what was actually wrong. Same
-    argument the 404 case above makes, arriving from the other four
-    statuses TMDb has been observed to use.
+    Both bodies are permanent properties of the *request*: a 15-day change window and a
+    21-item `append_to_response`. Translated as `PortUnavailable` they are retryable, so
+    `JobWorker` spends five rate-limited attempts on a request that can never succeed
+    and then parks with "upstream unavailable" rather than with what was wrong.
     """
     client, http = _client(_transport(status=status, body=body))
     async with http:
@@ -214,11 +211,12 @@ async def test_a_rejected_request_is_malformed_data_not_an_outage(status: int, b
 
 
 async def test_a_request_timeout_is_still_an_outage() -> None:
-    """The one 4xx that is *not* the caller's fault. TMDb itself has never
-    been observed to send it, but `Settings.tmdb_base_url` exists precisely
-    so a household can put a proxy in front of TMDb, and a proxy that gives
-    up waiting is exactly the transient failure the queue's backoff is
-    for."""
+    """The one 4xx that is *not* the caller's fault.
+
+    TMDb itself has never been observed to send it, but `Settings.tmdb_base_url` exists
+    precisely so a household can put a proxy in front of TMDb, and a proxy that gives up
+    waiting is exactly the transient failure the queue's backoff is for.
+    """
     client, http = _client(_transport(status=408))
     async with http:
         with pytest.raises(PortUnavailable):
@@ -226,9 +224,11 @@ async def test_a_request_timeout_is_still_an_outage() -> None:
 
 
 async def test_a_non_json_body_is_malformed() -> None:
-    """A reverse proxy or a captive portal serving HTML with status 200. A
-    raw `json.JSONDecodeError` escaping the port is not something a caller
-    written against `usher.ports.errors` can catch."""
+    """A reverse proxy or a captive portal serving HTML with status 200.
+
+    A raw `json.JSONDecodeError` escaping the port is not something a caller written
+    against `usher.ports.errors` can catch.
+    """
 
     def html(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html>nope</html>")
@@ -250,18 +250,12 @@ async def test_a_json_array_body_is_malformed() -> None:
 
 
 async def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None:
-    """The defect M8 found and fixed in the LLM adapter, reaching this one --
-    which is the point of `usher.adapters.http.decode_json` being one function
-    rather than three copies.
+    """A deeply nested body raises `RecursionError`, which an `except ValueError` misses.
 
-    `json.loads` raises `RecursionError` past a nesting depth of 9,999 (9,998
-    parses, measured on CPython 3.13 at the default recursion limit), and
-    `RecursionError` subclasses **`RuntimeError`, not `ValueError`** -- so the
-    `except ValueError` this client carried on its own did not see it, it is
-    not a `UsherPortError`, and it escaped the port to take the worker process
-    down instead of parking one job. Same standing as the HTML case above: the
-    body is whatever TMDb, or whatever `Settings.tmdb_base_url` points at, put
-    on the wire.
+    `RecursionError` subclasses `RuntimeError`, not `ValueError`, so it is not a
+    `UsherPortError` and it escapes the port to take the worker process down instead of
+    parking one job. `usher.adapters.http.decode_json` is one function rather than three
+    copies for this reason.
     """
     depth = 12_000
     nested = ("[" * depth + "]" * depth).encode()
@@ -279,13 +273,11 @@ async def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None
 
 
 async def test_the_throttle_holds_requests_to_the_configured_rate() -> None:
-    """PRD 10's dashboard 3 plots "TMDb requests/sec against the ~40
-    ceiling"; TMDb's own documentation says the limits "sit somewhere in the
-    40 requests per second range" and to "respect the 429 if you receive
-    one". Asserted against an injected clock rather than by sleeping.
+    """The throttle holds requests under the rate TMDb's documentation asks for.
 
-    Six requests at two per second: the first two spend the bucket's burst
-    and the remaining four wait half a second each.
+    Asserted against an injected clock rather than by sleeping: six requests at two per
+    second spend the bucket's burst on the first two, and the remaining four wait half a
+    second each.
     """
     clock = _Clock()
     client, http = _client(_transport(), requests_per_second=2.0, clock=clock, sleep=clock.sleep)
@@ -296,9 +288,11 @@ async def test_the_throttle_holds_requests_to_the_configured_rate() -> None:
 
 
 async def test_the_throttle_survives_concurrency() -> None:
-    """A per-call check with no lock lets N coroutines all read the same
-    token count and all decide they may go -- which is a burst of N against
-    a limit of one, and the failure only appears under concurrency."""
+    """A per-call check with no lock lets N coroutines read the same token count.
+
+    All of them then decide they may go, a burst of N against a limit of one, and the
+    failure only appears under concurrency.
+    """
     clock = _Clock()
     client, http = _client(_transport(), requests_per_second=2.0, clock=clock, sleep=clock.sleep)
     async with http:
@@ -307,8 +301,7 @@ async def test_the_throttle_survives_concurrency() -> None:
 
 
 async def test_a_burst_within_the_budget_does_not_wait() -> None:
-    """A throttle that slept before every request would halve the throughput
-    of a walk that is already under the ceiling."""
+    """A throttle that slept before every request would halve a walk under the ceiling."""
     clock = _Clock()
     client, http = _client(_transport(), requests_per_second=10.0, clock=clock, sleep=clock.sleep)
     async with http:

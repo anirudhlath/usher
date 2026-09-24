@@ -1,15 +1,4 @@
-"""Where a run's numbers go. Two sinks, deliberately.
-
-**Postgres, `eval` schema** -- what Grafana reads, and what makes *"did the
-run where recall dropped coincide with the embedding re-index?"* a join
-rather than a cross-tool eyeball, because eval scores live in the same
-database as `search_queries`, `llm_calls` and `curated_rows`.
-
-**`docs/evals/ledger.jsonl` in git** -- one summary line per `--full` run.
-Cheap, and it buys two things the table cannot: history survives a database
-rebuild (`m09e` already forced one full wipe) and a PR diff can *show* that a
-change moved recall@5 from .82 to .79.
-"""
+"""Where a run's numbers go: two sinks, deliberately."""
 
 import json
 import uuid
@@ -73,20 +62,18 @@ class RunRecord:
 
 
 async def ensure_schema(session: AsyncSession) -> None:
-    """Apply `schema.sql`, whole and idempotently. Not an alembic migration -- ADR-0041.
+    """Apply `schema.sql`, whole and idempotently.
 
-    Runs at the start of every eval run, which is why every statement in that
-    file is `IF NOT EXISTS` or `OR REPLACE`.
+    Not an alembic migration, and it runs at the start of every eval run, which
+    is why every statement in that file is `IF NOT EXISTS` or `OR REPLACE`.
 
-    The script is applied through the raw driver connection, not
+    The script goes through the raw driver connection rather than
     `session.execute(text(...))`: SQLAlchemy's asyncpg dialect prepares every
     statement and asyncpg refuses a multi-statement prepared statement
-    (`PostgresSyntaxError: cannot insert multiple commands...`, measured
-    2026-08-19). The driver connection's `execute()` uses the simple query
-    protocol and takes a whole script. The `SELECT 1` first pulls the driver
-    into the session's transaction so the DDL joins it rather than running in
-    autocommit -- the same reason `tests/integration/test_eval_ledger_postgres.py`'s
-    `_apply_schema` does it.
+    (`PostgresSyntaxError: cannot insert multiple commands...`). The driver
+    connection's `execute()` uses the simple query protocol and takes a whole
+    script. The `SELECT 1` first pulls the driver into the session's transaction
+    so the DDL joins it rather than running in autocommit.
     """
     await session.execute(text("SELECT 1"))
     driver: Any = (await (await session.connection()).get_raw_connection()).driver_connection

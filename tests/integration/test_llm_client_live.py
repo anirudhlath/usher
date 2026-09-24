@@ -1,25 +1,4 @@
-"""`LLMClientContract` against a real endpoint, when one is configured.
-
-**Skipped by default, and it says so loudly rather than passing quietly.**
-Set `USHER_TEST_LLM_BASE_URL` (and optionally `USHER_TEST_LLM_API_KEY` and
-`USHER_TEST_LLM_MODEL`) to run it. Nothing in CI sets them, so this file is a
-tool an operator points at their own deployment before trusting `usher
-curate` against it — the same role `scripts/capture_tmdb_fixture.py` plays for
-a fixture diff.
-
-**A contract suite that passes because nothing ran is the `sitecustomize.py`
-trap**, which this repository has now hit twice in other forms. So the
-environment variables are read once at import and the whole module is
-`skip`ped when they are absent — a skip is visible in pytest's summary where a
-vacuous pass is not — and `test_the_endpoint_was_really_reached` asserts a
-non-zero token count, which no fake and no misconfiguration can produce.
-
-**It really opens a socket**, so it is the one file in this repository outside
-`tests/` convention that the network guard would block. That is deliberate and
-is why it is opt-in: `CLAUDE.md`'s "no test in this repository makes a network
-request" remains true of every run that does not set these variables, which is
-every run anybody has made.
-"""
+"""`LLMClientContract` against a real endpoint, when one is configured."""
 
 import os
 
@@ -59,8 +38,10 @@ class TestLiveLLMClient(LLMClientContract):
 
 
 async def test_the_endpoint_was_really_reached() -> None:
-    """The control, without which every case above could be satisfied by a
-    client that answered from a cache.
+    """The control.
+
+    without which every case above could be satisfied by a client that answered from a
+    cache.
 
     A non-zero `tokens_in` cannot be produced by a misconfigured base URL, by
     a fake, or by a skipped run — and a skipped run does not reach here at

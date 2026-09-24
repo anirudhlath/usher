@@ -1,22 +1,8 @@
-"""`usher.composition`'s process-level wiring.
-
-Most of this module is exercised through its callers -- the lane supervisor
-in `tests/unit/test_api_lanes.py`, the CLI in `tests/unit/test_cli.py`, and
-both against real Postgres in `tests/integration/`. What lives here is the
-one decision `metadata_provider` makes *for the process*: whether this
-deployment has a metadata provider at all.
-
-That decision is a per-process fact and its log line has to be too. It was
-`build_worker`'s, which is called once per worker *pass*, so a default
-deployment with no TMDb key produced a `WARNING` every `IDLE_SLEEP_SECONDS`
--- ~17,280 a day. The lane's half of that is pinned in
-`test_a_missing_tmdb_key_is_not_re_reported_on_every_pass`; this file pins
-that the information is still surfaced rather than merely quieted.
-"""
+"""`usher.composition`'s process-level wiring."""
 
 import ast
+import asyncio
 import dataclasses
-import inspect
 import io
 import os
 import pathlib
@@ -25,15 +11,19 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Annotated, Any, cast
 
 import httpx
 import pytest
+from asgi_lifespan import LifespanManager
+from fastapi import Depends, Request
 from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import usher
+import usher.services.bootstrap
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
@@ -55,8 +45,20 @@ from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.adapters.bulk.imdb import IMDbTitleDataset
+from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
+from usher.adapters.emby.adapter import EmbyAdapter
+from usher.api.app import create_app
+from usher.api.deps import get_search_service, get_source_adapter_factory, get_source_gates
 from usher.composition import (
+    _READS,
+    _WRITTEN_BY,
+    BootstrapOutcome,
+    ConcededImport,
+    FailedImport,
     Pipeline,
+    SkippedStep,
+    SourceGateRegistry,
     SourceRegistry,
     UnitOfWork,
     _worker_handlers,
@@ -68,13 +70,22 @@ from usher.composition import (
     embedder,
     llm_client,
     metadata_provider,
+    nothing,
     run_bootstrap,
+    unit_of_work,
     worker_concurrency,
     worker_kinds,
 )
 from usher.config import Settings
+from usher.db.base import build_session_factory
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
-from usher.domain.bootstrap import FULL_SEQUENCE, PHASE_ALIASES, BootstrapPhase, ImportRun
+from usher.domain.bootstrap import (
+    FULL_SEQUENCE,
+    PHASE_ALIASES,
+    BootstrapPhase,
+    ImportRun,
+    ImportRunStatus,
+)
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -82,9 +93,22 @@ from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.source import Source
 from usher.domain.title import Title
-from usher.ports.bulk import ImdbTitle
+from usher.ports.bulk import (
+    GENOME_TAG_COUNT,
+    BulkBatch,
+    BulkCursor,
+    BulkDataset,
+    GenomeTag,
+    ImdbTitle,
+)
+from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import (
+    PortDataMalformed,
+    PortUnavailable,
+    RepositoryConflict,
+    UsherPortError,
+)
 from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.jobs import JobQueue, JobRequest
@@ -96,24 +120,23 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import (
+    SourceAdapter,
+    SourceAdapterFactory,
+    SourceItem,
+    SourceItemKind,
+)
+from usher.services.bootstrap import RetryPolicy
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
 from usher.services.handlers import SourceBinding
-from usher.services.jobs import JobWorker
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RowCache
 from usher.services.taste import TasteService
 
-#: The size of the pool `_pipeline_over_fakes` puts on the pipeline, and it is
-#: deliberately neither 200 nor the number of candidates any case seeds.
-#: `build_curation_service` has to take `pipeline.pool` rather than construct a
-#: second `CandidatePoolService` over the same repositories -- a second one
-#: would be built at `settings.curation_pool_size`, which is 200, and would
-#: answer *identically* on every fixture seeding fewer than 200 candidates. The
-#: pool's size is the one thing that tells the two apart, and
-#: `_schema(len(candidates))` puts it on the wire where a case can read it.
+#: The size of the pool `_pipeline_over_fakes` puts on the pipeline, deliberately
+#: neither 200 nor the number of candidates any case seeds.
 POOL_SIZE = 6
 
 
@@ -134,14 +157,11 @@ def _pipeline_over_fakes(
     unused on this path, and filling twelve of them would make the case read
     as a test of `build_pipeline` rather than of one wiring decision.
 
-    **Nothing on the curation path is `unused`, unlike the four fields above
-    it.** `build_worker` constructs `CurationService` eagerly whenever a
-    client exists, and a `None` there constructs perfectly well and fails an
-    `AttributeError` deep inside the first generation -- which is exactly the
-    shape a `curated=None` on `RowContext` took when it survived 2,743 cases
-    one task ago. The four optional arguments exist so a case can hold the
-    same objects the pipeline does and read back what the service wrote into
-    *them*.
+    Nothing on the curation path is `unused`, unlike the four fields above it:
+    `build_worker` constructs `CurationService` eagerly whenever a client exists, and a
+    `None` there constructs perfectly well and fails an `AttributeError` deep inside the
+    first generation. The four optional arguments exist so a case can hold the same
+    objects the pipeline does and read back what the service wrote into *them*.
     """
     settled = _Recording() if commit is None else commit
 
@@ -209,12 +229,9 @@ def _pipeline_over_fakes(
 #: subscript chain.
 _PROPERTIES = "properties"
 
-#: One shelf of five handles -- `DEFAULT_MIN_CARDS` exactly, so a validator
-#: floor moving up is a failure here rather than a silently shorter screen --
-#: every one of them inside `POOL_SIZE`. What this response is *not* is
-#: interesting: nothing here exercises `validate_curation`, which has its own
-#: file and 60 cases; these cases need a generation that survives so the write
-#: has somewhere to land.
+#: One shelf of five handles -- `DEFAULT_MIN_CARDS` exactly, so a validator floor
+#: moving up is a failure here rather than a silently shorter screen -- and every one
+#: of them inside `POOL_SIZE`.
 _ROWS = {
     ROWS_KEY: [
         {
@@ -229,12 +246,10 @@ _ROWS = {
 async def _candidates(titles: FakeTitleRepository, *, count: int) -> list[Title]:
     """`count` unwatched, enriched films, seeded **worst first**.
 
-    The pool ranks on `vote_count` descending, so an ascending seed makes pool
-    order the reverse of the order `new_id()` minted these in -- the UUIDv7
-    trap that cost M7 five untested orderings, avoided here for the same
-    reason `tests/unit/test_services_curation.py` avoids it: with a best-first
-    fixture a 1-based handle map, a 0-based one and "insertion order" all
-    agree, and ADR-0028's whole scheme rests on which one was sent.
+    The pool ranks on `vote_count` descending, so an ascending seed makes pool order
+    the reverse of the order `new_id()` minted these in -- the UUIDv7 trap. With a
+    best-first fixture a 1-based handle map, a 0-based one and "insertion order" all
+    agree, and the handle scheme rests on which one was sent.
     """
     seeded = []
     for index in range(count):
@@ -291,11 +306,12 @@ def warnings() -> Iterator[io.StringIO]:
 async def test_a_missing_tmdb_key_is_reported_where_the_decision_is_made(
     warnings: io.StringIO,
 ) -> None:
-    """PRD 08's "TMDb key missing" degradation is a *narrowed* deployment,
-    not a silent one: an operator whose enrich queue never drains has to be
-    able to see why. Once per process is where that belongs -- this function
-    is called exactly once by each of the three composition roots (`usher
-    work`, `usher push`, and `create_app`'s lifespan)."""
+    """A missing TMDb key is a *narrowed* deployment, not a silent one.
+
+    An operator whose enrich queue never drains has to be able to see why. Once per
+    process is where that belongs -- this function is called exactly once by each of the
+    three composition roots (`usher work`, `usher push`, and `create_app`'s lifespan).
+    """
     settings = _settings()
     assert settings.tmdb_api_key is None
 
@@ -309,9 +325,11 @@ async def test_a_missing_tmdb_key_is_reported_where_the_decision_is_made(
 
 
 async def test_a_configured_tmdb_key_says_nothing(warnings: io.StringIO) -> None:
-    """The other half. A warning every correctly-configured deployment sees
-    is a warning nobody reads -- the same rule `EmbyAdapter.verify` follows
-    for its administrator probe."""
+    """The other half: a configured provider says nothing.
+
+    A warning every correctly-configured deployment sees is a warning nobody reads --
+    the same rule `EmbyAdapter.verify` follows for its administrator probe.
+    """
     settings = _settings(SecretStr("0" * 32))
 
     provider, aclose = await metadata_provider(settings)
@@ -355,17 +373,15 @@ async def test_the_enrich_service_enqueues_into_the_pipelines_own_queue() -> Non
 
 
 async def test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit() -> None:
-    """[ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)
-    through the real wiring, which is the half `tests/unit/test_services_jobs.py`
-    cannot make.
+    """An event is a statement about committed state, through the real wiring.
 
-    That file pins `JobWorker`'s buffer against a handler written for it;
-    this one asserts the *decision* `build_worker` makes -- that the
-    `EnrichService` it constructs is handed `worker.events` rather than
-    `pipeline.events`. The two are indistinguishable from inside either
-    module: a worker that buffers correctly and a factory that hands the
-    bare bus past it publishes exactly as it does today, and every case in
-    both files stays green.
+    This is the half `tests/unit/test_services_jobs.py` cannot make: that file
+    pins `JobWorker`'s buffer against a handler written for it; this one
+    asserts the *decision* `build_worker` makes -- that the `EnrichService` it
+    constructs is handed `worker.events` rather than `pipeline.events`. The two
+    are indistinguishable from inside either module: a worker that buffers
+    correctly and a factory that hands the bare bus past it publishes exactly
+    as it does today, and every case in both files stays green.
 
     Driven through `run_once` rather than by reading a private attribute off
     the service, for the reason
@@ -413,8 +429,10 @@ async def test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit(
 
 
 async def test_the_worker_hands_the_enrich_service_the_row_cache_it_was_built_with() -> None:
-    """The whole chain, driven rather than read: `build_worker(rows=...)` ->
-    `_worker_handlers` -> `build_enrich_service(cache=...)` -> `EnrichService`.
+    """The whole chain, driven rather than read.
+
+    `build_worker(rows=...)` -> `_worker_handlers` -> `build_enrich_service(cache=...)`
+    -> `EnrichService`.
 
     `tests/unit/test_services_enrich.py` pins the service against a cache
     handed to it directly, which says nothing about whether any composition
@@ -484,10 +502,12 @@ async def test_the_worker_hands_the_enrich_service_the_row_cache_it_was_built_wi
 
 
 async def test_a_worker_built_without_a_row_cache_still_enriches() -> None:
-    """`usher work`'s arm. `rows` defaults to `None` all the way down, and a
-    root that composes no screens must not acquire a required collaborator --
-    `build_push_applier`'s recorded terms, and the reason the parameter is
-    optional rather than positional."""
+    """`usher work`'s arm.
+
+    `rows` defaults to `None` all the way down, and a root that composes no screens must
+    not acquire a required collaborator, which is why the parameter is optional rather
+    than positional.
+    """
     titles = FakeTitleRepository()
     title = Title(
         kind=TitleKind.MOVIE,
@@ -520,33 +540,9 @@ async def test_a_worker_built_without_a_row_cache_still_enriches() -> None:
 
 
 def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> None:
-    """The push and reconcile lanes publish as they go, and that is a
-    decision rather than an omission.
+    """The push and reconcile lanes publish as they go.
 
-    Neither is a job: each commits its own subject before it publishes
-    (`push.py:170` and `:275`, `reconcile.py:245`), so both already satisfy
-    ADR-0033's stronger form with no buffer at all -- and a `sync.progress`
-    frame held behind a 1,127-batch walk turns a progress bar into a single
-    jump at the end.
-
-    **Structural, because the defect is an absence and no lane's output can
-    show it.** "Published as it went" and "published at the end" are the same
-    list of frames in the same order; only a second commit boundary
-    distinguishes them, and a lane has none to hang the assertion on. So the
-    claim asserted is the one that can be: a `DeferredEventPublisher` is
-    constructed in exactly one place in `src/`, and no composition root can
-    acquire one for a lane by wrapping something.
-
-    ⚠️ **That one place moved in M9's W1, from `services/jobs.py` to
-    `composition.py`, and the claim is unchanged.** The buffer used to be
-    `JobWorker`'s, wrapped once for the life of the worker; it is now built per
-    *scope*, because two concurrent jobs sharing one buffer means the failing
-    one's `discard()` empties the surviving one's frames. The construction site
-    is therefore inside `build_worker`'s scope factory -- still exactly one, and
-    still not reachable by a lane.
-
-    Carries its own premise, because a scan that resolves nothing passes
-    exactly like a scan that passes.
+    That is a decision rather than an omission.
     """
     root = pathlib.Path(usher.__file__).parent
     sites = sorted(
@@ -565,14 +561,13 @@ def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> Non
 async def test_no_embedder_configured_degrades_rather_than_raising(
     warnings: io.StringIO,
 ) -> None:
-    """The same shape `metadata_provider` has, for the same reason: a worker
-    refusing to start without a model would take three working lanes down
-    with the fourth. PRD 05's catalog-lookup tier -- full-text plus trigram
-    over 1.27M titles -- needs no model at all, so "no embedder" is a
-    *narrowed* deployment rather than a broken one.
+    """The same shape `metadata_provider` has, for the same reason.
 
-    Reported here, once per process, and not in `build_worker`, which runs
-    once per worker *pass* at a 5 s floor -- the ~17,280-lines-a-day shape.
+    A worker refusing to start without a model would take three working lanes down with
+    the fourth. PRD 05's catalog-lookup tier -- full-text plus trigram -- needs no model
+    at all, so "no embedder" is a *narrowed* deployment rather than a broken one.
+    Reported here, once per process, and not in `build_worker`, which runs once per
+    worker *pass* at a 5 s floor.
     """
     built, aclose = await embedder(_settings(embedding_enabled=False))
     await aclose()  # the no-op half of the pair, callable unconditionally
@@ -583,24 +578,17 @@ async def test_no_embedder_configured_degrades_rather_than_raising(
 
 
 def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
-    """`run_once` claims `list(self._handlers)`, and its docstring says why:
-    claiming a kind you cannot run either crashes on the lookup or parks work
-    whose only problem is that it was offered to the wrong process -- and a
-    job parked that way needs a human to release it.
+    """`run_once` claims `list(self._handlers)`, so an unrunnable kind must stay out.
 
-    Fails: registering `INDEX` unconditionally and letting `IndexService`
-    hold `None`. Nothing raises until a job arrives, at which point it parks,
-    and the review list fills with work that is perfectly runnable elsewhere.
-
-    The `ENRICH` and `CURATE` halves are asserted alongside it, so the three
-    guards cannot drift into "two guarded, one not", and `MATCH` is asserted
-    so an implementation registering *nothing* cannot pass. This is the
-    default deployment -- no key, no extra, no model -- and its five
-    claimable kinds (`match`, `watch_history`, `watch_writeback`, `sync`,
-    `bootstrap`) are the whole of what it can do. `bootstrap` joined them in
-    M9's E5 for `sync`'s reason: a bulk import needs a writable data
-    directory and an outbound client, neither of which is a process resource
-    a deployment can lack at build time.
+    Claiming a kind you cannot run either crashes on the lookup or parks work whose only
+    problem is that it was offered to the wrong process, and a job parked that way needs
+    a human to release it. Rules out registering `INDEX` unconditionally and letting
+    `IndexService` hold `None`. The `ENRICH` and `CURATE` halves are asserted alongside
+    it so the three guards cannot drift into "two guarded, one not", and `MATCH` is
+    asserted so an implementation registering *nothing* cannot pass. This is the default
+    deployment -- no key, no extra, no model -- and its five claimable kinds are the
+    whole of what it can do. `bootstrap` is among them for `sync`'s reason: a bulk
+    import needs only a writable data directory and an outbound client.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -626,20 +614,14 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
 def test_a_write_back_handler_is_registered_in_every_build() -> None:
     """The kind a client's own press enqueues, so no deployment may lack it.
 
-    M4's rule -- *"a job kind whose handler is a stub is a queue that grows
-    forever"* -- and this is the shape it takes when the handler exists but
-    the registration is guarded: `run_once` claims `list(self._handlers)`, so
-    a `WATCH_WRITEBACK` behind any condition leaves the shipped default
-    deployment enqueueing a job on every `PUT /watch/...` that nothing ever
-    claims. That is not the benign "leave it for a worker that can run it"
-    bargain `INDEX` makes, because there is no such worker: the handler needs
-    a TMDb key, an embedder and an LLM endpoint exactly as much as `match`
-    does, which is not at all.
-
-    Asserted against the **bare** build -- no provider, no embedder, no
-    client -- because that is the configuration every guard would exclude it
-    from, with the fully-equipped build beside it as the control that stops
-    the case passing against a registration nothing reaches.
+    A job kind whose registration is guarded is a queue that grows forever: `run_once`
+    claims `list(self._handlers)`, so a `WATCH_WRITEBACK` behind any condition leaves
+    the shipped default deployment enqueueing a job on every `PUT /watch/...` that
+    nothing ever claims. That is not the benign "leave it for a worker that can run it"
+    bargain `INDEX` makes, because there is no such worker: the handler needs a TMDb
+    key, an embedder and an LLM endpoint exactly as much as `match` does, which is not
+    at all. Asserted against the **bare** build, with the fully-equipped build beside it
+    as the control that stops the case passing against a registration nothing reaches.
     """
     bare = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -665,8 +647,7 @@ def test_a_write_back_handler_is_registered_in_every_build() -> None:
 
 
 async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_repositories() -> None:
-    """The registration end to end: a real job, claimed by a real worker,
-    arriving at a real adapter.
+    """The registration end to end: a real job, a real worker, a real adapter.
 
     Two things only this shape can say. `mypy` holds the *types* of the two
     repositories `build_worker` hands the handler and says nothing about them
@@ -755,21 +736,14 @@ async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_rep
     assert queue.jobs_of(JobKind.WATCH_WRITEBACK) == [], "a successful job kept its row"
 
 
-def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_them() -> None:
-    """`JobWorker.registered_kinds`' docstring names which kinds are in every
-    build, and that sentence was written deliberately to be falsified here --
-    M8's trap 2 in a new location, where updating it silently is the failure
-    it exists to prevent.
+def test_a_bare_build_registers_exactly_the_five_unconditional_kinds() -> None:
+    """The four conditional kinds are `ENRICH`, `DERIVE`, `INDEX` and `CURATE`.
 
-    Derived from the bare build rather than from a literal list, so a sixth
-    unconditional kind cannot be added without the prose moving with it. The
-    claim is pinned rather than the prose: a verbatim assertion on the
-    sentence would fail every future copy-edit that left the claim intact,
-    which is the change-detector this repository has already been bitten by
-    once.
+    A set equality rather than a membership check: a sixth kind registered
+    unconditionally and a fifth one quietly made conditional are both failures,
+    and only the equality catches the second. The three cases below are the
+    controls that keep this from passing on a worker that registers nothing.
     """
-    doc = inspect.getdoc(JobWorker.registered_kinds)
-    assert doc is not None
     bare = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
@@ -779,15 +753,23 @@ def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_
         registry=_no_sources(),
         user_id=uuid.uuid4(),
     )
-    assert bare.registered_kinds, "the premise: a bare build registers something"
 
-    unnamed = sorted(kind.name for kind in bare.registered_kinds if kind.name not in doc)
-    assert unnamed == [], f"in every build and unmentioned by the docstring: {unnamed}"
+    assert bare.registered_kinds == frozenset(
+        {
+            JobKind.BOOTSTRAP,
+            JobKind.MATCH,
+            JobKind.SYNC,
+            JobKind.WATCH_HISTORY,
+            JobKind.WATCH_WRITEBACK,
+        }
+    )
 
 
 def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
-    """The control that makes the case above evidence rather than a
-    tautology: without it, an implementation registering *nothing* passes."""
+    """The control that makes the case above evidence rather than a tautology.
+
+    Without it, an implementation registering *nothing* passes.
+    """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
@@ -802,16 +784,15 @@ def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
 
 
 def test_a_worker_without_a_provider_registers_no_derive_handler() -> None:
-    """`DERIVE` is guarded on the **provider**, the `ENRICH` arm rather than
-    the `INDEX` one, and the guard is correct rather than merely consistent:
-    `DeriveService` holds a `MetadataProvider` for `to_derivation`, and a
-    deployment with no key has no TMDb payloads in `raw_payloads` to derive
-    from at all -- they exist only because a key once did.
+    """`DERIVE` is guarded on the **provider**, not on the embedder.
 
-    Fails: the unguarded registration. Its symptom is a parked job on a
-    keyless deployment, and a parked job needs a human to release work whose
-    only problem was the process it was offered to. Leaving it pending for a
-    worker that has a key is `INDEX`'s bargain, one lane over.
+    The guard is correct rather than merely consistent: `DeriveService` holds a
+    `MetadataProvider` for `to_derivation`, and a deployment with no key has no TMDb
+    payloads in `raw_payloads` to derive from at all -- they exist only because a key
+    once did. Rules out the unguarded registration, whose symptom is a parked job on a
+    keyless deployment, needing a human to release work whose only problem was the
+    process it was offered to. Leaving it pending for a worker that has a key is
+    `INDEX`'s bargain, one lane over.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -831,8 +812,10 @@ def test_a_worker_without_a_provider_registers_no_derive_handler() -> None:
 
 
 def test_a_worker_with_a_provider_registers_the_derive_handler() -> None:
-    """The control that makes the case above evidence rather than a
-    tautology: without it, an implementation registering *nothing* passes."""
+    """The control that makes the case above evidence rather than a tautology.
+
+    Without it, an implementation registering *nothing* passes.
+    """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
@@ -853,19 +836,14 @@ def test_a_worker_with_a_provider_registers_the_derive_handler() -> None:
 async def test_no_llm_configured_degrades_rather_than_raising(
     warnings: io.StringIO,
 ) -> None:
-    """The shipped default, and the shape `metadata_provider` and `embedder`
-    already have: `(None, no-op)` rather than a raise.
+    """The shipped default: `(None, no-op)` rather than a raise.
 
-    Off by default is the honest default twice over here. Nine of the ten row
-    providers need no model, so `GET /home` is a shorter screen rather than a
-    broken one -- that is `embedding_enabled`'s argument. The second is this
-    project's only one of its kind: turning it on sends the household's watch
-    history to whatever `USHER_LLM_BASE_URL` names, which may be a machine
-    the household does not own.
-
-    Reported here, once per process, and **not** in `build_worker`, which
-    runs once per worker *pass* at a 5 s floor -- the ~17,280-lines-a-day
-    shape this project has already measured for a string.
+    The same shape `metadata_provider` and `embedder` already have. Off by default is
+    the honest default twice over: nine of the ten row providers need no model, so
+    `GET /home` is a shorter screen rather than a broken one, and turning it on sends
+    the household's watch history to whatever `USHER_LLM_BASE_URL` names, which may be
+    a machine the household does not own. Reported here, once per process, and **not**
+    in `build_worker`, which runs once per worker *pass* at a 5 s floor.
     """
     settings = _settings()
     assert settings.llm_enabled is False, "the premise: off is the shipped default"
@@ -879,14 +857,12 @@ async def test_no_llm_configured_degrades_rather_than_raising(
 
 
 async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO) -> None:
-    """The other half, and the control that makes the case above evidence:
-    without it, a factory that answered `(None, warning)` for *every*
-    deployment passes.
+    """The other half, and the control that makes the case above evidence.
 
-    A warning every correctly-configured deployment sees is a warning nobody
-    reads -- the rule `metadata_provider`'s pair already follows. Nothing here
-    opens a socket: the client is an `httpx.AsyncClient` that has not been
-    asked for anything.
+    Without it, a factory that answered `(None, warning)` for *every* deployment passes.
+    A warning every correctly-configured deployment sees is a warning nobody reads --
+    the rule `metadata_provider`'s pair already follows. Nothing here opens a socket:
+    the client is an `httpx.AsyncClient` that has not been asked for anything.
     """
     built, aclose = await llm_client(_settings(llm_enabled=True))
     try:
@@ -900,18 +876,15 @@ async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO)
 async def test_a_credentialled_endpoint_with_no_prices_says_the_ledger_will_read_zero(
     warnings: io.StringIO,
 ) -> None:
-    """`llm_price_*_per_mtok` both default to `Decimal(0)`, and no provider
-    reports a cost, so `cost_usd` is computed from those two numbers alone --
-    an operator who never set them gets `0.00000000` on every row, which looks
-    like a measurement and is an absence.
+    """`llm_price_*_per_mtok` both default to `Decimal(0)` and no provider reports one.
 
-    **The credential is the gate, and it is what keeps this off the shipped
-    deployment.** Zero is the *honest* value for the self-hosted vLLM this
-    milestone was verified against, so warning on price alone would be the
-    thing `test_a_configured_llm_is_built_and_says_nothing` above exists to
-    forbid -- a warning every correctly-configured deployment sees. A hosted
-    provider requires an `llm_api_key` and the local endpoint needs none, so
-    the credential separates the two populations.
+    So `cost_usd` is computed from those two numbers alone, and an operator who never
+    set them gets `0.00000000` on every row -- a figure that reads as a number and is an
+    absence. The credential is the gate, and it is what keeps this off the shipped
+    deployment: zero is the honest value for a self-hosted endpoint, so warning on price
+    alone would be the warning every correctly-configured deployment sees. A hosted
+    provider requires an `llm_api_key` and a local one needs none, so the credential
+    separates the two populations.
     """
     built, aclose = await llm_client(
         _settings(llm_enabled=True, llm_api_key=SecretStr("sk-" + "0" * 44)),
@@ -931,8 +904,11 @@ async def test_a_credentialled_endpoint_with_no_prices_says_the_ledger_will_read
 async def test_a_credentialled_endpoint_with_prices_set_says_nothing(
     warnings: io.StringIO,
 ) -> None:
-    """The control that makes the case above evidence: without it, a warning
-    fired for every credentialled deployment would pass just as well."""
+    """The control that makes the case above evidence.
+
+    Without it, a warning fired for every credentialled deployment would pass just as
+    well.
+    """
     built, aclose = await llm_client(
         _settings(
             llm_enabled=True,
@@ -950,23 +926,16 @@ async def test_a_credentialled_endpoint_with_prices_set_says_nothing(
 
 
 def test_a_worker_without_an_llm_client_registers_no_curate_handler() -> None:
-    """`CURATE` is guarded on the **client**, exactly as `INDEX` is guarded on
-    the embedder, and for the identical reason: `run_once` claims
-    `list(self._handlers)`, so a worker with no model must not ask for work it
-    cannot do. Claiming it either crashes on the lookup or parks a job whose
-    only problem is the process it was offered to, and a job parked that way
-    needs a human to release it.
+    """`CURATE` is guarded on the **client**, exactly as `INDEX` is on the embedder.
 
-    Fails: registering `CURATE` unconditionally. It cannot even be spelled
-    without weakening `CurationService`'s `client: LLMClient` to
-    `LLMClient | None`, which is the point of that annotation -- "no client,
-    no curation" is a `mypy` fact at the one layer that can know it, rather
-    than an `if self._client is None` branch unreachable from `src/`.
-
-    The embedder is present, so this is a guard on the client rather than on
-    "anything optional": without the `INDEX` line the case passes against a
-    `CURATE` registered under `embedder is not None`, and without the `MATCH`
-    line it passes against an implementation registering *nothing*.
+    `run_once` claims `list(self._handlers)`, so a worker with no model must not ask for
+    work it cannot do: claiming it either crashes on the lookup or parks a job whose
+    only problem is the process it was offered to. Rules out registering `CURATE`
+    unconditionally, which cannot even be spelled without weakening
+    `CurationService`'s `client: LLMClient` to `LLMClient | None` -- "no client, no
+    curation" is a `mypy` fact at the one layer that can know it. The embedder is
+    present, so this is a guard on the client rather than on "anything optional", and
+    the `MATCH` line stops it passing against an implementation registering *nothing*.
     """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
@@ -984,9 +953,11 @@ def test_a_worker_without_an_llm_client_registers_no_curate_handler() -> None:
 
 
 def test_a_worker_with_an_llm_client_registers_the_curate_handler() -> None:
-    """The control that makes the case above evidence rather than a
-    tautology. `INDEX` is asserted absent alongside it so the two guards
-    cannot drift into "one client turns both on"."""
+    """The control that makes the case above evidence rather than a tautology.
+
+    `INDEX` is asserted absent alongside it, so the two guards cannot drift into "one
+    client turns both on".
+    """
     worker = build_worker(
         _work_for(_pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())),
         _settings(),
@@ -1002,24 +973,17 @@ def test_a_worker_with_an_llm_client_registers_the_curate_handler() -> None:
 
 
 async def test_the_worker_runs_a_curate_job_into_the_pipelines_own_curated_rows() -> None:
-    """**Behavioural, never an identity check on a private attribute**, and
-    driven through `run_once` rather than through a handler this file reached
-    for -- so registration, claiming, the key conversion and the write are one
-    assertion instead of four hopeful ones.
+    """Behavioural, never an identity check on a private attribute.
 
-    A `CurationService` wired to repositories of its own passes every case in
-    `tests/unit/test_services_curation.py` -- the screen is written, the
-    ledger row is written, nothing raises -- and a running deployment then
-    generates a household's shelves into an object nothing serves from. That
-    is `test_the_enrich_service_enqueues_into_the_pipelines_own_queue`'s
-    defect one milestone over, and `RowContext.curated = None`'s one task
-    over, where a `mypy` annotation was the only thing holding it. The only
-    way to see it is to read the **pipeline's** repositories back.
-
-    The household is the job's key and nothing else, which is the other half:
-    `build_worker` is handed a `user_id` for `watch_history`'s handler, and a
-    curate handler that took *that* would dedup correctly, park correctly, and
-    write household B's generation onto household A's screen.
+    Driven through `run_once` rather than through a handler this file reached for, so
+    registration, claiming, the key conversion and the write are one assertion instead
+    of four hopeful ones. A `CurationService` wired to repositories of its own passes
+    every case in `tests/unit/test_services_curation.py` -- the screen is written, the
+    ledger row is written, nothing raises -- while a running deployment generates a
+    household's shelves into an object nothing serves from. The household is the job's
+    key and nothing else, which is the other half: `build_worker` is handed a `user_id`
+    for `watch_history`'s handler, and a curate handler that took *that* would write
+    household B's generation onto household A's screen.
     """
     titles = FakeTitleRepository()
     await _candidates(titles, count=POOL_SIZE + 2)
@@ -1049,9 +1013,9 @@ async def test_the_worker_runs_a_curate_job_into_the_pipelines_own_curated_rows(
 
 
 async def test_the_curation_service_is_built_over_the_pipelines_pool_and_commits_once() -> None:
-    """The two collaborators a second copy would be invisible against, and the
-    one call that has to cover both writes.
+    """The two collaborators a second copy would be invisible against.
 
+    And the one call that has to cover both writes.
     `build_curation_service` must take `pipeline.pool` rather than construct a
     `CandidatePoolService` over the same repositories: a second one would be
     built at `settings.curation_pool_size`, which is 200, and would answer
@@ -1089,8 +1053,7 @@ async def test_the_curation_service_is_built_over_the_pipelines_pool_and_commits
 
 
 async def test_a_curate_job_for_an_empty_catalog_parks_and_buys_nothing() -> None:
-    """PRD 08's operator rule -- every command works against an empty database
-    -- and the milestone's cost argument, at the layer that spends the money.
+    """Every command works against an empty database, including the one that spends.
 
     A generation for a household with nothing to recommend is a charge with a
     guaranteed empty answer, so `CurationService` raises **before** the client
@@ -1127,10 +1090,11 @@ async def test_a_curate_job_for_an_empty_catalog_parks_and_buys_nothing() -> Non
 
 
 async def test_a_curate_job_that_could_not_reach_the_model_backs_off_and_still_bills() -> None:
-    """The other side of the classification, and the control that makes the
-    case above about `PortDataMalformed` rather than about "curation fails".
+    """The other side of the classification, and the control for the case above.
 
-    An endpoint that refused the connection is `PortUnavailable`, which
+    Without it that case is about "curation fails" rather than about
+    `PortDataMalformed`. An endpoint that refused the connection is `PortUnavailable`,
+    which
     `JobWorker` backs off rather than parks -- it may well answer on the next
     attempt, unlike an empty catalog. And the ledger still gets its row:
     `llm_calls` is one row per *attempt*, so a call that never got an answer
@@ -1165,19 +1129,14 @@ async def test_a_curate_job_that_could_not_reach_the_model_backs_off_and_still_b
 
 
 async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:
-    """**The measured failure this factory exists to prevent.**
+    """The model is loaded once per process, never once per worker pass.
 
-    `build_worker` runs once per worker *pass* -- `lanes._run_worker` rebuilds
-    it every turn of a loop whose floor is 5.0 s. A per-pass `logger.warning`
-    there was measured at ~17,280 lines a day; a per-pass *model load* is
-    4.84 s cold / 0.13 s warm and 65 MB of ONNX, so the lane would spend more
-    time loading than working, forever, with nothing in the logs saying so.
-
-    Three passes, not one: a single pass cannot tell "once" from "per pass"
-    -- the same shape
-    `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
-    needed. Counted through a *loading* embedder rather than read off the
-    source, so the case fails against any spelling that builds one here.
+    `build_worker` runs once per worker *pass* -- `lanes._run_worker` rebuilds it every
+    turn of a loop whose floor is 5.0 s -- so a per-pass model load would have the lane
+    spending more time loading than working, forever, with nothing in the logs saying
+    so. Three passes, not one: a single pass cannot tell "once" from "per pass".
+    Counted through a *loading* embedder rather than read off the source, so the case
+    fails against any spelling that builds one here.
     """
     loads: list[int] = []
 
@@ -1205,16 +1164,14 @@ async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:
 async def test_the_factory_sets_hf_hub_offline_before_importing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured: warm cache, no network, flag unset -> `RuntimeError: Cannot
-    send a request, as the client has been closed`, from huggingface_hub
-    reusing a closed client on the retry path. The message names neither the
-    network nor the cache. Reproduced two independent ways, and it is also
-    the only setting under which a genuine cache miss produces a
-    comprehensible `OSError`.
+    """A warm cache with no network and the flag unset raises a bare `RuntimeError`.
 
-    `_load_embedder` is replaced rather than left to import a real model:
-    this case is about the environment variable, and no test in this
-    repository downloads 65 MB or makes a network request.
+    "Cannot send a request, as the client has been closed", from huggingface_hub
+    reusing a closed client on the retry path -- a message naming neither the network
+    nor the cache. The flag is also the only setting under which a genuine cache miss
+    produces a comprehensible `OSError`. `_load_embedder` is replaced rather than left
+    to import a real model: this case is about the environment variable, and nothing
+    here downloads a checkpoint or makes a network request.
     """
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setattr("usher.composition._load_embedder", lambda _: FakeEmbedder())
@@ -1233,10 +1190,8 @@ async def test_an_operators_own_hf_hub_offline_value_wins(
     """`setdefault`, not assignment.
 
     An operator warming the cache for the first time runs one command with
-    `HF_HUB_OFFLINE=0`, and a container may set its own; either must survive.
-    Written as its own case because the mutation to `os.environ[...] = "1"`
-    survives the case above -- the plan predicted that and said to add this
-    rather than record it as untested.
+    `HF_HUB_OFFLINE=0`, and a container may set its own; either must survive. Its own
+    case because `os.environ[...] = "1"` passes the case above.
     """
     monkeypatch.setenv("HF_HUB_OFFLINE", "0")
     monkeypatch.setattr("usher.composition._load_embedder", lambda _: FakeEmbedder())
@@ -1250,11 +1205,11 @@ async def test_an_operators_own_hf_hub_offline_value_wins(
 async def test_an_embedder_that_cannot_load_degrades_rather_than_crashing(
     monkeypatch: pytest.MonkeyPatch, warnings: io.StringIO
 ) -> None:
-    """A missing extra, a missing model file, a cache miss under
-    `HF_HUB_OFFLINE=1`: all three are `ImportError`/`OSError` at *build* time
-    in a process whose other three lanes are fine.
+    """A missing extra, a missing model file, or a cache miss under `HF_HUB_OFFLINE=1`.
 
-    Fails: letting it propagate out of `create_app`'s lifespan, which turns
+    All three are `ImportError`/`OSError` at *build* time in a process whose other three
+    lanes are fine. Rules out letting it propagate out of `create_app`'s lifespan, which
+    turns
     "the embedding extra is not installed" into a server that will not boot
     -- the degradation-into-outage trade PRD 08 forbids.
 
@@ -1286,13 +1241,12 @@ async def _never_resolves(_: str) -> SourceBinding | None:
 def _work_for(pipeline: Pipeline) -> UnitOfWork:
     """A `UnitOfWork` handing back one already-built pipeline.
 
-    `build_worker` opens a scope per claim and per job since M9's W1, so it
-    takes a factory rather than a pipeline. Against fakes there is no session
-    to open and no `AsyncSession` to keep two coroutines off, so every scope
-    here is the same object -- which is exactly what
-    `tests/integration/test_services_jobs.py` must **not** do, and does not:
-    the property that concurrent jobs get *different sessions* is only
-    expressible against a real engine, and it is asserted there.
+    `build_worker` opens a scope per claim and per job, so it takes a factory rather
+    than a pipeline. Against fakes there is no session to open and no `AsyncSession` to
+    keep two coroutines off, so every scope here is the same object -- which is exactly
+    what `tests/integration/test_services_jobs.py` must **not** do, and does not: the
+    property that concurrent jobs get *different sessions* is only expressible against a
+    real engine, and it is asserted there.
     """
 
     @asynccontextmanager
@@ -1328,8 +1282,7 @@ def _no_sources() -> SourceRegistry:
 
 
 async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
-    """`build_pipeline` wires `Pipeline.taste` and `Pipeline.pool.taste` to the
-    **same object**, and until now that was a comment rather than a check.
+    """`Pipeline.taste` and `Pipeline.pool.taste` are wired to the **same object**.
 
     Two `TasteService` instances over one session are not merely wasteful.
     `centroid()` *writes*: it reads `user_taste`, and on a miss recomputes and
@@ -1354,16 +1307,14 @@ async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
 
 
 async def test_a_pipeline_with_no_llm_client_gives_search_nothing_to_expand_with() -> None:
-    """**The shipped default, at the wiring layer.** `USHER_LLM_ENABLED` is
-    `false`, so `llm_client` answers `(None, no-op)` and no caller has one to
-    pass -- and a `build_pipeline` that built an expander anyway would need a
-    client it does not have. What this pins is that the *absence* survives:
-    with no `llm=`, `SearchService` holds no expander and every search on every
-    default deployment embeds the query exactly as typed.
+    """The shipped default, at the wiring layer.
 
-    Reaching `_expander` is deliberate. A wiring assertion has nothing else to
-    look at -- the behavioural half needs a real `PostgresSearchIndex` -- and
-    this is the same shape as `pipeline.pool.taste is pipeline.taste` above.
+    `USHER_LLM_ENABLED` is `false`, so `llm_client` answers `(None, no-op)` and no
+    caller has one to pass. What this pins is that the *absence* survives: with no
+    `llm=`, `SearchService` holds no expander and every search on every default
+    deployment embeds the query exactly as typed. Reaching `_expander` is deliberate --
+    a wiring assertion has nothing else to look at, since the behavioural half needs a
+    real `PostgresSearchIndex`.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     try:
@@ -1395,10 +1346,9 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
         expander = pipeline.search._expander
         assert expander is not None
         assert expander._client is client
-        # Through `_spend`, which is where the three of them live since the
-        # ledger rule became `services/llm_ledger.py`'s rather than each
-        # spender's. The assertion is the same one -- these are still the
-        # objects `build_pipeline` is on the hook for wiring.
+        # Through `_spend`, which is where the three of them live now that the ledger
+        # rule is `services/llm_ledger.py`'s rather than each spender's. These are
+        # still the objects `build_pipeline` is on the hook for wiring.
         assert expander._spend._ledger is pipeline.llm_calls
         assert expander._spend._commit == session.commit
         assert expander._spend._model == "wired/asked-1"
@@ -1408,18 +1358,15 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
 
 
 async def test_a_client_is_necessary_and_not_sufficient_for_an_expander() -> None:
-    """**The second switch, at the wiring layer, and the state it is for is the
-    ordinary M8 deployment.** `USHER_LLM_ENABLED=true` with
-    `USHER_QUERY_EXPANSION_ENABLED=false` is a household that wants curated
-    rows and does not want its searches rewritten -- which is what PRD 05's
-    2026-08-07 measurement (MRR 0.733 -> 0.373) makes the default rather than
-    an eccentric choice.
+    """The second switch, at the wiring layer, for an ordinary deployment.
 
-    The distinction this case exists for is that the client is **present**
-    here. `test_a_pipeline_with_no_llm_client_gives_search_nothing_to_expand_with`
-    above reaches the same `None` through the `llm is None` arm, so it is
-    satisfied by a `build_pipeline` that ignores the setting entirely; only a
-    fixture holding a real client can tell the two arms apart.
+    `USHER_LLM_ENABLED=true` with `USHER_QUERY_EXPANSION_ENABLED=false` is a household
+    that wants curated rows and does not want its searches rewritten -- the default
+    rather than an eccentric choice, because expansion degrades retrieval here. The
+    distinction this case exists for is that the client is **present**: the case above
+    reaches the same `None` through the `llm is None` arm, so it is satisfied by a
+    `build_pipeline` that ignores the setting entirely, and only a fixture holding a
+    real client can tell the two arms apart.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     settings = _settings(llm_enabled=True)
@@ -1433,23 +1380,16 @@ async def test_a_client_is_necessary_and_not_sufficient_for_an_expander() -> Non
 
 
 async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> None:
-    """The mirror of the case above, and the configuration it is about is
-    ordinary rather than contrived.
+    """The mirror of the case above, over an ordinary configuration.
 
-    `unit_of_work` -- what `usher.api.lanes` and `usher work` build every unit
-    of work through -- calls `build_pipeline` with **no `llm`**, because a lane
-    has no use for a completion client. On a deployment with both switches on,
-    that is `query_expansion_enabled=True` arriving beside `llm is None`, which
-    is exactly the state a `build_pipeline` that consulted only the setting
-    would construct a `QueryExpansionService(client=None)` for: a service whose
-    first `complete_json` is an `AttributeError` inside a search.
-
-    Found 2026-08-07 by this task's sweep. Dropping the `llm is None` disjunct
-    survived all 2,892 unit cases -- because the only case reaching that arm
-    had the setting off, so the mutant answered `None` for the other reason.
-    It is caught by `mypy` (`client` narrows to `LLMClient` only through the
-    `is None` test), so the *gate* was never open; the **suite** was, and
-    "mypy holds it" is a claim about one tool rather than about the wiring.
+    `unit_of_work` -- what `usher.api.lanes` and `usher work` build every unit of work
+    through -- calls `build_pipeline` with **no `llm`**, because a lane has no use for a
+    completion client. On a deployment with both switches on, that is
+    `query_expansion_enabled=True` arriving beside `llm is None`, which is exactly the
+    state a `build_pipeline` consulting only the setting would construct a
+    `QueryExpansionService(client=None)` for: a service whose first `complete_json` is
+    an `AttributeError` inside a search. `mypy` narrows `client` only through the
+    `is None` test, so "mypy holds it" is a claim about one tool rather than the wiring.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     settings = _expanding()
@@ -1462,44 +1402,40 @@ async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> 
         await engine.dispose()
 
 
-async def test_both_search_roots_write_search_queries_over_this_sessions_commit() -> None:
-    """PRD 10's `search_queries`, wired on the two roots that build a
-    `SearchService`, and the *commit* is the half that has to be this
-    session's.
+async def test_only_the_root_with_no_commit_boundary_commits_the_analytics_row() -> None:
+    """PRD 10's `search_queries`, on the three roots that build a `SearchService`.
 
-    Three wirings, three ways for the analytics to go missing, and each is
-    silent:
+    The *commit* is the half that decides the shape.
+    Three ways for the row to go missing and every one of them is silent: no
+    analytics at all, a repository over another session, or a commit belonging
+    to some other session -- a search writes nothing else, so nothing carries
+    the row.
 
-    - **No analytics at all.** Every search answers correctly, both histograms
-      record, and the table PRD 10 turns ADR-0002's Meilisearch gate into a
-      live measurement with stays empty forever. There is no error and no log
-      line, which is why this is a wiring assertion rather than a behavioural
-      one.
-    - **A repository over another session**, so the row never reaches the
-      transaction the search commits.
-    - **A commit that is not this session's**, which leaves the row to be
-      rolled back when the read closes -- and a search writes nothing else, so
-      there is no second write to carry it. `cli._session_for` disposes its
-      engine without committing, so on that root the loss is total.
-
-    **Both roots, because `build_pipeline` delegating to `build_search_service`
-    is a fact about today's code rather than a guarantee.** `usher search`
-    reaches this through `build_pipeline` and `api/deps.get_search_service`
-    reaches it directly; a `build_pipeline` that re-assembled a `SearchService`
-    of its own would return a working one and record nothing.
+    `usher search` reaches this directly and through `build_pipeline`, and
+    neither of those roots ever commits, so the service does. The request root
+    has `get_session` and passes `nothing`: a row that committed itself would
+    end the request's transaction and leave the demand promotion after it in a
+    second one, which is two WAL flushes per keystroke.
     """
     engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
     try:
         session = AsyncSession(engine)
-        direct = build_search_service(session, _settings())
-        through_the_pipeline = build_pipeline(session, _settings()).search
-
-        for service in (direct, through_the_pipeline):
+        for service in (
+            build_search_service(session, _settings()),
+            build_pipeline(session, _settings()).search,
+        ):
             analytics = service._analytics
             assert analytics is not None
             assert isinstance(analytics.queries, PostgresSearchQueryRepository)
             assert analytics.queries._session is session
             assert analytics.commit == session.commit
+
+        state = SimpleNamespace(embedder=None, search_queries=None)
+        request = cast("Request", SimpleNamespace(app=SimpleNamespace(state=state)))
+        requested = get_search_service(request, session, _settings())._analytics
+        assert requested is not None
+        assert requested.queries._session is session  # type: ignore[attr-defined]
+        assert requested.commit is nothing
     finally:
         await engine.dispose()
 
@@ -1520,17 +1456,16 @@ def _expanding(**rest: object) -> Settings:
 
 
 # ---------------------------------------------------------------------------
-# `run_bootstrap` -- one dispatch, two roots (M9's E5).
+# `run_bootstrap` -- one dispatch, two roots.
 # ---------------------------------------------------------------------------
 
 
 class _JournallingCatalog(FakeBulkCatalogRepository):
-    """`FakeBulkCatalogRepository` that writes down when the load window opens
-    and closes and when the crosswalk is linked.
+    """Records when the load window opens and closes, and when the crosswalk is linked.
 
-    The window's two edges are recorded separately rather than as one entry,
-    because *"the window wraps both IMDb passes"* and *"the window wraps each
-    pass"* differ only in where the closes fall.
+    The window's two edges are recorded separately rather than as one entry, because
+    "the window wraps both IMDb passes" and "the window wraps each pass" differ only in
+    where the closes fall.
     """
 
     def __init__(self, journal: list[str]) -> None:
@@ -1557,11 +1492,11 @@ class _JournallingRuns(FakeImportRunRepository):
 
     The transport in these cases refuses every request, so `BulkDataset.
     revision()` raises `PortUnavailable` and `BootstrapService.
-    import_dataset` records a `FAILED` run rather than downloading 335 MiB.
-    A dataset that gets as far as `start()` therefore writes **twice** -- the
-    started row and the failed one -- and consecutive repeats are collapsed,
-    because this case is about the order of the phases and not about how many
-    writes each one makes.
+    import_dataset` records a `FAILED` run rather than downloading 335 MiB --
+    except for the datasets `_prerequisites_complete` stands in for. A dataset
+    that gets as far as `start()` writes more than once, and consecutive repeats
+    are collapsed, because this case is about the order of the phases and not
+    about how many writes each one makes.
     """
 
     def __init__(self, journal: list[str]) -> None:
@@ -1604,6 +1539,53 @@ def _offline_client(*_: object, **__: object) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
 
 
+class _Completes(BulkDataset[Any]):
+    """A dataset that imports nothing and completes: a finished prerequisite, offline."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def attribution(self) -> str:
+        return self._name
+
+    async def revision(self) -> str:
+        return "fixture-revision"
+
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[Any]]:
+        return self._one(revision or "fixture-revision")
+
+    async def _one(self, revision: str) -> AsyncIterator[BulkBatch[Any]]:
+        yield BulkBatch(rows=(), cursor=BulkCursor(revision=revision, position=1, rows_seen=0))
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _prerequisites_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IMDb's titles and both TMDb exports complete, and nothing else can.
+
+    Those three are what later phases read, so over a transport that refuses
+    everything this is the fixture in which no phase is skipped -- which is what a case
+    about the *order* of the whole dispatch needs. Neither writes a title, so the
+    catalog-joining phases still refuse an empty catalog in a sentence that names them.
+    """
+    monkeypatch.setattr(
+        usher.composition, "IMDbTitleDataset", lambda *_, **__: _Completes("imdb.title.basics")
+    )
+    monkeypatch.setattr(
+        usher.composition,
+        "TMDbIdDataset",
+        lambda *_, kind, **__: _Completes(f"tmdb.ids.{kind.value}"),
+    )
+
+
 async def _journal_of_a_full_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
@@ -1611,33 +1593,21 @@ async def _journal_of_a_full_bootstrap(
     through_the_worker: bool,
     phase: BootstrapPhase = BootstrapPhase.ALL,
     over_a_populated_catalog: bool = False,
+    prerequisites_complete: bool = False,
 ) -> list[str]:
-    """One bootstrap run's datasets and window edges, driven either the way
-    `usher bootstrap` drives it or the way the `bootstrap` job handler does,
-    over the same fakes.
+    """One bootstrap run's datasets and window edges.
 
-    `phase` defaults to `ALL` because that is what every caller wanted until
-    ADR-0040's `RATINGS` arm needed a journal of its own; a single-phase run
-    goes through the identical fakes rather than a second set, which is what
-    makes *"this phase imports one file and opens no window"* an assertion
-    about the same dispatch the parity case walks.
-
-    `over_a_populated_catalog` seeds **one** title, and it defaults to `False`
-    because an empty catalog is what makes the `--phase all` journal legible
-    at all: `credit-names`, `aliases` and `movielens` each answer an empty
-    `titles` with a refusal *sentence* rather than a dataset name, which is how
-    all six phases show up in one run whose transport refuses everything.
-    `ratings` refuses the same way and for a worse reason (its checkpoint is
-    shared with `imdb`), so a journal of what that phase *imports* has to be
-    taken over a catalog it will not refuse. The seed is invisible to the
-    journal -- neither fake records an `upsert_titles` -- so it changes what
-    the dispatch does and not what is written down.
+    Driven either the way `usher bootstrap` drives it or the way the `bootstrap` job
+    handler does, over the same fakes.
     """
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
     settings = _settings(bulk_data_dir=tmp_path)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    if prerequisites_complete:
+        _prerequisites_complete(monkeypatch)
     if over_a_populated_catalog:
         await catalog.upsert_titles([_A_SEEDED_TITLE])
 
@@ -1681,6 +1651,16 @@ async def _nothing() -> None:
     return None
 
 
+def _without_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One attempt per dataset, for the cases whose transport refuses every request.
+
+    Those cases are about which datasets a phase reaches and in what order; a retry
+    of the crosswalk's refused query would add four journal lines and four real
+    waits to a case that is not about retrying. Retrying has its own cases.
+    """
+    monkeypatch.setattr(usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(attempts=1))
+
+
 #: Which phase each journal entry belongs to. The three catalog-dependent
 #: phases contribute a refusal *sentence* rather than a dataset name against
 #: an empty catalog, which is what makes all six visible in one run.
@@ -1695,11 +1675,12 @@ _PHASE_OF = (
 
 
 def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
-    """The journal's entries collapsed to the phase each belongs to, in first
-    -sighting order, with an entry nothing claims raising rather than being
-    silently dropped -- a mapping that fell through would turn a reordered
-    phase into a missing one, which reads as a shorter list rather than as a
-    wrong one."""
+    """The journal's entries collapsed to the phase each belongs to, in first order.
+
+    An entry nothing claims raises rather than being silently dropped: a mapping that
+    fell through would turn a reordered phase into a missing one, which reads as a
+    shorter list rather than as a wrong one.
+    """
     seen: list[BootstrapPhase] = []
     for entry in journal:
         phase = next(
@@ -1715,56 +1696,16 @@ def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
 async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The proof that the extraction landed is **behavioural, not
-    structural**: the same phases, in the same order, whichever root drove
-    them.
+    """The proof is behavioural, not structural.
 
-    A structural assertion -- "the handler imports `run_bootstrap`" -- is
-    satisfied by a handler that imports it and then does something else, and
-    it is satisfied forever by a `run_bootstrap` whose arms have drifted from
-    the ones `usher bootstrap` reaches. What cannot be satisfied that way is
-    an identical journal of window edges, dataset names and the crosswalk
-    link, produced twice over the same fakes.
-
-    Three facts about that journal are asserted by name, because each is a
-    measured decision the order alone would not pin:
-
-    - **One window, both IMDb passes inside it.** Wrapping each pass
-      separately rebuilds `ix_titles_sort_name` and
-      `ix_titles_name_lower_year` between them and pays for the rebuild
-      twice -- 35.8 s suspended against 40.2 s kept (11.0% faster) with a
-      rebuilt pair ~24% smaller, 97 MB against 127 MB
-      (`.claude/rules/bootstrap-and-datasets.md`).
-    - **`link-crosswalk` immediately after the crosswalk import.** The import
-      stores pairs; the link is what attaches them to `titles`.
-    - **Every step of the full run, in `FULL_SEQUENCE`'s declared order**,
-      asserted against that tuple rather than against the other driver. It
-      read `[one for one in BootstrapPhase if one is not BootstrapPhase.ALL]`
-      until ADR-0040 added `RATINGS`, at which point the expectation demanded
-      a phase `--phase all` never emits -- because `--phase all` reaches those
-      rows *inside* its IMDb arm -- and this case went red on a correct
-      implementation. The repair is not a second name in the exclusion: the
-      enum holds steps and aliases, `FULL_SEQUENCE` and `PHASE_ALIASES` say
-      which is which in the domain, and
-      `test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias`
-      is what stops that pair drifting from the enum. **A parity assertion
-      cannot see a permutation** -- both roots call one function, so a
-      reordered dispatch reorders both journals identically and they still
-      match. Measured: moving the `credit-names` arm in front of the `imdb`
-      one survived this case until the order was pinned against the enum, and
-      the damage is the one Track 2 named -- `credit-names` joins to `titles`
-      on `imdb_id`, so ahead of `imdb` it refuses an empty catalog and the
-      phase silently does nothing, while behind a TMDb crawl it defers every
-      enriched title to TMDb permanently and 203,969 of the 204,335
-      >=100-vote titles never gain a `credit_names` at all. (It stales no
-      embedding in either position; this sentence said it staled that tier
-      until an audit checked it against `fill_credit_names`' own predicate.)
+    The same phases, in the same order, whichever root drove them. Over prerequisites
+    that complete, since a failed one would skip the phases that read it.
     """
     through_cli = await _journal_of_a_full_bootstrap(
-        monkeypatch, tmp_path, through_the_worker=False
+        monkeypatch, tmp_path, through_the_worker=False, prerequisites_complete=True
     )
     through_worker = await _journal_of_a_full_bootstrap(
-        monkeypatch, tmp_path, through_the_worker=True
+        monkeypatch, tmp_path, through_the_worker=True, prerequisites_complete=True
     )
 
     assert through_cli, "the premise: driving the dispatch records something"
@@ -1775,50 +1716,59 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     assert inside == ["imdb.title.basics", "imdb.title.ratings"]
     assert through_cli.count("window-open") == 1
     assert through_cli.count("window-close") == 1
-    # **"the ratings file is imported once" is deliberately *not* asserted
-    # here**, and the reason is this case's own fixture. Its catalog is empty,
-    # so a `RATINGS` arm wrongly reached by `--phase all` refuses instead of
-    # importing, and `journal.count("imdb.title.ratings") == 1` would hold
-    # against the very defect it looks like it is for -- an assertion that
-    # cannot fail, on the line most likely to be trusted. It lives in
-    # `test_a_full_run_imports_the_ratings_file_exactly_once`, over a seeded
-    # catalog, which is the only fixture in which the doubling is reachable.
+    # "The ratings file is imported once" is deliberately not asserted here; the
+    # reason is this case's own fixture.
 
     assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
     assert _phases_in(through_cli) == list(FULL_SEQUENCE)
 
 
+async def test_every_phase_a_phase_reads_names_the_checkpoints_that_stand_for_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`_READS` and `_WRITTEN_BY` are two tables, and the first is read through the second.
+
+    A prerequisite `_READS` names that `_WRITTEN_BY` lacks is a `KeyError` in the middle
+    of a bootstrap, at the first phase that reads it -- so every value of one is a key
+    of the other. And each checkpoint name is the one the importing dataset writes,
+    since a name no dataset uses blocks nothing: no checkpoint by it ever exists.
+    """
+    prerequisites = {one for reads in _READS.values() for one in reads}
+    assert prerequisites, "the premise: some phase reads what another writes"
+    assert prerequisites <= set(_WRITTEN_BY)
+
+    async with httpx.AsyncClient() as client:
+        importing = {
+            BootstrapPhase.IMDB: (IMDbTitleDataset(client, tmp_path, batch_size=1),),
+            BootstrapPhase.TMDB_IDS: tuple(
+                TMDbIdDataset(client, tmp_path, kind=kind, batch_size=1)
+                for kind in (TitleKind.MOVIE, TitleKind.SERIES)
+            ),
+        }
+    assert {
+        phase: tuple(one.name for one in datasets) for phase, datasets in importing.items()
+    } == dict(_WRITTEN_BY)
+
+
 def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> None:
-    """**The partition, asserted rather than maintained.**
+    """The partition, asserted rather than maintained.
 
-    `BootstrapPhase` holds steps and aliases, and the dispatch case above can
-    only assert the steps. A member added to neither collection is exactly the
-    defect that reads as working: the CLI offers it (`cli.PHASES` is derived
-    from the enum), the parser accepts it, `run_bootstrap` has no arm for it,
-    and it silently does nothing.  Spelling the two collections as a partition
-    is what makes that a red instead.
-
-    ⚠️ **What this cannot see: a member added to `PHASE_ALIASES` with no arm
-    in `run_bootstrap`.** An alias legitimately has no place in the sequence,
-    so the partition holds either way.  That half is covered for `RATINGS`
-    specifically by
-    `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else` below,
-    and it is stated here rather than left as an implied guarantee.
+    `BootstrapPhase` holds steps and aliases, and the dispatch case above can only
+    assert the steps. A member added to neither collection is the defect that reads as
+    working: the CLI offers it, the parser accepts it, `run_bootstrap` has no arm for
+    it, and it silently does nothing. What this cannot see is a member added to
+    `PHASE_ALIASES` with no arm in `run_bootstrap`, since an alias legitimately has no
+    place in the sequence; that half is covered for `RATINGS` by
+    `test_the_ratings_phase_imports_the_ratings_file_and_nothing_else` below.
     """
     assert set(FULL_SEQUENCE) | PHASE_ALIASES == set(BootstrapPhase)
     assert set(FULL_SEQUENCE).isdisjoint(PHASE_ALIASES)
     # The premise: both halves are non-empty, so the equality above is not
     # satisfied by an empty set on either side.
     assert FULL_SEQUENCE and PHASE_ALIASES
-    # **And the two orders are one order.** The three assertions above are
-    # about *membership* and cannot see a permutation, so the enum's
-    # declaration order and `FULL_SEQUENCE`'s could drift apart in green:
-    # measured 2026-08-19 by swapping `CROSSWALK` and `TMDB_IDS` in the enum
-    # *and* in `test_cli`'s `PHASES` literal -- a coherent-looking edit -- and
-    # leaving `FULL_SEQUENCE` and the dispatch alone: 4,237 passed. The damage
-    # is that `--help` derives its `choices=` from the enum and would then
-    # advertise, to an operator reading it as the run order, a sequence
-    # `--phase all` does not execute.
+    # And the two orders are one order. The three assertions above are about
+    # *membership* and cannot see a permutation, so the enum's declaration order and
+    # `FULL_SEQUENCE`'s could otherwise drift apart while every case stayed green.
     assert tuple(one for one in BootstrapPhase if one not in PHASE_ALIASES) == FULL_SEQUENCE
 
 
@@ -1826,31 +1776,7 @@ def test_every_phase_is_either_a_step_of_the_full_run_or_a_declared_alias() -> N
 async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, through_the_worker: bool
 ) -> None:
-    """**The point of the phase, asserted rather than described.**
-
-    `--phase imdb` imports `title.basics.tsv.gz` (214.4 MiB) before
-    `title.ratings.tsv.gz` (8.2 MiB) and rewrites every name and year; a name
-    change stales that title's embedding, and this phase exists to be run
-    against a live catalog that the deployed backend is serving.
-
-    The equality is against the whole journal rather than a membership test,
-    because the two defects this is for are both *additions*: an arm that
-    reused the IMDb arm's body pulls basics as well, and one that opened
-    `bulk_load_window()` would drop and rebuild two `titles` indexes under a
-    SHARE lock on a catalog nobody asked it to reindex.  Note what that buys
-    over `"imdb.title.basics" not in journal`: it also fails on
-    `window-open`/`window-close`, which is the second defect and the one no
-    membership test aimed at basics would catch.
-
-    **Both drivers, because only the worker arm can see the `Job.key`.**
-    `usher bootstrap` hands `run_bootstrap` a `BootstrapPhase` directly; the
-    `bootstrap` job handler reads `Job.key` and converts. The parity case above
-    drives only `ALL`, for which `phase.value` is indistinguishable from the
-    literal `"all"` that used to be there -- measured: reverting that site to
-    `BootstrapPhase.ALL.value` leaves the whole unit suite green. This arm is
-    what makes the threading observable, since a handler that ignored the key
-    would run `--phase all` here and journal seven datasets.
-    """
+    """The point of the phase, asserted rather than described."""
     journal = await _journal_of_a_full_bootstrap(
         monkeypatch,
         tmp_path,
@@ -1858,60 +1784,32 @@ async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
         phase=BootstrapPhase.RATINGS,
         over_a_populated_catalog=True,
     )
-    assert journal == ["imdb.title.ratings"]
+    # The refusing transport fails the import, so the dispatch's closing line for it
+    # shares the journal; the datasets touched are everything else.
+    assert [entry for entry in journal if _RESUME not in entry] == ["imdb.title.ratings"]
 
 
 async def test_a_full_run_imports_the_ratings_file_exactly_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """**The forbidden edit, over the only fixture that can see it.**
-
-    `run_bootstrap`'s ratings arm is spelled `is BootstrapPhase.RATINGS` and
-    not `in (BootstrapPhase.RATINGS, BootstrapPhase.ALL)`, because `--phase
-    all` already imports that file inside its IMDb arm -- so the second
-    spelling downloads 8.2 MiB twice and rewrites the same rows twice. That
-    was held by a **comment** until 2026-08-19, when the edit was planted and
-    the whole suite came back 5,479 passed, byte-identical to clean:
-    `_phases_in` collapses the duplicate onto `IMDB`, both window counts are
-    unmoved because the second import lands outside the window, the parity
-    equality holds because both drivers double it identically, and the
-    integration case drives `IMDB` and never `ALL`.
-
-    **The seeded catalog is what gives this case teeth, and it is the whole
-    difference from the parity case above.** Against an *empty* catalog the
-    wrongly-reached arm hits `_ratings`' refusal and imports nothing, so the
-    count is 1 under the defect too -- the fixture repairs the bug on the
-    test's behalf. One title is enough, since the refusal is
-    `count_titles() == 0`.
-
-    **And the seeding is why this drives `run_bootstrap` here rather than
-    calling `_journal_of_a_full_bootstrap`**, over the same two fakes rather
-    than a second set. With `titles` non-empty, `_movielens` no longer refuses
-    at its own guard and reaches `await dataset.revision()`, which it resolves
-    **outside** `import_dataset` -- so it is not covered by that method's
-    `except UsherPortError` and the offline transport ends the run by raising.
-    That happens in the last phase, long after both arms this case is about,
-    so the journal is complete for the claim; the `raises` is stated rather
-    than worked around because a run that ended some other way would satisfy
-    a bare `count(...) == 1` by never having got there at all -- which is what
-    the membership premise on the line above is for.
-    """
+    """The forbidden edit, over the only fixture that can see it."""
     journal: list[str] = []
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    _prerequisites_complete(monkeypatch)
     await catalog.upsert_titles([_A_SEEDED_TITLE])
 
-    with pytest.raises(PortUnavailable):
-        await run_bootstrap(
-            catalog,
-            runs,
-            _nothing,
-            _settings(bulk_data_dir=tmp_path),
-            BootstrapPhase.ALL,
-            report=journal.append,
-            events=NullEventPublisher(),
-        )
+    await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.ALL,
+        report=journal.append,
+        events=NullEventPublisher(),
+    )
 
     assert "imdb.title.ratings" in journal, "the premise: a full run reaches the ratings file"
     assert journal.count("imdb.title.ratings") == 1, journal
@@ -1920,44 +1818,9 @@ async def test_a_full_run_imports_the_ratings_file_exactly_once(
 async def test_the_ratings_phase_refuses_an_empty_catalog_before_downloading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """**The damage lands on a phase other than the one mis-run, which is what
-    makes this the worst outcome available here.**
+    """The damage lands on a phase other than the one mis-run.
 
-    `apply_ratings` is an `UPDATE titles ... WHERE t.imdb_id = s.imdb_id`, so
-    against an empty catalog the phase matches nothing -- and matching nothing
-    is not an error. It would stream the file to EOF, write 0 rows, and
-    checkpoint `imdb.title.ratings` **COMPLETED at the end**. That row is
-    deliberately the same one `--phase imdb` checkpoints against, so the next
-    real bootstrap resumes at EOF and imports no ratings *ever*, on that run
-    and on every later one. Measured end to end against real Postgres with the
-    committed fixtures, before the guard existed:
-
-        after --phase ratings on an empty catalog:
-            status=completed rows_seen=3 rows_written=0 position=4
-        after --phase imdb:
-            status=completed rows_seen=3 rows_written=0 position=4
-        titles: 5      titles carrying imdb_num_votes: 0
-
-    Five titles, zero ratings, and `bootstrap-status` green. `ratings` is the
-    **fourth** phase joining `titles` on `imdb_id` and was the only one without
-    the refusal `_credit_names`, `_aliases` and `_movielens` each carry; the
-    precedent is
-    `tests/unit/test_cli.py::test_the_genome_phase_refuses_an_empty_catalog_before_downloading`
-    and this is worse than the case that one guards, because the phase it
-    sterilises is a different one and it is reachable from
-    `POST /admin/bootstrap/ratings` on the serving box rather than only from a
-    CLI. It was stated as a precondition in a comment -- *"this phase only ever
-    runs against a populated catalog"* -- which is not a thing that runs.
-
-    Three assertions, one per property, following the genome case's shape.
-    **No request of any kind**: the transport fails this test if reached, which
-    pins "before the download" rather than merely "before the write". **No
-    `ImportRun` at all** -- this is the assertion that carries the finding,
-    because a FAILED row would be a lie and a COMPLETED one is precisely the
-    poison above; the absence of a row is what `bootstrap-status` renders as
-    "this phase has not run". **A message naming the reason and the fix**,
-    because PRD 08 requires every operator command to work against an empty
-    database, and "work" means saying why.
+    Which is what makes this the worst outcome available here.
     """
 
     def refuse(request: httpx.Request) -> httpx.Response:
@@ -2007,6 +1870,7 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
         return client
 
     monkeypatch.setattr(usher.composition, "bulk_client", recording)
+    _without_retries(monkeypatch)
     journal: list[str] = []
     settings = _settings(bulk_data_dir=tmp_path)
 
@@ -2040,15 +1904,1292 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
     assert built[1].is_closed
 
 
+#: `run_bootstrap`'s one line per failed dataset, whose last clause is the command.
+_RESUME = "; resume with: usher bootstrap --phase "
+
+
+def _recording_offline_client(requests: list[str]) -> Callable[..., httpx.AsyncClient]:
+    """`_offline_client`, noting the file each refused request asked for."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path.rsplit("/", 1)[-1])
+        raise httpx.ConnectError("the bootstrap dispatch reached the network")
+
+    return lambda *_, **__: httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+def _skip_line(step: str, blockers: str, noun: str, resume: str) -> str:
+    return (
+        f"{step} skipped: {blockers}, and {step} reads what {noun} write"
+        f"{'s' if noun == 'that import' else ''}; resume with: {resume}"
+    )
+
+
+async def test_a_failed_import_skips_every_later_phase_that_reads_what_it_wrote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`--phase all` stops what a failure would poison, and runs everything else.
+
+    A phase joining `titles` over a partial IMDb import checkpoints `completed` and
+    every later run resumes past the titles it missed -- so a failed `imdb` skips
+    `ratings`, `credit-names`, `aliases` and `movielens`, and the crosswalk, whose link
+    also stamps `tmdb_ids`' popularity, waits on both TMDb exports as well. `tmdb-ids`
+    reads nothing another phase writes, so it still runs.
+
+    Every failure and every skip closes the run in dispatch order -- the order to
+    resume them in -- each ending with the commands that continue it.
+    """
+    requests: list[str] = []
+    monkeypatch.setattr(usher.composition, "bulk_client", _recording_offline_client(requests))
+    _without_retries(monkeypatch)
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.ALL,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(one.run.dataset, one.phase) for one in outcome.failed] == [
+        ("imdb.title.basics", BootstrapPhase.IMDB),
+        ("tmdb.ids.movie", BootstrapPhase.TMDB_IDS),
+        ("tmdb.ids.series", BootstrapPhase.TMDB_IDS),
+    ]
+    basics, movie, series = (one.run for one in outcome.failed)
+    assert all(one.status is ImportRunStatus.FAILED for one in (basics, movie, series))
+    assert outcome.skipped == (
+        SkippedStep(BootstrapPhase.RATINGS, (basics,), (BootstrapPhase.IMDB,)),
+        SkippedStep(
+            BootstrapPhase.CREDIT_NAMES,
+            (basics,),
+            (BootstrapPhase.IMDB, BootstrapPhase.CREDIT_NAMES),
+        ),
+        SkippedStep(
+            BootstrapPhase.ALIASES, (basics,), (BootstrapPhase.IMDB, BootstrapPhase.ALIASES)
+        ),
+        SkippedStep(
+            BootstrapPhase.CROSSWALK,
+            (basics, movie, series),
+            (BootstrapPhase.IMDB, BootstrapPhase.TMDB_IDS, BootstrapPhase.CROSSWALK),
+        ),
+        SkippedStep(
+            BootstrapPhase.MOVIELENS,
+            (basics,),
+            (BootstrapPhase.IMDB, BootstrapPhase.MOVIELENS),
+        ),
+    )
+    # A skipped phase asked the network nothing and started no checkpoint.
+    assert requests[0] == "title.basics.tsv.gz"
+    assert {one.split("_ids_", 1)[0] for one in requests[1:]} == {"movie", "tv_series"}, requests
+    assert sorted(run.dataset for run in await runs.list_runs()) == [
+        "imdb.title.basics",
+        "tmdb.ids.movie",
+        "tmdb.ids.series",
+    ]
+
+    imdb, then = "usher bootstrap --phase imdb", ", then usher bootstrap --phase "
+    closing = [line for line in printed if _RESUME in line]
+    assert closing == [
+        f"imdb.title.basics failed at position 0: {basics.error}; resume with: {imdb}",
+        _skip_line("ratings", "imdb.title.basics is failed at position 0", "that import", imdb),
+        _skip_line(
+            "credit-names",
+            "imdb.title.basics is failed at position 0",
+            "that import",
+            f"{imdb}{then}credit-names",
+        ),
+        _skip_line(
+            "aliases",
+            "imdb.title.basics is failed at position 0",
+            "that import",
+            f"{imdb}{then}aliases",
+        ),
+        f"tmdb.ids.movie failed at position 0: {movie.error}"
+        "; resume with: usher bootstrap --phase tmdb-ids",
+        f"tmdb.ids.series failed at position 0: {series.error}"
+        "; resume with: usher bootstrap --phase tmdb-ids",
+        _skip_line(
+            "crosswalk",
+            "imdb.title.basics is failed at position 0, tmdb.ids.movie is failed at "
+            "position 0, tmdb.ids.series is failed at position 0",
+            "those imports",
+            f"{imdb}{then}tmdb-ids{then}crosswalk",
+        ),
+        _skip_line(
+            "movielens",
+            "imdb.title.basics is failed at position 0",
+            "that import",
+            f"{imdb}{then}movielens",
+        ),
+    ]
+    # The closing lines are the report's last, after every phase has spoken.
+    assert printed[-len(closing) :] == closing
+
+
+#: The dataset each catalog-reading phase imports, which is how a case tells that it ran.
+_DATASET_OF = {
+    BootstrapPhase.RATINGS: "imdb.title.ratings",
+    BootstrapPhase.CREDIT_NAMES: "imdb.credit_names",
+    BootstrapPhase.ALIASES: "imdb.title.akas",
+    BootstrapPhase.CROSSWALK: "wikidata.crosswalk",
+    BootstrapPhase.MOVIELENS: "movielens.genome",
+}
+
+
+async def _checkpoint(
+    runs: FakeImportRunRepository, dataset: str, status: ImportRunStatus, position: int
+) -> ImportRun:
+    """An earlier run's checkpoint, whose hold that run gave back as it ended."""
+    started = await runs.start(dataset, "an-earlier-revision")
+    stored = started.evolve(
+        status=status,
+        position=position,
+        error="an earlier run's failure" if status is ImportRunStatus.FAILED else None,
+    )
+    await runs.save(stored)
+    await runs.release(dataset)
+    return stored
+
+
+def _network_is_an_error(*_: object, **__: object) -> httpx.AsyncClient:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"a skipped phase reached the network: {request.url}")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+@pytest.mark.parametrize("status", [ImportRunStatus.FAILED, ImportRunStatus.RUNNING])
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_one_phase_refuses_to_run_over_an_unfinished_imdb_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    step: BootstrapPhase,
+    status: ImportRunStatus,
+) -> None:
+    """The same guard when the failure was an earlier run's, not this one's.
+
+    `--phase crosswalk` after a failed `--phase imdb` would link only the titles that
+    landed; `credit-names` would checkpoint `completed` over them. The catalog is not
+    empty, so the empty-catalog refusal cannot see it. `running` is a killed import or
+    another process mid-load: the same partial catalog.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    basics = await _checkpoint(runs, "imdb.title.basics", status, 500)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await catalog.count_titles() == 1, "the premise: the catalog is not empty"
+    resume = (
+        (BootstrapPhase.IMDB,) if step is BootstrapPhase.RATINGS else (BootstrapPhase.IMDB, step)
+    )
+    assert outcome.failed == ()
+    assert outcome.skipped == (SkippedStep(step, (basics,), resume),)
+    assert printed == [
+        _skip_line(
+            step.value,
+            f"imdb.title.basics is {status.value} at position 500",
+            "that import",
+            ", then ".join(f"usher bootstrap --phase {one.value}" for one in resume),
+        )
+    ]
+    assert await runs.list_runs() == [basics], "nothing else was started"
+
+
+@pytest.mark.parametrize("basics_status", [ImportRunStatus.COMPLETED, None])
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_a_finished_or_absent_imdb_import_blocks_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    step: BootstrapPhase,
+    basics_status: ImportRunStatus | None,
+) -> None:
+    """The case above, one checkpoint state over: the phase runs.
+
+    Absent too: a catalog a source sync filled has no IMDb checkpoint, and nothing in it
+    is partial. Each phase then fails at its own first request -- recorded, not raised,
+    `movielens` included -- which is how this case knows it ran.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    if basics_status is not None:
+        await _checkpoint(runs, "imdb.title.basics", basics_status, 500)
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.skipped == ()
+    assert [(one.run.dataset, one.phase) for one in outcome.failed] == [(_DATASET_OF[step], step)]
+
+
+async def test_the_crosswalk_also_waits_on_the_tmdb_exports_and_nothing_else_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The link stamps `tmdb_ids`' popularity onto each title it links, once.
+
+    A title linked while the export is partial keeps a `NULL` popularity, and every
+    later link passes over it (`WHERE t.tmdb_id IS NULL`). No other phase reads
+    `tmdb_ids`, so the same checkpoint must not stop `credit-names`.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    await _checkpoint(runs, "imdb.title.basics", ImportRunStatus.COMPLETED, 9)
+    series = await _checkpoint(runs, "tmdb.ids.series", ImportRunStatus.FAILED, 3)
+    printed: list[str] = []
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CROSSWALK,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.skipped == (
+        SkippedStep(
+            BootstrapPhase.CROSSWALK,
+            (series,),
+            (BootstrapPhase.TMDB_IDS, BootstrapPhase.CROSSWALK),
+        ),
+    )
+    assert printed == [
+        _skip_line(
+            "crosswalk",
+            "tmdb.ids.series is failed at position 3",
+            "that import",
+            "usher bootstrap --phase tmdb-ids, then usher bootstrap --phase crosswalk",
+        )
+    ]
+
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    names = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CREDIT_NAMES,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+    assert names.skipped == ()
+    assert [one.run.dataset for one in names.failed] == ["imdb.credit_names"]
+
+
+async def test_the_ratings_alias_resumes_as_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`--phase ratings` failing must not tell the operator to run `--phase imdb`.
+
+    That is 214 MiB and a rewrite of every name and year -- the cost the alias exists
+    to avoid -- for a dataset `ratings` resumes on its own.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        FakeImportRunRepository(),
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.RATINGS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(one.run.dataset, one.phase) for one in outcome.failed] == [
+        ("imdb.title.ratings", BootstrapPhase.RATINGS)
+    ]
+    assert printed[-1].endswith(f"{_RESUME}ratings")
+
+
+@pytest.mark.parametrize("phase", [BootstrapPhase.IMDB, BootstrapPhase.ALL])
+async def test_a_failed_ratings_file_resumes_as_ratings_whichever_phase_imported_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, phase: BootstrapPhase
+) -> None:
+    """Under `--phase imdb` or `all` too, once the titles themselves are complete.
+
+    Settled as `imdb`, its resume line said `--phase imdb`: 214 MiB and a rewrite of
+    every name and year, for an 8 MiB file the alias re-imports alone.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    _prerequisites_complete(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        phase,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    basics = await runs.get("imdb.title.basics")
+    assert basics is not None and basics.status is ImportRunStatus.COMPLETED, "the premise"
+    ratings = [one for one in outcome.failed if one.run.dataset == "imdb.title.ratings"]
+    assert [one.phase for one in ratings] == [BootstrapPhase.RATINGS]
+    assert [line for line in printed if line.startswith("imdb.title.ratings failed")] == [
+        f"imdb.title.ratings failed at position 0: {ratings[0].run.error}{_RESUME}ratings"
+    ]
+
+
+async def test_a_revision_blip_over_a_completed_import_fails_the_run_and_blocks_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """IMDb's `HEAD` unreachable on a re-run of `--phase imdb`, over imports that finished.
+
+    Nothing was written, so both checkpoints stay `COMPLETED` with the error beside
+    them, and the command still fails -- it did not refresh what it was asked to. A
+    later `--phase credit-names` then runs rather than being skipped; downgraded to
+    `FAILED`, it was skipped until 214 MiB had been imported again.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    basics = await _checkpoint(runs, "imdb.title.basics", ImportRunStatus.COMPLETED, 12_345)
+    ratings = await _checkpoint(runs, "imdb.title.ratings", ImportRunStatus.COMPLETED, 99)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.IMDB,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    stood: list[ImportRun] = []
+    for one in (basics, ratings):
+        stored = await runs.get(one.dataset)
+        assert stored is not None
+        stood.append(stored)
+    assert [(one.status, one.position) for one in stood] == [
+        (ImportRunStatus.COMPLETED, 12_345),
+        (ImportRunStatus.COMPLETED, 99),
+    ]
+    assert [one.error for one in stood] == [
+        f"HEAD https://datasets.imdbws.com/{name} failed: ConnectError "
+        "(gave up after 1 attempt over 0s)"
+        for name in ("title.basics.tsv.gz", "title.ratings.tsv.gz")
+    ]
+    assert outcome.failed == (
+        FailedImport(BootstrapPhase.IMDB, stood[0]),
+        FailedImport(BootstrapPhase.RATINGS, stood[1]),
+    )
+    assert outcome.skipped == ()
+    assert printed == [
+        f"{one.dataset} failed, and its completed import at position {one.position} "
+        f"stands: {one.error}{_RESUME}{phase}"
+        for one, phase in zip(stood, ("imdb", "ratings"), strict=True)
+    ]
+
+    later = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CREDIT_NAMES,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+    assert later.skipped == ()
+    assert [one.run.dataset for one in later.failed] == ["imdb.credit_names"]
+
+
+@pytest.mark.parametrize(
+    ("step", "resume"),
+    [
+        (BootstrapPhase.RATINGS, "usher bootstrap --phase imdb"),
+        (
+            BootstrapPhase.CREDIT_NAMES,
+            "usher bootstrap --phase imdb, then usher bootstrap --phase credit-names",
+        ),
+        (
+            BootstrapPhase.ALIASES,
+            "usher bootstrap --phase imdb, then usher bootstrap --phase aliases",
+        ),
+        (
+            BootstrapPhase.MOVIELENS,
+            "usher bootstrap --phase imdb, then usher bootstrap --phase movielens",
+        ),
+    ],
+)
+async def test_a_phase_refusing_an_empty_catalog_leaves_the_run_unfinished(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, step: BootstrapPhase, resume: str
+) -> None:
+    """It imported nothing, so the command did not do what it was asked.
+
+    On a fresh database each of these printed its refusal and exited 0, and a cron
+    reading the exit status saw a bootstrap that had worked. The refusal now closes the
+    run like a skip, with the commands that fill the catalog and then run the phase.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert (outcome.failed, outcome.skipped) == ((), ())
+    assert [one.phase for one in outcome.refused] == [step]
+    assert not outcome.succeeded
+    assert printed[-1] == (
+        f"{step.value} refused: titles is empty, and {step.value} joins against it"
+        f"; resume with: {resume}"
+    )
+    assert await runs.list_runs() == [], "a refusal starts no checkpoint"
+
+
+async def test_an_import_another_process_holds_is_left_to_it_whatever_its_row_says(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The holder's row carries its own error, and this run neither owns nor failed it.
+
+    Read as this run's failure, the concede printed the holder's error as its own and
+    said the dataset failed. It is unfinished all the same -- this run did not import
+    it -- so the command exits 1 and says to resume once the holder ends.
+    """
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    holder = FakeImportRunRepository(shares=runs)
+    started = await holder.start("tmdb.ids.movie", "fixture-revision")
+    held = started.evolve(error="the holder's own retry, still going")
+    await holder.save(held)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _prerequisites_complete(monkeypatch)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.TMDB_IDS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await runs.get("tmdb.ids.movie") == held, "the holder's row, untouched"
+    series = await runs.get(f"tmdb.ids.{TitleKind.SERIES.value}")
+    assert series is not None and series.status is ImportRunStatus.COMPLETED
+    assert outcome.unfinished == (ConcededImport(BootstrapPhase.TMDB_IDS, held),)
+    assert printed == [_left_alone_line("tmdb.ids.movie", BootstrapPhase.TMDB_IDS)]
+
+
+def _left_alone_line(dataset: str, phase: BootstrapPhase) -> str:
+    return (
+        f"{dataset} was left alone: another process is importing it or running a phase "
+        f"that reads it; once that process ends, resume with: usher bootstrap --phase "
+        f"{phase.value}"
+    )
+
+
+def _held_skip_line(step: BootstrapPhase) -> str:
+    return (
+        f"{step.value} skipped: imdb.title.basics is being imported by another process, "
+        f"and {step.value} reads what that import writes; once that process ends, resume "
+        f"with: usher bootstrap --phase {step.value}"
+    )
+
+
+@pytest.mark.parametrize("row", [ImportRunStatus.COMPLETED, None], ids=["refresh", "first"])
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_a_dataset_another_process_is_importing_blocks_every_phase_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    step: BootstrapPhase,
+    row: ImportRunStatus | None,
+) -> None:
+    """Whatever its row says: a refresh reads `completed` until its first batch lands.
+
+    Read by status alone, `--phase credit-names` joined `titles` while a worker's `imdb`
+    refresh was upserting them. The hold is what says an import is live, so a held
+    prerequisite is unfinished -- and a first import not yet committed has no row at all.
+    Released, it blocks nothing again.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    holder = FakeImportRunRepository(shares=runs)
+    if row is not None:
+        await _checkpoint(holder, "imdb.title.basics", row, 9)
+    await holder.hold("imdb.title.basics")
+    before = await runs.list_runs()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.skipped == (SkippedStep(step, (), (step,), ("imdb.title.basics",)),)
+    assert outcome.unfinished == outcome.skipped
+    assert printed == [_held_skip_line(step)]
+    assert await runs.list_runs() == before, "nothing was started"
+
+    await holder.release("imdb.title.basics")
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    after = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+    assert after.skipped == ()
+    assert [one.run.dataset for one in after.failed] == [_DATASET_OF[step]]
+
+
+async def test_a_failure_meeting_a_dataset_another_process_holds_writes_nothing_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """This run's `HEAD` fails while another process is importing the same dataset.
+
+    The failure was written onto the holder's row, and the line told the operator to
+    resume a dataset that was being imported. Only a holder writes a row: this run is
+    refused the hold, writes nothing, and its line says another process has it.
+    """
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    holder = FakeImportRunRepository(shares=runs)
+    live = await _checkpoint(holder, "imdb.title.basics", ImportRunStatus.RUNNING, 40)
+    await holder.hold("imdb.title.basics")
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.IMDB,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await runs.get("imdb.title.basics") == live, "the holder's row, untouched"
+    assert outcome.unfinished == (
+        ConcededImport(BootstrapPhase.IMDB, live),
+        SkippedStep(BootstrapPhase.RATINGS, (), (BootstrapPhase.RATINGS,), ("imdb.title.basics",)),
+    )
+    assert printed == [
+        _left_alone_line("imdb.title.basics", BootstrapPhase.IMDB),
+        _held_skip_line(BootstrapPhase.RATINGS),
+    ]
+
+
+#: Where each catalog-reading phase builds its dataset, for a case to replace it.
+_BUILT_BY = {
+    BootstrapPhase.RATINGS: "IMDbRatingDataset",
+    BootstrapPhase.CREDIT_NAMES: "IMDbCreditNamesDataset",
+    BootstrapPhase.ALIASES: "IMDbAkaDataset",
+    BootstrapPhase.CROSSWALK: "WikidataCrosswalkDataset",
+    BootstrapPhase.MOVIELENS: "MovieLensGenomeDataset",
+}
+
+
+async def _nothing_else() -> None:
+    return None
+
+
+class _Probe(BulkDataset[Any]):
+    """A catalog-reading phase's dataset, offline, running `during` as its fetch begins.
+
+    It then completes -- after one empty batch at position 1 when `batch` is set -- and
+    names the vocabulary a `movielens` run loads.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        during: Callable[[], Awaitable[None]] = _nothing_else,
+        *,
+        batch: bool = False,
+    ) -> None:
+        self._name, self._during, self._batch = name, during, batch
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def attribution(self) -> str:
+        return "synthetic, never redistributed"
+
+    async def revision(self) -> str:
+        return "R2"
+
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[Any]]:
+        return self._fetch()
+
+    async def _fetch(self) -> AsyncIterator[BulkBatch[Any]]:
+        await self._during()
+        if self._batch:
+            yield BulkBatch(rows=(), cursor=BulkCursor(revision="R2", position=1, rows_seen=0))
+
+    async def tag_vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
+        return _vocabulary_of(revision)
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _probing(monkeypatch: pytest.MonkeyPatch, step: BootstrapPhase, probe: _Probe) -> None:
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+    monkeypatch.setattr(usher.composition, _BUILT_BY[step], lambda *_, **__: probe)
+
+
+def _reads_of(step: BootstrapPhase) -> list[str]:
+    return [dataset for prerequisite in _READS[step] for dataset in _WRITTEN_BY[prerequisite]]
+
+
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_a_phase_holds_what_it_reads_until_it_ends_so_no_import_of_it_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, step: BootstrapPhase
+) -> None:
+    """Checked once as the phase began, an import started a moment later went unseen.
+
+    The phase then joined `titles` while that import rewrote them. Each dataset the phase
+    reads is now held shared from before it is checked until the phase ends: an import
+    of it tried from another process mid-phase is refused, and taken once the phase ends.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    rival = FakeImportRunRepository(shares=runs)
+    read = _reads_of(step)
+    refused: list[str] = []
+    live: list[bool] = []
+
+    async def import_elsewhere() -> None:
+        live.append(not await rival.hold_for_reading(_DATASET_OF[step]))
+        await rival.release_reads()
+        for dataset in read:
+            try:
+                await rival.hold(dataset)
+            except RepositoryConflict:
+                refused.append(dataset)
+            else:
+                await rival.release(dataset)
+
+    _probing(monkeypatch, step, _Probe(_DATASET_OF[step], import_elsewhere))
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.succeeded, outcome
+    assert live == [True], "the premise: the attempt was made inside the phase's own import"
+    assert refused == read
+    for dataset in read:
+        await rival.hold(dataset)
+
+
+@pytest.mark.parametrize("ending", ["completed", "failed", "skipped", "raised", "cancelled"])
+async def test_every_way_a_phase_ends_gives_back_what_it_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, ending: str
+) -> None:
+    """A read left behind refuses every later import of the dataset, in any process.
+
+    The Postgres arm keeps it on a checked-out connection, so it outlives the run for as
+    long as the connection does.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    started = asyncio.Event()
+    during: list[frozenset[str]] = []
+
+    async def fetch() -> None:
+        during.append(runs.reading)
+        if ending == "raised":
+            raise RuntimeError("a bug in a writer")
+        if ending == "cancelled":
+            started.set()
+            await asyncio.Event().wait()
+
+    if ending == "failed":
+        monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+        _without_retries(monkeypatch)
+    else:
+        _probing(monkeypatch, BootstrapPhase.CREDIT_NAMES, _Probe("imdb.credit_names", fetch))
+    if ending == "skipped":
+        await _checkpoint(runs, "imdb.title.basics", ImportRunStatus.FAILED, 7)
+    task = asyncio.create_task(
+        run_bootstrap(
+            catalog,
+            runs,
+            _nothing,
+            _settings(bulk_data_dir=tmp_path),
+            BootstrapPhase.CREDIT_NAMES,
+            report=lambda _: None,
+            events=NullEventPublisher(),
+        )
+    )
+
+    if ending == "cancelled":
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+    if ending in ("raised", "cancelled"):
+        with pytest.raises(RuntimeError if ending == "raised" else asyncio.CancelledError):
+            await task
+    else:
+        outcome = await task
+        assert [type(one).__name__ for one in outcome.unfinished] == {
+            "completed": [],
+            "failed": ["FailedImport"],
+            "skipped": ["SkippedStep"],
+        }[ending], "the premise: the phase ended the way this case is about"
+
+    if ending not in ("failed", "skipped"):
+        assert during == [frozenset({"imdb.title.basics"})], "the premise: it was read"
+    assert runs.reading == frozenset()
+    await FakeImportRunRepository(shares=runs).hold("imdb.title.basics")
+
+
+async def test_under_phase_all_no_import_meets_a_read_of_the_runs_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A phase's reads are its own and end with it, so no later step of the run meets them.
+
+    Taken for the whole run, they refuse the run's own imports: `imdb` concedes to the
+    read `ratings` takes beside it, and `tmdb-ids` to the crosswalk's.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    _prerequisites_complete(monkeypatch)
+    for step, dataset in _DATASET_OF.items():
+        _probing(monkeypatch, step, _Probe(dataset))
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.ALL,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.unfinished == ()
+    assert sorted((run.dataset, run.status) for run in await runs.list_runs()) == sorted(
+        (dataset, ImportRunStatus.COMPLETED)
+        for dataset in (
+            "imdb.title.basics",
+            "tmdb.ids.movie",
+            "tmdb.ids.series",
+            *_DATASET_OF.values(),
+        )
+    )
+    assert runs.reading == frozenset()
+
+
+async def test_an_import_meeting_a_phase_that_reads_it_elsewhere_is_left_alone_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The reader is joining against that dataset, so importing it now is the race.
+
+    It is not being imported, so the line must not say it is.
+    """
+    runs = FakeImportRunRepository()
+    reader = FakeImportRunRepository(shares=runs)
+    assert await reader.hold_for_reading("tmdb.ids.movie") is True
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _prerequisites_complete(monkeypatch)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.TMDB_IDS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(type(one), one.run.dataset) for one in outcome.conceded] == [
+        (ConcededImport, "tmdb.ids.movie")
+    ]
+    assert outcome.unfinished == outcome.conceded
+    assert await runs.get("tmdb.ids.movie") is None, "nothing was written"
+    assert printed == [_left_alone_line("tmdb.ids.movie", BootstrapPhase.TMDB_IDS)]
+
+
+async def test_a_phase_whose_read_is_lost_mid_import_stops_before_its_next_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The connection its reads live on ended, and the phase went on joining regardless.
+
+    Against titles any process could by then be importing. The beat before a write
+    confirms the reads beside the hold, so the batch is never written.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+
+    async def lose() -> None:
+        runs.lose_reads()
+
+    _probing(
+        monkeypatch,
+        BootstrapPhase.CREDIT_NAMES,
+        _Probe("imdb.credit_names", lose, batch=True),
+    )
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CREDIT_NAMES,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+
+    stored = await runs.get("imdb.credit_names")
+    assert stored is not None
+    assert outcome.failed == (FailedImport(BootstrapPhase.CREDIT_NAMES, stored),)
+    assert (stored.status, stored.position, stored.error) == (
+        ImportRunStatus.FAILED,
+        0,
+        "lost the shared hold on imdb.title.basics, which this reads",
+    )
+    assert runs.reading == frozenset()
+
+
+class _Genome(BulkDataset[Any]):
+    """`movielens.genome` at `R2`, offline; the fetch and the vocabulary are scripted.
+
+    `fetch` fails the first fetch with that error, or with none the drain yields nothing
+    and completes. `vocabulary` likewise fails `tag_vocabulary`. `watch` asks, while the
+    vocabulary loads, to read the dataset: refused, somebody holds it.
+    """
+
+    def __init__(
+        self,
+        *,
+        fetch: UsherPortError | None = None,
+        vocabulary: UsherPortError | None = None,
+        watch: FakeImportRunRepository | None = None,
+    ) -> None:
+        self._fetch, self._vocabulary, self._watch = fetch, vocabulary, watch
+        self.asked: list[str] = []
+        self.held_while_loading: list[bool] = []
+
+    @property
+    def name(self) -> str:
+        return "movielens.genome"
+
+    @property
+    def attribution(self) -> str:
+        return "synthetic, never redistributed"
+
+    async def revision(self) -> str:
+        return "R2"
+
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[Any]]:
+        return self._none()
+
+    async def _none(self) -> AsyncIterator[BulkBatch[Any]]:
+        if self._fetch is not None:
+            raise self._fetch
+        for _ in ():
+            yield BulkBatch(rows=(), cursor=BulkCursor(revision="R2", position=0, rows_seen=0))
+
+    async def tag_vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
+        self.asked.append(revision)
+        if self._watch is not None:
+            self.held_while_loading.append(not await self._watch.hold_for_reading(self.name))
+            await self._watch.release_reads()
+        if self._vocabulary is not None:
+            raise self._vocabulary
+        return _vocabulary_of(revision)
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _vocabulary_of(revision: str) -> tuple[GenomeTag, ...]:
+    return tuple(
+        GenomeTag(tag_id=n, tag=f"{revision} tag {n}") for n in range(1, GENOME_TAG_COUNT + 1)
+    )
+
+
+async def _genome_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    dataset: _Genome,
+    catalog: FakeBulkCatalogRepository,
+    runs: FakeImportRunRepository,
+    printed: list[str],
+) -> BootstrapOutcome:
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    monkeypatch.setattr(usher.composition, "MovieLensGenomeDataset", lambda *_, **__: dataset)
+    _without_retries(monkeypatch)
+    return await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.MOVIELENS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+
+async def _a_genome_at_r1(runs: FakeImportRunRepository) -> FakeBulkCatalogRepository:
+    """A catalog whose vectors and vocabulary are `R1`'s, and the checkpoint that says so."""
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    await catalog.replace_genome_tags(_vocabulary_of("R1"), revision="R1")
+    await runs.save(
+        ImportRun(
+            dataset="movielens.genome",
+            revision="R1",
+            status=ImportRunStatus.COMPLETED,
+            position=2,
+        )
+    )
+    return catalog
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PortDataMalformed("a malformed run in R2's scores"),
+        PortUnavailable("GET ml-latest.zip failed: ConnectTimeout"),
+    ],
+    ids=["malformed", "download-never-lands"],
+)
+async def test_a_movielens_refresh_that_landed_no_batch_keeps_the_vocabulary_it_had(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, error: UsherPortError
+) -> None:
+    """The refresh stands `completed` at `R1`, and so must `R1`'s vocabulary.
+
+    Read off the returned status, the phase loaded `R2`'s vocabulary over `R1`'s vectors
+    and the verdict read `mismatched`; with the download down, loading it downloaded the
+    archive again, outside the hold, and its second failure raised out of the run.
+    """
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    dataset = _Genome(fetch=error, vocabulary=error)
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    stored = await runs.get("movielens.genome")
+    assert stored is not None
+    assert (stored.status, stored.revision) == (ImportRunStatus.COMPLETED, "R1"), "the premise"
+    assert [one.run for one in outcome.failed] == [stored]
+    assert dataset.asked == [], "a vocabulary was loaded for a run that did not complete"
+    assert {revision for _, _, revision in catalog.genome_tags()} == {"R1"}
+
+
+async def test_a_movielens_import_another_process_holds_loads_no_vocabulary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The holder's row reads `completed` at the very revision this run resolved.
+
+    So the returned status could not tell a concede from a completion, and this run
+    loaded a vocabulary beside the holder's own writes.
+    """
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    holder = FakeImportRunRepository(shares=runs)
+    stored = await runs.get("movielens.genome")
+    assert stored is not None
+    held = stored.evolve(revision="R2")
+    await holder.save(held)
+    await holder.hold("movielens.genome")
+    dataset = _Genome()
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    assert outcome.unfinished == (ConcededImport(BootstrapPhase.MOVIELENS, held),)
+    assert dataset.asked == []
+    assert {revision for _, _, revision in catalog.genome_tags()} == {"R1"}
+
+
+async def test_the_vocabulary_is_loaded_under_the_hold_by_the_run_that_completed_the_vectors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Loaded after the hold was given back, it raced whichever process took it next."""
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    dataset = _Genome(watch=FakeImportRunRepository(shares=runs))
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    assert outcome.succeeded, outcome
+    assert dataset.asked == ["R2"]
+    assert dataset.held_while_loading == [True]
+    assert {revision for _, _, revision in catalog.genome_tags()} == {"R2"}
+
+
+async def test_a_vocabulary_that_fails_after_the_vectors_completed_is_recorded_not_raised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Every other failure of the phase is recorded; this one raised out of the whole run."""
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    dataset = _Genome(vocabulary=PortDataMalformed("genome-tags.csv names 1127 tags"))
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    stored = await runs.get("movielens.genome")
+    assert stored is not None
+    assert (stored.status, stored.revision, stored.error) == (
+        ImportRunStatus.COMPLETED,
+        "R2",
+        "genome-tags.csv names 1127 tags",
+    )
+    assert outcome.failed == (FailedImport(BootstrapPhase.MOVIELENS, stored),)
+    assert printed[-1] == (
+        "movielens.genome failed, and its completed import at position 0 stands: "
+        "genome-tags.csv names 1127 tags; resume with: usher bootstrap --phase movielens"
+    )
+
+
+class _WindowFailsToClose(FakeBulkCatalogRepository):
+    """A load window whose index rebuild raises on the way out."""
+
+    def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+        return self._failing()
+
+    @asynccontextmanager
+    async def _failing(self) -> AsyncIterator[None]:
+        yield
+        raise RuntimeError("the index rebuild failed")
+
+
+async def test_failures_and_skips_are_still_reported_when_the_run_then_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A raise after a failure must not swallow the lines saying what to resume.
+
+    The window closes after both IMDb passes, so a rebuild that raises there does so
+    after `imdb.title.basics` has failed and `ratings` has been skipped.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    printed: list[str] = []
+
+    with pytest.raises(RuntimeError, match="the index rebuild failed"):
+        await run_bootstrap(
+            _WindowFailsToClose(),
+            FakeImportRunRepository(),
+            _nothing,
+            _settings(bulk_data_dir=tmp_path),
+            BootstrapPhase.IMDB,
+            report=printed.append,
+            events=NullEventPublisher(),
+        )
+
+    assert [line.split(" ", 1)[0] for line in printed] == ["imdb.title.basics", "ratings"]
+    assert all(_RESUME in line for line in printed), printed
+
+
+async def test_a_retry_inside_the_dispatch_reaches_the_report_sink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`run_bootstrap` hands its own sink to the service, so a retry prints where the run does.
+
+    WDQS answers the first query with its query-timeout 504 and every later one with
+    an empty page: one retry, then a completed crosswalk and nothing returned.
+    """
+    answered: list[int] = []
+
+    def wdqs(request: httpx.Request) -> httpx.Response:
+        answered.append(len(answered))
+        if len(answered) == 1:
+            return httpx.Response(504, text="upstream request timeout")
+        return httpx.Response(200, json={"results": {"bindings": []}})
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(wdqs)),
+    )
+    monkeypatch.setattr(
+        usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(first_delay=0.0, max_delay=0.0)
+    )
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CROSSWALK,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert (outcome.failed, outcome.skipped) == ((), ())
+    stored = await runs.get("wikidata.crosswalk")
+    assert stored is not None and stored.status is ImportRunStatus.COMPLETED
+    assert printed == [
+        "wikidata.crosswalk: attempt 1 of 5 failed at position 0: "
+        "WDQS returned HTTP 504 for P4947 page 0; retrying in 0s"
+    ]
+    assert len(answered) == 4, "the premise: one refused query, then one per property"
+
+
+async def test_the_worker_logs_a_retry_as_a_warning_like_every_other_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A retry is a WARNING whichever root drove the phase.
+
+    `BootstrapService` logs one at WARNING when handed no sink, and the worker handed it
+    the INFO sink its phase reports go to -- so the same notice was a warning in one
+    process and routine chatter in another. Read at DEBUG, so that a notice logged at
+    both levels, or moved below WARNING, cannot pass for this.
+    """
+    answered: list[int] = []
+
+    def wdqs(request: httpx.Request) -> httpx.Response:
+        answered.append(len(answered))
+        if len(answered) == 1:
+            return httpx.Response(504, text="upstream request timeout")
+        return httpx.Response(200, json={"results": {"bindings": []}})
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(wdqs)),
+    )
+    monkeypatch.setattr(
+        usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(first_delay=0.0, max_delay=0.0)
+    )
+    records: list[tuple[str, str]] = []
+    handle = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])),
+        level="DEBUG",
+        filter="usher",
+    )
+    try:
+        queue = FakeJobQueue()
+        pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue)
+        worker = build_worker(
+            _work_for(
+                dataclasses.replace(
+                    pipeline,
+                    bulk=FakeBulkCatalogRepository(),
+                    import_runs=FakeImportRunRepository(),
+                )
+            ),
+            _settings(bulk_data_dir=tmp_path),
+            provider=None,
+            embedder=None,
+            client=None,
+            registry=_no_sources(),
+            user_id=uuid.uuid4(),
+        )
+        await queue.enqueue(
+            [
+                JobRequest(
+                    kind=JobKind.BOOTSTRAP,
+                    key=BootstrapPhase.CROSSWALK.value,
+                    priority=JobPriority.DEMAND,
+                )
+            ]
+        )
+        assert await worker.run_once() == 1
+    finally:
+        logger.remove(handle)
+
+    retry = (
+        "wikidata.crosswalk: attempt 1 of 5 failed at position 0: "
+        "WDQS returned HTTP 504 for P4947 page 0; retrying in 0s"
+    )
+    assert len(answered) == 4, "the premise: one refused query, then one per property"
+    assert [level for level, message in records if message == retry] == ["WARNING"]
+
+
 async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`run_bootstrap` takes a report sink because the two roots want the
-    same sentences in different places, and this is the half a default
-    argument would have got wrong.
+    """The two roots want the same sentences in different places, so the sink is passed.
 
+    This is the half a default argument would have got wrong.
     `usher bootstrap` prints; a worker inside the server process must not,
     because its stdout is a log stream and a bare line in it has no level, no
     timestamp and no trace id. The refusal sentence is the one that always
@@ -2096,33 +3237,9 @@ async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
 async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers_buffer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The one registration in `build_worker` that is handed `pipeline.events`
-    rather than `worker.events`, pinned from **both** sides.
+    """The one registration handed `pipeline.events` rather than `worker.events`.
 
-    G2 measured that swapping those two objects at a registration site is
-    invisible to every unit case of `JobWorker` -- the handler runs, the job
-    completes, the frames arrive, and only *when* they arrive differs. That
-    blind spot is why the enrich registration has a composition-level case,
-    and it is exactly as wide here with the polarity inverted: this producer
-    must **not** be deferred.
-
-    `DeferredEventPublisher`'s own docstring sizes its buffer for *"a handful
-    of events at most"*, and a bootstrap raises one per committed batch -- 26
-    for `--phase imdb`'s title pass alone at the shipped 50,000 batch size. So
-    a deferred bootstrap delivers its whole progress bar as a single jump
-    after the run it was describing has finished, which is the `0% to 100%`
-    failure `ReconcileService._publish_progress` already names, and
-    `discard()` on a failing job would throw away frames naming batches that
-    really did commit.
-
-    Both assertions are needed and neither implies the other: `is` the bus
-    says the right object was passed, and the `DeferredEventPublisher` check is
-    what fails if a later reader "fixes" this registration to match the four
-    below it. The second used to be spelled `is not worker.events`; since M9's
-    W1 the buffer belongs to the *scope* rather than to the worker, so there is
-    no such attribute to compare against and the type is what carries the
-    claim -- the buffer is the only `EventPublisher` in `src/` a handler can be
-    handed that is not a bus.
+    Pinned from **both** sides.
     """
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
     seen: list[EventPublisher] = []
@@ -2162,33 +3279,26 @@ async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers
 
 
 class _Recorder(NullEventPublisher):
-    """Distinguishable from every other publisher by identity, which is all
-    the case above needs -- `NullEventPublisher()` instances compare equal to
-    nothing but themselves, and an assertion spelled against the *class* would
-    pass against the scope buffer's inner publisher as readily as against the
-    bus itself."""
+    """Distinguishable from every other publisher by identity, which is all that is needed.
+
+    `NullEventPublisher()` instances compare equal to nothing but themselves, and an
+    assertion spelled against the *class* would pass against the scope buffer's inner
+    publisher as readily as against the bus itself.
+    """
 
 
 def test_every_configuration_registers_exactly_the_kinds_it_claims() -> None:
-    """`worker_kinds` and `_worker_handlers` are the one pair of lists in
-    `src/` that have to agree, and **both failure directions are quiet.**
+    """`worker_kinds` and `_worker_handlers` must agree, and both failures are quiet.
 
-    `JobWorker` claims `list(self._concurrency)`, whose keys come from
-    `worker_kinds`; the callables come from `_worker_handlers`. They cannot be
-    one expression, because the handler map needs a `Pipeline` -- i.e. a
-    session -- and the claimable kinds have to be known before any session is
-    opened. So:
-
-    - a kind in `worker_kinds` with no handler is a `KeyError` **inside a
-      claimed job**, which parks nothing and crashes the worker; and
-    - a handler with no entry in `worker_kinds` is work nothing ever claims,
-      which is M4's *"a job kind whose handler is a stub is a queue that grows
-      forever"* arriving through the registration instead.
-
-    Neither is visible from the outside, which is why this walks all **eight**
-    provider/embedder/client configurations rather than the two a case would
-    naturally reach for: three independent guards make eight states, and the
-    interesting ones are the mixed builds nothing else constructs.
+    `JobWorker` claims `list(self._concurrency)`, whose keys come from `worker_kinds`;
+    the callables come from `_worker_handlers`. They cannot be one expression, because
+    the handler map needs a `Pipeline` -- i.e. a session -- and the claimable kinds have
+    to be known before any session is opened. So a kind in `worker_kinds` with no
+    handler is a `KeyError` inside a claimed job, which parks nothing and crashes the
+    worker, and a handler with no entry in `worker_kinds` is work nothing ever claims.
+    Neither is visible from the outside, which is why this walks all eight
+    provider/embedder/client configurations: three independent guards make eight states,
+    and the interesting ones are the mixed builds nothing else constructs.
     """
     checked = 0
     for provider in (None, FakeMetadataProvider()):
@@ -2219,7 +3329,7 @@ def test_every_configuration_registers_exactly_the_kinds_it_claims() -> None:
 def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None:
     """The third list in the same rule, one layer down.
 
-    `worker_concurrency` resolves `KIND_CONCURRENCY` against the deployment's
+    `worker_concurrency` resolves `KIND_CONCURRENCY` against the deployment's own
     global, and a kind missing from it would be a `KeyError` at *build* time
     rather than inside a job -- loud, but only for the configuration that
     registers it, which for `curate` is the one nobody runs by default.
@@ -2241,4 +3351,345 @@ def test_the_concurrency_table_covers_exactly_the_kinds_a_build_claims() -> None
     pinched = worker_concurrency(_settings(job_concurrency=2), everything)
     assert max(pinched.values()) == 2, (
         f"a per-kind constant outran the configured global: {pinched}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The outbound gate's owner
+
+
+_GATED = Source(
+    id=new_id(),
+    kind=SourceKind.EMBY,
+    name="Living Room Emby",
+    base_url="https://emby.invalid",
+    credentials_ref="ref-1",
+    device_id=str(new_id()),
+)
+_SECOND_SERVER = Source(
+    id=new_id(),
+    kind=SourceKind.EMBY,
+    name="Bedroom Emby",
+    base_url="https://bedroom.invalid",
+    credentials_ref="ref-2",
+    device_id=str(new_id()),
+)
+_GATE_CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
+
+
+def _emby_gate(adapter: SourceAdapter) -> object:
+    assert isinstance(adapter, EmbyAdapter), "the premise: the factory built an Emby adapter"
+    return adapter._session._limiter
+
+
+#: Where each `SourceKind`'s adapter keeps the gate it was handed.
+_GATE_READERS: dict[SourceKind, Callable[[SourceAdapter], object]] = {
+    SourceKind.EMBY: _emby_gate,
+}
+
+
+def _gate_of(adapter: SourceAdapter, kind: SourceKind = SourceKind.EMBY) -> object:
+    """The `SourceGate` one adapter paces its outbound calls through.
+
+    Reached through two private attributes because there is no public
+    accessor and inventing one purely so a test could read it would be a
+    wider API for a narrower reason -- the argument
+    `test_the_deployment_tuning_reaches_the_adapter` already makes one
+    module over. Returned as `object` because every assertion about it here
+    is an **identity** assertion.
+    """
+    return _GATE_READERS[kind](adapter)
+
+
+def _source_of(kind: SourceKind, name: str, ref: str) -> Source:
+    return Source(
+        id=new_id(),
+        kind=kind,
+        name=name,
+        base_url="https://emby.invalid",
+        credentials_ref=ref,
+        device_id=str(new_id()),
+    )
+
+
+def test_every_source_kind_has_a_gate_reader() -> None:
+    """The premise the parametrisation below rests on.
+
+    Asserted rather than left to `list(SourceKind)` quietly covering one member.
+    A `SourceKind` with no row in `_GATE_READERS` is a kind whose adapter
+    nobody has checked shares a gate -- and since `SourceKind` is the seam
+    `factory.py` says a Jellyfin adapter arrives at, that is precisely the
+    moment the check is wanted.
+    """
+    assert set(_GATE_READERS) == set(SourceKind), (
+        "a `SourceKind` member has no gate reader, so the parametrised case below silently "
+        f"stopped covering it: {sorted(k.value for k in set(SourceKind) - set(_GATE_READERS))}"
+    )
+
+
+def _kind_id(kind: object) -> str:
+    return kind.value if isinstance(kind, SourceKind) else repr(kind)
+
+
+@pytest.mark.parametrize("kind", list(SourceKind), ids=_kind_id)
+async def test_two_adapters_for_one_source_share_one_gate_and_two_sources_do_not(
+    kind: SourceKind,
+) -> None:
+    """The gate is a process resource; the obvious placement is per request."""
+    gated = _source_of(kind, "Living Room", "ref-1")
+    second_server = _source_of(kind, "Bedroom", "ref-2")
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        work = unit_of_work(build_session_factory(engine), _settings(), events=NullEventPublisher())
+        async with work() as first:
+            one = first.adapters.build(gated, _GATE_CREDENTIALS)
+        async with work() as second:
+            two = second.adapters.build(gated, _GATE_CREDENTIALS)
+            elsewhere = second.adapters.build(second_server, _GATE_CREDENTIALS)
+        try:
+            assert one is not two, (
+                "the premise: two pipelines really did build two adapters -- "
+                "`SourceAdapterFactory.build`'s contract is that the caller owns each one"
+            )
+            gate_a = _gate_of(one, kind)
+            gate_b = _gate_of(two, kind)
+            gate_c = _gate_of(elsewhere, kind)
+
+            assert gate_a is gate_b, (
+                "two pipelines from one composition root gave one source two gates, "
+                "so the configured rate is multiplied by however many pipelines are open"
+            )
+            assert gate_a is not gate_c, (
+                "two sources sharing one gate is a limiter that halves itself per source"
+            )
+        finally:
+            await one.aclose()
+            await two.aclose()
+            await elsewhere.aclose()
+    finally:
+        await engine.dispose()
+
+
+async def test_every_composition_root_that_dials_a_source_reaches_one_gate_per_source(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The four roots, driven rather than argued."""
+    settings = _settings(
+        push_enabled=False,
+        worker_enabled=False,
+        image_cache_dir=tmp_path / "images",
+        source_requests_per_second=0.4,
+    )
+
+    # -- 1. the server: the lanes' unit of work and the request path -------
+    app = create_app(settings)
+    # The request path, driven rather than re-derived.
+    resolved: list[SourceAdapterFactory] = []
+
+    @app.get("/_probe/adapter-factory")
+    def _probe(
+        adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+    ) -> dict[str, bool]:
+        resolved.append(adapters)
+        return {"resolved": True}
+
+    async with LifespanManager(app) as manager:
+        gates = app.state.source_gates
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            probe = await client.get("/_probe/adapter-factory")
+        assert probe.status_code == 200, f"the probe route did not run: {probe.text}"
+        assert len(resolved) == 1, (
+            "the premise: the dependency graph resolved exactly one factory, so the gate "
+            "asserted below came through `api/deps.py` rather than from this file"
+        )
+        through_a_request = resolved[0].build(_GATED, _GATE_CREDENTIALS)
+        # The lanes, through the supervisor's own unit of work -- the object
+        # `_start_lane` (push) and `_run_worker` both open their pipelines
+        # from. Two scopes, because the two lanes never share one.
+        async with app.state.lanes._work() as push_scope:
+            through_the_push_lane = push_scope.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with app.state.lanes._work() as worker_scope:
+            through_the_worker_lane = worker_scope.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            server_gate = _gate_of(through_a_request)
+            assert _gate_of(through_the_push_lane) is server_gate, (
+                "the push lane paces independently of the request path, so an admin "
+                "status probe and a reconnect gap-closer spend two budgets"
+            )
+            assert _gate_of(through_the_worker_lane) is server_gate, (
+                "the worker lane paces independently of the push lane, so a source is "
+                "paced by two budgets rather than one"
+            )
+            assert server_gate is gates.gate(_GATED.id, _GATED.name)
+            assert server_gate._rate == 0.4, (
+                "the premise: these gates carry the configured rate, so the identity "
+                "above is not three unthrottled defaults agreeing by accident"
+            )
+        finally:
+            await through_a_request.aclose()
+            await through_the_push_lane.aclose()
+            await through_the_worker_lane.aclose()
+
+    # -- 2. `usher work`: one registry for the daemon, a scope per job -----
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        work = unit_of_work(build_session_factory(engine), settings, events=NullEventPublisher())
+        async with work() as one_job:
+            first = one_job.adapters.build(_GATED, _GATE_CREDENTIALS)
+        async with work() as another_job:
+            second = another_job.adapters.build(_GATED, _GATE_CREDENTIALS)
+        try:
+            assert _gate_of(first) is _gate_of(second)
+            assert _gate_of(first) is not server_gate, (
+                "the premise, and the honest half of the claim: a second process is a "
+                "second registry -- these two roots are only ever in one process here "
+                "because a test is a process that runs everything"
+            )
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+        # -- 3. `usher sync`: one pipeline, the sources looped inside it ----
+        sync = build_pipeline(AsyncSession(engine), settings)
+        walking = sync.adapters.build(_GATED, _GATE_CREDENTIALS)
+        watching = sync.adapters.build(_GATED, _GATE_CREDENTIALS)
+        elsewhere = sync.adapters.build(_SECOND_SERVER, _GATE_CREDENTIALS)
+        try:
+            assert _gate_of(walking) is _gate_of(watching), (
+                "`usher sync` walks items and then watch state through one pipeline; "
+                "two gates there is one command spending twice its own ceiling"
+            )
+            assert _gate_of(walking) is not _gate_of(elsewhere), (
+                "two sources sharing one gate is a limiter that halves itself per source"
+            )
+        finally:
+            await walking.aclose()
+            await watching.aclose()
+            await elsewhere.aclose()
+    finally:
+        await engine.dispose()
+
+
+#: The three composition roots in `usher.cli`, and the call each one builds its
+#: registry with. **Keyed by function rather than by command**, because that is
+#: what the assertion below can see: `usher push` with no `--probe` reaches
+#: `_run_lanes`, which is a root an operator cannot name.
+_CLI_ROOTS: dict[str, str] = {
+    "_work": "unit_of_work",  # `usher work`
+    "_run_lanes": "unit_of_work",  # bare `usher push`
+    "_sync": "build_pipeline",  # `usher sync`
+}
+
+
+def _cli_function(module: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """The top-level `def`/`async def` named `name`, or an assertion failure."""
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name:
+            return node
+    raise AssertionError(
+        f"`usher.cli` has no top-level `{name}` -- this table names a root that has been "
+        "renamed or moved, so the assertions below are about nothing"
+    )
+
+
+def _calls_of(root: ast.AST, callee: str) -> tuple[int, int]:
+    """`(in the function's own body, inside a nested definition)`.
+
+    The split *is* the assertion: a builder called from the function's own body
+    runs once when the command starts; the identical call moved inside a
+    `def`, an `async def` or a `lambda` runs once per invocation of that
+    closure -- which for a `@asynccontextmanager`-wrapped `work()` is once per
+    scope, i.e. per claim and per job.
+    """
+    own = nested = 0
+
+    def walk(node: ast.AST, inside: bool) -> None:
+        nonlocal own, nested
+        for child in ast.iter_child_nodes(node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == callee
+            ):
+                if inside:
+                    nested += 1
+                else:
+                    own += 1
+            walk(child, inside or isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef))
+
+    walk(root, False)
+    return own, nested
+
+
+def test_the_cli_roots_compose_once_rather_than_per_scope() -> None:
+    """Rows 4 and 5 of the table above are re-derivations.
+
+    The defect they miss is the one row 3 already shipped with.
+    """
+    source = pathlib.Path(usher.__file__).parent / "cli.py"
+    module = ast.parse(source.read_text(encoding="utf-8"), str(source))
+
+    for root, builder in _CLI_ROOTS.items():
+        own, nested = _calls_of(_cli_function(module, root), builder)
+        assert own + nested >= 1, (
+            f"the premise: `cli.{root}` does not call `{builder}` at all, so the assertion "
+            "below is an absence proved by a scan that found nothing"
+        )
+        assert nested == 0, (
+            f"`cli.{root}` calls `{builder}` inside a nested definition, so the registry is "
+            f"built once per invocation of that closure rather than once for the process -- "
+            f"{nested} of {own + nested} calls. That is a fresh outbound gate per scope, "
+            "which is what one shared registry per process exists to prevent"
+        )
+
+    walk, _ = _calls_of(_cli_function(module, "_sync"), "_open_adapter")
+    assert walk == 1, (
+        "`usher sync` opens more than one adapter per source, so the reconcile walk and the "
+        f"watch lane no longer share one -- {walk} calls to `_open_adapter`"
+    )
+
+
+async def test_a_request_without_the_lifespan_is_refused_rather_than_quietly_ungated() -> None:
+    """`api/deps.get_source_gates`' `RuntimeError` arm, which nothing ran."""
+    settings = _settings(push_enabled=False, worker_enabled=False)
+    app = create_app(settings)
+
+    @app.get("/_probe/gates")
+    def _probe(gates: Annotated[SourceGateRegistry, Depends(get_source_gates)]) -> dict[str, bool]:
+        return {"resolved": True}  # pragma: no cover -- the point is that it does not
+
+    assert not hasattr(app.state, "source_gates"), (
+        "the premise: the lifespan really has not run, so the refusal below is the "
+        "dependency's own and not an artefact of this case clearing state"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with pytest.raises(RuntimeError, match="source_gates is not set") as caught:
+            await client.get("/_probe/gates")
+
+    assert "LifespanManager" in str(caught.value), (
+        "the message names the attribute and not the remedy, which is the half a "
+        "reader needs -- `asgi_lifespan.LifespanManager` is what a bare ASGI "
+        "transport is missing"
+    )
+
+
+def test_get_source_gates_is_the_only_reader_of_app_state_source_gates() -> None:
+    """The registry reaches a request through the dependency and no other way.
+
+    A second reader — a router doing `request.app.state.source_gates` inline — would
+    resolve, pass mypy and behave identically today, and it is exactly how the
+    `RuntimeError` above stops being the only answer to a missing lifespan. Asserted as
+    a source scan rather than argued.
+    """
+    api = pathlib.Path(usher.__file__).parent / "api"
+    readers = sorted(
+        path.relative_to(api).as_posix()
+        for path in api.rglob("*.py")
+        if "state.source_gates" in path.read_text(encoding="utf-8")
+    )
+    assert readers == ["app.py", "deps.py"], (
+        "`app.state.source_gates` is written by `create_app`'s lifespan and read by "
+        f"`get_source_gates`, and by nothing else: {readers}"
     )

@@ -1,18 +1,4 @@
-"""generate -> run -> score -> compare -> record.
-
-**Only `FAIL` is a failure** -- `verdicts.py` has six members and five of them
-exit 0 -- and keeping them apart is what stops the harness becoming a red
-everyone learns to ignore, the failure mode `prd-maintenance.md` already records
-against a check nobody trusts. `verdict_for` below chooses among the four a bar
-can produce; `suggest_run.py` owns the run-level `SKIPPED` and
-`BASELINE_INVALID`, because only the surface knows its preconditions were unmet
-or that the catalog moved.
-
-This paragraph read *"four of the five verdicts here are not failures"* from the
-commit that created this file (2026-08-19) until 2026-09-02. `Verdict` has never
-had five members, and only `FAIL` has ever been in `_FAILING`, so neither half
-of that sentence was true on any tree.
-"""
+"""Generate -> run -> score -> compare -> record."""
 
 from collections.abc import Sequence
 
@@ -24,7 +10,7 @@ from usher.eval.surfaces.suggest import SurfaceRun
 from usher.eval.verdicts import Verdict
 
 # What every surface reports. `recall@5` over one relevant document is the
-# gate's own hit rate, which is what makes E1 comparable with 2026-08-03.
+# gate's own hit rate.
 _METRICS = ("recall@5", "mrr")
 # ranx's spelling on the left, the ledger's on the right. Two vocabularies,
 # and the boundary between them is here so `@` never reaches a column name or
@@ -44,10 +30,9 @@ def _quantile(ordered: Sequence[float], q: float) -> float:
 def score_surface(run: SurfaceRun, *, tier: str, bars: BarSet) -> tuple[ScoreRecord, ...]:
     """Score one tier's run, every stratum separately.
 
-    **Strata are never averaged together.** A mean over the five length bands
-    describes none of them -- ADR-0002 measured 27.8% on 2-4 characters
-    against 95-100% above 8, and the mean of those two is a number about no
-    query anyone types.
+    **Strata are never averaged together.** Recall over the shortest length band
+    and over the longest are not the same question, so a mean over the five
+    describes none of them -- a number about no query anyone types.
     """
     by_query = {ranking.query_id: ranking for ranking in run.rankings}
     strata: dict[str, list[str]] = {}
@@ -118,12 +103,11 @@ def verdict_for(records: Sequence[ScoreRecord]) -> Verdict:
 def rotate_labels(rankings: Sequence[Ranking]) -> tuple[Ranking, ...]:
     """The negative control: every query answered with the next query's hits.
 
-    **A rotation rather than a shuffle, and that is a measurement.**
-    `recall@5` over a single relevant document is order-insensitive within k,
-    so shuffling the top five leaves it *exactly* unchanged -- a control built
-    that way would pass on a green harness and on a broken one alike, which is
-    the "an eval that cannot fail ratifies the bug" failure applied to the
-    control itself.
+    **A rotation rather than a shuffle.** `recall@5` over a single relevant
+    document is order-insensitive within k, so shuffling the top five leaves it
+    *exactly* unchanged -- a control built that way would pass on a green
+    harness and on a broken one alike, which is "an eval that cannot fail
+    ratifies the bug" applied to the control itself.
 
     Deterministic, so the control needs no seed and no RNG: the same input
     always produces the same degraded run, which is what lets its expected

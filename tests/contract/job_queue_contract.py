@@ -1,35 +1,4 @@
-"""Behaviour every `JobQueue` implementation must satisfy.
-
-One case -- `test_two_workers_never_claim_the_same_job` -- needs two
-genuinely concurrent sessions and is **skipped** unless the subclass sets
-`requires_concurrency = True` and supplies a `concurrent_claims` harness.
-`FakeJobQueue` leaves it `False` and its run claims nothing about locking,
-which is honest: a single-threaded dict cannot express `SKIP LOCKED`, and a
-case that "passed" for it would ratify a plain `SELECT` in the real
-implementation.
-
-**The harness asserts on *observed* overlap, not on a count.** A count a
-serialised run would also produce proves nothing -- M3 deleted a
-single-flight lock and watched the concurrency test pass five runs in a row,
-because nothing in it ever truly awaited and the event loop ran each task
-through its whole cycle before starting the next. So `ClaimWindow` carries
-the wall-clock interval each claim actually occupied, and the case fails if
-those intervals do not overlap, whatever the claim counts say.
-
-Three test-only hooks the port deliberately does not carry:
-
-- `clear_backoff`, because advancing past a backoff by sleeping would make
-  this suite take the backoff schedule in real time, and because nothing in
-  `src/` would ever call it.
-- `concurrent_claims`, for the reason above.
-- `staging_locks`, which reads the relation locks the enqueue just took. A
-  dict has no locks, so the case is *skipped* by the fake rather than passed
-  -- an assertion that trivially holds against an in-memory implementation is
-  the vacuous-pass failure mode this file already refuses once.
-
-All three are fixtures the subclass supplies, so the port stays free of
-methods that exist only for tests.
-"""
+"""Behaviour every `JobQueue` implementation must satisfy."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -79,13 +48,11 @@ class ConcurrentClaimHarness(ABC):
 
     @abstractmethod
     async def run(self, *, keys: Sequence[str], claimers: int, limit: int = 1) -> list[ClaimWindow]:
-        """Enqueue one pending job per key (visibly, i.e. committed), then
-        run `claimers` claims that genuinely overlap in time.
+        """Enqueue one pending job per key, visibly committed, then run overlapping claims.
 
-        Must raise rather than hang if a claim blocks: an implementation
-        whose claim is `FOR UPDATE` without `SKIP LOCKED` makes the second
-        claimer wait on the first's uncommitted row lock forever, and a test
-        that hangs reports nothing.
+        Must raise rather than hang if a claim blocks: an implementation whose claim is
+        `FOR UPDATE` without `SKIP LOCKED` makes the second claimer wait on the first's
+        uncommitted row lock forever, and a test that hangs reports nothing.
         """
 
 
@@ -104,12 +71,7 @@ def overlapping(windows: Sequence[ClaimWindow]) -> bool:
 
 class JobQueueContract:
     requires_concurrency: bool = False
-    # What both subclasses construct their queue with. Named here so the
-    # ceiling case can assert on the exact attempt count at park time rather
-    # than only on "it parked eventually" -- an off-by-one in the ceiling
-    # (`>` where `>=` belongs) parks on the sixth attempt instead of the
-    # fifth, which a loop that keeps failing until something parks cannot
-    # see at all.
+    # What both subclasses construct their queue with.
     max_attempts: int = 5
 
     @pytest.fixture
@@ -130,29 +92,10 @@ class JobQueueContract:
     async def test_an_enqueue_locks_nothing_another_session_can_reach(
         self, queue: JobQueue, staging_locks: StagingLockReader | None
     ) -> None:
-        """The wrong implementation: `enqueue` before M6 -- `DROP TABLE IF
-        EXISTS stg_jobs` plus `CREATE UNLOGGED TABLE stg_jobs`, two `ACCESS
-        EXCLUSIVE` locks on a fixed, shared name, held to commit. M6 put a
-        one-row enqueue on the pipeline's hot path (one `index` job per
-        enriched title, one demand promotion per title read), so that name is
-        contended by a detail-screen open and a nightly walk's batch at once.
+        """The wrong implementation: staging tables created in a shared schema.
 
-        **On the lock rather than on wall-clock contention, on purpose:** a
-        timing case passes whenever the machine is idle, and the failure it
-        exists to catch only appears when it is not.
-        `tests/integration/test_staging_lock.py` carries the timing half as
-        well, where two real backends make it observable.
-
-        **On the *schema*, not on the relation name.** A temporary table is
-        still locked -- `CREATE TEMP TABLE` takes `ACCESS EXCLUSIVE` on its
-        own relation -- so "no lock on anything called `stg_jobs`" is a
-        property the fix does not have and never will. What the fix has is
-        that the locked relation lives in this backend's own `pg_temp`
-        schema, where no other session can name it.
-
-        The non-empty assertion is the vacuity guard: a reader wired to the
-        wrong pid, or scoped to a filter that matches nothing, would pass this
-        case exactly as a correct implementation does.
+        `DROP TABLE IF EXISTS stg_jobs` plus `CREATE UNLOGGED TABLE stg_jobs` is two
+        `ACCESS EXCLUSIVE` locks on a fixed, shared name, held to commit.
         """
         if staging_locks is None:
             pytest.skip("this implementation has no table locks to observe")
@@ -176,10 +119,11 @@ class JobQueueContract:
         assert claimed[0].attempts == 0
 
     async def test_enqueue_carries_the_traceparent_it_was_given(self, queue: JobQueue) -> None:
-        """PRD 10's "why did the title I just opened take 45 seconds" is the
-        worker's span linked back to the request that enqueued the work. A
-        queue that drops the header makes that link unrecoverable, and
-        nothing else in the pipeline would notice."""
+        """The worker's span has to link back to the request that enqueued the work.
+
+        A queue that drops the traceparent header makes that link unrecoverable, and
+        nothing else in the pipeline would notice.
+        """
         parent = "00-d14524c7eba73194c64d589cdd69488a-770641a119523a53-01"
         await queue.enqueue(
             [
@@ -199,16 +143,16 @@ class JobQueueContract:
         assert await queue.claim([JobKind.ENRICH]) == []
 
     async def test_a_claim_only_takes_the_kinds_it_asked_for(self, queue: JobQueue) -> None:
-        """A worker pool that runs only `enrich` must not claim and then
-        abandon every `match` job in the queue."""
+        """A worker pool that runs only `enrich` must not claim every `match` job."""
         await queue.enqueue([JobRequest(kind=JobKind.MATCH, key="m1", priority=JobPriority.NEW)])
         assert await queue.claim([JobKind.ENRICH]) == []
         assert (await queue.depth())[JobKind.MATCH] == 1, "and it stays claimable by its own worker"
 
     async def test_a_claim_respects_its_limit(self, queue: JobQueue) -> None:
-        """`job_batch_size` is what bounds a worker's in-flight work. A claim
-        that ignored `limit` would take the whole 1,126,674-job backlog in
-        one transaction."""
+        """`job_batch_size` is what bounds a worker's in-flight work.
+
+        A claim that ignored `limit` would take the whole backlog in one transaction.
+        """
         await queue.enqueue(
             [
                 JobRequest(kind=JobKind.ENRICH, key=f"t{index}", priority=JobPriority.NEW)
@@ -218,17 +162,17 @@ class JobQueueContract:
         assert len(await queue.claim([JobKind.ENRICH], limit=2)) == 2
 
     async def test_a_claimed_job_is_not_claimed_again(self, queue: JobQueue) -> None:
-        """The single-worker half of `test_two_workers_never_claim_the_same_job`
-        -- expressible everywhere, including in a fake. It catches a claim
-        that forgot to write `status = 'running'` at all, which no amount of
-        locking would fix."""
+        """The single-worker half of `test_two_workers_never_claim_the_same_job`.
+
+        Expressible everywhere, including in a fake. It catches a claim that forgot to
+        write `status = 'running'` at all, which no amount of locking would fix.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         assert len(await queue.claim([JobKind.ENRICH])) == 1
         assert await queue.claim([JobKind.ENRICH]) == []
 
     async def test_a_job_is_claimed_by_priority_then_age(self, queue: JobQueue) -> None:
-        """`ORDER BY priority DESC, created_at ASC`, and both halves are
-        asserted.
+        """`ORDER BY priority DESC, created_at ASC`, and both halves are asserted.
 
         Ascending priority serves background backfill ahead of a title a
         client is waiting on. No age tiebreak starves the oldest job at a
@@ -250,8 +194,7 @@ class JobQueueContract:
         assert [job.key for job in claimed] == ["old-high", "new-high", "old-low"]
 
     async def test_completing_a_job_removes_it_from_the_queue(self, queue: JobQueue) -> None:
-        """`complete` deletes the row -- asserted through `requeue_running`,
-        not through `depth`.
+        """`complete` deletes the row -- asserted through `requeue_running`, not through `depth`.
 
         `depth` counts `pending`, and a claimed job is already not pending, so
         a `complete` that did nothing at all still leaves `depth` at zero. Only
@@ -266,15 +209,13 @@ class JobQueueContract:
         assert await queue.claim([JobKind.ENRICH]) == []
 
     async def test_completing_an_unknown_job_is_not_an_error(self, queue: JobQueue) -> None:
-        """A worker whose claim was requeued out from under it by a restart
-        still calls `complete` when its work finishes."""
+        """A worker whose claim was requeued by a restart still calls `complete`."""
         await queue.complete(uuid.uuid4())
 
     async def test_a_failed_job_is_retried_after_a_backoff(
         self, queue: JobQueue, clear_backoff: ClearBackoff
     ) -> None:
-        """Re-claiming instantly turns one broken upstream into a hot loop
-        against it.
+        """Re-claiming instantly turns one broken upstream into a hot loop against it.
 
         Both directions are asserted: the job is held back while `run_after`
         stands, and it is claimable again once `run_after` is cleared. The
@@ -294,9 +235,11 @@ class JobQueueContract:
         assert [job.key for job in await queue.claim([JobKind.ENRICH])] == ["t1"]
 
     async def test_a_retry_keeps_its_place_in_the_queue(self, queue: JobQueue) -> None:
-        """A failure is not a demotion. A job a client is waiting on that
-        failed once must not fall behind the background backfill it was
-        ahead of."""
+        """A failure is not a demotion.
+
+        A job a client is waiting on that failed once must not fall behind the
+        background backfill it was ahead of.
+        """
         await queue.enqueue(
             [JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.DEMAND)]
         )
@@ -306,16 +249,18 @@ class JobQueueContract:
         assert job.priority == JobPriority.DEMAND
 
     async def test_failing_an_unknown_job_returns_none(self, queue: JobQueue) -> None:
-        """A worker whose claim was requeued out from under it by a restart
-        -- the port's own words for this case. It must not raise, and it must
-        not resurrect a row."""
+        """A worker whose claim was requeued out from under it by a restart.
+
+        It must not raise, and it must not resurrect a row.
+        """
         assert await queue.fail(uuid.uuid4(), error="gone", retryable=True) is None
 
     async def test_a_job_is_parked_after_the_attempt_ceiling_with_its_error(
         self, queue: JobQueue, clear_backoff: ClearBackoff
     ) -> None:
-        """PRD 08: "after N attempts a job is *parked* with its error, not
-        retried forever and not silently dropped."
+        """After N attempts a job is *parked* with its error.
+
+        Not retried forever, and not silently dropped.
         """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         job = None
@@ -338,12 +283,12 @@ class JobQueueContract:
     async def test_malformed_data_parks_immediately_rather_than_backing_off(
         self, queue: JobQueue
     ) -> None:
-        """`PortDataMalformed`'s own docstring: "the upstream answered, and
-        the answer was wrong. Retrying does not help." An implementation that
-        backs it off first produces five identical failures and delays a
-        human seeing it by the whole backoff schedule. Asserting on
-        `attempts == 1` is what distinguishes this from the ceiling park --
-        that one reports the ceiling."""
+        """The upstream answered and the answer was wrong, so retrying does not help.
+
+        An implementation that backs `PortDataMalformed` off first produces five
+        identical failures and delays a human seeing it by the whole backoff schedule.
+        Asserting on `attempts == 1` is what distinguishes this from the ceiling park.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         job = await queue.fail(claimed[0].id, error="TMDb returned a list", retryable=False)
@@ -355,12 +300,13 @@ class JobQueueContract:
     async def test_a_retry_after_hint_pushes_the_backoff_out_past_the_usual_schedule(
         self, queue: JobQueue
     ) -> None:
-        """The carried debt: `PortRateLimited.retry_after` is a server's own
-        answer to "when should I come back", and until this the queue
-        answered every 429 with its own jittered guess instead -- see
-        `JobWorker._fail`. `retry_after_seconds` is a **floor added to** the
-        existing backoff, not a replacement for it, so a hint far larger than
-        the queue's own `backoff_seconds` must still dominate."""
+        """The carried debt.
+
+        `PortRateLimited.retry_after` is a server's own answer to "when should I come
+        back", and `retry_after_seconds` is a **floor added to** the existing backoff
+        rather than a replacement for it -- so a hint far larger than the queue's own
+        `backoff_seconds` must still dominate.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         before = datetime.now(UTC)
@@ -377,11 +323,12 @@ class JobQueueContract:
     async def test_a_non_positive_hint_never_pulls_the_backoff_earlier_than_now(
         self, queue: JobQueue, hint: float
     ) -> None:
-        """A `Retry-After` hint can carry RFC 9110's HTTP-date form, and a
-        date already in the past parses to a negative number -- which must
-        not make a rate-limited job instantly re-claimable, the exact hot
-        loop the backoff exists to prevent. `GREATEST(retry_after_seconds,
-        0)` is what this pins; deleting it fails this case alone."""
+        """A `Retry-After` hint can carry RFC 9110's HTTP-date form.
+
+        A date already in the past parses to a negative number, which must not make a
+        rate-limited job instantly re-claimable -- the exact hot loop the backoff exists
+        to prevent. `GREATEST(retry_after_seconds, 0)` is what this pins.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         before = datetime.now(UTC)
@@ -395,11 +342,12 @@ class JobQueueContract:
     async def test_a_rate_limit_at_the_attempt_ceiling_still_parks_with_no_run_after(
         self, queue: JobQueue, clear_backoff: ClearBackoff
     ) -> None:
-        """A hint does not exempt a job from PRD 08's attempt ceiling. The two
-        parking arms in `_FAIL`'s `CASE` are untouched by the floor widening
-        this task made to the retryable arm beside them, and this is the case
-        that says so: a rate-limited job that keeps failing still parks with
-        no backoff pending."""
+        """A hint does not exempt a job from the attempt ceiling.
+
+        The two parking arms in `_FAIL`'s `CASE` are untouched by the floor on the
+        retryable arm beside them: a rate-limited job that keeps failing still parks
+        with no backoff pending.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         job = None
         for _ in range(10):
@@ -420,10 +368,12 @@ class JobQueueContract:
     async def test_malformed_data_still_parks_immediately_and_ignores_any_hint(
         self, queue: JobQueue
     ) -> None:
-        """`PortDataMalformed` never carries a `retry_after` in practice --
-        the two are different upstream signals -- but a caller could pass one
-        by accident, and the non-retryable arm must not consult it: there is
-        no backoff to floor when the job parks on its first attempt."""
+        """`PortDataMalformed` never carries a `retry_after` in practice.
+
+        The two are different upstream signals, but a caller could pass one by accident
+        and the non-retryable arm must not consult it: there is no backoff to floor when
+        the job parks on its first attempt.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         job = await queue.fail(
@@ -440,8 +390,7 @@ class JobQueueContract:
     async def test_a_parked_job_is_not_claimed(
         self, queue: JobQueue, clear_backoff: ClearBackoff
     ) -> None:
-        """A claim query missing `status = 'pending'` retries poison forever
-        -- which is the failure parking exists to prevent, restored."""
+        """A claim query missing `status = 'pending'` retries poison forever."""
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         await queue.fail(claimed[0].id, error="bad", retryable=False)
@@ -449,10 +398,11 @@ class JobQueueContract:
         assert await queue.claim([JobKind.ENRICH]) == []
 
     async def test_a_parked_job_is_not_requeued_by_a_restart(self, queue: JobQueue) -> None:
-        """`requeue_running` keyed on anything looser than `status = running`
-        un-parks poison on every restart, which is the same failure as a
-        claim that forgot the status filter, arriving through the recovery
-        path instead."""
+        """`requeue_running` keyed looser than `status = running` un-parks poison.
+
+        Every restart would do it -- the same failure as a claim that forgot the status
+        filter, arriving through the recovery path instead.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         await queue.fail(claimed[0].id, error="bad", retryable=False)
@@ -471,10 +421,11 @@ class JobQueueContract:
         assert len(await queue.parked()) == 3
 
     async def test_parked_jobs_are_listed_newest_first(self, queue: JobQueue) -> None:
-        """The admin listing is bounded, so its order decides what an operator
-        ever sees: oldest-first shows the same three ancient failures forever
-        while today's poison sits on page nine. Asserted because the ordering
-        mutation survived every other case in this suite."""
+        """The admin listing is bounded, so its order decides what an operator sees.
+
+        Oldest-first shows the same three ancient failures forever while today's poison
+        sits on page nine.
+        """
         for index in range(3):
             await queue.enqueue(
                 [JobRequest(kind=JobKind.ENRICH, key=f"t{index}", priority=JobPriority.NEW)]
@@ -490,18 +441,22 @@ class JobQueueContract:
     async def test_enqueueing_the_same_work_twice_does_not_duplicate_it(
         self, queue: JobQueue
     ) -> None:
-        """A nightly walk enqueues a match job per item. Without
-        `(kind, key)` uniqueness the second night's walk adds 1,126,674 more
-        on top of the first night's."""
+        """A nightly walk enqueues a match job per item.
+
+        Without `(kind, key)` uniqueness the second night's walk adds a second copy of
+        every one of them.
+        """
         request = JobRequest(kind=JobKind.MATCH, key="m1", priority=JobPriority.NEW)
         await queue.enqueue([request])
         await queue.enqueue([request])
         assert (await queue.depth())[JobKind.MATCH] == 1
 
     async def test_the_same_key_under_two_kinds_is_two_jobs(self, queue: JobQueue) -> None:
-        """`key` is the *kind's* own identifier -- a `MediaItem.id` for
-        `match` and for `watch_history` alike -- so uniqueness keyed on `key`
-        alone would silently drop one of the two."""
+        """`key` is the *kind's* own identifier.
+
+        A `MediaItem.id` for `match` and for `watch_history` alike, so uniqueness keyed
+        on `key` alone would silently drop one of the two.
+        """
         await queue.enqueue(
             [
                 JobRequest(kind=JobKind.MATCH, key="shared", priority=JobPriority.NEW),
@@ -518,9 +473,11 @@ class JobQueueContract:
         assert (await queue.depth())[JobKind.MATCH] == 1
 
     async def test_the_highest_priority_wins_inside_one_batch(self, queue: JobQueue) -> None:
-        """Promote-never-demote has to hold within a batch as well as across
-        batches: one walk can see the same item twice, once incidentally and
-        once because a client asked for it."""
+        """Promote-never-demote has to hold within a batch as well as across batches.
+
+        One walk can see the same item twice, once incidentally and once because a
+        client asked for it.
+        """
         await queue.enqueue(
             [
                 JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.BACKFILL),
@@ -534,8 +491,7 @@ class JobQueueContract:
     async def test_re_enqueueing_at_a_higher_priority_promotes_the_existing_job(
         self, queue: JobQueue
     ) -> None:
-        """M5's demand promotion, mechanically. `ON CONFLICT DO NOTHING`
-        makes it impossible without a schema change."""
+        """Demand promotion, mechanically: `ON CONFLICT DO NOTHING` cannot express it."""
         await queue.enqueue(
             [JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.BACKFILL)]
         )
@@ -546,8 +502,7 @@ class JobQueueContract:
         assert claimed[0].priority == JobPriority.DEMAND
 
     async def test_re_enqueueing_at_a_lower_priority_does_not_demote(self, queue: JobQueue) -> None:
-        """`SET priority = excluded.priority` lets a background backfill
-        sweep demote the job a client is blocked on."""
+        """`SET priority = excluded.priority` lets a backfill sweep demote a blocked job."""
         await queue.enqueue(
             [JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.DEMAND)]
         )
@@ -558,10 +513,12 @@ class JobQueueContract:
         assert claimed[0].priority == JobPriority.DEMAND
 
     async def test_re_enqueueing_does_not_reset_the_age_tiebreak(self, queue: JobQueue) -> None:
-        """A job re-seen by every nightly walk must not be pushed behind
-        everything enqueued since. `created_at` is the starvation guard, and
-        an upsert that refreshed it would defeat it silently -- the job stays
-        claimable the whole time, it just never gets claimed."""
+        """A job re-seen by every nightly walk must not be pushed behind everything since.
+
+        `created_at` is the starvation guard, and an upsert that refreshed it would
+        defeat it silently -- the job stays claimable the whole time, it just never gets
+        claimed.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="old", priority=JobPriority.NEW)])
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="new", priority=JobPriority.NEW)])
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="old", priority=JobPriority.NEW)])
@@ -584,9 +541,11 @@ class JobQueueContract:
     async def test_re_enqueueing_a_parked_job_reports_nothing_written(
         self, queue: JobQueue
     ) -> None:
-        """The return value is "rows written", and a parked row is not
-        written. A count that included it would make a walk's "enqueued
-        1,126,674 jobs" log line count work it declined to touch."""
+        """The return value is "rows written", and a parked row is not written.
+
+        A count that included it would make a walk's "enqueued N jobs" log line count
+        work it declined to touch.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         await queue.fail(claimed[0].id, error="bad", retryable=False)
@@ -608,11 +567,12 @@ class JobQueueContract:
     async def test_requeue_running_keeps_the_attempt_count_and_the_error(
         self, queue: JobQueue, clear_backoff: ClearBackoff
     ) -> None:
-        """A job that keeps killing its worker must still reach the attempt
-        ceiling. Clearing `attempts` on requeue turns a crash loop into an
-        infinite one, which is the failure parking exists to end -- and it
-        would be invisible, because the job stays perfectly claimable
-        throughout."""
+        """A job that keeps killing its worker must still reach the attempt ceiling.
+
+        Clearing `attempts` on requeue turns a crash loop into an infinite one, which is
+        the failure parking exists to end -- and it would be invisible, because the job
+        stays perfectly claimable throughout.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
         await queue.fail(claimed[0].id, error="upstream said no", retryable=True)
@@ -625,19 +585,16 @@ class JobQueueContract:
         assert recovered[0].last_error == "upstream said no"
 
     async def test_touch_moves_a_running_claim_out_of_a_lease(self, queue: JobQueue) -> None:
-        """The heartbeat half of the lease, and the property that makes a
-        *short* lease safe for a long job.
+        """The heartbeat half of the lease, and what makes a *short* lease safe.
 
-        `requeue_running(older_than_seconds=...)` is what recovers an abandoned
-        claim without stealing a live one; without a beat, the threshold has to
-        exceed the longest job a deployment can run -- a `bootstrap` phase is
-        measured in hours -- and the orphan window becomes hours with it. So the
-        assertion is a *pair*: at a threshold of zero the claim is recoverable,
-        and after a beat, at a threshold that spans the whole test, it is not.
+        `requeue_running(older_than_seconds=...)` recovers an abandoned claim without
+        stealing a live one; without a beat, the threshold has to exceed the longest job
+        a deployment can run -- a `bootstrap` phase runs for hours -- and the orphan
+        window becomes hours with it.
 
-        Neither half alone says anything. "It came back" is what a threshold of
-        zero does to everything; "it did not come back" is what an empty queue
-        does.
+        So the assertion is a *pair*: at a threshold of zero the claim is recoverable,
+        and after a beat, at a threshold spanning the whole test, it is not. Neither
+        half alone says anything.
         """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         claimed = await queue.claim([JobKind.ENRICH])
@@ -652,8 +609,7 @@ class JobQueueContract:
         )
 
     async def test_touch_leaves_a_job_no_worker_is_holding(self, queue: JobQueue) -> None:
-        """`status = 'running'` in the statement, which is the half easy to
-        omit.
+        """`status = 'running'` in the statement, which is the half easy to omit.
 
         A beat is sent for everything a worker holds, and by the time it lands a
         peer may already have recovered the claim or the job may have been
@@ -676,31 +632,39 @@ class JobQueueContract:
         assert await queue.touch([job.id for job in claimed]) == 0
 
     async def test_touch_tolerates_an_id_that_is_not_there(self, queue: JobQueue) -> None:
-        """A worker whose claim was recovered out from under it has nothing
-        useful to do with the news, and a job must not fail over its own
-        telemetry -- the same argument `complete`'s idempotence rests on."""
+        """A worker whose claim was recovered has nothing useful to do with the news.
+
+        A job must not fail over its own telemetry -- the same argument `complete`'s
+        idempotence rests on.
+        """
         assert await queue.touch([new_id()]) == 0
         assert await queue.touch([]) == 0
 
     async def test_requeue_running_leaves_pending_work_alone(self, queue: JobQueue) -> None:
-        """It returns "how many", and a count inflated by every pending job
-        makes "recovered 1,126,674 claims" the log line after every clean
-        restart."""
+        """It returns "how many".
+
+        A count inflated by every pending job would make "recovered N claims" the log
+        line after every clean restart.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
         assert await queue.requeue_running() == 0
 
     async def test_depth_reports_every_kind_including_the_empty_ones(self, queue: JobQueue) -> None:
-        """A `GROUP BY` returns only non-empty kinds, and a Prometheus gauge
-        that stops reporting a series is indistinguishable from one reporting
-        zero."""
+        """A `GROUP BY` returns only non-empty kinds.
+
+        A Prometheus gauge that stops reporting a series is indistinguishable from one
+        reporting zero.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.MATCH, key="m1", priority=JobPriority.NEW)])
         assert set(await queue.depth()) == set(JobKind)
         assert (await queue.depth())[JobKind.ENRICH] == 0
 
     async def test_depth_does_not_count_claimed_work(self, queue: JobQueue) -> None:
-        """`usher.jobs.queued` is what is waiting for a worker. Counting
-        in-flight work in it makes a queue that is draining perfectly look
-        stuck."""
+        """`usher.jobs.queued` is what is waiting for a worker.
+
+        Counting in-flight work in it makes a queue that is draining perfectly look
+        stuck.
+        """
         await queue.enqueue([JobRequest(kind=JobKind.MATCH, key="m1", priority=JobPriority.NEW)])
         await queue.claim([JobKind.MATCH])
         assert (await queue.depth())[JobKind.MATCH] == 0
@@ -708,20 +672,18 @@ class JobQueueContract:
     async def test_two_workers_never_claim_the_same_job(
         self, concurrent_claims: ConcurrentClaimHarness | None
     ) -> None:
-        """`FOR UPDATE` without `SKIP LOCKED` serialises the workers instead
-        of distributing them; a plain `SELECT` followed by an `UPDATE` hands
-        the same row to both, and the job runs twice.
+        """`FOR UPDATE` without `SKIP LOCKED` serialises the workers instead of spreading.
 
-        Two assertions, and the second is the one that matters. "Exactly one
-        claimer got the job" is also what a *serialised* pair of claims
-        produces, so it proves nothing on its own -- hence
-        `overlapping(...)`, which fails unless the two claims genuinely
-        occupied the same instant. The harness raises rather than hangs when
-        a claim blocks, which is what an unskipped `FOR UPDATE` does.
+        A plain `SELECT` followed by an `UPDATE` hands the same row to both, and the job
+        runs twice.
 
-        Skipped for any implementation that does not set
-        `requires_concurrency` -- see the module docstring for why pretending
-        otherwise would be worse than skipping.
+        Two assertions, and the second is the one that matters. "Exactly one claimer got
+        the job" is also what a *serialised* pair of claims produces, so it proves
+        nothing on its own -- hence `overlapping(...)`, which fails unless the two
+        claims genuinely occupied the same instant. The harness raises rather than hangs
+        when a claim blocks, which is what an unskipped `FOR UPDATE` does.
+
+        Skipped for any implementation that does not set `requires_concurrency`.
         """
         if not self.requires_concurrency:
             pytest.skip("this implementation cannot express concurrent claims")

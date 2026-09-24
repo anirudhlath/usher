@@ -1,46 +1,4 @@
-"""Price every read M7's nine row providers make, with and without its index.
-
-**Not a test.** It writes a synthetic household directly into a real
-database, so it never runs in CI and never runs against a real catalog. It
-seeds only if `media_items` is empty, so a second run re-measures the same
-population rather than doubling it.
-
-    docker run -d --name usher-measure -e POSTGRES_USER=usher \\
-      -e POSTGRES_PASSWORD=usher -e POSTGRES_DB=usher -p 55437:5432 \\
-      pgvector/pgvector:pg17
-    export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:55437/usher"
-    export USHER_SECRET_KEY="$(openssl rand -hex 32)"
-    uv run alembic upgrade head
-    uv run python scripts/measure_rows.py --scale 1126674
-
-**Both columns, always.** Every statement is planned twice -- once with the
-index this milestone adds and once with it dropped -- because
-`f1a7d3c9e824` is the standard this repository holds an index docstring to:
-that migration records that its index takes the sweep's `UPDATE` from 173 ms
-to 102 ms **and**, in the same paragraph, that it does not help the guard's
-`count(*)` at all. A docstring carrying only the flattering number would
-have been true and would have implied something false. So the unhelped
-statements are here on purpose -- `_RECENT`'s outer sort is a `Sort` node
-either way, `_NEXT_UP` gets no index from this milestone at all, and
-`list_needing_history` is the statement the *dropped* index never served.
-
-**The population is the one measured deployment's**: 94,448 movies, 32,409
-series, 999,827 episodes, 1,126,674 media items, and one series holding
-20,000 episodes, which is the shape that makes Recently Added's dedup cost
-what it costs. Everything is **value-synthetic** per the standing rule --
-every name is generated, no identifier comes from any third-party dataset,
-and `tests/unit/test_no_third_party_data.py` scans this file.
-
-The sweep's `UPDATE` is re-measured here too, and that is the row most
-likely to be got wrong: `ix_media_items_recently_added` is partial on
-`available`, and the sweep's whole job is to set `available = false`, so
-every row it retracts leaves that index and the sweep pays for it.
-
-`kill -9 "$(cat pidfile)"` does not stop this if you background it: `uv run`
-forks a child rather than exec-replacing itself, so kill the whole process
-group or an orphaned writer keeps committing underneath your next
-measurement.
-"""
+"""Price every read M7's nine row providers make, with and without its index."""
 
 import argparse
 import asyncio
@@ -96,20 +54,7 @@ async def _plan(
     hand-copied lookalike and both were replaced: a copy drifts from the code
     it claims to describe and then reads like coverage.
     """
-    # Warmed once and discarded before the measured run. Without this the
-    # first of the two passes pays every cold heap fetch and the second reads
-    # them from shared buffers, which is enough to reverse the sign of the
-    # comparison: measured, the first ordering of these passes reported
-    # `ix_media_items_recently_added` making its statement *slower* (118 ms
-    # against 53 ms), and a warm A/B in one session has it 2.3x faster at the
-    # same window. An A/B whose two halves see different cache states is not
-    # an A/B.
-    #
-    # **Inside a SAVEPOINT, because `EXPLAIN ANALYZE` runs the statement.**
-    # One of these is the availability sweep's `UPDATE`, so an unrolled-back
-    # warm-up retracts all 200 stale rows and the measured run then plans
-    # against nothing -- observed here as a 0.020 ms sweep, which is not a
-    # fast sweep, it is no sweep at all.
+    # Warmed once and discarded before the timed run.
     async with session.begin_nested() as warm:
         await session.execute(text(f"EXPLAIN (ANALYZE) {statement}"), parameters)
         await warm.rollback()
@@ -127,11 +72,11 @@ async def _plan(
 
 
 async def _seed(session: AsyncSession, scale: int) -> None:
-    """A synthetic household at the measured deployment's proportions.
+    """A synthetic household at a real deployment's proportions.
 
     `generate_series` rather than a walk: the point is the read, not how the
-    rows got there. Scaled linearly off `scale`, whose default is the one
-    measured library's item count.
+    rows got there. Scaled linearly off `scale`, whose default is one real
+    library's item count.
     """
     factor = scale / 1_126_674
     movies = int(94_448 * factor)
@@ -184,8 +129,8 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             "FROM measure_series s"
         )
     )
-    # Series 0 is the measured pathological one -- 20,000 episodes in 200
-    # seasons -- and it is the reason Recently Added's dedup is not free.
+    # Series 0 is the pathological one -- 20,000 episodes in 200 seasons --
+    # and it is the reason Recently Added's dedup is not free.
     await session.execute(
         text(
             "CREATE TABLE measure_ep (series_idx integer, season_number integer, "
@@ -237,17 +182,7 @@ async def _seed(session: AsyncSession, scale: int) -> None:
             )
         )
     # 85% played, ~0.3% in progress, and `last_played_at` NULL on ~70%, which
-    # is ADR-0014's walk-sourced shape rather than a convenient one.
-    #
-    # The three draws come from a subquery over the source rows, NOT from
-    # `CROSS JOIN LATERAL (SELECT random() ...)`. That spelling has no
-    # correlation to the outer row, so Postgres evaluates it **once** and
-    # every row in the table receives the identical draw -- measured here:
-    # it produced 1,126,684 played rows, zero in progress and zero datable,
-    # and every statement this script exists to price then planned against an
-    # empty result. A degenerate fixture is the "harness looked like it proved
-    # something" failure, and it is the reason these numbers are taken from a
-    # correlated subquery instead.
+    # is a real walk's shape rather than a convenient one.
     for target, source, other in (
         ("d.id", "episodes", "NULL"),
         ("NULL", "titles", "d.id"),
@@ -265,9 +200,9 @@ async def _seed(session: AsyncSession, scale: int) -> None:
                 f"random() AS c FROM {source}) d"  # `source`/`target` are module literals
             )
         )
-    # 200 stale rows, which is the nightly shape `f1a7d3c9e824` measured its
-    # sweep against. Without them the sweep's UPDATE plans against nothing and
-    # the re-measurement this script exists to take is vacuous.
+    # 200 stale rows, which is the nightly shape `f1a7d3c9e824`'s sweep index
+    # exists for. Without them the sweep's UPDATE plans against nothing and this
+    # script's whole reason to run is vacuous.
     await session.execute(
         text(
             "UPDATE media_items SET last_seen_at = now() - interval '3 days' "

@@ -1,22 +1,4 @@
-"""The similarity precompute against real Postgres.
-
-The unit file holds the blend. What is here is everything a dict cannot say:
-that `WHERE e.embedding IS NOT NULL` is *written down* rather than skipped by
-the accident of a Python control flow; that the candidate query is an exact
-scan rather than the HNSW graph; that the `halfvec` round trip does not reorder
-a top five; that a page costs one candidate statement rather than one per seed;
-and that `replace` is a real DELETE plus INSERT, where "replaced" and "merged"
-are distinguishable and in a dict they are not.
-
-**Every cosine is planted, never hoped for**, for the reason the unit file
-gives -- and here with one extra caveat that is a fact about the column: after
-the `halfvec` cast the vectors are no longer unit (norm drift 1.19e-07 ->
-1.21e-04, measured), so any margin smaller than ~1.2e-04 is measuring the
-storage format rather than the code.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""The similarity precompute against real Postgres."""
 
 import math
 import uuid
@@ -24,10 +6,12 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import pytest
+from loguru import logger
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import planted_pair
+from tests.fakes.similarity_scope import rebuild_job
 from usher.db.repositories.search import (
     _NEAREST,
     PostgresTitleEmbeddingRepository,
@@ -37,7 +21,8 @@ from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
-from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
+from usher.ports.repository import NeighborSeed, ScoredNeighbor, TitleEmbeddingUpsert
+from usher.ports.scheduler import JobOutcome
 from usher.services.similar import SimilarityService
 
 # The blend these arranged rows claim to have been computed under. A literal,
@@ -135,11 +120,11 @@ def _record_statements(session: AsyncSession, sink: list[str]) -> Iterator[None]
 async def test_the_precompute_excludes_null_embedding_rows_in_sql(
     session: AsyncSession,
 ) -> None:
-    """The unit case proves the *service* excludes them; this proves the
-    statement does. A fake computes cosine in Python and can skip a NULL by
-    accident of its own control flow, where Postgres needs
-    `WHERE e.embedding IS NOT NULL` written down -- and without it a
-    `halfvec <=> NULL` is NULL, which sorts last and then arrives.
+    """The unit case proves the *service* excludes them; this proves the statement does.
+
+    A fake computes cosine in Python and can skip a NULL by accident of its own control
+    flow, where Postgres needs `WHERE e.embedding IS NOT NULL` written down -- and
+    without it a `halfvec <=> NULL` is NULL, which sorts last and then arrives.
 
     Both directions, and both are asserted through the repository rather than
     through the service, because the exclusion is the repository's job on this
@@ -166,23 +151,17 @@ async def test_the_precompute_excludes_null_embedding_rows_in_sql(
 async def test_the_candidate_query_is_an_exact_scan_and_not_the_hnsw_index(
     session: AsyncSession,
 ) -> None:
-    """Asserted on the plan, not the clock. Recall loss in a live query is
-    per-query; recall loss in a cached artefact is permanent, and this table is
-    read until the next rebuild. PRD 05 says brute-force exact cosine is the
-    right call at this scale (10k x 384 halfvec is 7.7 MB).
+    """Asserted on the plan, not the clock.
 
-    **This milestone has not measured HNSW recall**, and borrowing the halfvec
-    quantisation figures to justify an approximate index would be laundering
-    one measurement into a claim about another.
-
-    **The statement *sequence* is the load-bearing assertion and the plan is
-    the corroboration, not the other way round.** At three rows the planner
-    would not choose an HNSW scan under any setting, so a plan assertion alone
-    would pass against a repository that never issued the GUC at all -- the
-    vacuous pass this milestone's trap section is about. What cannot pass
-    vacuously is "the candidate query ran between `enable_indexscan = off` and
-    `enable_indexscan = on`", captured off `before_cursor_execute` and never
-    transcribed.
+    Recall loss in a live query is per-query; recall loss in a cached artefact
+    is permanent, and this table is read until the next rebuild. PRD 05: at
+    library scale similarity is exact brute-force cosine. The statement
+    *sequence* is the load-bearing assertion and the plan is the corroboration:
+    at three rows the planner would not choose an HNSW scan under any setting,
+    so a plan assertion alone would pass against a repository that never issued
+    the GUC. What cannot pass vacuously is "the candidate query ran between
+    `enable_indexscan = off` and `enable_indexscan = on`", captured off
+    `before_cursor_execute` and never transcribed.
     """
     first, second = planted_pair(math.pi / 4)
     seed_id = await _seed(session, vector=first)
@@ -205,12 +184,10 @@ async def test_the_candidate_query_is_an_exact_scan_and_not_the_hnsw_index(
 
     await session.execute(text("SET LOCAL enable_indexscan = off"))
     await session.execute(text("SET LOCAL enable_bitmapscan = off"))
-    # `_NEAREST` read out of the module rather than transcribed, and rather
-    # than re-using the captured text: `before_cursor_execute` hands back the
-    # *compiled* statement, whose `:limit` has already become `$1`, so
-    # EXPLAINing that string leaves asyncpg expecting two arguments nobody can
-    # supply. Same rule the fingerprint cross-check follows -- a hand-copied
-    # lookalike drifts and then reads like coverage.
+    # `_NEAREST` read out of the module rather than transcribed, and rather than re-
+    # using the captured text: `before_cursor_execute` hands back the *compiled*
+    # statement, whose `:limit` has already become `$1`, so EXPLAINing that string
+    # leaves asyncpg expecting two arguments nobody can supply.
     assert seen[candidate].count("$") == 2, "the captured statement is not the candidate query"
     result = await session.execute(
         text(f"EXPLAIN {_NEAREST}"),
@@ -230,10 +207,11 @@ async def test_the_candidate_query_is_an_exact_scan_and_not_the_hnsw_index(
 async def test_the_repository_restores_the_index_gucs_after_its_own_statement(
     session: AsyncSession,
 ) -> None:
-    """The bracket, not a blanket. `SET LOCAL` is transaction-scoped, and this
-    transaction also *writes*: the rebuild's `DELETE` and `INSERT` run in it,
-    and leaving index scans off for them would make a page's write scan
-    `title_neighbors` end to end.
+    """The bracket, not a blanket.
+
+    `SET LOCAL` is transaction-scoped, and this transaction also *writes*: the rebuild's
+    `DELETE` and `INSERT` run in it, and leaving index scans off for them would make a
+    page's write scan `title_neighbors` end to end.
 
     Fails: `_force_exact_scan`'s spelling copied verbatim from the search
     adapter, whose transaction serves one read and can afford it.
@@ -252,19 +230,19 @@ async def test_the_repository_restores_the_index_gucs_after_its_own_statement(
 
 @pytest.mark.integration
 async def test_the_top_five_survive_the_halfvec_round_trip(session: AsyncSession) -> None:
-    """The measured safe band, exercised rather than cited: max cosine error
-    1.21e-04, mean 3.03e-05, top-1 and top-5 ordering identical in 42/42
-    queries. Planted angles far enough apart that a 1.21e-04 error cannot
+    """The safe band for `halfvec`, exercised rather than cited.
+
+    The planted angles are far enough apart that the round-trip error cannot
     reorder them, so this fails a *storage* mistake -- a `vector` column
     silently narrowed, or a float32 written through a lossy cast -- rather than
-    re-measuring quantisation.
+    re-deriving the quantisation error.
     """
     base, _ = planted_pair(0.0)
     seed_id = await _seed(session, vector=base)
     expected: list[uuid.UUID] = []
     for index in range(5):
-        # 0.15 rad apart: the cosine gap between neighbours is ~0.02, which is
-        # more than 150x the measured worst-case round-trip error.
+        # 0.15 rad apart: the cosine gap between neighbours is ~0.02, two
+        # orders of magnitude above the worst-case round-trip error.
         _, vector = planted_pair(0.15 * (index + 1))
         expected.append(await _seed(session, vector=vector))
     await session.flush()
@@ -283,12 +261,13 @@ async def test_the_top_five_survive_the_halfvec_round_trip(session: AsyncSession
 async def test_a_page_costs_one_candidate_statement_not_one_per_seed(
     session: AsyncSession,
 ) -> None:
-    """`nearest_for` takes a page of seeds. One round trip per seed is the same
-    shape `index(title_id)` was removed from `SearchIndex` for -- at 10,000
-    instead of 1.3M, which is smaller and is still no reason to reintroduce it
-    when a `CROSS JOIN LATERAL` expresses it in one statement.
+    """`nearest_for` takes a page of seeds.
 
-    Held fixed the way M4's ingest cases hold it: same statement shape,
+    One round trip per seed is the same shape `index(title_id)` was removed from
+    `SearchIndex` for -- at 10,000 instead of 1.3M, which is smaller and is still no
+    reason to reintroduce it when a `CROSS JOIN LATERAL` expresses it in one statement.
+
+    Held fixed the way the ingest cases hold it: same statement shape,
     different page size.
     """
     ids = []
@@ -314,9 +293,10 @@ async def test_a_page_costs_one_candidate_statement_not_one_per_seed(
 
 @pytest.mark.integration
 async def test_a_rebuild_writes_the_same_rows_the_second_time(session: AsyncSession) -> None:
-    """Idempotence against the real table, where `replace` is a real DELETE and
-    INSERT rather than a dict assignment -- the fake cannot distinguish
-    "replaced" from "merged".
+    """Idempotence against the real table.
+
+    `replace` is a real DELETE and INSERT rather than a dict assignment, and
+    the fake cannot distinguish "replaced" from "merged".
 
     A merge would double the row count on the second run and violate
     `pk_title_neighbors` on the third; either way the property that makes a
@@ -412,20 +392,16 @@ async def test_the_stored_rank_is_what_a_read_orders_by(session: AsyncSession) -
 async def test_a_read_orders_by_rank_and_not_by_the_neighbours_own_id(
     session: AsyncSession,
 ) -> None:
-    """`ORDER BY rank, neighbor_id` -- and deleting `rank` from it **survived
-    the whole suite** until this case existed.
+    """`ORDER BY rank, neighbor_id`, with `rank` the key that carries the claim.
 
     The case above separates `rank` from `score` and not `rank` from `id`: it
     mints the rank-0 neighbour first, so the monotonic UUIDv7 puts it first
     under either ordering. Here the arrangement is inverted -- the rank-1
     neighbour carries the *lower* id -- so an implementation that dropped the
-    `rank` key returns the catalog's oldest row as "most similar".
-
-    The distractor is `far_id`: a genuinely less similar title whose only
-    claim on the top of the shelf is that it was inserted first. Nothing
-    downstream recovers this -- `BaseRow.hydrate` turns ids into cards *in the
-    order given*, and `BecauseYouWatchedProvider` truncates to `_MAX_CARDS`
-    off the top, so a wrong order is also a wrong *selection*.
+    `rank` key returns the catalog's oldest row as "most similar". Nothing
+    downstream recovers it: `BaseRow.hydrate` turns ids into cards *in the
+    order given* and `BecauseYouWatchedProvider` truncates off the top, so a
+    wrong order is also a wrong *selection*.
     """
     neighbors = PostgresTitleNeighborRepository(session)
     first, second = planted_pair(math.pi / 4)
@@ -453,32 +429,7 @@ async def test_a_read_orders_by_rank_and_not_by_the_neighbours_own_id(
 async def test_count_stale_counts_rows_from_another_blend_and_not_rows_from_this_one(
     session: AsyncSession,
 ) -> None:
-    """The staleness predicate, against Postgres rather than against the fake.
-
-    Inverting `<>` to `=` in `_COUNT_STALE_NEIGHBORS` **survived the whole
-    suite**: every test of neighbour `count_stale` runs against
-    `FakeTitleNeighborRepository`, whose comparison is Python, and the only
-    integration reads of `count_stale` are the unrelated *embedding* one. So
-    the one clause that decides whether `usher.similarity.neighbors.stale`
-    means anything had no Postgres coverage at all.
-
-    **Both kinds of row have to be in the table at once.** With only stale rows
-    seeded, `<>` answers 1 and `=` answers 0 -- which an `== 1` assertion does
-    catch, but only by luck of direction; with only fresh rows the two swap and
-    a `== 0` assertion is satisfied by the inversion. Seeding one of each makes
-    the two predicates count *different rows*, and the per-title assertions pin
-    which is which.
-
-    The failure this guards is the one PRD 10 names: on a table inherited from
-    M6 -- the deployment the column was added for -- an inverted predicate
-    reads **zero**, and a gauge reading zero is indistinguishable from a fresh
-    table.
-
-    Both fingerprints are literals, for the reason `_FP` is one: the predicate
-    compares two strings and does not care whether either is today's real
-    blend, while a case that inherited `blend_fingerprint()` would stop
-    expressing "a different blend" the moment the weights moved.
-    """
+    """The staleness predicate, against Postgres rather than against the fake."""
     neighbors = PostgresTitleNeighborRepository(session)
     first, second = planted_pair(math.pi / 4)
     stale_seed = await _seed(session, vector=first)
@@ -507,8 +458,7 @@ async def test_count_stale_counts_rows_from_another_blend_and_not_rows_from_this
 
 @pytest.mark.integration
 async def test_two_equidistant_candidates_come_back_in_id_order(session: AsyncSession) -> None:
-    """*Which* candidates enter the pool, and in what order, is decided rather
-    than left to the executor.
+    """*Which* candidates enter the pool, and in what order, is decided here.
 
     Two candidates planted at the identical angle to the seed have an identical
     `<=>` distance, so `ORDER BY e.embedding <=> seed.embedding` alone leaves
@@ -562,12 +512,10 @@ async def test_computed_at_is_the_oldest_page_and_none_before_any_rebuild(
         [ScoredNeighbor(title_id=seed_id, neighbor_title_id=other_id, score=0.5, rank=0)],
         blend_fingerprint=_FP,
     )
-    # Backdated with a raw UPDATE, because the integration fixture is one
-    # transaction and `now()` is `transaction_timestamp()` -- frozen for its
-    # whole length, so two `replace` calls here genuinely share an instant and
-    # `min` versus `max` would be unobservable without giving the stamp
-    # something to move away from. Same device as
-    # `test_the_update_trigger_owns_updated_at`.
+    # Backdated with a raw UPDATE, because the integration fixture is one transaction
+    # and `now()` is `transaction_timestamp()` -- frozen for its whole length, so two
+    # `replace` calls here genuinely share an instant and `min` versus `max` would be
+    # unobservable without giving the stamp something to move away from.
     await session.execute(
         text("UPDATE title_neighbors SET computed_at = computed_at - interval '1 day'")
     )
@@ -588,12 +536,13 @@ async def test_computed_at_is_the_oldest_page_and_none_before_any_rebuild(
 async def test_a_score_outside_the_stored_range_is_a_translated_conflict(
     session: AsyncSession,
 ) -> None:
-    """`title_neighbors` carries `CHECK (score >= 0 AND score <= 1)`, and the
-    service clamps a negative cosine to keep the blend a convex combination.
-    This is the other side of that: if the clamp ever goes, the failure is a
+    """`title_neighbors` carries `CHECK (score >= 0 AND score <= 1)`.
+
+    The service clamps a negative cosine to keep the blend a convex
+    combination; this is the other side. If the clamp ever goes, the failure is a
     `RepositoryConflict` naming a constraint rather than a raw
-    `sqlalchemy.exc.IntegrityError` escaping the port -- and the session is
-    still usable afterwards, which is what the SAVEPOINT buys.
+    `sqlalchemy.exc.IntegrityError` escaping the port -- and the session is still usable
+    afterwards, which is what the SAVEPOINT buys.
     """
     from usher.ports.errors import RepositoryConflict
 
@@ -621,10 +570,10 @@ async def _give_genome(session: AsyncSession, title_id: uuid.UUID, lane: int) ->
 
     The vector is one-hot at `lane` -- so two titles sharing a lane are cosine
     1.0 and two on different lanes are 0.0. Real genome vectors are dense and
-    measure mean 0.6101 (Group F, over 268,157,000 pairs); the point of a
-    one-hot here is that these cases are about **whether the statement joins
-    both sides at all**, and a planted value nobody has to trust is what makes
-    a wrong join visible as a wrong number rather than as a plausible one.
+    measure mean 0.6101; the point of a one-hot here is that these cases are
+    about **whether the statement joins both sides at all**, and a planted
+    value nobody has to trust is what makes a wrong join visible as a wrong
+    number rather than as a plausible one.
 
     `halfvec(1128)` rejects any other length outright, which is the constraint
     `GenomeRepositoryContract` already records.
@@ -643,13 +592,11 @@ async def _give_genome(session: AsyncSession, title_id: uuid.UUID, lane: int) ->
 async def test_the_seed_page_reports_which_titles_carry_a_genome(
     session: AsyncSession,
 ) -> None:
-    """Kills a `has_genome` that is hardcoded, or an `EXISTS` joined the wrong
-    way round.
+    """Kills a `has_genome` that is hardcoded, or an `EXISTS` joined the wrong way round.
 
     Two seeds, one genomed. A statement answering `true` for both, or `false`
-    for both, produces a rebuild whose coverage report is a constant -- which
-    is exactly the number PRD 05 has been quoting without a denominator, now
-    arriving from a query that could be wrong in silence.
+    for both, produces a rebuild whose coverage report is a constant -- a
+    coverage figure arriving from a query that could be wrong in silence.
     """
     _, near = planted_pair(math.pi / 3)
     genomed = await _seed(session, vector=near, name="Harbour Nine")
@@ -666,28 +613,7 @@ async def test_the_seed_page_reports_which_titles_carry_a_genome(
 async def test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one(
     session: AsyncSession,
 ) -> None:
-    """The `None`-not-zero rule, asserted against the real join rather than
-    against the fake's dict.
-
-    Three candidates around one genomed seed: one sharing its genome lane
-    (cosine 1.0), one on a different lane (0.0 -- a *real* answer, and the
-    thing `None` must stay distinguishable from), and one with no genome row
-    at all (`None`).
-
-    **The middle candidate is what makes this case bite.** Without it, `None`
-    and `0.0` are the only two values present and an implementation that
-    `COALESCE`d the absent side to zero would be indistinguishable from a
-    correct one on these rows. With it, the two states are both present and
-    genuinely different.
-
-    **"Carries", not "scores", since M9's S7.** Nothing blends this value any
-    more, so the distinction the case pins now has exactly one consumer:
-    `NeighborRebuild.pairs_with_tags`, which counts `tags is not None`. A join
-    that answered 0.0 for a half-covered pair would report the genome as fully
-    covering a catalog it barely touches -- making a dead signal look live,
-    which is the wrong direction for the number a later milestone would re-open
-    the decision on.
-    """
+    """The `None`-not-zero rule, against the real join rather than the fake's dict."""
     seed_vector, near = planted_pair(math.pi / 3)
     seed_id = await _seed(session, vector=seed_vector, name="Harbour Nine")
     same_lane = await _seed(session, vector=near, name="Autumn Iron")
@@ -708,21 +634,284 @@ async def test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one(
 async def test_the_genome_join_does_not_run_inside_the_no_index_bracket(
     session: AsyncSession,
 ) -> None:
-    """**The plan says to put the genome join inside `_NEAREST`; measured, that
-    is the more expensive spelling, and this is the structural pin.**
+    """The genome join stays outside the no-index bracket, and that is structural.
 
     `_NEAREST` executes with `enable_indexscan = off` and
     `enable_bitmapscan = off`, which is the stated reason `titles` is read by a
     second statement rather than joined there. A `genome_scores` join inside
-    that bracket degrades to a sequential scan of the whole genome table
-    **once per seed** -- `Seq Scan on genome_scores ... loops=200` in the
-    measured plan -- where outside it the same work is one hash build shared by
-    the page. Measured on a real 15,565-row table: 165.7 ms -> 246.6 ms at 50
-    seeds (+49%), 619.9 ms -> 958.1 ms at 200 (+55%), against +20.3 ms flat for
-    the separate statement.
-
-    A timing assertion would be flaky, so this asserts the *shape* that makes
-    the cost true: the constant carries no reference to the genome table at
-    all. Fails the moment someone follows the plan's text.
+    that bracket degrades to a sequential scan of the whole genome table **once
+    per seed**, where outside it the same work is one hash build shared by the
+    page. A timing assertion would be flaky, so this asserts the *shape* that
+    makes the cost true: the constant carries no reference to the genome table.
     """
     assert "genome_scores" not in _NEAREST
+
+
+# -- the resume cursor and the model guard ---------------------------------
+
+# The guard's case runs before the cursor's, and the order is load bearing: a
+# deployment mid-model-swap has a mixed `title_embeddings`, so the refusal
+# fires and the cursor is never read -- which is also why a green cursor case
+# placed first could be green because nothing ran at all.
+
+
+@pytest.fixture
+def lines() -> Iterator[list[str]]:
+    captured: list[str] = []
+    sink = logger.add(captured.append, level="DEBUG", format="{level.name}|{message}")
+    yield captured
+    logger.remove(sink)
+
+
+@pytest.mark.integration
+async def test_the_scheduled_rebuild_refuses_a_table_written_by_another_model(
+    session: AsyncSession, lines: list[str]
+) -> None:
+    """The registration refuses a mixed table, and refusing means writing nothing."""
+    ids = []
+    for index in range(3):
+        _, vector = planted_pair(0.3 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+
+    async def commit() -> None:
+        await session.flush()
+
+    other_model = "fake:some-other-checkpoint"
+    assert other_model != _MODEL
+    mismatched = SimilarityService(
+        PostgresTitleEmbeddingRepository(session),
+        PostgresTitleNeighborRepository(session),
+        PostgresTitleRepository(session),
+        commit,
+        embedding_model=other_model,
+    )
+    before = await mismatched.computed_at()
+
+    assert await rebuild_job(mismatched).run() is JobOutcome.DECLINED
+
+    written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
+    assert written == 0, "the guard logged and then rebuilt anyway"
+    assert await mismatched.computed_at() == before
+    refusals = [line for line in lines if line.startswith("ERROR|")]
+    assert len(refusals) == 1
+    assert other_model in refusals[0]
+    assert _MODEL in refusals[0]
+
+    # The control: same rows, same job, a service that agrees with the table.
+    assert await rebuild_job(_service(session)).run() is JobOutcome.DONE
+
+    agreed = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
+    assert agreed == len(ids) * (len(ids) - 1), (
+        "the matching arm wrote nothing, so the refusal above proves nothing"
+    )
+
+
+class _RecordingEmbeddings(PostgresTitleEmbeddingRepository):
+    """The real repository, recording every `list_embedded` cursor it is given.
+
+    A subclass rather than a delegating double: the case is about *which*
+    `after` the walk starts from, and every other statement it issues has to
+    be the shipped one against the shipped table. A stand-in implementing the
+    whole port would let a resume that read a different population pass.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
+        self.calls: list[uuid.UUID | None] = []
+
+    async def list_embedded(
+        self, *, after: uuid.UUID | None = None, limit: int = 500
+    ) -> list[NeighborSeed]:
+        self.calls.append(after)
+        return await super().list_embedded(after=after, limit=limit)
+
+
+@pytest.mark.integration
+async def test_a_resumed_rebuild_starts_at_the_first_seed_without_a_current_fingerprint(
+    session: AsyncSession,
+) -> None:
+    """`rebuild(resume=True)` computes its start cursor once, from the artefact."""
+    ids = []
+    for index in range(6):
+        _, vector = planted_pair(0.2 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+    # The premise: `new_id()` is UUIDv7, so insertion order and id order agree
+    # and "the second seed" is a statement about both. A case that assumed it
+    # would still read green against a walk that visited them in another order.
+    assert ids == sorted(ids)
+
+    capped = await _service(session).rebuild(max_seeds=2)
+
+    assert capped.seeds == 2
+    stamped = (
+        (await session.execute(text("SELECT DISTINCT title_id FROM title_neighbors")))
+        .scalars()
+        .all()
+    )
+    assert sorted(stamped) == ids[:2], (
+        "the capped run wrote no rows, so a resume starting anywhere would pass"
+    )
+
+    embeddings = _RecordingEmbeddings(session)
+
+    async def commit() -> None:
+        await session.flush()
+
+    resumed = SimilarityService(
+        embeddings,
+        PostgresTitleNeighborRepository(session),
+        PostgresTitleRepository(session),
+        commit,
+        embedding_model=_MODEL,
+    )
+    await resumed.rebuild(resume=True)
+
+    assert embeddings.calls, "the rebuild issued no page read"
+    assert embeddings.calls[0] == ids[1]
+
+
+async def _written_rows(session: AsyncSession) -> list[tuple[uuid.UUID, uuid.UUID, float, int]]:
+    """Every neighbour row, without `computed_at`.
+
+    A clock moves between two runs and is the one column a byte-for-byte comparison
+    cannot include.
+    """
+    result = await session.execute(
+        text(
+            "SELECT title_id, neighbor_id, score, rank FROM title_neighbors "
+            "ORDER BY title_id, neighbor_id"
+        )
+    )
+    return [(row[0], row[1], row[2], row[3]) for row in result.all()]
+
+
+@pytest.mark.integration
+async def test_a_rebuild_with_no_argument_walks_exactly_as_a_resumed_one_over_a_stale_table(
+    session: AsyncSession,
+) -> None:
+    """`resume=True` over a fully-stale table is the same walk, not a different one."""
+    ids = []
+    for index in range(4):
+        _, vector = planted_pair(0.2 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+
+    async def commit() -> None:
+        await session.flush()
+
+    def _service_over(embeddings: PostgresTitleEmbeddingRepository) -> SimilarityService:
+        return SimilarityService(
+            embeddings,
+            PostgresTitleNeighborRepository(session),
+            PostgresTitleRepository(session),
+            commit,
+            embedding_model=_MODEL,
+        )
+
+    plain_reads = _RecordingEmbeddings(session)
+    plain = await _service_over(plain_reads).rebuild()
+    plain_rows = await _written_rows(session)
+
+    # The positive control, and it is the whole case's premise: a walk that
+    # wrote nothing would make every comparison below vacuously true.
+    assert plain.seeds == len(ids)
+    assert plain_rows, "the unresumed walk wrote no rows at all"
+    assert plain_reads.calls, "the unresumed walk issued no page read"
+
+    # Back to fully stale, so the second run meets the same table the first did.
+    await session.execute(text("DELETE FROM title_neighbors"))
+    await session.flush()
+
+    resumed_reads = _RecordingEmbeddings(session)
+    resumed = await _service_over(resumed_reads).rebuild(resume=True)
+
+    assert resumed_reads.calls == plain_reads.calls
+    assert resumed_reads.calls[0] is None, "a fully-stale table has nothing to resume after"
+    assert await _written_rows(session) == plain_rows
+    assert resumed == plain
+
+
+@pytest.mark.integration
+async def test_a_refusal_written_under_another_model_does_not_block_the_rebuild(
+    session: AsyncSession, lines: list[str]
+) -> None:
+    """The guard's population is the rows that **have a vector**.
+
+    That is the population `list_embedded` walks. A title whose document was
+    degenerate is stored as a `title_embeddings` row
+    with a NULL embedding and whatever model name the deployment carried when
+    it was refused. It is never a seed and it names no vector a pool can be
+    drawn from, so a guard scoped to the whole table would refuse a rebuild
+    over a perfectly uniform set of readable vectors because an *unreadable*
+    row disagreed -- and would do it on any deployment that has ever changed
+    model, which is every deployment the guard exists for.
+
+    The refusal is arranged under a model this service is not configured with,
+    so `stored_model_names` scoped to the whole table answers two names and
+    scoped to the readable rows answers one.
+    """
+    ids = []
+    for index in range(3):
+        _, vector = planted_pair(0.3 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    refused = await _seed(session, vector=None)
+    await session.execute(
+        text("UPDATE title_embeddings SET model_name = :name WHERE title_id = :id"),
+        {"name": "fake:some-other-checkpoint", "id": refused},
+    )
+    await session.flush()
+
+    service = _service(session)
+    assert await service.foreign_embedding_models() == ()
+
+    await rebuild_job(service).run()
+
+    written = (await session.execute(text("SELECT count(*) FROM title_neighbors"))).scalar_one()
+    assert written == len(ids) * (len(ids) - 1), "the refused row's model name refused the walk"
+    assert [line for line in lines if line.startswith("ERROR|")] == []
+
+
+@pytest.mark.integration
+async def test_an_unresumed_rebuild_still_starts_at_page_one_over_a_half_stamped_table(
+    session: AsyncSession,
+) -> None:
+    """The default is the *old* behaviour, on the one table where the two differ.
+
+    ⚠️ **A fully-stale table cannot see this.** There the cursor is `None`
+    anyway, so a `resume` that had quietly become the default would walk
+    identically and the byte-for-byte case above would stay green. The state
+    that separates them is the half-stamped one `max_seeds` produces: a
+    resumed run starts after the capped prefix, and an unresumed one must
+    still start at the beginning.
+
+    That is a claim about who decides. `usher similar --rebuild` is an
+    operator asking for a full walk and `--resume` is them asking for less;
+    the registration is what always resumes, because a timer has nobody to
+    ask.
+    """
+    ids = []
+    for index in range(4):
+        _, vector = planted_pair(0.2 * (index + 1))
+        ids.append(await _seed(session, vector=vector, genres=("drama",)))
+    await session.flush()
+    assert ids == sorted(ids)
+
+    capped = await _service(session).rebuild(max_seeds=2)
+    assert capped.seeds == 2, "nothing was stamped, so 'unresumed' has nothing to differ from"
+
+    async def commit() -> None:
+        await session.flush()
+
+    reads = _RecordingEmbeddings(session)
+    await SimilarityService(
+        reads,
+        PostgresTitleNeighborRepository(session),
+        PostgresTitleRepository(session),
+        commit,
+        embedding_model=_MODEL,
+    ).rebuild()
+
+    assert reads.calls, "the rebuild issued no page read"
+    assert reads.calls[0] is None

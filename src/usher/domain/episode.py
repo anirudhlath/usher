@@ -1,25 +1,4 @@
-"""The hierarchy under a series `Title`.
-
-Neither model is a `Title` and neither carries a `TitleKind`: PRD 02 keeps
-`TitleKind` at `movie | series` and hangs seasons and episodes off the
-series. That is what makes episode watch state behave like title watch
-state -- it attaches to canonical state rather than to a `MediaItem`, so it
-survives the series becoming available on a second source or the first
-source going away.
-
-`Season.season_number` and `Episode.season_number` are both stored, and the
-duplication is deliberate: an episode is looked up by
-`(title_id, season_number, episode_number)` during ingest, before its
-`Season` row is necessarily known, and a join to discover the number a
-source already told us would be one query per episode across 999,827 of
-them.
-
-**Standing constraint, the same one `title.py` carries:** each model's
-field set and its row's column set stay in exact 1:1 correspondence by
-name. `tests/unit/test_db_models_ingest.py` checks it for free; without it
-a mismatch only surfaces at read time, inside the Docker-requiring
-integration suite, as an opaque `ValidationError` from `extra="forbid"`.
-"""
+"""The hierarchy under a series `Title`."""
 
 import uuid
 from datetime import UTC, date, datetime
@@ -53,9 +32,10 @@ class Season(DomainModel):
 
 
 class Episode(DomainModel):
-    """One episode. First-class -- it carries watch state and it is what a
-    source actually holds -- but not independently searchable in v1
-    (PRD 05).
+    """One episode.
+
+    First-class -- it carries watch state and it is what a source actually holds -- but
+    not independently searchable in v1 (PRD 05).
 
     `absolute_number` is nullable and stays that way: it is TVDb's ordering
     concept, TMDb does not supply it, and an alternate-ordering provider is

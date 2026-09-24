@@ -1,9 +1,4 @@
-"""PostgresRowProviderSettingsRepository against real Postgres.
-
-The contract suite runs here unchanged; the two cases below are the ones the
-in-memory fake cannot express by construction -- a real primary-key row count,
-and durable persistence across a real commit boundary.
-"""
+"""PostgresRowProviderSettingsRepository against real Postgres."""
 
 import pytest
 from sqlalchemy import text
@@ -31,15 +26,17 @@ async def _row_count(session: AsyncSession, slug: str) -> int:
 
 
 async def test_re_setting_the_same_slug_writes_one_row_not_two(session: AsyncSession) -> None:
-    """The physical claim `ON CONFLICT (slug_prefix) DO UPDATE` makes, and one
-    the in-memory fake's dict cannot get wrong by construction: two writes for
+    """The physical claim `ON CONFLICT (slug_prefix) DO UPDATE` makes.
+
+    and one the in-memory fake's dict cannot get wrong by construction: two writes for
     one slug, the second flipping the value, must still leave exactly one row.
-    Deleting the `DO UPDATE` clause does not merely fail to collapse the two
-    writes -- the second bare `INSERT` raises a primary-key violation before a
-    row count is even reachable, which is the louder and more useful failure
-    `test_setting_the_same_slug_twice_upserts_rather_than_duplicating` (the
-    shared contract) already catches; this case additionally proves the count
-    on the one implementation that can.
+
+    Deleting the `DO UPDATE` clause does not merely fail to collapse the two writes --
+    the second bare `INSERT` raises a primary-key violation before a row count is even
+    reachable, which is the louder and more useful failure
+    `test_setting_the_same_slug_twice_upserts_rather_than_duplicating` (the shared
+    contract) already catches; this case additionally proves the count on the one
+    implementation that can.
     """
     repository = PostgresRowProviderSettingsRepository(session)
 
@@ -52,13 +49,13 @@ async def test_re_setting_the_same_slug_writes_one_row_not_two(session: AsyncSes
 async def test_a_write_is_invisible_to_a_second_session_until_the_caller_commits(
     postgres_url: str,
 ) -> None:
-    """**The standing rule, stated as behaviour rather than as a docstring
-    sentence.** `set_enabled` flushes and never commits, so the row it wrote
-    is this session's own uncommitted work until the caller commits it --
-    `PostgresBulkCatalogRepository.bulk_load_window`'s precedent
-    (`tests/integration/test_bulk_repository.py`), reached here from the write
-    side of a single-statement repository rather than from a multi-statement
-    window.
+    """**The standing rule.
+
+    stated as behaviour rather than as a docstring sentence.** `set_enabled` flushes and
+    never commits, so the row it wrote is this session's own uncommitted work until the
+    caller commits it -- `PostgresBulkCatalogRepository.bulk_load_window`'s precedent
+    (`tests/integration/test_bulk_repository.py`), reached here from the write side of a
+    single-statement repository rather than from a multi-statement window.
 
     Two independent sessions, built off their own engine rather than the
     per-test `session` fixture: that fixture's whole isolation model is a

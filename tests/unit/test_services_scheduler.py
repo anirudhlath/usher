@@ -1,0 +1,1166 @@
+"""The scheduler loop over fake jobs and `SearchQueryRetention` over a fake store.
+
+An injected clock, no database, and a `_NOW` no arithmetic error can land on.
+"""
+
+import asyncio
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from loguru import logger
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
+from usher.composition import build_scheduler
+from usher.config import Settings
+from usher.db.base import build_engine, build_session_factory
+from usher.domain.ids import new_id
+from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
+from usher.ports.scheduler import JobOutcome, ScheduledJob
+from usher.ports.search import SearchMode
+from usher.services.scheduler import (
+    RETENTION_PERIOD,
+    Scheduler,
+    SearchQueryRetention,
+    SearchQueryScope,
+)
+from usher.services.similar import NeighborRebuildJob
+
+# Not the epoch, and not a round number either -- see the module docstring.
+_NOW = datetime(2026, 8, 27, 18, 30, 43, tzinfo=UTC)
+_HOUR = timedelta(hours=1)
+
+
+class _Clock:
+    """A clock a case moves by hand, so no case waits on a real one."""
+
+    def __init__(self, now: datetime = _NOW) -> None:
+        self.now = now
+
+    def read(self) -> datetime:
+        return self.now
+
+
+class _Fake(ScheduledJob):
+    """A job that records what was asked of it.
+
+    `name` and `period` are properties because the port declares them abstract, so an
+    implementation that forgets one fails at instantiation rather than at the first
+    metric label.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        period: timedelta = _HOUR,
+        last: datetime | None = None,
+        fails: bool = False,
+        declines: bool = False,
+        last_done_fails: bool = False,
+        blocks: asyncio.Event | None = None,
+    ) -> None:
+        self._name = name
+        self._period = period
+        self._last = last
+        self._fails = fails
+        self._declines = declines
+        self._last_done_fails = last_done_fails
+        self._blocks = blocks
+        self.runs = 0
+        self.asked = 0
+        # Wall-clock intervals, one per run, so a case can assert two runs did
+        # not overlap. A count of two completions is what a concurrent pair
+        # produces too -- CLAUDE.md's fourth evidence rule, applied in the
+        # direction that wants serialisation.
+        self.windows: list[tuple[float, float]] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def period(self) -> timedelta:
+        return self._period
+
+    async def last_done(self) -> datetime | None:
+        self.asked += 1
+        if self._last_done_fails:
+            raise RuntimeError("the artefact could not be read")
+        return self._last
+
+    async def run(self) -> JobOutcome:
+        started = asyncio.get_running_loop().time()
+        self.runs += 1
+        try:
+            if self._blocks is not None:
+                await self._blocks.wait()
+            else:
+                # One real suspension, so two concurrent runs would genuinely
+                # interleave here. Without it a `gather` would still produce
+                # disjoint windows and the sequencing case could not fail.
+                await asyncio.sleep(0.01)
+            if self._fails:
+                raise ZeroDivisionError("the scheduled job blew up")
+            return JobOutcome.DECLINED if self._declines else JobOutcome.DONE
+        finally:
+            self.windows.append((started, asyncio.get_running_loop().time()))
+
+
+def _scheduler(*jobs: ScheduledJob, clock: _Clock | None = None) -> Scheduler:
+    scheduler = Scheduler(tick_seconds=60.0, now=(clock or _Clock()).read)
+    for job in jobs:
+        scheduler.register(job)
+    return scheduler
+
+
+def _no_sessions() -> async_sessionmaker[AsyncSession]:
+    """A real session factory over a real engine against a port nothing listens on.
+
+    `build_engine` opens no connection -- that is `create_app`'s own lifespan
+    property -- and `build_scheduler` only closes over this, so no case here
+    touches a socket. A `Mock` would satisfy the type and would let a
+    `build_scheduler` that *used* the factory eagerly pass silently.
+    """
+    return build_session_factory(build_engine("postgresql+asyncpg://u:p@127.0.0.1:1/usher"))
+
+
+class _RecordingScope:
+    """A `SearchQueryScope` over one repository, counting opens and clean exits.
+
+    The fake has no transaction, so a commit is not observable as a stored effect;
+    what is observable is that `run()` opens a fresh scope per chunk rather than one
+    for the whole drain. The Postgres arm asserts the commit itself.
+    """
+
+    def __init__(self, repository: SearchQueryRepository) -> None:
+        self._repository = repository
+        self.opened = 0
+        self.closed_cleanly = 0
+
+    @asynccontextmanager
+    async def __call__(self) -> AsyncIterator[SearchQueryRepository]:
+        self.opened += 1
+        yield self._repository
+        self.closed_cleanly += 1
+
+
+def _scope_over(repository: SearchQueryRepository) -> SearchQueryScope:
+    return _RecordingScope(repository)
+
+
+def _row(*, at: datetime, user_id: uuid.UUID) -> SearchQueryRecord:
+    """One `search_queries` row, with everything this file does not vary filled in.
+
+    Invented values, like every fixture here.
+    """
+    return SearchQueryRecord(
+        id=new_id(),
+        at=at,
+        user_id=user_id,
+        query="the quiet vacuum",
+        mode=SearchMode.FULL_TEXT,
+        result_count=1,
+        latency_ms=1,
+    )
+
+
+@pytest.fixture
+def spans() -> Iterator[InMemorySpanExporter]:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    yield exporter
+    exporter.clear()
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A real `MeterProvider` for this case alone.
+
+    `tests/conftest.py`'s `reset_otel_meter_provider` is what makes "for this case
+    alone" true.
+    """
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _instruments(reader: InMemoryMetricReader) -> set[str]:
+    """Every instrument that has recorded a point."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return set()
+    return {
+        metric.name
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+
+
+@pytest.fixture
+def lines() -> Iterator[list[str]]:
+    captured: list[str] = []
+    sink = logger.add(captured.append, level="DEBUG", format="{level.name}|{message}")
+    yield captured
+    logger.remove(sink)
+
+
+# -- the due comparison ----------------------------------------------------
+
+
+#: A ceiling on any `SearchQueryRetention.run()` this file drives -- the unit
+#: half of `tests/integration/test_search_query_retention.py::DRAIN_DEADLINE`,
+#: and it only works because `FakeSearchQueryRepository.prune` awaits.
+#: A drain whose terminator is broken has to reach pytest as a failure rather
+#: than as a hang.
+DRAIN_DEADLINE = 5.0
+
+
+async def _drain(job: SearchQueryRetention) -> None:
+    """`job.run()`, bounded.
+
+    See `DRAIN_DEADLINE`.
+    """
+    await asyncio.wait_for(job.run(), DRAIN_DEADLINE)
+
+
+async def _tick(scheduler: Scheduler) -> int:
+    """`scheduler.tick()`, bounded.
+
+    See `DRAIN_DEADLINE`. `Scheduler.tick()` awaits `job.run()` with no deadline of
+    its own, so a job that never returns wedges the tick; this helper is what lets
+    the suite report that as a failure rather than as a hang.
+    """
+    return await asyncio.wait_for(scheduler.tick(), DRAIN_DEADLINE)
+
+
+async def test_a_job_whose_period_has_not_elapsed_is_not_run() -> None:
+    """A due job runs and a not-due one does not, in the same tick.
+
+    A scheduler that ran nothing at all also satisfies *"the not-due job did not
+    run"*, so the case asserts the due job **did**, and both assertions carry their
+    own message. One tick, two jobs on one registry, one clock.
+    """
+    clock = _Clock()
+    due = _Fake("due", period=_HOUR, last=clock.now - timedelta(hours=2))
+    waiting = _Fake("waiting", period=_HOUR, last=clock.now - timedelta(minutes=30))
+    scheduler = _scheduler(due, waiting, clock=clock)
+
+    ran = await _tick(scheduler)
+
+    assert due.runs == 1, "the job whose period had elapsed was not run"
+    assert waiting.runs == 0, "a job whose period has not elapsed was run anyway"
+    assert ran == 1
+
+
+async def test_a_job_at_exactly_its_period_is_due() -> None:
+    """The boundary, because `>=` and `>` are the two spellings.
+
+    A period is *"at least this long since the last completion"*, so the instant it
+    has been exactly that long the job is due -- and a fixture an hour either side of
+    the boundary cannot tell the two spellings apart.
+    """
+    clock = _Clock()
+    job = _Fake("exact", period=_HOUR, last=clock.now - _HOUR)
+    assert await _tick(_scheduler(job, clock=clock)) == 1
+    assert job.runs == 1
+
+
+async def test_a_job_that_has_never_run_is_due() -> None:
+    """*"Never built"* and *"not due"* are two states a naive `now - last_done` collapses.
+
+    With a `TypeError` rather than a wrong answer, because `datetime - None` does not
+    subtract. The neighbour rebuild on a fresh deployment is exactly this state, so
+    it is the first one a registration will meet.
+    """
+    job = _Fake("never", last=None)
+    assert await _tick(_scheduler(job)) == 1
+    assert job.runs == 1
+
+
+# -- the registry a composition root builds --------------------------------
+
+
+def _settings(**overrides: object) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
+def test_the_registry_a_composition_root_builds_holds_both_jobs_in_order() -> None:
+    """Both registrations are present, and in registration order.
+
+    A registry nothing asserts is indistinguishable from one somebody forgot to fill.
+    """
+    scheduler = build_scheduler(_settings(), sessions=_no_sessions())
+
+    assert isinstance(scheduler, Scheduler)
+    assert [job.name for job in scheduler.jobs] == [
+        "search_queries.retention",
+        "similar.rebuild",
+    ]
+
+
+def test_a_scheduler_with_no_way_to_reach_a_database_registers_nothing() -> None:
+    """`sessions=None` is an explicit *"this process cannot reach a database"*.
+
+    An empty registry is still a legal state. The wrong implementation this kills
+    registers the retention job anyway and leaves it to fail on its first
+    `last_done()` -- which the loop absorbs, counts, backs off on and repeats
+    forever, with the only symptom a log line every few minutes.
+    """
+    scheduler = build_scheduler(_settings(), sessions=None)
+
+    assert scheduler.jobs == ()
+
+
+async def test_the_retention_registration_carries_the_window_and_the_batch_an_operator_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two settings reach the job, and the period comes from neither."""
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    oldest = _NOW - timedelta(days=300)
+    for minute in range(7):
+        await repository.record(_row(at=oldest + timedelta(minutes=minute), user_id=user_id))
+    scope = _RecordingScope(repository)
+    monkeypatch.setattr(
+        "usher.composition.search_query_scope",
+        lambda sessions: scope,
+    )
+
+    scheduler = build_scheduler(
+        _settings(search_query_retention_days=7, search_query_retention_batch=3),
+        sessions=_no_sessions(),
+    )
+
+    job = next(one for one in scheduler.jobs if isinstance(one, SearchQueryRetention))
+    assert await job.last_done() == oldest + timedelta(days=7), (
+        "the reading is min(at) + the window an operator set, capped at now"
+    )
+    opened_by_the_reading = scope.opened
+
+    await _drain(job)
+
+    assert scope.opened - opened_by_the_reading == 3, "3 + 3 + 1 at the batch an operator set"
+    assert not repository.rows, "the premise: every row was past the seven-day cutoff"
+    assert timedelta(days=1) == RETENTION_PERIOD, (
+        "the retention job offers itself once a day, and .env.example, Config.settings.ts, "
+        "PRD 08 and PRD 10 all say so in prose no test reads"
+    )
+    assert job.period == RETENTION_PERIOD
+
+
+def test_the_rebuild_registration_carries_the_period_an_operator_set() -> None:
+    """The one setting reaches the job, as a `timedelta` of **hours**.
+
+    The wrong implementations this kills: a registration hard-coding 24 h beside a
+    setting an operator can change; one passing the *hours* where a `timedelta` is
+    wanted, a factor of 3,600 that reads as correct at a glance; and one wiring
+    `timedelta(days=...)` from the retention setting next to it. The fixture value is
+    non-default and not a whole number of days, so both failures show rather than
+    one. A period here is a setting where retention's is a constant, because what it
+    has to clear is the walk's own duration -- a function of catalog size, which
+    nothing in `src/` can know.
+    """
+    scheduler = build_scheduler(
+        _settings(similar_rebuild_period_hours=5.5), sessions=_no_sessions()
+    )
+
+    job = next(one for one in scheduler.jobs if isinstance(one, NeighborRebuildJob))
+    assert job.period == timedelta(hours=5.5)
+    assert job.name == "similar.rebuild"
+
+
+# -- the retention registration --------------------------------------------
+
+
+async def test_an_empty_table_is_not_due_rather_than_never_built() -> None:
+    """An empty table is not due, rather than never built.
+
+    `ScheduledJob.last_done` says `None` means *"never built, therefore due"*, which
+    is right for an artefact and wrong for an **invariant**: an empty
+    `search_queries` holds nothing past its cutoff, so the rule is satisfied
+    vacuously and a `None` here would run a no-op prune on every tick forever. Both
+    halves are asserted, because *"the reading is not `None`"* is also what a job
+    answering `datetime.min` would produce.
+    """
+    clock = _Clock()
+    job = SearchQueryRetention(
+        _scope_over(FakeSearchQueryRepository()),
+        window=timedelta(days=90),
+        batch=10,
+        period=RETENTION_PERIOD,
+        now=clock.read,
+    )
+
+    assert await job.last_done() == clock.now
+
+    assert await _tick(_scheduler(job, clock=clock)) == 0
+
+
+async def test_a_table_whose_oldest_row_is_inside_the_window_is_not_due() -> None:
+    """The state a healthy deployment is in almost always.
+
+    The wrong implementation this kills spells `last_done()` as `min(at)` itself: a
+    row 14 days old against a 90-day window reads as *"last done 14 days ago"*, due
+    against any period under a fortnight, and after a prune it would sit at the
+    window's age and stay due forever. The control is the second arm -- one row moved
+    past the cutoff must be due, or a `last_done()` that always answered `now` would
+    pass the first half.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    await repository.record(_row(at=clock.now - timedelta(days=14), user_id=user_id))
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=10,
+        period=timedelta(days=1),
+        now=clock.read,
+    )
+
+    assert await job.last_done() == clock.now
+    assert await _tick(_scheduler(job, clock=clock)) == 0, "nothing is past the cutoff"
+
+    await repository.record(_row(at=clock.now - timedelta(days=95), user_id=user_id))
+
+    assert await job.last_done() == clock.now - timedelta(days=5)
+    assert await _tick(_scheduler(job, clock=clock)) == 1, (
+        "a row five days past a 90-day window is four days past a one-day period"
+    )
+
+
+async def test_the_period_is_how_much_expired_data_may_accumulate() -> None:
+    """The arithmetic the reading buys, stated as a boundary.
+
+    A job is due once the oldest surviving row is `window + period` old, so a row
+    exactly that old is due and one a moment short of it is not -- which is the whole
+    difference between a period that decides something and one that decides nothing.
+    Two arms one microsecond apart, because a fixture a day either side cannot tell
+    `>=` from `>`, and the not-due arm is what stops a job that is simply always due.
+    """
+    clock = _Clock()
+    window = timedelta(days=90)
+    period = timedelta(days=1)
+    user_id = new_id()
+
+    short = FakeSearchQueryRepository()
+    await short.record(
+        _row(at=clock.now - window - period + timedelta(microseconds=1), user_id=user_id)
+    )
+    exact = FakeSearchQueryRepository()
+    await exact.record(_row(at=clock.now - window - period, user_id=user_id))
+
+    def job(repository: FakeSearchQueryRepository) -> SearchQueryRetention:
+        return SearchQueryRetention(
+            _scope_over(repository), window=window, batch=10, period=period, now=clock.read
+        )
+
+    assert await _tick(_scheduler(job(short), clock=clock)) == 0
+    assert await _tick(_scheduler(job(exact), clock=clock)) == 1
+
+
+async def test_a_run_moves_the_reading_its_own_period_is_compared_against() -> None:
+    """A reading this job's own runs move, which is what `min(search_queries.at)` is not.
+
+    The job is due, it runs, and the same reading is `now` afterwards, so the next
+    tick does nothing. The premise guard is the first assertion: a job that was never
+    due could not demonstrate anything by not running. The second half is the other
+    direction -- a new search is the newest row, so it moves neither `min(at)` nor
+    the invariant, where under `min(at)`-as-a-completion-time a table that keeps
+    being searched ages into permanent dueness.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    await repository.record(_row(at=clock.now - timedelta(days=200), user_id=user_id))
+    await repository.record(_row(at=clock.now - timedelta(days=10), user_id=user_id))
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=10,
+        period=timedelta(days=1),
+        now=clock.read,
+    )
+    scheduler = _scheduler(job, clock=clock)
+
+    assert await _tick(scheduler) == 1, "the premise: this job was due"
+
+    assert await job.last_done() == clock.now
+    assert await _tick(scheduler) == 0, "its own run moved the reading past its own period"
+
+    await repository.record(_row(at=clock.now, user_id=user_id))
+
+    assert await _tick(scheduler) == 0, (
+        "a fresh search must not make the retention job due -- that is the defect "
+        "min(search_queries.at) as a last_done() has"
+    )
+
+
+async def test_the_prune_drains_in_chunks_and_opens_a_scope_for_each() -> None:
+    """A commit per chunk, observed on this arm as a scope per chunk.
+
+    The wrong implementations this kills: one `DELETE` for the whole
+    population, which holds a transaction and a lock set over a table
+    `GET /search` writes to on every request; a loop that reuses one scope, so
+    every chunk commits at the end or not at all; and a loop that stops after
+    the first chunk, which leaves the table over-length while reporting
+    success.
+
+    Seven expired rows against a batch of three: chunks of 3, 3, 1 -- and the
+    short third is what terminates it, so **three** scopes and not four. The
+    survivor arm is what stops a `run()` that simply emptied the table from
+    passing.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    for days in (200, 180, 160, 140, 120, 110, 100):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+    for days in (80, 1):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+    scope = _RecordingScope(repository)
+    job = SearchQueryRetention(
+        scope, window=timedelta(days=90), batch=3, period=RETENTION_PERIOD, now=clock.read
+    )
+
+    await _drain(job)
+
+    assert scope.opened == 3, "3 + 3 + 1: the short chunk is the terminator"
+    assert scope.closed_cleanly == 3, "every chunk's scope has to exit cleanly to commit"
+    assert sorted((clock.now - record.at).days for record in repository.rows.values()) == [1, 80]
+
+
+def test_a_chunk_size_below_one_is_refused_where_the_job_is_built() -> None:
+    """A batch of zero deletes nothing per chunk and `0 < 0` is false, so the drain never ends.
+
+    What stopped that today was `Settings.search_query_retention_batch`'s
+    `ge=1`, two layers from the loop it protects and reachable only through
+    the composition root -- a job built any other way looped forever and the
+    symptom was a lane that never returned. The refusal belongs where the
+    number arrives.
+    """
+    with pytest.raises(ValueError, match="batch"):
+        SearchQueryRetention(
+            _scope_over(FakeSearchQueryRepository()),
+            window=timedelta(days=90),
+            batch=0,
+            period=RETENTION_PERIOD,
+        )
+
+
+async def test_the_cutoff_is_taken_once_and_not_per_chunk() -> None:
+    """A boundary recomputed inside its own loop moves under it.
+
+    The wrong implementation this kills reads the clock per chunk, so a run
+    that takes minutes deletes rows that were inside the window when it
+    started. Driven with a clock that jumps a year between chunks and a batch
+    of one: with the cutoff taken once, the row 10 days old survives;
+    recomputed per chunk it is a year past the second chunk's cutoff and goes.
+
+    This is also what makes the loop terminate against a live table -- a row
+    written *during* the run is newer than a fixed cutoff by construction.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    for days in (400, 380, 10):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+
+    def jumping_clock() -> datetime:
+        reading = clock.now
+        clock.now += timedelta(days=365)
+        return reading
+
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=1,
+        period=RETENTION_PERIOD,
+        now=jumping_clock,
+    )
+
+    await _drain(job)
+
+    survivors = [record.at for record in repository.rows.values()]
+    assert len(survivors) == 1, "only the two rows past the *original* cutoff may go"
+
+
+async def test_the_prune_says_how_many_rows_it_removed(lines: list[str]) -> None:
+    """*"A filter is invisible without a counter"*, one table over.
+
+    Without it, *"this deployment answered few searches"* and *"retention
+    deleted them"* are the same observation. The wrong implementation this
+    kills is a `run()` that returns quietly, which every other case here
+    passes.
+    """
+    clock = _Clock()
+    user_id = new_id()
+    repository = FakeSearchQueryRepository()
+    for days in (400, 380):
+        await repository.record(_row(at=clock.now - timedelta(days=days), user_id=user_id))
+    job = SearchQueryRetention(
+        _scope_over(repository),
+        window=timedelta(days=90),
+        batch=10,
+        period=RETENTION_PERIOD,
+        now=clock.read,
+    )
+
+    await _drain(job)
+
+    pruned = [line for line in lines if "pruned" in line]
+    assert len(pruned) == 1, f"expected one line naming the count, got {pruned}"
+    assert "pruned 2 " in pruned[0], pruned[0]
+
+
+# -- sequencing ------------------------------------------------------------
+
+
+def _overlap(one: tuple[float, float], other: tuple[float, float]) -> float:
+    return min(one[1], other[1]) - max(one[0], other[0])
+
+
+async def test_two_due_jobs_run_one_at_a_time() -> None:
+    """Asserted by observed non-overlap, never by a count.
+
+    Two completions is exactly what a concurrent pair produces, so the fakes record
+    the wall-clock interval each occupied and the case asserts the two do not
+    intersect. One task per job rather than a group: a group cancels its siblings on
+    the first escape, which turns one poisoned job into a three-hour rebuild
+    abandoned mid-page.
+    """
+    clock = _Clock()
+    first = _Fake("first", last=clock.now - timedelta(hours=2))
+    second = _Fake("second", last=clock.now - timedelta(hours=2))
+
+    assert await _tick(_scheduler(first, second, clock=clock)) == 2
+
+    assert len(first.windows) == 1 and len(second.windows) == 1, (
+        "two windows are a statement about two runs; one is a statement about nothing"
+    )
+    assert _overlap(first.windows[0], second.windows[0]) <= 0.0, (
+        f"the two jobs overlapped: {first.windows[0]} and {second.windows[0]}"
+    )
+
+
+# -- failure isolation -----------------------------------------------------
+
+
+async def test_a_failing_job_does_not_stop_its_siblings(lines: list[str]) -> None:
+    """Without the named `except Exception` the first raise takes the rest of the registry.
+
+    The loop task dies, and CPython reports the unretrieved exception at GC time, to
+    stderr, with no job name in it -- the shape `LaneSupervisor._guard` exists for.
+    The log line has to name the job, or an operator has an exception and no idea
+    which of two batches raised it.
+    """
+    clock = _Clock()
+    poison = _Fake("poison", last=None, fails=True)
+    healthy = _Fake("healthy", last=None)
+
+    ran = await _tick(_scheduler(poison, healthy, clock=clock))
+
+    assert poison.runs == 1
+    assert healthy.runs == 1, "a failing job took its sibling down with it"
+    assert ran == 1, "a job that raised was counted as having run"
+    failures = [line for line in lines if "poison" in line]
+    assert failures, f"the failure was not logged with the job's name: {lines}"
+    assert "ZeroDivisionError" in "\n".join(failures)
+
+
+async def test_a_last_done_that_raises_neither_runs_the_job_nor_stops_the_tick(
+    lines: list[str],
+) -> None:
+    """`last_done()` reads an artefact, so it fails the way every database call fails.
+
+    Running the job anyway would start a multi-hour rebuild on the strength of a read
+    that did not answer.
+    """
+    clock = _Clock()
+    unreadable = _Fake("unreadable", last=None, last_done_fails=True)
+    healthy = _Fake("healthy", last=None)
+
+    assert await _tick(_scheduler(unreadable, healthy, clock=clock)) == 1
+
+    assert unreadable.runs == 0, "a job ran on the strength of a read that raised"
+    assert healthy.runs == 1
+    assert [line for line in lines if "unreadable" in line]
+
+
+class _NaiveLastDone(ScheduledJob):
+    """A job whose `last_done()` answers a **timezone-naive** datetime.
+
+    Not a hypothetical and not a hostile double: SQLAlchemy hands a naive
+    value back for a `TIMESTAMP WITHOUT TIME ZONE` column,
+    `ScheduledJob.last_done` states *"timezone-aware"* in prose, and nothing
+    in the type system enforces it. This is the shape of the first
+    registration that reads the wrong column type.
+    """
+
+    name = "naive"
+    period = _HOUR
+
+    async def last_done(self) -> datetime | None:
+        return _NOW.replace(tzinfo=None) - timedelta(hours=2)
+
+    async def run(self) -> JobOutcome:  # pragma: no cover - never reached
+        raise AssertionError("a job whose reading could not be compared must not be run")
+
+
+async def test_a_job_whose_last_done_is_naive_is_a_failure_and_not_a_dead_tick(
+    lines: list[str],
+) -> None:
+    """A naive `last_done()` is that job's failure and not a dead tick.
+
+    With the due comparison outside the guard, `now - last` raises `TypeError: can't
+    subtract offset-naive and offset-aware datetimes` and escapes `tick()` entirely:
+    every job registered after the offender is skipped on every tick, the log line
+    carries no job name, and under `usher schedule --once` it escapes the command.
+    The sibling is registered **after** the offender deliberately -- registration
+    order is run order, so one registered first would still run under the broken
+    code and the case would pass against it.
+    """
+    clock = _Clock()
+    offender = _NaiveLastDone()
+    sibling = _Fake("healthy", period=_HOUR, last=clock.now - timedelta(hours=2))
+    scheduler = _scheduler(offender, sibling, clock=clock)
+
+    ran = await _tick(scheduler)
+
+    assert sibling.runs == 1, "a job registered after the offender was skipped by its failure"
+    assert ran == 1, "the tick counted the sibling and not the job that could not be compared"
+    assert [line for line in lines if "naive" in line and "last done" in line], (
+        f"the failure has to name the job: {lines}"
+    )
+
+
+async def test_a_job_whose_last_done_is_naive_backs_off_rather_than_retrying_every_tick(
+    lines: list[str],
+) -> None:
+    """An unusable reading is a failure of that job, so it is counted and spaced like one.
+
+    The wrong implementation this kills is a `_due_now` that caught the `TypeError`,
+    returned `False` and recorded nothing: the loop would then ask a permanently
+    broken job on every tick forever, the same hot loop `_back_off` exists to stop,
+    arriving through the read instead of through the run.
+    """
+    clock = _Clock()
+    offender = _NaiveLastDone()
+    scheduler = _scheduler(offender, clock=clock)
+
+    await _tick(scheduler)
+    before = len([line for line in lines if "last done" in line])
+    await _tick(scheduler)
+
+    assert before == 1, "the first tick did not report the failure, so there is nothing to space"
+    assert len([line for line in lines if "last done" in line]) == 1, (
+        "a job whose reading could not be compared was asked again on the very next tick"
+    )
+
+
+async def test_a_failing_job_is_not_offered_again_on_the_very_next_tick() -> None:
+    """*"A failing job does not stop the loop"* is satisfied by a loop that never progresses.
+
+    With no stored state a **failed** run is indistinguishable from one never run, so
+    a job that raises is due again on the next tick and retries at the tick rate
+    forever -- 288 attempts a day at the 300 s default, against a database that is by
+    hypothesis already unhappy. The second tick is the assertion: a scheduler with no
+    backoff runs it twice.
+    """
+    clock = _Clock()
+    job = _Fake("poison", period=_HOUR, last=None, fails=True)
+    scheduler = _scheduler(job, clock=clock)
+
+    await _tick(scheduler)
+    assert job.runs == 1, "the first tick did not run the job, so there is no failure to space"
+    await _tick(scheduler)
+
+    assert job.runs == 1, "a job that raised was retried on the very next tick"
+
+
+async def test_the_backoff_expires_and_never_exceeds_the_period() -> None:
+    """Two properties in one case, because each is what stops the other from being wrong.
+
+    **It expires**, or a single blip retires the job for the life of the
+    process -- which is worse than the hot loop it replaces, and silent.
+
+    **It is capped at the job's own period**, which is what makes it a bound
+    on the retry *rate* rather than a second schedule: a job that keeps
+    failing settles to being offered no more often than the schedule it would
+    have had if every attempt had succeeded. The `tick_seconds` here is an
+    hour and the period is an hour, so an uncapped doubling would put the
+    second retry two hours out and this case would fail.
+    """
+    clock = _Clock()
+    job = _Fake("poison", period=_HOUR, last=None, fails=True)
+    scheduler = Scheduler(tick_seconds=_HOUR.total_seconds(), now=clock.read)
+    scheduler.register(job)
+
+    await _tick(scheduler)
+    assert job.runs == 1
+
+    clock.now += timedelta(minutes=59)
+    await _tick(scheduler)
+    assert job.runs == 1, "the backoff expired early"
+
+    clock.now += timedelta(minutes=2)
+    await _tick(scheduler)
+    assert job.runs == 2, "the backoff never expired"
+
+    # And the cap holds on the *second* failure, where an uncapped doubling
+    # would ask for two periods.
+    clock.now += timedelta(minutes=61)
+    await _tick(scheduler)
+    assert job.runs == 3, "the backoff doubled past the job's own period"
+
+
+async def test_a_run_that_succeeds_clears_the_backoff() -> None:
+    """Otherwise a job that failed once carries the penalty forever.
+
+    The doubling would go on doubling across successes. The premise is the first arm:
+    without a failure to clear there is nothing for this case to be about.
+    """
+    clock = _Clock()
+    job = _Fake("flaky", period=_HOUR, last=None, fails=True)
+    scheduler = _scheduler(job, clock=clock)
+
+    await _tick(scheduler)
+    assert job.runs == 1
+    job._fails = False
+    clock.now += timedelta(minutes=2)
+    await _tick(scheduler)
+    assert job.runs == 2, "the premise: the backoff had expired and the job ran clean"
+
+    # A clean run resets the counter, so the *next* failure is spaced by one
+    # tick again rather than by two.
+    job._fails = True
+    await _tick(scheduler)
+    assert job.runs == 3
+    clock.now += timedelta(seconds=61)
+    await _tick(scheduler)
+    assert job.runs == 4, "a clean run did not reset the doubling"
+
+
+async def test_a_declined_run_is_not_work_and_is_spaced_out_like_a_failure(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """A job that refuses did not try, and the loop has to be able to tell.
+
+    `JobOutcome` carries what a decline costs and what it buys; this is the
+    loop's half of it -- out of `tick()`'s total, on neither instrument, and
+    not offered again on the very next tick.
+
+    The control is the second half: an assertion that an instrument recorded
+    nothing is satisfied by an instrument nobody wired.
+    """
+    clock = _Clock()
+    refuses = _Fake("refuses", period=_HOUR, last=clock.now - timedelta(hours=2), declines=True)
+    scheduler = _scheduler(refuses, clock=clock)
+
+    assert await _tick(scheduler) == 0, "a refusal was counted as work"
+    assert refuses.runs == 1
+    assert await _tick(scheduler) == 0
+    assert refuses.runs == 1, "a declined job was offered again on the very next tick"
+    assert not {one for one in _instruments(meter_reader) if one.startswith("usher.scheduler.")}, (
+        "a refusal is neither a duration nor a failure"
+    )
+
+    worked = _Fake("worked", period=_HOUR, last=clock.now - timedelta(hours=2))
+    assert await _tick(_scheduler(worked, clock=clock)) == 1
+    assert "usher.scheduler.job.duration" in _instruments(meter_reader), (
+        "the premise: this reader sees the scheduler's own histogram"
+    )
+
+
+async def test_a_backed_off_job_is_not_asked_when_it_was_last_done() -> None:
+    """The backoff is checked **before** the artefact read.
+
+    A job this process has already decided not to offer costs no query at all. A
+    scheduler that still issued `last_done()` every tick would have moved the hot
+    loop from the run to the read.
+    """
+    clock = _Clock()
+    job = _Fake("poison", period=_HOUR, last=None, fails=True)
+    scheduler = _scheduler(job, clock=clock)
+
+    await _tick(scheduler)
+    asked = job.asked
+    await _tick(scheduler)
+
+    assert job.asked == asked, "a backed-off job was still asked when it was last done"
+
+
+async def test_a_cancelled_job_is_re_raised_rather_than_swallowed() -> None:
+    """`stop()` works by cancelling.
+
+    An `except Exception` that also caught `asyncio.CancelledError` would turn a
+    shutdown into a logged failure and a loop that carried on.
+    """
+    started = asyncio.Event()
+
+    class _Cancels(_Fake):
+        async def run(self) -> JobOutcome:
+            self.runs += 1
+            started.set()
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable: the case cancels this run")
+
+    job = _Cancels("cancels", last=None)
+    scheduler = _scheduler(job)
+    tick = asyncio.create_task(scheduler.tick())
+    await started.wait()
+    tick.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+
+
+async def test_a_tick_that_raises_does_not_end_the_loop(lines: list[str]) -> None:
+    """The loop's own boundary, one layer above the per-job one.
+
+    A tick that failed for a reason no job owns must slow the scheduler down, never
+    end it. A loop that returned would leave the deployment with no scheduler and
+    nothing saying so until the next restart.
+    """
+    ticks = 0
+
+    class _Loop(Scheduler):
+        async def tick(self) -> int:
+            nonlocal ticks
+            ticks += 1
+            raise RuntimeError("the tick itself blew up")
+
+    scheduler = _Loop(tick_seconds=0.001)
+    await scheduler.start()
+    try:
+        for _ in range(200):
+            if ticks >= 2:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        await scheduler.stop()
+
+    assert ticks >= 2, f"the loop stopped after {ticks} tick(s)"
+    assert [line for line in lines if "the tick itself blew up" in line]
+
+
+# -- the lifecycle ---------------------------------------------------------
+
+
+async def test_start_creates_the_task_and_awaits_nothing() -> None:
+    """`start()` reads nothing, which is what keeps `/health` answering 200 with Postgres down.
+
+    A `start()` that read anything would turn a database outage into a failure to
+    boot. Driven one step by hand -- `coro.send(None)` must raise `StopIteration` for
+    a coroutine that never suspended, and hands back a future for one that parked --
+    so there is no polling, no clock, and no slow-but-eventually-fine implementation
+    that passes. The second assertion is what stops this passing because `start()`
+    did nothing at all.
+    """
+    scheduler = _scheduler(_Fake("first", last=None))
+    coro = scheduler.start()
+    try:
+        with pytest.raises(StopIteration):
+            coro.send(None)
+        assert scheduler.running() is True
+    finally:
+        coro.close()
+        await scheduler.stop()
+
+
+async def test_the_first_last_done_happens_inside_the_loop_task() -> None:
+    """The other half: `start()` asking nothing is only useful if the loop then asks.
+
+    Without this, a scheduler that started a task doing nothing would satisfy the
+    case above perfectly.
+    """
+    job = _Fake("first", last=None)
+    scheduler = Scheduler(tick_seconds=0.001)
+    scheduler.register(job)
+    await scheduler.start()
+    try:
+        for _ in range(200):
+            if job.asked:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        await scheduler.stop()
+    assert job.asked >= 1, "the loop task never asked a job when it was last done"
+
+
+async def test_stop_cancels_an_in_flight_job_and_awaits_its_task() -> None:
+    """An in-flight rebuild is cancelled at its next `await`, which is inside a page.
+
+    That page's transaction rolls back, which is safe because each page deletes and
+    re-inserts its own seeds' rows in one transaction (`services/similar.py`). The
+    task object is asserted `done()`, not `running()` reported false: a `stop()` that
+    merely dropped its reference reports exactly the same thing and leaks the task.
+    """
+    blocked = asyncio.Event()
+    job = _Fake("blocked", last=None, blocks=blocked)
+    scheduler = _scheduler(job)
+
+    await scheduler.start()
+    for _ in range(200):
+        if job.runs:
+            break
+        await asyncio.sleep(0.005)
+    task = scheduler.task()
+    assert task is not None and not task.done()
+    assert job.runs == 1, "the job never started, so there was nothing in flight to cancel"
+
+    await scheduler.stop()
+
+    assert task.done(), "stop() returned with the loop task still live"
+    assert not blocked.is_set(), "the case released the job itself, so nothing was cancelled"
+    assert scheduler.running() is False
+
+
+async def test_stop_before_start_is_not_an_error() -> None:
+    """`LaneSupervisor.stop()` runs on every shutdown.
+
+    Including one whose `start()` was gated off by the setting.
+    """
+    await _scheduler().stop()
+
+
+# -- observability ---------------------------------------------------------
+
+
+async def test_the_due_gauge_reads_a_snapshot_the_tick_refreshes() -> None:
+    """**The gauge may not query the database**, and that is not a style preference.
+
+    OTel invokes an observable callback from the metric reader's background thread,
+    every read here is a coroutine on asyncpg, and a callback that queried would have to
+    bounce one onto the event loop and block the exporter thread on it -- a deadlock
+    whenever the loop is itself blocked (`.claude/rules/api-telemetry-and-lanes.md`).
+
+    So `read()` is synchronous and hands back the tick's own reading. Negative
+    means not due, which is what makes one series answer *"how overdue"* and
+    *"how long left"* without a second instrument.
+    """
+    clock = _Clock()
+    overdue = _Fake("overdue", period=_HOUR, last=clock.now - timedelta(hours=3))
+    waiting = _Fake("waiting", period=_HOUR, last=clock.now - timedelta(minutes=15))
+    scheduler = _scheduler(overdue, waiting, clock=clock)
+
+    assert scheduler.read() == {}, "a gauge reported before anything had read an artefact"
+    await _tick(scheduler)
+
+    due = scheduler.read()
+    assert due["overdue"] == pytest.approx(timedelta(hours=2).total_seconds())
+    assert due["waiting"] == pytest.approx(-timedelta(minutes=45).total_seconds())
+
+
+async def test_a_job_that_has_never_run_reports_no_due_point_at_all() -> None:
+    """*"Seconds since `last_done()` minus period"* has no value when there is none.
+
+    A fabricated zero would read as *"exactly due"* -- the same rule
+    `telemetry._ReaderSlot` states: an unset reader observes nothing. The absence is
+    bounded rather than open-ended: a never-run job is due, so the tick runs it and
+    the next tick has a reading.
+    """
+    job = _Fake("never", last=None)
+    scheduler = _scheduler(job)
+
+    await _tick(scheduler)
+
+    assert "never" not in scheduler.read(), f"a never-run job reported {scheduler.read()}"
+
+
+async def test_a_job_whose_last_done_raises_reports_no_due_point() -> None:
+    """And the previous reading is dropped rather than left standing.
+
+    A gauge still reporting a number for a job whose artefact cannot be read is the
+    stale-but-wrong case the snapshot design exists to avoid.
+    """
+    clock = _Clock()
+    job = _Fake("flaky", period=_HOUR, last=clock.now - timedelta(hours=3))
+    scheduler = _scheduler(job, clock=clock)
+    await _tick(scheduler)
+    assert "flaky" in scheduler.read()
+
+    job._last_done_fails = True
+    await _tick(scheduler)
+
+    assert "flaky" not in scheduler.read()
+
+
+async def test_the_job_span_is_a_root_even_when_the_tick_runs_inside_a_span(
+    spans: InMemorySpanExporter,
+) -> None:
+    """A root span with a `Link`, never a child.
+
+    `context=Context()` is what makes "root" structural rather than a property of
+    where the task happened to be created: `asyncio.create_task` copies the ambient
+    context, so a lifespan that started the scheduler inside a span would otherwise
+    make every scheduled run a child of one request forever. The enclosing span is
+    the control -- without it a scheduler that dropped `Context()` would still
+    produce a parentless span and this case could not fail.
+    """
+    job = _Fake("linked", last=None)
+    scheduler = _scheduler(job)
+
+    with trace.get_tracer("test").start_as_current_span("enclosing") as enclosing:
+        await _tick(scheduler)
+        enclosing_context = enclosing.get_span_context()
+
+    finished = {span.name: span for span in spans.get_finished_spans()}
+    assert "scheduler.linked" in finished, f"no span named for the job: {sorted(finished)}"
+    run = finished["scheduler.linked"]
+    assert run.parent is None, "the scheduled run is a child of whatever started the scheduler"
+    assert [link.context.span_id for link in run.links] == [enclosing_context.span_id]
+
+
+# -- the settings ----------------------------------------------------------
+
+
+def test_the_scheduler_is_off_by_default() -> None:
+    """A settings default is a claim like any other.
+
+    Off, because a fresh deployment has no embeddings and nothing excludes a second
+    runner.
+    """
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher", secret_key="0" * 32
+    )
+    assert settings.scheduler_enabled is False
+    assert settings.scheduler_tick_seconds == 300.0
+
+
+def test_the_tick_period_has_a_measured_floor() -> None:
+    """`ge=60.0`, and the floor is a bound on cost rather than a style preference.
+
+    A tick is one `last_done()` per registered job and nothing else, which is the
+    whole of `ScheduledJob`'s contract.
+    """
+    for refused in (0.0, 1.0, 59.9):
+        with pytest.raises(ValueError, match="scheduler_tick_seconds"):
+            Settings(
+                database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+                secret_key="0" * 32,
+                scheduler_tick_seconds=refused,
+            )
+    accepted = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        scheduler_tick_seconds=60.0,
+    )
+    assert accepted.scheduler_tick_seconds == 60.0

@@ -1,17 +1,4 @@
-"""The machinery `conftest.py` added for issue #79, against a real Postgres.
-
-Every other file in this directory *relies* on `session`'s teardown asserting
-that `pg_class` describes this database. A guard nothing plants against passes
-exactly like a guard that works — the standing rule this repository has learned
-from a `sitecustomize.py` that was never on `PYTHONPATH` and an import contract
-that substituted an anchor string that did not exist — so the leak is created
-here on purpose and the guard is watched finding it.
-
-These cases are also the executable form of two findings that are otherwise
-only prose: `ANALYZE` outliving its own rollback (issues #26, #43) and
-`CREATE INDEX` doing the identical thing through the identical catalog path,
-which no grep for `ANALYZE` would ever have turned up (#79).
-"""
+"""The machinery `conftest.py` adds, against a real Postgres."""
 
 import pytest
 from sqlalchemy import text
@@ -37,9 +24,11 @@ _NOTHING_FORGIVEN = frozenset[str]()
 
 
 async def _committed_titles(conn: AsyncConnection) -> int:
-    """What `titles` really holds, which is not always zero: a route-driven
-    test commits for real, so this file cannot assume an empty catalog and
-    asserts on the *difference* the seed makes instead."""
+    """What `titles` really holds, which is not always zero.
+
+    a route-driven test commits for real, so this file cannot assume an empty catalog
+    and asserts on the *difference* the seed makes instead.
+    """
     return int((await conn.execute(text("SELECT count(*) FROM titles"))).scalar_one())
 
 
@@ -63,8 +52,7 @@ async def _committed_titles(conn: AsyncConnection) -> int:
 async def test_the_guard_catches_statistics_that_outlived_their_rollback(
     postgres_url: str, what: str, leak: list[str]
 ) -> None:
-    """The plant, on its own connection so the leak is real rather than
-    arranged.
+    """The plant, on its own connection so the leak is real rather than arranged.
 
     It has to be a connection of this case's own: the lie only exists *after*
     a rollback, and the `session` fixture's rollback happens in its teardown,
@@ -121,13 +109,14 @@ async def test_the_guard_is_quiet_when_pg_class_is_telling_the_truth(
 
 
 async def test_a_suspended_index_leaves_the_plan_and_comes_back(session: AsyncSession) -> None:
-    """`index_suspended` is only worth having if the planner really stops
-    seeing the index and really starts again.
+    """`index_suspended` is only worth having if the planner really stops seeing the index and.
+
+    really starts again.
 
     Both halves are asserted, because a context manager whose `UPDATE` silently
     matched nothing would leave every margin assertion in this suite comparing
     a plan against itself — passing while measuring nothing, which is the
-    failure mode #79 exists to remove rather than to introduce somewhere new.
+    failure mode this guard exists to remove rather than to introduce anew.
     """
     reads_valid = text("SELECT indisvalid FROM pg_index WHERE indexrelid = CAST(:name AS regclass)")
     probe = text("EXPLAIN SELECT id FROM titles ORDER BY sort_name LIMIT 5")
@@ -150,10 +139,12 @@ async def test_a_suspended_index_leaves_the_plan_and_comes_back(session: AsyncSe
 
 
 def test_total_cost_reads_the_root_nodes_total_and_not_its_start() -> None:
-    """The `start..total` distinction is the whole point: two plans routinely
-    tie on the cost of returning the *first* row while differing by orders of
-    magnitude over the whole result, so a margin taken off `start` would
-    compare the numbers that agree."""
+    """The `start..total` distinction is the whole point.
+
+    two plans routinely tie on the cost of returning the *first* row while differing by
+    orders of magnitude over the whole result, so a margin taken off `start` would
+    compare the numbers that agree.
+    """
     assert (
         total_cost(
             "Update on media_items  (cost=4.94..31.72 rows=0 width=0)\n"
@@ -164,8 +155,10 @@ def test_total_cost_reads_the_root_nodes_total_and_not_its_start() -> None:
 
 
 def test_total_cost_refuses_a_plan_that_was_explained_without_costs() -> None:
-    """`EXPLAIN (COSTS OFF)` returns a perfectly good plan with no numbers in
-    it, and a helper that answered 0.0 there would make every margin assertion
-    below it pass trivially."""
+    """`EXPLAIN (COSTS OFF)` returns a perfectly good plan with no numbers in it.
+
+    and a helper that answered 0.0 there would make every margin assertion below it pass
+    trivially.
+    """
     with pytest.raises(AssertionError, match="did not run with costs"):
         total_cost("Update on media_items\n  ->  Bitmap Heap Scan on media_items")

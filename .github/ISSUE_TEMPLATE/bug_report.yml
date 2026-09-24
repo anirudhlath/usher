@@ -1,0 +1,55 @@
+name: Bug report
+description: Something behaves differently from what the docs say it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for vulnerabilities.** Use the private reporting link on the
+        chooser instead — a security issue filed publicly is disclosed the
+        moment you press submit.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `usher --version`, verbatim.
+      placeholder: usher 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      description: >
+        The first bisect. The CLI and the HTTP API reach the same code through
+        different boundaries and show different symptoms, so which one you used
+        narrows it before anything else does.
+      options:
+        - The `usher` command line
+        - The HTTP API
+        - The console at /console
+        - The container / docker compose
+        - A bulk import (bootstrap)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command and its full output
+      description: >
+        Run it again with `--traceback` and paste everything. The CLI's error
+        boundary prints one line on purpose, so without that flag a report
+        carries the summary and none of the diagnosis.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what said so
+      description: >
+        A link into `docs/prd/` or the README if you have one. "Code that
+        contradicts the PRD is a bug in one of them" — knowing which you read
+        settles which.
+    validations:
+      required: true

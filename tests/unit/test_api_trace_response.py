@@ -1,28 +1,4 @@
-"""`traceresponse` — the header that makes `Problem`'s "Open trace" possible.
-
-Two halves, and only the second one has teeth.
-
-The first is the **shape**: a well-formed header on a 200, on a 404 problem
-document and on a 422, driven through a real `create_app()` so both exception
-handlers are on the path. Every assertion in that half is satisfied by a
-middleware that emits a hard-coded constant, which is why it is not the half
-this file rests on.
-
-The second is the **identity**: the trace id and span id in the header are read
-back off the span the tracer really produced for that request, through a span
-processor attached to the live `TracerProvider`, and the span they name is
-asserted to be the `SERVER` span rather than one of the `http send` spans the
-ASGI instrumentation opens inside its own `send`. `CLAUDE.md`'s standing rule —
-*a membership assertion is not an ordering test* — has a spelling here: **a
-regex is not an identity test**, and a constant passes one.
-
-The third case is the absence: `INVALID_SPAN`'s all-zero ids are a
-well-formed-looking header that names nothing, and the W3C grammar forbids them
-in as many words (*"All zeroes forbidden"*, for both ids). No header at all is
-the only honest answer, and it is the same rule `_observations` applies to a
-gauge with no reader and `current_traceparent` applies to a job enqueued
-outside a span.
-"""
+"""`traceresponse` — the header that makes `Problem`'s "Open trace" possible."""
 
 import re
 import uuid
@@ -52,13 +28,9 @@ from usher.telemetry import TRACERESPONSE_HEADER, traceresponse
 
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 
-#: The W3C grammar, transcribed from `w3c/trace-context`'s
-#: `spec/21-http_response_header_format.md`: `version "-" trace-id "-"
-#: child-id "-" trace-flags`, every field **lowercase** hex, 2/32/16/2
-#: characters. Deliberately not `[0-9a-fA-F]`: the spec says *"Tracing systems
-#: MUST ignore the trace context metric when the span id is invalid (for
-#: example, if it contains non-lowercase hex characters)"*, so a header this
-#: pattern would have to widen for is a header a conformant reader drops.
+# : The W3C grammar, transcribed from `w3c/trace-context`'s :
+# `spec/21-http_response_header_format.md`: `version "-" trace-id "-" : child-id "-"
+# trace-flags`, every field **lowercase** hex, 2/32/16/2 : characters.
 _TRACERESPONSE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
 _ALL_ZERO_TRACE = "0" * 32
@@ -184,10 +156,12 @@ async def test_a_200_carries_a_well_formed_traceresponse(client: httpx.AsyncClie
 
 
 async def test_a_404_problem_document_carries_it_too(client: httpx.AsyncClient) -> None:
-    """`http_error_as_a_problem_document`'s path, which is the one that
-    matters most: a 404 is exactly when somebody wants the trace link, and the
-    handler runs inside `ExceptionMiddleware` — one layer *below* this
-    middleware — so nothing about the normal path implies this one."""
+    """`http_error_as_a_problem_document`'s path, which is the one that matters most.
+
+    a 404 is exactly when somebody wants the trace link, and the handler runs inside
+    `ExceptionMiddleware` — one layer *below* this middleware — so nothing about the
+    normal path implies this one.
+    """
     response = await client.get(f"/titles/{uuid.uuid4()}")
     assert response.status_code == 404
     assert response.json()["code"] == "not_found", "this is not the problem-document path"
@@ -195,9 +169,11 @@ async def test_a_404_problem_document_carries_it_too(client: httpx.AsyncClient) 
 
 
 async def test_a_422_carries_it_too(client: httpx.AsyncClient) -> None:
-    """`validation_error_without_the_request_body`'s path — the second
-    handler, registered for a different exception type, reached through
-    FastAPI's own request parsing rather than through a raise in a handler."""
+    """`validation_error_without_the_request_body`'s path.
+
+    the second handler, registered for a different exception type, reached through
+    FastAPI's own request parsing rather than through a raise in a handler.
+    """
     response = await client.get("/events?titles=not-a-uuid")
     assert response.status_code == 422
     assert response.json()["code"] == "validation_failed", "this is not the 422 handler's path"
@@ -228,10 +204,12 @@ async def test_the_header_names_the_span_the_tracer_actually_made(
 
 
 async def test_two_requests_get_two_different_trace_ids(client: httpx.AsyncClient) -> None:
-    """The cheapest control against a constant, kept beside the identity case
-    because it fails for a different reason: a middleware that read one span
-    once and cached it passes `test_the_header_names_the_span…` on the request
-    that populated the cache."""
+    """The cheapest control against a constant.
+
+    kept beside the identity case because it fails for a different reason: a middleware
+    that read one span once and cached it passes `test_the_header_names_the_span…` on
+    the request that populated the cache.
+    """
     first = await client.get("/health")
     second = await client.get("/health")
     assert first.headers[TRACERESPONSE_HEADER] != second.headers[TRACERESPONSE_HEADER]
@@ -242,8 +220,8 @@ async def test_no_header_at_all_when_nothing_is_recording() -> None:
 
     `trace.get_current_span()` answers `INVALID_SPAN` there, so this is the
     all-zero case: `00-000…0-000…0-00` is well-formed to every regex and names
-    nothing. **Absent, never zeroed** — the same rule `_observations` applies
-    to a gauge with no reader, one layer up.
+    nothing. **Absent, never zeroed** — the same rule `telemetry._ReaderSlot`
+    applies to a gauge with no reader, one layer up.
     """
     sent: list[Message] = []
 
@@ -290,9 +268,10 @@ def test_a_non_recording_span_with_a_real_id_emits_nothing_either() -> None:
 
 
 def test_the_invalid_span_is_absent_rather_than_zeroed() -> None:
-    """`traceresponse` as a function, over the value the SDK itself uses for
-    "there is no span". Kept beside the middleware case above because the two
-    fail differently: this one names the formatter, that one names the wiring.
+    """`traceresponse` as a function, over the value the SDK itself uses for "there is no span".
+
+    Kept beside the middleware case above because the two fail differently: this one
+    names the formatter, that one names the wiring.
     """
     assert traceresponse(trace.INVALID_SPAN) is None
     context = trace.INVALID_SPAN.get_span_context()

@@ -1,33 +1,4 @@
-"""The playback surface through a real request, a real schema and a real adapter.
-
-**What only this level can see.** `tests/unit/test_api_playback.py` drives the
-same three routes over port fakes with scripted targets, so what is left here
-is everything the fakes stand in for:
-
-- the **un-overridden** dependency graph -- `get_playback_service`,
-  `get_ticket_cipher`, `get_credential_store` and four repositories resolving
-  through FastAPI's own machinery against Postgres, which is a startup error a
-  direct call cannot produce;
-- `PostgresCredentialStore` really **decrypting** a stored credential, so the
-  adapter is built from a round trip rather than from a literal;
-- `PostgresMediaItemRepository.list_for_title` and `list_for_episode`, which
-  are two different statements -- the first carries `AND episode_id IS NULL`,
-  which excludes precisely the rows the second is about, and no fake can make
-  that mistake observable;
-- the **real `EmbyAdapter`** building a real `MediaSources`-derived URL with a
-  real `AccessToken` in it. The unit file's targets are scripted, so its leak
-  assertions are over a token a test wrote; here the token is one the server
-  minted and the adapter fetched, which is the only version of that assertion
-  the shipped path can fail.
-
-**One override and one only**: the adapter factory, pointed at
-`FakeEmbyServer` over an `httpx.MockTransport`. This suite makes no network
-request -- `test_admin_sources.py` states the same rule for the same reason.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request. `media_items` cascades from `sources`; `titles`,
-`seasons` and `episodes` do not cascade from it, so they go by hand.
-"""
+"""The playback surface through a real request, a real schema and a real adapter."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -50,7 +21,6 @@ from usher.api.app import create_app
 from usher.api.deps import get_source_adapter_factory
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
@@ -127,21 +97,6 @@ def settings(postgres_url: str) -> Settings:
     )
 
 
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one.
-
-    The route reads through its own session in its own transaction, so a test
-    that seeded through a single shared transaction would be handing the app
-    rows it cannot see.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
 class _Seeded:
     def __init__(self) -> None:
         self.source_id = uuid.uuid4()
@@ -152,15 +107,10 @@ class _Seeded:
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
-        # **First, and it is an obligation this file inherited rather than a
-        # tidy-up.** `search_queries.user_id` is `ON DELETE RESTRICT`, so a
-        # committed row from the attribution case below turns another
-        # committing file's `DELETE FROM users WHERE name = 'default'` into a
-        # foreign-key violation -- in that file, not in this one, which is
-        # the shape CLAUDE.md records for `titles` and `jobs`. The rows this
-        # file writes belong to the singleton default household, which it
-        # does not own and must not delete, so the rows go and the household
-        # stays.
+        # First, because `search_queries.user_id` is `ON DELETE RESTRICT`: a
+        # committed row from the attribution case below turns another committing
+        # file's `DELETE FROM users WHERE name = 'default'` into a foreign-key
+        # violation, in that file rather than in this one.
         await session.execute(text("DELETE FROM search_queries"))
         # Takes `media_items` and `source_credentials` with it
         # (`ON DELETE CASCADE`), which is what leaves `titles` unreferenced.
@@ -319,14 +269,12 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def test_a_play_over_the_real_graph_answers_tickets_and_not_the_emby_url(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """The un-overridden graph, end to end, with the leak assertion that
-    only this level can make.
+    """The un-overridden graph, with the leak assertion only this level can make.
 
-    The token is the one `FakeEmbyServer._authenticate` minted for **this**
-    request's adapter, reached through a real `source_credentials` decrypt --
-    so unlike the unit file's scripted URL, nothing here wrote it down in
-    advance. The positive control comes first: a route answering nothing at
-    all would satisfy the absence assertions too.
+    The token is the one `FakeEmbyServer._authenticate` minted for *this*
+    request's adapter, reached through a real `source_credentials` decrypt, so
+    nothing here wrote it down in advance. The positive control comes first: a
+    route answering nothing at all would satisfy the absence assertions too.
     """
     response = await client.post(f"/titles/{seeded.movie_id}/play")
 
@@ -347,23 +295,15 @@ async def test_a_play_over_the_real_graph_answers_tickets_and_not_the_emby_url(
 async def test_a_play_carrying_a_search_id_records_played_durably(
     client: AsyncClient, seeded: _Seeded, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """**PRD 10's `played`, through the un-overridden graph, read back on a
-    different connection.**
+    """`played` is committed, read back on a different connection.
 
-    That last clause is what only this level can say: `get_session` is the
-    request's commit boundary, and a route that issued the `UPDATE` and never
-    committed passes every case driven over a fake, because a dict does not
-    roll back. The table exists to answer *did they play anything*, and an
-    answer that does not survive the response answers nothing.
-
-    It is also the only place the real statement binds `clicked_title_id`
-    as a **typed `NULL`** against Postgres from a route -- an untyped one is
-    the shape asyncpg refuses outright.
-
-    `ensure_default_user` seeds the household the request will itself
-    resolve, so the row is one the route's own `AND user_id = :user_id` can
-    match; an invented id would make this pass as a cross-household refusal,
-    which is the answer it is checking against.
+    `get_session` is the request's commit boundary, and a route that issued the
+    `UPDATE` and never committed passes every case driven over a fake, because a
+    dict does not roll back. It is also the only place a route binds
+    `clicked_title_id` as a typed `NULL` against Postgres, an untyped one being
+    the shape asyncpg refuses outright. `ensure_default_user` seeds the household
+    the request itself resolves, so an invented id could not make this pass as a
+    cross-household refusal.
     """
     async with sessions() as session:
         household = await ensure_default_user(session)
@@ -379,6 +319,9 @@ async def test_a_play_carrying_a_search_id_records_played_durably(
                 mode=SearchMode.FULL_TEXT,
                 result_count=3,
                 latency_ms=12,
+                # No tier, so a `search` row: the funnel attributes a
+                # click and a play, and `SuggestResponse` publishes no id
+                # for a client to report either against.
             )
         )
         await session.commit()
@@ -405,11 +348,11 @@ async def test_a_play_carrying_a_search_id_records_played_durably(
 async def test_following_the_ticket_redirects_to_the_url_the_adapter_really_built(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """*What changes is the artifact, not the grant* -- ADR-0012, measured.
+    """What the ticket changes is the artifact, not the grant.
 
-    The `302`'s `Location` carries the real Emby URL with its `api_key`,
-    because a URL without one is a URL that does not play. What the ticket
-    bought is that the client's own stored copy is not that URL.
+    The `302`'s `Location` carries the real Emby URL with its `api_key`, because a
+    URL without one is a URL that does not play. What the ticket bought is that
+    the client's own stored copy is not that URL.
     """
     minted = (await client.post(f"/titles/{seeded.movie_id}/play")).json()["targets"][0]["url"]
     token = server.tokens[-1]
@@ -429,8 +372,7 @@ async def test_following_the_ticket_redirects_to_the_url_the_adapter_really_buil
 async def test_an_episode_play_reads_the_episode_row_and_not_the_titles(
     client: AsyncClient, seeded: _Seeded
 ) -> None:
-    """`list_for_episode`, against the statement that really carries
-    `AND episode_id IS NULL`.
+    """`list_for_episode`, against the statement that really carries `AND episode_id IS NULL`.
 
     Both arms, because either alone is satisfied by a route wired to the
     wrong read: the series' own `title_id` holds no episode-free copy, so
@@ -448,15 +390,13 @@ async def test_an_episode_play_reads_the_episode_row_and_not_the_titles(
 async def test_a_source_that_cannot_be_reached_is_a_503_source_unavailable(
     client: AsyncClient, seeded: _Seeded, server: FakeEmbyServer
 ) -> None:
-    """The project's first genuine `503 source_unavailable`, against a real
-    `EmbyAdapter` whose transport refuses the connection.
+    """`503 source_unavailable` from an adapter whose transport refuses to connect.
 
-    Not a scripted `PortUnavailable`: the failure starts as an
-    `httpx.ConnectError` inside the adapter's own authentication and is
-    translated by the shipped error mapping, which is the path a real outage
-    takes. What reaches the client is a fixed sentence and the operator's own
-    source name -- never `str(exc)`, which quotes the URL the upstream choked
-    on and that URL carries a token.
+    Not a scripted `PortUnavailable`: the failure starts as an `httpx.ConnectError`
+    inside the adapter's own authentication and is translated by the shipped error
+    mapping, which is the path a real outage takes. What reaches the client is a
+    fixed sentence and the operator's own source name -- never `str(exc)`, which
+    quotes the URL the upstream choked on, and that URL carries a token.
     """
     server.offline = True
 
@@ -477,14 +417,11 @@ async def test_a_source_that_cannot_be_reached_is_a_503_source_unavailable(
 async def test_a_ticket_minted_by_this_deployment_is_refused_by_a_rotated_key(
     client: AsyncClient, app: FastAPI, seeded: _Seeded, settings: Settings
 ) -> None:
-    """Rotating `USHER_SECRET_KEY` is the coarse revocation the stateless
-    ticket has, and this is it happening.
+    """Rotating `USHER_SECRET_KEY` is the coarse revocation a stateless ticket has.
 
-    `services/playback_ticket.py` records it as correct rather than a bug;
-    nothing had exercised it end to end. The app's settings are swapped on
-    `app.state` -- which is where `get_app_settings` reads them, so the next
-    request derives a different subkey -- and the ticket minted a moment ago
-    stops redeeming.
+    The app's settings are swapped on `app.state`, which is where
+    `get_app_settings` reads them, so the next request derives a different subkey
+    and the ticket minted a moment ago stops redeeming.
     """
     minted = (await client.post(f"/titles/{seeded.movie_id}/play")).json()["targets"][0]["url"]
     assert (await client.get(minted)).status_code == 302
@@ -503,11 +440,11 @@ async def test_a_ticket_minted_by_this_deployment_is_refused_by_a_rotated_key(
 async def test_the_ticket_path_segment_needs_no_further_encoding(
     client: AsyncClient, seeded: _Seeded
 ) -> None:
-    """D1's `quote(ticket, safe="=")` finding, over a real minted URL.
+    """`quote(ticket, safe="=")` survives a round trip over a real minted URL.
 
-    The premise is asserted rather than assumed: if the segment held a
-    character the mint had to escape, `unquote` would not be the identity
-    and this case would be testing nothing.
+    The premise is asserted rather than assumed: if the segment held a character
+    the mint had to escape, `unquote` would not be the identity and this case
+    would be testing nothing.
     """
     minted = (await client.post(f"/titles/{seeded.movie_id}/play")).json()["targets"][0]["url"]
     segment = minted.rsplit("/", 1)[-1]

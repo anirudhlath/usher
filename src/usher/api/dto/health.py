@@ -1,17 +1,26 @@
-"""Response DTOs for the health endpoints.
+"""Response DTOs for the health endpoints."""
 
-Review item 11: a plain `dict[str, object]` return type generates
-`{"type": "object"}` in OpenAPI -- no fields, no types, nothing a
-generated client can use. PRD 07 promises a typed HTTP contract
-("Clients codegen typed models in any language"); these are the first
-two of it.
-"""
+from datetime import datetime
 
 from pydantic import BaseModel
 
 
 class LivenessResponse(BaseModel):
+    """Liveness, and the one fact an operator needs during an incident.
+
+    **`version` is here and not on `ReadinessChecks`**: `ready` is
+    `all(self.model_dump().values())`, so every field added there becomes part of
+    the status code, and a version string is not a check.
+
+    Publishing it on an unauthenticated probe is deliberate. This repository is
+    public and MIT, `/openapi.json` is served unauthenticated and describes a
+    strictly larger surface, and knowing which image is actually running is what
+    an incident needs. **An operator who disagrees drops `/health` at the reverse
+    proxy** -- the compose healthcheck targets `/health/ready`.
+    """
+
     status: str
+    version: str
 
 
 class ReadinessChecks(BaseModel):
@@ -28,30 +37,28 @@ class ReadinessChecks(BaseModel):
 
 
 class LaneReport(BaseModel):
-    """Which background lanes this process is running.
+    """Which background lanes this process is running."""
 
-    **Reported, never gated on.** `ReadinessResponse.status` and its HTTP
-    code are computed from `checks` alone, and this is deliberately its own
-    model rather than two more booleans inside `ReadinessChecks`: `ready`'s
-    `all(checks.model_dump().values())` would then take this process out of
-    a load balancer because Emby is unreachable, which restarting it cannot
-    fix and which PRD 08's own failure table says leaves the catalog fully
-    browsable. That inverts the very argument M1's liveness/readiness split
-    is built on -- liveness stays off the database because restarting does
-    not fix Postgres either.
-
-    `push` is the **names of the sources whose lanes are running**, which is
-    a fact about this process, not a probe: it says a lane exists, never
-    that its socket is healthy. Whether a channel is *delivering* is
-    grounded in a message ledger and is reported by
-    `GET /admin/sources/{id}/status`'s `push_available`, because a
-    readiness endpoint Docker polls every 2 s must not answer a question
-    that costs an upstream request against a server PRD 01 measures at
-    1-5 s per request.
-    """
-
+    # A comment, not the docstring: pydantic emits a model's class docstring as the
+    # JSON-Schema `description`, and FastAPI publishes that at `/openapi.json`.
     push: list[str]
     worker: bool
+
+    # The lanes whose task has *finished*, which is not a state a healthy lane reaches
+    # -- `PushSupervisor.run` returns only after the failure ceiling and `_guard`
+    # catches everything else.
+    crashed_sources: list[str]
+
+    # How many abandoned claims **this process** has taken back since it started -- the
+    # total `JobWorker.recover()` returned, summed, never a fresh query.
+    recovered_claims: int | None
+
+    # The instant of the last recovery pass that found something -- `None`
+    # while this process has recovered nothing, whether because it never
+    # asked or because there was nothing to take back. Deliberately not
+    # "when recovery last ran": a probe polled every 2 s would then carry a
+    # timestamp that moves on its own and says nothing.
+    recovered_at: datetime | None
 
 
 class ReadinessResponse(BaseModel):

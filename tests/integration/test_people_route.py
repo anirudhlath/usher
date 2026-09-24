@@ -1,24 +1,4 @@
-"""`GET /people/{id}` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_people.py` drives the
-route over the three port fakes, so the grouping, the ordering and the absent
-`groups` key are all covered there. What is left is the wiring and the SQL:
-that `create_app()`'s **un-overridden** dependency graph resolves all three
-repositories onto one request-scoped session, that `PersonRepository.get`'s
-statement really is scoped to the id it was handed, that `list_for_person`
-answers real rows, and what the whole answer costs in statements.
-
-The cost is the half nothing else can measure. This route is two reads and a
-hydration by construction; a spelling that hydrated per credit would answer
-identically and issue one statement per title, which is the round-trip-per-item
-shape `list_by_ids` exists to delete.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request. `credits` cascades from both `people` and `titles`, and
-`title_search_names` cascades from `titles`; nothing here writes `media_items`,
-`watch_states` or `jobs`, because this route reads nothing household-scoped and
-promotes nothing.
-"""
+"""`GET /people/{id}` through a real request against a real schema."""
 
 from collections.abc import AsyncIterator, Iterator
 
@@ -32,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -57,18 +36,6 @@ def settings(postgres_url: str) -> Settings:
         push_enabled=False,
         worker_enabled=False,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one: the
-    route reads from its own session in its own transaction, so a test seeding
-    through a shared rolled-back one would hand the app rows it cannot see."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -96,9 +63,11 @@ async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[Non
 
 @pytest_asyncio.fixture
 async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
-    """**No `dependency_overrides` at all**, which is the point of this file:
-    `get_person_repository`, `get_credit_repository` and `get_title_repository`
-    are resolved through FastAPI's own machinery onto one `get_session`."""
+    """**No `dependency_overrides` at all**, which is the point of this file.
+
+    `get_person_repository`, `get_credit_repository` and `get_title_repository` are
+    resolved through FastAPI's own machinery onto one `get_session`.
+    """
     app: FastAPI = create_app(settings)
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
@@ -108,9 +77,11 @@ async def client(settings: Settings, clean: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every SQL statement SQLAlchemy issues, captured off
-    `before_cursor_execute` rather than transcribed -- a hand-copied lookalike
-    of a query drifts from the repository and then reads like coverage."""
+    """Every SQL statement SQLAlchemy issues.
+
+    captured off `before_cursor_execute` rather than transcribed -- a hand-copied
+    lookalike of a query drifts from the repository and then reads like coverage.
+    """
     seen: list[str] = []
 
     def record(
@@ -176,8 +147,7 @@ async def _given_credits(sessions: async_sessionmaker[AsyncSession], *rows: Cred
 async def test_a_filmography_is_grouped_and_ordered_off_real_rows(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The whole answer, assembled by the shipped graph with nothing
-    overridden.
+    """The whole answer, assembled by the shipped graph with nothing overridden.
 
     The ordering premise is asserted here too rather than only in the unit
     file: `Title.id` is a UUIDv7 minted at validation time, so seeding
@@ -242,8 +212,9 @@ async def test_a_filmography_is_grouped_and_ordered_off_real_rows(
 async def test_the_read_is_scoped_to_the_person_asked_for(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The wrong implementation this kills at the request level: a `get` or a
-    `list_for_person` whose `WHERE` lost its predicate.
+    """The wrong implementation this kills at the request level.
+
+    a `get` or a `list_for_person` whose `WHERE` lost its predicate.
 
     Both are populated, correctly shaped and about the wrong person, and the
     second one is the sharper of the two -- it renders somebody else's
@@ -276,8 +247,10 @@ async def test_the_read_is_scoped_to_the_person_asked_for(
 
 
 async def test_an_unknown_person_is_a_404_from_the_real_graph(client: AsyncClient) -> None:
-    """The 404 through the un-overridden wiring, so it is the row that is
-    missing rather than a fake that was never seeded."""
+    """The 404 through the un-overridden wiring.
+
+    so it is the row that is missing rather than a fake that was never seeded.
+    """
     person_id = new_id()
     response = await client.get(f"/people/{person_id}")
     assert response.status_code == 404

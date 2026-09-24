@@ -1,65 +1,4 @@
-"""In-memory `MediaItemRepository`.
-
-**Where this diverges from Postgres, on purpose.** Seven places, each of which
-the paired `tests/integration/test_media_item_repository.py` run is what
-actually closes. *("More forgiving" and "five" until 2026-08-11: the list had
-six bullets under a count of five, and the seventh below is the first entry
-where this fake is **louder** than Postgres rather than more permissive.)*
-
-- It is a `dict` keyed on `(source_id, external_id)`, so a duplicate inside
-  one batch is silently last-wins. The real one raises
-  `CardinalityViolationError: ON CONFLICT DO UPDATE command cannot affect
-  row a second time` unless its staging read is
-  `SELECT DISTINCT ON (source_id, external_id)`, so
-  `test_upsert_many_tolerates_a_duplicate_within_one_batch` and
-  `test_the_last_of_a_duplicated_pair_wins` both pass here for a reason that
-  has nothing to do with the code under test.
-- No CHECK constraints, so a negative `width` or `file_size_bytes` stores
-  happily -- and worse, `MediaItem`'s own pydantic bounds *do* fire on the
-  way out of this fake's constructor, so the fake rejects it at a different
-  moment and with a different exception type than Postgres does. The real
-  path stages a `COPY` that bypasses the ORM entirely and fails at the
-  following upsert, as `RepositoryConflict`.
-- No foreign keys, so an item can name a `title_id` or `episode_id` no row
-  has. The real one raises, and `PostgresMediaItemRepository` translates it.
-- Sorting is Python's, not Postgres's, in two ways. `list_unmatched`'s
-  NULLS-LAST rule is spelled here as a sentinel and there as literal
-  `NULLS LAST`, and Postgres's *default* for `ORDER BY x DESC` is NULLS
-  FIRST -- so the two agree only because
-  `test_unmatched_items_sort_dated_before_undated` runs against both. And
-  `list.sort` is **stable**, so a missing `id` tiebreak is invisible here
-  (equal keys keep insertion order) and is a real paging bug against
-  Postgres, which makes no such promise. That is why
-  `test_the_review_queue_breaks_ties_on_id` asserts the ordering property
-  directly instead of paging a large set and hoping the planner reorders.
-  `resolve_external_ids` picks a winner among two copies of one film the
-  same way and inherits the same caveat -- a `DISTINCT ON` whose `ORDER BY`
-  ran out of keys returns an arbitrary row there and insertion order here.
-- **`list_for_title`'s `id` tiebreak is unobservable here, and not by
-  omission -- by construction.** This fake mints each item's id with
-  `new_id()` at the moment it stores it, and a `dict` keeps a key's original
-  position when the value is reassigned, so its id order and its storage
-  order are the same sequence and no amount of seeding can separate them.
-  Against Postgres they separate as soon as an update touches an indexed
-  column: `test_list_for_title_breaks_ties_on_id` moves `last_seen_at`
-  specifically to force a non-HOT update, and the read then arrives in heap
-  order rather than id order. Measured: dropping the tiebreak fails that
-  case in `tests/integration/` and passes every case here.
-- No transaction, so nothing here can leave a session poisoned and
-  `test_a_caught_conflict_leaves_the_session_usable` is a Postgres-only
-  case. A fake cannot express `PendingRollbackError` and pretending
-  otherwise would ratify a repository with no SAVEPOINT.
-- **`list_unmatched_page`'s keyset is louder here than there, which is the
-  one divergence on this list that runs that way.** A NULL cannot poison a
-  comparison in Python: the row-comparison spelling ADR-0034 refutes --
-  `(added_at, id) < (boundary.added_at, boundary.id)` -- raises `TypeError`
-  in the first case that reaches an undated boundary, while against Postgres
-  the identical mistake answers NULL, drops the whole undated tail, and
-  serves full-looking pages the entire way. So the contract case that walks
-  a boundary inside the undated group is a *loud* regression here and a
-  *silent* one there, and only the integration run reproduces what a client
-  would actually see.
-"""
+"""In-memory `MediaItemRepository`."""
 
 import uuid
 from collections.abc import Sequence
@@ -88,33 +27,9 @@ _UNDATED = datetime.min.replace(tzinfo=UTC)
 
 
 def _after(entry: MediaItem, boundary: UnmatchedCursorPosition) -> bool:
-    """Whether `entry` sorts strictly after `boundary` in the review queue's
-    order: `added_at DESC NULLS LAST, id DESC`.
+    """Whether `entry` sorts strictly after `boundary` in the review queue's order.
 
-    ADR-0034's three arms, written out rather than folded into one tuple
-    comparison -- and both of the tuple spellings were measured before this one
-    was kept, because "the arms are clearer" would not have been a reason.
-
-    - `(entry.added_at, entry.id) < (boundary.added_at, boundary.id)` raises
-      `TypeError` the moment either side is undated. That is the last
-      divergence in this module's docstring: the mistake that is *silent*
-      against Postgres is loud here, and it fails three cases at once.
-    - `(entry.added_at or _UNDATED, entry.id) < (boundary.added_at or
-      _UNDATED, boundary.id)` -- which is how this fake's own `list_unmatched`
-      already spells NULLS LAST, so it is the spelling an author would reach
-      for -- **survives every case in the contract, measured.** It is
-      order-preserving on the whole reachable domain, so it is not a coverage
-      gap: the sentinel and the three arms are the same relation for every
-      value a source can report, and they differ only for an item genuinely
-      dated `datetime.min`, which is the sentinel's own value.
-
-    The arms are kept anyway, and the reason is what a *contract* fake is for:
-    they are the shape of the Postgres predicate, so the NULL leg exists here
-    as something a plant can delete. Under the sentinel there is no NULL leg to
-    drop and the fake arm of the contract loses that mutation entirely.
-
-    Strict on every arm. Relaxed anywhere, the walk re-serves its boundary row
-    at each page break.
+    `added_at DESC NULLS LAST, id DESC`.
     """
     if boundary.added_at is None:
         # The boundary is inside the undated group, which sorts last, so only
@@ -152,9 +67,11 @@ class FakeMediaItemRepository(MediaItemRepository):
         self.calls = 0
 
     def reset_calls(self) -> None:
-        """A test-double affordance, not a port method -- see
-        `tests/fakes/title_match_repository.py` for why the round-trip count
-        is a service property that only a counter can express."""
+        """A test-double affordance, not a port method.
+
+        see `tests/fakes/title_match_repository.py` for why the round-trip count is a
+        service property that only a counter can express.
+        """
         self.calls = 0
 
     async def upsert_many(self, rows: Sequence[MediaItemUpsert]) -> BulkWriteResult:
@@ -190,13 +107,7 @@ class FakeMediaItemRepository(MediaItemRepository):
                 inserted += 1
                 continue
             self._items[key] = existing.evolve(
-                # Three COALESCEs, not one. `title_id`/`episode_id`: never
-                # downgrade a matched item to unmatched -- the nightly walk
-                # upserts with `title_id=None` long before the match pass has
-                # resolved anything, so an unconditional assignment erases
-                # every manual review-queue resolution the same night it was
-                # made. `added_at`: a source that stops reporting when a file
-                # arrived must not erase the answer it gave last night.
+                # Three COALESCEs, not one.
                 title_id=row.title_id if row.title_id is not None else existing.title_id,
                 episode_id=row.episode_id if row.episode_id is not None else existing.episode_id,
                 container=row.container,
@@ -281,14 +192,9 @@ class FakeMediaItemRepository(MediaItemRepository):
             ]
             if not candidates:
                 continue
-            # The freshest sighting, then the id -- a total order, spelled
-            # the same way the real one spells its `DISTINCT ON (...) ORDER
-            # BY ..., last_seen_at DESC, external_id`. Two copies of one
-            # film on one source is ordinary, and picking between them by
-            # insertion order would make a backfill's upstream request
-            # depend on which walk happened to see which file first.
-            # `list.sort` is stable, so the `external_id` tiebreak is what
-            # makes a tie deterministic here as well as there.
+            # The freshest sighting, then the id -- a total order, spelled the same way
+            # the real one spells its `DISTINCT ON (...) ORDER BY ..., last_seen_at
+            # DESC, external_id`.
             candidates.sort(key=lambda entry: (-entry.last_seen_at.timestamp(), entry.external_id))
             resolved[target] = candidates[0].external_id
         return resolved
@@ -304,11 +210,6 @@ class FakeMediaItemRepository(MediaItemRepository):
             if entry.title_id == title_id and entry.episode_id is None
         ]
         # Available first, then freshest, then a total order on `id`.
-        # `list.sort` is stable, so the final key is invisible here and is a
-        # real shuffle against Postgres -- the divergence this module's
-        # docstring names, and why the contract asserts the tiebreak as an
-        # ordering property rather than by seeding enough rows to provoke a
-        # reorder.
         copies.sort(
             key=lambda entry: (not entry.available, -entry.last_seen_at.timestamp(), entry.id)
         )
@@ -337,15 +238,9 @@ class FakeMediaItemRepository(MediaItemRepository):
             for entry in self._items.values()
             if entry.title_id is None and (source_id is None or entry.source_id == source_id)
         ]
-        # `(added_at or _UNDATED, id)` reversed: descending by date, with
-        # undated items last and `id` breaking ties, which is
-        # `ORDER BY added_at DESC NULLS LAST, id DESC`. Postgres's own
-        # default for a DESC sort is NULLS *FIRST*, so the two agree only
-        # because both spell it out -- `_UNDATED` here, `NULLS LAST` there.
-        # An earlier version of this key led with `added_at is not None`,
-        # which read as the load-bearing part and was not: mutating it away
-        # left every contract case green, because the sentinel alone already
-        # decides the order.
+        # `(added_at or _UNDATED, id)` reversed: descending by date, with undated items
+        # last and `id` breaking ties, which is `ORDER BY added_at DESC NULLS LAST, id
+        # DESC`.
         matching.sort(key=lambda entry: (entry.added_at or _UNDATED, entry.id), reverse=True)
         return matching[offset : offset + limit]
 
@@ -401,16 +296,9 @@ class FakeMediaItemRepository(MediaItemRepository):
     async def list_recently_added(
         self, *, since: AwareDatetime, limit: int = 24
     ) -> list[AddedTitle]:
-        # One row per title, keeping the NEWEST contributing file -- an
-        # episode's row carries its series' `title_id`, so a series that just
-        # landed is one row per episode file and one card.
-        #
-        # The `added_at is None` guard is written out rather than folded into
-        # a sort key, and so is the `>= since` comparison. Python's `None`
-        # comparisons and SQL's three-valued logic agree here only because
-        # both were written to: in SQL `added_at >= :since` is simply not true
-        # for a NULL, and a fake that reached for `entry.added_at or _UNDATED`
-        # would silently include every undated row in the library.
+        # One row per title, keeping the NEWEST contributing file -- an episode's row
+        # carries its series' `title_id`, so a series that just landed is one row per
+        # episode file and one card.
         newest: dict[uuid.UUID, AddedTitle] = {}
         for entry in self._items.values():
             if not entry.available or entry.title_id is None or entry.added_at is None:

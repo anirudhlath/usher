@@ -1,13 +1,4 @@
-"""The source-adapter contract, against the real EmbyAdapter.
-
-The same file of assertions that `tests/unit/test_source_adapter_contract.py`
-runs against an adapter with no wire format at all. Both runs are needed:
-that one proves the assertions are not secretly Emby-shaped, this one proves
-they survive a serialisation. Neither alone is evidence.
-
-No Docker and no network -- the whole thing rides on an in-memory transport,
-which is why the load-bearing suite stays in the fast lane.
-"""
+"""The source-adapter contract, against the real EmbyAdapter."""
 
 from collections.abc import AsyncIterator
 
@@ -29,16 +20,14 @@ class TestEmbyAdapter(SourceAdapterContract):
 
 
 def test_both_implementations_run_the_same_assertions() -> None:
-    """A contract suite is only evidence if both subclasses actually run all
-    of it. Nothing stops a subclass from overriding a case with a weaker one
-    -- so this asserts neither does, and that the count is not silently
-    drifting as cases are added.
+    """A contract suite is only evidence if both subclasses actually run all of it.
+
+    Nothing stops a subclass from overriding a case with a weaker one -- so this asserts
+    neither does, and that the count is not silently drifting as cases are added.
 
     **The count has to move in the same commit as the cases**, or the suite
     stays red -- which is the design of this guard rather than friction with
-    it. M3 shipped `== 39`, M4 took it to 43, M5's six push cases took it to
-    49, and issue #41's `start_index`-offsets-the-filtered-stream case takes
-    it to 50.
+    it.
 
     Exactly one of the 50 skips on this subclass:
     `test_events_raises_source_not_supported_when_push_is_unavailable`,

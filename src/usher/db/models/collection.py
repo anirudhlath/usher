@@ -1,19 +1,4 @@
-"""`collections` -- TMDb's movie franchise grouping.
-
-Carries a `set_updated_at` trigger for `people`'s reason: written by a staged
-`INSERT ... ON CONFLICT DO UPDATE`, a path `onupdate=` never reaches.
-
-**Movies only.** `belongs_to_collection` is a field of `/movie/{id}` with no
-`/tv/{id}` counterpart -- verified against the recorded payloads. So
-`titles.collection_id` is NULL on every series row, permanently, and the
-schema deliberately does **not** enforce that with a
-`CHECK (collection_id IS NULL OR kind = 'movie')` on `titles`: the constraint
-would encode a claim about TMDb's product decisions, and the day TMDb adds a
-series equivalent (or M9's admin API offers a hand-curated grouping) it is a
-migration on the catalog table plus a rewrite. `attach_titles`' own
-`WHERE t.kind = 'movie'` and a CollectionRepository contract case carry the
-property instead. Measured-and-declined, so it is not "fixed" in later.
-"""
+"""`collections` -- TMDb's movie franchise grouping."""
 
 import uuid
 from datetime import datetime
@@ -41,14 +26,6 @@ class CollectionRow(Base):
 
     __table_args__ = (
         # The upsert's ON CONFLICT target and resolve_tmdb_ids' lookup.
-        # Partial, so the staged upsert must repeat `WHERE tmdb_id IS NOT
-        # NULL` -- db/staging.py's first trap.
-        #
-        # Not composite with anything: `belongs_to_collection.id` is one id
-        # space because there is no series equivalent, so ADR-0011's
-        # movies-and-series-collide hazard does not arise. Named because its
-        # absence is otherwise indistinguishable from having forgotten
-        # ADR-0011.
         Index(
             "ix_collections_tmdb_id",
             "tmdb_id",

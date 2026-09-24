@@ -33,12 +33,8 @@ def test_watch_state_attaches_to_a_title() -> None:
     )
     assert state.played is False
     assert state.play_count == 0
-    # The load-bearing invariant: watch state attaches to the canonical
-    # Title, never to a source-specific record. Asserted against
-    # model_fields, not just "the constructor doesn't require one", so a
-    # future refactor that reintroduces source_id/media_item_id onto
-    # WatchState fails this test instead of silently reintroducing the
-    # coupling watch state is designed to survive.
+    # The load-bearing invariant: watch state attaches to the canonical Title, never to
+    # a source-specific record.
     assert "source_id" not in WatchState.model_fields
     assert "media_item_id" not in WatchState.model_fields
 
@@ -62,8 +58,10 @@ def test_watch_state_is_immutable() -> None:
 
 
 def test_user_and_watch_state_are_hashable() -> None:
-    """Neither carries a dict or list field, so — unlike Title — both hash
-    cleanly. See DomainModel's docstring for the asymmetry."""
+    """Neither carries a dict or list field, so — unlike Title — both hash cleanly.
+
+    See DomainModel's docstring for the asymmetry.
+    """
     hash(User(name="default"))
     hash(_watch_state())
 
@@ -90,10 +88,12 @@ def test_user_rejects_naive_created_at() -> None:
 
 
 def test_user_created_at_defaults_to_aware_now_when_omitted() -> None:
-    """Pins that created_at is required and aware-by-default, not merely
-    that an explicit naive value is rejected -- a field that quietly went
-    back to Optional (default None) would still pass the rejection test
-    above but fail this one the moment created_at is read."""
+    """Pins that created_at is required and aware-by-default.
+
+    not merely that an explicit naive value is rejected -- a field that quietly went
+    back to Optional (default None) would still pass the rejection test above but fail
+    this one the moment created_at is read.
+    """
     user = User(name="default")
     assert user.created_at.tzinfo is not None
 
@@ -165,9 +165,12 @@ def test_watch_state_accepts_exactly_episode() -> None:
 
 
 def test_origin_has_no_default() -> None:
-    """Defaulting to API would silently mislabel source-pushed state as
-    user-originated if a sync path forgot to set it. Provenance must be
-    supplied explicitly."""
+    """Defaulting to API would silently mislabel source-pushed state as user-originated if a.
+
+    sync path forgot to set it.
+
+    Provenance must be supplied explicitly.
+    """
     with pytest.raises(ValidationError):
         WatchState.model_validate({"user_id": new_id(), "title_id": new_id()})
 
@@ -177,7 +180,7 @@ def test_watch_state_rejects_unknown_origin() -> None:
         WatchState.model_validate({"user_id": new_id(), "title_id": new_id(), "origin": "webhook"})
 
 
-# --- serialization round-trip (the wire contract from M4 onward) -----------
+# --- serialization round-trip (the wire contract) --------------------------
 
 
 def test_user_serialization_round_trips() -> None:

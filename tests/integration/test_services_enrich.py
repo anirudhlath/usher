@@ -1,22 +1,4 @@
-"""`EnrichService`'s index enqueue, against real Postgres.
-
-**This file exists for one ordering the unit suite cannot see.** The enqueue
-happens after the commit, and the reason is a transaction: a worker claiming
-the index job reads `titles` in a *different* one, so a job enqueued before
-the commit can run against the pre-enrichment row -- fingerprint the old
-text, embed the old text, and then stop matching the stale predicate because
-the fingerprint agrees with what it embedded. A permanently stale vector the
-backfill will never re-claim, produced by the enqueue that exists to keep it
-fresh, with nothing raising anywhere.
-
-`FakeJobQueue` and `FakeTitleRepository` share no transaction, so against
-them an enqueue before the commit is *indistinguishable* from one after.
-`tests/unit/test_services_enrich.py` asserts the order through a recording
-collaborator, which is one more than the plan expected of it and still not
-the data consequence. Here the consequence is readable: the enqueue is made
-by a publisher-shaped probe that reads `titles` back **on its own
-connection**, and a separate connection cannot see an uncommitted write.
-"""
+"""`EnrichService`'s index enqueue, against real Postgres."""
 
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -26,7 +8,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.fakes.metadata_provider import FakeMetadataProvider
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.sync import PostgresRawPayloadStore
@@ -44,8 +25,9 @@ _MARK = "enrich-index-case"
 
 
 class _ReadsOnItsOwnConnection(JobQueue):
-    """Enqueues through the real queue, and records what a *different*
-    transaction can see at that instant.
+    """Enqueues through the real queue.
+
+    and records what a *different* transaction can see at that instant.
 
     The whole point: `EnrichService` writes the enriched name inside its own
     transaction, so a second connection reads the pre-enrichment row until
@@ -108,33 +90,22 @@ async def _wipe(session: AsyncSession) -> None:
         text("DELETE FROM titles WHERE tmdb_id = :tmdb_id OR sort_name = :mark"),
         {"tmdb_id": _TMDB_ID, "mark": _MARK},
     )
-    # `DROP TABLE IF EXISTS stg_jobs` stood here until M6's staging tables
+    # `DROP TABLE IF EXISTS stg_jobs` stood here until the staging tables
     # became `CREATE TEMP TABLE ... ON COMMIT DROP`; the commit below is now
     # what removes it rather than what persists it.
     await session.commit()
 
 
 @pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Its own engine, because every case here needs two live connections at
-    once -- the suite's usual per-test session is one connection inside one
-    rolled-back transaction, which is exactly what this file cannot use.
-    """
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
-@pytest_asyncio.fixture
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """This module commits for real, because the ordering it exists to check
-    is only visible from a second connection -- which cannot see a rolled-back
-    transaction at all. So it cleans up after itself: a leftover `titles` row
-    fails an unrelated file on `ix_titles_tmdb_id_kind`. A leftover `stg_jobs`
-    used to be the other half of that and no longer can be -- the staging
-    tables are temporary and drop at commit.
+    """This module commits for real.
+
+    because the ordering it exists to check is only visible from a second connection --
+    which cannot see a rolled-back transaction at all.
+
+    So it cleans up after itself: a leftover `titles` row fails an unrelated file on
+    `ix_titles_tmdb_id_kind`. A leftover `stg_jobs` used to be the other half of that
+    and no longer can be -- the staging tables are temporary and drop at commit.
     """
     async with sessions() as session:
         await _wipe(session)
@@ -208,7 +179,7 @@ async def test_a_finished_enrichment_leaves_one_index_job_in_the_table(
 async def test_the_enqueue_sees_a_committed_title(
     sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """**The case the unit suite structurally cannot write.**
+    """**The case the unit suite structurally cannot write.**.
 
     A second connection is opened at the instant of the enqueue and asked what
     it can see. After the commit it reads `enriched`; before it, it reads

@@ -1,88 +1,9 @@
-"""The server process's background lanes (PRD 01's concurrency model).
-
-Three kinds: one push lane per enabled source, one job worker, and one
-`rows.refresh` lane. The first two are settings-gated, which is PRD 01's
-"`--worker` entrypoint flag ... so lanes can be moved to a separate container
-later by editing compose, with no code change" expressed as configuration
-rather than as an argument -- one image serves an all-in-one deployment and a
-split one.
-
-**The third is gated on being handed a cache and a queue, not on a setting.**
-A switch would let an operator configure the state PRD 06's serve-stale must
-never reach: a stale screen served with nothing behind it to replace it. What
-turns the lane on is `create_app` building the pair -- and `usher work`, which
-serves no screens, builds neither. `Settings` is `extra="forbid()"`-strict for
-the same reason `_MAX_ROWS` is not a field: a knob owes a reader *and* a
-reason, and "make serve-stale silently wrong" is not one.
-
-**It is one lane, not one task per stale key** -- the shape
-`services/rows/cache.py` names as the wrong one. Its bound is the queue's
-(`REFRESH_QUEUE_SIZE`) and its concurrency is one, so it is a *third*
-long-running consumer of the connection pool alongside the push lanes and the
-worker, holding at most one session at a time. Both numbers are in PRD 01's
-concurrency table, because a bound an operator cannot read is not one.
-
-**And it is not a source lane.** `running_sources()` still means "push lanes
-with a live task" and readiness still reports exactly what it reported -- a
-third lane kind that quietly joined that list would take a process out of a
-load balancer for a screen refresh, which is the inversion the
-liveness/readiness split exists to prevent
-(`tests/integration/test_health.py`).
-
-**The worker runs here rather than only in `usher work`, and that is the
-milestone's boundary call 5.** PRD 03's read-through loop is `open -> stub ->
-promote -> enrich -> title.updated -> client patches`, and M5's event bus is
-in-memory. With the worker in another process the enrichment completes and
-nothing is told; the client's next refetch gets the right answer, which is
-degradation rather than breakage, but it is not the loop PRD 03 describes.
-`usher work` keeps working for an operator who wants a separate worker, and
-publishes to a `NullEventPublisher` -- stated in its own composition root.
-
-**This module holds no session and imports no SQLAlchemy.** A supervisor
-that held a session would hold it for the life of a socket -- hours, idle in
-transaction, with a snapshot from whenever the lane started -- so every unit
-of work opens its own, and `composition.unit_of_work` is what turns a
-session factory into the callable below. That also means a lane test can
-supply a `Pipeline` over port fakes rather than standing up a database.
-
-**`start()` creates tasks and awaits nothing.** `create_app`'s lifespan
-builds an engine and opens no connection, and that is load-bearing: `/health`
-answers 200 with Postgres down while `/health/ready` reports 503, verified
-live against a real container in M1. A supervisor that read the source list
-inside `start()` would turn a database outage into a failure to boot,
-trading a documented, tested degradation for a worse one. The first refresh
-therefore happens *inside* the refresher task, where a failure is logged and
-retried.
-
-**One task per lane, never one `TaskGroup` over all of them.** A bug in one
-source's lane must cost that source and nothing else; a task group cancels
-its siblings on the first escape, and if the group were awaited in the
-lifespan it would take the HTTP server with it.
-
-**Two workers are now safe, and the switch is still what an operator
-wants.** This used to read *"one worker per deployment, not per process"*,
-because `JobWorker.startup()` requeued everything left `running` and at two
-workers each stole the other's live claims. M9's W1 replaced that with a
-lease and a heartbeat (`JobWorker.recover`), so a second `usher work` beside
-the server no longer corrupts anything -- what it still does is share the
-same `job_concurrency` budget against the same upstreams from two processes,
-which is the thing ADR-0005's rate limit is per-*client* and cannot see. So
-`USHER_WORKER_ENABLED=false` on the server remains the documented shape for a
-split deployment; it is now a capacity decision rather than a correctness
-one.
-
-**Tests that build an app but do not want lanes must say so.** Both switches
-default on, so `create_app(Settings(...))` under `LifespanManager` starts a
-worker that polls the real queue and a push lane per configured source. Every
-fixture in this suite that does not want that passes
-`push_enabled=False, worker_enabled=False` explicitly, which is greppable in
-a way an autouse default would not be.
-"""
+"""The server process's background lanes (PRD 01's concurrency model)."""
 
 import asyncio
-import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from loguru import logger
 from opentelemetry import trace
@@ -93,10 +14,12 @@ from usher.composition import (
     Pipeline,
     QueueGauges,
     SearchGauges,
+    SessionFactory,
     SourceRegistry,
     UnitOfWork,
     build_push_applier,
     build_row_context,
+    build_scheduler,
     build_worker,
     open_adapter,
     selected_sources,
@@ -110,19 +33,24 @@ from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.home import HomeService
-from usher.services.jobs import JobWorker
+from usher.services.jobs import JobWorker, WorkerLoop
 from usher.services.push import PushOutcome, PushSupervisor
 from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache, StaleScreen
-from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
+from usher.services.scheduler import Scheduler
+from usher.telemetry import (
+    PushSnapshot,
+    register_queue_gauges,
+    register_scheduler_gauges,
+    register_search_gauges,
+)
 
 _tracer = trace.get_tracer("usher.rows")
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
-# setting, for the reason `usher.cli`'s copy of this constant is not: it is
-# the polling floor of a lane that already has push as its real answer for
-# *inbound* work, and a knob would invite tuning a number that is about to
-# stop mattering. What it drains is Usher's own queue, which has no push.
+# setting, for the reason `usher.cli`'s copy is not: it is the polling floor of
+# a lane whose real answer for *inbound* work is push. What it drains is Usher's
+# own queue, which has none.
 IDLE_SLEEP_SECONDS = 5.0
 
 
@@ -139,6 +67,7 @@ class LaneSupervisor:
         client: LLMClient | None = None,
         rows: RowCache | None = None,
         refreshes: RefreshQueue | None = None,
+        sessions: SessionFactory | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
@@ -149,13 +78,16 @@ class LaneSupervisor:
         # -- and it is optional for the same reason `provider` and `embedder`
         # are: a lane supervisor in a test has no `app.state` to read one off.
         self._rows = rows
-        # The stale-key handover, filled by `HomeService` on the request path
-        # and drained by the one lane below. `None` alongside `rows` is `None`
-        # -- the pair is the switch, see the module docstring -- and a
-        # supervisor given one without the other starts no refresh lane rather
-        # than half of one.
+        # The stale-key handover, filled by `HomeService` on the request path and
+        # drained by the one lane below. The pair is the switch: a supervisor given
+        # one without the other starts no refresh lane rather than half of one.
         self._refreshes = refreshes
         self._user_id = user_id
+        # The scheduler's registrations need a database and do **not** need a
+        # `Pipeline`: `SearchQueryRetention` reads one aggregate and issues one
+        # `DELETE`, so `unit_of_work` above -- twenty-odd repositories, two suggest
+        # indexes, an embedder, a source-gate registry -- is the wrong scope entirely.
+        self._sessions = sessions
         self._provider = provider
         # Carried, never built here. All three of these are per-*process*
         # resources handed in by the composition root that made them, and
@@ -166,13 +98,8 @@ class LaneSupervisor:
         # lane register no `curate` handler -- so curate work waits for a
         # process that can run it rather than being claimed and parked.
         self._client = client
-        # Injected only so a test can run several worker passes without
-        # spending five seconds each: `usher work`'s equivalent is a module
-        # constant for the reason stated above, and nothing in `src/` passes
-        # this. Without it "startup() runs once, not per pass" is a property
-        # no case can observe -- and it is a real one, because
-        # `requeue_running` at `older_than_seconds=0.0` requeues *everything*
-        # running and would steal another worker's live claims every poll.
+        # Injected only so a test can run several worker passes without spending
+        # five seconds each. Nothing in `src/` passes it.
         self._idle_seconds = idle_seconds
         self._lanes: dict[uuid.UUID, asyncio.Task[None]] = {}
         self._names: dict[uuid.UUID, str] = {}
@@ -180,25 +107,31 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._rows_lane: asyncio.Task[None] | None = None
+        # The scheduled-work lane. Built in `start()`, and it owns its own task
+        # rather than being one of the four above: `Scheduler.stop()` cancels and
+        # awaits it, for the same reason `JobWorker` owns its heartbeat.
+        self._scheduler: Scheduler | None = None
+        # What `JobWorker.recover()` returned, kept rather than discarded -- see
+        # `recovered_claims()` below. `None` until the first recovery pass returns,
+        # so a process running no worker lane reports *not probed*, not *no orphans*.
+        self._recovered_claims: int | None = None
+        self._recovered_at: datetime | None = None
         self._gauges = QueueGauges()
-        # PRD 10's embedding backlog, on the same beat and for the same
-        # reason: an OTel observable callback runs on the metric reader's
-        # background thread and cannot await an asyncpg query. Refreshed
-        # whether or not this process holds a model -- a worker without one
-        # leaves index jobs for a worker that has, and the backlog is the
-        # number that says so.
+        # PRD 10's embedding backlog, on the same beat and for the same reason: an OTel
+        # observable callback runs on the metric reader's background thread and cannot
+        # await an asyncpg query.
         self._backlog = SearchGauges()
 
     # -- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
-        """Create the lanes' tasks. Awaits nothing, connects to nothing.
+        """Create the lanes' tasks.
 
-        `async` despite never suspending because `stop()` is, because a
-        future lane may need to, and because a lifespan calling one of a
-        pair with `await` and the other without reads as a mistake.
-        `tests/unit/test_api_lanes.py` drives this coroutine one step by
-        hand and requires `StopIteration`, which is what pins it.
+        Awaits nothing, connects to nothing.
+
+        `async` despite never suspending because `stop()` is, because a future
+        lane may need to, and because a lifespan calling one of a pair with
+        `await` and the other without reads as a mistake.
         """
         if self._settings.worker_enabled:
             self._worker = asyncio.create_task(self._run_worker(), name="usher.lane.worker")
@@ -208,6 +141,16 @@ class LaneSupervisor:
             self._rows_lane = asyncio.create_task(
                 self._run_row_refresh(), name="usher.lane.rows.refresh"
             )
+        if self._settings.scheduler_enabled:
+            # **Off by default, unlike the two switches above**, so an existing app
+            # fixture does not have to grow a third `scheduler_enabled=False`.
+            self._scheduler = build_scheduler(self._settings, sessions=self._sessions)
+            # Registered here rather than unconditionally in `create_app`: with no
+            # scheduler there is no snapshot to read, and "no reader, no observation"
+            # keeps a scheduler-less process from publishing a series about jobs it
+            # does not run.
+            register_scheduler_gauges(self._scheduler.read)
+            await self._scheduler.start()
 
     async def stop(self) -> None:
         """Cancel every lane, then close every adapter.
@@ -229,6 +172,12 @@ class LaneSupervisor:
         # would re-raise whatever it crashed with. Neither may stop the rest
         # of shutdown -- and the second would escape the lifespan.
         await asyncio.gather(*tasks, return_exceptions=True)
+        # The scheduler owns its own task, so it is cancelled and awaited
+        # through its own `stop()` rather than joining the gather above. An
+        # in-flight job is cancelled at its next `await`; `ScheduledJob.run`
+        # carries what that obliges an implementation to.
+        if self._scheduler is not None:
+            await self._scheduler.stop()
         self._lanes.clear()
         self._worker = None
         self._refresher = None
@@ -245,17 +194,62 @@ class LaneSupervisor:
         )
 
     def crashed_sources(self) -> list[str]:
-        """Lanes whose task has finished, which is not a state a healthy
-        lane reaches: `PushSupervisor.run` returns only after the failure
-        ceiling, and `_guard` catches everything else. Reported so a case
-        can tell "the lane crashed" from "the lane was never started", which
-        `running_sources()` alone cannot."""
+        """Lanes whose task has finished, which is not a state a healthy lane reaches.
+
+        `PushSupervisor.run` returns only after the failure ceiling, and `_guard`
+        catches everything else.
+
+        Reported so a case can tell "the lane crashed" from "the lane was never
+        started", which `running_sources()` alone cannot.
+        """
         return sorted(
             self._names[source_id] for source_id, task in self._lanes.items() if task.done()
         )
 
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    def scheduler_running(self) -> bool:
+        """Whether the scheduled-work lane has a live task.
+
+        **Deliberately not part of `running_sources()` and deliberately not in
+        `ReadinessChecks`**, for `rows_refreshing()`'s reason exactly: it is
+        not a source, and a lane that runs a three-hour batch once a day must
+        not be able to take this process out of a load balancer.
+
+        Reported so a case can state its premise -- *"the lane is up"* -- before
+        waiting on a job, because "the job never ran" and "the lane was never
+        started" are different failures and only the second is a wiring bug.
+        """
+        return self._scheduler is not None and self._scheduler.running()
+
+    def recovered_claims(self) -> int | None:
+        """The total `JobWorker.recover()` has returned here, or `None` if never asked.
+
+        Three values, three statements -- `None` *not probed*, `0` *asked and found
+        none*, non-zero *took some back* -- on the terms
+        `SourceStatus.push_available` already sets. The wire contract is on
+        `LaneReport` (`usher.api.dto.health`); restating it here is two copies to drift.
+        """
+        return self._recovered_claims
+
+    def recovered_at(self) -> datetime | None:
+        """When the last recovery pass that *found something* ran.
+
+        `LaneReport` says why this is not "when recovery last ran".
+        """
+        return self._recovered_at
+
+    def _note_recovery(self, recovered: int) -> None:
+        """Fold one `recover()` result into the two reported fields.
+
+        Reads the **return value**; a counter incremented before the call instead
+        is the mutation this exists to refuse. The two agree at exactly one orphan
+        and diverge at zero, so only a pass that recovers **none** tells them apart.
+        """
+        self._recovered_claims = (self._recovered_claims or 0) + recovered
+        if recovered:
+            self._recovered_at = datetime.now(UTC)
 
     def rows_refreshing(self) -> bool:
         """Whether the `rows.refresh` lane has a live task.
@@ -265,8 +259,6 @@ class LaneSupervisor:
         `checks` alone: a screen refresh lane that could 503 this process would
         take it out of a load balancer for a reason restarting it cannot fix,
         while `GET /home` carries on answering from a cache and a full compose.
-        `tests/integration/test_health.py` is where a reachable database makes
-        both of those mutations die.
         """
         return self._rows_lane is not None and not self._rows_lane.done()
 
@@ -287,44 +279,41 @@ class LaneSupervisor:
         }
 
     def push_available(self, source_id: uuid.UUID) -> bool | None:
-        """What `GET /admin/sources/{id}/status` reports, or `None` when no
-        lane is running for that source -- "not probed", which is a
-        different answer from "push is broken" and is the honest one."""
+        """What `GET /admin/sources/{id}/status` reports.
+
+        `None` when no lane is running for that source -- "not probed", a different
+        answer from "push is broken" and the honest one.
+        """
         adapter = self._open_adapters.get(source_id)
         return None if adapter is None else adapter.supports_push
 
     # -- the push lanes --------------------------------------------------
 
     async def refresh(self) -> None:
-        """Start a lane for every enabled source that has none, and drop the
-        lanes of sources that have gone, been disabled, or crashed.
+        """Start a lane for every enabled source that has none.
 
-        **Not re-entrant, and never called concurrently.** The refresher
-        task awaits one call before sleeping, and nothing else in `src/`
-        calls it -- two overlapping refreshes could each see a source with
-        no lane and start two, i.e. two sockets against one server. Left as
-        a stated precondition rather than a lock, because a lock here would
-        be guarding a caller that does not exist.
-
-        A source added through `POST /admin/sources` gets a lane without a
-        restart, which PRD 08 requires of everything else about a source and
-        would otherwise be false for push alone. A *disabled* one loses its
-        lane, because `enabled` is how an operator parks a server that is
-        being rebuilt and a lane would keep the backoff schedule warm
-        against a machine nobody wants touched.
+        Lanes of sources that have gone or been disabled are dropped, and a lane
+        that has finished **releases its adapter** without being restarted.
         """
         async with self._work() as pipeline:
             wanted = {source.id: source for source in await selected_sources(pipeline)}
             for source_id in list(self._lanes):
                 if source_id not in wanted:
                     await self._stop_lane(source_id)
+            for source_id, task in list(self._lanes.items()):
+                # `task.done()` is the whole predicate, and the only thing between
+                # this and releasing a *live* lane's adapter mid-stream.
+                if task.done():
+                    await self._release_adapter(source_id)
             for source_id, source in wanted.items():
                 if source_id not in self._lanes:
                     await self._start_lane(pipeline, source)
 
     async def _refresh_loop(self) -> None:
-        """Refresh, then sleep -- in that order, so the first lane set is
-        built by this task rather than by `start()`."""
+        """Refresh, then sleep.
+
+        In that order, so the first lane set is built by this task, not `start()`.
+        """
         while True:
             try:
                 await self.refresh()
@@ -385,6 +374,19 @@ class LaneSupervisor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._release_adapter(source_id)
+
+    async def _release_adapter(self, source_id: uuid.UUID) -> None:
+        """Close this source's adapter and forget it, at most once.
+
+        The `pop` is the property, not an optimisation: `refresh` runs on a timer,
+        so a release path that only called `aclose()` would call it again every
+        `push_source_refresh_seconds` for the life of the process -- and `aclose`
+        is idempotent on both implementations, so nothing would say so.
+
+        Shared with `_stop_lane` deliberately: a source whose lane is stopped and
+        one whose lane finished on its own must release the adapter the same way.
+        """
         adapter = self._open_adapters.pop(source_id, None)
         if adapter is not None:
             await adapter.aclose()
@@ -399,37 +401,7 @@ class LaneSupervisor:
             return await applier.apply(source, adapter, event, user_id=await self._user_id())
 
     async def _close_gap(self, source: Source, adapter: SourceAdapter) -> None:
-        """PRD 03's reconnect delta: the item lane, then the watch lane.
-
-        In that order, and for the reason `usher sync` runs them in that
-        order: `WatchStateSyncService` resolves each state against a
-        `MediaItem`, so a watch walk that ran first would count every state
-        unmatched and merge nothing.
-
-        **A delta with no cursor is a full walk, and until 2026-08-19 this
-        method performed one on startup without saying so.** `reconcile` reads
-        its `since` from the newest *completed* item-lane run; with none there
-        is no `since`, so `list_items(since=None)` walks the entire library --
-        1,126,789 items on the household this project measures -- issued by
-        `uvicorn` with default settings and no operator command, against a
-        server the operator may not own. `push_gap_min_interval_seconds` does
-        not cover it: that bounds how *often* a gap is closed and says nothing
-        about how large the walk is.
-
-        So the decision is `USHER_PUSH_GAP_CLOSE`, defaulting to `cursored`:
-        close a gap that is a *gap*, refuse one that is the whole catalog, and
-        leave the first walk to `usher sync`, which is a command an operator
-        issued. A deployment past its first walk has a cursor and is
-        unaffected.
-
-        **Every arm logs, and this is the only place that may.** The line
-        belongs here rather than in `refresh()` or `_start_lane`, which the
-        refresher calls once per `push_source_refresh_seconds` forever -- a
-        per-lane fact logged in a per-poll function is the ~17,280 warnings a
-        day `.claude/rules/config-cli-and-deployment.md` records against
-        `build_worker`. A gap is closed on reconnect and rate-limited by
-        `PushSupervisor._gap`, so this is once per close.
-        """
+        """PRD 03's reconnect delta: the item lane, then the watch lane."""
         if self._settings.push_gap_close == "never":
             # Before the unit of work: there is nothing to ask a database.
             logger.info(
@@ -439,10 +411,13 @@ class LaneSupervisor:
             )
             return
         async with self._work() as pipeline:
-            # The walk's own question, asked by the walk's own method, so the
-            # size this logs and the size it then performs cannot disagree.
+            # The walk's own question, asked by the walk's own method, so the size this
+            # logs and the size it then performs cannot disagree, and one reader of
+            # `None` is shared with `reconcile()` instead of two.
             cursor = await pipeline.reconcile.cursor_for(source, SyncRunKind.DELTA)
             if cursor is None:
+                # The source's **name**, never its base URL and never anything from
+                # its credential row -- PRD 08's credentials-are-never-logged rule.
                 if self._settings.push_gap_close == "cursored":
                     logger.warning(
                         "not closing {source}'s push gap: no item sync has ever completed "
@@ -466,28 +441,26 @@ class LaneSupervisor:
                     source=source.name,
                     since=cursor.isoformat(),
                 )
-            await pipeline.reconcile.reconcile(source, SyncRunKind.DELTA, adapter)
+            await pipeline.reconcile.reconcile(
+                source,
+                SyncRunKind.DELTA,
+                adapter,
+                max_items=self._settings.push_gap_max_items,
+            )
+            # Unconditionally, after a bounded item walk as much as a whole one.
+            # `reconcile` never raises, so a truncated walk arrives as a returned
+            # `FAILED` run rather than as control flow, and the watch lane must
+            # still run -- a different lane with a different cursor.
             await pipeline.watch.sync(source, adapter, user_id=await self._user_id())
 
     async def _write_push_available(self, source: Source, available: bool) -> None:
         async with self._work() as pipeline:
             stored = await pipeline.sources.get(source.id)
             if stored is None or stored.supports_push == available:
-                # No write when nothing changed -- and **this guard is
-                # belt-and-braces against a repository it does not own, not
-                # the thing that makes the property true.** Measured by
-                # mutation: deleting it leaves `sources.updated_at` exactly
-                # where it was, because `PostgresSourceRepository.update`
-                # sets attributes on a loaded ORM row and SQLAlchemy's
-                # unit of work emits no `UPDATE` when no attribute actually
-                # changed, so the `set_updated_at` trigger never fires.
-                # The guard earns its keep the day that repository issues a
-                # bare `UPDATE ... SET` statement instead, at which point a
-                # flapping lane would move a column an operator reads to see
-                # when a source last changed, once per reconnect. Recorded
-                # as an equivalent mutant against today's repository rather
-                # than deleted, and rather than left with a comment claiming
-                # something the code does not do.
+                # No write when nothing changed. Belt-and-braces against a repository
+                # this does not own, not the thing that makes the property true:
+                # `PostgresSourceRepository.update` sets attributes on a loaded ORM
+                # row, so an unchanged value leaves `sources.updated_at` where it was.
                 return
             await pipeline.sources.update(stored.evolve(supports_push=available))
             await pipeline.commit()
@@ -499,9 +472,8 @@ class LaneSupervisor:
 
         One consumer, so at most one refresh is ever in flight and the pool
         sees at most one extra session. The queue in front of it is where the
-        *bound* lives: full means dropped, and a dropped key costs one hard
-        miss on the next request past `TTL + grace` -- the cost M7 already
-        pays on every expiry.
+        *bound* lives: full means dropped, and a dropped key costs one hard miss
+        on the next request past `TTL + grace` -- the cost already paid on expiry.
         """
         # Bound once rather than re-narrowed per statement -- `start()` is what
         # guarantees it is not `None`, and `assert` is not available in shipped
@@ -516,13 +488,9 @@ class LaneSupervisor:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # **Named, and named with the lane.** Without this the lane
-                # task dies and CPython reports the unretrieved exception at
-                # GC time, to stderr, with no source in it -- the shape
-                # `_guard` above exists for, arriving here through a `while
-                # True` instead of through a task. The stale entry is left
-                # exactly where it was, so the next request is still served
-                # and the household sees a screen rather than a 500.
+                # **Named, and named with the lane.** Without this the lane task dies
+                # and CPython reports the unretrieved exception at GC time, to stderr,
+                # with no source in it.
                 logger.exception(
                     "the rows.refresh lane failed to refresh a screen and left the "
                     "stale one in place: {error}",
@@ -538,37 +506,24 @@ class LaneSupervisor:
     async def _refresh_screen(self, stale: StaleScreen) -> None:
         """One household's screen, rebuilt on this lane's own session.
 
-        **A root span with a `Link`, never a child.** PRD 10 specifies exactly
-        this for a worker's `job.*` and the reason is the same: the request
-        that served the stale screen has usually already returned, so a child
-        span of a finished parent misstates causality. It also corrects PRD
-        10's "the number of `row.build` children of a `home.compose` is the
-        number of misses" -- these `row.build` spans have no `home.compose`
-        parent at all, because `HomeService.rebuild` opens none.
+        **A root span with a `Link`, never a child.** The request that served the
+        stale screen has usually already returned, so a child span of a finished
+        parent misstates causality.
 
-        **It composes the same filtered registry `GET /home` does, and that is
-        not symmetry for its own sake.** A refresh runs *because* a screen
-        expired, and it writes what it builds back into the same `RowCache` --
-        so a lane composing the unfiltered `pipeline.row_providers` would put a
-        disabled provider's shelf back on the screen the toggle route had just
-        cleared, roughly `_SCREEN_TTL` after the operator switched it off. The
-        route would look like it worked and the shelf would return, which is
-        the failure mode M7's boundary call 9 refused this table over.
+        **It composes the same filtered registry `GET /home` does.** A refresh runs
+        *because* a screen expired and writes what it builds back into the same
+        `RowCache`, so a lane composing the unfiltered `pipeline.row_providers`
+        would put a disabled provider's shelf back on the screen the toggle route
+        had just cleared -- the route would look like it worked.
         """
         links = [Link(stale.link)] if stale.link.is_valid else []
-        # `context=Context()` -- an empty context -- so "root" is structural
-        # rather than a property of where `start()` happened to be called.
-        # A worker's `job.*` relies on there being no ambient span, which is
-        # true today and is not enforced; a lane task inherits the context of
-        # whatever created it (`asyncio.create_task` copies it), so a lifespan
-        # or a test that started the supervisor inside a span would silently
-        # turn every refresh into a child of one request forever.
+        # `context=Context()` -- an empty context -- so "root" is structural rather than
+        # a property of where `start()` happened to be called.
         with _tracer.start_as_current_span("rows.refresh", context=Context(), links=links) as span:
             async with self._work() as pipeline:
-                # A session this lane opened, closed when the block ends --
-                # never the request's, which `get_session` committed and closed
-                # when the handler returned. That is the whole reason M7
-                # deferred this rather than half-implementing it.
+                # A session this lane opened, closed when the block ends -- never
+                # the request's, which `get_session` committed and closed when the
+                # handler returned.
                 service = HomeService(
                     enabled_row_providers(
                         row_provider_settings(
@@ -584,78 +539,49 @@ class LaneSupervisor:
     # -- the worker lane -------------------------------------------------
 
     async def _run_worker(self) -> None:
-        """PRD 08's queue consumer, in the process the SSE clients are
-        connected to.
-
-        Polls rather than listens, at the same floor `usher work` uses --
-        and the comment there applies unchanged: it is the polling floor of
-        a lane that already has push as its real answer for *inbound* work.
-        What it drains is Usher's own queue, which has no push.
-
-        **The worker is built once per process, not once per pass.** It used
-        to be rebuilt on every turn of this loop because it was bound to that
-        pass's session; since M9's W1 it holds a *factory* and opens a scope
-        per job, so the only thing that has to happen per pass is the gauge
-        refresh, which needs a pipeline of its own and gets one. The lazy build
-        is what keeps `start()`'s promise that a lane connects to nothing: the
-        first `await self._user_id()` is a database call, and doing it here
-        means a database that is down at boot delays the first job instead of
-        crashing the lane.
-
-        **Recovery runs on a timer, not once.** `startup()` ran exactly once,
-        at process start, with `older_than_seconds=0.0` -- which could only
-        recover *this* process's orphans and only by stealing every other
-        worker's live claims. `recover()` takes an age instead, so it is safe
-        to call repeatedly and safe to call while other workers are running,
-        which is the only shape under which a crashed peer's claims ever come
-        back. Throttled to half the lease because it is an `UPDATE` scanning
-        `status = 'running'` and there is nothing to find between leases.
-        """
+        """PRD 08's queue consumer, in the process the SSE clients are connected to."""
         register_queue_gauges(self._gauges.read)
         register_search_gauges(self._backlog.read)
         registry = SourceRegistry()
-        worker: JobWorker | None = None
-        recovered_at = 0.0
-        while True:
-            ran = 0
-            try:
-                if worker is None:
-                    worker = build_worker(
-                        self._work,
-                        self._settings,
-                        provider=self._provider,
-                        embedder=self._embedder,
-                        client=self._client,
-                        registry=registry,
-                        user_id=await self._user_id(),
-                        # This process serves the screens, so an enrichment
-                        # running here has a cache to invalidate. `usher work`
-                        # passes nothing and composes nothing.
-                        rows=self._rows,
-                    )
-                now = time.monotonic()
-                if now - recovered_at >= self._settings.job_lease_seconds / 2:
-                    await worker.recover()
-                    recovered_at = now
-                ran = await worker.run_once()
-                async with self._work() as pipeline:
-                    await self._gauges.refresh(pipeline.queue)
-                    await self._backlog.refresh(
-                        pipeline.embeddings,
-                        pipeline.neighbors,
-                        self._settings.embedding_model,
-                    )
-            except asyncio.CancelledError:
-                await registry.aclose()
-                raise
-            except Exception as exc:
-                # Including a `UsherPortError`: a database outage must slow
-                # the lane down, never end it. A worker lane that returned
-                # would leave the queue draining only on the next restart,
-                # with nothing in `/health/ready` saying so.
-                logger.warning("the worker lane's pass failed: {error}", error=str(exc))
-            if ran == 0:
-                await asyncio.sleep(self._idle_seconds)
+
+        async def _build() -> JobWorker:
+            return build_worker(
+                self._work,
+                self._settings,
+                provider=self._provider,
+                embedder=self._embedder,
+                client=self._client,
+                registry=registry,
+                user_id=await self._user_id(),
+                # This process serves the screens, so an enrichment running
+                # here has a cache to invalidate. `usher work` passes nothing
+                # and composes nothing.
+                rows=self._rows,
+            )
+
+        async def _refresh() -> None:
+            async with self._work() as pipeline:
+                await self._gauges.refresh(pipeline.queue)
+                await self._backlog.refresh(
+                    pipeline.embeddings,
+                    pipeline.neighbors,
+                    self._settings.embedding_model,
+                )
+
+        try:
+            await WorkerLoop(
+                _build,
+                lease_seconds=self._settings.job_lease_seconds,
+                idle_seconds=self._idle_seconds,
+                refresh=_refresh,
+                # `/health/ready`'s body carries the total, so an operator can
+                # see a peer's claims coming back rather than only a WARNING
+                # that fires when the count is non-zero.
+                recovered=self._note_recovery,
+                failure="the worker lane's pass failed: {error}",
+            ).run()
+        finally:
+            await registry.aclose()
 
 
 __all__ = ["IDLE_SLEEP_SECONDS", "LaneSupervisor"]

@@ -80,7 +80,7 @@ can be matched up by eye.
 | `tt99000120` / TMDb `90000120` | `emby/multi_version_movie.json` |
 | `tt99000150` | the Greek-final-sigma title, where Postgres `lower()`, Python `str.lower()` and `str.casefold()` disagree |
 | `tt99000160` | the `ß` title, where both `lower()`s agree and `casefold()` does not |
-| `tt99000210` | the title already carrying TMDb's own figures, over which `apply_ratings` must write only the `imdb_*` pair (ADR-0040) |
+| `tt99000210` | the title already carrying TMDb's own figures, over which `apply_ratings` must write only the `imdb_*` pair |
 | `tt99001000` | the 8-digit-tconst validation case |
 | TMDb `90000550` / `90001399` | `tmdb/movie.json` / `tmdb/series.json` |
 | TMDb `96000000`/`96000001` | seasons; `97000001`/`97000002` episodes |
@@ -88,9 +88,8 @@ can be matched up by eye.
 
 `movie_ids.slice.jsonl` and `tv_series_ids.slice.jsonl` both carry
 `90000045`, deliberately: TMDb's movie and series id spaces overlap on 26,968
-ids (measured 2026-07-30), which is what
-[ADR-0011](../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md)
-exists for. A fixture without a collision could not exercise it.
+ids (measured 2026-07-30), which is why `tmdb_id` is unique per kind rather
+than globally. A fixture without a collision could not exercise it.
 
 ## Do a test's ids need to be recognisable?
 

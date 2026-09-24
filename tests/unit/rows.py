@@ -1,24 +1,4 @@
-"""The seeding every provider case shares, and the discipline it enforces.
-
-**A wrong row renders identically to a right one**, so every case in every
-`test_rows_*.py` file asserts on **position** and seeds a distractor a broken
-implementation would rank first. `assert title_id in {c.title_id for c in
-row.cards}` is satisfied by returning the library in physical order, and so is
-`assert len(row.cards) > 0`.
-
-**A distractor that varies two things at once is not a distractor**, and this
-milestone's own plan wrote one into its headline table -- the ContinueWatching
-distractor it specifies sets `played` *and* `position_seconds = 0`, so it
-isolates neither half of the `NOT played AND position_seconds > 0` predicate.
-`Library.finished` therefore keeps its resume position, and
-`Library.never_started` is the separate seed for the other half.
-
-`Library` seeds through the real fakes rather than through dicts, so a case
-reads as a household rather than as a fixture, and every id is minted per call
-and never sorted on: `watch_states.id` is a UUIDv7, so id order is insertion
-order, and a fixture whose insertion order matches its intended answer order is
-satisfied by `ORDER BY id`. Group E found six vacuous fixtures that way.
-"""
+"""The seeding every provider case shares, and the discipline it enforces."""
 
 import uuid
 from collections.abc import Sequence
@@ -96,12 +76,7 @@ class Library:
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
         self.curated_rows = FakeCuratedRowRepository()
-        # Artwork, seeded through `poster()`/`backdrop()` below. Empty by
-        # default and deliberately so: **most cards in this suite carry no
-        # artwork**, which is the state a real catalog is in before its first
-        # `usher derive` and the state every pre-C6 case in these files was
-        # written against. A `Library` that minted a poster per title would
-        # make `artwork is None` unreachable and hide the ADR-0014 arm.
+        # Artwork, seeded through `poster()`/`backdrop()` below.
         self.images = FakeImageRepository()
         # `replace_for_titles` is a replace, so incremental seeding has to hold
         # the accumulated set per title and re-send it. Keeping the accumulator
@@ -144,19 +119,17 @@ class Library:
             genres=tuple(genres),
             keywords=tuple(keywords),
             # The builder's own keyword names are test-local vocabulary and
-            # stay; only the `Title` fields they feed moved. ADR-0040.
+            # stay; only the `Title` fields they feed are provider-scoped.
             tmdb_popularity=popularity,
             tmdb_vote_count=vote_count,
             runtime_minutes=runtime_minutes,
             enrichment_state=EnrichmentState.ENRICHED,
         )
         await self.titles.add(title)
-        # `FakeCollectionRepository` models `titles.kind` and the catalog's own
-        # order because `attach_titles` refuses a series and `list_owned`
-        # returns members "in release order" -- both are facts about `titles`
-        # that a collection fake cannot invent. Registered here so no case has
-        # to remember to, which is how the four vacuous fixtures Group G found
-        # were written.
+        # `FakeCollectionRepository` models `titles.kind` and the catalog's own order
+        # because `attach_titles` refuses a series and `list_owned` returns members "in
+        # release order" -- both are facts about `titles` that a collection fake cannot
+        # invent.
         self.collections.catalog.kinds[title.id] = kind
         self.collections.catalog.order.append(title.id)
         if owned:
@@ -237,10 +210,10 @@ class Library:
         )
         await self.episodes.upsert_episodes([one])
         self.episode_series[one.id] = series_id
-        # **Trap 7's third fake.** `FakePersonRepository._title_of` reproduces
-        # `COALESCE(w.title_id, e.title_id)` and reads this map; without it an
-        # episode watch state reaches no credits at all, which is precisely the
-        # films-only answer `list_recurring_for_user` exists to refuse.
+        # `FakePersonRepository._title_of` reproduces `COALESCE(w.title_id,
+        # e.title_id)` and reads this map; without it an episode watch state
+        # reaches no credits at all, which is the films-only answer
+        # `list_recurring_for_user` exists to refuse.
         self.people.household.episode_titles[one.id] = series_id
         if owned:
             await self.copy(series_id, episode_id=one.id)
@@ -302,21 +275,19 @@ class Library:
         await self.watched(title_id, played=False, position_seconds=position_seconds, at=at)
 
     async def finished(self, title_id: uuid.UUID, *, at: datetime, play_count: int = 1) -> None:
-        """**The distractor, and it varies exactly one thing.**
+        """The distractor, and it varies exactly one thing.
 
         `played = True` with the resume position *kept*, so it isolates the
-        `NOT played` half of `list_in_progress`' predicate. The plan's own
-        headline seeding sets `played` and `position_seconds = 0` together,
-        which isolates neither half -- Group E measured that and this is the
-        correction. `never_started` is the separate seed for the other half.
+        `NOT played` half of `list_in_progress`' predicate. Setting `played` and
+        `position_seconds = 0` together would isolate neither half;
+        `never_started` is the separate seed for the other one.
         """
         await self.watched(
             title_id, played=True, position_seconds=5400, play_count=play_count, at=at
         )
 
     async def never_started(self, title_id: uuid.UUID) -> None:
-        """`position_seconds = 0` with `played = False`: the *other* half of the
-        predicate, alone."""
+        """`position_seconds = 0` with `played = False`: the other half, alone."""
         await self.watched(title_id, played=False, position_seconds=0, at=days_ago(0.5))
 
     # -- people, credits and collections -----------------------------------

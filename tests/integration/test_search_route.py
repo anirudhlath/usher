@@ -1,30 +1,8 @@
-"""`GET /search` through a real request against a real schema.
-
-**What only this level can see.** `tests/unit/test_api_search.py` drives the
-router over a scripted `SearchIndex`, and `tests/integration/
-test_services_search.py` drives the real service over real Postgres -- so what
-is left for this file is the *request*: the shipped `get_search_service`
-resolving through `usher.composition.build_search_service` into a real
-`PostgresSearchIndex` on the request's session, and the answer that produces
-travelling back through the DTO.
-
-**The unit file's fake has no text analysis at all** -- substring matching over
-casefolded fields, no stemming, no `tsquery` parsing, no `ts_rank`, no weight
-classes -- so *every* claim about what a query actually matches is only true
-here. That is why the ranking case below asks a question the fake could not be
-asked: a name match must outrank an overview match, which is `setweight` plus
-`ts_rank` rather than a hand-coded constant.
-
-**This module commits for real, so it cleans up after itself.** `get_session`
-commits every request; CLAUDE.md records what leaving `titles` behind did to
-four tests in three other files, each of which passed in isolation.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`GET /search` through a real request against a real schema."""
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
@@ -38,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.api.app import create_app
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -47,6 +24,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
+from usher.services.search import SearchQueryBuffer
 
 SECRET_KEY = "0123456789abcdef0123456789abcdef"
 SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
@@ -56,12 +34,8 @@ SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
 # committing file is also using.
 MARK = "Search Route Case"
 
-# A word invented for this file and shared by both seeded titles, so a query
-# for it matches two rows and the *order* is assertable. One holds it in its
-# name and the other only in its overview: under `setweight`'s A/D split the
-# name match must win, and under any implementation that lost the weighting
-# they tie and the `id` tiebreak decides -- which is why the ids are ordered
-# deliberately below.
+# A word invented for this file and shared by both seeded titles, so a query for it
+# matches two rows and the *order* is assertable.
 TERM = "kestrelbound"
 
 # The suggest cases' title, invented for this file. Long enough that a
@@ -90,20 +64,11 @@ def settings(postgres_url: str) -> Settings:
         # assert on.
         push_enabled=False,
         worker_enabled=False,
+        # Stated rather than defaulted, so the keystroke case below reads as a
+        # deployment that records rather than as an absence.
+        # `tests/integration/test_search_analytics.py` owns the semantics.
+        search_suggest_analytics=True,
     )
-
-
-@pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Separately-committing sessions, not the suite's rolled-back one: the
-    route reads from its own session in its own transaction, so a test that
-    seeded through a single shared transaction would be handing the app rows it
-    cannot see."""
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -111,22 +76,12 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
         # `TRUNCATE sources CASCADE` takes `media_items` with it, which is what
         # leaves this file's titles with no referents.
         await session.execute(text("TRUNCATE sources CASCADE"))
-        # PRD 10's analytics rows, since M9's F2: every `GET /search` through
-        # this file writes one and commits it. **They have to go before any
-        # other file deletes the default user** -- `search_queries.user_id` is
-        # `ON DELETE RESTRICT` on purpose (a household's search history is user
-        # state), so a row left behind here turns a neighbouring file's
-        # `DELETE FROM users WHERE name = 'default'` into a foreign-key
-        # violation rather than into a slow test. Unscoped rather than marked,
-        # because this table has no column this file could mark.
+        # PRD 10's analytics rows: every `GET /search` through this file
+        # writes one and commits it.
         await session.execute(text("DELETE FROM search_queries"))
-        # PRD 03's demand lane, since issue #73: `GET /search` and
-        # `GET /search/suggest` promote the skeletons they answered with, and
-        # `get_session` commits at the end of a successful request -- so a read
-        # route in this file writes `jobs` rows. Scoped to this file's marker,
-        # like the titles below, and run **before** them: the job's `key` is
-        # the title's id as text, so once the title row is gone there is
-        # nothing left to identify this file's jobs by.
+        # PRD 03's demand lane: `GET /search` and `GET /search/suggest`
+        # promote the skeletons they answered with, and `get_session` commits at the end
+        # of a successful request -- so a read route in this file writes `jobs` rows.
         await session.execute(
             text(
                 "DELETE FROM jobs WHERE kind = 'enrich' AND key IN "
@@ -158,8 +113,9 @@ class _Catalog:
 
 @pytest_asyncio.fixture
 async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _Catalog:
-    """One title carrying `TERM` in its **name**, one carrying it only in its
-    **overview**, and one owned copy of the second.
+    """One title carrying `TERM` in its **name**.
+
+    one carrying it only in its **overview**, and one owned copy of the second.
 
     The described title is created **first**, so its UUIDv7 sorts below the
     named one's. That is the ordering premise this file needs rather than a
@@ -235,20 +191,46 @@ async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _C
     return _Catalog(named=named.id, described=described.id, typeable=typeable.id)
 
 
+@dataclass(frozen=True, slots=True)
+class _Deployment:
+    """The shipped app, and the buffer its keystroke rows are handed to.
+
+    Two fixtures over one of these rather than two apps: a case that reads the
+    table after a keystroke has to flush the *same* buffer the request
+    submitted to.
+    """
+
+    client: AsyncClient
+    keystrokes: SearchQueryBuffer
+
+
 @pytest_asyncio.fixture
-async def client(settings: Settings, catalog: _Catalog) -> AsyncIterator[AsyncClient]:
+async def deployment(settings: Settings, catalog: _Catalog) -> AsyncIterator[_Deployment]:
     app: FastAPI = create_app(settings)
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
         async with AsyncClient(transport=transport, base_url="http://test") as connected:
-            yield connected
+            yield _Deployment(client=connected, keystrokes=app.state.search_queries)
+
+
+@pytest_asyncio.fixture
+async def client(deployment: _Deployment) -> AsyncClient:
+    return deployment.client
+
+
+@pytest_asyncio.fixture
+async def keystrokes(deployment: _Deployment) -> SearchQueryBuffer:
+    """The drain, for a case that reads back a row a keystroke only submitted."""
+    return deployment.keystrokes
 
 
 async def test_the_shipped_graph_answers_a_real_full_text_search(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """The whole path with nothing overridden: `get_search_service` ->
-    `build_search_service` -> `PostgresSearchIndex` on the request's session.
+    """The whole path with nothing overridden.
+
+    `get_search_service` -> `build_search_service` -> `PostgresSearchIndex` on the
+    request's session.
 
     **The ordering premise is asserted first**, because UUIDv7 makes
     `ORDER BY id` and `ORDER BY <the real key>` agree by accident: with the
@@ -283,9 +265,9 @@ async def test_the_shipped_graph_answers_a_real_full_text_search(
 async def test_a_fused_request_is_served_as_full_text_on_an_api_only_deployment(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """`create_app`'s lifespan builds a model only when `worker_enabled`, and
-    this app has it off -- which is the shipped shape of an API-only
-    deployment, not a test contrivance.
+    """`create_app`'s lifespan builds a model only when `worker_enabled`, and this app has it off.
+
+    which is the shipped shape of an API-only deployment, not a test contrivance.
 
     The results are the full-text ones and every row of them is correct; the
     only thing that says the deployment is narrowed is the two mode fields
@@ -305,8 +287,10 @@ async def test_a_fused_request_is_served_as_full_text_on_an_api_only_deployment(
 async def test_a_semantic_request_is_refused_rather_than_quietly_narrowed(
     client: AsyncClient,
 ) -> None:
-    """`fused` narrows because a whole lane is left; `semantic` refuses,
-    because the caller asked the one question full text cannot answer.
+    """`fused` narrows because a whole lane is left.
+
+    `semantic` refuses, because the caller asked the one question full text cannot
+    answer.
 
     Driven through the real graph rather than a raised fake, so this is also
     the proof that `build_search_service` really does hand the API a
@@ -341,8 +325,9 @@ async def test_a_blank_query_is_answered_without_touching_the_index(
 async def test_the_limit_is_clamped_by_the_deployments_own_ceiling(
     postgres_url: str, catalog: _Catalog
 ) -> None:
-    """The route declares no maximum, so an absurd `?limit=` is the
-    deployment's ceiling rather than a 422 or a scan.
+    """The route declares no maximum.
+
+    so an absurd `?limit=` is the deployment's ceiling rather than a 422 or a scan.
 
     `search_result_limit = 1` here, against two matching titles: one comes
     back. A route that had re-declared a `le=` of its own would answer 422 for
@@ -377,16 +362,17 @@ async def test_the_limit_is_clamped_by_the_deployments_own_ceiling(
 async def test_the_two_tiers_are_two_indexes_in_the_composed_graph(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """**The one claim only this level can make: `build_search_service` really
-    constructs two different `SuggestIndex` implementations, and each one is
-    reachable by name from the wire.**
+    """**The one claim only this level can make.
+
+    `build_search_service` really constructs two different `SuggestIndex`
+    implementations, and each one is reachable by name from the wire.**.
 
     Every unit case in `tests/unit/test_api_suggest.py` is satisfied by a
     factory that handed one index to both slots and by fakes that are two
     objects either way -- what distinguishes them is *which statement runs
     against which index in the real schema*. `PostgresPrefixSuggestIndex`
     reads `ix_titles_name_lower_prefix`, which exists only because `m09a`
-    shipped it; `PostgresSuggestIndex` reads the GIN trigram index M6 shipped.
+    shipped it; `PostgresSuggestIndex` reads the GIN trigram index.
 
     Three arms, and all three are needed. Tier 1 on a true prefix proves the
     btree path answers at all. Tier 1 on a typo proves it is **not** the
@@ -415,8 +401,9 @@ async def test_the_two_tiers_are_two_indexes_in_the_composed_graph(
 async def test_the_minimum_prefix_length_is_in_force_on_the_shipped_route(
     client: AsyncClient, catalog: _Catalog
 ) -> None:
-    """Three characters of a real prefix of a real seeded title, through the
-    real graph: an empty box and a `min_query_length` that says why.
+    """Three characters of a real prefix of a real seeded title, through the real graph.
+
+    an empty box and a `min_query_length` that says why.
 
     The fourth character is what makes this a statement about the bound rather
     than about the catalog -- the same title, one character further in, comes
@@ -437,10 +424,11 @@ async def test_the_minimum_prefix_length_is_in_force_on_the_shipped_route(
 async def test_a_blank_suggest_is_answered_without_touching_either_index(
     client: AsyncClient,
 ) -> None:
-    """200 with no results, which is the request a search box sends on every
-    backspace to zero. On tier 1 the query it replaces is `LIKE '%'` over
-    1,271,138 rows plus a 10.9M-row union, collected, de-duplicated and sorted
-    to answer a question nobody asked."""
+    """200 with no results, which is the request a search box sends on every backspace to zero.
+
+    On tier 1 the query it replaces is `LIKE '%'` over 1,271,138 rows plus a 10.9M-row
+    union, collected, de-duplicated and sorted to answer a question nobody asked.
+    """
     for tier in ("prefix", "fuzzy"):
         response = await client.get("/search/suggest", params={"q": "   ", "tier": tier})
         assert response.status_code == 200, response.text
@@ -455,8 +443,9 @@ async def test_a_blank_suggest_is_answered_without_touching_either_index(
 async def test_one_answered_request_writes_exactly_one_search_queries_row(
     client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
 ) -> None:
-    """PRD 10's analytics row, through the shipped request and read back from a
-    session the request never touched.
+    """PRD 10's analytics row.
+
+    through the shipped request and read back from a session the request never touched.
 
     **`get_session` commits when the handler returns, so this reads a committed
     row either way** -- which is exactly why the durability claim is made one
@@ -494,9 +483,9 @@ async def test_one_answered_request_writes_exactly_one_search_queries_row(
         (TERM, "full_text", 2),
         (TERM, "full_text", 2),
     ]
-    # The outcome half is F3's, and it is written as literals rather than left
-    # to a column default -- so a dashboard reads a real `false` rather than a
-    # column nobody filled.
+    # The outcome half is written as literals rather than left to a column
+    # default -- so a dashboard reads a real `false` rather than a column
+    # nobody filled.
     assert [(one.clicked_title_id, one.played) for one in rows] == [(None, False), (None, False)]
     # Not an invented id: `DefaultUserIdDep` resolves PRD 01's singleton, which
     # is the only household this deployment has.
@@ -504,39 +493,48 @@ async def test_one_answered_request_writes_exactly_one_search_queries_row(
     assert all(one.latency_ms >= 0 for one in rows), rows
 
 
-async def test_a_keystroke_writes_no_row_on_either_tier(
-    client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
+async def test_a_keystroke_writes_a_row_only_when_it_clears_its_tiers_minimum(
+    client: AsyncClient,
+    keystrokes: SearchQueryBuffer,
+    sessions: async_sessionmaker[AsyncSession],
+    catalog: _Catalog,
 ) -> None:
-    """`GET /search/suggest` records nothing -- answered, refused, or blank --
-    and the control is a `/search` request through the same client.
+    """`GET /search/suggest` records one row per **answered** request.
 
-    Storing a `SuggestTier` under `search_queries.mode`, a `SearchMode`, would
-    be two vocabularies under one name; and tier 1 at p50 0.6 ms against full
-    text's 33.3 ms means a keystroke-driven client would out-number the
-    searches by an order of magnitude in every mode-split panel. The argument
-    is in `SearchService.suggest`'s docstring and in PRD 10, and this is what
-    says the shipped route agrees with it.
-
-    Four requests, because the route has three arms -- answered, below
-    `min_query_length`, and blank -- and a writer placed on any one of them is
-    a different defect.
+    None for the two arms that never reach the service.
     """
-    for params in (
-        {"q": TYPED_PREFIX},
-        {"q": TYPED_PREFIX[:3]},
-        {"q": "   "},
-        {"q": TYPED_TYPO, "tier": "fuzzy"},
-    ):
+    answered = ({"q": TYPED_PREFIX}, {"q": TYPED_TYPO, "tier": "fuzzy"})
+    unanswered = ({"q": TYPED_PREFIX[:3]}, {"q": "   "})
+    for params in (*answered, *unanswered):
         assert (await client.get("/search/suggest", params=params)).status_code == 200, params
 
+    # The keystroke hands its row over and does not wait for it, so a reader
+    # that did not flush would be racing the drain rather than asserting on it.
+    await keystrokes.flush()
     async with sessions() as reader:
-        assert await _analytics_rows(reader) == 0
+        assert await _analytics_rows(reader) == len(answered), (
+            "one row per answered keystroke, and none for the two arms that return "
+            "before the service"
+        )
+        written = (
+            await reader.execute(text("SELECT surface, tier FROM search_queries ORDER BY id"))
+        ).all()
+    assert [(one.surface, one.tier) for one in written] == [
+        ("suggest", "prefix"),
+        ("suggest", "fuzzy"),
+    ]
 
     assert (await client.get("/search", params={"q": TERM})).status_code == 200
     async with sessions() as reader:
-        assert await _analytics_rows(reader) == 1, (
-            "the control: this deployment does write a row on the search path"
-        )
+        assert await _analytics_rows(reader) == len(answered) + 1
+        latest = (
+            await reader.execute(
+                text("SELECT surface, tier FROM search_queries ORDER BY id DESC LIMIT 1")
+            )
+        ).one()
+    assert (latest.surface, latest.tier) == ("search", None), (
+        "the control: the search path still writes a search row with no tier"
+    )
 
 
 async def _analytics_rows(session: AsyncSession) -> int:

@@ -1,34 +1,4 @@
-"""In-memory `TasteRepository`.
-
-**The staleness predicate is the whole port, so this fake has to model it
-rather than store rows.** `get()` is not a dict lookup with a filter bolted on:
-it re-evaluates all three disjuncts of `STALE_TASTE` on every call, against a
-watermark it computes from a `WatchStateRepository` it is handed. A fake that
-merely returned whatever was last `put` would pass every case about *storage*
-and none about *invalidation*, which is the only thing this port does.
-
-**Divergences from `PostgresTasteRepository`, stated rather than discovered.**
-
-1. **The watermark comes from a supplied repository, not from a table.** The
-   real one runs `max(updated_at)` over `watch_states`; there is no such table
-   here, so the fake reads `FakeWatchStateRepository`'s own states. Two fakes
-   modelling one table, the arrangement `FakeTitleEmbeddingRepository` and
-   `FakeTitleRepository` already carry -- and passing no repository at all is
-   meaningful, modelling a household whose history is empty.
-2. **`updated_at` is the fake's `observed_at`.** `trg_watch_states_set_updated_
-   at` owns that column against Postgres and this fake stores the merge's own
-   instant there. Already the seventh divergence recorded on
-   `FakeWatchStateRepository`; it means a case that needs the *write* instant
-   to differ from the *observation* instant is an integration case.
-3. **No `halfvec` quantisation.** Vectors round-trip exactly here and to a
-   measured max cosine error of 1.21e-04 against Postgres, which is why the
-   unit file asserts to `abs=1e-9` and the integration file to `abs=1e-3`.
-
-`writes` counts `put` calls, which is what makes "a refusal is written once and
-re-claimed exactly once" assertable at all -- the outcome that distinguishes a
-written refusal from a household recomputed on every read of every home screen
-forever is a *count*, not a value.
-"""
+"""In-memory `TasteRepository`."""
 
 import uuid
 from datetime import UTC, datetime

@@ -1,21 +1,4 @@
-"""`user_taste`, and the one predicate that decides whether a centroid is
-still true.
-
-Implements `TasteRepository` (`usher.ports.repository`). The module's whole
-content is `STALE_TASTE` and the three statements around it: this is
-[ADR-0020](../../../../docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md)'s
-fingerprint scheme applied per user, spelled once here exactly as
-`STALE_EMBEDDING` is spelled once in `db/repositories/search.py`.
-
-**PRD 06 asks for an event and this module is the refusal.** Its caching table
-says the centroid is *"invalidated on watch-state change"*. The nightly walk
-merges up to **1,126,789** watch states, so one invalidation per merged row is
-the fan-out PRD 07 declines to publish for `watchstate.updated` -- a million
-messages a night for at most one useful recomputation per user. Nothing here is
-called by the merge path, and the merge path does not import this module.
-
-Same session ownership as every other repository: flushes, never commits.
-"""
+"""`user_taste`, and the one predicate that decides whether a centroid is still true."""
 
 import uuid
 from typing import Any
@@ -27,38 +10,11 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.search import EMBEDDING_DIMENSIONS
+from usher.db.repositories._errors import refusals_as_conflict
 from usher.ports.repository import LibraryGenres, StoredTaste, TasteRepository
 
 # The whole invalidation, in one place, so a second consumer cannot spell it
-# differently. Three disjuncts, and each answers a different question a caller
-# would otherwise have to ask separately:
-#
-#   1. no row at all -- never computed,
-#   2. a different embedder -- the stored vector is from another space,
-#   3. the household's history has moved since the mean was taken.
-#
-# **`IS DISTINCT FROM` on the watermark, never `<`.** Only the first of the
-# three reasons is obvious:
-#
-#   (a) a NEWER watch state raises the max and the centroid recomputes, which
-#       is the whole requirement and the only case `<` also handles;
-#   (b) a DELETED watch state LOWERS the max, and `<` would go on serving a
-#       centroid computed over a row that no longer exists -- for a household
-#       that unwatched something, forever;
-#   (c) a CLEARED history makes the subquery NULL, and `stored < NULL` is
-#       NULL, which is not true, so a `<` spelling never recomputes for a
-#       household whose history was wiped.
-#
-# `IS DISTINCT FROM` is correct in all three, and (b) and (c) are why
-# `TasteRepositoryContract` carries a case for each rather than only the
-# newer-state one -- a suite holding just (a) is green against the `<` bug.
-#
-# **`updated_at` and not `last_played_at` as the source column.**
-# `updated_at` is what the merge touches and it carries both an `onupdate` and
-# `trg_watch_states_set_updated_at`, so it is monotone and always moves. A
-# re-merge that raises `play_count` without moving `last_played_at` is exactly
-# the `completed` -> `rewatched` promotion the centroid's weights care about;
-# a `last_played_at` watermark would miss every rewatch.
+# differently.
 STALE_TASTE = """
     ut.user_id IS NULL
     OR ut.model_name IS DISTINCT FROM :model_name
@@ -67,19 +23,8 @@ STALE_TASTE = """
     )
 """
 
-# A LEFT JOIN from a one-row VALUES rather than a plain SELECT, so the
-# `ut.user_id IS NULL` disjunct above has a row to be NULL *on*. Selected
-# against the target table alone, "no row at all" returns no rows and the
-# predicate is never evaluated -- which happens to give the right answer here
-# (both mean "recompute") and would stop doing so the moment a caller wanted
-# to tell "absent" from "stale". Spelled to match the predicate's own three
-# disjuncts rather than to rely on their collapsing.
-#
-# `.columns()` is mandatory on the read: a bare `text()` carries no type
-# information, asyncpg has no codec for a pgvector type, and the extension's
-# TEXT output form comes back as a `str` -- so `tuple(row.centroid)` yields 384
-# one-character strings and raises nothing. Group F hit exactly this on
-# `genome_scores` and it is recorded in that module.
+# A LEFT JOIN from a one-row VALUES rather than a plain SELECT, so the `ut.user_id IS
+# NULL` disjunct above has a row to be NULL *on*.
 _GET = f"""
 SELECT ut.user_id, ut.centroid, ut.model_name, ut.source_watermark,
        ut.title_count, ut.computed_at
@@ -109,28 +54,6 @@ ON CONFLICT (user_id) DO UPDATE SET
 """
 
 # Task 23's baseline: how the OWNED library is composed by genre.
-#
-# **"Owned" is `owned_title_ids`' definition, deliberately.** `episode_id IS
-# NULL` bounds a series to one row -- an episode's `MediaItem` carries its
-# series' `title_id`, so without it the measured pathological series counts
-# 20,000 times and one show decides the whole baseline. And there is **no**
-# `available` filter, which is the opposite call `list_recently_added` makes:
-# a copy the nightly sweep retracted is still a copy you have, but it is not
-# something that "arrived this week". Two statements, two answers, both
-# deliberate.
-#
-# **`EXISTS` rather than a join plus `DISTINCT`.** A title owned on three
-# sources is owned once, and a join would count it three times -- inflating
-# `tagged_titles` and every genre that title carries, unequally, by however
-# many copies the household happens to hold.
-#
-# **The genre total rides on the same statement, under a NULL sentinel.**
-# `sum(counts)` is not it: a title carries two to four genres, so the shares
-# deliberately do not partition. Two separate statements could disagree -- a
-# title landing between them makes a `share_library` exceed 1 for a genre
-# nobody added, which reads as a plausible number rather than as a fault.
-# `titles.genres` is `text[] NOT NULL`, so `unnest` never yields NULL and the
-# sentinel row is unambiguous.
 _LIBRARY_GENRES = """
 WITH owned AS (
     SELECT t.id, t.genres
@@ -149,16 +72,8 @@ SELECT NULL, (SELECT count(*)::int FROM owned)
 """
 
 # The same six columns as `_GET`, with **neither the staleness predicate nor a
-# `model_name` bind** -- one primary-key probe on `user_taste`, whose whole
-# content is `pk_user_taste`. It is the read a process holding no embedder
-# makes: it cannot supply a `model_name` and it could not act on "recompute"
-# if it were told to, so `STALE_TASTE` has nothing to offer it. See
-# `TasteRepository.latest`.
-#
-# `.columns()` is mandatory here for `_GET`'s reason and not by symmetry:
-# asyncpg has no codec for a pgvector type, so without it the extension's TEXT
-# output form comes back as a `str` and `tuple(row.centroid)` yields 384
-# one-character strings, raising nothing.
+# `model_name` bind** -- one primary-key probe on `user_taste`, whose whole content is
+# `pk_user_taste`.
 _LATEST = """
 SELECT ut.user_id, ut.centroid, ut.model_name, ut.source_watermark,
        ut.title_count, ut.computed_at
@@ -235,21 +150,26 @@ class PostgresTasteRepository(TasteRepository):
         return _to_stored(row)
 
     async def put(self, taste: StoredTaste) -> None:
-        await self._session.execute(
-            text(_PUT),
-            {
-                "user_id": taste.user_id,
-                # `str(list)` is pgvector's own text input form and the cast
-                # in the statement does the rest -- the same route
-                # `genome_scores` takes for `real[] -> halfvec`, without
-                # needing a staging column here because this is one row.
-                "centroid": None if taste.centroid is None else str(list(taste.centroid)),
-                "model_name": taste.model_name,
-                "source_watermark": taste.source_watermark,
-                "title_count": taste.title_count,
-                "computed_at": taste.computed_at,
-            },
-        )
+        # Two of this table's columns are narrower than the field feeding them, so
+        # without this the refusal crosses the port boundary as a raw driver exception.
+        async with refusals_as_conflict(
+            self._session, "a stored centroid violates user_taste's own bounds"
+        ):
+            await self._session.execute(
+                text(_PUT),
+                {
+                    "user_id": taste.user_id,
+                    # `str(list)` is pgvector's own text input form and the
+                    # cast in the statement does the rest -- the same route
+                    # `genome_scores` takes for `real[] -> halfvec`, without
+                    # needing a staging column here because this is one row.
+                    "centroid": None if taste.centroid is None else str(list(taste.centroid)),
+                    "model_name": taste.model_name,
+                    "source_watermark": taste.source_watermark,
+                    "title_count": taste.title_count,
+                    "computed_at": taste.computed_at,
+                },
+            )
 
     async def watermark(self, user_id: uuid.UUID) -> AwareDatetime | None:
         with self._session.no_autoflush:

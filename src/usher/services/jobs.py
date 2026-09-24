@@ -1,84 +1,4 @@
-"""The queue's consumer (PRD 08's job-reliability rules).
-
-Six properties that are not obvious from "it calls a handler":
-
-1. **The claim is committed before the handler runs.** `JobQueue`'s own
-   docstring requires it, and what it buys is that the claim is *durable*
-   while the work is in flight: a process killed mid-job leaves a `running`
-   row that `requeue_running` can recover, rather than a claim that rolls
-   back into `pending` with no record that anything ever tried. It also
-   keeps a transaction from spanning the whole job -- at a queue the size of
-   this library that is a transaction held open for as long as the slowest
-   upstream, with every claimed row locked behind it.
-2. **`PortDataMalformed` parks immediately.** Its own docstring: "the
-   upstream answered, and the answer was wrong. Retrying does not help, so a
-   caller parks the work rather than backing off." Every other
-   `UsherPortError` backs off, and parks at the queue's attempt ceiling.
-3. **Anything that is not a `UsherPortError` propagates -- after being
-   written down.** A bug in a handler is not an upstream failure; recording
-   it as one turns a crash into five retries and a park whose message points
-   at the wrong thing, with the worker still running and nothing ever loud.
-   It still propagates; what `_run` does on the way past is log the job's
-   kind and key **with the traceback**, because a stack that only exists on
-   the dying process's stderr is a stack nobody has once the process is gone
-   (issue #8).
-4. **A failing job costs its own job, not the batch.** Each job is completed
-   and committed as it finishes, so a crash halfway through a batch cannot
-   un-complete the half that worked -- and a bug that escapes one job's task
-   does not cancel its siblings, which is why this module uses
-   `asyncio.wait` rather than a `TaskGroup`.
-5. **Jobs run concurrently, in a bounded pool, each on its own scope.** See
-   below; this is what M9's W1 changed and why.
-6. **A live claim is heartbeated and an abandoned one is leased.** Recovery
-   is `recover()` on an age threshold, called repeatedly, rather than
-   `startup()` on `older_than_seconds=0.0`, called once.
-
-## The scope, and why a session could not simply be passed in
-
-`run_once` used to claim a batch of `batch_size` and **await them one at a
-time**. In-flight upstream requests per process: exactly one. M9's S3
-measured that over 130,334 live TMDb requests: three worker processes reached
-19.76 rps against a token bucket configured at 10 rps **per process** that was
-never the binding constraint on any of them, and per-worker throughput *rose*
-from 6.59 to 7.72 rps when one of the three died. The ceiling was the loop.
-
-The `gather` is the easy part of removing it. The hard part is that
-`AsyncSession` is **not concurrency-safe** and every handler's repositories are
-bound to one, so concurrent jobs need a session, a commit, a set of handlers
-and an event buffer *each*. Hence `JobScope`: the worker is constructed with a
-**factory** rather than with a bound queue and commit, and it opens one scope
-per claim and one per job. `services/` may depend only on `domain/` and
-`ports/` (ADR-0009), so the factory is a plain callable returning an async
-context manager and the composition root is what knows it opens a session --
-the same reason `commit` was injected before rather than a session being
-passed in.
-
-The event buffer moved into the scope for the same reason and it is not
-symmetry: `DeferredEventPublisher` is emptied by `flush()` on success and by
-`discard()` on failure, so one buffer shared by two in-flight jobs means a
-failing job discards a *surviving* job's frames -- an enriched title no client
-is ever told about. `tests/unit/test_services_jobs.py::
-test_one_jobs_events_are_not_discarded_by_another_jobs_failure` is that case,
-and it is deliberately red only against the intermediate implementation
-(concurrency over one shared buffer) because with one job in flight the state
-is unreachable.
-
-## The pool is fed, not batched
-
-A `gather` over a fixed batch of 20 waits for the slowest of 20 before
-claiming the next 20, which is a straggler stall a continuously-fed pool does
-not have -- and it leaves 20 claims outstanding when only `max_in_flight` of
-them can run, which is 20 rows a crash orphans instead of `max_in_flight`. So
-a pass claims **what the pool has room for**, and tops up when in-flight falls
-to the low-water mark. `batch_size` is what bounds one *pass* (so the lane can
-refresh its gauges and the CLI can say `--once`), no longer what one claim
-asks for.
-
-The worker's span is a **root with a link** to whatever enqueued the job,
-never a child. The enqueueing request has usually already returned, and a
-child span of a finished parent misstates causality and grows a branch on a
-closed trace minutes after it ended.
-"""
+"""The queue's consumer (PRD 08's job-reliability rules)."""
 
 import asyncio
 import time
@@ -94,7 +14,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.trace import Link
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from usher.domain.jobs import Job, JobKind
+from usher.domain.jobs import BOOTSTRAP_CONCURRENCY, Job, JobKind
 from usher.ports.errors import PortDataMalformed, PortRateLimited, UsherPortError
 from usher.ports.jobs import JobQueue
 from usher.services.events import DeferredEventPublisher
@@ -102,15 +22,7 @@ from usher.services.events import DeferredEventPublisher
 Handler = Callable[[Job], Awaitable[None]]
 
 #: How long a claim may sit in `running` without being heartbeated before any
-#: worker may take it back. **This is what makes orphan recovery work at more
-#: than one worker at all.** `JobWorker.startup()` used to call
-#: `requeue_running()` with the port's `older_than_seconds=0.0` default, which
-#: requeues *everything* currently running -- correct at exactly one worker and,
-#: at two, a restart that steals the other's live claims. M9's S3 hit the
-#: consequence: one of three workers died holding 20 claims and there was **no
-#: way to recover them without corrupting the other two**, so the 20 were
-#: written off. A lease plus a heartbeat is what turns that dead end into a
-#: wait, and the wait is bounded by this number.
+#: worker may take it back.
 DEFAULT_LEASE_SECONDS: Final = 300.0
 
 #: How much of the lease may pass between heartbeats. A third, so two
@@ -120,53 +32,6 @@ HEARTBEAT_FRACTION: Final = 3.0
 
 #: Per-kind ceilings on jobs in flight, `None` meaning "whatever the deployment
 #: configured globally" (`Settings.job_concurrency`).
-#:
-#: **One global number would be wrong**, and each entry below names the
-#: measurement it comes from rather than a preference. Total over `JobKind` on
-#: purpose: a new member with no entry fails
-#: `tests/unit/test_config.py::test_the_worker_concurrency_settings_have_the_measured_defaults`
-#: rather than silently inheriting a number chosen for something else -- filed
-#: there because that case also pins the global this table resolves against,
-#: and the two lists are only meaningful beside each other.
-#:
-#: - **`ENRICH`, and the global default with it.** Network-bound against TMDb.
-#:   Little's law over what S3 *measured*: p95 HTTP 0.4267 s plus ~0.033 s of
-#:   Postgres bookkeeping per job (S2's one-worker 10.38 rps against its own
-#:   0.0637 s mean HTTP) is a p95 job of ~0.46 s, so holding ADR-0005's ~25 rps
-#:   takes ~11.5 jobs in flight. `Settings.job_concurrency` defaults to 12.
-#: - **`MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`.** A *household* media
-#:   server, not a CDN-backed public API, and **this repository has never
-#:   measured one under concurrent load** -- so the number is deliberately a
-#:   small constant rather than the global, and it says so. `handlers.py` prices
-#:   the upstream at 1-5 s per request; four in flight is up to four concurrent
-#:   requests against a machine somebody is also watching television on.
-#: - **`INDEX` = 1.** CPU-bound through `fastembed`, and measured:
-#:   `.claude/rules/search-and-embeddings.md` records ~8,000-10,700 tokens/s
-#:   held **flat across the whole size range**, with the best batch at 16 and
-#:   flat to 64. A tokens/s ceiling set by the CPU is not raised by asking for
-#:   it from more coroutines; the parallelism unit is already the batch, and
-#:   `Settings.embedding_batch_size` is the knob that moves it.
-#: - **`CURATE` = 1.** PRD 06 budgets *one modest completion per household per
-#:   day*, and M8 measured the reference endpoint with no headroom left: pool
-#:   600 renders ~12,540 prompt tokens, which with `llm_max_output_tokens=2048`
-#:   leaves **56 tokens** under `max_model_len`. Two concurrent generations
-#:   double KV-cache demand on a server measured at its context ceiling.
-#: - **`SYNC` = 1.** One walk of the one measured library is 1,126,674 items;
-#:   two at once double the request rate against that household server, and
-#:   ADR-0015's retraction ceiling is computed per run, so two overlapping runs
-#:   each see half the retractions and neither trips it.
-#: - **`BOOTSTRAP` = 1.** `BulkCatalogRepository.bulk_load_window` **commits
-#:   the caller's session** -- the one documented exception on that port -- and
-#:   asks for a session carrying no unrelated pending work. Two phases at once
-#:   also write the same destination tables from two staging copies.
-#: - **`DERIVE` = 4.** ⚠️ **The one number here that is not measured**, and the
-#:   honest statement is that it is derived from a *budget* rather than from a
-#:   throughput: derivation is pure Postgres (a JSONB read and three writes, no
-#:   network, no model), so its ceiling is what the connection pool can serve
-#:   without starving the API in the in-process lane -- four of
-#:   `Settings.db_pool_size`'s twenty. The measurement that would replace it is
-#:   derive jobs/s against 1, 2, 4 and 8 in flight on one pool; nothing in this
-#:   repository has run it.
 KIND_CONCURRENCY: Final[Mapping[JobKind, int | None]] = MappingProxyType(
     {
         JobKind.ENRICH: None,
@@ -177,7 +42,7 @@ KIND_CONCURRENCY: Final[Mapping[JobKind, int | None]] = MappingProxyType(
         JobKind.INDEX: 1,
         JobKind.CURATE: 1,
         JobKind.SYNC: 1,
-        JobKind.BOOTSTRAP: 1,
+        JobKind.BOOTSTRAP: BOOTSTRAP_CONCURRENCY,
     }
 )
 
@@ -226,12 +91,9 @@ class JobWorker:
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ) -> None:
         self._scopes = scopes
-        # **The registration list and the concurrency table are one object.**
-        # `run_once` claims `list(self._concurrency)`, so a kind this worker
-        # cannot run cannot be claimed, and a kind it can run cannot be missing
-        # a ceiling. `composition.worker_kinds` builds it, and
-        # `test_composition.py` asserts it agrees with the handler map in every
-        # one of the eight provider/embedder/client configurations.
+        # The registration list and the concurrency table are one object:
+        # `run_once` claims `list(self._concurrency)`, so a kind this worker cannot
+        # run cannot be claimed, and a kind it can run cannot be missing a ceiling.
         self._concurrency = dict(concurrency)
         self._max_in_flight = max(1, max_in_flight)
         # Refill when the pool is half empty rather than when it is empty: a
@@ -250,35 +112,30 @@ class JobWorker:
     def registered_kinds(self) -> frozenset[JobKind]:
         """Exactly what `run_once` will claim.
 
-        A read-only view rather than a test reaching into `_concurrency`, and
-        the property that assertion needs is the one `run_once` relies on:
-        **four of the nine kinds are registered conditionally** by
+        A read-only view rather than a test reaching into `_concurrency`. Four
+        of the nine kinds are registered conditionally by
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
         `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
-        deployment cannot run that kind" is wiring a test has to be able to
-        see, and `MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK`, `SYNC` and
-        `BOOTSTRAP` are the five in every build. `SYNC` joined them in M9's
-        E3 and `BOOTSTRAP` in E5: there is no optional process resource
-        behind a triggered sync or a bulk import, only the adapter factory
-        and the outbound client every root already builds, so both are
-        registered exactly as unconditionally as the other three.
+        deployment cannot run that kind" is wiring a test has to be able to see.
+        The other five are in every build: there is no optional process resource
+        behind a triggered sync or a bulk import, only the adapter factory and
+        the outbound client every root already builds.
         """
         return frozenset(self._concurrency)
 
     async def recover(self) -> int:
-        """Return **abandoned** claims to `pending`. Returns how many.
+        """Return abandoned claims to `pending`.
 
-        PRD 08's *"startup requeues anything left `in_progress`"*, corrected in
-        two ways that are the same correction:
+        Returns how many. PRD 08: *"Abandoned claims are recovered on a lease"*,
+        which takes two things:
 
-        - **It is an age threshold, not everything.** `requeue_running()`'s
+        - An age threshold, not everything. `requeue_running()`'s
           `older_than_seconds=0.0` default requeues every `running` row, which
-          at two workers means a restart steals the other's live claims. With
-          concurrency inside one process it would steal *its own*.
-        - **It is called repeatedly, not once at startup.** Recovery that only
-          runs when a process starts cannot recover a process that died and did
-          not come back -- which is precisely S3's twenty orphans, unrecoverable
-          because the only lever also corrupted the two surviving workers.
+          at two workers means a restart steals the other's live claims, and
+          under concurrency inside one process it would steal its own.
+        - Called repeatedly, not once at startup. Recovery that only runs when a
+          process starts cannot recover a process that died and did not come
+          back.
 
         Safe against a *live* claim because `_heartbeat` moves
         `jobs.updated_at` for everything in flight, so a claim older than the
@@ -297,8 +154,9 @@ class JobWorker:
         return requeued
 
     async def run_once(self) -> int:
-        """Claim and run up to `batch_size` jobs, concurrently. Returns how
-        many ran.
+        """Claim and run up to `batch_size` jobs, concurrently.
+
+        Returns how many ran.
 
         Claims only the kinds this worker has a handler for. Claiming
         everything and discovering the gap afterwards would either crash on
@@ -306,7 +164,7 @@ class JobWorker:
         the wrong process -- and a job parked that way needs a human to
         release it.
 
-        **`asyncio.wait`, never a `TaskGroup` and never `gather`.** A bug in
+        `asyncio.wait`, never a `TaskGroup` and never `gather`. A bug in
         one handler must cost its own job: a task group cancels its siblings on
         the first escape, which would turn one poisoned job into `N` claims
         abandoned mid-write, and `gather(return_exceptions=False)` returns while
@@ -341,17 +199,10 @@ class JobWorker:
                     for job in claimed
                 }
                 if len(claimed) < room:
-                    # **A short claim means the queue is drained, so stop
-                    # asking and let the pool finish.** Without this the pass
-                    # issues a second, empty claim immediately -- and it really
-                    # is immediate, because `create_task` only *schedules*, so
-                    # not one of the jobs just claimed has started yet. That is
-                    # a wasted round trip and a wasted commit on every pass of
-                    # a nearly-empty queue, which is the shape a household
-                    # deployment is in almost always. Anything enqueued while
-                    # these run (an `enrich` staging its `index` and `derive`)
-                    # is claimed by the next pass, which follows with no sleep
-                    # because this one ran something.
+                    # A short claim means the queue is drained, so stop asking and
+                    # let the pool finish. Without this the pass issues a second,
+                    # empty claim immediately -- `create_task` only *schedules*, so
+                    # not one of the jobs just claimed has started yet.
                     break
         except BaseException:
             # Including `CancelledError`, which is how a lane is stopped. A
@@ -373,9 +224,9 @@ class JobWorker:
     async def _claim(self, limit: int) -> list[Job]:
         """One claim, on its own scope, committed before it is returned.
 
-        The commit that makes the claim durable while the work runs -- see the
-        module docstring. It has to happen before the first handler, and the
-        scope closes here rather than being held for the batch: a session kept
+        The commit that makes the claim durable while the work runs. It has to
+        happen before the first handler, and the scope closes here rather than
+        being held for the batch: a session kept
         open across the slowest upstream is the transaction this design exists
         to avoid, and under concurrency it would also be a session two jobs
         could reach.
@@ -393,20 +244,18 @@ class JobWorker:
     async def _run_in_scope(self, job: Job) -> None:
         """One job, gated by its kind's ceiling, on a session of its own.
 
-        The gate is taken **before** the scope is opened, so a kind waiting at
-        its ceiling is not also holding a connection out of the pool. That
-        matters most for the kinds whose ceiling is 1 -- an `INDEX` backlog
-        would otherwise pin `max_in_flight` connections doing nothing.
+        The gate is taken *before* the scope is opened, so a kind waiting at its
+        ceiling is not also holding a connection out of the pool. That matters
+        most for the kinds whose ceiling is 1 -- an `INDEX` backlog would
+        otherwise pin `max_in_flight` connections doing nothing.
 
-        ⚠️ **`_in_flight` is joined *before* the gate, not after it, and the
-        two spellings differ by a lost job.** The claim was committed the
+        `_in_flight` is joined before the gate, not after it, and the two
+        spellings differ by a duplicate execution. The claim was committed the
         moment it was claimed, so from the queue's point of view this row is
-        `running` while it waits its turn -- and a wait can be long: twenty
-        `index` jobs at a ceiling of one, thirty seconds each, is ten minutes
-        for the last of them, well past the 300 s lease. Heartbeated only from
-        the gate inwards, that job ages out and **another worker takes a claim
-        this one still intends to run**, which is a duplicate execution rather
-        than a lost one. "In flight" means claimed and not yet settled.
+        `running` while it waits its turn -- and a wait at a ceiling of one can
+        outlast the lease. Heartbeated only from the gate inwards, that job ages
+        out and another worker takes a claim this one still intends to run. "In
+        flight" means claimed and not yet settled.
         """
         self._in_flight.add(job.id)
         try:
@@ -419,10 +268,9 @@ class JobWorker:
         """Keep every in-flight claim out of `recover()`'s reach.
 
         Without this the lease has to exceed the longest job -- and the longest
-        job here is a `bootstrap` phase measured in hours, which would make the
-        orphan window hours too. With it the lease is a property of the
-        *process being alive* rather than of what it happens to be running, so
-        S3's twenty orphans would have come back in five minutes.
+        job here is a `bootstrap` phase that runs for hours, which would make
+        the orphan window hours too. With it the lease is a property of the
+        *process being alive* rather than of what it happens to be running.
 
         A failed beat is logged and not fatal: the worst case is that a claim
         ages past its lease and is re-run, and redelivery is safe by
@@ -458,37 +306,9 @@ class JobWorker:
                 except UsherPortError as exc:
                     await self._fail(job, exc, scope, retryable=True)
                 except Exception:
-                    # **Records and re-raises; it does not handle.** Property 3
-                    # above is untouched -- a bug is still not an upstream
-                    # failure, still does not reach `fail()`, and still leaves
-                    # this pass by the `raise` below. What this arm adds is the
-                    # two facts a stack cannot supply once the process is gone.
-                    #
-                    # Issue #8, and it is the gap that made that issue
-                    # unanswerable for a week. M9's S3 lost a `usher work`
-                    # daemon to an unhandled `MissingGreenlet` 78 minutes and
-                    # ~92,000 jobs in; its log's last two records name a job
-                    # that failed *cleanly* on the `ix_titles_imdb_id` conflict
-                    # path, and the job that actually died appears nowhere. The
-                    # stack was thrown away one layer up (`cli.OPERATOR_ERRORS`
-                    # named `SQLAlchemyError`, which is `MissingGreenlet`'s
-                    # base; narrowed to `DBAPIError` in the same commit as
-                    # this). Both halves are needed: the CLI's fix puts the
-                    # stack on stderr, and this puts it in the *log*, beside
-                    # the job it belongs to, in the same JSON stream an
-                    # operator is already collecting.
-                    #
-                    # `except Exception` and not `BaseException`:
-                    # `CancelledError` is how `_pass` stops a lane and is not a
-                    # crash to report.
-                    #
-                    # `logger.opt(exception=True)` rather than this module's
-                    # `str(exc)` house rule, and the difference is safe for one
-                    # measured reason: `telemetry.configure_logging` sets
-                    # `diagnose=False`, which is what stops loguru rendering
-                    # frame *locals* -- PRD 08's credentials-are-never-logged
-                    # rule survives, because a traceback without locals carries
-                    # frames and no values.
+                    # Records and re-raises; it does not handle. A bug is still not
+                    # an upstream failure, still does not reach `fail()`, and still
+                    # leaves this pass by the `raise` below.
                     span.set_attribute("usher.job.crashed", True)
                     logger.opt(exception=True).error(
                         "{kind} job {key} crashed; the claim stays running until the lease "
@@ -503,21 +323,15 @@ class JobWorker:
                     # must not re-run the nineteen. Redelivery is safe by
                     # construction (PRD 08), but doing it for free is not.
                     await scope.commit()
-                    # ADR-0033, and it is the last thing that happens: every
-                    # write this unit of work made -- the handler's own, the
-                    # `BACKFILL` requests it staged, and the `DELETE` that
-                    # completed the job -- is committed above, so a client
-                    # told now can refetch anything the frame names. Before
-                    # `complete()` it could not: the two enqueues and the
-                    # completion were still open on this session.
+                    # The last thing that happens: every write this unit of work made
+                    # -- the handler's own, the `BACKFILL` requests it staged, and the
+                    # `DELETE` that completed the job -- is committed above, so a
+                    # client told now can refetch anything the frame names.
                     await scope.events.flush()
             finally:
-                # The clear at the end of this job, and it is here rather than
-                # on the two `except` arms because a bug that is not a
-                # `UsherPortError` propagates past both by design. **This
-                # buffer is the scope's**, so it holds this job's frames and
-                # nothing else -- shared, the line below would empty a
-                # concurrent job's.
+                # The clear at the end of this job, and it is here rather than on the
+                # two `except` arms because a bug that is not a `UsherPortError`
+                # propagates past both by design.
                 scope.events.discard()
         _job_duration.record(time.perf_counter() - started, {"kind": job.kind.value})
 
@@ -525,14 +339,8 @@ class JobWorker:
         self, job: Job, exc: UsherPortError, scope: JobScope, *, retryable: bool
     ) -> None:
         # `str(exc)`, never the exception object and never a payload: PRD 08's
-        # credentials-are-never-logged rule applies to a column an operator
-        # reads and to this log line alike.
-        #
-        # `isinstance`, not `getattr(exc, "retry_after", None)`: the latter is
-        # how a future exception member accidentally opts into a behaviour
-        # nobody chose. `PortRateLimited` is the one member of the taxonomy
-        # that carries the attribute; naming it is what keeps that true
-        # tomorrow rather than only today.
+        # credentials-are-never-logged rule applies to a column an operator reads and to
+        # this log line alike.
         retry_after_seconds = exc.retry_after if isinstance(exc, PortRateLimited) else None
         outcome = await scope.queue.fail(
             job.id, error=str(exc), retryable=retryable, retry_after_seconds=retry_after_seconds
@@ -549,6 +357,99 @@ class JobWorker:
             disposition="unknown" if outcome is None else outcome.status.value,
             error=str(exc),
         )
+
+
+class WorkerLoop:
+    """The poll loop around a `JobWorker`, shared by both composition roots.
+
+    `usher work` and the server's worker lane are the same deployment one
+    setting apart, so the three things that decide what a pass *means* -- when
+    recovery is allowed to run, what a crashed pass costs, and how long a pass
+    that claimed nothing waits -- belong in one place rather than in two that
+    have to be compared. What differs between the roots is passed in: the
+    worker, the per-pass refresh, where a recovery count goes, and the line a
+    crash is recorded on.
+
+    `worker` is a callable and is resolved on the first pass, because the lane
+    needs its first database call to happen inside the loop rather than at
+    process start.
+    """
+
+    def __init__(
+        self,
+        worker: Callable[[], Awaitable[JobWorker]],
+        *,
+        lease_seconds: float,
+        idle_seconds: float,
+        refresh: Callable[[], Awaitable[None]],
+        recovered: Callable[[int], None],
+        failure: str,
+    ) -> None:
+        self._worker = worker
+        self._built: JobWorker | None = None
+        self._lease_seconds = lease_seconds
+        self._idle_seconds = idle_seconds
+        self._refresh = refresh
+        self._recovered = recovered
+        self._failure = failure
+        # `-inf`, never `0.0`: `time.monotonic()` is seconds since boot on Linux,
+        # so a `0.0` origin suppresses recovery for the first half lease of host
+        # uptime -- exactly when a stack coming up with the machine is holding the
+        # previous boot's orphans.
+        self._throttled_at = float("-inf")
+
+    async def pass_once(self) -> int:
+        """One pass, unguarded.
+
+        Returns how many jobs ran.
+
+        Recovery is throttled to half the lease because it is an `UPDATE`
+        scanning `status = 'running'` and between leases there is nothing to
+        find. It runs *before* the claim, so a dead process's abandoned claims
+        are this pass's work rather than nobody's.
+        """
+        if self._built is None:
+            self._built = await self._worker()
+        now = time.monotonic()
+        if now - self._throttled_at >= self._lease_seconds / 2:
+            self._recovered(await self._built.recover())
+            self._throttled_at = now
+        ran = await self._built.run_once()
+        await self._refresh()
+        return ran
+
+    async def guarded_pass(self) -> int:
+        """`pass_once`, with a crashed pass costing the pass rather than the process.
+
+        Returns `0` on a crash, which is what makes the caller sleep instead of
+        hot-looping a failing pass.
+
+        `logger.exception`, never `logger.warning`: an arm that swallowed a bug
+        and logged a *message* would turn a dead worker -- at least visible --
+        into a healthy-looking one silently retrying a deterministic fault.
+        `configure_logging` sets `diagnose=False`, so the frames carry no locals.
+
+        `Exception`, never `BaseException`: `CancelledError` is how a SIGINT
+        reaches this loop, and catching it would build a worker that cannot be
+        stopped out of the arm that stops it dying.
+        """
+        try:
+            return await self.pass_once()
+        except Exception as exc:
+            logger.exception(self._failure, error=str(exc))
+            return 0
+
+    async def run(self, *, after: Callable[[int], None] | None = None) -> None:
+        """Guarded passes until cancelled, sleeping after one that claimed nothing.
+
+        `after` is the root's chance to report a pass it has just seen.
+        """
+        while True:
+            ran = await self.guarded_pass()
+            if after is not None:
+                after(ran)
+            if ran == 0:
+                await asyncio.sleep(self._idle_seconds)
 
 
 def _links_for(job: Job) -> list[Link]:
@@ -573,7 +474,7 @@ def _first_failure(done: "set[asyncio.Task[None]]") -> BaseException | None:
     `task.exception()` rather than `task.result()`: reading the exception is
     what marks it retrieved, so a job that failed and whose sibling failed too
     does not also produce CPython's "exception was never retrieved" line at GC
-    time -- the shape `api/lanes._guard` exists for, arriving through a task.
+    time.
     """
     for task in done:
         if task.cancelled():

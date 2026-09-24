@@ -1,27 +1,25 @@
-"""The resumable, checkpointed bulk-import loop (PRD 04, Phases 0-2).
+"""The resumable, checkpointed bulk-import loop (PRD 04, Phases 0-2)."""
 
-One loop, shared by every dataset. Its whole job is the invariant that makes
-"resumable" true: **a batch's rows and the cursor that describes them are
-committed in the same transaction.** Commit the rows first and a crash claims
-work it never did; commit the cursor first and a crash silently loses rows.
-
-Instrumentation lives here rather than being deferred to M10, per the spec's
-"instrumentation is cross-cutting, not a milestone": one span per run, one per
-batch, plus the four metrics PRD 10's catalogue gained for this milestone.
-"""
-
+import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Final
 
 from loguru import logger
 from opentelemetry import metrics, trace
 
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
-from usher.ports.bulk import BulkCursor, BulkDataset
-from usher.ports.errors import PortDataMalformed, RepositoryConflict, UsherPortError
+from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset
+from usher.ports.errors import (
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+    RepositoryConflict,
+    UsherPortError,
+)
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.repository import (
     BulkCatalogRepository,
@@ -33,9 +31,9 @@ from usher.ports.repository import (
 _tracer = trace.get_tracer("usher.bootstrap")
 _meter = metrics.get_meter("usher.bootstrap")
 
-# PRD 10's metric catalogue, M2's four. Created at import time against
-# whatever MeterProvider `configure_metrics` installed -- which is a real SDK
-# provider unconditionally, exported only when an OTLP endpoint is set.
+# PRD 10's metric catalogue. Created at import time against whatever
+# MeterProvider `configure_metrics` installed -- a real SDK provider
+# unconditionally, exported only when an OTLP endpoint is set.
 _rows_counter = _meter.create_counter(
     "usher.bootstrap.rows", unit="1", description="Rows written by a bulk importer"
 )
@@ -50,21 +48,100 @@ _failures = _meter.create_counter(
 )
 
 
+#: The members of the taxonomy that say "ask again later": the upstream could not be
+#: reached or answered in time, or asked to be backed off. Everything else a dataset
+#: raises -- above all `PortDataMalformed` -- is the same answer on every attempt.
+TRANSIENT: tuple[type[UsherPortError], ...] = (PortUnavailable, PortRateLimited)
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """How long `import_dataset` keeps resuming a dataset whose upstream failed transiently.
+
+    **Bounded per unit of work, not per phase.** A *streak* is the run of failures at
+    one checkpoint; a committed batch ends it, so a long walk with scattered failures
+    completes while one unit that never answers gives up. A streak ends after
+    `attempts` attempts (the first included) or once the next wait would carry it
+    past `budget` seconds from its first failure, whichever comes first.
+
+    The waits double from `first_delay` up to `max_delay`, and a `Retry-After` hint is
+    a floor under them, never a ceiling. No jitter: one process retrying one upstream
+    has nobody to fall into step with.
+
+    The shipped numbers are WDQS's: its query limit is 60 s and its timeouts arrive
+    after ~65 s, so five attempts with waits of 15, 30, 60 and 120 s spend at most
+    ~10 minutes on one page before the phase fails -- resumably, where it stopped.
+    """
+
+    attempts: int = 5
+    first_delay: float = 15.0
+    max_delay: float = 120.0
+    budget: float = 900.0
+
+    def delay(self, retry: int, exc: UsherPortError) -> float:
+        """Seconds to wait before retry number `retry` (1-based)."""
+        backoff = min(self.first_delay * 2.0 ** (retry - 1), self.max_delay)
+        hint = exc.retry_after if isinstance(exc, PortRateLimited) else None
+        return backoff if hint is None else max(backoff, hint)
+
+
+#: Read when a service is built rather than bound as a default, so a case can replace
+#: it for everything a composition root constructs.
+DEFAULT_RETRY = RetryPolicy()
+
+#: How often a started import moves its checkpoint's `heartbeat_at` while it waits on
+#: anything but its own writes: a download, an index build, a fetch, a retry's wait.
+HEARTBEAT_SECONDS: Final = 30.0
+
+
+class _GaveUp(Exception):
+    """A transient failure that outlasted its `RetryPolicy`, with the count that proves it.
+
+    Private and not an `UsherPortError`: it never leaves `import_dataset`, which records
+    it exactly as it records the port error it wraps -- with how hard it tried appended,
+    because "failed" and "failed five times over four minutes" ask different things of
+    an operator.
+    """
+
+    def __init__(self, cause: UsherPortError, attempts: int, elapsed: float, reason: str) -> None:
+        tried = f"{attempts} attempt{'' if attempts == 1 else 's'} over {elapsed:.0f}s"
+        super().__init__(f"{cause} (gave up after {tried}{reason})")
+        self.cause = cause
+
+
+class _FetchFailed(Exception):
+    """A transient port error raised by the *dataset*, as opposed to by the writer.
+
+    Only the fetch is retried: a writer that raised may have left half a batch in the
+    transaction, and resuming over it is a decision about the writer's atomicity this
+    loop cannot make. `at` is the run as this attempt last committed it, which is where
+    the retry resumes: `_drain` sets it on the way out.
+    """
+
+    def __init__(self, cause: UsherPortError) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.at: ImportRun | None = None
+
+
+def _warn(line: str) -> None:
+    """Where a retry notice goes when nobody handed the service a sink."""
+    logger.warning("{line}", line=line)
+
+
 class VocabularyState(StrEnum):
-    """Whether the stored tag vocabulary can name the lanes of the stored
-    vectors — the **decision**, with the sentence left to whoever renders it.
+    """Whether the stored tag vocabulary can name the lanes of the stored vectors.
 
     Five members and not four: "there is nothing to name" and "there is
     something to name and no names" are different operator actions, and
     collapsing them is how a fresh database ends up being told to re-run a
-    phase it has no use for. `MIXED_RELEASES` is the one that is *not* a
-    verdict about the vocabulary at all — with `genome_scores` holding two
-    releases there is no single revision to ask for, and asking for either
-    would report the vocabulary as wrong when what is wrong is the vectors.
+    phase it has no use for. `MIXED_RELEASES` is not a verdict about the
+    vocabulary at all -- with `genome_scores` holding two releases there is no
+    single revision to ask for, and asking for either would report the
+    vocabulary as wrong when what is wrong is the vectors.
 
-    A member rather than a string because both surfaces branch on it:
-    `usher bootstrap-status` renders a sentence and
-    `GET /admin/bootstrap/status` puts the member on the wire, so a client
+    A member rather than a string because both surfaces branch on it: the CLI
+    renders a sentence and the route puts the member on the wire, so a client
     can distinguish the five without parsing English.
     """
 
@@ -72,8 +149,7 @@ class VocabularyState(StrEnum):
     NO_VECTORS = "no_vectors"
     #: `genome_scores` holds more than one release; not judged.
     MIXED_RELEASES = "mixed_releases"
-    #: Vectors exist and `genome_tags` is empty — every catalog bootstrapped
-    #: before `m08b` is in this state, and the fix is `--phase movielens`.
+    #: Vectors exist and `genome_tags` is empty; the fix is `--phase movielens`.
     NOT_LOADED = "not_loaded"
     #: A vocabulary is stored and it was loaded from another release.
     MISMATCHED = "mismatched"
@@ -85,12 +161,9 @@ class VocabularyState(StrEnum):
 class VocabularyVerdict:
     """`VocabularyState` plus whatever that state has to carry.
 
-    Two optional fields rather than five subclasses, because exactly two
-    states carry anything: `NAMED` carries a count and `MISMATCHED` carries
-    the port's own message, which names **both** release tokens. That message
-    is the port's diagnosis rather than a surface's prose — the same string
-    `ImportRun.error` stores — so passing it through is not the "route
-    serialising English" this report exists to avoid.
+    Two optional fields rather than five subclasses: exactly two states carry
+    anything. `MISMATCHED` carries the port's own message, which names both
+    release tokens -- the port's diagnosis, not a surface's prose.
     """
 
     state: VocabularyState
@@ -102,23 +175,16 @@ class VocabularyVerdict:
 class BootstrapReport:
     """Everything `bootstrap-status` describes, assembled once.
 
-    ⚠️ **Two aggregate reads on every call, and they are priced for an
-    operator screen rather than a client one.** Measured 2026-08-12 against a
-    real 1,272,367-title catalog with a 15,565-vector genome (`\\timing`,
-    median of five, on a *busy* box, so these are upper bounds):
-    `count_titles()` is a seq-scan `count(*)` at **80.6 ms**;
-    `genome_coverage()` is **248.6 ms** for its five-way aggregate plus
-    **2.0 ms** for the revisions read, because three of its five terms are
-    themselves full scans of `titles`. So one report is roughly **a third of
-    a second**, and it grows with the catalog rather than with what is on the
-    screen. Fine behind an admin page somebody opens on purpose; **do not
-    reuse this shape on a client path.**
+    Two aggregate reads on every call, priced for an operator screen rather
+    than a client one: `count_titles()` is a seq-scan `count(*)`, and three of
+    `genome_coverage()`'s five terms are themselves full scans of `titles`. So
+    a report costs hundreds of milliseconds and grows with the catalog rather
+    than with what is on the screen. Fine behind an admin page somebody opens
+    on purpose; do not reuse this shape on a client path.
 
-    Deliberately **not cached.** A cache would be an unmeasured mechanism on
-    the one page an operator opens precisely because they do not trust what
-    they last saw, and it would have to be invalidated by a writer in another
-    process. The number is stated instead, which is what makes the cost a
-    decision rather than a surprise.
+    Deliberately not cached: it would have to be invalidated by a writer in
+    another process, on the one page an operator opens precisely because they
+    do not trust what they last saw.
     """
 
     runs: tuple[ImportRun, ...]
@@ -132,21 +198,19 @@ async def vocabulary_verdict(
 ) -> VocabularyVerdict:
     """`GenomeRepository.vocabulary`'s operator surface, as a decision.
 
-    **The one function both surfaces call.** It lives here rather than in
+    The one function both surfaces call. It lives here rather than in
     `usher.cli` because a route that re-derived it would be a second answer to
     *"what does 'not loaded' mean?"*, and the branch the two would disagree on
     is the one nobody ever looks at.
 
-    The refusal is *caught and turned into a state*, not raised:
-    `PortDataMalformed` is deliberately not in `cli.OPERATOR_ERRORS` — the
-    three `UsherPortError` subclasses ADR-0026's amendment added are the
-    transport ones and this is a content one — so letting it out would answer
-    "what state is my genome in?" with a stack trace about the answer being
-    bad, at a terminal and with a 500 on the wire.
+    The refusal is caught and turned into a state, not raised:
+    `PortDataMalformed` is deliberately not in `cli.OPERATOR_ERRORS`, being a
+    content error rather than a transport one, so letting it out would answer
+    "what state is my genome in?" with a stack trace at a terminal and a 500
+    on the wire.
 
     Takes the port rather than a session, which is the seam that keeps the
-    five branches unit-testable: `cli._status` opens its own engine and is
-    not.
+    five branches unit-testable.
     """
     if not coverage.revisions:
         return VocabularyVerdict(state=VocabularyState.NO_VECTORS)
@@ -166,19 +230,16 @@ async def bootstrap_report(
     catalog: BulkCatalogRepository,
     genome: GenomeRepository,
 ) -> BootstrapReport:
-    """The four reads `usher bootstrap-status` has made since M2, as a value.
+    """Everything `usher bootstrap-status` reads, as one value.
 
-    Assembled here rather than inside either surface, for the reason
-    `composition.run_bootstrap` is one dispatch two roots call: the CLI prints
-    it and `GET /admin/bootstrap/status` serialises it, and a report built
-    twice is two answers waiting to drift. It takes ports and not a session,
-    so both roots hand it whatever they already hold.
+    Assembled here rather than inside either surface: the CLI prints it and
+    `GET /admin/bootstrap/status` serialises it, and a report built twice is
+    two answers waiting to drift. It takes ports and not a session, so both
+    roots hand it whatever they already hold.
 
-    **No read here can fail on an empty database**, which is PRD 08's operator
+    No read here can fail on an empty database, which is PRD 08's operator
     rule and the reason this returns a report for every state rather than
-    raising for some: `list_runs()` answers `[]`, both aggregates answer zero,
-    and `vocabulary_verdict` answers `NO_VECTORS` without asking the port
-    anything at all.
+    raising for some.
     """
     stored = await runs.list_runs()
     titles = await catalog.count_titles()
@@ -191,33 +252,15 @@ async def bootstrap_report(
     )
 
 
+def _cursor(run: ImportRun, revision: str) -> BulkCursor | None:
+    """The cursor a run resumes from, or `None` for one at the very start."""
+    if not run.position:
+        return None
+    return BulkCursor(revision=revision, position=run.position, rows_seen=run.rows_seen)
+
+
 class BootstrapService:
-    """Drives one `BulkDataset` into the catalog, resumably.
-
-    `commit` is injected rather than a session being passed in: `services/`
-    may depend only on `domain/` and `ports/` (PRD 01, layering rule 2), and a
-    session is neither. The caller -- `usher.cli`, the composition root --
-    supplies a zero-argument coroutine that commits its own unit of work.
-
-    `events` and `phase` are **keyword-only and never defaulted**, on
-    `ReconcileService`'s stated grounds (`services/reconcile.py:121`): a
-    shared `NullEventPublisher()` in a signature is a mutable-looking default
-    that is stateless only by accident, and every other collaborator here is
-    required. The two composition roots supply one where they mean it --
-    `composition.build_worker` the process bus, `cli._bootstrap` a real
-    `NullEventPublisher` for a process that has no SSE client on the other
-    side of a publish.
-
-    **`phase` is the `BootstrapPhase` this run was asked for, not the dataset
-    currently streaming**, and the frame carries both. `dataset` is the
-    fine-grained identifier and moves through seven values on a `--phase all`
-    run; `phase` is what an operator typed, what
-    `POST /admin/bootstrap/{phase}` answered with, and what `Job.key` holds --
-    so it is the field a client uses to tell *its* request's frames from
-    somebody else's. The alternative was threading the phase through every
-    `import_dataset` call in `composition`, which is the same fact spelled
-    once per dataset.
-    """
+    """Drives one `BulkDataset` into the catalog, resumably."""
 
     def __init__(
         self,
@@ -227,12 +270,33 @@ class BootstrapService:
         *,
         events: EventPublisher,
         phase: BootstrapPhase,
+        report: Callable[[str], None] | None = None,
+        retry: RetryPolicy | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        heartbeat: float = HEARTBEAT_SECONDS,
     ) -> None:
+        """`report` takes one line per retry; the log gets it as a WARNING when absent.
+
+        One channel, not both: under the CLI the log is stdout too, so a sink *and*
+        a log line would print every retry twice.
+        """
         self._runs = runs
         self._catalog = catalog
         self._commit = commit
         self._events = events
         self._phase = phase
+        self._report = report or _warn
+        self._retry = retry or DEFAULT_RETRY
+        self._sleep = sleep
+        self._clock = clock
+        self._heartbeat = heartbeat
+        self._conceded: set[str] = set()
+
+    @property
+    def conceded(self) -> frozenset[str]:
+        """The datasets `import_dataset` found another process holding, and left alone."""
+        return frozenset(self._conceded)
 
     async def import_dataset[RowT](
         self,
@@ -240,176 +304,228 @@ class BootstrapService:
         write: Callable[[Sequence[RowT]], Awaitable[int]],
         *,
         revision: str | None = None,
+        then: Callable[[ImportRun], Awaitable[None]] | None = None,
     ) -> ImportRun:
         """Stream `dataset` through `write`, checkpointing every batch.
 
-        Returns the final `ImportRun` and never raises a `UsherPortError` --
-        a failed phase must leave a durable, inspectable record and let the
-        caller decide whether to continue with the next phase, which is what
-        `bootstrap --phase all` needs to be useful when one upstream is down.
-        Three distinct outcomes share that "does not raise" property, but
-        only two of them are safe to persist:
-
-        1. **`self._runs.start()` raises `RepositoryConflict`.** We lost a
-           race to claim `dataset`'s row to a concurrent process and hold no
-           `ImportRun` of our own -- `start()` never returned one. The only
-           row that exists for `dataset` belongs to whichever process's
-           insert actually won, quite possibly still `RUNNING`. Delegated to
-           `_concede_to_other_owner`, which touches nothing: no `save`, no
-           `commit`. Returns the winner's row exactly as stored, read-only,
-           so a caller sees a real report instead of a crash but the durable
-           record itself is left alone. This case does not fall through to
-           case 2 below -- see the nested `try` in the implementation.
-        2. **`revision()` raises, or `start()` succeeds and `_drain` raises
-           afterward.** Either way we own (or have never yet touched) the
-           run at `dataset.name`, so the except handler re-fetches whatever
-           `self._runs` currently holds for it -- never this call's own
-           `run` variable -- and records `FAILED` there. `_drain` checkpoints
-           and commits after every batch it completes, using its *own* local
-           `run` binding, so when it raises instead of returning, this
-           method's `run` is still whatever `self._runs.start()` returned
-           *before* any of that batch progress, stale by however many
-           batches `_drain` already committed; evolving that stale value
-           would silently regress the checkpoint backwards on every failure.
-           Re-fetching by name is safe here specifically because we know we
-           own the row: `ImportRunRepository.save`'s only conflict path is a
-           fresh insert colliding with a concurrent fresh insert (case 1),
-           and once any row exists for a dataset, every later `start()`/
-           `save()` call updates that same row rather than competing for a
-           new one -- so a `RepositoryConflict` cannot reach this branch
-           under `_drain`'s normal write pattern (it only ever updates the
-           id `start()` already gave us). `revision()` itself can raise
-           either `PortUnavailable` or `PortRateLimited` (both real -- the
-           shared download helper every M2 adapter's `revision()` delegates
-           to maps a 429 straight to the latter), and both are
-           `UsherPortError` subclasses, so catching the base class here
-           catches both without needing to name either.
-        3. **Anything that is not a `UsherPortError`** (from `start()`,
-           `_drain`, or `write` itself) propagates untouched -- a bug in
-           this process is not an upstream failure and must not be recorded
-           as one.
+        The caller's transaction ends before the first request, `start()` is committed
+        before anything is fetched, and so is every batch. `then` runs once this process
+        has completed the import, still holding it, and a port error from it is recorded
+        like the drain's own. The hold is released however the import ends.
         """
         started = time.perf_counter()
+        resolved = revision or "unknown"
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
             try:
-                # `revision`, when given, is the value the caller already
-                # resolved this run -- the same parameter `BulkDataset.batches`
-                # carries and for a stronger reason than saving a HEAD.
-                #
-                # The `movielens` phase has to stamp `genome_scores
-                # .genome_revision` with the release each row came from, so
-                # its writer needs the value *during* the drain, and `write`
-                # is handed rows and nothing else. Resolving it separately in
-                # the caller and letting this method resolve it again leaves
-                # two `HEAD`s that can disagree: upstream re-uploading between
-                # them would download and stream release B while stamping
-                # every row release A. That is a mislabelled row, which is the
-                # precise failure `genome_revision` exists to make visible --
-                # so the caller passes its value in and the two agree by
-                # construction rather than by luck.
-                #
-                # Defaulted to `None`, so the four M2 call sites are
-                # unaffected and still resolve it here.
-                resolved = revision if revision is not None else await dataset.revision()
+                # Before a `HEAD` that can be retried for minutes: `run_bootstrap` has
+                # read the checkpoints, and that read must not stay open across it.
+                await self._commit()
+                # The caller's already-resolved value, so this run and the batches it
+                # streams cannot straddle two revisions.
+                resolved = revision if revision is not None else await self._revision(dataset)
                 span.set_attribute("usher.revision", resolved)
                 try:
                     run = await self._runs.start(dataset.name, resolved)
                 except RepositoryConflict as exc:
-                    # Case 1 -- handled entirely inside this nested try, so
-                    # it never reaches the outer `except UsherPortError`
-                    # below and never triggers the re-fetch-and-overwrite
-                    # that branch performs for case 2.
-                    run = await self._concede_to_other_owner(dataset.name, resolved, exc, span)
-                else:
-                    resume_from = (
-                        BulkCursor(
-                            revision=resolved, position=run.position, rows_seen=run.rows_seen
-                        )
-                        if run.position
-                        else None
-                    )
-                    if resume_from is not None:
-                        logger.info(
-                            "resuming {dataset} from position {position} "
-                            "({rows} rows already seen)",
-                            dataset=dataset.name,
-                            position=resume_from.position,
-                            rows=resume_from.rows_seen,
-                        )
-                    run = await self._drain(dataset, write, run, resume_from, resolved)
-            except UsherPortError as exc:
-                # Case 2. self._runs.get(), not this call's own `run`
-                # binding -- see the docstring above for why that binding
-                # can be either nonexistent (revision() failed first) or
-                # stale (_drain committed progress under its own local `run`
-                # before raising), and why re-fetching by name is safe here
-                # specifically (we own this row, unlike case 1). Falls back
-                # to a freshly-constructed run only for a dataset that has
-                # never once gotten past revision() -- "unknown" satisfies
-                # ImportRun.revision's min_length=1 and the matching DB
-                # CHECK constraint, and start() overwrites it the moment
-                # revision() next succeeds.
-                run = (await self._runs.get(dataset.name)) or ImportRun(
-                    dataset=dataset.name, revision="unknown"
-                )
-                run = run.evolve(
-                    status=ImportRunStatus.FAILED,
-                    # str(exc), never the exception object and never a
-                    # payload: PRD 08's credentials-never-logged rule, and
-                    # `error` is a Text column an operator reads.
-                    error=str(exc),
-                    heartbeat_at=datetime.now(UTC),
-                    finished_at=datetime.now(UTC),
-                )
-                await self._runs.save(run)
+                    return await self._concede_to_other_owner(dataset.name, resolved, exc)
+                # Before the first fetch, which can be a 214 MiB download: held
+                # uncommitted through it, `RUNNING` keeps an xid, is invisible to
+                # `bootstrap-status` and to `run_bootstrap`'s read of what is
+                # unfinished, and dies to `idle_in_transaction_session_timeout`
+                # with nothing recorded.
                 await self._commit()
-                _failures.add(1, {"dataset": dataset.name, "kind": type(exc).__name__})
+                resume_from = _cursor(run, resolved)
+                if resume_from is not None:
+                    logger.info(
+                        "resuming {dataset} from position {position} ({rows} rows already seen)",
+                        dataset=dataset.name,
+                        position=resume_from.position,
+                        rows=resume_from.rows_seen,
+                    )
+                run = await self._drain_resuming(dataset, write, run, resolved)
+                if then is not None:
+                    await then(run)
+                    await self._commit()
+                return run
+            except (UsherPortError, _GaveUp) as exc:
                 span.set_attribute("usher.failed", True)
-                logger.error(
-                    "{dataset} import failed at position {position}: {error}",
-                    dataset=dataset.name,
-                    position=run.position,
-                    error=str(exc),
-                )
+                return await self._fail(dataset.name, resolved, exc)
             finally:
+                await self._runs.release(dataset.name)
                 _phase_duration.record(time.perf_counter() - started, {"dataset": dataset.name})
+
+    async def resolve_revision[RowT](self, dataset: BulkDataset[RowT]) -> str | ImportRun:
+        """`dataset`'s revision, retried like a fetch -- or the run its failure left.
+
+        For a caller that needs the revision before it can build its writer, and so
+        cannot leave resolving it to `import_dataset`: `movielens` stamps every vector
+        and its vocabulary with it. A `HEAD` that never answers is then recorded
+        exactly as `import_dataset` would record it, rather than raised out of the run.
+        """
+        try:
+            await self._commit()
+            return await self._revision(dataset)
+        except (UsherPortError, _GaveUp) as exc:
+            try:
+                return await self._fail(dataset.name, "unknown", exc)
+            finally:
+                await self._runs.release(dataset.name)
+
+    async def _fail(self, dataset: str, revision: str, exc: UsherPortError | _GaveUp) -> ImportRun:
+        """Record this attempt's failure as `dataset`'s holder, or concede and write nothing.
+
+        Only a holder writes a checkpoint. A failure before `start()` holds nothing yet,
+        and a lost hold has been dropped, so both take it here first; while another
+        process has it, the failure is logged and the dataset left to that process.
+        """
+        try:
+            await self._runs.hold(dataset)
+        except RepositoryConflict as held:
+            logger.error("{dataset} failed: {error}", dataset=dataset, error=str(exc))
+            return await self._concede_to_other_owner(dataset, revision, held)
+        return await self._record_failure(dataset, exc)
+
+    async def _record_failure(self, dataset: str, exc: UsherPortError | _GaveUp) -> ImportRun:
+        """Record, as `dataset`'s holder, why this attempt failed, and commit it.
+
+        `FAILED` -- unless the checkpoint is `COMPLETED`, which means no batch of this
+        attempt landed (or the import completed and `then` failed), so the completed
+        import stands whole. Downgrading that would block every phase reading it until
+        the dataset is imported again, so it keeps its status with the error beside it.
+        `FAILED` is therefore said only of a catalog holding part of a snapshot, or no
+        completed import of the dataset at all.
+
+        `_GaveUp` is recorded as the port error it wraps, with the attempts appended to
+        the message. The returned run is the stored one.
+        """
+        cause = exc if isinstance(exc, UsherPortError) else exc.cause
+        stored = await self._runs.get(dataset)
+        now = datetime.now(UTC)
+        # str(exc), never the exception object and never a payload: PRD 08's
+        # credentials-never-logged rule, and `error` is a Text column an operator reads.
+        if stored is not None and stored.status is ImportRunStatus.COMPLETED:
+            run = stored.evolve(error=str(exc), heartbeat_at=now)
+            outcome = "failed, so its completed import at position {position} stands"
+        else:
+            run = (stored or ImportRun(dataset=dataset, revision="unknown")).evolve(
+                status=ImportRunStatus.FAILED, error=str(exc), heartbeat_at=now, finished_at=now
+            )
+            outcome = "import failed at position {position}"
+        await self._runs.save(run)
+        await self._commit()
+        _failures.add(1, {"dataset": dataset, "kind": type(cause).__name__})
+        logger.error(
+            "{dataset} " + outcome + ": {error}",
+            dataset=dataset,
+            position=run.position,
+            error=str(exc),
+        )
         return run
 
-    async def _concede_to_other_owner(
-        self, dataset: str, revision: str, exc: RepositoryConflict, span: trace.Span
-    ) -> ImportRun:
-        """Case 1 of `import_dataset`: `self._runs.start()` lost the race to
-        create `dataset`'s row to a concurrent process.
+    async def _revision[RowT](self, dataset: BulkDataset[RowT]) -> str:
+        """`dataset.revision()`, retried under the same `RetryPolicy` as a fetch.
 
-        `RepositoryConflict` only ever reaches `import_dataset` from
-        `start()` itself -- see the surrounding method's docstring for why
-        `_drain`'s own `save()` calls cannot trigger it under normal
-        operation. That means whenever this method runs, we hold no
-        `ImportRun` of our own to evolve: the one row that exists for
-        `dataset` belongs entirely to whichever process's insert actually
-        won, quite possibly still `RUNNING`, quite possibly already
-        `COMPLETED`. Re-fetching it and saving a `FAILED` status on top --
-        which is exactly what `import_dataset`'s case-2 handler does, and
-        did here too before this method existed -- would silently overwrite
-        that other process's real progress with a failure message
-        describing *this* process's redundant attempt, not its own. That is
-        worse than the crash it replaced: the crash was a loud, visible
-        `PendingRollbackError`; a corrupted checkpoint is silent, and a
-        subsequent resume reads exactly this record.
-
-        So this method calls neither `self._runs.save()` nor `self._commit()`
-        -- it only reads. Returns the current owner's record exactly as
-        stored, for the caller to inspect or log. The synthetic fallback (a
-        freshly-built, never-persisted `ImportRun`) exists only for the
-        pathological case where the very row that caused this conflict is
-        already gone by the time we look here -- deleted out from under both
-        processes -- so a caller always gets *something* inspectable back
-        without this method fabricating a claim over a dataset it just lost
-        the race for.
+        It is the first request a phase makes -- a `HEAD` for every IMDb, TMDb and
+        MovieLens dataset -- so it is the likeliest to meet a transient failure, and
+        nothing is checkpointed yet: a retry here is simply asking again.
         """
+        attempt = 1
+        streak_started: float | None = None
+        while True:
+            try:
+                return await dataset.revision()
+            except TRANSIENT as exc:
+                now = self._clock()
+                if streak_started is None:
+                    streak_started = now
+                wait = self._next_wait(
+                    dataset.name, "resolving its revision", attempt, now - streak_started, exc
+                )
+                await self._pause(wait)
+                attempt += 1
+
+    async def _pause(self, seconds: float, *, holding: str | None = None) -> None:
+        """Wait `seconds` before a retry, and never inside a transaction.
+
+        A streak can wait ~10 minutes, and a transaction held across it is `idle in
+        transaction` for all of that: it holds back vacuum, keeps what it read or wrote
+        from everyone else, and is killed under `idle_in_transaction_session_timeout`,
+        whereupon the next statement raises something no `except` here records. So the
+        commit ends it first. Nothing of this service's is pending by then -- `start()`
+        and every batch commit before anything is fetched.
+
+        `holding` is the dataset this service has started, whose heartbeat the wait keeps
+        moving. One helper for both retried calls, so neither can wait inside a
+        transaction while the other does not.
+        """
+        await self._commit()
+        if holding is None:
+            await self._sleep(seconds)
+        else:
+            await self._beating(self._sleep(seconds), holding)
+
+    async def _beating[T](self, work: Awaitable[T], dataset: str) -> T:
+        """`work`, moving `dataset`'s heartbeat every `heartbeat` seconds until it ends.
+
+        A download, an index build, a slow page or a retry's wait takes minutes with no
+        batch to checkpoint, and a heartbeat left that long reads as a dead importer.
+        Each beat is committed as it lands, so none is held across the wait. `work` runs
+        as a task only so the wait can be timed; it never touches the session.
+
+        **Each beat confirms the hold** (`touch`): a hold whose connection ended --
+        `idle_session_timeout`, a proxy's idle cut, a server restart -- raises
+        `RepositoryConflict` here, which ends the import rather than letting it write
+        beside whoever takes the dataset next. The statement is also what keeps an idle
+        hold from meeting `idle_session_timeout` at all.
+        """
+        task = asyncio.ensure_future(work)
+        try:
+            while not (await asyncio.wait({task}, timeout=self._heartbeat))[0]:
+                await self._runs.touch(dataset)
+                await self._commit()
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.wait({task})
+
+    def _next_wait(
+        self, dataset: str, where: str, attempt: int, elapsed: float, exc: UsherPortError
+    ) -> float:
+        """The wait before attempt `attempt + 1`, announced -- or `_GaveUp`.
+
+        `elapsed` runs from the streak's first failure. One rule for both
+        retried calls, so a revision and a fetch cannot drift apart on the bound.
+        """
+        if attempt >= self._retry.attempts:
+            raise _GaveUp(exc, attempt, elapsed, "") from exc
+        wait = self._retry.delay(attempt, exc)
+        if elapsed + wait > self._retry.budget:
+            raise _GaveUp(
+                exc,
+                attempt,
+                elapsed,
+                f": the next wait would pass the {self._retry.budget:.0f}s retry budget",
+            ) from exc
+        self._report(
+            f"{dataset}: attempt {attempt} of {self._retry.attempts} failed {where}: {exc}; "
+            f"retrying in {wait:.0f}s"
+        )
+        return wait
+
+    async def _concede_to_other_owner(
+        self, dataset: str, revision: str, exc: RepositoryConflict
+    ) -> ImportRun:
+        """Another process holds `dataset`, so this one leaves it.
+
+        Its row is returned as stored, error and all, with no `save` and no `commit`. With
+        no row to read -- the holder has not committed its first yet -- the synthetic run
+        returned is never persisted.
+        """
+        self._conceded.add(dataset)
         owner = await self._runs.get(dataset)
-        span.set_attribute("usher.conflict", True)
+        trace.get_current_span().set_attribute("usher.conflict", True)
         logger.warning(
             "not recording a failure for {dataset}: {error} -- a different "
             "run already owns its checkpoint, leaving it untouched",
@@ -420,6 +536,47 @@ class BootstrapService:
             dataset=dataset, revision=revision, status=ImportRunStatus.FAILED, error=str(exc)
         )
 
+    async def _drain_resuming[RowT](
+        self,
+        dataset: BulkDataset[RowT],
+        write: Callable[[Sequence[RowT]], Awaitable[int]],
+        run: ImportRun,
+        revision: str,
+    ) -> ImportRun:
+        """`_drain`, resumed from the last committed checkpoint after a transient failure.
+
+        **A retry is a resume**: it hands the dataset the cursor this attempt last
+        committed -- the same thing an operator re-running the phase gets, done without
+        them. Nothing already committed is fetched or written again. The cursor is the
+        attempt's own, never re-read from the row: over a completed import the row is
+        still that import until the first batch lands. Bounded by `RetryPolicy`; a
+        streak that outlasts it raises `_GaveUp`, which `import_dataset` records at the
+        checkpoint reached.
+        """
+        attempt = 1
+        streak_started: float | None = None
+        while True:
+            try:
+                return await self._drain(dataset, write, run, _cursor(run, revision), revision)
+            except _FetchFailed as failed:
+                exc = failed.cause
+                committed = failed.at or run
+                now = self._clock()
+                if streak_started is None or committed.position != run.position:
+                    # A batch committed since the last failure, or this is the first:
+                    # either way this failure opens a new streak.
+                    attempt, streak_started = 1, now
+                run = committed
+                wait = self._next_wait(
+                    dataset.name,
+                    f"at position {run.position}",
+                    attempt,
+                    now - streak_started,
+                    exc,
+                )
+                await self._pause(wait, holding=dataset.name)
+                attempt += 1
+
     async def _drain[RowT](
         self,
         dataset: BulkDataset[RowT],
@@ -428,68 +585,72 @@ class BootstrapService:
         resume_from: BulkCursor | None,
         revision: str,
     ) -> ImportRun:
-        # `revision=revision`: the value `import_dataset` already resolved,
-        # not left for `batches()` to re-derive. Cheap for an implementation
-        # whose own `revision()` is already cheap (IMDb, Wikidata), but not
-        # merely an optimisation for TMDb's daily export -- its own module
-        # docstring notes an unresolved `revision` forces the multi-day
-        # backward-scanning `_newest_available` walk all over again, and a
-        # fresh re-resolve could in principle disagree with the value this
-        # run already committed to across a UTC-midnight race.
-        async for batch in dataset.batches(resume_from=resume_from, revision=revision):
-            batch_started = time.perf_counter()
-            with _tracer.start_as_current_span("bootstrap.batch") as span:
-                span.set_attribute("usher.dataset", dataset.name)
-                span.set_attribute("usher.batch.rows", len(batch.rows))
-                written = await write(batch.rows)
-                run = run.evolve(
-                    revision=batch.cursor.revision,
-                    position=batch.cursor.position,
-                    rows_seen=batch.cursor.rows_seen,
-                    rows_written=run.rows_written + written,
-                    heartbeat_at=datetime.now(UTC),
+        batches = dataset.batches(resume_from=resume_from, revision=revision)
+        try:
+            async for batch in self._fetched(batches, dataset.name):
+                batch_started = time.perf_counter()
+                with _tracer.start_as_current_span("bootstrap.batch") as span:
+                    span.set_attribute("usher.dataset", dataset.name)
+                    span.set_attribute("usher.batch.rows", len(batch.rows))
+                    # Before the write: a fetch quicker than a beat never beats, and a
+                    # batch written without the hold lands beside whoever took it.
+                    await self._runs.touch(dataset.name)
+                    written = await write(batch.rows)
+                    run = run.evolve(
+                        revision=batch.cursor.revision,
+                        position=batch.cursor.position,
+                        rows_seen=batch.cursor.rows_seen,
+                        rows_written=run.rows_written + written,
+                        heartbeat_at=datetime.now(UTC),
+                    )
+                    await self._runs.save(run)
+                    # The single commit that makes this resumable: rows and cursor land
+                    # together or not at all.
+                    await self._commit()
+                    # After that commit, never before it: an event is a statement about
+                    # committed state, and this frame's subject is the batch the line
+                    # above just made durable.
+                    await self._publish_progress(run)
+                _rows_counter.add(written, {"dataset": dataset.name})
+                _batch_duration.record(
+                    time.perf_counter() - batch_started, {"dataset": dataset.name}
                 )
-                await self._runs.save(run)
-                # The single commit that makes this resumable: rows and cursor
-                # land together or not at all. Fires even for a row-less
-                # batch (an implementation may yield one solely to advance
-                # the cursor past filtered-out records, per BulkDataset.
-                # batches' contract) -- skipping the commit there would make
-                # a resume replay the filtered-out run on every restart.
-                await self._commit()
-                # **After that commit, never before it.** ADR-0033: an event
-                # is a statement about committed state, and this frame's
-                # subject is the batch the line above just made durable --
-                # `rows_seen`, `rows_written` and `position` are all read off
-                # the `ImportRun` that is now in `import_runs`. A client
-                # acting on the frame reads exactly that or newer. The
-                # ordering is asserted rather than assumed: a fake records
-                # how many commits had happened when each frame arrived.
-                await self._publish_progress(run)
-            _rows_counter.add(written, {"dataset": dataset.name})
-            _batch_duration.record(time.perf_counter() - batch_started, {"dataset": dataset.name})
+        except _FetchFailed as failed:
+            failed.at = run
+            raise
         return await self._finish(run)
+
+    async def _fetched[RowT](
+        self, batches: AsyncIterator[BulkBatch[RowT]], dataset: str
+    ) -> AsyncIterator[BulkBatch[RowT]]:
+        """`batches`, heartbeating while each is fetched, a transient fetch failure marked.
+
+        The marking is what lets `_drain_resuming` retry the dataset and never the writer,
+        whose own failures pass through `_drain`'s body untouched.
+        """
+        iterator = aiter(batches)
+        while True:
+            try:
+                batch = await self._beating(anext(iterator, None), dataset)
+            except TRANSIENT as exc:
+                raise _FetchFailed(exc) from exc
+            if batch is None:
+                return
+            yield batch
 
     async def _publish_progress(self, run: ImportRun) -> None:
         """One `bootstrap.progress` per committed batch, scoped to no title.
 
-        **Per batch rather than per run**, because an admin UI's progress bar
-        is the whole point of the event and one at the end is a bar that jumps
-        from 0% to 100% -- the failure `ReconcileService._publish_progress`
-        already names for `sync.progress`, and the reason the `bootstrap`
-        job's registration hands this service the process bus rather than
-        `JobWorker`'s deferred buffer (`composition.build_worker` carries that
-        argument in full).
+        Per batch rather than per run: an admin UI's progress bar is the whole
+        point of the event, and one at the end is a bar that jumps from 0% to
+        100%. That is why the `bootstrap` job's registration hands this service
+        the process bus rather than `JobWorker`'s deferred buffer.
 
-        **Scoped to no title**, which is what makes PRD 07's *"Admin UI only"*
-        true rather than advisory: a `?titles=` subscriber never sees one, and
-        a bulk import touching most of the catalog would otherwise wake every
-        detail screen in the household once per batch.
+        Scoped to no title, which is what makes PRD 07's *"Admin UI only"* true
+        rather than advisory: a bulk import touching most of the catalog would
+        otherwise wake every detail screen in the household once per batch.
 
-        **No `percent`**, and the payload is what a cursor can honestly
-        supply: `ClientEventKind.BOOTSTRAP_PROGRESS` carries the argument, and
-        PRD 07's payload column is corrected rather than satisfied by a
-        fraction invented from a byte offset.
+        No `percent`: a byte offset cannot honestly supply one.
         """
         await self._events.publish(
             ClientEvent(
@@ -505,6 +666,7 @@ class BootstrapService:
         )
 
     async def _finish(self, run: ImportRun) -> ImportRun:
+        await self._runs.touch(run.dataset)  # As before a batch: only the holder writes.
         now = datetime.now(UTC)
         run = run.evolve(
             status=ImportRunStatus.COMPLETED, error=None, heartbeat_at=now, finished_at=now

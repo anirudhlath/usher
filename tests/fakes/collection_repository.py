@@ -1,38 +1,4 @@
-"""In-memory `CollectionRepository`.
-
-**Where this is more forgiving than Postgres, on purpose.** Six places, each
-of which the paired `tests/integration/test_collection_repository.py` run is
-what actually closes:
-
-- **`titles` is a mapping this fake is handed**, so `attach_titles` can apply
-  the `kind = 'movie'` filter at all. In SQL that is a `WHERE` clause a
-  mutation deletes; here it is an `if` a mutation deletes; the case kills
-  both, which is the one place these two implementations fail identically.
-  Named first because it is the divergence a reader would otherwise assume
-  cuts the other way.
-- **No foreign keys**, so `attach_titles` here cannot raise
-  `RepositoryConflict` for a `collection_id` naming no collection.
-  `test_a_link_to_no_collection_is_a_port_error` is Postgres-only.
-- **`IS DISTINCT FROM` is Python's `!=`**, which already treats `None`
-  correctly. In SQL `<>` does not -- `NULL <> :x` is NULL, so a first attach
-  writes nothing at all -- which is why the contract asserts the *first*
-  call's count as well as the second's.
-- **No stored generated column and no GIN index**, so the whole cost the
-  `IS DISTINCT FROM` guard exists to avoid is invisible here. The guard is
-  observable only through the returned count, which is why the port promises
-  *changed* rather than *touched*.
-- **`xmax = 0` has no analogue.** `inserted`/`updated` are dict membership,
-  which *is* the answer rather than a measurement of it.
-- **No release date, so `get`'s members come back in insertion order.** The
-  real one orders them `release_date NULLS LAST, year NULLS LAST, title_id`,
-  which is the order a franchise page renders in -- so the shared contract
-  asserts on the member *set* and only
-  `tests/integration/test_collection_repository.py` can assert the sequence.
-  Same divergence `list_owned` already carries, at a second read.
-
-`titles` and `media_items` are test-double affordances written only by
-`FakeCollectionSeeder`; the port never writes either.
-"""
+"""In-memory `CollectionRepository`."""
 
 import uuid
 from collections.abc import Sequence
@@ -50,8 +16,7 @@ class SeededMediaItem:
     `episode_id` is modelled because `list_owned`'s predicate excludes those
     rows: `IngestService` writes an episode's row with its series' `title_id`
     **and** its own `episode_id`, so a join on `title_id` alone reads a series
-    as owned once per episode file -- 999,827 of the one measured deployment's
-    1,126,789 items.
+    as owned once per episode file.
     """
 
     title_id: uuid.UUID
@@ -103,8 +68,7 @@ class FakeCollectionRepository(CollectionRepository):
             collection_id=collection_id,
             name=name,
             # Insertion order, because this fake has no release date. The
-            # sequence is therefore asserted only in the integration arm; see
-            # the module docstring's sixth divergence.
+            # sequence is therefore asserted only in the integration arm.
             title_ids=tuple(members),
             owned_title_ids=frozenset(members) & self._owned_titles(),
         )
@@ -112,11 +76,10 @@ class FakeCollectionRepository(CollectionRepository):
     def _owned_titles(self) -> set[uuid.UUID]:
         """`episode_id IS NULL AND available`, which both reads apply.
 
-        One helper here and **two written-out copies in Postgres**, where
-        `_LIST_OWNED` and `_GET_COLLECTION` are separate statements. That is a
-        divergence worth knowing about rather than tidying: each of those
-        copies has its own contract case, and a mutation to one of them fails
-        only that case there while failing both here.
+        One helper here and two written-out copies in Postgres, where
+        `_LIST_OWNED` and `_GET_COLLECTION` are separate statements. Each copy
+        has its own contract case, so a mutation to one fails only that case
+        there while failing both here.
         """
         return {
             item.title_id

@@ -1,9 +1,4 @@
-"""PostgresCredentialStore against real Postgres.
-
-The contract suite runs here unchanged; the four cases below are the ones
-the in-memory fake cannot express, and they are the ones PRD 08's rules
-actually reduce to.
-"""
+"""PostgresCredentialStore against real Postgres."""
 
 import uuid
 
@@ -46,20 +41,21 @@ class TestPostgresCredentialStoreContract(CredentialStoreContract):
         return PostgresCredentialStore(session, KEY)
 
     async def owner(self, store: CredentialStore) -> uuid.UUID:
-        # Reaches into the store's own session rather than taking a second
-        # `session` fixture argument: the credential row's foreign key must
-        # point at a source visible in *this* store's transaction, and two
-        # sessions on the same connection would not see each other's
-        # unflushed work. (`flake8-self`/SLF is not in this project's ruff
-        # selection, so no suppression is needed.)
+        # Reaches into the store's own session rather than taking a second `session`
+        # fixture argument: the credential row's foreign key must point at a source
+        # visible in *this* store's transaction, and two sessions on the same connection
+        # would not see each other's unflushed work.
         assert isinstance(store, PostgresCredentialStore)
         return await _seed_source(store._session)
 
 
 async def test_the_stored_column_is_not_the_plaintext(session: AsyncSession) -> None:
-    """PRD 08's whole point. Reads the raw column rather than going through
-    `get`, because `get` decrypts -- a store that "encrypted" by base64ing
-    would satisfy a round-trip test and fail this one."""
+    """PRD 08's whole point.
+
+    Reads the raw column rather than going through `get`, because `get` decrypts -- a
+    store that "encrypted" by base64ing would satisfy a round-trip test and fail this
+    one.
+    """
     owner = await _seed_source(session)
     await PostgresCredentialStore(session, KEY).put("ref-1", RIGHT, owner_id=owner)
     await session.flush()
@@ -73,9 +69,11 @@ async def test_the_stored_column_is_not_the_plaintext(session: AsyncSession) -> 
 
 
 async def test_a_different_secret_key_cannot_read_it(session: AsyncSession) -> None:
-    """Rotating USHER_SECRET_KEY must be a loud, diagnosable failure that
-    names the row, not a silent garbage read and not a `None` that would
-    look like an unconfigured source."""
+    """Rotating USHER_SECRET_KEY must be a loud.
+
+    diagnosable failure that names the row, not a silent garbage read and not a `None`
+    that would look like an unconfigured source.
+    """
     owner = await _seed_source(session)
     await PostgresCredentialStore(session, KEY).put("ref-1", RIGHT, owner_id=owner)
     await session.flush()
@@ -86,9 +84,11 @@ async def test_a_different_secret_key_cannot_read_it(session: AsyncSession) -> N
 
 
 async def test_deleting_the_source_cascades_to_its_credentials(session: AsyncSession) -> None:
-    """The reason `owner_id` is on the port at all. Without the cascade, a
-    crash between "delete the credential" and "delete the source" leaves an
-    encrypted row nothing can attribute or clean up."""
+    """The reason `owner_id` is on the port at all.
+
+    Without the cascade, a crash between "delete the credential" and "delete the source"
+    leaves an encrypted row nothing can attribute or clean up.
+    """
     owner = await _seed_source(session)
     await PostgresCredentialStore(session, KEY).put("ref-1", RIGHT, owner_id=owner)
     await session.flush()
@@ -107,18 +107,22 @@ async def test_deleting_the_source_cascades_to_its_credentials(session: AsyncSes
 
 
 async def test_put_for_an_unknown_owner_is_a_port_error(session: AsyncSession) -> None:
-    """A raw sqlalchemy.exc.IntegrityError escaping here would break the
-    "db is driven, not driving" contract exactly the way it did in
-    PostgresTitleRepository before its translation was added."""
+    """A raw sqlalchemy.exc.IntegrityError escaping here would break the "db is driven.
+
+    not driving" contract exactly the way it did in PostgresTitleRepository before its
+    translation was added.
+    """
     with pytest.raises(RepositoryConflict):
         await PostgresCredentialStore(session, KEY).put("ref-1", RIGHT, owner_id=new_id())
 
 
 async def test_the_session_survives_that_conflict(session: AsyncSession) -> None:
-    """The SAVEPOINT, not just the translation. `SourceService.register`
-    inserts the source and then the credential on one session; if a failed
-    `put` poisoned the transaction, the caller's rollback path could not
-    even read back what it had already written."""
+    """The SAVEPOINT, not just the translation.
+
+    `SourceService.register` inserts the source and then the credential on one session;
+    if a failed `put` poisoned the transaction, the caller's rollback path could not
+    even read back what it had already written.
+    """
     store = PostgresCredentialStore(session, KEY)
     with pytest.raises(RepositoryConflict):
         await store.put("ref-1", RIGHT, owner_id=new_id())

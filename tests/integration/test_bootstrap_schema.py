@@ -1,11 +1,4 @@
-"""The migration actually builds what the models describe.
-
-tests/integration/test_migrations.py already diffs the whole migrated
-schema against Base.metadata, which covers drift. These two cover the
-things a diff cannot: that no new trigger appeared, and that the
-(tmdb_id, kind) index really lets both TMDb namespaces coexist in one
-table.
-"""
+"""The migration actually builds what the models describe."""
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,15 +7,17 @@ from usher.db.base import build_engine
 
 
 async def test_bootstrap_tables_added_no_new_triggers(postgres_url: str) -> None:
-    """Guards the coupling test_db_models_bootstrap.py describes: an
-    updated_at column on any of the three would want a trigger.
+    """Guards the coupling test_db_models_bootstrap.py describes.
+
+    an updated_at column on any of the three would want a trigger.
 
     Scoped to the three bootstrap tables by name, which is what this test
     claims to be about. It used to assert the *whole database's* trigger set
     instead -- a second copy of `test_migrations.py`'s assertion, in a file
-    whose own docstring says that one already covers drift -- so M4's two
+    whose own docstring says that one already covers drift -- so the two
     new triggers on unrelated tables broke it for no reason anyone reading
-    the title would predict."""
+    the title would predict.
+    """
     engine = build_engine(postgres_url)
     async with engine.connect() as conn:
         result = await conn.execute(
@@ -38,9 +33,11 @@ async def test_bootstrap_tables_added_no_new_triggers(postgres_url: str) -> None
 
 
 async def test_both_tmdb_namespaces_coexist_in_tmdb_ids(session: AsyncSession) -> None:
-    """(tmdb_id, kind) as the primary key, exercised rather than inspected:
-    26,968 real ids are live in both namespaces, so a single-column key
-    would reject this insert and lose half of television."""
+    """(tmdb_id, kind) as the primary key, exercised rather than inspected.
+
+    26,968 real ids are live in both namespaces, so a single-column key would reject
+    this insert and lose half of television.
+    """
     await session.execute(
         text(
             "INSERT INTO tmdb_ids (tmdb_id, kind, original_name, popularity) VALUES "

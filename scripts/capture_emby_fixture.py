@@ -1,34 +1,7 @@
 # scripts/capture_emby_fixture.py
-"""Re-derive a scrubbed Emby *shape* from a live server. NOT a test.
+"""Re-derive a scrubbed Emby *shape* from a live server.
 
-`tests/fixtures/emby/*.json` are shape-recorded and value-synthetic: the
-field names, nesting, and types come from real responses, every value is
-invented. This script is how an operator regenerates a scrubbed capture
-locally to check whether their server's shape has drifted from what the
-mapper expects.
-
-Its output is deliberately not committed, and deliberately not a payload: a
-real response embeds TMDb-sourced metadata (which TMDb's terms forbid
-redistributing, and which CLAUDE.md's "ship importers, never data" already
-forbids committing), identifies a real library, and carries real server and
-user ids. What it prints instead keeps every key and replaces every leaf
-value with its *type name*, so a diff against a committed fixture is a diff
-of shape.
-
-That is why the output is worth a second glance rather than a glance: shape
-is exactly what the M3 live run found the fixtures wrong about. Emby 4.9.5.0
-sends `ExtendedVideoType`/`ExtendedVideoSubType` and sends neither
-`VideoRangeType` nor `DvProfile`, so a `str` appearing under one key and a
-key vanishing entirely are both real findings, not noise.
-
-    export USHER_EMBY_URL=https://emby.example
-    export USHER_EMBY_USER=someone
-    export USHER_EMBY_PASSWORD=...
-    uv run python scripts/capture_emby_fixture.py > /tmp/shape.json
-    uv run python scripts/capture_emby_fixture.py --type Episode
-
-One request per run, because the upstream is measured at 1-5 s per request
-and a shape diff needs one item, not a library.
+NOT a test.
 """
 
 import argparse

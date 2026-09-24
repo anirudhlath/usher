@@ -16,29 +16,20 @@ from usher.eval.runner import score_surface, verdict_for
 from usher.eval.surfaces.suggest import SurfaceRun
 from usher.eval.verdicts import Verdict
 
-# tests/unit/test_eval_runner.py -> tests/unit -> tests -> repo root. Same
-# derivation as tests/unit/test_eval_contract.py, which reads the same file
-# for the same reason: a fact about pyproject.toml has to be read from
-# pyproject.toml, not re-asserted as a literal that can drift out from under
-# it.
+# tests/unit/test_eval_runner.py -> tests/unit -> tests -> repo root. A fact
+# about pyproject.toml has to be read from pyproject.toml, not re-asserted as
+# a literal that can drift out from under it.
 _ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_a_missing_extra_is_a_refusal_and_names_a_command_that_actually_installs_it() -> None:
-    """`EvalDependencyMissing` subclasses `EvalRefused` so every handler that
-    wants a refusal gets this one too -- but `pytest.raises(EvalDependencyMissing)`
-    says nothing about that, since it is satisfied by a child of anything;
-    only an `isinstance` assertion on the parent pins the ancestry (the
-    precedent is `tests/unit/test_ports_ingest.py`'s
-    `test_the_sweep_refusal_is_a_port_error`).
+    """The refusal subclasses `EvalRefused` and names an extra that really installs it.
 
-    And the message is the whole point of this class existing: a bare
-    ImportError tells an operator a module is absent, not that it is
-    optional, which extra carries it, or what to type. That command is only
-    honest if the extra it names is one `uv sync --extra` can actually
-    install -- a rename of the extra in `pyproject.toml` must not leave this
-    message pointing an operator at a command that fails, so the extra named
-    here is checked against `pyproject.toml` itself rather than trusted."""
+    `pytest.raises(EvalDependencyMissing)` is satisfied by a child of anything, so only
+    an `isinstance` on the parent pins the ancestry. The extra the message names is
+    checked against `pyproject.toml` rather than trusted, so renaming it cannot leave an
+    operator with a command that fails.
+    """
     problem = EvalDependencyMissing("ranx")
     assert isinstance(problem, EvalRefused)
     assert "uv sync --extra eval" in str(problem)
@@ -56,15 +47,7 @@ def test_a_missing_extra_is_a_refusal_and_names_a_command_that_actually_installs
 
 
 def test_a_refusal_message_survives_construction_and_stays_matchable() -> None:
-    """`EvalRefused` carries the reason a run could not be measured, and that
-    reason has to survive construction and remain something a caller can
-    `pytest.raises(..., match=...)` for -- which is what this case pins.
-
-    It does **not** pin that the type is distinct from a scoring error, or
-    that no caller can catch the two together in one clause -- there is no
-    second type in this module for it to be distinct from yet, so nothing
-    here checks that property. It belongs on whichever future case
-    introduces a scoring-error type and has to catch the two separately."""
+    """The reason a run was refused survives construction and stays matchable."""
     with pytest.raises(EvalRefused, match="sampling frame"):
         raise EvalRefused("the sampling frame does not reproduce the gate's")
 
@@ -90,9 +73,11 @@ def _run(hit: bool) -> SurfaceRun:
 
 
 def test_a_pending_bar_reports_the_number_and_does_not_gate() -> None:
-    """Spec 14: no bar exists for tier 2's overall recall, so the first run
-    reports it. A run that claimed PASS against a bar that does not exist has
-    claimed to face something it did not."""
+    """No bar exists for tier 2's overall recall, so the run reports the number.
+
+    A run that claimed PASS against a bar that does not exist has claimed to face
+    something it did not.
+    """
     scores = score_surface(_run(hit=True), tier="fuzzy", bars=load_bars(_BARS))
     overall = next(s for s in scores if s.metric == "recall_at_5" and s.stratum == "all")
     assert overall.judgement is Judgement.PENDING
@@ -100,25 +85,24 @@ def test_a_pending_bar_reports_the_number_and_does_not_gate() -> None:
 
 
 def test_a_window_bar_fails_a_value_outside_it() -> None:
-    """Tier 1's 1.9% is a window. This stub run scores 1.0, which is far
-    above it -- and 'a tier 1 that scores higher is not the index that was
-    measured' is exactly what the window says."""
+    """Tier 1's bar is a window, so a value far above it fails as surely as one below."""
     scores = score_surface(_run(hit=True), tier="prefix", bars=load_bars(_BARS))
     overall = next(s for s in scores if s.metric == "recall_at_5" and s.stratum == "all")
     assert overall.judgement is Judgement.FAIL
 
 
 def test_every_stratum_the_run_produced_gets_a_score_row() -> None:
-    """A stratum silently absent from the ledger is a stratum nobody plots.
-    ADR-0002's 0.0% transposition finding is a stratum, not a headline."""
+    """A stratum silently absent from the ledger is a stratum nobody plots."""
     scores = score_surface(_run(hit=True), tier="fuzzy", bars=load_bars(_BARS))
     strata = {one.stratum for one in scores if one.metric == "recall_at_5"}
     assert strata == {"all", "band=5-7", "typo_class=substitution"}
 
 
 def test_observations_are_recorded_per_stratum() -> None:
-    """A recall of 1.0 over three cases and over three thousand are different
-    facts. Without the denominator a trend chart cannot tell them apart."""
+    """A recall of 1.0 over three cases and over three thousand are different facts.
+
+    Without the denominator a trend chart cannot tell them apart.
+    """
     scores = score_surface(_run(hit=True), tier="fuzzy", bars=load_bars(_BARS))
     assert all(one.observations >= 1 for one in scores)
 
@@ -163,27 +147,19 @@ def _judged(*judgements: Judgement) -> tuple[ScoreRecord, ...]:
 def test_the_verdict_precedence_holds_in_every_combination(
     judgements: tuple[Judgement, ...], expected: Verdict
 ) -> None:
-    """**`verdict_for` had no test at all**, found 2026-08-20 by Task 15's
-    sweep: the plant `only PENDING -> PASS` survived the whole eval selection,
-    and a grep afterwards found nothing in `tests/` naming the function.
+    """`verdict_for`'s four branches are ordered, and the mixed rows pin the order.
 
-    The first row is the one the plant falsified and the one that matters
-    today, because `docs/evals/bars.toml` ships **three** pending bars: a run
-    whose only judgements are PENDING must report PENDING, not PASS. It is
-    `exit_code_for`'s input, so the damage is a CI job going green on a run
-    that faced no bar -- the "a run that did not run is not a pass" trap, one
-    level down from where this repository usually meets it.
-
-    Parametrised over the whole precedence rather than over that one row,
-    because the function's four branches are ordered and a case pinning only
-    the branch a sweep happened to plant leaves the other three where this one
-    was. The mixed rows are the ones with teeth: any single-judgement row is
-    also satisfied by an implementation that returns whatever it was given."""
+    A run whose only judgements are PENDING must report PENDING, not PASS: this feeds
+    `exit_code_for`, so a wrong precedence is a CI job going green on a run that faced
+    no bar. Any single-judgement row is also satisfied by an implementation that returns
+    whatever it was given.
+    """
     assert verdict_for(_judged(*judgements)) is expected
 
 
 def test_an_empty_run_is_unbarred_rather_than_a_pass() -> None:
-    """The degenerate input, and it is not hypothetical: a surface whose tiers
-    all raised produces no records, and `UNBARRED` is what says so. `PASS`
-    here would be a run claiming to have faced a bar it never reached."""
+    """A surface whose tiers all raised produces no records, and `UNBARRED` says so.
+
+    `PASS` here would be a run claiming to have faced a bar it never reached.
+    """
     assert verdict_for(()) is Verdict.UNBARRED

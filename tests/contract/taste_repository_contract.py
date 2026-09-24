@@ -1,30 +1,4 @@
-"""Behaviour every `TasteRepository` implementation must satisfy.
-
-**This suite is almost entirely about one predicate**, because that is almost
-all this port does. `get()` is not a lookup: it is `STALE_TASTE` evaluated over
-two tables, and an implementation that stored and returned rows faithfully
-while getting any one of its three disjuncts wrong would pass every case about
-*storage* and serve a confidently wrong centroid forever.
-
-**Three of the cases exist to separate `IS DISTINCT FROM` from `<`**, and only
-the first of the three is the obvious one:
-
-- a **newer** watch state raises `max(updated_at)`. Both spellings catch it,
-  and a suite holding only this case is green against the bug.
-- a **deleted** watch state *lowers* it. `<` never looks backwards, so it goes
-  on serving a centroid computed over a row that no longer exists -- for a
-  household that unwatched something, forever.
-- a **cleared** history makes the subquery `NULL`, and `stored < NULL` is
-  `NULL`, which is not true. So `<` never recomputes for a household whose
-  history was wiped, which is the same failure with the same cause and a
-  different shape.
-
-Subclass and provide `repository`, `user_id` and `other_user_id` (which must
-name users that actually exist, for an implementation with foreign keys), plus
-the three history hooks below. `WatchStateRepository` has no delete method --
-deliberately, PRD 02 hard-deletes nothing through a port -- so the hooks reach
-past it, and each arm reaches past it in its own way.
-"""
+"""Behaviour every `TasteRepository` implementation must satisfy."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -41,8 +15,7 @@ MODEL = "fake:test-embedding"
 
 # 384 lanes, because that is what `halfvec(384)` accepts and a shorter vector
 # would have to be padded by one arm's seeder and not the other's -- the
-# padding would then be the suite's behaviour rather than the port's. Group F
-# hit the identical constraint on `halfvec(1128)`.
+# padding would then be the suite's behaviour rather than the port's.
 _DIMENSION = EMBEDDING_DIMENSIONS
 
 
@@ -59,8 +32,10 @@ def _vector(lead: float) -> tuple[float, ...]:
 
 class TasteRepositoryContract:
     async def add_history(self, user_id: uuid.UUID, *, at: datetime) -> uuid.UUID:
-        """Write one watch state for `user_id` whose stored `updated_at` is
-        `at`, and return something `drop_history` can remove."""
+        """Write one watch state for `user_id` whose stored `updated_at` is `at`.
+
+        and return something `drop_history` can remove.
+        """
         raise NotImplementedError
 
     async def drop_history(self, handle: uuid.UUID) -> None:
@@ -129,8 +104,11 @@ class TasteRepositoryContract:
     async def test_the_watermark_is_the_newest_update_and_not_the_oldest(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """`max`, seeded out of order so a `min` and a "whatever came last"
-        both answer differently."""
+        """`max`.
+
+        seeded out of order so a `min` and a "whatever came last" both answer
+        differently.
+        """
         await self.add_history(user_id, at=LATER)
         await self.add_history(user_id, at=EARLIER)
 
@@ -139,10 +117,11 @@ class TasteRepositoryContract:
     async def test_the_watermark_is_scoped_to_one_user(
         self, repository: TasteRepository, user_id: uuid.UUID, other_user_id: uuid.UUID
     ) -> None:
-        """Without the scope every household in the deployment shares one
-        watermark, so one member watching anything invalidates everybody's
-        centroid -- a recompute storm that looks exactly like a working cache
-        from the outside."""
+        """Without the scope every household in the deployment shares one watermark.
+
+        so one member watching anything invalidates everybody's centroid -- a recompute
+        storm that looks exactly like a working cache from the outside.
+        """
         await self.add_history(other_user_id, at=LATER)
 
         assert await repository.watermark(user_id) is None
@@ -157,8 +136,10 @@ class TasteRepositoryContract:
     async def test_a_stored_centroid_round_trips_and_stays_readable(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """The cache actually caching. Nothing has moved, so nothing is
-        stale."""
+        """The cache actually caching.
+
+        Nothing has moved, so nothing is stale.
+        """
         await self.add_history(user_id, at=EARLIER)
         await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
 
@@ -173,10 +154,12 @@ class TasteRepositoryContract:
     async def test_a_second_put_replaces_rather_than_duplicating(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """The primary key *is* the user id, so two rows for one household is
-        a state no consumer could interpret -- and an implementation that
-        inserted rather than upserted would raise here rather than answer
-        ambiguously, which is the failure worth having."""
+        """The primary key *is* the user id.
+
+        so two rows for one household is a state no consumer could interpret -- and an
+        implementation that inserted rather than upserted would raise here rather than
+        answer ambiguously, which is the failure worth having.
+        """
         await self.add_history(user_id, at=EARLIER)
         await repository.put(self.stored(user_id, centroid=_vector(0.25), watermark=EARLIER))
         await repository.put(self.stored(user_id, centroid=_vector(0.75), watermark=EARLIER))
@@ -190,8 +173,9 @@ class TasteRepositoryContract:
     async def test_a_refusal_is_readable_and_carries_a_null_centroid(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """**The written refusal.** Kills the implementation that treats
-        "stored with no centroid" as "not stored".
+        """**The written refusal.** Kills the implementation that treats "stored with no.
+
+        centroid" as "not stored".
 
         The distinction is invisible in the value and total in the cost: under
         that implementation a household below the minimum is recomputed on
@@ -213,8 +197,7 @@ class TasteRepositoryContract:
     async def test_a_refusal_for_a_household_with_no_history_is_readable(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """The `NULL` watermark, both stored and computed, and the reason the
-        column is nullable.
+        """The `NULL` watermark, both stored and computed, and the reason the column is nullable.
 
         `NULL IS DISTINCT FROM NULL` is **false**, so a refusal written for a
         household that has watched nothing reads as current. Under the plan's
@@ -235,15 +218,18 @@ class TasteRepositoryContract:
     async def test_latest_is_none_for_a_household_with_nothing_stored(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """The absent arm. `None` here means *nothing was ever computed*, which
-        a ranking caller reads as "no term" -- and which is the shipped state
-        of every deployment whose worker has not run."""
+        """The absent arm.
+
+        `None` here means *nothing was ever computed*, which a ranking caller reads as
+        "no term" -- and which is the shipped state of every deployment whose worker has
+        not run.
+        """
         assert await repository.latest(user_id) is None
 
     async def test_latest_answers_a_row_written_under_another_model(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """**The whole reason this method exists.**
+        """**The whole reason this method exists.**.
 
         A request holds no embedder, so it has no `model_name` to ask `get()`
         with -- and `get()` would answer `None` for every name but the one that
@@ -277,9 +263,10 @@ class TasteRepositoryContract:
     async def test_latest_answers_a_written_refusal_rather_than_raising(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """The second arm, and it is the state `StoredTaste`'s docstring exists
-        to make representable: a household below the minimum has a **row** whose
-        centroid is NULL.
+        """The second arm.
+
+        and it is the state `StoredTaste`'s docstring exists to make representable: a
+        household below the minimum has a **row** whose centroid is NULL.
 
         Answered, never raised, and never collapsed into "no row": a ranking
         caller reads it as "no term", which is the same answer -- but an
@@ -299,8 +286,9 @@ class TasteRepositoryContract:
     async def test_latest_answers_a_row_that_get_calls_stale(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """**No staleness predicate**, and the two reads disagreeing here is the
-        design rather than a leak.
+        """**No staleness predicate**.
+
+        and the two reads disagreeing here is the design rather than a leak.
 
         `STALE_TASTE` answers *"should I recompute?"*, and a caller with no
         embedder cannot act on it. Worse, the watch state that moves the
@@ -324,9 +312,11 @@ class TasteRepositoryContract:
     async def test_latest_is_scoped_to_one_household(
         self, repository: TasteRepository, user_id: uuid.UUID, other_user_id: uuid.UUID
     ) -> None:
-        """An unscoped read hands one household's taste to another, and the
-        result renders perfectly: a populated, correctly-shaped, 384-lane unit
-        vector that ranks this member's search by somebody else's viewing."""
+        """An unscoped read hands one household's taste to another.
+
+        and the result renders perfectly: a populated, correctly-shaped, 384-lane unit
+        vector that ranks this member's search by somebody else's viewing.
+        """
         await self.add_history(user_id, at=EARLIER)
         await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
 
@@ -353,9 +343,11 @@ class TasteRepositoryContract:
     async def test_a_different_model_name_makes_the_stored_centroid_unreadable(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """Kills the implementation that stores the vector and forgets the
-        model, so a checkpoint swap serves vectors from a different space at
-        full confidence -- populated, correctly-shaped, and meaningless."""
+        """Kills the implementation that stores the vector and forgets the model.
+
+        so a checkpoint swap serves vectors from a different space at full confidence --
+        populated, correctly-shaped, and meaningless.
+        """
         await self.add_history(user_id, at=EARLIER)
         await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
 
@@ -364,8 +356,10 @@ class TasteRepositoryContract:
     async def test_a_newer_watch_state_makes_the_stored_centroid_unreadable(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """The requirement itself, and the only one of the three a `<`
-        watermark comparison also satisfies."""
+        """The requirement itself.
+
+        and the only one of the three a `<` watermark comparison also satisfies.
+        """
         await self.add_history(user_id, at=EARLIER)
         await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
         await self.add_history(user_id, at=LATER)
@@ -375,7 +369,7 @@ class TasteRepositoryContract:
     async def test_a_deleted_watch_state_makes_the_stored_centroid_unreadable(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """**Kills the `<` spelling, which only ever looks forward.**
+        """**Kills the `<` spelling, which only ever looks forward.**.
 
         The household unwatched something; the max fell back to the older
         state. Under `<` the stored watermark is now *greater* than the
@@ -393,9 +387,9 @@ class TasteRepositoryContract:
     async def test_a_cleared_history_makes_the_stored_centroid_unreadable(
         self, repository: TasteRepository, user_id: uuid.UUID
     ) -> None:
-        """**Kills the `<` spelling again, through `NULL` rather than through
-        an ordering** -- a different failure with the same cause, which is why
-        both cases exist.
+        """**Kills the `<` spelling again, through `NULL` rather than through an ordering**.
+
+        a different failure with the same cause, which is why both cases exist.
 
         With no states left the subquery is `NULL`, and `stored < NULL` is
         `NULL`, which is not true. So a `<` implementation never recomputes for
@@ -438,7 +432,7 @@ class TasteRepositoryContract:
     async def test_the_baseline_counts_owned_titles_and_not_the_catalog(
         self, repository: TasteRepository
     ) -> None:
-        """**The decision the whole affinity rests on.**
+        """**The decision the whole affinity rests on.**.
 
         A household cannot watch what it does not own, so the baseline is the
         owned shelf rather than the 1.27M-row catalog. Against a global
@@ -460,8 +454,10 @@ class TasteRepositoryContract:
     async def test_a_title_carrying_two_genres_counts_once_under_each(
         self, repository: TasteRepository
     ) -> None:
-        """The shares deliberately do not partition, so `tagged_titles` is
-        **not** `sum(counts.values())` and must not be derived from it.
+        """The shares deliberately do not partition.
+
+        so `tagged_titles` is **not** `sum(counts.values())` and must not be derived
+        from it.
 
         Dividing by a title's genre count to force a partition would make a
         two-genre title contribute half the evidence of a one-genre title,
@@ -479,9 +475,9 @@ class TasteRepositoryContract:
     async def test_an_untagged_owned_title_is_in_neither_the_counts_nor_the_total(
         self, repository: TasteRepository
     ) -> None:
-        """`titles.genres` is `ARRAY(Text) NOT NULL DEFAULT '{}'` and the
-        skeleton tier is largely empty, so untagged titles are most of a real
-        library.
+        """`titles.genres` is `ARRAY(Text) NOT NULL DEFAULT '{}'` and the skeleton tier is.
+
+        largely empty, so untagged titles are most of a real library.
 
         Left in the denominator they divide every `share_library` by the tagged
         fraction and inflate every lift uniformly — which on a mostly-skeleton
@@ -520,7 +516,7 @@ class TasteRepositoryContract:
     async def test_an_episode_copy_does_not_make_its_series_count_many_times(
         self, repository: TasteRepository
     ) -> None:
-        """**`episode_id IS NULL`, and it is the whole bound.**
+        """**`episode_id IS NULL`, and it is the whole bound.**.
 
         An episode's `MediaItem` carries its *series'* `title_id`, so without
         the clause one 20,000-episode series decides the entire genre baseline
@@ -539,8 +535,9 @@ class TasteRepositoryContract:
     async def test_a_series_owned_only_through_its_episodes_is_not_in_the_baseline(
         self, repository: TasteRepository
     ) -> None:
-        """The **cost** of `episode_id IS NULL`, pinned as behaviour rather
-        than left as a comment.
+        """The **cost** of `episode_id IS NULL`.
+
+        pinned as behaviour rather than left as a comment.
 
         `owned_title_ids` states it exactly — *"a library that reported
         episodes but never their series row reads as not-owned for that
@@ -565,9 +562,11 @@ class TasteRepositoryContract:
     async def test_an_empty_catalog_has_an_empty_baseline_rather_than_raising(
         self, repository: TasteRepository
     ) -> None:
-        """The denominator a caller must not divide by. `TasteService` checks
-        `tagged_titles == 0` and returns no affinities; a naive caller divides
-        and raises in the request path."""
+        """The denominator a caller must not divide by.
+
+        `TasteService` checks `tagged_titles == 0` and returns no affinities; a naive
+        caller divides and raises in the request path.
+        """
         library = await repository.library_genre_counts()
 
         assert library.counts == {}

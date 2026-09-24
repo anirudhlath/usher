@@ -1,33 +1,4 @@
-"""`usher genres --backfill`, against real Postgres.
-
-**The claim this file exists to verify is not "the column was rewritten".**
-That is assertable against a dict and is, in `tests/unit/test_services_genres.py`.
-The claim here is the one ADR-0039 mispriced: normalising `titles.genres`
-changes **segment 6 of 7** of the document `_FINGERPRINT_SQL` hashes, so a
-title whose genre moved stops reproducing its stored `source_fingerprint` and
-`usher index` claims it — with nothing in the backfill knowing anything about
-embeddings. The alternative implementation this rules out is a backfill that
-hand-rolls a staling mechanism of its own beside the fingerprint, which is two
-definitions of "stale" and the failure `db/repositories/search.py` records as a
-dashboard reading zero while a worker still claims rows.
-
-`md5` over `titles`' own columns is evaluated in Postgres, so none of it is
-expressible against `FakeTitleEmbeddingRepository` — whose own docstring says
-*"any test that asserts staleness against this fake is asserting the fake's own
-arithmetic"*.
-
-**Driven through `_genres` and `_index` themselves** rather than through a
-reimplementation of either loop, which is `test_index_backfill.py`'s rule and
-for its reason: the cursor's advance is one line inside those functions and a
-test that rewrote the loop would be testing the test.
-
-**Every sweep starts from an anchor id, and that is not tidiness.** This module
-commits for real, so the whole `titles` table is inside the sweep's population
-and a bare run's counts would be an assertion about the database rather than
-about the case. `_anchor` seeds one already-canonical title first and every
-sweep resumes after it, which is `test_index_backfill.py::_is_stale`'s
-reasoning applied to a count instead of to a predicate.
-"""
+"""`usher genres --backfill`, against real Postgres."""
 
 import asyncio
 import uuid
@@ -41,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.cli import _genres, _index
 from usher.config import Settings
-from usher.db.base import build_engine, build_session_factory
 from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.db.repositories.search import STALE_EMBEDDING, PostgresTitleEmbeddingRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -95,18 +65,12 @@ async def _wipe(session: AsyncSession) -> None:
 
 
 @pytest_asyncio.fixture
-async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = build_engine(postgres_url)
-    try:
-        yield build_session_factory(engine)
-    finally:
-        await engine.dispose()
-
-
-@pytest_asyncio.fixture
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """This module commits for real: `_genres` opens its own engine, so a
-    rolled-back fixture transaction would be invisible to it."""
+    """This module commits for real.
+
+    `_genres` opens its own engine, so a rolled-back fixture transaction would be
+    invisible to it.
+    """
     async with sessions() as session:
         await _wipe(session)
     yield
@@ -133,8 +97,10 @@ async def _seed(sessions: async_sessionmaker[AsyncSession], *titles: Title) -> N
 
 @pytest_asyncio.fixture
 async def anchor(sessions: async_sessionmaker[AsyncSession], clean: None) -> uuid.UUID:
-    """One already-canonical title, committed before anything else this case
-    seeds, whose id every sweep below resumes after.
+    """One already-canonical title.
+
+    committed before anything else this case seeds, whose id every sweep below resumes
+    after.
 
     Ids are UUIDv7 and therefore time-ordered, so a row committed first sorts
     first — but that is a property of a dependency rather than of this test,
@@ -146,9 +112,10 @@ async def anchor(sessions: async_sessionmaker[AsyncSession], clean: None) -> uui
 
 
 async def _embed(sessions: async_sessionmaker[AsyncSession], title: Title) -> None:
-    """Store the vector *and* the fingerprint the composer computes for this
-    title as it stands, which is what makes the title current rather than
-    merely present."""
+    """Store the vector *and* the fingerprint the composer computes for this title as it stands.
+
+    which is what makes the title current rather than merely present.
+    """
     async with sessions() as session:
         await PostgresTitleEmbeddingRepository(session).upsert_many(
             [
@@ -175,7 +142,8 @@ async def _sweep(
 
     `asyncio.wait_for` for `test_index_backfill.py::_sweep`'s reason: the
     failure a sweep has is non-termination, and a hang reads in a log like a
-    mutation nothing observed rather than one everything caught."""
+    mutation nothing observed rather than one everything caught.
+    """
     await asyncio.wait_for(
         _genres(settings, backfill=backfill, batch_size=batch_size, limit=limit, after=after),
         timeout=60.0,
@@ -212,8 +180,9 @@ async def test_the_rewrite_stales_the_embedding_through_the_shipped_fingerprint(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The load-bearing case.** A rewritten genre must make `usher index`
-    claim the title, through `_FINGERPRINT_SQL` and nothing else.
+    """**The load-bearing case.** A rewritten genre must make `usher index` claim the title.
+
+    through `_FINGERPRINT_SQL` and nothing else.
 
     **The premise is the first assertion, not a comment.** A title embedded
     from its own document is *not* stale — without that, a fingerprint that
@@ -251,9 +220,10 @@ async def test_the_backfill_reports_the_embeddings_it_staled(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The count an operator reads is the *stale predicate's* own difference,
-    so a rewrite over a title carrying no vector reports zero rather than one
-    — which is what makes the live figure 304 rather than 79,913.
+    """The count an operator reads is the *stale predicate's* own difference.
+
+    so a rewrite over a title carrying no vector reports zero rather than one — which is
+    what makes the live figure 304 rather than 79,913.
     """
     embedded = _title("The Quiet Vacuum", "Sci-Fi")
     unembedded = _title("Ninth Harbour", "Reality-TV")
@@ -277,12 +247,15 @@ async def test_a_second_backfill_rewrites_nothing_and_stales_nothing(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**Re-runnability, against the statement rather than against the
-    caller.** `replace_genres` guards with `IS DISTINCT FROM`, so even a
-    caller that handed back every row would write nothing; the report an
-    operator reads is `rowcount`, which is what makes "it already ran" a fact
-    rather than a hope. This is the property an Alembic migration cannot have,
-    and it is why this is a command.
+    """**Re-runnability.
+
+    against the statement rather than against the caller.** `replace_genres` guards with
+    `IS DISTINCT FROM`, so even a caller that handed back every row would write nothing;
+    the report an operator reads is `rowcount`, which is what makes "it already ran" a
+    fact rather than a hope.
+
+    This is the property an Alembic migration cannot have, and it is why this is a
+    command.
     """
     title = _title("The Quiet Vacuum", "Sci-Fi")
     await _seed(sessions, title)
@@ -314,9 +287,11 @@ async def test_the_bare_form_reports_without_writing(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`usher genres` with no `--backfill` is the read-only bargain `usher
-    index` and `usher derive` already take, and this is the case that fails if
-    the dry run ever reaches the `UPDATE`."""
+    """`usher genres` with no `--backfill` is the read-only bargain `usher index` and `usher.
+
+    derive` already take, and this is the case that fails if the dry run ever reaches
+    the `UPDATE`.
+    """
     title = _title("The Quiet Vacuum", "Sci-Fi")
     await _seed(sessions, title)
     capsys.readouterr()
@@ -334,9 +309,11 @@ async def test_a_bounded_run_resumes_from_the_cursor_it_printed(
     anchor: uuid.UUID,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """1.27M rows is a run an operator interrupts. `--limit` bounds it and
-    `--after` continues it, and the two must compose into exactly one pass over
-    the population."""
+    """1.27M rows is a run an operator interrupts.
+
+    `--limit` bounds it and `--after` continues it, and the two must compose into
+    exactly one pass over the population.
+    """
     titles = [_title(f"Title {index}", "Sci-Fi") for index in range(4)]
     await _seed(sessions, *titles)
     ordered = sorted(title.id for title in titles)

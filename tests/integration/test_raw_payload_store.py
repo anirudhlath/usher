@@ -1,11 +1,4 @@
-"""The shared contract against real Postgres, plus what a Python dict cannot
-express: JSONB.
-
-`FakeRawPayloadStore` hands back exactly the object it was given, so
-`test_a_payload_survives_nesting_and_nulls` proves the assertion is
-expressible and this run proves it survives a real serialise/deserialise
-round trip through a normalising column type.
-"""
+"""The shared contract against real Postgres, plus what a Python dict cannot express: JSONB."""
 
 import pytest
 from sqlalchemy import text
@@ -29,12 +22,13 @@ class TestPostgresRawPayloadStore(RawPayloadStoreContract):
 async def test_a_payload_round_trips_as_a_dict_not_a_string(
     store: PostgresRawPayloadStore,
 ) -> None:
-    """A `text()` statement carries no SQLAlchemy type for the column, so
-    whether asyncpg hands `jsonb` back as a `dict` or as a `str` depends on
-    whether a codec was installed on that connection. Getting it wrong is not
-    loud: the value is a perfectly good `str` that reaches `EnrichService` and
-    fails there, one layer away from the cause. This is what pins the actual
-    behaviour rather than assuming it."""
+    """A `text()` statement carries no SQLAlchemy type for the column.
+
+    Whether asyncpg hands `jsonb` back as a `dict` or as a `str` depends on whether a
+    codec was installed on that connection, and getting it wrong is not loud: the
+    value is a perfectly good `str` that reaches `EnrichService` and fails there, one
+    layer away from the cause.
+    """
     await store.put("tmdb", "movie", "90000550", PAYLOAD)
     found = await store.get("tmdb", "movie", "90000550")
     assert found is not None
@@ -45,16 +39,13 @@ async def test_a_payload_round_trips_as_a_dict_not_a_string(
 async def test_a_refresh_moves_fetched_at_inside_one_transaction(
     session: AsyncSession, store: PostgresRawPayloadStore
 ) -> None:
-    """`clock_timestamp()`, not `now()`. `now()` is `transaction_timestamp()`
-    and is frozen for the life of the transaction, so an enrichment worker
-    that refreshes several payloads in one transaction would stamp every one
-    of them with its start instant -- and the longer the transaction, the
-    more wrong the answer to the one compliance question this column exists
-    to answer.
+    """`clock_timestamp()`, not `now()`.
 
-    The whole point is that this holds *inside* one transaction, which is
-    exactly the shape this suite's fixture provides, so the case is here
-    rather than in the shared contract.
+    `now()` is `transaction_timestamp()` and is frozen for the life of the
+    transaction, so an enrichment worker that refreshes several payloads in one
+    transaction would stamp every one of them with its start instant. The whole point
+    is that this holds *inside* one transaction, which is exactly the shape this
+    suite's fixture provides, so the case is here rather than in the shared contract.
     """
     await store.put("tmdb", "movie", "90000550", {"v": 1})
     first = await store.get("tmdb", "movie", "90000550")
@@ -69,9 +60,11 @@ async def test_a_refresh_moves_fetched_at_inside_one_transaction(
 async def test_a_second_put_does_not_add_a_row(
     session: AsyncSession, store: PostgresRawPayloadStore
 ) -> None:
-    """`uq_raw_payloads_provider_kind_reference` is the `ON CONFLICT` target,
-    and without it every re-enrichment of the same title adds ~8 kB to a
-    database PRD 08 budgets at 8-12 GB total."""
+    """`uq_raw_payloads_provider_kind_reference` is the `ON CONFLICT` target.
+
+    Without it every re-enrichment of the same title adds several kB to a database
+    PRD 04 sizes at ~8-12 GB after import.
+    """
     await store.put("tmdb", "movie", "90000550", {"v": 1})
     await store.put("tmdb", "movie", "90000550", {"v": 2})
     count = (await session.execute(text("SELECT count(*) FROM raw_payloads"))).scalar_one()
@@ -81,9 +74,11 @@ async def test_a_second_put_does_not_add_a_row(
 async def test_the_compliance_query_uses_the_fetched_at_index(
     session: AsyncSession, store: PostgresRawPayloadStore, analyze: Analyze
 ) -> None:
-    """`ix_raw_payloads_fetched_at` is ascending because the question asks for
-    the minimum (PRD 10, dashboard 5). A `min()` that seq-scans is fine at
-    1,000 rows and is not at the catalog's enrichment volume."""
+    """`ix_raw_payloads_fetched_at` ascends because the question asks for the minimum.
+
+    PRD 10, dashboard 5. A `min()` that seq-scans is fine at a thousand rows and is
+    not at the catalog's enrichment volume.
+    """
     for index in range(2_000):
         await store.put("tmdb", "movie", str(index), {"v": index})
     await analyze("raw_payloads")
@@ -102,16 +97,15 @@ async def test_the_compliance_query_uses_the_fetched_at_index(
 async def test_an_empty_provider_is_a_port_error_not_an_integrity_error(
     store: PostgresRawPayloadStore,
 ) -> None:
-    """`ck_raw_payloads_provider_not_empty`. Nothing above this layer
-    validates the three key parts -- they are plain `str` arguments, not a
-    domain model -- so the CHECK is the only thing between a caller's bug and
-    a cache entry nothing can ever look up again, and it has to reach that
-    caller as a port error (ADR-0009).
+    """`ck_raw_payloads_provider_not_empty`.
 
-    The second half is the one that bites: without a SAVEPOINT the caught
-    violation leaves the *session* aborted, so an enrichment worker that
-    logged the bad key and carried on would find its next unrelated statement
-    raising `PendingRollbackError` instead of running.
+    Nothing above this layer validates the three key parts -- they are plain `str`
+    arguments, not a domain model -- so the CHECK is the only thing between a
+    caller's bug and a cache entry nothing can ever look up again, and it has to
+    reach that caller as a port error. The second half is the one that bites: without
+    a SAVEPOINT the caught violation leaves the *session* aborted, so an enrichment
+    worker that logged the bad key and carried on would find its next unrelated
+    statement raising `PendingRollbackError` instead of running.
     """
     with pytest.raises(RepositoryConflict) as caught:
         await store.put("", "movie", "90000550", {"v": 1})

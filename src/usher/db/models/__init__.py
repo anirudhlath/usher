@@ -1,4 +1,7 @@
-"""SQLAlchemy tables. Importing this module registers all metadata."""
+"""SQLAlchemy tables.
+
+Importing this module registers all metadata.
+"""
 
 from usher.db.models.analytics import SearchQueryRow
 from usher.db.models.bootstrap import IdCrosswalkRow, ImportRunRow, TmdbIdRow

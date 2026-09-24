@@ -1,18 +1,6 @@
-"""The series hierarchy on the wire: `GET /series/{id}/seasons`,
-`GET /seasons/{id}/episodes` and `GET /episodes/{id}`.
+"""The series hierarchy on the wire.
 
-Driven through a real `create_app()` with two dependencies overridden -- the
-title repository and the episode repository -- so the router, the DTOs, A3's
-cursor codec, A2's problem envelope and FastAPI's own path and query parsing
-all sit on the path a request takes. Only the two Postgres reads are stood in
-for; `tests/integration/test_series_route.py` is what runs those.
-
-**These three routes hold no watch state, and that is a decision rather than an
-omission.** `PUT /watch/episodes/{id}` is group D's, and a `watch_state` key
-here would be a second read *per episode* on a paged route -- the N+1 that
-`resolve_episodes` and `next_up` both exist to prevent, arriving through a DTO.
-If group D wants it, it is an additive change to `api/dto/episode.py` and
-belongs there.
+`GET /series/{id}/seasons`, `GET /seasons/{id}/episodes` and `GET /episodes/{id}`.
 """
 
 import uuid
@@ -115,13 +103,11 @@ async def _episodes(
 async def test_a_series_lists_its_seasons_in_order_and_specials_are_one_of_them(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Season 0 is a season of the series here, and `next_up` still excludes
-    it -- the divergence is argued at both call sites and pinned in one
-    contract case.
+    """Season 0 is a season of the series here, and `next_up` still excludes it.
 
-    Seeded in descending order so the minted UUIDv7s descend with the season
-    numbers: without that, `ORDER BY id` and `ORDER BY season_number` return
-    the same list and the ordering this asserts is untested.
+    Seeded in descending order so the minted UUIDv7s descend with the season numbers:
+    without that, `ORDER BY id` and `ORDER BY season_number` return the same list and
+    the ordering this asserts is untested.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     second = await _season(episodes, series.id, 2)
@@ -146,16 +132,12 @@ async def test_a_series_lists_its_seasons_in_order_and_specials_are_one_of_them(
 async def test_a_movie_answers_200_with_no_seasons_and_an_unknown_id_answers_404(
     client: httpx.AsyncClient, titles: FakeTitleRepository
 ) -> None:
-    """The two are distinguishable, and one case says so because either one
-    alone is satisfied by an implementation that got the other wrong.
+    """An empty season list and an unknown title are distinguishable, in one case.
 
-    A movie having no seasons is a fact about the title, so it is a `200` with
-    an empty list -- the same argument `api/dto/title.py` makes for absence
-    over `null`, arriving at a collection that is genuinely empty rather than
-    undelivered. `404` is reserved for an id no title carries at all, in A2's
-    envelope with V1's generic `not_found`: RFC 9457's `instance` already
-    carries the path, so a per-resource code would be a second spelling of it
-    (ADR-0030).
+    A movie having no seasons is a fact about the title, so it is a `200` with an
+    empty list: a collection that is genuinely empty rather than undelivered. `404`
+    is reserved for an id no title carries at all, under the generic `not_found`
+    code, since the problem document's `instance` already carries the path.
     """
     movie = await _title(titles, TitleKind.MOVIE, "Example Movie")
 
@@ -175,15 +157,12 @@ async def test_a_movie_answers_200_with_no_seasons_and_an_unknown_id_answers_404
 async def test_a_season_that_exists_and_holds_nothing_answers_200_and_an_unknown_id_404(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """An empty episode list is a real state.
+    """An empty episode list is a real state, not a missing one.
 
-    Since M9's T1 a season block TMDb declines to serve and a season the show
-    does not have are the **same 200 with the key absent**
-    (`.claude/rules/tmdb-and-enrichment.md`), so a listed season whose block
-    never arrived leaves a `Season` row with no episodes rather than a parked
-    job. The route says that honestly -- an empty page, with the provider's own
-    `episode_count` still on the season -- and keeps `404` for a season id that
-    does not exist.
+    A season block TMDb declines to serve leaves a `Season` row with no episodes
+    rather than a parked job. The route says so honestly -- an empty page, with the
+    provider's own `episode_count` still on the season -- and keeps `404` for a
+    season id that does not exist.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     listed = await _season(episodes, series.id, 1, episode_count=10)
@@ -200,12 +179,10 @@ async def test_a_season_that_exists_and_holds_nothing_answers_200_and_an_unknown
 async def test_a_season_pages_by_episode_number_and_the_pages_abut(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Five episodes at `limit=2`, walked to exhaustion through the wire
-    cursor.
+    """Five episodes at `limit=2`, walked to exhaustion through the wire cursor.
 
-    The cursor is A3's codec at the router and the port took typed keyset
-    values, which is ADR-0034's first decision: nothing below `api/` ever sees
-    the base64.
+    The codec lives at the router and the port takes typed keyset values, so nothing
+    below `api/` ever sees the base64.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
@@ -230,13 +207,11 @@ async def test_a_season_pages_by_episode_number_and_the_pages_abut(
 async def test_a_page_that_exactly_exhausts_the_season_carries_no_next_cursor(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The off-by-one ADR-0034's over-fetch exists to remove, and it is
-    invisible outside `count % limit == 0`.
+    """The off-by-one the over-fetch exists to remove, invisible outside `count % limit == 0`.
 
-    With the naive *"the page is full, so there is more"* spelling this fails
-    and the partition case above -- five episodes at `limit=2` -- stays green,
-    because `5 % 2 != 0`. A client must never have to spend a request to learn
-    it is finished.
+    The naive "the page is full, so there is more" spelling fails here while the
+    five-at-`limit=2` case above stays green. A client must never have to spend a
+    request to learn it is finished.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
@@ -253,16 +228,14 @@ async def test_a_page_that_exactly_exhausts_the_season_carries_no_next_cursor(
 async def test_a_cursor_minted_for_another_season_is_refused_rather_than_answered(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """ADR-0034's digest, doing the job it exists for.
+    """The cursor's digest, doing the job it exists for.
 
-    Without it, a cursor minted inside season 1 and replayed against season 2
-    decodes cleanly and produces a plausible, wrong, **silent** page -- season
-    2's episodes starting after *season 1's* episode 2. With it, that is a
-    `400 invalid_cursor`, which is a refusal a client can act on.
+    Without it, a cursor minted inside season 1 and replayed against season 2 decodes
+    cleanly and produces a plausible, wrong, silent page. With it, that is a
+    `400 invalid_cursor`, a refusal a client can act on.
 
-    The premise is asserted first: season 2 answers `200` for a plain request,
-    so the `400` below is the cursor being refused rather than the season
-    being missing.
+    The premise is asserted first: season 2 answers `200` for a plain request, so the
+    `400` below is the cursor being refused rather than the season being missing.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     first = await _season(episodes, series.id, 1)
@@ -289,9 +262,11 @@ async def test_a_cursor_minted_for_another_season_is_refused_rather_than_answere
 async def test_a_cursor_that_is_not_a_cursor_is_a_400_and_never_a_500(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """Every refusal is a `400 invalid_cursor` problem document -- never a 500,
-    and never a pydantic 422, which would echo the rejected cursor back under
-    `input`."""
+    """Every refusal is a `400 invalid_cursor` problem document.
+
+    Never a 500, and never a pydantic 422, which would echo the rejected cursor back
+    under `input`.
+    """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
     await _episodes(episodes, series.id, season, [1, 2])
@@ -305,16 +280,12 @@ async def test_a_cursor_that_is_not_a_cursor_is_a_400_and_never_a_500(
 async def test_an_episode_carries_the_ids_a_client_climbs_back_up_with_and_no_provider_id(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """`title_id` and `season_id` on the episode, so a client that opened one
-    from a search result can reach its season and its series without a second
-    search.
+    """`title_id` and `season_id` on the episode, and no provider ids at all.
 
-    And no `tmdb_id`, no `imdb_id` and no source concept: PRD 07's first line
-    is *"Nothing in this surface mentions a media server"*, and CLAUDE.md's
-    identity rule is that a provider id is an indexed attribute and never an
-    identifier in an API contract. The positive control comes first -- an
-    absence assertion is worth nothing until the body is proved to hold the
-    episode at all.
+    A client that opened an episode from a search result reaches its season and its
+    series without a second search; a provider id is an indexed attribute and never an
+    identifier in an API contract. The positive control comes first, since an absence
+    assertion is worth nothing until the body is proved to hold the episode at all.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
@@ -345,11 +316,11 @@ async def test_an_episode_carries_the_ids_a_client_climbs_back_up_with_and_no_pr
 async def test_an_episode_id_no_episode_carries_is_a_404_problem_document(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The control comes first and it is what makes this a case at all: a path
-    the app does not route answers `404 not_found` in the identical envelope,
-    because `create_app` registers the Starlette handler app-wide. So a bare
-    404 assertion here would pass against a route that was never written --
-    which it did, when this file was first run red.
+    """The control comes first and it is what makes this a case at all.
+
+    A path the app does not route answers `404 not_found` in the identical envelope,
+    because `create_app` registers the Starlette handler app-wide, so a bare 404
+    assertion here would pass against a route that was never written.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
@@ -368,16 +339,12 @@ async def test_an_episode_id_no_episode_carries_is_a_404_problem_document(
 async def test_the_episodes_route_reads_once_per_page_and_never_once_per_episode(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """The N+1 `resolve_episodes` and `next_up` both exist to prevent,
-    arriving at a route.
+    """The N+1 `resolve_episodes` and `next_up` both exist to prevent, at a route.
 
-    The page size is what varies and the season is what is held fixed, which
-    is the shape a statement-count assertion needs: a read per episode is
-    invisible when the two runs return the same number of rows. Two reads per
-    request, whatever the page holds -- the season's own existence and the
-    page -- and the second is one statement rather than one per row.
-    `FakeEpisodeRepository.calls` counts them here; the integration file counts
-    real statements.
+    The page size varies and the season is held fixed, which is the shape a
+    statement-count assertion needs: a read per episode is invisible when the two runs
+    return the same number of rows. Two reads per request whatever the page holds --
+    the season's own existence and the page.
     """
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
@@ -397,12 +364,11 @@ async def test_the_episodes_route_reads_once_per_page_and_never_once_per_episode
 async def test_the_seasons_route_reads_once_for_the_series_whatever_it_holds(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """One read on `EpisodeRepository` for the whole hierarchy, and it is
-    never `list_for_title` -- that read returns the entire tree, 20,001 rows
-    for the one measured pathological series, to render a season list.
+    """One read on `EpisodeRepository` for the hierarchy, and never `list_for_title`.
 
-    The title's own existence read is a `TitleRepository` statement and is not
-    counted here; the integration file counts both, against real Postgres.
+    That read returns the entire tree -- every episode of every season -- to render a
+    season list. The title's own existence read is a `TitleRepository` statement and
+    is not counted here.
     """
     small = await _title(titles, TitleKind.SERIES, "Two Seasons")
     for number in range(1, 3):
@@ -427,8 +393,7 @@ async def test_the_seasons_route_reads_once_for_the_series_whatever_it_holds(
 async def test_a_limit_above_the_ceiling_is_refused_without_echoing_it(
     client: httpx.AsyncClient, titles: FakeTitleRepository, episodes: FakeEpisodeRepository
 ) -> None:
-    """A2's control, on this route's own query string: the 422 carries the
-    stripped error list and never the submitted value."""
+    """The 422 carries the stripped error list and never the submitted value."""
     series = await _title(titles, TitleKind.SERIES, "Example Series")
     season = await _season(episodes, series.id, 1)
 

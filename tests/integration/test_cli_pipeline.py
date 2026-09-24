@@ -1,39 +1,12 @@
-"""The CLI's ingest commands, run for real against a live PostgreSQL.
+"""The CLI's ingest commands, run for real against a live PostgreSQL."""
 
-`tests/unit/test_cli.py` covers the argument surface; nothing there
-constructs a repository, and a composition root's whole job is construction.
-The plan's own Step 3 verified these by hand against `docker compose`
-(`sync-status`, `unmatched`, `work --once` on an empty database, all
-exiting 0) -- this is that check, automated, because "every command works
-before a sync has ever run" is exactly the property an operator needs when
-diagnosing why the sync did not happen, and it is the property a wiring
-change silently breaks.
-
-**These tests do not use the `session` fixture, and that is the point.**
-Each command owns its own engine, session, and transaction -- built from
-`Settings` the way the real process builds them -- so what runs here is the
-real `build_engine` -> `build_session_factory` -> `_build_pipeline` chain
-rather than a hand-assembled one. The cost is that they commit for real
-against the session-scoped container instead of rolling back, so
-`_clean_slate` deletes what they wrote. It used to drop `stg_*` tables too
--- `usher.db.staging` created them with DDL, Postgres DDL is transactional,
-and a *committing* test was the only kind that could leak one, which
-surfaced as schema drift in `test_migrations.py`, a different file that then
-failed only in combination. M6's `CREATE TEMP TABLE ... ON COMMIT DROP`
-removed the leak, so those two lines are gone rather than kept as a cleanup
-that can no longer fire.
-
-No test here reaches a network. `_open_adapter` is exercised on the branch
-where the credential row is missing, which answers before an adapter is
-built; anything that reached `EmbyAdapter` would resolve a hostname. The
-same holds for `usher push --probe`, whose whole job is opening a socket:
-the two cases below exercise "nothing to probe" and "no credential to probe
-with", both of which answer from local state.
-"""
-
+import asyncio
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -70,7 +43,7 @@ from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
-from usher.ports.search import SearchFilters
+from usher.ports.search import SearchFilters, SuggestTier
 from usher.services.curation_validate import (
     ITEM_IDS_KEY,
     REASON_KEY,
@@ -78,7 +51,7 @@ from usher.services.curation_validate import (
     TITLE_KEY,
     DropReason,
 )
-from usher.services.search import SuggestTier
+from usher.services.similar import blend_fingerprint
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -92,13 +65,11 @@ AsyncCloser = Callable[[], Awaitable[None]]
 
 @pytest.fixture
 def cli_settings(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[Settings]:
-    """`Settings` as `usher.cli.main` builds them: from the environment,
-    through the cached `get_settings()`.
+    """`Settings` as `usher.cli.main` builds them, through the cached `get_settings()`.
 
-    The CLI reads `get_settings()` and the API reads `app.state.settings`,
-    and that asymmetry is deliberate (M3 found `Depends(get_settings)`
-    re-reads `os.environ` and failed 13 of 15 tests). Building them the same
-    way the CLI does is what makes this a test of the CLI's own root.
+    The CLI reads `get_settings()` and the API reads `app.state.settings`, and that
+    asymmetry is deliberate: `Depends(get_settings)` re-reads `os.environ`. Building
+    them the same way the CLI does is what makes this a test of the CLI's own root.
     """
     monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
@@ -125,34 +96,23 @@ async def _purge(settings: Settings) -> None:
     async with _session_for(settings) as session:
         for statement in (
             "DELETE FROM jobs",
-            # M8's cost ledger, which cascades from nothing and has no
+            # The cost ledger, which cascades from nothing and has no
             # `user_id` to scope a delete by -- so a committing curate case
             # has to clear the table.
             "DELETE FROM llm_calls",
             "DELETE FROM watch_states",
             "DELETE FROM media_items",
-            # M9's analytics table, and it has to precede the users delete
-            # below: `search_queries.user_id` is `ON DELETE RESTRICT` on
-            # purpose, so a row `usher search` committed turns that statement
-            # into a foreign-key violation. Like `llm_calls` two lines up it
-            # cascades from nothing; unlike it, it *does* have a `user_id` --
-            # which is exactly what makes the ordering load-bearing rather than
-            # the scoping.
+            # The analytics table, and it has to precede the users delete below:
+            # `search_queries.user_id` is `ON DELETE RESTRICT` on purpose, so a row
+            # `usher search` committed turns that statement into a foreign-key
+            # violation.
             "DELETE FROM search_queries",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
-            # `LIKE 'cli-%'`, not `= 'cli-orphan'`, and the difference is a
-            # whole-suite outage. This file commits through its own sessions
-            # rather than the rolled-back one, so a title it seeds under any
-            # other name survives every later case in the session and inflates
-            # their counts -- `titles` is read by the candidate pool, by
-            # `count_by_state`, and by the curate cases' own premise guards.
-            # Adding one `cli-real` row for a case that needs a title that
-            # *exists* turned 1 failure into 43, none of them in the file that
-            # wrote the row. Matching the prefix the `sources` line above
-            # already uses covers whatever the next case needs to seed.
+            # `LIKE 'cli-%'`, not `= 'cli-orphan'`, and the difference is a whole-suite
+            # outage.
             "DELETE FROM titles WHERE sort_name LIKE 'cli-%'",
-            # M9's overrides table. It ships **empty** and is never seeded, so
+            # The overrides table. It ships **empty** and is never seeded, so
             # `DELETE FROM` restores the shipped state exactly -- and it is what
             # makes `usher home`'s provider count a fact rather than a hope
             # about whether an earlier case in this file disabled something.
@@ -165,10 +125,11 @@ async def _purge(settings: Settings) -> None:
 async def test_sync_status_works_before_any_sync_has_run(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A command that only works after a successful sync is a command an
-    operator cannot use to find out why the sync did not happen. Every
-    `JobKind` is reported, including the empty ones -- a queue that stops
-    reporting a kind is indistinguishable from one reporting zero."""
+    """A command that only works after a successful sync cannot diagnose a failed one.
+
+    Every `JobKind` is reported, including the empty ones -- a queue that stops
+    reporting a kind is indistinguishable from one reporting zero.
+    """
     await _sync_status(cli_settings)
     printed = capsys.readouterr().out
     for kind in JobKind:
@@ -186,14 +147,15 @@ async def test_unmatched_reports_an_empty_review_queue(
 async def test_work_runs_a_pass_over_an_empty_queue(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`work --once` against an empty database. It builds every service and a
-    handler per kind this deployment can serve -- **two** of the six here,
-    since `enrich` and `derive` want a TMDb key, `index` wants the embedding
-    extra and `curate` wants `USHER_LLM_ENABLED`, and this fixture configures
-    none of the three -- requeues whatever a previous process left `running`,
-    claims nothing, and exits. It creates the singleton default user on the
-    way, which nothing before M4 ever did and without which
-    `watch_states.user_id` has no row to point at."""
+    """`work --once` against an empty database.
+
+    It builds every service and a handler per kind this deployment can serve -- **two**
+    of the six here, since `enrich` and `derive` want a TMDb key, `index` wants the
+    embedding extra and `curate` wants `USHER_LLM_ENABLED`, and this fixture configures
+    none of the three -- requeues whatever a previous process left `running`, claims
+    nothing, and exits. It creates the singleton default user on the way, without which
+    `watch_states.user_id` has no row to point at.
+    """
     await _work(cli_settings, once=True)
     assert "0 jobs" in capsys.readouterr().out
     async with _session_for(cli_settings) as session:
@@ -211,28 +173,7 @@ async def test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing(
     clean_slate: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**`usher work` is the second composition root, and this is the only
-    thing that says it builds an `LLMClient` at all.**
-
-    `tests/integration/test_lanes_in_the_server_process.py` makes the same
-    claim about `create_app`; the two roots are exactly what
-    `usher.composition` exists to keep in step, and "one root gains a
-    collaborator and the other keeps answering as though it had none" is the
-    drift that module's docstring names. Without this case, deleting
-    `_work`'s `llm_client(settings)` leaves the whole suite green and turns
-    `USHER_LLM_ENABLED=true` on a split deployment into a queue that grows
-    forever.
-
-    Parked rather than completed, and against an **empty** database on
-    purpose: `CurationService` refuses an empty candidate pool with
-    `PortDataMalformed` *before* the client is touched, so this exercises the
-    whole claim/handle/classify path at a cost of nothing and opens no socket
-    -- which is the same reason PRD 08's "every command works against an
-    empty database" is the rule this file is built around.
-
-    Its own settings rather than the shared `cli_settings` fixture, because
-    the one thing under test is a setting the shared fixture does not set.
-    """
+    """`usher work` is the second composition root, and it builds an `LLMClient`."""
     monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
     monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
     monkeypatch.setenv("USHER_LLM_ENABLED", "true")
@@ -267,16 +208,11 @@ async def test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing(
 async def test_work_releases_every_process_resource_it_built(
     cli_settings: Settings, monkeypatch: pytest.MonkeyPatch, clean_slate: None
 ) -> None:
-    """The `usher work` half of `create_app`'s
-    `test_the_lifespan_releases_every_process_resource_it_built`, and the two
-    are one claim about two roots -- which is what `usher.composition` exists
-    to keep in step.
+    """The `usher work` half of `create_app`'s own release claim.
 
-    Measured before writing it: deleting any one of `aclose()`,
-    `aclose_model()` or `aclose_client()` from `_work`'s `finally` left
-    `tests/unit` and `tests/integration` fully green. `aclose_client()` is
-    M8's line and the other two are inherited; all three are pinned here
-    rather than only the new one.
+    The two are one claim about two roots, which is what `usher.composition` exists to
+    keep in step. Deleting any one of `aclose()`, `aclose_model()` or `aclose_client()`
+    from `_work`'s `finally` leaves both suites green, so all three are pinned here.
 
     The three factories are substituted for the reason the API case states:
     on this deployment's settings the real ones all answer
@@ -310,8 +246,10 @@ async def test_the_default_user_is_created_once_and_is_stable(
     cli_settings: Settings, clean_slate: None
 ) -> None:
     """Two runs of the same command must write history to the same user.
-    `is_default` is a plain boolean with no partial unique index behind it,
-    so "the default user" is a stable *choice* rather than a constraint."""
+
+    `is_default` is a plain boolean with no partial unique index behind it, so "the
+    default user" is a stable *choice* rather than a constraint.
+    """
     async with _session_for(cli_settings) as session:
         first = await ensure_default_user(session)
         await session.commit()
@@ -331,10 +269,11 @@ async def test_the_default_user_is_created_once_and_is_stable(
 async def test_work_completes_a_job_for_an_item_no_source_addresses(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A `match` job for an item no configured source addresses completes
-    rather than parks (PRD 08 reserves parking for work a human must look
-    at), so the worker's loop is exercised end to end without a network
-    call: `SourceRegistry.resolve` answers `None` from local state alone.
+    """A `match` job no configured source addresses completes rather than parks.
+
+    PRD 08 names the case -- *"one no configured source addresses, completes"* -- and
+    the worker's loop is exercised end to end without a network call:
+    `SourceRegistry.resolve` answers `None` from local state alone.
     """
     async with _session_for(cli_settings) as session:
         pipeline = build_pipeline(session, cli_settings)
@@ -349,34 +288,242 @@ async def test_work_completes_a_job_for_an_item_no_source_addresses(
     assert remaining == 0, "a job for an item nothing addresses is done, not poison"
 
 
-async def test_unmatched_lists_and_resolves_through_the_real_repository(
+#: Backdated an hour, past `USHER_JOB_LEASE_SECONDS`' 300 s default without
+#: moving the setting. A **raw `INSERT`** because that is the only way to own
+#: `jobs.updated_at`: every statement in `PostgresJobQueue` stamps it
+#: `clock_timestamp()` itself, so a claim made through the port is by
+#: construction fresh and can never be older than the lease.
+_PLANT_AN_ORPHAN = """
+INSERT INTO jobs (id, kind, key, priority, status, attempts, created_at, updated_at)
+VALUES (
+    :id, :kind, :key, :priority, 'running', 0,
+    clock_timestamp() - interval '1 hour',
+    clock_timestamp() - interval '1 hour'
+)
+"""
+
+
+async def test_work_names_the_claims_it_took_back_from_a_process_that_stopped(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`recover()`'s return value has a reader at both call sites, this being one.
+
+    Discarding it leaves a worker that died holding claims traceable only through a
+    WARNING that fires when the count is non-zero. The server reports the total in
+    `/health/ready`'s body; this command has no readiness route, so it says so in the
+    pass line it already prints rather than growing a surface.
+
+    The premise is asserted first and from the command's own session: a row
+    recovery cannot see recovers `0`, and `0` is also what a discarded return
+    value prints.
+    """
+    key = f"an-orphan-{new_id()}"
+    async with _session_for(cli_settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+    async with _session_for(cli_settings) as session:
+        stale = (
+            await session.execute(
+                text(
+                    "SELECT status, updated_at <= clock_timestamp() - "
+                    "make_interval(secs => :lease) AS stale FROM jobs WHERE key = :key"
+                ),
+                {"lease": cli_settings.job_lease_seconds, "key": key},
+            )
+        ).one()
+    assert (stale.status, stale.stale) == ("running", True), (
+        "the premise: an abandoned claim older than the lease is what recovery takes back"
+    )
+
+    await _work(cli_settings, once=True)
+
+    out = capsys.readouterr().out
+    assert "1 recovered claims" in out, out
+    # And the recovered claim really was re-run in the same pass, which is
+    # what makes the number a recovery rather than a count of anything.
+    assert "1 jobs" in out, out
+
+
+class _JustBooted:
+    """`time`, with `monotonic()` frozen at a small uptime.
+
+    Substituted for `usher.services.jobs`'s **module** attribute, never the
+    global one: `asyncio` resolves `time.monotonic` through `loop.time()` at
+    call time, so a global patch freezes every sleep in the event loop and this
+    hangs rather than fails. That module is where the throttle both worker
+    roots share reads the clock, and it reads `perf_counter` for a job's
+    duration histogram, so the shim carries both.
+    """
+
+    def __init__(self, uptime: float) -> None:
+        self._uptime = uptime
+
+    def monotonic(self) -> float:
+        return self._uptime
+
+    def perf_counter(self) -> float:
+        return self._uptime
+
+
+async def test_work_recovers_on_its_first_pass_on_a_host_that_just_booted(
     cli_settings: Settings,
     clean_slate: None,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    session: AsyncSession,
 ) -> None:
-    """The review queue's two halves, against real SQL. `--resolve` writes
-    `title_id` and leaves `episode_id` null, which `attach_title` documents
-    as the deliberate act of a human rather than a walk's "I did not look".
+    """`usher work --once` inside the first 150 s of host uptime still recovers.
+
+    `time.monotonic()` on Linux is seconds since boot, so a throttle whose origin is
+    `0.0` makes `now - origin >= lease / 2` false for half a lease after the machine
+    came up, and a cron run at boot prints `0 recovered claims` -- `0` asserting "no
+    orphans" about a question it never asked. The `api/lanes.py` twin carries the full
+    argument; this is the call site a scheduler starts at boot.
     """
-    title_id = new_id()
-    async with _session_for(cli_settings) as own:
+    monkeypatch.setattr("usher.services.jobs.time", _JustBooted(10.0))
+    assert cli_settings.job_lease_seconds / 2 > 10.0, (
+        "the premise: the shimmed uptime is inside the window the throttle would skip"
+    )
+    key = f"an-orphan-{new_id()}"
+    async with _session_for(cli_settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+
+    await _work(cli_settings, once=True)
+
+    out = capsys.readouterr().out
+    assert "1 recovered claims" in out, out
+
+
+async def test_the_work_daemon_reports_a_recovery_that_happens_after_it_started(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A daemon prints its recovery total on every pass, not once at startup.
+
+    A single startup line lands when the total is almost always zero, so every later
+    recovery is invisible in the only mode a container runs. `usher work --once`
+    prints the total in its pass line, and that has to hold for the daemon too.
+
+    Two recoveries are needed to see the difference, and the second has to
+    happen *after* the daemon is already running, so the lease is dialled to
+    its floor (`ge=10.0`) and the throttle with it. The second orphan is
+    planted mid-run and backdated an hour, which is what makes it recoverable
+    against a 10 s lease rather than a live claim of this very worker's.
+
+    The premise -- that the first line really did print before the second
+    orphan existed -- is asserted before the plant, because a case that only
+    read the final buffer could not tell "reported twice" from "reported once,
+    late".
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("USHER_JOB_LEASE_SECONDS", "10")
+    get_settings.cache_clear()
+    settings = get_settings()
+    try:
+        await _purge(settings)
+        first, second = f"orphan-a-{new_id()}", f"orphan-b-{new_id()}"
+        await _plant_orphan(settings, first)
+
+        daemon = asyncio.create_task(_work(settings, once=False))
+        try:
+            startup = await _until(
+                lambda out: "1 recovered claims" in out, capsys, note="the first pass"
+            )
+            # The premise, asserted rather than described: at this point only
+            # one orphan has ever existed, so a case that ends up green cannot
+            # have been satisfied by the startup line alone.
+            assert "2 recovered claims" not in startup, startup
+
+            await _plant_orphan(settings, second)
+            await _until(
+                lambda out: "2 recovered claims" in out,
+                capsys,
+                bound=30.0,
+                note="a recovery after startup never reached stdout",
+            )
+        finally:
+            daemon.cancel()
+            with suppress(asyncio.CancelledError):
+                await daemon
+        await _purge(settings)
+    finally:
+        get_settings.cache_clear()
+
+
+async def _plant_orphan(settings: Settings, key: str) -> None:
+    async with _session_for(settings) as session:
+        await session.execute(
+            text(_PLANT_AN_ORPHAN),
+            {
+                "id": new_id(),
+                "kind": JobKind.MATCH.value,
+                "key": key,
+                "priority": int(JobPriority.NEW),
+            },
+        )
+        await session.commit()
+
+
+async def _until(
+    matches: Callable[[str], bool],
+    capsys: pytest.CaptureFixture[str],
+    *,
+    bound: float = 30.0,
+    note: str = "",
+) -> str:
+    """Poll `capsys` for a daemon's line, handing back everything seen so far.
+
+    Accumulating rather than re-reading: `readouterr()` **drains** the buffer,
+    so a poll loop that tested only the latest chunk would miss a line printed
+    between two reads -- the same trap as a `_drain` that reads a counter
+    instead of a total. Returning the accumulation is what lets the caller
+    assert a premise about what had *not* arrived yet.
+    """
+    seen = ""
+    deadline = time.perf_counter() + bound
+    while time.perf_counter() < deadline:
+        seen += capsys.readouterr().out
+        if matches(seen):
+            return seen
+        await asyncio.sleep(0.05)
+    seen += capsys.readouterr().out
+    raise AssertionError(f"{note}; stdout was {seen!r}")
+
+
+async def _an_unmatched_item(settings: Settings) -> uuid.UUID:
+    """One source and one item on the review queue, committed.
+
+    The id is what `--resolve` is given, so a case can name a *held* item and vary only
+    the title -- which is what tells the three refusals below apart.
+    """
+    async with _session_for(settings) as own:
         source = Source(
             kind=SourceKind.EMBY,
-            name="cli-source",
+            name=f"cli-source-{new_id()}",
             base_url="https://emby.invalid",
             credentials_ref=f"ref-{new_id()}",
             device_id=str(new_id()),
         )
         await PostgresSourceRepository(own).add(source)
-        await own.execute(
-            text(
-                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
-                "VALUES (:id, 'movie', 'cli-orphan', 'cli-orphan', 'skeleton')"
-            ),
-            {"id": title_id},
-        )
-        pipeline = build_pipeline(own, cli_settings)
+        pipeline = build_pipeline(own, settings)
         await pipeline.media_items.upsert_many(
             [
                 MediaItemUpsert(
@@ -400,19 +547,52 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
         )
         await own.commit()
         stored = await pipeline.media_items.get_by_external_id(source.id, "unmatched-1")
-    assert stored is not None
+    assert stored is not None, "the premise: the item being resolved is on the queue"
+    return stored.id
+
+
+async def _a_title(settings: Settings) -> uuid.UUID:
+    """A `titles` row `--title` can legitimately name."""
+    title_id = new_id()
+    async with _session_for(settings) as own:
+        await own.execute(
+            text(
+                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
+                "VALUES (:id, 'movie', 'cli-orphan', 'cli-orphan', 'skeleton')"
+            ),
+            {"id": title_id},
+        )
+        await own.commit()
+    return title_id
+
+
+async def test_unmatched_lists_and_resolves_through_the_real_repository(
+    cli_settings: Settings,
+    clean_slate: None,
+    capsys: pytest.CaptureFixture[str],
+    session: AsyncSession,
+) -> None:
+    """The review queue's two halves, against real SQL.
+
+    `--resolve` writes `title_id` and leaves `episode_id` null, which `attach_title`
+    documents as the deliberate act of a human rather than a walk's "I did not look".
+    """
+    media_item_id = await _an_unmatched_item(cli_settings)
+    title_id = await _a_title(cli_settings)
 
     await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
     assert "unmatched-1" in capsys.readouterr().out
 
-    await _unmatched(cli_settings, limit=50, offset=0, resolve=str(stored.id), title=str(title_id))
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(title_id)
+    )
     assert "resolved" in capsys.readouterr().out
 
     async with _session_for(cli_settings) as own:
         row = (
             await own.execute(
                 text("SELECT title_id, episode_id FROM media_items WHERE id = :id"),
-                {"id": stored.id},
+                {"id": media_item_id},
             )
         ).one()
     assert row.title_id == title_id
@@ -427,42 +607,57 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
 async def test_resolving_an_item_that_does_not_exist_says_so(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The media item is the absent one, so the title has to be real.
+    """The title is real and the media item is not.
 
-    This case passed a random uuid for *both* ids until 2026-08-19 and
-    asserted the media-item message, which made it a test of check order
-    wearing the name of a test about a missing item: issue #5 added the
-    title lookup that now runs first, and the case failed reporting the
-    other true fact. Each absence gets its own case below, and each one
-    seeds the id it is not testing.
+    Which is the only fixture that keeps this a test of `attach_title`'s
+    `rowcount == 0`: the title lookup runs first, so a fixture naming a random uuid for
+    *both* ids is answered by the other true fact and becomes a test of check order
+    wearing this case's name. Each absence gets its own case, and each seeds the id it
+    is not testing.
     """
-    title_id = new_id()
-    async with _session_for(cli_settings) as own:
-        await own.execute(
-            text(
-                "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
-                "VALUES (:id, 'movie', 'cli-real', 'cli-real', 'skeleton')"
-            ),
-            {"id": title_id},
-        )
-        await own.commit()
-
+    title_id = await _a_title(cli_settings)
     await _unmatched(
         cli_settings, limit=50, offset=0, resolve=str(uuid.uuid4()), title=str(title_id)
     )
     assert "no such media item" in capsys.readouterr().out
 
 
+async def test_an_unknown_title_id_is_a_sentence_against_real_postgres(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The foreign key itself, which is the half no fake can exhibit.
+
+    `FakeMediaItemRepository`'s own divergence list says it has no foreign keys, so the
+    unit twin proves the pre-check and this proves what the pre-check stands in front
+    of.
+    """
+    media_item_id = await _an_unmatched_item(cli_settings)
+    unknown = new_id()
+
+    await _unmatched(
+        cli_settings, limit=50, offset=0, resolve=str(media_item_id), title=str(unknown)
+    )
+
+    printed = capsys.readouterr().out
+    assert str(unknown) in printed, printed
+    assert "Traceback" not in printed, printed
+    assert "resolved" not in printed, printed
+
+    await _unmatched(cli_settings, limit=50, offset=0, resolve=None, title=None)
+    assert str(media_item_id) in capsys.readouterr().out
+
+
 async def test_resolving_to_a_title_that_does_not_exist_says_so(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Issue #5: a well-formed `--title` naming no row used to reach the
-    write and come back as a `RepositoryConflict` stack, whose message
-    named the *media item* id -- the one the operator got right.
+    """A well-formed `--title` naming no row is refused before the write.
 
-    The media item is absent here too, and that is deliberate: the point
-    is that the title check runs *before* the write, so it does not need
-    a media item to exist in order to refuse.
+    Reaching the write instead returns a `RepositoryConflict` stack whose message names
+    the *media item* id -- the one the operator got right.
+
+    The media item is absent here too, and that is deliberate: the point is that the
+    title check runs *before* the write, so it does not need a media item to exist in
+    order to refuse.
     """
     missing = new_id()
     await _unmatched(
@@ -475,9 +670,11 @@ async def test_resolving_to_a_title_that_does_not_exist_says_so(
 
 async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:
     """`enabled` is how an operator parks a server that is being rebuilt.
-    Honouring `--source` over the flag would walk it anyway -- and a full
-    walk of a half-restored library is exactly the shape ADR-0015's
-    retraction guard exists to catch after the fact."""
+
+    Honouring `--source` over the flag would walk it anyway -- and a full walk of a
+    half-restored library is exactly the shape the retraction guard exists to catch
+    after the fact.
+    """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher", secret_key="0" * 32
     )
@@ -498,11 +695,12 @@ async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:
 async def test_a_source_with_no_credential_row_is_skipped_not_crashed(
     session: AsyncSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An operator running `usher sync` across three sources needs the
-    second and third to run when the first's credential row has gone
-    missing -- the same reasoning `ReconcileService.reconcile` applies one
-    layer down to an unreachable server. Answered from local state, so no
-    adapter is built and no hostname is resolved."""
+    """`usher sync` runs the second and third source when the first's credential is gone.
+
+    The same reasoning `ReconcileService.reconcile` applies one layer down to an
+    unreachable server. Answered from local state, so no adapter is built and no
+    hostname is resolved.
+    """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher", secret_key="0" * 32
     )
@@ -520,10 +718,11 @@ async def test_a_source_with_no_credential_row_is_skipped_not_crashed(
 
 
 def test_allow_full_retraction_is_the_only_way_past_the_ceiling(session: AsyncSession) -> None:
-    """ADR-0015's ceiling reaches the service from `Settings` unless the
-    operator passed the flag, and the flag means exactly 1.0 -- "retract
-    whatever you find", which is right only for a library that really was
-    removed."""
+    """The retraction ceiling reaches the service from `Settings` unless a flag overrides.
+
+    The flag means exactly 1.0 -- "retract whatever you find", which is right only for
+    a library that really was removed.
+    """
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher",
         secret_key="0" * 32,
@@ -538,10 +737,11 @@ def test_allow_full_retraction_is_the_only_way_past_the_ceiling(session: AsyncSe
 async def test_push_probe_reports_nothing_to_probe_before_it_opens_anything(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`usher push --probe` against an empty deployment must answer, not
-    crash -- the same rule `sync-status` follows: a command an operator can
-    only run *after* a working source is no use for diagnosing why the
-    source is not working."""
+    """`usher push --probe` against an empty deployment must answer, not crash.
+
+    The same rule `sync-status` follows: a command an operator can only run *after* a
+    working source is no use for diagnosing why the source is not working.
+    """
     await _push(cli_settings, source_name=None, probe=True)
     assert "no enabled sources configured" in capsys.readouterr().out
     await _push(cli_settings, source_name="cli-nothing", probe=True)
@@ -551,9 +751,11 @@ async def test_push_probe_reports_nothing_to_probe_before_it_opens_anything(
 async def test_push_probe_skips_a_source_whose_credential_row_is_gone(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Answered from local state, so no adapter is built and no hostname is
-    resolved -- which is what keeps this file's "no test here reaches a
-    network" claim true of a command whose whole job is opening a socket."""
+    """Answered from local state, so no adapter is built and no hostname is resolved.
+
+    Which is what keeps this file's "no test here reaches a network" claim true of a
+    command whose whole job is opening a socket.
+    """
     async with _session_for(cli_settings) as session:
         await PostgresSourceRepository(session).add(
             Source(
@@ -571,12 +773,10 @@ async def test_push_probe_skips_a_source_whose_credential_row_is_gone(
     assert "upgraded=" not in printed
 
 
-# -- `usher search` / `usher suggest`, against the real indexes ------------
-#
-# Every title here is synthetic (`tests/fixtures/README.md`'s bands), and each
-# carries `sort_name = _SEARCH_MARK` so `_purge_search` can find its own rows
-# without a blanket `DELETE FROM titles` that could reach another committing
-# file's work.
+# -- `usher search` / `usher suggest`, against the real indexes ------------ Every title
+# here is synthetic (`tests/fixtures/README.md`'s bands), and each carries `sort_name =
+# _SEARCH_MARK` so `_purge_search` can find its own rows without a blanket `DELETE FROM
+# titles` that could reach another committing file's work.
 
 _SEARCH_MARK = "cli-search"
 
@@ -645,13 +845,12 @@ def a_model(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_search_reports_semantic_coverage_and_moves_when_something_is_embedded(
     cli_settings: Settings, clean_search: None, a_model: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The milestone's headline failure mode, arriving at the CLI.
+    """A fused search over a catalog with no vectors says so rather than serving quietly.
 
-    The wrong implementation: a `_search` that prints the rows and stops. A
-    FUSED search over a catalog with no vectors returns a perfectly plausible
-    ranked list -- no error, no empty result, no log line -- and an operator
-    cannot tell it from a working hybrid search. The coverage figure is the
-    only thing that says so.
+    The wrong implementation is a `_search` that prints the rows and stops: such a
+    search returns a perfectly plausible ranked list -- no error, no empty result, no
+    log line -- and an operator cannot tell it from a working hybrid search. The
+    coverage figure is the only thing that says so.
 
     **Asserts the figure *moves*, not merely that it is printed**, because a
     `_search` that hardcoded `semantic_coverage=0.000` passes the first half
@@ -713,10 +912,12 @@ async def test_search_says_the_deployment_has_no_model_rather_than_no_embeddings
 async def test_semantic_search_without_a_model_refuses_rather_than_narrowing(
     cli_settings: Settings, clean_search: None
 ) -> None:
-    """`--mode semantic` asks the one question full-text cannot answer, so a
-    silent narrowing would hand back a plausible answer to a different
-    question. `SystemExit` with a sentence naming the way out, the treatment
-    `_as_uuid` gives a bad id."""
+    """`--mode semantic` asks the one question full-text cannot answer.
+
+    A silent narrowing would hand back a plausible answer to a different question, so
+    it is `SystemExit` with a sentence naming the way out -- the treatment `_as_uuid`
+    gives a bad id.
+    """
     await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
     with pytest.raises(SystemExit, match="embedding model"):
         await _search(
@@ -727,8 +928,7 @@ async def test_semantic_search_without_a_model_refuses_rather_than_narrowing(
 async def test_search_says_no_match_rather_than_printing_nothing(
     cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An empty stdout is indistinguishable from a command that crashed
-    before it printed, and this one still has a coverage line to give."""
+    """An empty stdout reads as a crash, and this command still has coverage to print."""
     await _search(
         cli_settings,
         query="zzznothingmatchesthis",
@@ -744,25 +944,19 @@ async def test_search_says_no_match_rather_than_printing_nothing(
 async def test_a_cli_search_leaves_a_search_queries_row_behind_the_process(
     cli_settings: Settings, clean_slate: None, clean_search: None
 ) -> None:
-    """**The root that would lose the row, and the only one where "durable"
-    means anything a session cannot fake.**
+    """The root that would lose the row, where "durable" means what a session cannot fake.
 
     `cli._session_for` yields a session and disposes the engine **without ever
-    committing**, so a `search_queries` row left for the caller is rolled back
-    on the way out and `usher search` records nothing, silently. What makes
-    that invisible in every other file is that `api/deps.get_session` *does*
-    commit -- so a service leaning on its caller looks correct on the route and
-    is wrong here.
+    committing**, so a `search_queries` row left for the caller is rolled back on the
+    way out and `usher search` records nothing, silently. What makes that invisible in
+    every other file is that `api/deps.get_session` *does* commit -- so a service
+    leaning on its caller looks correct on the route and is wrong here.
 
-    Read back through a session opened **after** `_search` returned and its
-    engine was disposed, which is as close to "survives the process" as a test
-    in this process gets: nothing of the writer's is still open.
-
-    The household is the same singleton `usher search` resolved, and the row's
-    presence proves the household row committed too -- `ensure_default_user`
-    only flushes, and `search_queries.user_id` is a real foreign key, so a
-    commit carrying the row without its household would have been refused
-    rather than silently partial.
+    Read back through a session opened **after** `_search` returned and its engine was
+    disposed: nothing of the writer's is still open. The household is the same
+    singleton `usher search` resolved, and the row's presence proves the household row
+    committed too -- `ensure_default_user` only flushes, and `search_queries.user_id`
+    is a real foreign key.
     """
     await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
 
@@ -787,17 +981,18 @@ async def test_a_cli_search_leaves_a_search_queries_row_behind_the_process(
 async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
     cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str], tier: str
 ) -> None:
-    """The type-ahead path end to end through the real indexes, and with **no
-    model loaded** -- `SuggestIndex` is its own port precisely because this
-    tier serves the whole catalog without one.
+    """The type-ahead path end to end through the real indexes, and with **no model loaded**.
+
+    `SuggestIndex` is its own port precisely because this tier serves the whole catalog
+    without one.
 
     **Both tiers, because `build_pipeline` now constructs two of them and only
     a real request can say that both resolved.** A `build_search_service` that
     handed the trigram index to both slots passes every unit case in the
     project -- the fakes are two objects either way -- and fails here only if
     the statement each tier issues is really run against the real schema.
-    `PostgresPrefixSuggestIndex` reads `ix_titles_name_lower_prefix`, which
-    exists only because `m09a` shipped it."""
+    `PostgresPrefixSuggestIndex` reads `ix_titles_name_lower_prefix`.
+    """
     title = _searchable("The Quiet Vacuum")
     await _seed_searchable(cli_settings, [title])
     await _suggest(cli_settings, prefix="The Quiet Vacu", limit=5, tier=tier)
@@ -808,29 +1003,7 @@ async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
 async def test_every_search_command_prints_and_never_logs(
     cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`cli._print_home_report`'s rule, asserted rather than followed.
-
-    **Cited by name rather than by line number since 2026-08-07**: the two
-    copies of this citation said `cli.py:153-154`, which had drifted onto an
-    `httpx.AsyncClient` construction inside `_bootstrap` -- a line reference
-    into a 1,500-line module is a citation that goes stale on the next
-    insertion above it.
-
-    With `USHER_LOG_JSON=true` -- the default -- a result routed through
-    loguru is a JSON envelope wrapped around a table, per line. The wrong
-    implementation is `logger.info` in a command, which looks fine in a dev
-    shell with `USHER_LOG_JSON=false` and is unreadable as shipped.
-
-    **`--mode fused` is in this list because a *collaborator* broke the rule,
-    not the command.** Found by the operator smoke run rather than by this
-    suite: `composition.embedder` reports "no embedding model configured;
-    index jobs will not be claimed" once per process, which is exactly right
-    for `usher work` and is, for a search, a JSON envelope printed in front of
-    the results carrying advice about a lane this process does not run -- and
-    duplicating, worse, the warning `_search` prints itself. A version of this
-    case driving only `--mode full_text` never reaches the factory at all and
-    passes against that.
-    """
+    """`cli._print_home_report`'s rule, asserted rather than followed."""
     await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
     sink: list[str] = []
     handler = logger.add(sink.append, level="DEBUG")
@@ -848,19 +1021,15 @@ async def test_every_search_command_prints_and_never_logs(
 async def test_similar_says_whether_the_neighbours_were_ever_computed(
     cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`title_neighbors` is a batch artefact, so an empty answer has two causes
-    and only one is a fact about the title.
+    """`title_neighbors` is a batch artefact, so an empty answer has two causes.
 
-    The wrong implementation prints one message for both, and it sends an
-    operator to look at the wrong thing exactly half the time: "no neighbours
-    for this title" means run nothing, and "no neighbours have ever been
-    computed" means run `usher similar --rebuild`. This is the one place in
-    M6 where freshness is a whole-artefact age rather than a per-row
-    fingerprint (`TitleNeighborRepository.computed_at`), which is why the
-    distinction has to be made in the command rather than derived from a row.
-
-    Landed here rather than with the command it tests: `usher similar` shipped
-    with Task 21 and both sentences, and neither was ever asserted.
+    Only one of them is a fact about the title. The wrong implementation prints one
+    message for both, and it sends an operator to look at the wrong thing exactly half
+    the time: "no neighbours for this title" means run nothing, and "no neighbours have
+    ever been computed" means run `usher similar --rebuild`. Freshness here is a
+    whole-artefact age rather than a per-row fingerprint
+    (`TitleNeighborRepository.computed_at`), which is why the distinction has to be
+    made in the command rather than derived from a row.
     """
     seed, other = _searchable("The Quiet Vacuum"), _searchable("Vane 4417")
     await _seed_searchable(cli_settings, [seed, other])
@@ -885,30 +1054,96 @@ async def test_similar_says_whether_the_neighbours_were_ever_computed(
     assert "have ever been computed" not in printed, printed
 
 
+async def test_similar_with_no_arguments_reports_the_whole_tables_age_and_stale_count(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The staleness line is a **whole-table** count, not a per-title one."""
+    seed, other = _searchable("The Quiet Vacuum"), _searchable("Vane 4417")
+    await _seed_searchable(cli_settings, [seed, other])
+
+    await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    empty = capsys.readouterr().out
+    assert "no neighbours have ever been computed" in empty, empty
+    # The premise, and it is the trap this case is built around: an empty table
+    # answers zero stale, so the sentence above has to be the one that fires.
+    assert "disagrees with the running blend" not in empty, empty
+
+    current = blend_fingerprint(embedding_model=cli_settings.embedding_model)
+    stamped = datetime.now(UTC) - timedelta(hours=5)
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [seed.id],
+            [ScoredNeighbor(title_id=seed.id, neighbor_title_id=other.id, score=0.5, rank=0)],
+            blend_fingerprint=current,
+        )
+        await session.execute(text("UPDATE title_neighbors SET computed_at = :at"), {"at": stamped})
+        await session.commit()
+
+    await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    fresh = capsys.readouterr().out
+    assert stamped.isoformat() in fresh, fresh
+    assert "5.0h old" in fresh, fresh
+    assert "no neighbour row disagrees with the running blend" in fresh, fresh
+
+    # One row under a blend that is not the running one. The age line stays --
+    # neither read subsumes the other -- and the count is the one that moves.
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [other.id],
+            [ScoredNeighbor(title_id=other.id, neighbor_title_id=seed.id, score=0.5, rank=0)],
+            blend_fingerprint=_FP,
+        )
+        await session.commit()
+
+    await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    stale = capsys.readouterr().out
+    assert "1 neighbour rows were computed under a different blend" in stale, stale
+    assert "no neighbour row disagrees" not in stale, stale
+    assert stamped.isoformat() in stale, stale
+
+
+async def test_the_whole_table_report_prints_and_never_logs(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cli._print_home_report`'s rule again, for the argumentless form.
+
+    `test_every_search_command_prints_and_never_logs` above drives the per-title form
+    and cannot reach this one. With `USHER_LOG_JSON=true` -- the default -- a report
+    routed through loguru is a JSON envelope wrapped around a sentence.
+    """
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="DEBUG")
+    try:
+        await _similar(cli_settings, title_id=None, limit=5, rebuild=False)
+    finally:
+        logger.remove(handler)
+    assert capsys.readouterr().out, "the whole-table report printed nothing at all"
+    assert sink == [], f"the whole-table report logged instead of printing: {sink}"
+
+
 async def test_home_composes_a_screen_against_an_empty_database(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**PRD 08's operator rule, and the arithmetic it is hunting.**
+    """PRD 08's operator rule, and the arithmetic it is hunting.
 
     The failure here is not a missing row -- it is that the taste centroid is a
     mean, and the mean of zero embeddings is `0/0`. An empty household is a
     fact rather than an error, so this exits 0 and prints a report in which
     every provider proposed nothing.
 
-    **Driven against real Postgres rather than as a unit case**, which is a
-    correction to this milestone's plan: it specifies
-    `tests/unit/test_cli_home.py` with `empty_db`/`seeded_db` fixtures, and no
-    such seam exists -- every command coroutine in `usher.cli` takes a
-    `Settings` and opens its own engine through `_session_for`. The plan's own
-    "every operator command has to work against an empty database" is also
-    exactly the claim a fake database cannot make.
+    **Driven against real Postgres rather than as a unit case**: every command
+    coroutine in `usher.cli` takes a `Settings` and opens its own engine through
+    `_session_for`, and "every operator command has to work against an empty database"
+    is exactly the claim a fake database cannot make.
     """
     await _home(cli_settings, limit=10, repeat=1)
 
     out = capsys.readouterr().out
     assert "10 providers, 10 proposed nothing" in out
     assert "screen: 0 rows, 0 cards" in out
-    # The other direction of M9 E2's line, and the control for the case below:
+    # The other direction of the same line, and the control for the case below:
     # on a virgin `row_provider_settings` every provider composes, so "none" is
     # what an operator reads when the empty screen is *not* a toggle's doing.
     assert "disabled by an operator: none (0 of 10 registered" in out
@@ -917,23 +1152,19 @@ async def test_home_composes_a_screen_against_an_empty_database(
 async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**An absent provider and a silent one are the two states this milestone
-    exists to distinguish**, and a report that drops the silent ones makes them
-    indistinguishable from unregistered ones -- which is exactly how a provider
-    left out of `ROW_PROVIDERS` survives review.
+    """An absent provider and a silent one are two states the report must distinguish.
 
-    Kills a report built by iterating the *proposals* rather than the registry.
-    Asserted by name for every one of the **ten**, because a count is satisfied
-    by a report printing one provider ten times.
+    A report that drops the silent ones makes them indistinguishable from unregistered
+    ones -- which is exactly how a provider left out of `ROW_PROVIDERS` survives
+    review. Kills a report built by iterating the *proposals* rather than the registry.
+    Asserted by name for every one of the **ten**, because a count is satisfied by a
+    report printing one provider ten times.
 
-    **A superset passes this case and that is why the tenth had to be added
-    deliberately.** M8 registered `CuratedProvider` and every assertion below
-    stayed green -- the report simply grew a line nothing looked at -- which is
-    the same shape as the report dropping a silent provider, arriving from the
-    other direction. The count in
-    `test_home_composes_a_screen_against_an_empty_database` above is what
-    actually failed, so the two cases are load-bearing together and neither is
-    on its own.
+    **A superset passes this case**, which is why each is named: a report that grew a
+    line nothing looked at is the same shape as one dropping a silent provider,
+    arriving from the other direction. The count in
+    `test_home_composes_a_screen_against_an_empty_database` above is what catches that,
+    so the two cases are load-bearing together and neither is on its own.
     """
     await _home(cli_settings, limit=10, repeat=1)
 
@@ -956,13 +1187,14 @@ async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
 async def test_home_prints_a_cold_and_a_warm_composition(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**The only measurement of the cache this milestone has**, because
-    `usher.cache.hits`/`.misses` is M9's. A `--repeat` that measured cache hits
-    would report a number near zero and mean nothing, so each repeat clears the
-    cache and the warm read is timed once, separately, and labelled.
+    """The only reading of the cache this command gives.
 
-    The threshold line is asserted too: a boundary call that promises a
-    measurement and prints no number is a boundary call nobody can act on.
+    A `--repeat` served out of the warm cache would report a number near zero and mean
+    nothing, so each repeat clears the cache and the warm read is timed once,
+    separately, and labelled.
+
+    The threshold line is asserted too: a boundary call that promises a number and
+    prints none is a boundary call nobody can act on.
     """
     await _home(cli_settings, limit=10, repeat=3)
 
@@ -981,31 +1213,7 @@ async def test_home_prints_a_cold_and_a_warm_composition(
 async def test_home_omits_a_disabled_provider_and_names_the_ones_switched_off(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**A setting honoured by one composition root and not the other is two
-    different products** (M9 E2).
-
-    `GET /home` filters `ROW_PROVIDERS` against `row_provider_settings` in
-    `api/deps.py`; this command builds its own `HomeService` from
-    `pipeline.row_providers` and would have gone on composing the provider an
-    operator switched off through the admin route -- which is the surface an
-    operator reaches for *when a shelf is missing*, so it is the worst one to
-    be wrong.
-
-    **The row is written through the repository rather than through the route**,
-    deliberately: the claim is that this command reads the *table*, so a fixture
-    that went through `PUT /admin/rows/providers/{slug}` would leave the
-    question of whether the two share a process open. Nothing here has an HTTP
-    server at all.
-
-    Three assertions and the third is the one the acceptance criterion is
-    about. A disabled provider has **no line in the table** -- it never
-    proposed, so `ComposeReport` has no entry for it -- which is
-    indistinguishable from a provider that was deleted from the registry. The
-    printed line is what stops an operator being told to read the database.
-    `recently-added` is the control: the report still has nine lines, so "the
-    line is gone" is a statement about one provider rather than about a report
-    that stopped printing.
-    """
+    """A setting honoured by one composition root and not the other is two products."""
     async with _session_for(cli_settings) as session:
         await build_pipeline(session, settings=cli_settings).row_provider_settings.set_enabled(
             "seasonal", enabled=False
@@ -1025,27 +1233,21 @@ async def test_home_omits_a_disabled_provider_and_names_the_ones_switched_off(
 async def test_home_prints_and_never_logs_its_answer(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The split every command in this module makes: `loguru` output is
-    operational and goes to a sink an operator may not be reading; a command's
-    answer is stdout, which is what gets piped."""
+    """The split every command in this module makes.
+
+    `loguru` output is operational and goes to a sink an operator may not be reading; a
+    command's answer is stdout, which is what gets piped.
+    """
     await _home(cli_settings, limit=10, repeat=1)
 
     assert capsys.readouterr().out.strip()
 
 
-# --------------------------------------------------------------- usher curate
-#
-# **Driven against real Postgres for the reason `usher home`'s cases are**: the
-# command coroutine takes a `Settings` and builds its own engine, its own
-# pipeline and its own `CurationService` through `_session_for`, so the three
-# arms below are the only place that wiring is executed at all.
-#
-# The *client* is the one collaborator these substitute, and it is substituted
-# rather than pointed at a dead endpoint for two reasons that point the same
-# way: nothing in this suite may open a socket, and a scripted response is what
-# makes "what did the validator do with a real completion" observable end to
-# end. `tests/unit/test_cli_curate.py` covers the arm with no client at all,
-# which is the one that must answer before a connection is opened.
+# --------------------------------------------------------------- usher curate **Driven
+# against real Postgres for the reason `usher home`'s cases are**: the command coroutine
+# takes a `Settings` and builds its own engine, its own pipeline and its own
+# `CurationService` through `_session_for`, so the three arms below are the only place
+# that wiring is executed at all.
 
 _CURATE_MARK = "cli-curate"
 
@@ -1057,10 +1259,12 @@ _CARDS = 5
 
 
 def _curatable(name: str) -> Title:
-    """One candidate. No `media_items` row, deliberately: ownership is a *sort
-    key* in `list_unwatched_candidates` and never a filter, so an unowned
-    title is an eligible candidate and seeding a library would test the
-    ordering instead of the wiring."""
+    """One candidate.
+
+    No `media_items` row, deliberately: ownership is a *sort key* in
+    `list_unwatched_candidates` and never a filter, so an unowned title is an eligible
+    candidate and seeding a library would test the ordering instead of the wiring.
+    """
     return Title(kind=TitleKind.MOVIE, name=name, sort_name=_CURATE_MARK, year=2021)
 
 
@@ -1075,10 +1279,12 @@ async def _seed_candidates(settings: Settings, count: int) -> list[Title]:
 
 
 def _completion(handles: Sequence[int]) -> dict[str, Any]:
-    """One shelf, addressed by handle. Written through the validator's own four
-    exported key constants rather than by retyping `"rows"`/`"item_ids"`: a
-    fixture saying `ids` and a reader saying `item_ids` is a case that asserts
-    a 100% drop and calls it coverage."""
+    """One shelf, addressed by handle.
+
+    Written through the validator's own four exported key constants rather than by
+    retyping `"rows"`/`"item_ids"`: a fixture saying `ids` and a reader saying
+    `item_ids` is a case that asserts a 100% drop and calls it coverage.
+    """
     return {
         ROWS_KEY: [
             {
@@ -1145,8 +1351,7 @@ async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
     clean_curation: None,
     scripted_llm: FakeLLMClient,
 ) -> None:
-    """**PRD 08's operator rule, on the one command in this project that spends
-    money.**
+    """PRD 08's operator rule, on the one command in this project that spends money.
 
     An empty catalog produces an empty candidate pool, and
     `CurationService.generate` refuses it *before the client is touched* --
@@ -1155,13 +1360,12 @@ async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
     teeth:
 
     - the operator gets a sentence rather than sixty frames;
-    - **the sentence names nothing an operator cannot look up**, which until
-      2026-08-07 it did -- see the comment on that assertion;
+    - **the sentence names nothing an operator cannot look up**;
     - **nothing was attempted**, so `complete_json` was never called. A
       generation for a household with nothing to recommend is a charge with a
       guaranteed empty answer;
-    - **nothing was billed.** This is the one path in the milestone that
-      writes no `llm_calls` row at all, and the rule the service implements is
+    - **nothing was billed.** This is the one path that writes no `llm_calls`
+      row at all, and the rule the service implements is
       `record()` on every path that *attempted* a call -- a row here would be
       spend an operator has to explain away.
     """
@@ -1174,15 +1378,8 @@ async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
     # The fact none of the raised messages carries and every operator asks
     # first, on the run where the screen looks unchanged.
     assert "previous rows still stand" in message, message
-    # **The sentence's only concrete token was the household's uuid until
-    # 2026-08-07**, carried as the raise's `detail`. `build_parser` refuses a
-    # `--user` flag on the grounds that a household id is "an id an operator has
-    # no way to look up on a deployment that has exactly one", so the command
-    # was printing the one token its own parser argues nobody can read.
-    # `test_the_empty_pool_message_carries_no_household_id` pins the raise; this
-    # asserts the *rendered* sentence, which is the surface that argument is
-    # about -- and it matches a uuid shape rather than this run's id because the
-    # user row is flushed and never committed, so there is no id to read back.
+    # The sentence must not reduce to the household's uuid, which the raise
+    # carries as its `detail`.
     assert re.search(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", message) is None, message
     assert scripted_llm.calls == [], "an empty catalog bought a completion"
     assert scripted_llm.closed == 1, "the command did not release the client it built"
@@ -1198,8 +1395,10 @@ async def test_curate_writes_a_generation_and_reports_what_it_bought(
     scripted_llm: FakeLLMClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The whole path, end to end and through the real wiring: pool → prompt →
-    one completion → validate → `replace_for_user` → ledger → one commit.
+    """The whole path, end to end and through the real wiring.
+
+    Pool → prompt → one completion → validate → `replace_for_user` → ledger → one
+    commit.
 
     **The pool size is asserted as a number larger than what was kept**, which
     is the property `CurationReport` carries it for: a command that summed the
@@ -1264,36 +1463,7 @@ async def test_curate_says_what_it_dropped_when_nothing_survived(
     scripted_llm: FakeLLMClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**ADR-0028's rule 3 at a terminal: the call worked, the money is spent,
-    and the generation produced nothing.**
-
-    The state that made ADR-0028 necessary is a run whose ledger row reads
-    `ok = true` with real tokens and whose household has no rows -- so what
-    this command has to say is not "it failed" but *what was dropped and for
-    which reason*, which is the only thing distinguishing a validator eating
-    the output from a model with nothing to say. `CurationRejected.error` is
-    numbers and label names only, which is why it is safe to put on a screen.
-
-    Handles past the end of the pool rather than a malformed body: it is the
-    108/108 shape ADR-0028 measured, it leaves the completion perfectly
-    well-formed, and it reaches **two** reasons at once -- five cards
-    `not_in_pool` and then the row itself `row_too_short` -- which is the
-    second-order effect an operator reads first.
-
-    Both database assertions matter and the second is the one a missing commit
-    breaks: last night's screen still stands, *and* the spend is on the record
-    anyway.
-
-    **And the message may not say "nothing was written", which is what it said
-    until 2026-08-07.** The two assertions below are a contradiction unless the
-    sentence is right: this case requires `len(ledger) == 1` -- the call was
-    billed -- so a message telling the operator nothing was written is telling
-    them they were not charged, on the one path in this milestone where the
-    money is gone and the screen is unchanged. That is the exact state
-    ADR-0028's rule 3 exists to make visible, inverted at the terminal. The
-    clause the arm is *for* is the screen one, which is true on all three paths
-    and is asserted above.
-    """
+    """The call worked, the money is spent, and the generation produced nothing."""
     await _seed_candidates(cli_settings, 10)
     invented = range(9001, 9001 + _CARDS)
     scripted_llm.responses.append(_completion(invented))
@@ -1328,11 +1498,12 @@ async def test_curate_says_a_pool_below_the_card_floor_cannot_fill_one_row(
     scripted_llm: FakeLLMClient,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**M9 Task G4, end to end and with nothing between the guard and the
-    screen.** `curation_validate._row` discards a row carrying fewer than
-    `DEFAULT_MIN_CARDS` *distinct* cards, so a catalog of four cannot produce
-    one surviving row however good the completion is -- and before this guard
-    the household paid a completion to find that out, every night.
+    """The card floor, end to end and with nothing between the guard and the screen.
+
+    `curation_validate._row` discards a row carrying fewer than `DEFAULT_MIN_CARDS`
+    *distinct* cards, so a catalog of four cannot produce one surviving row however
+    good the completion is -- and without the guard the household pays a completion to
+    find that out, every night.
 
     **The premise is the second arm, and it is why `calls == []` means
     anything.** A fake with nothing scripted, a household that never reached
@@ -1396,33 +1567,10 @@ async def test_work_parks_a_curate_job_whose_pool_cannot_fill_one_row(
     cli_settings: Settings,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """**The disposition, asserted rather than described.** With this file's
-    seeding helpers, which is why a `usher work` case lives in the `usher
-    curate` section.
+    """The disposition, asserted rather than described.
 
-    `PortDataMalformed` **parks**, and
-    `test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing` above
-    asserts that for a catalog of nothing. This asserts it for a catalog of
-    four -- the arm the widened inequality added, and the only one where a
-    completion was previously bought.
-
-    **Parking is a permanent block, and this pins it as one.** `_ENQUEUE`
-    carries `WHERE jobs.status <> 'parked'`, so every later enqueue for this
-    household writes **zero** rows until a human releases the job. That is what
-    makes *"until a human releases it"* a fact rather than a warning, and it is
-    why the disposition had to follow M9 Task G3's verdict rather than a
-    preference: G3 measured that ownership is an `ORDER BY` key and not a
-    filter, so the pool is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)`
-    and only a *catalog* below the floor reaches here. That is the empty
-    catalog's shape -- an operator's problem, not a transient one that the next
-    sync fixes -- and a park is right for it. Had the pool honoured an
-    ownership claim, this would fire for an ordinary small library and a park
-    would be a permanent block on a condition that grows out of itself.
-
-    Its own settings rather than the shared fixture, for the reason the case
-    above gives: `USHER_LLM_ENABLED` is what makes this root build a curate
-    handler at all, and no socket is opened because the guard answers in front
-    of the client.
+    Driven with this file's seeding helpers, which is why a `usher work` case lives in
+    the `usher curate` section.
     """
     seeded = await _seed_candidates(cli_settings, _CARDS - 1)
     monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)

@@ -1,24 +1,4 @@
-"""Every staging table in `src/` is temporary, and it drops at commit.
-
-A rule rather than a list, because the list is what drifts -- and it has: this
-sentence said "ten across five repositories" until 2026-09-02, when
-`grep -rho "CREATE TEMP TABLE stg_[a-z_]*" src/ | sort -u` answered **16 across
-eight**. Re-derive it rather than trusting the number here; the scan below does
-not depend on it. The next one is the one that
-reintroduces the hazard: a shared name in `public` taking two `ACCESS
-EXCLUSIVE` locks per batch, held to commit, plus a table left behind by any
-caller that commits -- which surfaces as schema drift in
-`test_migration_matches_the_orm_metadata`, in a *later file*, so the suite
-that caused it passes alone.
-
-Scanned as text rather than asserted per module, for the reason
-`test_every_setting_is_read_by_something` is a substring scan: the DDL is a
-string constant spread across those eight files and a per-file assertion is a
-list again. It cannot tell a DDL from a docstring quoting one, which is why the
-match requires `CREATE` and a `stg_` name on the same line -- prose about the
-old shape reads `DROP TABLE IF EXISTS stg_jobs` or names the constant, never
-`CREATE ... TABLE stg_x (`.
-"""
+"""Every staging table in `src/` is temporary, and it drops at commit."""
 
 import re
 from pathlib import Path
@@ -55,7 +35,10 @@ def _close_paren(text: str, opened_at: int) -> int:
 
 
 def _staging_ddls() -> list[tuple[Path, str, str]]:
-    """Every `CREATE ... TABLE stg_*` in `src/`, whitespace-normalised."""
+    """Every `CREATE ...
+
+    TABLE stg_*` in `src/`, whitespace-normalised.
+    """
     found: list[tuple[Path, str, str]] = []
     for path in sorted(_SRC.rglob("*.py")):
         text = path.read_text()
@@ -83,26 +66,9 @@ def test_the_scan_finds_the_staging_ddl_it_is_scanning_for() -> None:
 
 
 def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
-    """The wrong implementation: `CREATE UNLOGGED TABLE stg_jobs`, which is
-    what every one of these was until M6.
+    """The wrong implementation.
 
-    `TEMP` is what removes the contention *and* the `pg_type` race: a
-    temporary table lives in the session's own `pg_temp` schema, so two
-    backends creating one at the same instant neither wait for each other nor
-    collide on `pg_type_typname_nsp_index` -- which asyncpg reports as
-    `UniqueViolationError` and SQLAlchemy wraps as `IntegrityError`,
-    indistinguishable to a repository from a genuine data conflict.
-
-    `ON COMMIT DROP` is what makes it pool-safe and deletes the cleanup nine
-    integration files used to carry: without it a temporary table outlives the
-    transaction and rides a pooled connection into whatever checks it out
-    next, which is a *worse* leak than the public one because nothing outside
-    that session can see it to drop it.
-
-    **`CREATE TEMP UNLOGGED TABLE` is a syntax error**, verified against
-    `pgvector/pgvector:pg17`: `TEMP` replaces `UNLOGGED` rather than joining
-    it, and a temporary table is already WAL-free. So the modifier is exactly
-    `TEMP`, never both.
+    `CREATE UNLOGGED TABLE stg_jobs`, which is what every one of these once was.
     """
     wrong = [
         (path.name, name, statement)
@@ -115,32 +81,25 @@ def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
     )
 
 
-# Staging tables introduced *after* `fc6d2b81a794`, which therefore have no
-# `public` leftover for it to drop -- no released version of usher ever ran a
-# `CREATE TABLE public.stg_people`.
-#
-# **An exception list, not a second copy of the rule**, and the distinction is
-# what keeps this guard sharp. The rule below still fails closed: a twelfth
-# staging table added with a DDL and no line *anywhere* is red. What this
-# permits is the one honest answer for a genuinely new table, and the
-# alternative is worse -- adding these three to `_LEFTOVER_STAGING_TABLES`
-# would edit an already-shipped migration so it drops tables that provably
-# cannot exist, which is a migration claiming a cleanup it never performed.
+# Staging tables introduced *after* `fc6d2b81a794`, which therefore have no `public`
+# leftover for it to drop -- no released version of usher ever ran a `CREATE TABLE
+# public.stg_people`.
 _NEVER_EXISTED_IN_PUBLIC = {
-    "stg_people",  # M7
-    "stg_credits",  # M7
-    "stg_collections",  # M7
-    "stg_genome",  # M7
-    "stg_credit_names",  # M9 T6
-    "stg_akas",  # M9 T7
+    "stg_people",
+    "stg_credits",
+    "stg_collections",
+    "stg_genome",
+    "stg_credit_names",
+    "stg_akas",
 }
 
 
 def test_the_leftover_migration_names_every_staging_table() -> None:
-    """Migration `fc6d2b81a794` drops the `public.stg_*` tables a release
-    predating the temporary ones may have left behind, and it enumerates them
-    rather than globbing `pg_class` -- a wildcard over someone else's schema
-    is a migration that destroys data it was never told about.
+    """Migration `fc6d2b81a794` drops the `public.stg_*` tables a release predating the.
+
+    temporary ones may have left behind, and it enumerates them rather than globbing
+    `pg_class` -- a wildcard over someone else's schema is a migration that destroys
+    data it was never told about.
 
     So the list has to stay complete, and nothing else makes it. **This does
     not kill "delete the loop body"**, and that is deliberate rather than a

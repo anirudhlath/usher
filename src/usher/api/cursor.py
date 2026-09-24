@@ -1,44 +1,4 @@
-"""The opaque cursor: a wire artefact that carries a sort position and nothing
-else.
-
-PRD 07: *"Cursor-based (opaque, encodes sort position). Offset paging is not
-offered."* The second half is measured rather than asserted --
-`MediaItemRepository.list_unmatched`'s `OFFSET` is **43.7 ms at offset 0 and
-388.9 ms at offset 1,126,574**, linear per page and quadratic to drain -- which
-is why `RawPayloadStore.iterate` and `TitleEmbeddingRepository.list_stale`
-already take a typed `after: uuid.UUID`. This module gives that habit a wire
-form, and ADR-0034 records the three decisions behind it. In short:
-
-**The cursor never reaches a port.** A repository keeps taking typed keyset
-values; the base64 lives here because opacity is a *client-contract* concern.
-A port that took a cursor would have to decode one, which means knowing the
-sort vocabulary of the layer above it -- and `tests/unit/test_ports_pagination.py`
-is what keeps that a fact rather than a habit.
-
-**The cursor is not signed and carries no user.** It holds a version, the
-sort-key values, and an 8-byte digest of the query it was minted for. Nothing
-in it is secret and every position it names is one the same request reaches by
-paging, so a forged cursor is not a capability -- it is a request for a page
-the client could have asked for anyway, and the route's own authorisation is
-still the thing that answers it. `Settings.secret_key` is deliberately not
-read here. **The day a cursor grows a `user_id`, a household filter, or
-anything else the route does not re-derive from the request, that stops being
-true and this needs a MAC**; `CursorSpec`'s field list is pinned by a test for
-exactly that reason.
-
-**The digest is not security, it is coherence.** Without it, a cursor minted
-under `sort=year` and replayed against `sort=name` decodes cleanly and
-produces a plausible, wrong, silent page. With it, that is a
-`400 invalid_cursor`. It is computed over the sort name and the filter state
--- values the client itself sent and is the only party ever holding the
-cursor -- so it discloses nothing to anyone who did not already have it.
-
-**Every refusal is a `400 invalid_cursor` problem document with a fixed
-sentence.** A cursor is a submitted value, so `api/errors.py`'s rule binds it:
-no `detail` here interpolates anything the client sent, and the refusal is
-raised as a `ProblemException` rather than left to a pydantic validator, which
-would answer 422 and echo the rejected cursor back under `input`.
-"""
+"""The opaque cursor: a wire artefact that carries a sort position and nothing else."""
 
 import base64
 import binascii
@@ -63,9 +23,8 @@ from usher.api.errors import ProblemException
 CURSOR_VERSION: Final = 1
 
 #: Eight bytes. Long enough that two of this API's sorts will not collide,
-#: short enough that the cursor stays a short query parameter. It is a
-#: coherence check and not a MAC, so the bar is accidental collision rather
-#: than forgery -- see the module docstring.
+#: short enough that the cursor stays a short query parameter. A coherence
+#: check and not a MAC, so the bar is accidental collision, not forgery.
 _DIGEST_BYTES: Final = 8
 
 # The payload's three members. Single letters because this rides in a query
@@ -76,10 +35,9 @@ _DIGEST_KEY: Final = "q"
 _KEYS_KEY: Final = "k"
 
 # The refusal sentences. Fixed, distinct, and interpolating nothing the client
-# submitted. Distinct because six causes rendered as one sentence are one
-# refusal nobody can diagnose; fixed because the moment one renders a value,
-# `api/errors.py`'s whole reason for existing is undone one parameter to the
-# left.
+# submitted. Distinct because six causes rendered as one sentence are one refusal
+# nobody can diagnose; fixed because the moment one renders a value,
+# `api/errors.py`'s reason for existing is undone one parameter to the left.
 _RESUME: Final = "Start from the first page."
 _NOT_BASE64: Final = f"The cursor is not valid base64url text. {_RESUME}"
 _NOT_A_PAYLOAD: Final = f"The cursor does not decode to a pagination cursor. {_RESUME}"
@@ -118,30 +76,7 @@ type CursorValue = str | int | float | uuid.UUID | dt.datetime | None
 
 @dataclass(frozen=True, slots=True)
 class CursorSpec:
-    """One sort order's wire identity and keyset shape.
-
-    Three fields, and the *absences* are the design. There is no `user`, no
-    `household`, no offset and no page number: a cursor carries a sort
-    position and nothing else, which is what makes it safe to leave unsigned.
-    `tests/unit/test_api_cursor.py::test_a_spec_holds_no_household_and_no_secret`
-    pins the field list so a fourth one has to argue for itself.
-
-    `filters` is the rest of the query -- whatever else narrows the
-    population. It is **not** carried in the cursor; only its digest is, and
-    the digest is what refuses a cursor minted over `genre=horror` and
-    replayed against `genre=comedy`. Rendered in sorted order, so a client
-    that reorders its own query string on a retry does not lose its place.
-
-    **`types` must end in a unique component, and this class refuses to exist
-    otherwise.** A keyset over a non-unique column is not a total order, and
-    the damage is silent: `RawPayloadStore.iterate`'s docstring already
-    records that one bootstrap transaction stamps every row with the same
-    `transaction_timestamp()`, so a page boundary inside that group drops the
-    rest of it with nothing to say so. Three groups write keyset SQL
-    independently this milestone; refusing it once here is cheaper than each
-    of them remembering. Usher's unique component is always its UUIDv7
-    primary key (ADR-0003), so the rule is spelled as that.
-    """
+    """One sort order's wire identity and keyset shape."""
 
     sort: str
     types: tuple[CursorType, ...]
@@ -162,12 +97,6 @@ class CursorSpec:
                 "a keyset must be a total order, so its last component must be the UUIDv7 "
                 f"primary key; {self.sort!r} ends in {self.types[-1].name}"
             )
-        # Copied, then wrapped. The copy stops a caller mutating the dict it
-        # handed over -- which would silently change the digest of a spec a
-        # route holds as a module constant -- and the proxy stops the spec
-        # mutating its own. Immutability only: `mappingproxy` delegates
-        # `__hash__` to the dict it wraps, which is `None`, so this dataclass
-        # is not hashable and does not claim to be (CLAUDE.md).
         object.__setattr__(self, "filters", MappingProxyType(dict(self.filters)))
 
     @property
@@ -223,8 +152,7 @@ def encode_cursor(values: Sequence[CursorValue], *, spec: CursorSpec) -> str:
 
 
 def decode_cursor(raw: str, *, spec: CursorSpec) -> tuple[CursorValue, ...]:
-    """The position a cursor names, as the same typed values it was minted
-    from.
+    """The position a cursor names, as the same typed values it was minted from.
 
     Raises `ProblemException` -- `400 invalid_cursor` -- for every malformed
     input, in the order the causes can be told apart: a cursor that is not
@@ -273,21 +201,22 @@ def paginate[RowT, ItemT](
 
 
 def _invalid(detail: str) -> ProblemException:
-    """One line for a route to adopt, and the reason `ProblemCode` already
-    carries `INVALID_CURSOR`: `api/errors.py`'s status table cannot map this,
-    because no *status* implies it -- a 400 is not always a bad cursor."""
+    """One line for a route to adopt.
+
+    `ProblemCode` carries `INVALID_CURSOR` because `api/errors.py`'s status table
+    cannot map this: no *status* implies it, and a 400 is not always a bad cursor.
+    """
     return ProblemException(status_code=400, code=ProblemCode.INVALID_CURSOR, detail=detail)
 
 
 def _payload(raw: str) -> Mapping[str, Any]:
-    """base64url -> JSON -> a mapping, refusing at each step separately."""
+    """Base64url -> JSON -> a mapping, refusing at each step separately."""
     padded = raw + "=" * (-len(raw) % 4)
     try:
-        # `validate=True`, and it is load-bearing rather than pedantic:
-        # `base64.urlsafe_b64decode` **discards** every character outside the
-        # alphabet by default, so `!!not-base64!!` decodes to plausible
-        # garbage and is refused two steps later as "not a payload". The
-        # cause a client is told is then the wrong one.
+        # `validate=True` is load-bearing: `base64.urlsafe_b64decode` **discards**
+        # every character outside the alphabet by default, so `!!not-base64!!`
+        # decodes to plausible garbage and is refused two steps later as "not a
+        # payload" -- the wrong cause to tell a client.
         decoded = base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
     except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
         raise _invalid(_NOT_BASE64) from exc

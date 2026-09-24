@@ -20,8 +20,9 @@ import { CONFIG, SETTING_COUNT } from './Config.settings'
 /**
  * **This file's timeout, and only this file's.**
  *
- * Configuration is the largest single surface in the product — 73 setting rows,
- * rendered twice over (a table and, at 390 px, 73 stacked cards), each with a
+ * Configuration is the largest single surface in the product — 80 setting rows
+ * as of 2026-09-07, and it only grows — rendered twice over (a table and, at
+ * 390 px, one stacked card each), each with a
  * description, and two of the cases sweep the whole thing with axe. Measured
  * under `vitest --coverage`, which is what CI runs and which roughly doubles
  * everything: 11.0 s for the table case and 6.2 s for the cards case, against a
@@ -222,6 +223,23 @@ describe('Config', () => {
     ).toBeVisible()
   })
 
+  it('explains the pool default with the arithmetic at the catalogue’s own defaults', () => {
+    // Written out, the sentence said 12 jobs plus a claim and a heartbeat made 14
+    // long after a bootstrap import took connections of its own. The two defaults it
+    // restates are read from their rows; the Python case holds the arithmetic to
+    // `Settings`' validator.
+    const defaultOf = (key: string): number => Number(CONFIG.find((row) => row.key === key)?.def)
+    const pool = CONFIG.find((row) => row.key === 'USHER_DB_POOL_SIZE')?.about ?? ''
+    const shape =
+      /^Connections per process\. (\d+) because .*: (\d+) jobs in flight .* together (\d+), leaving (\d+) for the API\.$/
+    expect(pool).toMatch(shape)
+    const [size, jobs, needed, left] = (shape.exec(pool) ?? []).slice(1).map(Number)
+    expect(size).toBe(defaultOf('USHER_DB_POOL_SIZE'))
+    expect(jobs).toBe(defaultOf('USHER_JOB_CONCURRENCY'))
+    expect((needed ?? 0) + (left ?? 0)).toBe(size)
+    expect(needed).toBeGreaterThan(jobs ?? Infinity)
+  })
+
   it('searches by name and by what a setting controls', async () => {
     const { user } = renderConfig()
     await screen.findByRole('heading', { level: 1, name: 'Configuration' })
@@ -241,8 +259,18 @@ describe('Config', () => {
     const { user } = renderConfig()
     await screen.findByRole('heading', { level: 1, name: 'Configuration' })
 
+    // Derived from CONFIG rather than written as a literal: this assertion
+    // was `5` and went red when J2 added USHER_SEARCH_SUGGEST_ANALYTICS to
+    // the group, which is a true statement about the catalogue failing a
+    // test about the *filter*. The premises below are what keep it from
+    // being vacuous -- a filter returning everything, or nothing, would
+    // satisfy a bare derived count.
+    const inSearch = CONFIG.filter((row) => row.group === 'search').length
+    expect(inSearch).toBeGreaterThan(1)
+    expect(inSearch).toBeLessThan(SETTING_COUNT)
+
     await user.selectOptions(screen.getByRole('combobox', { name: 'Subsystem' }), 'search')
-    await waitFor(() => expect(screen.getByText(`5 of ${SETTING_COUNT} shown`)).toBeVisible())
+    await waitFor(() => expect(screen.getByText(`${inSearch} of ${SETTING_COUNT} shown`)).toBeVisible())
     expect(rowFor('USHER_SEARCH_RRF_K')).toBeVisible()
     expect(screen.queryByText('USHER_SSE_QUEUE_SIZE')).toBeNull()
   })

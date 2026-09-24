@@ -7,9 +7,9 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL, with a React 19 console in `web/` served at `/console`.
 
-`main` is past M9. Since that gate closed it has taken the console, the
-demand-enrichment lane (`VisibilityService`), migrations `m10a`/`m10b`, and a
-wider embedding column. Task breakdowns are in `docs/plans/`;
+`main` is past M10 (Hardening): telemetry export, outbound rate limiting,
+backup/restore and secret rotation, the scheduler, dashboards and alerts, and
+the release workflow. Task breakdowns are in `docs/plans/`;
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
 tooling that does not exist** — check Commands below.
 
@@ -19,8 +19,7 @@ behind the extra) or `openai:` (any OpenAI-compatible endpoint) — and `m09e`
 widened `title_embeddings.embedding` and `user_taste.centroid` from
 `halfvec(384)` to `halfvec(1024)`, **deleting every embedding, centroid and
 neighbour row**. There is no honest conversion between widths, so *"a model swap
-needs no migration"* holds only within one width
-([ADR-0038](docs/prd/decisions/0038-the-embedding-width-is-deployment-wide-ddl.md)).
+needs no migration"* holds only within one width.
 Nothing restores the rows: `usher index --backfill`, then `usher work`, then
 `usher similar --rebuild`. `m09f` then capped `EMBEDDING_DIMENSIONS` at ~4,000
 lanes by moving every `halfvec` column to `PLAIN` storage. This is here rather
@@ -28,15 +27,17 @@ than in a rules file because path-scoped rules do not survive compaction.
 
 ## Keep the PRD current
 
-`docs/prd/` is the authoritative description of what Usher is and why. Code that
-contradicts it is a bug in one of them. **Update the PRD in the same commit as
-the change that invalidates it** — not in a follow-up. Start at
-`docs/prd/README.md`; conventions load automatically when working in `docs/`.
+`docs/prd/` is the authoritative statement of what Usher does: user-facing
+behaviour, one concern per document, and not the reasoning behind it — the
+argument for a behaviour, and the alternatives it beat, live with the code or
+the plan that made it. Code that contradicts it is a bug in one of them.
+**Update the PRD in the same commit as the change that invalidates it** — not
+in a follow-up. Start at `docs/prd/README.md`; conventions load automatically
+when working in `docs/`.
 
 ## Conventions that will bite you
 
-- **Ports are `abc.ABC`, not `typing.Protocol`**
-  ([ADR-0001](docs/prd/decisions/0001-abc-over-protocol.md)). Do not modernise.
+- **Ports are `abc.ABC`, not `typing.Protocol`.** Do not modernise.
 - **Layering is enforced by `import-linter`, not by convention.** `domain/`
   imports nothing from `adapters/`, `db/` or `api/`; `services/` depends only on
   `domain/` and `ports/`.
@@ -129,11 +130,13 @@ without `paths:` loads *unconditionally* and a split into one is a promotion.
 A finding that genuinely applies everywhere goes in "Five rules about evidence"
 above — five entries in nine milestones, so the bar is high.
 
-**`.claude/settings.json` carries three hooks, and all three are mechanisms.**
+**`.claude/settings.json` carries four hooks, and all four are mechanisms.**
 `session-start.sh` warns if this worktree's `.venv` lacks the `eval` extra;
 `guard-generated.sh` refuses a hand edit to `web/src/api/schema.d.ts`;
-`guard-bash.sh` refuses working-tree discards, `ruff format` on prose, and venv
-activation. **A hook is the right shape when the mistake has more spellings than
+`guard-prose.sh` refuses an edit that adds Python prose past the comment
+convention (`guard_prose.py` holds the caps, and a breach already in the file
+is tolerated); `guard-bash.sh` refuses working-tree discards, `ruff format` on
+prose, and venv activation. **A hook is the right shape when the mistake has more spellings than
 you can list** — `deny` is prefix matching, so it caught `uv run ruff format
 docs/` and missed `python -m ruff format docs/`. Add one only for a mistake a
 session has made, and prove both directions: the new spellings blocked, the
@@ -153,7 +156,7 @@ uv sync --extra eval             # NOT optional — see below
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests            # strict, including tests/
-uv run lint-imports              # architecture contracts — 12 kept, 0 broken
+uv run lint-imports              # architecture contracts — 13 kept, 0 broken
 uv run pytest                    # tests/integration/ needs Docker
 ```
 
@@ -212,7 +215,7 @@ functions entirely** — see `.claude/rules/db-and-sql.md` before trusting it.
 
 ### The CLI
 
-`usher` is a console script; `python -m usher` is the same code path. 17
+`usher` is a console script; `python -m usher` is the same code path. 21
 subcommands — `uv run usher --help` is authoritative.
 
 ```bash
@@ -224,17 +227,27 @@ uv run usher push --source "..." | --probe
 uv run usher index [--backfill]                 # search-index freshness
 uv run usher search "..." | suggest "..." --limit 5
 uv run usher eval [suggest --full]              # --full enforces bars, writes the ledger
-uv run usher similar <id> | --rebuild
+uv run usher similar [<id>] [--rebuild [--resume] [--max-seeds N]]
 uv run usher derive | genres [--backfill] | home | curate
+uv run usher schedule [--once]                  # scheduled batches whose period has elapsed
+uv run usher backup [--output OUTPUT]           # everything nothing else can rebuild, one file
+uv run usher restore [--dry-run] [--skip-unresolvable] <artifact>
+uv run usher rotate-secret --new-key-env VAR    # the variable's NAME, never the key
 uv sync --extra embedding                       # optional: fastembed, 167 MiB, no torch
 ```
 
 - **`--phase all` does not dispatch every member**, and `ratings` is an alias
-  rather than a step (ADR-0040).
-- **Nothing runs `usher similar --rebuild` for you** — the one freshness gap in
-  the project. A title's neighbours go stale when some *other* title gets an
-  embedding, which no per-row predicate can decide. Operator command or cron,
-  after `usher index --backfill`.
+  rather than a step.
+- **`usher similar --rebuild` is *schedulable*, not automatic.** M10's J6
+  registers it as `similar.rebuild` on `USHER_SIMILAR_REBUILD_PERIOD_HOURS`
+  (24 h), behind `USHER_SCHEDULER_ENABLED=false` — so nothing runs it for you
+  unless you opt in, and operator command or cron after `usher index
+  --backfill` is still the shipped path. The registered job **refuses** when
+  `USHER_EMBEDDING_MODEL` disagrees with what `title_embeddings.model_name`
+  holds, and always resumes. **The undecidable half of staleness survives all
+  of it**: a title's neighbours go stale when some *other* title gets an
+  embedding, which no per-row predicate can decide. Bare `usher similar`
+  prints the table's age and stale count.
 
 ### Scripts that are not tests, and live runs
 

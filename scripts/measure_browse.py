@@ -1,138 +1,4 @@
-"""Price `/browse`'s two reads at catalog scale, against a bar written first.
-
-**Not a test, and not a fixture.** It reads a real database and takes the
-catalog as it finds it -- it creates no title, enriches nothing, and it
-creates and drops **no index**, deliberately: the index question is this
-measurement's *output*, and an index built to make a bar go green is tuning
-until the number is right. Point it at a throwaway catalog.
-
-    docker run -d --name usher-m9-pg -e POSTGRES_USER=usher \\
-      -e POSTGRES_PASSWORD=usher -e POSTGRES_DB=usher -p 55432:5432 \\
-      --shm-size=1g pgvector/pgvector:pg17
-    export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:55432/usher"
-    export USHER_SECRET_KEY="$(openssl rand -hex 32)"
-    uv run alembic upgrade head
-    uv run python scripts/measure_browse.py --all --out /var/tmp/m9-B7/run.json
-
-================================================================================
-THE BAR -- written down, hashed, and committed before any number was produced
-================================================================================
-
-The authoritative copy is `/var/tmp/m9-B7/BAR.md`,
-`sha256 256f28ba8102a47677acb3fe34afe8dc52787ab3d42c1f2ad2e88ef949cdfba9`,
-written 2026-08-12T06:31:44-05:00 -- **before the first `SELECT` was issued
-against any catalog**. `/var/tmp` rather than `/tmp` because `/tmp` is tmpfs on
-this host and a bar whose whole value is that it provably predates the numbers
-must not live in RAM. It is restated here so the two copies have to agree.
-
-**Bar 1 -- unfiltered facet counts, p95 <= 200 ms at 1.27M titles.** Scored on
-`TitleRepository.browse_facets(genre=None, year=None, owned=None)`, i.e. *both*
-aggregates a request pays for -- the genre `unnest`/`GROUP BY` and the year
-`GROUP BY` -- summed, because a client asking for facets gets both or neither.
-The arms are also reported separately and a bar that passes only because one
-was excluded fails.
-
-**Bar 2 -- a predicated browse (one genre), p95 <= 50 ms.** Scored on
-`TitleRepository.browse(sort=S, genre=G, limit=25)`: one keyset page at the
-route's own over-fetch (`over_fetch(24) == 25`), across all four members of
-`BrowseSort`, first page and a resumed page, pooled at the
-**median-selectivity** genre. Per-sort and per-selectivity breakdowns are
-reported beside it and decide nothing.
-
-Neither bar has a tolerance. 201 ms fails.
-
-**If bar 1 fails**, the recorded consequence is the plan's own and is adopted
-verbatim: facets are served only for a **predicated** browse and the response
-**says so with an explicit key** rather than an empty facet map -- an empty map
-and "facets were not computed" are two different facts and a client cannot tell
-them apart. The DTO is written *after* this run for exactly that reason.
-
-**If bar 2 fails**, the outcome is a measured index recommendation reported
-with the plan that would use it, not a wire change: a browse page is the
-screen and there is no reduced version of it. B6 shipped no index deliberately
-and named this measurement as the decider; `ix_titles_popularity` is the
-precedent for adding one on a guess and dropping it two milestones later.
-**If bar 2 fails only for the low-selectivity genre and passes at the median**,
-that is a pass with a reported defect, in that order and in those words --
-B3's W1/W3 convention adopted rather than reinvented.
-
-Three predictions, scored PASS/REFUTED beside their numbers and binding on
-nothing:
-
-1. **Bar 1 is expected to fail.** B3 measured a titles-only one-character
-   prefix matching 85,082 rows and returning 10 at ~180-293 ms p95 under load;
-   an aggregate has no `LIMIT` pushdown and is strictly more work than a top-10.
-2. **Bar 2 is at risk from the lossy bitmap, not from the sort.** B3's
-   worst-case plan kept 997,618 rows against 5,706,090 removed by filter with
-   66,188 lossy heap blocks, and G7 is refuted -- the cost was the `UNION`'s
-   de-duplication and the recheck, not a 26 kB top-N heapsort. A low-selectivity
-   `genres @> ARRAY['Drama']` has the same exposure.
-3. **The unfiltered browse page is expected to be fast and to prove nothing.**
-   It is measured for contrast and is not what bar 2 is scored on.
-
-================================================================================
-NO PLAN-SHAPE ASSERTION, FOR B3'S MEASURED REASON
-================================================================================
-
-**A plan-shape guard is vacuous below the scale at which the planner chooses
-that shape** -- B3's Gather refusal cannot fire on a 4,000-row catalog. So this
-harness asserts *no* plan shape. It captures `EXPLAIN (ANALYZE, BUFFERS)`
-verbatim for every timed statement, stores it in the run log with its row
-counts, buffer counts, `Heap Blocks: exact=... lossy=...`, `Rows Removed by
-Filter` and any `Sort Method` line, and the write-up names the row count any
-shape was observed at. A shape not observed is reported as not observed, never
-as refused.
-
-================================================================================
-THE STATEMENT MEASURED IS THE SHIPPED ONE, NOT A COPY OF IT
-================================================================================
-
-Every timing drives `PostgresTitleRepository.browse` / `.browse_facets`
-directly, through a session wrapper that **records the SQLAlchemy statement
-object the repository built** and hands it straight on. So the `EXPLAIN` text
-is compiled from the shipped statement rather than retyped beside it: there is
-no second spelling that could drift. `verify_harness` additionally re-executes
-each recorded statement and refuses the run unless it answers the same number
-of rows the repository did -- B3's third harness check, one layer in.
-
-================================================================================
-THE QUIET METRIC, REUSED RATHER THAN RE-DERIVED
-================================================================================
-
-Imported from `measure_suggest_tiers`, not copied: one definition, and B3 paid
-for it already. In short -- **a load-average gate condemns every clean run**
-(B3's went 1.34 -> 2.82 while provably idle, because a long run of continuous
-querying raises its own average), so the one-minute average is context and
-decides nothing. The gate is the **foreign process census**, matched on argv
-*tokens* with shells and `sleep` skipped, plus the **drift in non-idle CPU**
-between two idle-sampled moments, **two-sided at +/-0.10** -- absolute, because
-B3's own smoke run drifted **-0.1037** (the box got *quieter*) and a one-sided
-test would have passed it. A run that is not quiet is discarded and re-run, not
-caveated.
-
-Per-phase checkpointing is likewise B3's: every phase writes the whole log to
-`--out`, and a crash writes what it had with the traceback, because a phase
-that raises N minutes into a quiet window must not take the N-1 before it.
-
-================================================================================
-WHAT IS RECORDED WITH EVERY NUMBER
-================================================================================
-
-Catalog row count; the **enrichment split**, because *"`tmdb_popularity` IS
-NULL on all 1,271,138 rows"* was a `--phase imdb` fact read as a catalog fact;
-the NULL
-fraction of each of the four sort keys; the genre vocabulary with the row count
-behind every probed genre; **whether `media_items` holds anything at all**, an
-`owned` filter over an empty table not being the `owned` filter that ships;
-`work_mem`, `shared_buffers`, `max_parallel_workers_per_gather`; and when the
-tables were last analysed.
-
-Reps are fixed here, before the run: one discarded warm-up, then up to
-`--reps` (default 20) timed executions per probe, bounded by a 6-second
-per-probe budget so a slow probe is measured fewer times rather than a fast one
-too few. p95 is nearest-rank, for the reason B3 gives: an interpolated p95
-invents a latency no query had.
-"""
+"""Price `/browse`'s two reads at catalog scale, against a bar written first."""
 
 from __future__ import annotations
 
@@ -169,10 +35,9 @@ from usher.ports.repository.title import BrowseSort
 PAGE_LIMIT = 24
 FETCH_LIMIT = over_fetch(PAGE_LIMIT)
 
-#: How long one probe may spend being repeated. A slow probe is measured fewer
-#: times rather than a fast probe too few -- B3's `_PROBE_BUDGET_MS`, widened
-#: because an unfiltered aggregate is expected to be seconds rather than
-#: milliseconds and five reps of it must still fit.
+#: How long one probe may spend being repeated, so a slow probe gets fewer
+#: repetitions rather than a fast probe too few. Wide enough that five reps of
+#: a seconds-long unfiltered aggregate still fit.
 _PROBE_BUDGET_MS = 6_000.0
 _MIN_REPS = 5
 
@@ -180,12 +45,7 @@ _MIN_REPS = 5
 BAR_FACETS_MS = 200.0
 BAR_BROWSE_MS = 50.0
 
-#: Where the pre-registered bar lives, and the digest it had when it was
-#: written. `/var/tmp` and not `/tmp` **on purpose**: `/tmp` is tmpfs on this
-#: host, so a bar whose whole value is that it provably predates the numbers
-#: would sit in RAM and a reboot would erase the proof. `S108` is about
-#: predictable temp-file paths as an attack surface; this is a durable record
-#: with a published digest, which is the opposite property.
+#: Where the pre-registered bar lives, and the digest it had when written.
 BAR_PATH = "/var/tmp/m9-B7/BAR.md"  # noqa: S108
 BAR_SHA256 = "256f28ba8102a47677acb3fe34afe8dc52787ab3d42c1f2ad2e88ef949cdfba9"
 BAR_WRITTEN_AT = "2026-08-12T06:31:44-05:00"
@@ -338,7 +198,7 @@ async def catalog_facts(session: AsyncSession) -> dict[str, Any]:
             )
         ).all()
     ]
-    # **`media_items` empty is a fact about what `owned` can be measured
+    # **`media_items` empty is a fact about what `owned` can be scored
     # against, not a footnote.** An `EXISTS` probe over an empty table is
     # answered from an empty index and is not the filter that ships.
     facts["owned_is_measurable"] = bool(facts["media_items"])
@@ -401,8 +261,8 @@ async def _time(label: str, call: Any, reps: int) -> tuple[Timing, list[float]]:
     """Timed executions in milliseconds, after one discarded warm-up.
 
     The warm-up is discarded *and read*: it decides how many repetitions the
-    probe can afford, so a slow probe is measured fewer times rather than a
-    fast probe too few.
+    probe can afford, so a slow probe gets fewer of them rather than a fast
+    probe too few.
     """
     started = time.perf_counter()
     await call()
@@ -420,11 +280,9 @@ async def _time(label: str, call: Any, reps: int) -> tuple[Timing, list[float]]:
 async def verify_harness(session: AsyncSession, recorder: RecordingSession) -> dict[str, Any]:
     """That the statements this harness explains are the ones the repository ran.
 
-    Without this the script measures a copy of the shipped path and reports it
-    as the shipped path -- B3's third harness check, arriving at a recorded
-    statement object rather than at an adapter's return value. Each recorded
-    statement is re-executed from its own compiled text and refused unless it
-    answers the same row count.
+    Without this the script times a copy of the shipped path and reports it as
+    the shipped path. Each recorded statement is re-executed from its own
+    compiled text and refused unless it answers the same row count.
     """
     repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
     recorder.statements.clear()
@@ -458,7 +316,7 @@ async def verify_harness(session: AsyncSession, recorder: RecordingSession) -> d
 async def diagnose_order_by(
     session: AsyncSession, recorder: RecordingSession, reps: int
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """**Added after both bars were scored, and it is a diagnostic, not a bar.**
+    """A diagnostic, not a bar.
 
     Bar 2's named output is an index recommendation, and the first question a
     recommendation has to answer is whether the index is missing or merely
@@ -466,15 +324,11 @@ async def diagnose_order_by(
     leading `(key IS NOT NULL) DESC` term is dropped and nothing else moves --
     same columns, same `LIMIT`, same session.
 
-    The term is written out rather than spelled `nulls_last(...)` on a stated
-    argument -- *"the keyset predicate has to agree with this term for term
-    and two spellings of one rule is how they stop agreeing"* -- and that
-    argument is about **correctness**, which it gets right. What it does not
-    say, because nobody had measured it, is that the two spellings produce the
-    same row order and **different sort keys**, and an index is matched by the
-    sort key. `titles.sort_name` is declared `NOT NULL`, so for
-    `BrowseSort.NAME` the dropped term is provably constant and the two
-    statements are the same question.
+    The term is written out rather than spelled `nulls_last(...)` so the keyset
+    predicate agrees with it term for term. The two spellings give the same row
+    order and **different sort keys**, and an index is matched by the sort key.
+    `titles.sort_name` is `NOT NULL`, so for `BrowseSort.NAME` the dropped term
+    is provably constant and the two statements are the same question.
     """
     repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
     results: dict[str, Any] = {}
@@ -486,20 +340,8 @@ async def diagnose_order_by(
         shipped = recorder.statements[0]
         direction = "DESC" if descending else "ASC"
         compiled = _compiled(shipped)
-        # One variable: the leading boolean term goes, the `NULLS LAST` it was
-        # written out from stays, so the row order is unchanged.
-        #
-        # 🔴 **The first spelling of this surgery did not land and the check
-        # written to catch that could not fire.** The anchor was guessed as
-        # `ORDER BY (col IS NOT NULL) DESC, ...` and SQLAlchemy emits
-        # `ORDER BY titles.col IS NOT NULL DESC, ...` -- no parentheses, and
-        # table-qualified -- so `str.replace` matched nothing, the guard
-        # `"IS NOT NULL) DESC" in variant` was spelled against the same absent
-        # parenthesis and was vacuously false, and the run timed **two copies
-        # of one statement** and reported them as a refutation. The guard is
-        # now byte inequality against the text it was derived from, which is
-        # the F3 landing-check repair and is immune to how the compiler spells
-        # anything.
+        # One variable: the leading boolean term goes, the `NULLS LAST` it was written
+        # out from stays, so the row order is unchanged.
         old = f"ORDER BY titles.{column} IS NOT NULL DESC, titles.{column} {direction}"
         new = f"ORDER BY titles.{column} {direction} NULLS LAST"
         variant = compiled.replace(old, new)
@@ -578,9 +420,9 @@ async def measure_browse(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Bar 2, the unfiltered contrast, and the resumed page at every sort.
 
-    The resumed page is not decoration: the keyset predicate is three arms
-    (ADR-0034) and the first page exercises none of them, so a bar scored on
-    page one alone is a bar about a query the second request never makes.
+    The resumed page is not decoration: the keyset predicate is three arms and
+    the first page exercises none of them, so a bar scored on page one alone is
+    a bar about a query the second request never makes.
     """
     repository = PostgresTitleRepository(recorder)  # type: ignore[arg-type]
     filters: list[tuple[str, dict[str, Any]]] = [
@@ -748,9 +590,11 @@ async def run(args: argparse.Namespace) -> None:
         raise
     finally:
         await engine.dispose()
-    # Sampled after every backend is gone, so the closing reading is taken
-    # under the same condition as the opening one: this harness idle, and
-    # whatever else is on the box still running.
+    # Not `quiet_closing`: this one persists raw snapshots into `log.load` and
+    # *warns* rather than gating, neither of which a bool carries. Sampled
+    # after every backend is gone, so the closing reading is taken under the
+    # same condition as the opening one: this harness idle, and whatever else
+    # is on the box still running.
     time.sleep(_CPU_SETTLE_SECONDS)
     log.load["after"] = _load_snapshot()
     before, after = log.load["before"], log.load["after"]
@@ -758,8 +602,8 @@ async def run(args: argparse.Namespace) -> None:
     foreign = max(before["processes"]["pytest"], after["processes"]["pytest"])
     log.load["cpu_busy_drift"] = round(drift, 4)
     log.load["foreign_pytest_processes"] = foreign
-    # Two-sided, for B3's measured reason: a box that got *quieter* mid-run was
-    # also not the same box throughout, and B3's own smoke run drifted -0.1037.
+    # Two-sided: a box that got *quieter* mid-run was also not the same box
+    # throughout.
     log.load["quiet_enough"] = foreign == 0 and abs(drift) <= _CPU_DRIFT_LIMIT
     log.load["one_minute_loadavg_before_after"] = [before["loadavg"][0], after["loadavg"][0]]
     log.load["loadavg_is_context_not_a_gate"] = (

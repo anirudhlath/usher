@@ -1,172 +1,574 @@
-"""BootstrapService against real Postgres, racing two processes for the same
-dataset's checkpoint row.
+"""BootstrapService against real Postgres: two processes on one dataset, and a stopped import.
 
-The unit-level fakes (tests/unit/test_services_bootstrap.py) have no real
-transactional semantics, which is exactly why this class of bug hid for as
-long as it did: PostgresImportRunRepository.save() originally left the
-*session* poisoned after a caught RepositoryConflict, so
-BootstrapService.import_dataset's except handler's own re-fetch
-(self._runs.get(dataset.name)) raised sqlalchemy.exc.PendingRollbackError
-instead of returning -- a fake session has no such state to poison. Group G
-fixed that with the missing `await self._session.rollback()`
-(PostgresImportRunRepository.save()), pinned by
-tests/integration/test_import_run_repository.py::
-test_the_session_survives_a_conflict_for_the_callers_next_statement.
-
-Fixing *that* surfaced a second bug, one layer up, in this module's own
-territory: once self._runs.get() after a conflict stopped raising and
-started actually returning a row, it returns the *other*, winning process's
-row -- the loser never got one of its own. import_dataset's except handler
-used to re-fetch by dataset name unconditionally and evolve+save FAILED onto
-whatever it found, which is correct when that row is the caller's own (a
-`_drain` failure) but silently corrupts a legitimately RUNNING or
-already-COMPLETED import when it belongs to someone else (a `start()`
-conflict). This file proves the fix -- BootstrapService.import_dataset now
-distinguishes the two -- against a real two-process race, not a mocked one.
+Each case builds its own engine and deletes the checkpoints it committed.
 """
 
+import asyncio
+import pathlib
+import time
 from collections.abc import AsyncIterator, Sequence
 
-from sqlalchemy import delete
+import httpx
+import pytest
+from pydantic import SecretStr
+from sqlalchemy import QueuePool, delete, text
+from sqlalchemy.exc import DBAPIError
 
+import usher.composition
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
+from usher.composition import FailedImport, SkippedStep, run_bootstrap
+from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.models.bootstrap import ImportRunRow
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
-from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset
+from usher.domain.bootstrap import BootstrapPhase, ImportRunStatus
+from usher.domain.enums import TitleKind
+from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
 from usher.ports.events import NullEventPublisher
 from usher.services.bootstrap import BootstrapService
 
 _DATASET = "concurrency.probe"
 
 
-class _AlwaysFreshStart(PostgresImportRunRepository):
-    """Standing in for the losing side of a genuine two-process TOCTOU race.
+class _Gated(BulkDataset[int]):
+    """`count` batches, whose first fetch waits on `gate` -- a download, held open.
 
-    A real race needs both processes' `get()` to return `None` before
-    either commits, which running two sequential `await`s against one
-    event loop can't reproduce -- by the time this test's loser session
-    calls `start()`, the winner has already committed, so a real,
-    unmodified `start()` would call `get()`, see the winner's row, and
-    take the benign "adopt the existing row" update path instead of racing
-    into a fresh insert. This forces exactly the precondition a real race's
-    loser is in: skip the existing-row check and attempt a fresh insert
-    unconditionally, as if this really were `dataset`'s first-ever run.
-
-    `save()` and `get()` are untouched, real `PostgresImportRunRepository`
-    methods -- including Group G's rollback fix -- so only the race
-    *precondition* is forced here; the conflict itself, the `IntegrityError`
-    translation, and the recovery are all the genuine, currently-shipped
-    code under test.
+    `fetching` is set as the fetch begins, and `fetched_at` records when.
     """
 
-    async def start(self, dataset: str, revision: str) -> ImportRun:
-        run = ImportRun(dataset=dataset, revision=revision)
-        await self.save(run)
-        return run
-
-
-class _NeverDrained(BulkDataset[object]):
-    """A `BulkDataset` standing in for the loser's dataset. `revision()`
-    must succeed -- the conflict this test cares about comes from
-    `self._runs.start()`, not from resolving a revision -- but `batches()`
-    must never actually be reached: a `start()` conflict is handled before
-    `import_dataset` ever calls it. Raising here, rather than yielding
-    nothing, turns "the conflict path really does short-circuit before
-    draining" into something this test verifies rather than assumes.
-    """
+    def __init__(
+        self,
+        gate: asyncio.Event | None,
+        fetching: asyncio.Event,
+        revision: str = "etag-1",
+        *,
+        name: str = _DATASET,
+        count: int = 2,
+    ) -> None:
+        self._gate = gate
+        self._fetching = fetching
+        self._revision = revision
+        self._name = name
+        self._count = count
+        self.fetched_at: float | None = None
 
     @property
     def name(self) -> str:
-        return _DATASET
+        return self._name
 
     @property
     def attribution(self) -> str:
-        return "stub, never redistributed"
+        return "synthetic, never redistributed"
 
     async def revision(self) -> str:
-        return "etag-1"
+        return self._revision
 
     def batches(
         self, *, resume_from: BulkCursor | None = None, revision: str | None = None
-    ) -> AsyncIterator[BulkBatch[object]]:
-        raise AssertionError(
-            "batches() must not be called: a RepositoryConflict from start() "
-            "must short-circuit before _drain is ever entered"
-        )
+    ) -> AsyncIterator[BulkBatch[int]]:
+        return self._iter(resume_from.position if resume_from else 0)
+
+    async def _iter(self, start: int) -> AsyncIterator[BulkBatch[int]]:
+        self.fetched_at = time.monotonic()
+        self._fetching.set()
+        if self._gate is not None:
+            await self._gate.wait()
+        for index in range(start, self._count):
+            yield BulkBatch(
+                rows=(index,),
+                cursor=BulkCursor(revision=self._revision, position=index + 1, rows_seen=index + 1),
+            )
 
     async def aclose(self) -> None:
         return None
 
 
-async def _write(rows: Sequence[object]) -> int:
-    raise AssertionError("write() must not be called -- see _NeverDrained.batches()")
+@pytest.fixture
+async def forget_probe(postgres_url: str) -> AsyncIterator[None]:
+    """Deletes the checkpoint the case committed for real, however it ends."""
+    yield
+    engine = build_engine(postgres_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(delete(ImportRunRow).where(ImportRunRow.dataset == _DATASET))
+    finally:
+        await engine.dispose()
 
 
-async def test_a_conflicting_start_leaves_the_winners_run_untouched(postgres_url: str) -> None:
-    """Two real, engine-bound sessions -- not the shared `session` fixture
-    every other test in this suite uses, and deliberately so: that fixture
-    binds to a connection with an externally-managed outer transaction, and
-    SQLAlchemy's own `join_transaction_mode` resolves to "rollback_only" for
-    exactly that shape (see tests/integration/conftest.py's own docstring).
-    `PostgresImportRunRepository.save()`'s fix calls a real
-    `session.rollback()` on the *loser's* session specifically; against the
-    shared fixture that would roll back the fixture's own transaction
-    instead of just the loser's failed insert, corrupting every other
-    integration test's isolation rather than pinning this one. Same shape as
-    tests/integration/test_bulk_repository.py's
-    `test_bulk_load_window_commits_the_callers_own_pending_work` and
-    tests/integration/test_import_run_repository.py's
-    `test_the_session_survives_a_conflict_for_the_callers_next_statement`,
-    including the cleanup discipline.
+def _service(runs: PostgresImportRunRepository, commit: object) -> BootstrapService:
+    return BootstrapService(
+        runs,
+        FakeBulkCatalogRepository(),
+        commit,  # type: ignore[arg-type]
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.CROSSWALK,
+    )
+
+
+def _recorder(into: list[Sequence[int]]) -> object:
+    async def write(rows: Sequence[int]) -> int:
+        into.append(rows)
+        return len(rows)
+
+    return write
+
+
+async def test_a_second_process_concedes_while_the_first_downloads_and_writes_nothing(
+    postgres_url: str, forget_probe: None
+) -> None:
+    """The first holds the dataset from `start()` until it returns, so the second leaves it.
+
+    Committing `start()` before the first fetch made the `RUNNING` row visible, and a
+    second process adopted it and wrote every batch beside the first. Its whole import
+    here runs inside the first one's download -- the windows are recorded and asserted
+    to nest -- and it fetches nothing, writes nothing and returns the holder's row. Once
+    the first returns, the hold is gone and a third run takes the checkpoint.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, first_fetching, second_fetching = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    first_written: list[Sequence[int]] = []
+    second_written: list[Sequence[int]] = []
+    try:
+        async with factory() as first_session, factory() as second_session:
+            first = _Gated(gate, first_fetching)
+            first_task = asyncio.create_task(
+                _service(
+                    PostgresImportRunRepository(first_session), first_session.commit
+                ).import_dataset(first, _recorder(first_written))  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(first_fetching.wait(), 5)
+
+            second = _service(PostgresImportRunRepository(second_session), second_session.commit)
+            second_began = time.monotonic()
+            conceded = await asyncio.wait_for(
+                second.import_dataset(
+                    _Gated(None, second_fetching),
+                    _recorder(second_written),  # type: ignore[arg-type]
+                ),
+                5,
+            )
+            second_ended = time.monotonic()
+            released = time.monotonic()
+            gate.set()
+            finished = await asyncio.wait_for(first_task, 5)
+
+            third = _service(PostgresImportRunRepository(second_session), second_session.commit)
+            resumed = await third.import_dataset(
+                _Gated(None, asyncio.Event()),
+                _recorder(second_written),  # type: ignore[arg-type]
+            )
+    finally:
+        await engine.dispose()
+
+    assert first.fetched_at is not None
+    assert first.fetched_at <= second_began <= second_ended <= released, (
+        "the premise: the second import ran inside the first one's download",
+        (first.fetched_at, second_began, second_ended, released),
+    )
+    assert not second_fetching.is_set(), "the second process fetched"
+    assert second_written == [], "the second process wrote"
+    assert second.conceded == frozenset({_DATASET})
+    assert (conceded.id, conceded.status, conceded.error) == (
+        finished.id,
+        ImportRunStatus.RUNNING,
+        None,
+    )
+    assert first_written == [(0,), (1,)]
+    assert (finished.status, finished.position) == (ImportRunStatus.COMPLETED, 2)
+    assert third.conceded == frozenset()
+    assert (resumed.id, resumed.status, resumed.position) == (
+        finished.id,
+        ImportRunStatus.COMPLETED,
+        2,
+    )
+
+
+async def test_an_import_cancelled_in_its_first_fetch_leaves_a_completed_one_standing(
+    postgres_url: str, forget_probe: None
+) -> None:
+    """Ctrl-C or SIGTERM during the download of a new revision, over a finished import.
+
+    Nothing of the new snapshot landed, so the checkpoint still describes the catalog:
+    `completed`, at the revision and position it completed, which blocks no phase. It
+    read `running` at position 0 of the new revision, and every dependent phase was
+    skipped. The hold is released on the way out, so the next run takes it at once.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     try:
-        async with factory() as winner_session, factory() as loser_session:
-            # The winner: a real process that really commits first, exactly
-            # the state a genuine winning bootstrap leaves behind.
-            winner_run = await PostgresImportRunRepository(winner_session).start(_DATASET, "etag-1")
-            await winner_session.commit()
-
-            # The loser: BootstrapService.import_dataset, driven for real,
-            # racing the same dataset via _AlwaysFreshStart -- see its own
-            # docstring for why forcing the race's precondition is
-            # necessary here (a real race needs both sides' get() to return
-            # None before either commits, which two sequential awaits on
-            # one event loop can't reproduce on their own).
-            loser_catalog = FakeBulkCatalogRepository()
-            loser_service = BootstrapService(
-                _AlwaysFreshStart(loser_session),
-                loser_catalog,
-                loser_session.commit,
-                events=NullEventPublisher(),
-                phase=BootstrapPhase.ALL,
+        async with factory() as seed:
+            repository = PostgresImportRunRepository(seed)
+            started = await repository.start(_DATASET, "etag-0")
+            completed = started.evolve(
+                status=ImportRunStatus.COMPLETED, position=2, rows_seen=2, rows_written=2
             )
-            result = await loser_service.import_dataset(_NeverDrained(), _write)
+            await repository.save(completed)
+            await seed.commit()
+            await repository.release(_DATASET)
 
-            # The core regression: the loser's own report reflects the real
-            # winner's row -- not a fabricated FAILED status describing the
-            # loser's own redundant attempt.
-            assert result.id == winner_run.id
-            assert result.status is ImportRunStatus.RUNNING
-            assert result.error is None
+        gate, fetching = asyncio.Event(), asyncio.Event()
+        written: list[Sequence[int]] = []
+        async with factory() as session:
+            task = asyncio.create_task(
+                _service(PostgresImportRunRepository(session), session.commit).import_dataset(
+                    _Gated(gate, fetching, "etag-1"),
+                    _recorder(written),  # type: ignore[arg-type]
+                )
+            )
+            await asyncio.wait_for(fetching.wait(), 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
-            # The stronger assertion the coordinator asked for: not just
-            # "the loser didn't crash", but that the winner's row, read back
-            # from the *winner's own* session, is byte-for-byte unchanged.
-            # A naive re-fetch-and-overwrite fix would still pass the
-            # weaker assertion above (it evolves a copy) right up until this
-            # read proves the persisted row itself was corrupted.
-            reread = await PostgresImportRunRepository(winner_session).get(_DATASET)
-            assert reread is not None
-            assert reread.id == winner_run.id
-            assert reread.status is ImportRunStatus.RUNNING
-            assert reread.error is None
-            assert reread.position == winner_run.position
+        async with factory() as reader:
+            after = PostgresImportRunRepository(reader)
+            stored = await after.get(_DATASET)
+            retaken = await after.start(_DATASET, "etag-1")
+            await after.release(_DATASET)
     finally:
-        async with factory() as cleanup:
-            await cleanup.execute(delete(ImportRunRow).where(ImportRunRow.dataset == _DATASET))
-            await cleanup.commit()
         await engine.dispose()
+
+    assert written == [], "the premise: nothing of the new snapshot landed"
+    assert stored is not None
+    assert stored == completed.evolve(heartbeat_at=stored.heartbeat_at)
+    assert (retaken.revision, retaken.position) == ("etag-1", 0)
+
+
+async def test_an_import_whose_hold_ends_mid_download_stops_and_says_so(
+    postgres_url: str, forget_probe: None
+) -> None:
+    """The hold's connection is ended while the first fetch waits on a download.
+
+    `idle_session_timeout`, a proxy's idle cut and a restart all end it the same way, and
+    the advisory lock goes with it. Nothing checked, so the import went on writing a
+    dataset any other process could now take. The next beat confirms the hold, finds it
+    gone, and the import is recorded failed -- by a process that took the dataset again
+    to write it, and gave it back.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, fetching = asyncio.Event(), asyncio.Event()
+    written: list[Sequence[int]] = []
+    try:
+        async with factory() as session:
+            service = BootstrapService(
+                PostgresImportRunRepository(session),
+                FakeBulkCatalogRepository(),
+                session.commit,
+                events=NullEventPublisher(),
+                phase=BootstrapPhase.CROSSWALK,
+                heartbeat=0.05,
+            )
+            task = asyncio.create_task(
+                service.import_dataset(
+                    _Gated(gate, fetching),
+                    _recorder(written),  # type: ignore[arg-type]
+                )
+            )
+            await asyncio.wait_for(fetching.wait(), 5)
+            async with engine.connect() as killer:
+                ended = await killer.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND classid = CAST(:ns AS oid) "
+                        "AND objid = CAST(hashtext(:dataset) AS oid) AND objsubid = 2"
+                    ),
+                    {"ns": 0x75736872, "dataset": _DATASET},
+                )
+            run = await asyncio.wait_for(task, 5)
+
+        async with factory() as reader:
+            after = PostgresImportRunRepository(reader)
+            stored = await after.get(_DATASET)
+            retaken = await after.start(_DATASET, "etag-1")
+            await after.release(_DATASET)
+    finally:
+        await engine.dispose()
+
+    assert ended == 1, "the premise: the one backend holding the dataset was ended"
+    assert written == [], "the import wrote after its hold was gone"
+    assert run.status is ImportRunStatus.FAILED
+    assert (run.error or "").startswith(f"lost the hold on the import of {_DATASET}"), run.error
+    assert stored == run
+    assert (retaken.revision, retaken.position) == ("etag-1", 0), "the dataset is free again"
+
+
+_TITLES, _NAMES = "imdb.title.basics", "imdb.credit_names"
+
+
+@pytest.fixture
+async def forget_titles_and_names(postgres_url: str) -> AsyncIterator[None]:
+    """Deletes the two checkpoints the case committed for real, however it ends."""
+    yield
+    engine = build_engine(postgres_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                delete(ImportRunRow).where(ImportRunRow.dataset.in_((_TITLES, _NAMES)))
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _a_catalog() -> FakeBulkCatalogRepository:
+    """One synthetic title, so `credit-names` finds a catalog to join against."""
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles(
+        [
+            ImdbTitle(
+                imdb_id="tt99000101",
+                kind=TitleKind.MOVIE,
+                name="The Quiet Vacuum",
+                original_name=None,
+                year=1994,
+                end_year=None,
+                runtime_minutes=101,
+            )
+        ]
+    )
+    return catalog
+
+
+def _credit_names_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, dataset: _Gated
+) -> Settings:
+    """`run_bootstrap`'s `credit-names` over `dataset`, offline, and the settings to run it."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the bootstrap reached the network: {request.url}")
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda *_, **__: httpx.AsyncClient(transport=httpx.MockTransport(refuse)),
+    )
+    monkeypatch.setattr(usher.composition, "IMDbCreditNamesDataset", lambda *_, **__: dataset)
+    return Settings(
+        database_url=SecretStr("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"),
+        secret_key=SecretStr("0" * 32),
+        bulk_data_dir=tmp_path,
+    )
+
+
+async def test_an_import_begun_while_a_phase_reads_its_dataset_is_left_alone(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    forget_titles_and_names: None,
+) -> None:
+    """`credit-names` joins the titles while another process starts importing them.
+
+    Checked once as the phase began, the import went unseen and rewrote the titles under
+    the join. The phase holds them shared until it ends: the import, its whole attempt
+    inside the phase's fetch, concedes, fetches nothing and writes nothing -- and once
+    the phase ends, a third run imports them.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, reading, importing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    phase = _Gated(gate, reading, name=_NAMES, count=0)
+    settings = _credit_names_from(monkeypatch, tmp_path, phase)
+    written: list[Sequence[int]] = []
+    try:
+        async with factory() as reader_session, factory() as importer_session:
+            phase_task = asyncio.create_task(
+                run_bootstrap(
+                    await _a_catalog(),
+                    PostgresImportRunRepository(reader_session),
+                    reader_session.commit,
+                    settings,
+                    BootstrapPhase.CREDIT_NAMES,
+                    report=lambda _: None,
+                    events=NullEventPublisher(),
+                )
+            )
+            await asyncio.wait_for(reading.wait(), 5)
+            # Its session gave its connection back at the last commit.
+            assert isinstance(engine.pool, QueuePool)
+            held_by_the_phase = engine.pool.checkedout()
+
+            importer = _service(
+                PostgresImportRunRepository(importer_session), importer_session.commit
+            )
+            began = time.monotonic()
+            conceded = await asyncio.wait_for(
+                importer.import_dataset(
+                    _Gated(None, importing, name=_TITLES),
+                    _recorder(written),  # type: ignore[arg-type]
+                ),
+                5,
+            )
+            ended = time.monotonic()
+            released = time.monotonic()
+            gate.set()
+            outcome = await asyncio.wait_for(phase_task, 5)
+
+            third = _service(PostgresImportRunRepository(importer_session), importer_session.commit)
+            imported = await third.import_dataset(
+                _Gated(None, asyncio.Event(), name=_TITLES),
+                _recorder(written),  # type: ignore[arg-type]
+            )
+    finally:
+        await engine.dispose()
+
+    assert phase.fetched_at is not None
+    assert phase.fetched_at <= began <= ended <= released, (
+        "the premise: the import was attempted inside the phase's fetch",
+        (phase.fetched_at, began, ended, released),
+    )
+    assert held_by_the_phase == 2, "beside its session: the connection its reads are on, its hold's"
+    assert importer.conceded == frozenset({_TITLES})
+    assert (conceded.dataset, conceded.status) == (_TITLES, ImportRunStatus.FAILED)
+    assert not importing.is_set(), "the import fetched"
+    assert outcome.succeeded, outcome
+    assert (imported.status, imported.position) == (ImportRunStatus.COMPLETED, 2)
+    assert third.conceded == frozenset()
+    assert written == [(0,), (1,)], "only the third run wrote"
+
+
+async def test_a_phase_begun_while_its_dataset_is_being_imported_is_skipped(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    forget_titles_and_names: None,
+) -> None:
+    """The reverse: `imdb` is mid-download in one process when `credit-names` starts.
+
+    A refresh's row reads `completed` until its first batch lands, so only the hold says
+    the titles are being rewritten. The phase's shared read is refused, so it is skipped
+    before its first request -- inside the import's fetch, recorded and asserted -- and
+    runs once the import has ended.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, importing, fetched = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    settings = _credit_names_from(
+        monkeypatch, tmp_path, _Gated(None, fetched, name=_NAMES, count=0)
+    )
+    written: list[Sequence[int]] = []
+    try:
+        async with factory() as importer_session, factory() as reader_session:
+            seed = PostgresImportRunRepository(importer_session)
+            completed = (await seed.start(_TITLES, "etag-0")).evolve(
+                status=ImportRunStatus.COMPLETED, position=2, rows_seen=2, rows_written=2
+            )
+            await seed.save(completed)
+            await importer_session.commit()
+            await seed.release(_TITLES)
+
+            titles = _Gated(gate, importing, name=_TITLES)
+            import_task = asyncio.create_task(
+                _service(
+                    PostgresImportRunRepository(importer_session), importer_session.commit
+                ).import_dataset(titles, _recorder(written))  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(importing.wait(), 5)
+
+            reader = PostgresImportRunRepository(reader_session)
+            began = time.monotonic()
+            skipped = await asyncio.wait_for(
+                run_bootstrap(
+                    await _a_catalog(),
+                    reader,
+                    reader_session.commit,
+                    settings,
+                    BootstrapPhase.CREDIT_NAMES,
+                    report=lambda _: None,
+                    events=NullEventPublisher(),
+                ),
+                5,
+            )
+            ended = time.monotonic()
+            stored_meanwhile = await reader.get(_TITLES)
+            released = time.monotonic()
+            gate.set()
+            finished = await asyncio.wait_for(import_task, 5)
+
+            after = await run_bootstrap(
+                await _a_catalog(),
+                reader,
+                reader_session.commit,
+                settings,
+                BootstrapPhase.CREDIT_NAMES,
+                report=lambda _: None,
+                events=NullEventPublisher(),
+            )
+    finally:
+        await engine.dispose()
+
+    assert titles.fetched_at is not None
+    assert titles.fetched_at <= began <= ended <= released, (
+        "the premise: the phase ran inside the import's fetch",
+        (titles.fetched_at, began, ended, released),
+    )
+    assert stored_meanwhile is not None
+    assert stored_meanwhile.status is ImportRunStatus.COMPLETED, (
+        "the premise: the row alone says nothing is being imported"
+    )
+    assert skipped.unfinished == (
+        SkippedStep(BootstrapPhase.CREDIT_NAMES, (), (BootstrapPhase.CREDIT_NAMES,), (_TITLES,)),
+    )
+    assert (finished.status, finished.position) == (ImportRunStatus.COMPLETED, 2)
+    assert written == [(0,), (1,)]
+    assert after.succeeded, after
+    assert fetched.is_set(), "the phase ran once the import had ended"
+
+
+async def test_a_restart_mid_phase_is_recorded_as_its_failure_and_raises_nothing(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    forget_titles_and_names: None,
+) -> None:
+    """A Postgres restart ends the hold's backend and the reads' at once, mid-fetch.
+
+    The failure was recorded, and then the phase's end gave its reads back on the ended
+    connection and `run_bootstrap` raised that instead: `--phase all` abandoned every later
+    phase, the exit line named the unlock, and a worker's job crashed. A lock whose
+    connection ended has been given back already.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, reading = asyncio.Event(), asyncio.Event()
+    settings = _credit_names_from(monkeypatch, tmp_path, _Gated(gate, reading, name=_NAMES))
+    try:
+        async with factory() as session:
+            task = asyncio.create_task(
+                run_bootstrap(
+                    await _a_catalog(),
+                    PostgresImportRunRepository(session),
+                    session.commit,
+                    settings,
+                    BootstrapPhase.CREDIT_NAMES,
+                    report=lambda _: None,
+                    events=NullEventPublisher(),
+                )
+            )
+            await asyncio.wait_for(reading.wait(), 5)
+            async with engine.connect() as killer:
+                ended = await killer.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND classid = CAST(:ns AS oid)"
+                    ),
+                    {"ns": 0x75736872},
+                )
+            gate.set()
+            try:
+                outcome = await asyncio.wait_for(task, 5)
+            except DBAPIError as exc:
+                pytest.fail(f"run_bootstrap raised past the failure it recorded: {exc!r}")
+        async with factory() as reader:
+            stored = await PostgresImportRunRepository(reader).get(_NAMES)
+    finally:
+        await engine.dispose()
+
+    assert ended == 2, "the premise: the phase's hold and the connection its reads are on"
+    assert stored is not None
+    assert outcome.unfinished == (FailedImport(BootstrapPhase.CREDIT_NAMES, stored),)
+    assert (stored.status, stored.position, stored.error) == (
+        ImportRunStatus.FAILED,
+        0,
+        f"lost the hold on the import of {_NAMES}: its connection ended",
+    )

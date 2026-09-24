@@ -1,16 +1,4 @@
-"""The worker loop, against `FakeJobQueue`.
-
-**What this file cannot say, stated before the cases that can.** The fake is
-one dict behind one event loop: it has no row lock, no transaction, and no
-second session, so "the claim is committed before the work starts" is
-checked here as an *ordering of calls* and there is nothing here that could
-tell an ordering from a durability. `tests/integration/test_services_jobs.py`
-is where a second Postgres backend looks at the queue from outside a running
-handler and sees `running` rather than `pending`, and where two real workers
-claim disjoint halves of one batch. The fake's own module docstring lists
-`SKIP LOCKED` first among the things it cannot express, and the worker is
-the code that depends on it most.
-"""
+"""The worker loop, against `FakeJobQueue`."""
 
 import asyncio
 import contextlib
@@ -55,8 +43,8 @@ class _RecordingPublisher(EventPublisher):
     """The bus's stand-in, writing into the same log the commits do.
 
     One shared list rather than a counter beside a counter, for `_Fixture`'s
-    own reason: ADR-0033 is a rule about *ordering*, and "one publish, one
-    commit" is what both orders produce.
+    own reason: the rule is about *ordering*, and "one publish, one commit" is
+    what both orders produce.
     """
 
     def __init__(self, log: list[str]) -> None:
@@ -142,12 +130,8 @@ class _Fixture:
         #: Every scope this fixture has opened, so a case can assert there was
         #: one per job rather than one per worker.
         self.scopes: list[JobScope] = []
-        # `concurrency` above 1 by default, so every case in this file runs
-        # under the shape production runs under rather than under a serialised
-        # special case. The shipped *global* is `Settings.job_concurrency` and
-        # `tests/unit/test_config.py` pins its value; four is enough here to
-        # make a pool a pool, and the fake suspends nowhere, so the ordering
-        # cases below stay deterministic under it.
+        # `concurrency` above 1 by default, so every case in this file runs under the
+        # shape production runs under rather than under a serialised special case.
         self.worker = JobWorker(
             self._scope,
             dict.fromkeys(self._handlers, concurrency),
@@ -161,9 +145,9 @@ class _Fixture:
         """One scope, with a buffer of its own over the shared bus.
 
         The queue is shared because `FakeJobQueue` *is* the store -- one dict
-        behind one event loop, with no second session to model (this file's own
-        docstring). What is per-scope here is what is per-session in
-        production: the commit, the handlers and the event buffer.
+        behind one event loop, with no second session to model. What is
+        per-scope here is what is per-session in production: the commit, the
+        handlers and the event buffer.
         """
         events = DeferredEventPublisher(self.bus)
         scope = JobScope(
@@ -279,17 +263,11 @@ async def test_a_handler_runs_and_the_job_is_removed(fixture: _Fixture) -> None:
 
     `depth` counts `pending` only, so a worker that ran the handler and never
     called `complete` leaves the row `running` and reads back as an empty
-    queue -- measured: deleting the `complete` call fails nothing else in
-    this file. `requeue_running` is what can see it, and a job stuck
-    `running` forever is the state PRD 08's recovery exists to clean up.
-
-    **Asked of the queue directly rather than through `JobWorker.recover()`,
-    and that is a change M9's W1 forced.** `recover` now passes an age
-    threshold, so against a claim made milliseconds ago it answers `0` whether
-    the job was completed or abandoned -- the lease that makes recovery safe at
-    more than one worker is exactly what makes it useless as an assertion here.
-    The port's own `older_than_seconds=0.0` default is what still sees
-    everything.
+    queue, which is the state PRD 08's recovery exists to clean up. Asked of
+    the queue directly rather than through `JobWorker.recover()`, which passes
+    an age threshold and so answers `0` against a claim made milliseconds ago
+    whether it was completed or abandoned; the port's own
+    `older_than_seconds=0.0` default still sees everything.
     """
     await fixture.given("t1")
     assert await fixture.worker.run_once() == 1
@@ -301,9 +279,11 @@ async def test_a_handler_runs_and_the_job_is_removed(fixture: _Fixture) -> None:
 
 
 async def test_the_handler_is_given_the_job_it_was_claimed_for(fixture: _Fixture) -> None:
-    """`Job.key` is how every handler finds its work -- a title id for
-    `enrich`, an external id for `watch_history` -- so handing over anything
-    but the claimed row makes each of them operate on the wrong thing."""
+    """`Job.key` is how every handler finds its work.
+
+    A title id for `enrich`, an external id for `watch_history` -- so handing
+    over anything but the claimed row makes each operate on the wrong thing.
+    """
     await fixture.given("t1")
     await fixture.worker.run_once()
     assert [job.key for job in fixture.handled] == ["t1"]
@@ -317,15 +297,13 @@ async def test_an_empty_queue_is_not_an_error(fixture: _Fixture) -> None:
 
 
 async def test_the_claim_is_committed_before_the_work_starts(fixture: _Fixture) -> None:
-    """A worker that claims and works in one uncommitted transaction holds
-    every claimed row's lock for the length of the batch, and leaves a
-    process killed mid-job with no record that anything was ever tried --
-    the claim rolls back and `requeue_running` has nothing to recover.
+    """The claim is committed before the handler runs.
 
-    An ordering assertion, and only that: this fake has no transaction, so
-    nothing here can tell a commit that happened from one that mattered.
-    `tests/integration/test_services_jobs.py` looks at the row from a second
-    Postgres backend while the handler is still running.
+    A worker that claims and works in one uncommitted transaction holds every
+    claimed row's lock for the length of the batch, and leaves a process killed
+    mid-job with no record that anything was tried. An ordering assertion and
+    only that: this fake has no transaction, so nothing here can tell a commit
+    that happened from one that mattered.
     """
     await fixture.given("t1")
     await fixture.worker.run_once()
@@ -334,14 +312,12 @@ async def test_the_claim_is_committed_before_the_work_starts(fixture: _Fixture) 
 
 
 async def test_each_job_is_committed_as_it_finishes(fixture: _Fixture) -> None:
-    """Per job, not per batch. A crash nineteen jobs into twenty must not
-    re-run the nineteen -- redelivery is safe by construction, but paying for
-    it when the alternative is free is not.
+    """Per job, not per batch.
 
-    The `complete` entries are the queue's, added when this fixture grew an
-    ordering claim about the *completion* (ADR-0033); they pin the second
-    half of "committed as it finishes", which is that the commit follows the
-    completion rather than merely following the handler.
+    A crash nineteen jobs into twenty must not re-run the nineteen. The
+    `complete` entries are the queue's, and they pin the second half of
+    "committed as it finishes": the commit follows the completion rather than
+    merely following the handler.
     """
     await fixture.given("t1", "t2", "t3")
     await fixture.worker.run_once()
@@ -360,9 +336,12 @@ async def test_each_job_is_committed_as_it_finishes(fixture: _Fixture) -> None:
 
 
 async def test_the_worker_only_claims_kinds_it_can_handle(fixture: _Fixture) -> None:
-    """A worker that claimed every kind would take work it cannot run and
-    then either crash on the handler lookup or park it -- and a job parked
-    for being offered to the wrong process needs a human to release it."""
+    """A worker claims only the kinds it has a handler for.
+
+    One that claimed every kind would take work it cannot run and then crash on
+    the handler lookup or park it -- and a job parked for being offered to the
+    wrong process needs a human to release it.
+    """
     await fixture.given("t1")
     await fixture.given("m1", kind=JobKind.MATCH)
     assert await fixture.worker.run_once() == 1
@@ -383,9 +362,11 @@ async def test_a_transient_failure_backs_the_job_off(fixture: _Fixture) -> None:
 
 
 async def test_a_backed_off_job_is_not_immediately_re_claimed(fixture: _Fixture) -> None:
-    """The hot loop the backoff exists to prevent, at the worker level: one
-    broken upstream must not become a request per handler invocation for as
-    long as it stays broken."""
+    """The hot loop the backoff exists to prevent, at the worker level.
+
+    One broken upstream must not become a request per handler invocation for as
+    long as it stays broken.
+    """
     fixture.register(JobKind.ENRICH, fixture.raising(PortUnavailable("upstream is down")))
     await fixture.given("t1")
     assert await fixture.worker.run_once() == 1
@@ -393,10 +374,12 @@ async def test_a_backed_off_job_is_not_immediately_re_claimed(fixture: _Fixture)
 
 
 async def test_malformed_data_parks_immediately(fixture: _Fixture) -> None:
-    """`PortDataMalformed`: "the upstream answered, and the answer was wrong.
-    Retrying does not help, so a caller parks the work rather than backing
-    off." Five identical failures and a five-times-longer wait before a human
-    sees it is the alternative."""
+    """`PortDataMalformed` means the upstream answered and the answer was wrong.
+
+    Retrying does not help, so the work is parked rather than backed off; the
+    alternative is five identical failures and a five-times-longer wait before
+    a human sees it.
+    """
     fixture.register(JobKind.ENRICH, fixture.raising(PortDataMalformed("TMDb returned a list")))
     await fixture.given("t1")
     await fixture.worker.run_once()
@@ -408,10 +391,11 @@ async def test_malformed_data_parks_immediately(fixture: _Fixture) -> None:
 async def test_a_job_that_keeps_failing_is_parked_rather_than_retried_forever(
     fixture: _Fixture,
 ) -> None:
-    """PRD 08: "after N attempts a job is *parked* with its error, not
-    retried forever and not silently dropped." All three outcomes are
-    asserted: it stopped being claimable, it is listed, and it kept its
-    error."""
+    """PRD 08's rule: after `job_max_attempts` attempts a job is *parked* with its error.
+
+    Not retried forever and not silently dropped. All three outcomes are
+    asserted: it stopped being claimable, it is listed, and it kept its error.
+    """
     fixture.register(JobKind.ENRICH, fixture.raising(PortUnavailable("still down")))
     await fixture.given("t1")
     for _ in range(5):
@@ -424,10 +408,12 @@ async def test_a_job_that_keeps_failing_is_parked_rather_than_retried_forever(
 
 
 async def test_a_parked_job_keeps_the_error_that_parked_it(fixture: _Fixture) -> None:
-    """The whole of "not silently dropped" is this string: it is what an
-    operator reads in the admin list, and `str(exc)` rather than the
-    exception object because PRD 08's credentials-never-logged rule applies
-    to a column as much as to a log line."""
+    """The whole of "not silently dropped" is this string.
+
+    It is what an operator reads in the admin list, and `str(exc)` rather than
+    the exception object because PRD 08's credentials-never-logged rule applies
+    to a column as much as to a log line.
+    """
     fixture.register(JobKind.ENRICH, fixture.raising(PortDataMalformed("TMDb returned a list")))
     await fixture.given("t1")
     await fixture.worker.run_once()
@@ -437,10 +423,11 @@ async def test_a_parked_job_keeps_the_error_that_parked_it(fixture: _Fixture) ->
 
 
 async def test_a_failure_costs_its_own_job_and_not_the_batch(fixture: _Fixture) -> None:
-    """One poisoned job in a claimed batch of three must not abandon the
-    other two -- at `batch_size=20` against a queue the size of this
-    library, a try/except outside the loop turns one bad payload into
-    nineteen jobs silently returned to `pending` on every pass."""
+    """One poisoned job in a claimed batch of three must not abandon the other two.
+
+    At `batch_size=20`, a try/except outside the loop turns one bad payload
+    into nineteen jobs silently returned to `pending` on every pass.
+    """
     failing = fixture.raising(PortDataMalformed("bad payload"))
 
     async def _handle(job: Job) -> None:
@@ -462,9 +449,11 @@ async def test_a_bug_in_a_handler_is_not_recorded_as_an_upstream_failure(
     fixture: _Fixture,
 ) -> None:
     """A `ZeroDivisionError` is not a `UsherPortError` and must propagate.
-    Swallowing it into `fail(retryable=True)` turns a crash into a job that
-    retries five times and then parks with a misleading error -- and the
-    worker keeps running, so nothing is ever loud."""
+
+    Swallowing it into `fail(retryable=True)` turns a crash into a job that retries five
+    times and then parks with a misleading error -- and the worker keeps running, so
+    nothing is ever loud.
+    """
     fixture.register(JobKind.ENRICH, fixture.raising(ZeroDivisionError("bug")))
     await fixture.given("t1")
     with pytest.raises(ZeroDivisionError):
@@ -475,23 +464,16 @@ async def test_a_bug_in_a_handler_is_not_recorded_as_an_upstream_failure(
 async def test_a_bug_in_a_handler_records_its_traceback_and_says_which_job(
     fixture: _Fixture, errors: io.StringIO
 ) -> None:
-    """Issue #8's operational half, and the *only* thing the S3 run lacked.
+    """A crash records which job was in flight, and its traceback.
 
-    A crash still propagates -- that is the case above and it is not
-    negotiable -- but propagating is the last thing that happens to it in this
-    process, and everything above here is a boundary that formats. What the
-    log has to hold before the stack leaves is the two facts the stack alone
-    cannot supply once the process is gone: **which job** was in flight, and
-    the traceback, without anybody having had to remember `usher --traceback
-    work` beforehand. S3 recorded neither: its last two records name the job
-    that failed *cleanly* on the conflict path, and the job that actually died
-    is not in the log at all.
-
-    `logger.opt(exception=True)` and not `str(exc)`, deliberately against this
-    module's own house rule for `_fail`: PRD 08's credentials-are-never-logged
-    rule is enforced here by `telemetry.configure_logging` setting
-    `diagnose=False`, which is what stops loguru rendering frame *locals* into
-    the traceback. The frames themselves carry no values.
+    Propagating is the last thing that happens to a crash in this process, so
+    what the log has to hold before the stack leaves is the two facts the stack
+    alone cannot supply once the process is gone: **which job** was in flight,
+    and the traceback, without anybody having had to remember `usher
+    --traceback work` beforehand. `logger.opt(exception=True)` and not
+    `str(exc)`, deliberately against this module's house rule for `_fail`:
+    `telemetry.configure_logging` sets `diagnose=False`, which is what stops
+    loguru rendering frame *locals* into the traceback.
     """
     fixture.register(JobKind.ENRICH, fixture.raising(ZeroDivisionError("bug")))
     await fixture.given("t1")
@@ -507,10 +489,12 @@ async def test_a_bug_in_a_handler_records_its_traceback_and_says_which_job(
 
 
 async def test_every_port_error_backs_off_rather_than_escaping(fixture: _Fixture) -> None:
-    """Not just the two subclasses the other cases happen to raise. A worker
-    that named `PortUnavailable` specifically would let `PortAuthFailed` and
-    `PortRateLimited` escape `run_once` and kill the loop -- which is the
-    same failure `ReconcileService` guards against one lane over."""
+    """Not just the two subclasses the other cases happen to raise.
+
+    A worker that named `PortUnavailable` specifically would let `PortAuthFailed` and
+    `PortRateLimited` escape `run_once` and kill the loop -- which is the same failure
+    `ReconcileService` guards against one lane over.
+    """
 
     class _Boom(UsherPortError):
         pass
@@ -524,15 +508,11 @@ async def test_every_port_error_backs_off_rather_than_escaping(fixture: _Fixture
 async def test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstream_asked(
     fixture: _Fixture,
 ) -> None:
-    """The carried debt this task closes: `PortRateLimited.retry_after` has
-    been assigned in six places since M4 and read nowhere in `src/` -- an
-    upstream that said exactly when to come back was answered with the
-    queue's own jittered guess instead. Fails today at ~1 s, the fixture's
-    `backoff_seconds`, which is the whole of the debt expressed as a number.
+    """A `retry_after` hint is honoured rather than answered with the queue's guess.
 
-    Positive control that the failure path actually ran (`attempts == 1`,
-    `last_error` names the failure), then the number that matters: the job is
-    not claimable again for at least the 300 s the upstream asked for.
+    A positive control that the failure path ran (`attempts == 1`, `last_error`
+    names the failure), then the number that matters: the job is not claimable
+    again for at least the 300 s the upstream asked for.
     """
     fixture.register(JobKind.ENRICH, fixture.raising(PortRateLimited(retry_after=300.0)))
     await fixture.given("t1")
@@ -550,10 +530,12 @@ async def test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstrea
 async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
     fixture: _Fixture,
 ) -> None:
-    """`fail` answers `None` for an id the queue no longer knows -- a restart
-    requeued the claim and someone else finished it. The worker has nothing
-    useful to do with that news except not crash on it, and crashing would
-    take the whole loop down over a job that has already succeeded."""
+    """`fail` answers `None` for an id the queue no longer knows.
+
+    A restart requeued the claim and someone else finished it. The worker has
+    nothing useful to do with that news except not crash on it, and crashing
+    would take the whole loop down over a job that has already succeeded.
+    """
 
     async def _steal_then_fail(job: Job) -> None:
         await fixture.queue.complete(job.id)
@@ -565,28 +547,21 @@ async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
     assert await fixture.queue.parked() == []
 
 
-# -- ADR-0033: an event is offered after the job's own commit ----------------
+# -- an event is offered only after the job's own commit --------------------
 
 
 async def test_an_event_a_handler_raised_is_not_offered_until_the_completion_is_committed(
     fixture: _Fixture,
 ) -> None:
-    """[ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md),
-    made a property of the worker rather than of each handler.
+    """An event is a statement about committed state, made the worker's property.
 
-    `EnrichService` commits its own title before it publishes and five
-    hand-written comments across three services argue for the same ordering
-    -- but the transaction still open at the instant of an `enrich` frame is
-    **`JobWorker`'s**, holding the two `BACKFILL` enqueues the handler staged
-    and the `DELETE` that completes the job. Buffering here is the only
-    spelling under which *"the client was told"* implies *"every write this
-    unit of work made landed"*, and it is the spelling nothing can forget:
-    a sixth handler that publishes gets the ordering without writing a line.
-
-    **An interleaving, never a membership check.** `publish in log` and
-    `len(offered) == 1` are both satisfied by the order this case exists to
-    forbid. Before the buffer the same fixture recorded
-    `[..., "handle:t1", "publish", "complete", "commit"]`.
+    The transaction still open at the instant of an `enrich` frame is
+    **`JobWorker`'s**, holding the `BACKFILL` enqueues the handler staged and
+    the `DELETE` that completes the job, so buffering here is the only spelling
+    under which *"the client was told"* implies *"every write this unit of work
+    made landed"* -- and the only one nothing can forget. An interleaving,
+    never a membership check: `publish in log` and `len(offered) == 1` are both
+    satisfied by the order this case exists to forbid.
     """
     fixture.register(JobKind.ENRICH, fixture.publishing())
     await fixture.given("t1")
@@ -599,16 +574,13 @@ async def test_an_event_a_handler_raised_is_not_offered_until_the_completion_is_
 
 
 async def test_a_job_that_failed_offers_nothing(fixture: _Fixture) -> None:
-    """The twin, written in the same commit as the case above.
+    """The twin of the case above, and the buffer's whole reason for existing.
 
-    A buffer that flushed on both paths passes that one and is precisely the
-    bug the buffer exists to prevent: the handler's writes rolled back with
-    the job, so a frame telling a client to refetch names a change that never
-    happened -- and the retry publishes a second one.
-
-    **The premise first.** An assertion that nothing was offered is vacuous
-    against a handler that raised nothing, which is the shape a probe that
-    never ran already took once in this milestone.
+    A buffer that flushed on both paths passes that one: the handler's writes
+    rolled back with the job, so a frame telling a client to refetch names a
+    change that never happened -- and the retry publishes a second one. The
+    premise comes first, because an assertion that nothing was offered is
+    vacuous against a handler that raised nothing.
     """
     fixture.register(
         JobKind.ENRICH, fixture.publishing(failing=PortUnavailable("upstream is down"))
@@ -623,9 +595,11 @@ async def test_a_job_that_failed_offers_nothing(fixture: _Fixture) -> None:
 
 
 async def test_a_parked_job_offers_nothing_either(fixture: _Fixture) -> None:
-    """`PortDataMalformed` takes the other `except` arm, and an arm added to
-    one and not the other is exactly the drift `_settle` was collapsed to
-    prevent one service over. Two arms, two cases."""
+    """`PortDataMalformed` takes the other `except` arm.
+
+    An arm added to one and not the other is exactly the drift `_settle` was
+    collapsed to prevent one service over: two arms, two cases.
+    """
     fixture.register(
         JobKind.ENRICH, fixture.publishing(failing=PortDataMalformed("TMDb returned a list"))
     )
@@ -639,12 +613,11 @@ async def test_a_parked_job_offers_nothing_either(fixture: _Fixture) -> None:
 
 
 async def test_the_buffer_is_per_job_and_not_per_pass(fixture: _Fixture) -> None:
-    """A batch of two, the first succeeding and the second failing, offers
-    exactly the first job's events.
+    """A batch of two, one succeeding and one failing, offers only the first's events.
 
     `_run` sits inside `for job in claimed:` deliberately, and a flush hoisted
-    to the end of `run_once` would publish the failed job's frame alongside
-    the successful one's -- invisible to every case that claims one job.
+    to the end of `run_once` would publish the failed job's frame alongside the
+    successful one's -- invisible to every case that claims one job.
     """
     succeeding = fixture.publishing()
     failing = fixture.publishing(failing=PortUnavailable("upstream is down"))
@@ -689,13 +662,11 @@ async def test_a_crashing_handlers_event_is_not_offered_on_the_next_jobs_commit(
 async def test_a_flush_that_raises_does_not_turn_a_completed_job_into_a_failed_one(
     fixture: _Fixture,
 ) -> None:
-    """`EventPublisher.publish` never raises -- *contract*, and a contract is
-    what an implementation can break.
+    """A publisher that breaks the never-raises contract must not fail a finished job.
 
-    The buffer is a new caller of `publish` on a path where the job is
-    already complete and committed, so a publisher that broke the contract
-    would take a finished job's `run_once` down with it and, on the worker
-    lane, log a pass failure for a pass that succeeded.
+    The buffer calls `publish` on a path where the job is already complete and
+    committed, so a raise there would take that job's `run_once` down with it and
+    log a pass failure for a pass that succeeded.
     """
     fixture.bus.raises = RuntimeError("a subscriber transport blew up")
     fixture.register(JobKind.ENRICH, fixture.publishing())
@@ -714,25 +685,16 @@ async def test_a_flush_that_raises_does_not_turn_a_completed_job_into_a_failed_o
 async def test_a_worker_publishing_into_a_null_bus_completes_and_says_nothing(
     fixture: _Fixture, errors: io.StringIO
 ) -> None:
-    """`usher work` as a separate process publishes to `NullEventPublisher`,
-    which is a real deployment rather than a test double: M5's bus is
-    in-memory, so an enrichment finished in another process reaches no SSE
-    client, and the client's next refetch gets the right answer anyway.
+    """`usher work` as a separate process publishes to `NullEventPublisher`.
 
-    **The silence is the assertion, and without it the case has no teeth.**
-    `flush` catches whatever a broken publisher raises, because it runs after
-    a commit it cannot undo -- so a scope wrapping a broken bus completes every
-    job perfectly well and logs an `ERROR` per published event instead. That is
-    this repository's ~17,280-lines-a-day shape arriving through an exception
-    handler, and `assert it did not raise` cannot see it.
-
-    ⚠️ **What moved in M9's W1**: the null default used to be `JobWorker`'s own
-    (`events: EventPublisher | None = None`). The buffer belongs to the scope
-    now, so the default belongs to whoever builds one -- `build_pipeline`,
-    whose `events` argument already defaults to `NullEventPublisher()` for
-    exactly this deployment and says so. This case therefore builds the scope
-    the way a composition root does, instead of resting on a worker default
-    that no longer exists.
+    A real deployment rather than a test double: the bus is in-memory, so an
+    enrichment finished in another process reaches no SSE client and the
+    client's next refetch gets the right answer anyway. The silence is the
+    assertion -- `flush` catches whatever a broken publisher raises, because it
+    runs after a commit it cannot undo, so a scope wrapping a broken bus
+    completes every job and logs an `ERROR` per published event instead. The
+    scope is built the way a composition root builds one, since the null
+    default belongs to `build_pipeline` rather than to `JobWorker`.
     """
     queue = FakeJobQueue()
     events = DeferredEventPublisher(NullEventPublisher())
@@ -761,17 +723,16 @@ async def test_a_worker_publishing_into_a_null_bus_completes_and_says_nothing(
 
 
 class _Rendezvous:
-    """`arrive()` returns once every expected handler has arrived -- or after
-    `deadline` seconds if they never do.
+    """`arrive()` returns once every expected handler has, or after `deadline`.
 
-    **The deadline is what makes this a test rather than a hang.** The obvious
+    The deadline is what makes this a test rather than a hang. The obvious
     spelling is `asyncio.Barrier`, and against a worker that awaits its jobs
     one at a time a barrier *deadlocks*: the first handler waits for a second
-    that cannot start until the first returns. `.claude/rules/testing-discipline.md`
-    records that exact trap from M5's event bus -- *"a timing case can only ever
-    report a timeout against it"*, and a case that hangs reports nothing. With a
-    deadline the sequential run instead produces two disjoint, **recorded**
-    windows, so the case fails on the property it is about and prints them.
+    that cannot start until the first returns.
+    `.claude/rules/testing-discipline.md` records that trap -- a timing case
+    can only ever report a timeout against it, and a case that hangs reports
+    nothing. With a deadline the sequential run instead produces two disjoint,
+    **recorded** windows, so the case fails on the property it is about.
     """
 
     def __init__(self, expected: int, *, deadline: float = 0.5) -> None:
@@ -792,10 +753,8 @@ class _Rendezvous:
 def _iou(windows: Sequence[ClaimWindow]) -> float:
     """Shared time as a fraction of the union of the windows, for the record.
 
-    `JobQueueContract`'s own concurrency case reports 76.2% on this host and
-    the two-lane push case 99.3-99.4%; a number here is what lets a future
-    reader tell "they overlapped" from "they overlapped by a scheduling
-    accident of one microsecond".
+    A number is what lets a reader tell "they overlapped" from "they overlapped
+    by a scheduling accident of one microsecond".
     """
     latest_start = max(one.started_at for one in windows)
     earliest_end = min(one.finished_at for one in windows)
@@ -806,17 +765,12 @@ def _iou(windows: Sequence[ClaimWindow]) -> float:
 async def test_two_jobs_in_one_batch_genuinely_overlap(fixture: _Fixture) -> None:
     """CLAUDE.md's fourth evidence rule, applied to the worker itself.
 
-    **"Two jobs completed" is also what the sequential loop produces**, and
-    that is the whole reason this case records intervals instead. `run_once`
-    claimed a batch of twenty and awaited them one at a time -- no `gather`, no
-    `TaskGroup`, no semaphore -- so in-flight work per process was exactly one,
-    and M9's S3 measured what that costs: 19.76 rps on three workers against a
-    per-process bucket configured at 10 rps that was never once the binding
-    constraint.
-
-    Red against that implementation, on the overlap assertion and not on a
-    clock: `_Rendezvous` gives up rather than deadlocking, so both windows are
-    recorded and printed.
+    "Two jobs completed" is also what a sequential loop produces, and that is
+    the whole reason this case records intervals instead. A `run_once` that
+    claimed a batch and awaited it one job at a time -- no `gather`, no
+    `TaskGroup`, no semaphore -- holds in-flight work at exactly one, and is
+    red here on the overlap assertion rather than on a clock: `_Rendezvous`
+    gives up rather than deadlocking, so both windows are recorded and printed.
     """
     rendezvous = _Rendezvous(2)
     windows: list[ClaimWindow] = []
@@ -886,20 +840,13 @@ async def test_one_jobs_events_are_not_discarded_by_another_jobs_failure(
 ) -> None:
     """The buffer is per job, and under concurrency that has to be structural.
 
-    `JobWorker` wrapped its publisher in **one** `DeferredEventPublisher` for
-    the life of the worker and `_run`'s `finally` calls `discard()` on it. Two
-    jobs in flight at once through that, and the failing one's `discard` empties
-    the *surviving* one's frames -- an enriched title no client is ever told
-    about, with nothing anywhere saying so.
-
-    ⚠️ **This case is not red against the sequential worker and could not be**:
-    with one job in flight there is no second buffer to empty, so the bug is
-    unreachable rather than untested. It is red against the *intermediate*
-    implementation -- concurrency added over a single shared buffer -- which is
-    the mistake this task was most likely to make, and it was planted and
-    watched to fail there before the per-scope buffer landed. The ordering
-    below is what makes it observable: the surviving job publishes, waits for
-    the doomed one to have failed and discarded, and only then completes.
+    One `DeferredEventPublisher` for the life of the worker, with `_run`'s
+    `finally` calling `discard()` on it, loses the surviving job's frames to
+    the failing job's discard -- an enriched title no client is ever told
+    about, with nothing anywhere saying so. The bug is unreachable with one job
+    in flight, so the ordering below is what makes it observable: the surviving
+    job publishes, waits for the doomed one to have failed and discarded, and
+    only then completes.
     """
     failed = asyncio.Event()
 
@@ -927,10 +874,11 @@ async def test_one_jobs_events_are_not_discarded_by_another_jobs_failure(
 
 
 async def test_recover_requeues_a_claim_older_than_the_lease(fixture: _Fixture) -> None:
-    """PRD 08: "recovery requeues anything left `in_progress` by an unclean
-    shutdown." Without it a killed worker's claims are invisible until a human
-    notices the queue has stopped moving -- which is exactly what M9's S3 was
-    left with when one of three workers died holding twenty of them."""
+    """PRD 08: a claim nobody has touched for a lease is taken back.
+
+    Without it a killed worker's claims are invisible until a human notices the
+    queue has stopped moving.
+    """
     await fixture.given("t1")
     await fixture.queue.claim([JobKind.ENRICH])
     fixture.queue.backdate(seconds=DEFAULT_LEASE_SECONDS + 1)
@@ -940,17 +888,15 @@ async def test_recover_requeues_a_claim_older_than_the_lease(fixture: _Fixture) 
 
 
 async def test_recover_leaves_a_claim_that_is_still_being_worked_on(fixture: _Fixture) -> None:
-    """**The arm with teeth, and the one `older_than_seconds=0.0` fails.**
+    """The arm with teeth, and the one `older_than_seconds=0.0` fails.
 
     "An abandoned claim comes back" is satisfied by requeueing *everything*
-    running, which is what `JobWorker.startup()` did and what made recovery a
-    dead end at more than one worker: S3 recorded that with three workers there
-    was no way to recover one's orphans without corrupting the other two. So
-    the property this pins is the negative one -- a claim younger than the
-    lease is left alone, however many times recovery runs.
-
-    The premise is asserted first: without a genuinely `running` row to leave
-    alone, `recover() == 0` is what an empty queue answers too.
+    running, which is a dead end at more than one worker: there is then no way
+    to recover one worker's orphans without corrupting another's. So the
+    property pinned here is the negative one -- a claim younger than the lease
+    is left alone, however many times recovery runs. The premise is asserted
+    first: without a genuinely `running` row to leave alone, `recover() == 0`
+    is what an empty queue answers too.
     """
     await fixture.given("live")
     claimed = await fixture.queue.claim([JobKind.ENRICH])
@@ -967,9 +913,9 @@ async def test_a_heartbeat_keeps_a_long_job_out_of_recovery(fixture: _Fixture) -
     """The half that makes a *short* lease safe for a long job.
 
     Without `touch`, the lease has to exceed the longest job a deployment can
-    run -- a `bootstrap` phase is measured in hours -- so the orphan window
-    becomes hours and the recovery is useless in practice. With it the lease is
-    a bound on *the process still being alive*.
+    run -- a `bootstrap` phase can take hours -- so the orphan window becomes
+    hours and the recovery is useless in practice. With it the lease is a bound
+    on *the process still being alive*.
 
     Driven through the queue rather than through `JobWorker._heartbeat`,
     because the beat's interval is a third of a 300 s lease and a case that
@@ -992,8 +938,10 @@ async def test_a_heartbeat_keeps_a_long_job_out_of_recovery(fixture: _Fixture) -
 
 
 async def test_recover_commits_what_it_requeued(fixture: _Fixture) -> None:
-    """A requeue that is never committed is a requeue that did not happen,
-    and the process that would have noticed has just started."""
+    """A requeue that is never committed is a requeue that did not happen.
+
+    And the process that would have noticed has just started.
+    """
     await fixture.given("t1")
     await fixture.queue.claim([JobKind.ENRICH])
     fixture.queue.backdate(seconds=DEFAULT_LEASE_SECONDS + 1)
@@ -1013,9 +961,10 @@ async def test_recover_on_a_clean_queue_requeues_nothing(fixture: _Fixture) -> N
 async def test_a_workers_span_links_to_whatever_enqueued_the_job(
     fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """PRD 10: "why did the title I just opened take 45 seconds" is one
-    query. The enqueue happens inside a request's span and the execution
-    happens minutes later in a worker; a `Link` is what joins them.
+    """PRD 10: "why did the title I just opened take 45 seconds" is one query.
+
+    The enqueue happens inside a request's span and the execution happens minutes later
+    in a worker; a `Link` is what joins them.
 
     A *link*, not a parent: the request has already returned, and a child
     span of a finished parent misstates causality -- and would make the
@@ -1040,9 +989,11 @@ async def test_a_workers_span_links_to_whatever_enqueued_the_job(
 async def test_a_job_enqueued_outside_a_span_gets_an_unlinked_root(
     fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """Everything a background sweep enqueues has a null `traceparent`. A
-    worker that invented a link to the all-zero context would join every one
-    of them into a trace that never existed."""
+    """Everything a background sweep enqueues has a null `traceparent`.
+
+    A worker that invented a link to the all-zero context would join every one of them
+    into a trace that never existed.
+    """
     await fixture.given("t1")
     await fixture.worker.run_once()
     job_spans = [span for span in spans.get_finished_spans() if span.name == "job.enrich"]
@@ -1053,9 +1004,11 @@ async def test_a_job_enqueued_outside_a_span_gets_an_unlinked_root(
 async def test_a_malformed_traceparent_does_not_fail_the_job(
     fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """A job is not worth failing over its own telemetry. The column is free
-    text written by whatever enqueued the work, and a truncated or
-    hand-edited value must cost a link rather than a park."""
+    """A job is not worth failing over its own telemetry.
+
+    The column is free text written by whatever enqueued the work, and a truncated or
+    hand-edited value must cost a link rather than a park.
+    """
     await fixture.given("t1", traceparent="not-a-traceparent")
     assert await fixture.worker.run_once() == 1
     job_spans = [span for span in spans.get_finished_spans() if span.name == "job.enrich"]
@@ -1065,15 +1018,13 @@ async def test_a_malformed_traceparent_does_not_fail_the_job(
 
 
 def test_a_link_is_never_built_from_a_context_that_names_nothing() -> None:
-    """`_links_for`'s `is_valid` guard, tested directly because the SDK hides
-    it: a `Link` to the all-zero span context is dropped on the way into the
-    span, so a worker that built one anyway records the same empty `links`
-    tuple and every case above still passes. Measured -- deleting the guard
-    survived the whole file.
+    """`_links_for`'s `is_valid` guard, tested directly because the SDK hides it.
 
-    Kept rather than deleted, because "no link" and "a link to a trace that
-    never existed" are different claims, and the second one is what reaches
-    an exporter that is less forgiving than this SDK.
+    A `Link` to the all-zero span context is dropped on the way into the span,
+    so a worker that built one anyway records the same empty `links` tuple and
+    every case above still passes. "No link" and "a link to a trace that never
+    existed" are different claims, and the second is what reaches an exporter
+    less forgiving than this SDK.
     """
     kinds = JobKind.ENRICH
     assert _links_for(Job(kind=kinds, key="t1")) == []
@@ -1093,9 +1044,11 @@ def test_a_link_is_never_built_from_a_context_that_names_nothing() -> None:
 async def test_the_span_carries_what_an_operator_would_filter_on(
     fixture: _Fixture, spans: InMemorySpanExporter
 ) -> None:
-    """PRD 10 reads job outcomes off spans as well as off the table. Without
-    the attempt count on the span, "which jobs are on their fourth try" is
-    only answerable by querying the queue, which a trace view cannot do."""
+    """PRD 10 reads job outcomes off spans as well as off the table.
+
+    Without the attempt count on the span, "which jobs are on their fourth try" is only
+    answerable by querying the queue, which a trace view cannot do.
+    """
     fixture.register(JobKind.ENRICH, fixture.raising(PortUnavailable("down")))
     await fixture.given("t1")
     await fixture.worker.run_once()
@@ -1113,11 +1066,13 @@ async def test_the_span_carries_what_an_operator_would_filter_on(
 
 
 def test_the_service_never_imports_a_storage_or_transport_library() -> None:
-    """ADR-0009 and PRD 01's layering rule, at module level. `import-linter`
-    already forbids `usher.services -> usher.db`; this catches the other
-    half, which no contract expresses: a worker reaching for `sqlalchemy` to
-    commit, or for `httpx` to decide whether a failure is retryable, instead
-    of for `usher.ports.errors`."""
+    """PRD 01's layering rule, at module level.
+
+    `import-linter` already forbids `usher.services -> usher.db`; this catches the other
+    half, which no contract expresses: a worker reaching for `sqlalchemy` to commit, or
+    for `httpx` to decide whether a failure is retryable, instead of for
+    `usher.ports.errors`.
+    """
     import usher.services.jobs as module
 
     source = (module.__file__ or "").replace(".pyc", ".py")
@@ -1128,21 +1083,13 @@ def test_the_service_never_imports_a_storage_or_transport_library() -> None:
 
 
 def test_no_temporary_marker_survives_in_this_module() -> None:
-    """A 🔴 that says "for exactly one commit" and survives that commit is
-    worse than one that was never written.
+    """A temporary marker that outlives its commit is worse than one never written.
 
-    `registered_kinds`' docstring carried one between M9's D7 and D8: the
-    member `WATCH_WRITEBACK` existed, four routes enqueued it, and no build
-    registered a handler for it -- which is precisely the queue that grows
-    forever M4 refused to ship. The marker was the branch advertising that
-    state, and striking it is how the advertisement ends. This assertion is
-    what stops a revert re-introducing the sentence while the registration
-    stays, which is the contradiction nobody re-reads a docstring to notice.
-
-    The same shape as `test_ports_metadata.py`'s surviving-🔶 scan, over the
-    whole module rather than one docstring: a marker moved to a neighbouring
-    method is the same defect and a scan pointed at one surface reads as
-    coverage.
+    This assertion is what stops a revert re-introducing a marker while the
+    state it advertised is gone, which is the contradiction nobody re-reads a
+    docstring to notice. Scanned over the whole module rather than one
+    docstring: a marker moved to a neighbouring method is the same defect, and
+    a scan pointed at one surface reads as coverage.
     """
     import usher.services.jobs as module
 
@@ -1150,11 +1097,14 @@ def test_no_temporary_marker_survives_in_this_module() -> None:
 
 
 def test_the_worker_holds_no_reference_to_a_job_id_it_did_not_claim() -> None:
-    """A guard against the shape this loop could drift into: `complete` and
-    `fail` take a `uuid.UUID`, and the only ids in scope are the claimed
-    jobs'. Checked as a signature rather than as behaviour because the
-    failure it prevents -- completing a neighbouring job -- is unreachable
-    while that stays true."""
+    """A guard against the shape this loop could drift into.
+
+    `complete` and `fail` take a `uuid.UUID`, and the only ids in scope are the claimed
+    jobs'.
+
+    Checked as a signature rather than as behaviour because the failure it prevents --
+    completing a neighbouring job -- is unreachable while that stays true.
+    """
     import inspect
 
     from usher.ports.jobs import JobQueue
@@ -1164,20 +1114,15 @@ def test_the_worker_holds_no_reference_to_a_job_id_it_did_not_claim() -> None:
 
 
 async def test_a_job_waiting_at_its_kinds_ceiling_is_heartbeated_too() -> None:
-    """**Claimed and not yet settled is what "in flight" has to mean**, and
-    the other spelling loses a job to a duplicate run.
+    """Claimed and not yet settled is what "in flight" has to mean.
 
-    A claim is committed the instant it is made, so a job queued behind its
-    kind's ceiling is `running` in the table while it waits its turn -- and the
-    wait can be long: twenty `index` jobs at a ceiling of one, thirty seconds
-    each, is ten minutes for the last of them, well past the 300 s lease.
-    Heartbeated only once it starts, that job ages out of the lease and another
-    worker takes a claim this one still intends to run.
-
-    Asserted on the id set the heartbeat sends rather than on a timing: the
-    beat's interval is a third of a lease, so a case that waited for one would
-    wait a hundred seconds. What it needs to know is that **both** ids are in
-    the set while only one of them is executing.
+    The other spelling loses a job to a duplicate run. A claim is committed the
+    instant it is made, so a job queued behind its kind's ceiling is `running`
+    in the table while it waits its turn, and the wait can outlast the lease.
+    Heartbeated only once it starts, that job ages out and another worker takes
+    a claim this one still intends to run. Asserted on the id set the heartbeat
+    sends rather than on a timing: **both** ids have to be in the set while
+    only one of them is executing.
     """
     fixture = _Fixture(concurrency=2)
     fixture.worker._concurrency[JobKind.ENRICH] = 1
@@ -1190,12 +1135,10 @@ async def test_a_job_waiting_at_its_kinds_ceiling_is_heartbeated_too() -> None:
         entered += 1
         if entered > 1:
             return
-        # **Read once, from the job that holds the gate, and only after the
-        # other one has had a turn of the loop to reach it.** Two spellings
-        # were wrong before this one: `held.update(...)` on *every* call unions
-        # the two jobs' own ids and passes against a worker that heartbeats
-        # nothing until a job starts, and reading immediately on entry
-        # snapshots before `create_task` has even scheduled the sibling.
+        # Read once, from the job that holds the gate, and only after the other
+        # has had a turn of the loop to reach it: `held.update(...)` on every
+        # call unions the two jobs' own ids, and reading immediately on entry
+        # snapshots before the second task has been scheduled.
         for _ in range(100):
             await asyncio.sleep(0)
             if len(fixture.worker._in_flight) > 1:

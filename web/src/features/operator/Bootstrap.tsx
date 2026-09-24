@@ -16,12 +16,29 @@
  *   renders "Stalled?" — with the question mark, because the API states a
  *   timestamp and the inference is ours. The age is computed here; the
  *   threshold lives in the component.
+ * · **Ages and rates are measured to the poll, not to the render.** A poll
+ *   that returns the same bytes keeps the same `data` and re-renders nothing,
+ *   so an age read off `Date.now()` stops where the data last moved and a dead
+ *   importer never turns "Stalled?". `dataUpdatedAt` moves on every poll, so it
+ *   is the clock.
  * · **Polling is conditional.** Status costs ~0.33 s and is uncached, so it is
- *   polled every 10 s and only while at least one run is `running`. When
- *   nothing runs the screen says "idle — not polling" rather than polling
- *   invisibly forever.
+ *   polled every 10 s while at least one run is `running`, and for a bounded
+ *   window after a 202: a refresh of a `completed` import reads `completed`
+ *   through its revision lookup and download until its first batch lands
+ *   (PRD 04), so "while running" alone stops watching at the press of "Run
+ *   again". When neither holds the screen says "idle — not polling" rather than
+ *   polling invisibly forever.
  * · **A `failed` run is a normal, designed state**: bad-tone status word,
  *   `error` verbatim, position retained, trigger relabelled "Resume".
+ * · **Only `failed` is drawn as a failure.** An `error` on a run of any other
+ *   status is warn-toned, in the live card and the phase row alike.
+ * · **`error` is read whatever the status says.** A `completed` checkpoint
+ *   keeps its status with an error beside it (PRD 04) when a refresh lands no
+ *   batch — it may have started and downloaded before failing — or when the
+ *   MovieLens vocabulary fails to load after the vectors completed, so a green
+ *   "completed" can hide the only sign that the last press of "Run again" did
+ *   not do what it was asked. Such a row is warn-toned, never green and never
+ *   bad: the completed import still stands, and the copy claims only that.
  * · **Genome coverage is counts.** The route returns six of them and declines
  *   the division. Every ratio printed here is shown as numerator / denominator
  *   *and* as a percent whose denominator is named on screen, because picking
@@ -71,9 +88,10 @@ function problemOf(error: unknown): ProblemDocument {
   return { status: 0, detail: String(error) }
 }
 
-function secondsSince(iso: string): number | null {
+/** Seconds from `iso` to `asOf`, the moment the poll that reported it landed. */
+function secondsSince(iso: string, asOf: number): number | null {
   const at = Date.parse(iso)
-  return Number.isNaN(at) ? null : Math.max(0, Math.round((Date.now() - at) / 1000))
+  return Number.isNaN(at) ? null : Math.max(0, Math.round((asOf - at) / 1000))
 }
 
 function formatDuration(ms: number): string {
@@ -86,10 +104,10 @@ function formatDuration(ms: number): string {
   return `${s} s`
 }
 
-function elapsedOf(run: ImportRun): string | undefined {
+function elapsedOf(run: ImportRun, asOf: number): string | undefined {
   const started = Date.parse(run.started_at)
   if (Number.isNaN(started)) return undefined
-  const end = run.finished_at === null ? Date.now() : Date.parse(run.finished_at)
+  const end = run.finished_at === null ? asOf : Date.parse(run.finished_at)
   return Number.isNaN(end) ? undefined : formatDuration(end - started)
 }
 
@@ -98,18 +116,17 @@ function elapsedOf(run: ImportRun): string | undefined {
  * reports a cursor and no rate; a number before the second poll would be
  * invented rather than derived.
  */
-function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, number | null> {
+function useThroughput(runs: readonly ImportRun[] | undefined, asOf: number): Map<string, number | null> {
   const previous = useRef<{ at: number; seen: Map<string, number> } | null>(null)
   const [rates, setRates] = useState<Map<string, number | null>>(new Map())
 
   useEffect(() => {
     if (!runs) return
-    const now = Date.now()
     const seen = new Map(runs.map((run) => [run.dataset, run.rows_seen]))
     const last = previous.current
-    previous.current = { at: now, seen }
+    previous.current = { at: asOf, seen }
     if (!last) return
-    const seconds = (now - last.at) / 1000
+    const seconds = (asOf - last.at) / 1000
     if (seconds <= 0) return
     const next = new Map<string, number | null>()
     for (const [dataset, rows] of seen) {
@@ -117,7 +134,7 @@ function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, numb
       next.set(dataset, before === undefined ? null : Math.max(0, Math.round((rows - before) / seconds)))
     }
     setRates(next)
-  }, [runs])
+  }, [runs, asOf])
 
   return rates
 }
@@ -210,8 +227,8 @@ function statusTone(
 ): 'good' | 'bad' | 'warn' | 'info' | 'neutral' {
   if (!run) return 'neutral'
   if (stalled) return 'warn'
-  if (run.status === 'completed') return 'good'
   if (run.status === 'failed') return 'bad'
+  if (run.status === 'completed') return run.error === null ? 'good' : 'warn'
   return 'info'
 }
 
@@ -227,12 +244,14 @@ interface PhaseRowProps {
   spec: PhaseSpec
   index: number
   run: ImportRun | undefined
+  /** When the poll that reported `run` landed. */
+  asOf: number
   measured: string
   onRun: (spec: PhaseSpec) => void
 }
 
-function PhaseRow({ spec, index, run, measured, onRun }: PhaseRowProps) {
-  const ago = run ? secondsSince(run.heartbeat_at) : null
+function PhaseRow({ spec, index, run, asOf, measured, onRun }: PhaseRowProps) {
+  const ago = run ? secondsSince(run.heartbeat_at, asOf) : null
   const stalled = run?.status === 'running' && ago !== null && ago > 120
   const word = statusWord(run, stalled)
 
@@ -255,6 +274,19 @@ function PhaseRow({ spec, index, run, measured, onRun }: PhaseRowProps) {
           </span>
           <Badge tone={statusTone(run, stalled)}>{word}</Badge>
         </span>
+        {run && run.error !== null && (
+          <span
+            style={{
+              font: 'var(--text-body-xs)',
+              color: run.status === 'failed' ? 'var(--bad-text)' : 'var(--warn-text)',
+            }}
+          >
+            {run.status === 'completed' &&
+              'The completed import stands; the last attempt recorded an error: '}
+            {/* Verbatim, and never parsed: it is the server's own sentence. */}
+            <span>{run.error}</span>
+          </span>
+        )}
         <span style={{ font: 'var(--text-body-xs)', color: 'var(--text-muted)' }}>
           {spec.size} · measured {measured} · writes {spec.writes} · resumable from the stored cursor
         </span>
@@ -293,22 +325,54 @@ function ratio(numerator: number, denominator: number): string {
 
 /* ------------------------------------------------------------------ screen */
 
+/**
+ * How long a 202 keeps the screen polling when no run reads `running`. A
+ * refresh reads `completed` until its first batch lands, so "poll while
+ * something runs" alone stops at the press. The window is a bound, not a
+ * promise: it sees a queued phase read `running` or record why it failed within
+ * twenty minutes of the 202 — room for a lookup or first fetch retrying its
+ * whole `RetryPolicy.budget`, 900 s, if the job is claimed within a few minutes.
+ * It does not see a first batch that lands later, a later step of "Run all
+ * phases" once none reads `running` between two, or a job queued behind another
+ * bootstrap job. The screen says so, and a reload looks again.
+ */
+const WATCH_MINUTES = 20
+
+function pollingWord(anyRunning: boolean, watching: boolean): string {
+  if (anyRunning) return 'polling every 10 s while something runs'
+  if (watching) return `polling every 10 s for ${WATCH_MINUTES} min after queueing`
+  return 'idle — not polling'
+}
+
 export default function Bootstrap() {
   const toasts = useToasts()
   const traceOf = useProblemTrace()
+  // The 202 being watched, numbered so a second one restarts the window.
+  const [watching, setWatching] = useState<number | null>(null)
+  const accepted = useRef(0)
+  useEffect(() => {
+    if (watching === null) return
+    const timer = setTimeout(() => setWatching(null), WATCH_MINUTES * 60_000)
+    return () => clearTimeout(timer)
+  }, [watching])
   const status = useBootstrapStatus({
-    // §8: uncached and ~0.33 s a call, so poll only while something is running.
+    // §8: uncached and ~0.33 s a call, so poll only while something is running
+    // or a 202 is being watched -- the second half a departure from §8, recorded
+    // with its reason in CONVENTIONS.md.
     refetchInterval: (query) =>
-      query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
+      watching !== null || query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
   })
   const start = useStartBootstrap()
   const [pending, setPending] = useState<PhaseSpec | 'all' | null>(null)
 
   const data = status.data
   const runs = data?.runs
-  const throughput = useThroughput(runs)
+  // Read on every render, so every poll re-renders even when its body is unchanged.
+  const asOf = status.dataUpdatedAt
+  const throughput = useThroughput(runs, asOf)
 
   const anyRunning = (runs ?? []).some((run) => run.status === 'running')
+  const polling = anyRunning || watching !== null
   const live = (runs ?? []).filter((run) => run.status === 'running' || run.status === 'failed')
   const neverBuilt = data !== undefined && data.runs.length === 0
 
@@ -337,6 +401,8 @@ export default function Bootstrap() {
     setPending(null)
     start.mutate(phase, {
       onSuccess: (queued) => {
+        accepted.current += 1
+        setWatching(accepted.current)
         toasts.receipt({
           title: phase === 'all' ? 'Queued every bootstrap phase' : `Queued the ${phase} phase`,
           detail: 'Accepted with a 202. Progress appears under Running now within a few seconds.',
@@ -370,13 +436,16 @@ export default function Bootstrap() {
             {count(data?.titles ?? 0)} titles
           </Badge>
           <Badge
-            tone={anyRunning ? 'info' : 'neutral'}
-            icon={<Icon name={anyRunning ? 'radio' : 'circle-dashed'} />}
+            tone={polling ? 'info' : 'neutral'}
+            icon={<Icon name={polling ? 'radio' : 'circle-dashed'} />}
           >
-            {anyRunning ? 'polling every 10 s while something runs' : 'idle — not polling'}
+            {pollingWord(anyRunning, watching !== null)}
           </Badge>
           <span style={{ font: 'var(--text-body-xs)', color: 'var(--text-muted)' }}>
-            Status costs about 0.33 s and is uncached, so it is only polled while a run is live.
+            Status costs about 0.33 s and is uncached, so it is only polled while a run is live, and for{' '}
+            {WATCH_MINUTES} min after a phase is queued: long enough to see it read running or record why it
+            failed, not a first batch that lands later, a later step of Run all phases, or a job queued behind
+            another bootstrap job. Reload to look again.
           </span>
         </div>
 
@@ -442,7 +511,7 @@ export default function Bootstrap() {
             {live.length > 0 ? (
               <div className="flex flex-col gap-2">
                 {live.map((run) => {
-                  const elapsed = elapsedOf(run)
+                  const elapsed = elapsedOf(run, asOf)
                   return (
                     <CursorProgress
                       key={run.dataset}
@@ -455,7 +524,7 @@ export default function Bootstrap() {
                       // Verbatim, in mono: this is the resume point.
                       position={String(run.position)}
                       revision={run.revision}
-                      heartbeatAgoSeconds={secondsSince(run.heartbeat_at)}
+                      heartbeatAgoSeconds={secondsSince(run.heartbeat_at, asOf)}
                       {...(elapsed === undefined ? {} : { elapsed })}
                       {...(run.error === null ? {} : { error: run.error })}
                     />
@@ -464,8 +533,18 @@ export default function Bootstrap() {
               </div>
             ) : (
               <StateBlock kind="empty" title="Nothing is running" meta="no run reports status: running">
-                Every recorded run has finished. Nothing is being polled — status is uncached and costs about
-                0.33 s, so it is only asked for while a run is live.
+                {watching === null ? (
+                  <>
+                    Every recorded run has finished. Nothing is being polled — status is uncached and costs
+                    about 0.33 s, so it is only asked for while a run is live.
+                  </>
+                ) : (
+                  <>
+                    No run reads running yet. A refresh of a completed import reads completed until its first
+                    batch lands, so status is polled every 10 s for {WATCH_MINUTES} min after a phase is
+                    queued.
+                  </>
+                )}
               </StateBlock>
             )}
           </OpsSection>
@@ -494,6 +573,7 @@ export default function Bootstrap() {
                   spec={spec}
                   index={index}
                   run={runFor(spec.phase)}
+                  asOf={asOf}
                   measured={measuredFor(spec.phase)}
                   onRun={setPending}
                 />

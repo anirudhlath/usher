@@ -1,16 +1,4 @@
-"""`DeriveService` against fakes: no database, no network, no clock.
-
-Every collaborator is a port, which is the point -- ADR-0016's whole claim is
-that these four entities come out of a payload M4 already cached, and the
-way that stays true is structural rather than disciplinary.
-
-**The central case is
-`test_a_series_payload_does_not_attach_its_cast_to_a_movie_with_the_same_tmdb_id`**,
-and it is the only one a derivation keyed on the bare integer fails. Every
-other case here passes against that defect with the right counts, the right
-people and the right idempotence -- which is this milestone's opening
-argument arriving inside its own test suite.
-"""
+"""`DeriveService` against fakes: no database, no network, no clock."""
 
 import uuid
 from typing import Any
@@ -95,20 +83,14 @@ def harness() -> _Harness:
 async def test_a_series_payload_does_not_attach_its_cast_to_a_movie_with_the_same_tmdb_id(
     harness: _Harness,
 ) -> None:
-    """**This task's central case, and the only one that fails against the
-    defect it names.**
+    """The join back to a title is `(provider, kind, reference)`, never the bare id.
 
-    `raw_payloads` has no `title_id` and no foreign key to `titles`, so the
-    join back is `(provider, kind, reference)` -- and the payload's own `id`
-    field is the bare integer, sitting right there, inviting a resolution that
-    drops the kind. ADR-0011: 26,968 measured TMDb ids are live in *both*
-    spaces, and every one of them is a series whose cast would be written onto
-    a film.
-
-    A derivation keyed on the integer alone passes every other case in this
-    file -- the counts are right, the people are right, idempotence holds --
-    and produces a catalog where half the television has a film's cast. It
-    raises nothing and renders identically to a correct one.
+    `raw_payloads` has no `title_id` and no foreign key to `titles`, and the
+    payload's own `id` field is the bare integer, sitting right there, inviting
+    a resolution that drops the kind. TMDb's movie and series id spaces overlap,
+    so a derivation keyed on the integer alone passes every other case in this
+    file and produces a catalog where television carries a film's cast --
+    raising nothing, and rendering identically to a correct one.
     """
     movie_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="The Film")
     series_id = await harness.given_title(
@@ -142,15 +124,13 @@ async def test_a_series_payload_does_not_attach_its_cast_to_a_movie_with_the_sam
 
 
 async def test_a_series_never_receives_a_collection_id(harness: _Harness) -> None:
-    """`belongs_to_collection` is a field of `/movie/{id}` with no `/tv/{id}`
-    counterpart, so a series row carrying one is a defect wherever it came
-    from.
+    """`belongs_to_collection` is a `/movie/{id}` field with no `/tv/{id}` twin.
 
-    **The movie is seeded in the same page on purpose**: a series derived
-    alone passes trivially, because there is no collection anywhere to attach.
-    The way this ships wrong is a walk that reads the collection once per
-    *page* instead of once per payload, or a dict keyed on the bare `tmdb_id`
-    again -- and both need a page holding one of each to be visible.
+    So a series row carrying one is a defect wherever it came from. The movie
+    is seeded in the same page on purpose: a series derived alone passes
+    trivially, and the wrong implementations -- a collection read once per
+    *page*, or a dict keyed on the bare `tmdb_id` -- need a page holding one of
+    each to be visible.
     """
     movie_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000560)
     series_id = await harness.given_title(kind=TitleKind.SERIES, tmdb_id=90000561)
@@ -173,14 +153,12 @@ async def test_a_series_never_receives_a_collection_id(harness: _Harness) -> Non
 
 
 async def test_deriving_twice_leaves_one_row_per_credit(harness: _Harness) -> None:
-    """PRD 08's redelivery rule, and `JobWorker.recover()` requeues a claim
-    its worker stopped heartbeating, so this is ordinary rather than
-    hypothetical.
+    """PRD 08's redelivery rule, which `JobWorker.recover()` makes ordinary.
 
     Idempotence comes from two mechanisms and this case sees both: people
-    dedupe on `tmdb_id` (never on `Person.id`, which the derivation mints
-    fresh per sighting, so an id-keyed upsert grows a copy of every actor per
-    pass), and credits are a scoped replace.
+    dedupe on `tmdb_id` (never on `Person.id`, which the derivation mints fresh
+    per sighting, so an id-keyed upsert grows a copy of every actor per pass),
+    and credits are a scoped replace.
     """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000570)
     await harness.given_payload(
@@ -203,8 +181,7 @@ async def test_deriving_twice_leaves_one_row_per_credit(harness: _Harness) -> No
 async def test_a_credit_dropped_from_a_refreshed_payload_is_dropped_from_the_table(
     harness: _Harness,
 ) -> None:
-    """The case that kills the `ON CONFLICT DO NOTHING` implementation, and
-    nothing else does.
+    """The case that kills the `ON CONFLICT DO NOTHING` implementation, and nothing else does.
 
     An upsert is idempotent and it never deletes, so a miscredited actor
     corrected upstream survives in `credits` forever -- and therefore in
@@ -254,13 +231,12 @@ async def test_a_credit_dropped_from_a_refreshed_payload_is_dropped_from_the_tab
 async def test_a_title_whose_credits_all_disappeared_is_cleared_not_skipped(
     harness: _Harness,
 ) -> None:
-    """The row shape a re-derivation cannot repair, and the reason the delete
-    scope is `title_ids` rather than the rows being written.
+    """Why the delete's scope is `title_ids` rather than the rows being written.
 
-    A title that contributes *no* rows is invisible to a scope derived from
-    the batch, so its stale credits and its stale `credit_names` survive every
-    future derivation. `TitleNeighborRepository.replace` makes the identical
-    argument one table over.
+    A title that contributes *no* rows is invisible to a scope derived from the
+    batch, so its stale credits and its stale `credit_names` survive every
+    future derivation -- the one row shape a re-derivation cannot repair.
+    `TitleNeighborRepository.replace` makes the identical argument one table over.
     """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000590)
     await harness.given_payload(
@@ -290,16 +266,11 @@ async def test_credit_names_holds_the_top_ten_billed_and_not_the_whole_cast(
     """Two cutoffs, and they are deliberately not the same number.
 
     `credits` stores cast where `order < 50`; `credit_names` stores the **top
-    ten** plus every stored crew name. The gap is the point: `credit_names`
-    feeds the embedding and the tsvector, and both degrade with length. Two
-    hundred names at ~2 tokens each quadruples a ~115-token document and takes
-    the film's own name from ~4% of the text to under 1%, and a class-B lexeme
-    set twenty times the size of class A is one where a two-word query
-    accumulates against the wrong thing.
-
-    Seeded with thirty cast, `order` **descending** through the array, so an
-    implementation that slices before sorting keeps the *worst* ten and one
-    that slices after keeps the right ten. Both return ten names.
+    ten** plus every stored crew name, because `credit_names` feeds the
+    embedding and the tsvector and both degrade with length. Seeded with thirty
+    cast, `order` **descending** through the array, so an implementation that
+    slices before sorting keeps the *worst* ten and one that slices after keeps
+    the right ten. Both return ten names.
     """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000600)
     await harness.given_payload(
@@ -325,8 +296,11 @@ async def test_credit_names_holds_the_top_ten_billed_and_not_the_whole_cast(
 
 
 async def test_credit_names_puts_crew_after_the_billed_cast(harness: _Harness) -> None:
-    """Order is the ranking. Cast first, in billing order, then crew -- a
-    director ahead of the lead actor is a class-B ordering nobody chose."""
+    """Order is the ranking.
+
+    Cast first, in billing order, then crew -- a director ahead of the lead actor is a
+    class-B ordering nobody chose.
+    """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000610)
     await harness.given_payload(
         TitleKind.MOVIE,
@@ -361,14 +335,13 @@ async def test_credit_names_puts_crew_after_the_billed_cast(harness: _Harness) -
 async def test_a_payload_naming_no_title_in_the_catalog_is_skipped_rather_than_raising(
     harness: _Harness,
 ) -> None:
-    """`raw_payloads` outlives `titles` -- there is no foreign key between
-    them -- so a payload for a title deleted since the fetch is ordinary, not
-    poison.
+    """`raw_payloads` outlives `titles`, with no foreign key between them.
 
-    Same call `IndexService` makes: *a job for work that has since become
-    impossible completes rather than parks*. An implementation that raised
-    would let one deleted title abort a whole derivation page, and the page
-    after it, forever.
+    A payload for a title deleted since the fetch is ordinary, not poison --
+    the same call `IndexService` makes: a job for work that has since become
+    impossible completes rather than parks. An implementation that raised would
+    let one deleted title abort a whole derivation page, and the page after it,
+    forever.
     """
     kept = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000620)
     await harness.given_payload(
@@ -398,19 +371,14 @@ async def test_a_payload_naming_no_title_in_the_catalog_is_skipped_rather_than_r
 
 
 async def test_deriving_makes_no_provider_fetch(harness: _Harness) -> None:
-    """ADR-0016's whole claim, asserted rather than described.
-
-    That ADR kept `raw_payloads` because *"three later milestones re-derive
-    entities from a payload M4 already holds -- with no second network
-    call"*, and `ports/metadata.py` wrote the same note from the other end.
-    This is where the note is presented.
+    """A derivation re-reads a stored payload and makes no second network call.
 
     The provider is held for `to_derivation` alone, and `to_derivation` is a
     pure function. A derivation that called `fetch` would re-request the whole
     enriched tier against a rate limit to read data already sitting in a JSONB
-    column -- so the fake is armed to raise, and the assertion is on the call
-    count as well, because a `fetch` inside a `try` would swallow the raise
-    and still spend the request.
+    column -- so the fake is armed to raise, and the call count is asserted as
+    well, because a `fetch` inside a `try` would swallow the raise and still
+    spend the request.
     """
     await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000630)
     await harness.given_payload(
@@ -431,7 +399,7 @@ async def test_deriving_makes_no_provider_fetch(harness: _Harness) -> None:
 
 
 async def test_deriving_writes_images_and_makes_no_provider_fetch(harness: _Harness) -> None:
-    """ADR-0016's **fourth** entity, and the positive control comes first.
+    """Images, and the positive control comes first.
 
     `test_deriving_makes_no_provider_fetch` above arms the same fake to raise
     and asserts `fetches == 0`. That assertion is satisfied by a derivation
@@ -474,20 +442,14 @@ async def test_deriving_writes_images_and_makes_no_provider_fetch(harness: _Harn
 async def test_re_deriving_keeps_every_image_id_so_a_cached_reference_stays_valid(
     harness: _Harness,
 ) -> None:
-    """**The property `Cache-Control: immutable` rests on**, asserted through
-    the whole walk rather than at the repository.
+    """The property `Cache-Control: immutable` rests on, over the whole walk.
 
-    The mapper mints a fresh UUIDv7 per sighting -- it has to, since an image
-    has no provider integer id to re-point through the way `Person` and
-    `Collection` do -- so *every* derivation hands the repository ids the
-    catalog has never seen. What keeps a client's `/images/{id}` valid is the
-    upsert inferring `uq_images_owner_provider_path` and answering with the id
-    the row was first inserted with, and this case is the one that says the
-    derivation reaches that path rather than a delete-then-insert.
-
-    `PostgresImageRepository`' half of it is measured on a real container by
-    `ImageRepositoryContract.test_a_second_replace_keeps_the_id_of_a_path_that_did_not_change`;
-    what is new here is the walk in front of it. The second payload moves a
+    The mapper mints a fresh UUIDv7 per sighting -- an image has no provider
+    integer id to re-point through the way `Person` and `Collection` do -- so
+    *every* derivation hands the repository ids the catalog has never seen.
+    What keeps a client's `/images/{id}` valid is the upsert inferring
+    `uq_images_owner_provider_path` and answering with the id the row was first
+    inserted with, rather than a delete-then-insert. The second payload moves a
     field on purpose, so this cannot pass by the write being skipped: the ids
     must be equal *and* the refreshed value must have landed.
     """
@@ -526,17 +488,13 @@ async def test_re_deriving_keeps_every_image_id_so_a_cached_reference_stays_vali
 async def test_a_title_whose_artwork_all_disappeared_has_its_images_cleared(
     harness: _Harness,
 ) -> None:
-    """The delete's scope is the page's titles, never the rows being written
-    -- `test_a_title_whose_credits_all_disappeared_is_cleared_not_skipped`'s
-    argument arriving at a third table, and it needs its own case because the
-    two writes take two scopes that a wrong implementation can spell
-    differently.
+    """The delete's scope is the page's titles, never the rows being written.
 
-    A title contributing no image rows is invisible to a scope derived from
-    the batch, so its stale artwork survives every future derivation -- and a
-    stale image row is a `/images/{id}` whose upstream path the CDN has
-    stopped serving, rendered as a broken image with nothing reporting an
-    error. It is the one row shape a re-derivation cannot repair.
+    The credits argument arriving at a third table, and it needs its own case
+    because the two writes take two scopes a wrong implementation can spell
+    differently. A title contributing no image rows is invisible to a scope
+    derived from the batch, so its stale artwork survives every future
+    derivation and renders as a broken image with nothing reporting an error.
     """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000660)
     await harness.given_payload(
@@ -559,9 +517,11 @@ async def test_a_title_whose_artwork_all_disappeared_has_its_images_cleared(
 async def test_deriving_an_empty_cache_writes_nothing_and_reports_zero(
     harness: _Harness,
 ) -> None:
-    """PRD 08's rule at the service rather than at the CLI: *every one of them
-    has to work against an empty database*. The report is all zeroes and
-    nothing raises -- and no page is committed, because there was no page."""
+    """PRD 08's rule at the service rather than at the CLI.
+
+    Every command has to work against an empty database: the report is all
+    zeroes, nothing raises, and no page is committed because there was no page.
+    """
     report = await harness.service.derive_all()
 
     assert report.payloads_read == 0
@@ -593,9 +553,11 @@ async def test_a_page_is_one_transaction_and_a_walk_is_several(harness: _Harness
 
 
 async def test_a_limit_stops_the_walk_without_draining_the_cache(harness: _Harness) -> None:
-    """`usher derive --backfill --limit N` is an operator bounding a run on a
-    box they care about, and a limit that only bounded the *report* would be a
-    flag that reads like a bound and is not."""
+    """`--limit N` bounds the walk and not only the report.
+
+    An operator bounding a run on a box they care about gets a flag that reads
+    like a bound and is one.
+    """
     for index in range(6):
         await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000660 + index)
         await harness.given_payload(
@@ -653,10 +615,11 @@ async def test_deriving_one_title_reads_one_key_and_not_the_whole_cache(
 async def test_deriving_a_title_with_no_cached_payload_completes_rather_than_raising(
     harness: _Harness,
 ) -> None:
-    """A title enriched before `credits` joined `*_APPEND_TO_RESPONSE`, or one
-    whose cache entry was never written. Nothing to derive is not a failure --
-    parking it would need a human to release work whose only problem is that
-    there is none."""
+    """A title whose cache entry was never written has nothing to derive.
+
+    That is not a failure -- parking it would need a human to release work
+    whose only problem is that there is none.
+    """
     title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000680)
     await harness.service.derive(title_id)
     assert await harness.credits.list_for_title(title_id) == []
@@ -665,16 +628,19 @@ async def test_deriving_a_title_with_no_cached_payload_completes_rather_than_rai
 async def test_deriving_a_title_the_catalog_no_longer_holds_completes(
     harness: _Harness,
 ) -> None:
-    """`handlers.py`'s standing rule, at the third kind that needs it: a job
-    for work that has since become impossible completes rather than parks."""
+    """`handlers.py`'s standing rule, at a third kind that needs it.
+
+    A job for work that has since become impossible completes rather than parks.
+    """
     await harness.service.derive(uuid.uuid4())
 
 
 async def test_deriving_a_title_with_no_tmdb_id_completes(harness: _Harness) -> None:
-    """A stub minted from an Emby item carrying only an IMDb id has no TMDb
-    reference at all, so there is no cache key to read. 979,401 of the one
-    measured catalog's 1,271,138 titles carry no `tmdb_id`; this is the common
-    case, not the odd one."""
+    """A stub carrying only an IMDb id has no TMDb reference, so no cache key.
+
+    Most of the catalog carries no `tmdb_id`; this is the common case, not the
+    odd one.
+    """
     title = Title(kind=TitleKind.MOVIE, name="A Stub", sort_name="A Stub")
     await harness.titles.add(title)
     await harness.service.derive(title.id)

@@ -1,46 +1,10 @@
-"""In-memory `SearchQueryRepository`.
+"""In-memory `SearchQueryRepository`."""
 
-**Where this is more forgiving than Postgres, on purpose.** Four places, each
-of which the paired `tests/integration/test_search_query_repository.py` run
-is what actually closes:
-
-- **No foreign keys**, so `record()` stores a row for a `user_id` no `users`
-  row names and `record_outcome()` attributes to a `clicked_title_id` no
-  `titles` row names. Both refusals are Postgres-only, `llm_calls`' and
-  `curated_rows`' precedent for the identical shape. **This is about the
-  keys, not about `record_outcome`'s `user_id` scope**, which is a predicate
-  rather than a key and is modelled here exactly -- see the comment on it.
-- **No CHECK constraints.** `ck_search_queries_query_not_empty`,
-  `ck_search_queries_result_count_non_negative` and
-  `ck_search_queries_latency_ms_non_negative` are enforced here not at all --
-  `SearchQueryRecord` is a plain, unvalidated dataclass, unlike a pydantic
-  domain model, so there is nothing here to fire even by accident.
-- **No client-side encoder to refuse an out-of-range `int`.** Postgres's
-  `integer` columns and asyncpg's binary encoder are what make `2**31`
-  unstorable; a Python `int` has no such ceiling, so
-  `test_a_latency_the_column_cannot_hold_is_a_port_error` is Postgres-only.
-- **No transaction and no SAVEPOINT**, so nothing here exercises the property
-  the SAVEPOINT buys: that a refused write leaves the caller's session usable
-  for whatever else it is holding.
-
-**The duplicate-`id` refusal on `record()` is modelled exactly rather than
-diverged**, name and all, `FakeLLMCallRepository`'s reason: `record()` is an
-insert, never an upsert, and a service could otherwise violate that through
-every unit test in the milestone and only discover it against a real primary
-key.
-
-**`record_outcome`'s two conditions are modelled exactly too, and separately**
--- `clicked_title_id` first-write-wins, `played` monotonic-or -- because
-together they are this port's one piece of real behaviour rather than a
-storage detail. A fake that shared one guard between them (the shape a review
-caught before it shipped: `db/repositories/search_query.py`'s module
-docstring has the corrected argument) would pass every other case in the
-contract and hide the defect that guard produces -- F3's own funnel calls
-this twice on one row, a click and then a play, and the second call must
-still land.
-"""
-
+import asyncio
 import uuid
+from datetime import datetime
+
+from pydantic import AwareDatetime
 
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import SearchQueryRecord, SearchQueryRepository
@@ -55,10 +19,9 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         self.outcomes: dict[uuid.UUID, tuple[uuid.UUID | None, bool]] = {}
 
     async def record(self, record: SearchQueryRecord) -> None:
-        # `pk_search_queries`, modelled rather than diverged -- see the module
-        # docstring. Checked before the write, so a refused call leaves the
-        # table exactly as it was, which is also what the real one's SAVEPOINT
-        # buys on the arm that has a transaction.
+        # `pk_search_queries`, modelled rather than diverged. Checked before the
+        # write, so a refused call leaves the table exactly as it was, which is
+        # also what the real one's SAVEPOINT buys on the arm with a transaction.
         if record.id in self.rows:
             raise RepositoryConflict(
                 f"search query {record.id} is already recorded", constraint="pk_search_queries"
@@ -75,14 +38,8 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         played: bool,
     ) -> None:
         stored = self.rows.get(query_id)
-        # No row named this id, or one belonging to another household -- a
-        # silent no-op either way, matching the real statement's
-        # zero-rows-affected `UPDATE`. **The household scope is modelled here
-        # rather than left to the arm with a real `WHERE`**, unlike the four
-        # divergences above: it is the one predicate in this port that is a
-        # security boundary, so a fake that ignored it would let every unit
-        # case in the milestone pass against an unscoped statement and leave
-        # the cross-household write caught only by a test with Docker.
+        # No row named this id, or one belonging to another household -- a silent no-op
+        # either way, matching the real statement's zero-rows-affected `UPDATE`.
         if stored is None or stored.user_id != user_id:
             return
         already_clicked, already_played = self.outcomes[query_id]
@@ -91,10 +48,32 @@ class FakeSearchQueryRepository(SearchQueryRepository):
         # household actually opened. `already_clicked` is never overwritten
         # once set.
         winning_click = already_clicked if already_clicked is not None else clicked_title_id
-        # Monotonic on `played` alone, and independent of the guard above --
-        # this is the whole fix. A call that only means to report a play
-        # (`clicked_title_id=None`, `played=True`, arriving after the click
-        # that already attributed this row) must still land, and once
-        # `played` is `True` a later `False` is stale information rather
-        # than a correction to write over it.
+        # Monotonic on `played` alone, and independent of the guard above -- this is the
+        # whole fix.
         self.outcomes[query_id] = (winning_click, already_played or played)
+
+    async def oldest(self) -> AwareDatetime | None:
+        # `min(at)` over the values held, not "the first row written" -- an
+        # implementation that answered insertion order would pass every case
+        # that seeds in order, which is why the contract seeds out of it.
+        if not self.rows:
+            return None
+        return min(record.at for record in self.rows.values())
+
+    async def prune(self, *, before: datetime, limit: int) -> int:
+        # This yield is load-bearing: the Postgres arm awaits a real round trip
+        # per chunk, so a caller looping over `prune` always has a cancellation
+        # point. A fake that completed synchronously would let a broken `run()`
+        # terminator spin the event loop past `asyncio.wait_for`.
+        await asyncio.sleep(0)
+        # `<`, spelled out rather than inherited: `<=` here would make the
+        # contract's exactly-on-the-cutoff arm pass on one arm and fail on the
+        # other, a divergence about the one thing this method is for.
+        expired = sorted(
+            (record for record in self.rows.values() if record.at < before),
+            key=lambda record: record.at,
+        )[:limit]
+        for record in expired:
+            del self.rows[record.id]
+            self.outcomes.pop(record.id, None)
+        return len(expired)

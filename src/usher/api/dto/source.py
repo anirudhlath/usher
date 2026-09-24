@@ -1,29 +1,4 @@
-"""Request and response shapes for the admin source routes.
-
-`api/dto/` types are distinct from `domain/` models (PRD 07): the wire
-contract is versioned independently. Here the split earns its keep
-immediately -- `SourceResponse` deliberately omits `credentials_ref`, which
-`Source` carries and no client has any use for, and `SourceCreateRequest`
-carries a `username` and `password` that no response type does.
-
-**The credential is write-only, structurally.** It appears on the request
-model and on no response model, so PRD 08's "credentials are never returned
-by any API, including admin" is a property of the type graph rather than of
-whoever wrote the handler -- there is no response type with a field to put
-one in. PRD 08 names *both* halves ("the stored username and password"), so
-`SourceResponse` omits the username too, not just the password.
-
-Holding the password as `SecretStr` closes the second half: `repr()` and
-`str()` of one are `'**********'`, so a parsed request that reaches a log
-line, a traceback frame summary, or an exception message renders redacted.
-It also puts `"writeOnly": true` on the field in `/openapi.json` (verified
-directly), which is the machine-readable form of the same rule -- a
-generated client marks it send-only rather than inferring that from the
-absence of a response field.
-It does *not* close the request-echo path -- a pydantic validation error
-carries the raw, unparsed body in its `input` field, which never reaches a
-`SecretStr` at all. `usher.api.errors` is what closes that one.
-"""
+"""Request and response shapes for the admin source routes."""
 
 import uuid
 
@@ -73,15 +48,12 @@ class SourceStatusResponse(BaseModel):
     """PRD 07's `GET /admin/sources/{id}/status`.
 
     `push_available` is `bool | None` and `null` means "not probed" -- see
-    `SourceStatus`. An admin UI renders that as "unknown", which is the
-    honest answer until M5's probe asserts on received messages.
+    `SourceStatus`. An admin UI renders that as "unknown".
 
-    `is_administrator` is `bool | None` on the same three-valued pattern and
-    for a sharper reason -- see `SourceStatus`. ADR-0012 accepts the risk
-    that a source is configured with an Emby administrator account, whose
-    token then rides in every playback URL and (from M5) opens a long-lived
-    push socket; the recorded mitigation is PRD 03's "configure a normal
-    user", which is guidance an operator can only follow if they can see
+    `is_administrator` is `bool | None` on the same three-valued pattern. A source
+    configured with an Emby administrator account rides that token in every
+    playback URL and opens a long-lived push socket; the mitigation is PRD 03's
+    "configure a normal user", which an operator can only follow if they can see
     which they did.
 
     `detail` is the adapter's own operator-facing status line, built from
@@ -111,12 +83,13 @@ class SourceStatusResponse(BaseModel):
 
 
 class SyncTriggerResponse(BaseModel):
-    """`POST /admin/sources/{id}/sync`'s whole body: the enqueued job's
-    identity, on the same shape `usher.api.dto.rows.RegenerateResponse` uses
-    for `POST /admin/rows/regenerate` -- both routes promise exactly one
-    thing, that this row is on the queue at `JobPriority.DEMAND` or was
-    already there, and `(kind, key)` is the only fact about it a reader can
-    still act on. `key` is `"{source_id}:{lane}"`, never a bare source id --
+    """`POST /admin/sources/{id}/sync`'s whole body -- the enqueued job's identity.
+
+    The route promises exactly one thing, that this row is on the queue at
+    `JobPriority.DEMAND` or was already there, and `(kind, key)` is the only fact
+    about it a reader can still act on.
+
+    `key` is `"{source_id}:{lane}"`, never a bare source id --
     `usher.domain.jobs.JobKind.SYNC` says why the composite is deliberate.
     """
 

@@ -35,8 +35,7 @@ cp /var/tmp/plant.bak src/usher/services/x.py
 diff /var/tmp/plant.bak src/usher/services/x.py      # read the restore back
 ```
 
-A plant that dies on a linter never reached the suite, so `BROKEN-MUTATION` says
-nothing about coverage — respell it. **The guard-verification cycle** anchors on
+**The guard-verification cycle** anchors on
 `^E `: pytest prints the failing assertion's surrounding *source*, so a guard's
 text appears in the traceback of a case that failed on something else entirely.
 
@@ -82,9 +81,23 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   question.** Ask what makes it redundant, then whether any fixture has ever
   made that thing false. Two predicates equally selective in every fixture are
   one predicate.
+- **A membership test over joined text is an "at least one" claim.**
+  `assert needle in "\n".join(parts)` passes with every part but one mutated.
+  Assert per part, or assert the **set** of values the parts carry.
+- **What an artefact says and what it computes are two claims.** A case pinning
+  a rendered label leaves the expression producing it free, and the asymmetry is
+  invisible because both read like the same test. Pin the computation too: then
+  either half alone fails, and only changing both passes — which is a change
+  that no longer claims to be the same artefact.
 - Where an assertion covers arithmetic over a size, pick the input at which the
   arithmetic **changes** — a power of ten for `len(str(n))`, the boundary for a
   comparison — and parametrise the neighbours to show they cannot see it.
+- **Covering both answers of a classifier is not covering its threshold.**
+  Fixtures either side agree under `>=` and `>`; only one standing *on* the
+  boundary tells them apart. Enumerate the values the **call sites** pass, not
+  the values the function returns, and read the boundary off the collaborator
+  that produces it — a case naming the constant itself pins it against itself
+  and stays green when the call site moves.
 - **Could this fixture also be the row above or below?** Two configurations
   reaching the same state pin only one of themselves. And a comment justifying a
   fixture's shape is a claim about its *surroundings*, so copying it into a new
@@ -150,6 +163,18 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   identifying nothing.** Hold a strong reference to every observed object, and
   take ownership from `asyncio.current_task().get_name()` (readable inside
   SQLAlchemy's sync ORM events, via the greenlet bridge), not from a clock.
+  Take the reference **before** recording the address, on *every* path that
+  records one: `after_commit` fires before `after_transaction_end`, so a log
+  pinning only in the begin/end handlers credits a commit to an address it does
+  not yet own — safe by the registration order of two independent listeners and
+  by nothing else. That shape yields a false **green** (a later object landing
+  on the freed, already-credited address inherits the credit), never a red, so
+  no flake will ever surface it.
+- **Assert the pinning, as coverage of what the log keys on** — `{id(x) for x
+  in held} >= recorded_ids`, not `len(set(held)) == len(held)`, which an emptied
+  `held` satisfies trivially. The pin is a deliberate leak and reads like an
+  oversight, so the plant to defend against is somebody tidying it away, and the
+  obvious spelling cannot see that plant.
 
 ## Suite-level state
 
@@ -194,8 +219,6 @@ uv run pytest <the case> 2>&1 | grep -E '^E .*<the guard message>'
   rendered sentence is a change-detector and makes a sweep coarse, every plant
   dying on the same equality; pin the claim as substrings where another
   component honours it, the line where the rendering is itself the defence.
-- A mutation must reproduce the defect it names; a wrong answer that
-  accidentally equals the right one is not evidence.
 - **Where a redundant-looking write is defended by an invariant, the mutation is
   observable exactly where the suite breaks that invariant on purpose** —
   usually a `model_construct` case written for something else. Check there

@@ -1,46 +1,4 @@
-"""`TitleReadService` against real Postgres, for the things its port fakes
-structurally cannot express.
-
-**`FakeJobQueue.enqueue` reports a re-enqueue as a row written, and Postgres
-does not.** The fake takes the update branch and adds one to its count
-whatever it wrote; the real `_ENQUEUE`'s conflict clause carries
-`AND jobs.priority < excluded.priority`, so re-enqueueing an already-promoted
-job matches nothing and answers **0**. That is the divergence, and it is the
-one the read path stands on: `_promote` returns whether an enqueue was
-*attempted*, and a version that returned "a row changed" passes every unit
-case in `tests/unit/test_services_titles.py` and then reports `promoted =
-False` for every second open of the same stub in production. Measured both
-ways -- the mutation survives the unit file and fails here.
-
-**And the promotion clause itself is SQL.** "Opening a stub raises `NEW` to
-`DEMAND`" and "opening a parked title leaves it parked and at its old
-priority" are one `ON CONFLICT ... WHERE` against the real queue and two
-Python branches in the fake, so only this run says anything about the
-statement M4 wrote.
-
-Foreign keys are the third: `media_items.title_id`, `media_items.source_id`
-and `watch_states.user_id` are all real here and are dict entries there.
-
-**And the cast/crew reads are the fourth, which is a divergence running the
-other way.** `FakeCreditRepository.list_for_title` reproduces the ordering in
-Python as `(billing_order is None, billing_order or 0, person_id)`; the
-shipped one is `ORDER BY c.billing_order ASC NULLS LAST, c.person_id` over a
-real join to `people`. Two consequences worth stating rather than assuming.
-The `NULLS LAST` is **free in Postgres** -- an ASC sort defaults to it -- so
-that clause is an equivalent mutant against this arm and is load-bearing only
-against the fake, where the tempting `or 0` repair sorts an unbilled credit
-above the lead. What only this arm can see is the statement: the `kind`
-predicate, the `title_id` scope and the join that supplies the name are one
-`SELECT` here and three Python comprehensions there.
-
-**And the images read is the fifth, in the same direction.**
-`FakeImageRepository` sorts with a Python key function, so its ordering case
-passes because the key function *is* the answer; here a deleted `ORDER BY
-is_primary DESC, id` leaves heap order, which a small fixture is frequently
-already in. The servability filter is the other half: it is a *read-side*
-drop, so only an arm that can hold the stored row and the answered row apart
-can say the catalog is still a faithful record of what the provider published.
-"""
+"""`TitleReadService` against real Postgres, for what its port fakes cannot express."""
 
 import uuid
 from collections.abc import AsyncIterator
@@ -158,25 +116,14 @@ async def _seed_person(session: AsyncSession, name: str) -> Person:
 async def test_the_cast_is_top_billed_first_and_an_unbilled_credit_sorts_last(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The ordering, the `kind` filter and the `title_id` scope as one real
-    statement rather than as three comprehensions.
+    """The ordering, the `kind` filter and the `title_id` scope as one real statement.
 
-    **Seeded so `ORDER BY c.person_id` alone answers the wrong list.** The
-    people are minted lowest-id-first in the order bit part, lead, uncredited,
-    crew -- so an implementation that dropped `billing_order` from the
-    ordering, which is the second wrong implementation `CreditRepository`'s
-    own docstring names, returns the bit part first and passes every
-    membership assertion. The premise is asserted rather than assumed, because
-    UUIDv7 makes `ORDER BY id` and `ORDER BY <the real key>` agree by accident
-    whenever a fixture mints ids in ranking order.
-
-    The unbilled cast member is the third position deliberately: `billing_order`
-    is nullable and a crew credit legitimately has none, so a cast list has to
-    place an unbilled member without either raising or promoting it.
-
-    The second title exists so the `WHERE c.title_id = ...` scope is a real
-    assertion -- an implementation that forgot it returns four cast entries
-    here in whatever order the planner reached them.
+    Seeded so `ORDER BY c.person_id` alone answers the wrong list: the people are minted
+    lowest-id-first as bit part, lead, uncredited, crew, so an implementation that
+    dropped `billing_order` returns the bit part first and still passes every membership
+    assertion. `billing_order` is nullable, so the unbilled member sits third to prove a
+    cast list places it without raising or promoting it. The second title makes the
+    `WHERE c.title_id = ...` scope a real assertion.
     """
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     other = await _seed_title(session, EnrichmentState.ENRICHED)
@@ -256,13 +203,10 @@ async def test_a_title_whose_credits_were_never_derived_answers_with_neither(
 ) -> None:
     """The majority state, and the one the wire renders as two absent keys.
 
-    An enriched title with no `credits` rows is what every title looks like
-    before `usher derive` runs, and what ~93.8% of the catalog looks like
-    after the IMDb principals loader fills `titles.credit_names` without
-    creating a single `people` or `credits` row. This read is over `credits`,
-    so empty is the honest answer for both -- and the residual, that a
-    genuinely uncredited film is indistinguishable from an underived one,
-    is recorded in PRD 07 rather than closed with a flag nothing writes.
+    An enriched title with no `credits` rows is what a title looks like before
+    `usher derive` runs, and what most of the catalog looks like after the IMDb
+    principals loader fills `titles.credit_names` without creating a `people` or
+    `credits` row. This read is over `credits`, so empty is the honest answer for both.
     """
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     detail = await service.detail(title.id, user_id=user_id)
@@ -273,16 +217,12 @@ async def test_a_title_whose_credits_were_never_derived_answers_with_neither(
 async def test_a_second_open_still_reports_a_promotion(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The property the fake cannot see, and the reason this file exists.
+    """`_promote` reports "this read asked for the front of the queue", not "a row changed".
 
-    `PostgresJobQueue.enqueue` answers **0** for the second open -- the
-    promotion clause's `AND jobs.priority < excluded.priority` finds nothing
-    left to raise, which M4 recorded as the honest number. So `_promote`
-    reports "this read asked for the front of the queue", not "a row
-    changed": the alternative tells a client that the second open of an
-    already-promoted title declined to promote it, which is both false and
-    exactly backwards. `FakeJobQueue` counts that same re-enqueue as one row
-    written, so the unit suite ratifies either spelling.
+    `PostgresJobQueue.enqueue` writes nothing on the second open, because the promotion
+    clause finds nothing left to raise. Reporting that as a declined promotion would be
+    backwards. `FakeJobQueue` counts the re-enqueue as a write, so only this arm can see
+    the difference.
     """
     title = await _seed_title(session, EnrichmentState.STUB)
 
@@ -320,9 +260,10 @@ async def test_opening_a_stub_raises_a_queued_job_to_demand(
 async def test_opening_a_parked_title_leaves_it_parked_at_its_own_priority(
     service: TitleReadService, queue: PostgresJobQueue, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """PRD 08's "re-enqueueing does not un-park, and a parked job's priority
-    is not promoted behind their back either" -- both halves, against the
-    statement that actually enforces them."""
+    """Re-enqueueing does not un-park, and does not raise a parked job's priority either.
+
+    Both halves, against the statement that actually enforces them.
+    """
     title = await _seed_title(session, EnrichmentState.STUB)
     await queue.enqueue(
         [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.NEW)]
@@ -343,11 +284,9 @@ async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
 ) -> None:
     """Two real `sources` rows and two real foreign keys.
 
-    The retracted copy is the point: PRD 08's rule says a degraded source
-    narrows the answer rather than failing it, and what "narrowed" means on
-    the wire is a copy still present with `available = false`. The sweep that
-    produced it is a real `UPDATE`, and the ordering that puts it last is
-    Postgres's, not a Python `sort`.
+    A degraded source narrows the answer rather than failing it, and "narrowed" on the
+    wire is a copy still present with `available = false`. The sweep that produced it is
+    a real `UPDATE`, and the ordering that puts it last is Postgres's, not a Python sort.
     """
     other = Source(
         kind=SourceKind.EMBY,
@@ -376,12 +315,11 @@ async def test_availability_spans_two_sources_and_keeps_a_retracted_copy(
 async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
     service: TitleReadService, session: AsyncSession, source: Source, user_id: uuid.UUID
 ) -> None:
-    """`watch_states` has a `num_nonnulls(title_id, episode_id) = 1` CHECK, so
-    an episode's state and its series' state are separate rows that a dict
-    cannot keep apart by constraint -- and `get_for_title` on a series must
-    not pick up whichever of its episodes the planner reached first. Same
-    asymmetry `resolve_external_ids`' title branch needed `episode_id IS
-    NULL` for, and the same one `list_for_title` now needs it for.
+    """An episode's state and its series' state are separate `watch_states` rows.
+
+    A dict cannot keep them apart by constraint, and `get_for_title` on a series must
+    not pick up whichever of its episodes the planner reached first — the same
+    `episode_id IS NULL` asymmetry `resolve_external_ids`' title branch needs.
     """
     series = await _seed_title(session, EnrichmentState.ENRICHED, kind=TitleKind.SERIES)
     season, episode = uuid.uuid4(), uuid.uuid4()
@@ -428,9 +366,7 @@ async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
 async def test_a_read_of_a_title_with_no_source_row_answers_rather_than_raising(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The catalog is 1,271,138 titles against one source's 1,126,789 items,
-    89% of them episodes, so "on no source" is the majority state and has to
-    be a normal 200-shaped answer rather than an absence."""
+    """Being on no source is the majority state, so the read answers rather than raises."""
     title = await _seed_title(session, EnrichmentState.SKELETON)
     detail = await service.detail(title.id, user_id=user_id)
     assert detail is not None
@@ -441,19 +377,12 @@ async def test_a_read_of_a_title_with_no_source_row_answers_rather_than_raising(
 async def test_the_images_order_comes_from_the_statement_and_not_from_the_heap(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The fifth divergence, and it runs the same way as the credits one: the
-    fake sorts in Python, so its ordering case passes because the key function
-    *is* the answer. Only here can a deleted `ORDER BY` leave heap order --
-    which on a small fixture is frequently already sorted, and which is why
-    the premise below is stated from the ids the fixture minted rather than
-    from the order they were inserted in.
+    """Only this arm can see a deleted `ORDER BY`, because the fake sorts in Python.
 
-    The backdrop is written first, so its UUIDv7 id is the smaller and
-    `is_primary DESC` is the only thing that can put the poster in front of
-    it. There is no `sort_order` column between the two keys -- ADR-0032's
-    migration request left it out and `m09c` is authorised for the natural key
-    alone -- so `id` is first-sighting order and this is the whole of the
-    read's order.
+    The backdrop is written first, so its UUIDv7 id is the smaller and `is_primary DESC`
+    is the only thing that can put the poster in front of it. There is no `sort_order`
+    column between the two keys, so `id` is first-sighting order and the pair of keys is
+    the whole of the read's order.
     """
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     backdrop = Image(
@@ -485,11 +414,11 @@ async def test_the_images_order_comes_from_the_statement_and_not_from_the_heap(
 async def test_a_declined_logo_is_filtered_out_of_a_real_read(
     service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
 ) -> None:
-    """The filter over rows Postgres really returned, which is the arm that
-    can see the *row still being there*: `replace_for_titles` stored it,
-    `list_for_title` answers it, and the service drops it -- so an operator
-    debugging a missing logo finds the reference with one `SELECT`, which is
-    the reason C4 rejected refusing at the write instead."""
+    """The filter runs over rows Postgres really returned, so the row is still there.
+
+    `replace_for_titles` stores it, `list_for_title` answers it, and the service drops
+    it — so an operator debugging a missing logo finds the reference with one `SELECT`.
+    """
     title = await _seed_title(session, EnrichmentState.ENRICHED)
     images = PostgresImageRepository(session)
     await images.replace_for_titles(

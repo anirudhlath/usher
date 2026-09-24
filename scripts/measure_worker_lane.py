@@ -1,42 +1,4 @@
-"""Price the worker lane against a local stub, and ask whether the rate limit binds.
-
-**Not a test.** It writes to a real database and opens real sockets. It never
-touches `api.themoviedb.org`: the upstream is a stub on `127.0.0.1` that
-replays the latency distribution M9's S3 measured over 130,334 live requests
-(median 0.0588 s, mean 0.0993 s, p95 0.4267 s). ADR-0005 chose ~25 rps as
-courtesy against TMDb's stated ~40 and S3 already drew 86 x 502 from that
-server in two bursts of 43, so probing a third party's real ceiling is not
-something this harness is allowed to do -- and a stub is the *accurate*
-instrument as well as the courteous one, because it isolates the lane from
-upstream variance.
-
-    uv run python scripts/measure_worker_lane.py --jobs 400
-    uv run python scripts/measure_worker_lane.py --database-url "$USHER_DATABASE_URL"
-
-**The question is not "how many rps".** M9's S3 measured 19.76 rps on three
-workers against a bucket configured at 10 rps per process that was *never
-binding on any of them* -- so the architecture, not the policy, was the
-ceiling. The bar this harness scores is that a **single process** tracks its
-configured limit across several settings: set it, and watch throughput follow.
-The pre-registered bar is `/var/tmp/w1/BAR.md`, whose sha256 is re-computed at
-run time and printed below, so an edit made after a number was seen shows up in
-the log.
-
-Two instruments, deliberately, because they fail differently:
-
-* **Requests counted at the stub**, over a steady-state window that drops the
-  first `--warmup` seconds. That is the rate the bucket is supposed to bind.
-* **Maximum concurrent in-flight requests at the stub**, plus the
-  intersection-over-union of the request windows. A count of completed jobs is
-  also what a sequential loop produces (CLAUDE.md's fourth evidence rule); an
-  observed overlap is not.
-
-Quiet-check: the two-sided idle-sampled CPU drift and the argv-token foreign
-process census from `scripts/measure_suggest_tiers.py`, imported rather than
-re-derived -- a one-minute load average rises from the run's own work and would
-condemn every clean run, and `pgrep -f pytest` counts the shell that mentions
-the word.
-"""
+"""Price the worker lane against a local stub, and ask whether the rate limit binds."""
 
 import argparse
 import asyncio
@@ -58,11 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.measure_suggest_tiers import (
-    _CPU_DRIFT_LIMIT,
-    _CPU_SETTLE_SECONDS,
-    _load_snapshot,
-)
+from scripts.measure_suggest_tiers import quiet_closing, quiet_opening
 
 from usher.composition import (
     SourceRegistry,
@@ -80,17 +38,14 @@ from usher.ports.jobs import JobRequest
 
 BAR = Path("/var/tmp/w1/BAR.md")  # noqa: S108 -- durable, not tmpfs; CLAUDE.md
 
-# S3's measured HTTP latency, 130,334 requests over 1.98 h against the live
-# API (`.claude/rules/tmdb-and-enrichment.md`). A *constant*-latency stub
-# cannot show the straggler behaviour that separates a fixed-batch `gather`
-# from a continuously-fed pool, and S2's own 0.38% sample priced the median
-# correctly and the tail not at all -- so the tail is the part that has to be
-# reproduced rather than the mean.
+# S3's live HTTP latency against the real API
+# (`.claude/rules/tmdb-and-enrichment.md`).
 _LATENCY_MEDIAN = 0.0588
 _LATENCY_MEAN = 0.0993
 _LATENCY_P95 = 0.4267
 
-# The three configured limits the bar names, all at or under ADR-0005's ~25.
+# The three configured limits the bar names, all under the default
+# `USHER_TMDB_REQUESTS_PER_SECOND` (30).
 _LIMITS: tuple[float, ...] = (5.0, 12.0, 24.0)
 
 
@@ -102,38 +57,18 @@ def _sha256(path: Path) -> str:
 #: is. Only the spread is a choice, and it is `--sigma`.
 _LATENCY_MU = -2.834
 
-#: 🔴 **No two-parameter lognormal reproduces all three of S3's statistics, and
-#: the docstring here claimed one did until the harness's own printed
-#: comparison said otherwise on the first real run.** It read *"a lognormal
-#: fitted on the median and the p95 lands the mean at 0.099 s within a
-#: percent"*, from an arithmetic slip: `(ln(0.4267) - mu) / 1.645` is **1.205**,
-#: not the 0.9007 written beside it. So the two fits are a genuine choice and
-#: each is wrong in a different direction, measured over 20,000 draws:
-#:
-#: | `sigma` | median | mean | p95 |
-#: |---|---|---|---|
-#: | S3, live, n = 130,334 | 0.0588 | 0.0993 | 0.4267 |
-#: | **0.9** — matches the *mean* | 0.0587 | 0.0882 (-11%) | 0.2585 (**-39%**) |
-#: | **1.205** — matches the *p95* | 0.0588 | 0.1214 (+22%) | 0.4267 |
-#:
-#: The real distribution is more skewed than a lognormal, which is itself worth
-#: knowing: S3's own note that *"concurrency does not move the median request;
-#: it moves the tail"* is exactly the part a two-parameter fit cannot hold on to.
-#: **Both are run and both are reported.** 1.205 is the sterner test of
-#: `Settings.job_concurrency`, whose 12 is derived from the p95 -- a heavier
-#: tail needs more in flight to hold a given rate -- and 0.9 is the one closest
-#: to the per-job wall clock S2 measured end to end. A bar cleared under one and
-#: not the other is a finding, not a pass.
-#:
-#: The default stays at 0.9 because that is what the first run was taken with,
-#: and moving an instrument after seeing a number is how a bar stops being one.
+#: **No two-parameter lognormal reproduces all three of S3's statistics.**
+#: Fixing the median and the p95 puts sigma at 1.205 and moves the mean; this
+#: default fixes the median and the mean instead.
 _DEFAULT_SIGMA = 0.9
 
 
 def _delay(chooser: random.Random, sigma: float) -> float:
-    """One draw from S3's measured latency distribution. See `_DEFAULT_SIGMA`
-    for which two of its three statistics a given `sigma` reproduces, and why
-    no value reproduces all three."""
+    """One draw from S3's live latency distribution.
+
+    See `_DEFAULT_SIGMA` for which two of its three statistics a given `sigma`
+    reproduces, and why no value reproduces all three.
+    """
     return chooser.lognormvariate(_LATENCY_MU, sigma)
 
 
@@ -153,10 +88,9 @@ class _Window:
 class _Stub:
     """A local HTTP/1.1 responder standing in for `api.themoviedb.org/3`.
 
-    Raw asyncio rather than uvicorn: the point of the stub is that its own
-    scheduling contributes as little as possible to the number being measured,
-    and an ASGI server brings its own concurrency semantics into the middle of
-    a concurrency measurement.
+    Raw asyncio rather than uvicorn: the stub's own scheduling has to
+    contribute as little as possible, and an ASGI server brings its own
+    concurrency semantics into the middle of a concurrency run.
     """
 
     chooser: random.Random
@@ -177,13 +111,11 @@ class _Stub:
                 self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
                 try:
                     await asyncio.sleep(_delay(self.chooser, self.sigma))
-                    # **The requested id is echoed back**, and that is not
-                    # decoration: `titles.tmdb_id` carries a unique index per
-                    # kind, so a stub answering a constant id makes every
-                    # enrichment after the first a `RepositoryConflict` on
-                    # `ix_titles_tmdb_id_kind` -- which is a *retryable*
-                    # failure, so the lane would measure the backoff path and
-                    # report it as throughput. Found by running it.
+                    # **The requested id is echoed back.** `titles.tmdb_id`
+                    # carries a unique index per kind, so a stub answering a
+                    # constant id makes every enrichment after the first a
+                    # retryable `RepositoryConflict` -- and the lane would
+                    # exercise the backoff path instead of the enrich path.
                     body = _body_for(head)
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
@@ -275,7 +207,7 @@ async def _seed(sessions: async_sessionmaker[AsyncSession], count: int) -> list[
     """One skeleton movie per job, and the `enrich` jobs that name them.
 
     Truncated first: a run that inherited the previous run's queue would be
-    measuring a different population from the one it reports.
+    reading a different population from the one it reports.
     """
     prefix = f"{uuid.uuid4().hex[:8]}-0000-7000-8000-"
     async with sessions() as session:
@@ -365,8 +297,7 @@ async def _drain(
     """Run the worker lane for `seconds`, exactly as `usher work` runs it.
 
     Returns (jobs completed, wall clock). **The one API-coupled function in
-    this file** -- everything above and below it is the measurement, so the
-    before/after really is one instrument.
+    this file**, so the before/after really is one instrument.
     """
     provider, aclose = await metadata_provider(settings)
     ran_total = 0
@@ -403,10 +334,8 @@ async def _outcome(sessions: async_sessionmaker[AsyncSession]) -> tuple[int, int
 
     **The premise guard on every rate above it.** A request counted at the stub
     that produced no enriched title is a request the lane made on a failure
-    path, and a rate computed over those is a measurement of the backoff
-    schedule. Found by running it: a stub answering a constant TMDb id made
-    every enrichment after the first a `RepositoryConflict`, and the run
-    reported a perfectly plausible rps.
+    path, so a rate computed over those prices the backoff schedule -- and it
+    reads as a perfectly plausible rps.
     """
     async with sessions() as session:
         left = int((await session.execute(text("SELECT count(*) FROM jobs"))).scalar_one())
@@ -511,14 +440,9 @@ def _throwaway_postgres() -> tuple[str, Callable[[], None]]:
 async def run(args: argparse.Namespace, database_url: str) -> None:
     global _BARE
     print(f"bar: {BAR} sha256={_sha256(BAR) if BAR.exists() else 'MISSING'}")
-    # Settle first: the opening sample must be taken under the same condition
-    # as the closing one, and starting a container leaves the box in its own
+    # Settling first, because starting a container leaves the box in its own
     # wake for several seconds.
-    time.sleep(_CPU_SETTLE_SECONDS)
-    before = _load_snapshot()
-    opening = float(before["cpu_busy"])
-    foreign = int(before["processes"]["pytest"])
-    print(f"quiet: opening cpu busy {opening}, foreign pytest {foreign}, load {before['loadavg']}")
+    opening = quiet_opening(settle=True)
 
     _BARE = _settings(database_url=database_url, base_url="http://127.0.0.1:1", rps=1.0)
 
@@ -548,14 +472,7 @@ async def run(args: argparse.Namespace, database_url: str) -> None:
         _report(runs[-1:], label=f"limit {limit}")
 
     _report(runs, label=args.label)
-    time.sleep(_CPU_SETTLE_SECONDS)
-    after = _load_snapshot()
-    closing = float(after["cpu_busy"])
-    foreign = max(foreign, int(after["processes"]["pytest"]))
-    drift = round(closing - opening, 4)
-    print(f"quiet: closing cpu busy {closing}, drift {drift} (limit +-{_CPU_DRIFT_LIMIT})")
-    if abs(drift) > _CPU_DRIFT_LIMIT or foreign:
-        print("QUIET CHECK FAILED -- discard this run and repeat it")
+    quiet_closing(opening)
 
 
 def main() -> None:

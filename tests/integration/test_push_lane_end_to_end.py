@@ -1,35 +1,4 @@
-"""The push lane, whole: a socket's event into catalog state and out to a
-client, against real Postgres -- and what it costs.
-
-**What is here that is not in `tests/integration/test_services_push.py`.**
-That file drives `PushApplyService` directly and owns the two properties
-only Postgres can express: the `observed_at` a merge must carry
-(`trg_watch_states_set_updated_at` owns `updated_at`, so a push stamped with
-anything earlier writes nothing at all) and ADR-0014's `COALESCE` on both
-columns (`play_count` **and** `last_played_at`, because the nullable one
-survives the wrong statement and a case checking only the timestamp would
-ratify the bug). Neither is repeated here.
-
-What is left is the composition: `PushSupervisor`'s own loop driving
-`PushApplyService` into real repositories and out through the **real**
-`InMemoryEventBus` to a real subscriber, the real `PostgresJobQueue` behind
-the backfill's `(kind, key)` uniqueness, and the two measurements shaped so
-a quadratic would show.
-
-**The measurements, and what each holds fixed.** M4's lesson is that "a
-statement-count assertion needs the right thing held fixed", so the
-database half holds the **event count** fixed at 20 and varies the items per
-event (1, then 10) -- a per-item round trip inside an event is the candidate
-defect, and at 1,126,789 items on the one measured source a
-`UserDataChanged` naming a thousand of them is an ordinary afternoon. The
-bus half holds the **event count** fixed and varies the subscriber count at
-two points far enough apart to tell linear from quadratic, which one point
-cannot.
-
-This module runs inside the integration fixture's rolled-back transaction,
-so unlike the three other files this task adds it commits nothing and leaks
-no `stg_*` table.
-"""
+"""The push lane, whole: a socket's event into catalog state and out to a client."""
 
 import asyncio
 import time
@@ -110,10 +79,12 @@ def queue(session: AsyncSession) -> PostgresJobQueue:
 def applier(
     session: AsyncSession, bus: InMemoryEventBus, queue: PostgresJobQueue
 ) -> PushApplyService:
-    """The real chain M4 owns, on real repositories, publishing to the real
-    bus. `session.flush`, not `commit`: the integration fixture owns one
-    connection-bound transaction it rolls back, and what is under test is
-    the SQL and the fan-out rather than durability."""
+    """The real chain, on real repositories, publishing to the real bus.
+
+    `session.flush`, not `commit`: the integration fixture owns one
+    connection-bound transaction it rolls back, and what is under test is the
+    SQL and the fan-out rather than durability.
+    """
     media_items = PostgresMediaItemRepository(session)
     matching = PostgresTitleMatchRepository(session)
     return PushApplyService(
@@ -140,12 +111,13 @@ def applier(
 
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
-    """Every statement SQLAlchemy issues, captured off
-    `before_cursor_execute` rather than transcribed -- M4 replaced two tasks
-    that asserted on a hand-copied lookalike, because the copy drifts from
-    the repository and then reads like coverage. A `COPY` is invisible here
-    (it runs on the raw asyncpg connection), which is the point: it is one
-    command however many records stream through it."""
+    """Every statement SQLAlchemy issues.
+
+    Captured off `before_cursor_execute` rather than transcribed: a hand-copied
+    lookalike drifts from the repository and then reads like coverage. A `COPY`
+    is invisible here -- it runs on the raw asyncpg connection -- which is the
+    point: it is one command however many records stream through it.
+    """
     seen: list[str] = []
 
     def record(
@@ -209,18 +181,15 @@ async def test_a_pushed_watch_state_lands_and_is_published(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """**The milestone in one case, through the lane's own loop.**
+    """The whole lane in one case, through its own loop.
 
-    A `PushSupervisor` holds a channel, an event arrives on it, and the
-    position lands in `watch_states` *and* reaches a subscriber on the bus
-    the SSE route reads from -- with the event's `title_id` on it, which is
-    the field a client filters by and the one the plan's own self-review
-    found being paired wrongly.
-
-    The supervisor is the real one: the loop, the `_note` transition, the
-    gap gate and the failure counter all run. What is faked is the adapter
-    (a socket is a network request) and the commit (this suite's transaction
-    is rolled back).
+    A `PushSupervisor` holds a channel, an event arrives on it, and the position
+    lands in `watch_states` *and* reaches a subscriber on the bus the SSE route
+    reads from -- carrying the event's `title_id`, which is the field a client
+    filters by. The supervisor is the real one: the loop, the `_note`
+    transition, the gap gate and the failure counter all run. What is faked is
+    the adapter (a socket is a network request) and the commit (this suite's
+    transaction is rolled back).
     """
     title_id = await _given_matched_movie(session, source, "movie-1")
     adapter = FakeSourceAdapter(source)
@@ -244,14 +213,11 @@ async def test_a_pushed_watch_state_lands_and_is_published(
                     SourceWatchState(external_id="movie-1", position_seconds=612, played=False)
                 )
             )
-            # **Three frames, not one, since M7.** The lane publishes one
-            # `row.invalidated` per row a watch state can move and then the
-            # `watchstate.updated`, and the whole sequence is read rather than
-            # searched for: a loop that read *until* it found a watch-state
-            # event would pass against a lane that published forty row
-            # invalidations first, which is precisely the fan-out trap 5 is
-            # about. Bounded by `BOUND`, so a lane that publishes fewer fails
-            # here rather than hanging.
+            # Three frames, not one. The lane publishes one `row.invalidated`
+            # per row a watch state can move and then the `watchstate.updated`,
+            # and the whole sequence is read rather than searched for: a loop
+            # reading *until* it found a watch-state event would pass against a
+            # lane that published forty row invalidations first.
             published = [await asyncio.wait_for(anext(subscribed), timeout=BOUND) for _ in range(3)]
         finally:
             lane.cancel()
@@ -288,16 +254,12 @@ async def test_a_pushed_played_item_enqueues_exactly_one_history_backfill(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """`(kind, key)` is unique, so a film paused and resumed six times is
-    **one** `watch_history` job rather than six.
+    """`(kind, key)` is unique, so six pauses are one `watch_history` job.
 
-    A `UserDataChanged` entry carries no play history anybody has measured,
-    so ADR-0014 makes the adapter report `play_count=None` and every pushed
-    play event arrives needing a backfill. At a household's viewing rate the
-    difference is a queue that stays small against one that grows with
-    playback -- and `FakeJobQueue` cannot show it, because the constraint
-    that collapses the six is a real unique index rather than a dict key
-    that happens to match.
+    A `UserDataChanged` entry carries no play history, so the adapter reports
+    `play_count=None` and every pushed play event arrives needing a backfill.
+    `FakeJobQueue` cannot show the collapse, because what collapses the six is a
+    real unique index rather than a dict key that happens to match.
     """
     await _given_matched_movie(session, source, "movie-1")
     adapter = FakeSourceAdapter(source)
@@ -328,23 +290,17 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
     source: Source,
     user_id: uuid.UUID,
 ) -> None:
-    """**The measurement shaped so a quadratic would show.**
+    """Shaped so that a per-item round trip inside an event would show.
 
-    The candidate defect is a per-item database round trip inside an event,
-    so the **event count** is held fixed at 20 and the items per event are
-    varied (1, then 10): twenty events costing 20k statements either way is
-    the property, and "the cost per item is small" is not. `apply_states`
-    resolves a whole batch in one `resolve_targets` and merges it in one
-    `merge_from_source`, so ten items in one event must cost exactly what
-    one does.
-
-    Holding the *items* fixed and growing the event count instead would
-    measure nothing: that is supposed to grow.
-
-    `played=False` throughout, deliberately. A played item with no count
-    enqueues a `watch_history` backfill, and `PostgresJobQueue.enqueue`
-    stages through DDL -- which is a real cost, measured by the case above
-    it, and which would swamp the signal this case is looking for.
+    The event count is held fixed and the items per event are varied (1, then
+    10): the same statement total either way is the property, and "the cost per
+    item is small" is not. `apply_states` resolves a whole batch in one
+    `resolve_targets` and merges it in one `merge_from_source`, so ten items in
+    one event must cost exactly what one does. Holding the *items* fixed and
+    growing the event count instead would show nothing: that is supposed to
+    grow. `played=False` throughout, deliberately, because a played item with no
+    count enqueues a `watch_history` backfill and `PostgresJobQueue.enqueue`
+    stages through DDL, which would swamp the signal.
     """
     many = [f"movie-{index}" for index in range(10)]
     for external_id in many:
@@ -355,7 +311,7 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
         return SourceWatchState(external_id=external_id, position_seconds=position, played=False)
 
     # Warm: both walks below run against rows that already exist, so what is
-    # measured is the merge rather than the insert.
+    # counted is the merge rather than the insert.
     await applier.apply(
         source, adapter, _watch_event(*(_state(one, 1) for one in many)), user_id=user_id
     )
@@ -381,24 +337,8 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
         f"{one_item_each} statements for 20 events of 1 item, {ten_items_each} for 20 "
         "events of 10 -- something in the push lane costs a statement per item"
     )
-    # **And the level, because flatness alone hides what this found.** Nine
-    # statements per event, measured: one `resolve_targets`, then `SAVEPOINT`
-    # / `DROP TABLE IF EXISTS pg_temp.stg_watch_states` / `CREATE TEMP TABLE
-    # stg_watch_states` / four merge statements (an `UPDATE ... FROM` and an
-    # `INSERT ... ON CONFLICT DO NOTHING` per conflict target, title and
-    # episode) / `RELEASE SAVEPOINT`, plus a `COPY` this counter cannot see.
-    #
-    # So **a push event costs staging DDL**, and a `UserDataChanged` arriving
-    # once a second during playback pays it every time. Bounded per event
-    # rather than growing with anything, which is why the count is recorded
-    # here rather than optimised. The *contention* half of this note is
-    # settled: `stg_watch_states` used to be a fixed, shared name taking an
-    # `ACCESS EXCLUSIVE` lock, so the push lane and a nightly watch-state
-    # walk serialised against each other for the length of each other's
-    # batch; M6 made every staging table `CREATE TEMP TABLE ... ON COMMIT
-    # DROP`, so there is no shared name left to serialise on. Same fix
-    # `tests/integration/test_titles_route.py` records for `stg_jobs` on the
-    # read path; this is the write path's copy of it.
+    # And the level, because flatness alone would hide a uniform regression:
+    # nine statements per event -- one resolve, four of staging, four of merge.
     assert one_item_each == 20 * 9, (
         f"{one_item_each / 20} statements per event against the nine measured "
         "2026-08-01: one resolve, four merge statements, and four of staging"
@@ -406,37 +346,7 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
 
 
 async def test_the_sse_fan_out_stays_linear_in_the_subscriber_count() -> None:
-    """The bus half of the same question, measured at **two** points.
-
-    One publish is O(subscribers) by construction -- that is what a fan-out
-    is -- so the plan's shape ("50 subscribers within 10x of 1") is not the
-    claim: it compares a point dominated by fixed cost with one dominated by
-    fan-out, and a correct implementation can legitimately fail it. What
-    must not grow is the work *per subscriber*, so this measures the same
-    burst at 25 and at 200 subscribers and compares the ratio against what
-    each shape predicts: **8x if the per-subscriber cost is flat, ~64x if
-    the fan-out is quadratic in subscribers.**
-
-    Both ends are measured rather than predicted, on this host,
-    2026-08-01: **6.0x, 6.3x, 6.2x** over three rounds as shipped (below
-    8x, because a fixed per-publish cost dilutes the fan-out at the small
-    end), against **25.6x** for a `publish` given an artificial O(S)
-    check per subscriber. The bound sits between the two with a 2.4x
-    margin below and a 1.7x margin above, and the failure message carries
-    the numbers rather than a verdict. A ratio is also robust to a host
-    that is uniformly slow, which a wall-clock threshold is not.
-
-    **What this cannot see, stated rather than implied:** work proportional
-    to the *replay ring* done once per subscriber. That is O(subscribers x
-    ring), which is still linear in subscribers, so both points scale
-    together and the ratio is unchanged. It is also the more plausible
-    defect of the two, and what rules it out is `publish` being a
-    `put_nowait` and a branch -- pinned by driving the coroutine one step by
-    hand in `tests/unit/test_services_events.py`, and by the interval
-    measurement in `tests/contract/event_publisher_contract.py`. A
-    wall-clock ratio is the weakest of the three and is here for the one
-    thing the other two cannot express.
-    """
+    """The bus half of the same question, sampled at two subscriber counts."""
     events = 200
     small, large = 25, 200
 

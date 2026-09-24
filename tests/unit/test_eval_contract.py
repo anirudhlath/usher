@@ -1,32 +1,4 @@
-"""Structural guarantees about `usher.eval` that no runtime test can see.
-
-Each is an absence claim -- *nothing imports this package*, *nothing outside
-one package imports `ranx`*, *no migration has quietly acquired this schema* --
-and an absence is exactly what rots silently, because the thing that would
-falsify it is a line somebody adds in a file this test does not name.
-
-**Two groups, nine cases.** Three are about the import contracts: the
-eleventh's source list, the twelfth's, and the one inch of the twelfth's claim
-that a `forbidden` contract cannot express. The other six are Task 7's, and
-they are about the `eval` schema staying outside the alembic chain. **Four of
-those six are one claim asserted four ways, because alembic can acquire a
-schema through any of them and a guard that checks one reads exactly like a
-guard that checks all four**: a migration file naming it, a model putting a
-table in `Base.metadata`, the chain growing a second head, and `env.py`
-widening what `--autogenerate` reflects. The last two are about the DDL file
-itself -- that it ships beside the module, and that it is spelled so applying
-it twice is safe. This docstring said there were three and predicted a fourth
-until Task 7 landed; a docstring promising cases that do not exist is the same
-kind of rot one layer up, and so is one that under-counts them.
-
-**Every case here derives its expectation from a walk of the package**, which
-is the repair `test_ports_repository_package.py` makes for the same failure
-mode one contract up: a static-analysis contract configured by an enumeration
-needs a test that the enumeration is complete, and a hand-written expected list
-is a second copy of the thing under test. Each walk carries its own premise
-guard, because a scan that globs nothing passes exactly like a scan that
-passes.
-"""
+"""Structural guarantees about `usher.eval` that no runtime test can see."""
 
 import ast
 import pkgutil
@@ -46,21 +18,13 @@ from usher.db.base import Base
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-# `usher.cli` is the eval package's composition root -- `usher eval` is a
-# subcommand -- so it is exempt, exactly as `usher.composition` is exempt from
-# the contracts it composes. `usher.eval` is the forbidden module itself and
-# cannot be a source of a contract forbidding it. Every other top-level name
-# is a source, and the case below is what makes that sentence true rather than
-# aspirational.
+# `usher.cli` is the eval package's composition root -- `usher eval` is a subcommand --
+# so it is exempt, exactly as `usher.composition` is exempt from the contracts it
+# composes.
 _EXEMPT = {"usher.cli"}
 _THE_PACKAGE_ITSELF = {"usher.eval"}
 
 # The twelfth contract's exemption, and it is a different one on purpose.
-# `usher.cli` is *not* exempt there: being the harness's composition root is a
-# reason to let it import `usher.eval`, and no reason at all to let it import
-# `ranx`. What is exempt is the one package allowed to name the library, and it
-# is exempted from *both* walks by subtraction -- `usher.eval` drops out of the
-# top-level walk because its children are enumerated instead.
 _MAY_IMPORT_RANX = "usher.eval.metrics"
 
 # The fifth contract, found by what it forbids rather than by its name, for the
@@ -69,12 +33,9 @@ _MAY_IMPORT_RANX = "usher.eval.metrics"
 # `test_the_eval_package_is_named_by_an_import_contract`.
 _THE_COMPOSITION_ROOT = "usher.cli"
 
-# The one source the eleventh contract lists that nothing in the fifth
-# contract's six can reach -- which is what makes it the documented exception to
-# that contract's safety argument. It is the *only* thing named here: the case
-# below derives the unreachable set from the graph and asserts it equals exactly
-# this, rather than looping over the three modules that are reachable, which
-# would be a second copy of a fact a reader has to trust somebody enumerated.
+# The one source the eleventh contract lists that nothing in the fifth contract's six
+# can reach -- which is what makes it the documented exception to that contract's safety
+# argument.
 _REACHED_BY_NOTHING = "usher.__main__"
 
 # The second group's two paths. `schema.sql` is reached through
@@ -120,53 +81,11 @@ def _contracts() -> list[dict[str, Any]]:
 
 
 def test_the_eval_package_is_named_by_an_import_contract() -> None:
-    """The allowlist note in `[tool.importlinter]` says a new top-level package
-    must be named by some contract or it escapes all of them -- and **the
-    contract's `source_modules` list is the whole contract**, so a top-level
-    name that lands unlisted is a module free to import a dev-only extra while
-    the gate still reports 11 kept.
+    """Every top-level package is named by a contract, or it escapes all of them.
 
-    That is not hypothetical here: `usher.__main__` was missing from the list
-    as first written, and a *used* `from usher.eval import goldens` planted in
-    it reported **11 kept, 0 broken**. The container entrypoint could have
-    imported the eval harness and nothing would have said so.
-
-    So the expectation is **derived rather than hand-written**, which is the
-    repair `test_ports_repository_package.py` makes for the same failure mode
-    one contract up: the membership is exactly what `_top_level_names()` walks,
-    so the two agree by construction instead of by someone remembering. A
-    hand-written subset -- four layers checked in a loop, as this case began --
-    passes just as happily against a list missing five.
-
-    **`allow_indirect_imports` is asserted here too, and it is the same kind of
-    claim: the configuration *is* the contract.** Measured 2026-08-19 -- with
-    the flag deleted and the `usher eval` subcommand planted (a used,
-    ruff-clean `from usher.eval.metrics import ir` in `usher/cli.py`), this
-    contract reports **11 kept, 1 broken** on
-    `usher.__main__ -> usher.cli -> usher.eval.metrics.ir`, because a
-    `forbidden` contract reports indirect chains by default and the container
-    entrypoint imports the CLI. So the `usher.cli` exemption does not hold for
-    the one case it exists for, and the flag is what makes it hold.
-
-    **The assertion is here because the repair somebody will reach for is the
-    wrong one.** The red names `usher.__main__`, so the obvious fix is to drop
-    it from `source_modules` -- which unpicks the measured hole recorded above
-    (a used `from usher.eval import goldens` in `__main__.py` reported *11
-    kept, 0 broken* while unlisted) and then fails the set equality below,
-    pointing the reader further from the repair. A one-token deletion that
-    re-arms a trap is exactly the shape a configuration test exists for.
-
-    **And the flag's *safety* argument is pinned too, which until 2026-08-19 it
-    was not.** The flag is defensible because the fifth contract still reports a
-    chain through `usher.cli` for every source that can reach it -- a measured
-    graph fact (`usher.config`, `usher.composition` and `usher.telemetry` had
-    3, 3 and 12 direct importers inside that contract's six on the day it was
-    written) with nothing checking it, next to four things about the same flag
-    that *were* checked. A refactor leaving one of those three unimported from
-    within the six would reopen the hole with the gate still at 12 kept and
-    every existing assertion here green, so the last block below derives the
-    reachability from `grimp` instead, and derives `usher.__main__` as the
-    single exception rather than repeating the prose.
+    A contract's `source_modules` list is the whole contract, so a top-level name
+    that lands unlisted is a module free to import a dev-only extra while the gate
+    still reports every contract kept.
     """
     naming = [one for one in _contracts() if "usher.eval" in one.get("forbidden_modules", [])]
     assert len(naming) == 1, (
@@ -214,21 +133,10 @@ def test_the_eval_package_is_named_by_an_import_contract() -> None:
         f"listed but gone: {sorted(set(contract['source_modules']) - walked)}"
     )
 
-    # **The safety argument for `allow_indirect_imports`, which until now rested
-    # on a measured graph fact that nothing checked.** What the flag gives up is
-    # a chain through `usher.cli`; what makes that acceptable is that the fifth
-    # contract ("cli is a composition root, nothing depends on it") carries no
-    # such flag, so any source it *can reach* still gets the chain reported
-    # there. `usher.__main__` is the documented exception -- nothing imports it,
-    # which is exactly what it is for -- and the rest of the argument is a
-    # property of the graph that a refactor could quietly falsify with the gate
-    # still reporting 12 kept.
-    #
-    # So the exception is **derived** rather than asserted in prose: every
-    # source the eleventh contract lists and the fifth does not is checked for
-    # reachability, and the set that comes back unreached must be exactly
-    # `usher.__main__`. A refactor that left `usher.telemetry` unimported from
-    # within those six fails here by name.
+    # The safety argument for `allow_indirect_imports`. What the flag gives up is a
+    # chain through `usher.cli`; what makes that acceptable is that the fifth contract
+    # ("cli is a composition root, nothing depends on it") carries no such flag, so any
+    # source it *can reach* still gets the chain reported there.
     guarding = [
         one for one in _contracts() if one.get("forbidden_modules") == [_THE_COMPOSITION_ROOT]
     ]
@@ -283,20 +191,14 @@ def test_the_ranx_contract_names_every_module_that_may_not_import_it() -> None:
     """The same shape one contract over, for the twelfth.
 
     `usher/eval/metrics/__init__.py` says `ir.py` is the only module in this
-    project that imports `ranx`, and that sentence is the whole mitigation for
-    the risk it records -- `numba`/`llvmlite` pin an LLVM ABI and lag new
-    CPython, so the escape to `ir_measures` has to stay a small, bounded change.
-    Until 2026-08-19 the sentence was conventional and `pyproject.toml` claimed
-    otherwise: `ranx` was not in the import graph at all, and a *used*
-    `import ranx` planted in `usher/adapters/http.py` and `usher/eval/errors.py`
-    at once reported **11 kept, 0 broken**.
-
-    It is a contract now, and **the source list is the whole contract** -- a
-    module that lands unlisted is a module free to import the library while the
-    gate reports 12 kept. So the expectation is derived from two walks rather
-    than written down twice: every top-level name, plus `usher.eval`'s own
-    children because the package cannot be named as a source without forbidding
-    the one import the design exists for.
+    project that imports `ranx`, and that sentence is the whole mitigation for the
+    risk it records -- `numba`/`llvmlite` pin an LLVM ABI and lag new CPython, so
+    the escape to `ir_measures` has to stay a small, bounded change. The source
+    list is the whole contract, so a module that lands unlisted is free to import
+    the library while the gate reports every contract kept. The expectation is
+    derived from two walks rather than written down twice: every top-level name,
+    plus `usher.eval`'s own children, because the package cannot be named as a
+    source without forbidding the one import the design exists for.
     """
     naming = [one for one in _contracts() if "ranx" in one.get("forbidden_modules", [])]
     assert len(naming) == 1, (
@@ -356,24 +258,16 @@ def test_the_ranx_contract_names_every_module_that_may_not_import_it() -> None:
 
 
 def test_only_the_ir_module_inside_the_metrics_package_names_ranx() -> None:
-    """The one inch of the twelfth contract's claim that the contract cannot
-    reach, held by a scan for M8 Task 17's recorded reason -- *prefer a graph
-    property wherever one is expressible*, and cover what it cannot with the
-    other kind of check, because neither subsumes the other.
+    """The one inch of the twelfth contract's claim that the contract cannot reach.
 
-    A `forbidden` contract's `source_modules` cover a module **and all its
-    descendants**, so `usher.eval.metrics` cannot be a source with `ir` carved
-    out of it. A second module inside that package importing `ranx` is
-    therefore KEPT by the contract, while `metrics/__init__.py` still says
-    `ir.py` is the only one.
-
-    **An `ast` walk and not a text scan**, because the text is already there:
-    `metrics/__init__.py`'s own docstring names `ranx` three times explaining
-    why it is confined, and a `"ranx" in source` scan would report the file
-    that documents the rule as the file that breaks it -- then be "fixed" by
-    deleting the explanation. Same trap `test_api_rows.py` hit from the other
-    side, where prose *satisfied* a scan on behalf of a reader that did not
-    exist.
+    A `forbidden` contract's `source_modules` cover a module *and all its
+    descendants*, so `usher.eval.metrics` cannot be a source with `ir` carved out
+    of it. A second module inside that package importing `ranx` is therefore kept
+    by the contract, while `metrics/__init__.py` still says `ir.py` is the only
+    one. An `ast` walk and not a text scan, because that file's own docstring
+    names `ranx` three times explaining why it is confined, and a
+    `"ranx" in source` scan would report the file documenting the rule as the file
+    breaking it -- then be "fixed" by deleting the explanation.
     """
     package = _ROOT / "src" / "usher" / "eval" / "metrics"
     scanned = sorted(path.name for path in package.glob("*.py"))
@@ -446,14 +340,13 @@ def _statements(sql: str) -> list[str]:
 
 
 def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
-    """ADR-0041. A migration would create these tables in every deployment,
-    for a harness those deployments cannot run because the `eval` extra is
-    not installed -- and a dev-only branch is the standard way `alembic
-    heads` stops being one head.
+    """No migration in the chain creates the eval schema.
 
-    Asserted structurally because the failure is silent: a migration added
-    later still leaves every eval test green, and the harness's own
-    `ensure_schema` would apply a schema the chain had already built.
+    A migration would create these tables in every deployment, for a harness those
+    deployments cannot run because the `eval` extra is not installed. Asserted
+    structurally because the failure is silent: a migration added later still
+    leaves every eval test green, and the harness's own `ensure_schema` would
+    apply a schema the chain had already built.
     """
     migrations = sorted(_MIGRATIONS.rglob("*.py"))
     assert len(migrations) >= 22, (
@@ -475,13 +368,13 @@ def test_the_eval_schema_is_not_in_the_alembic_chain() -> None:
 
 
 def test_no_orm_model_puts_a_table_in_the_eval_schema() -> None:
-    """The second way a migration arrives, and the file scan above cannot see
-    it: `alembic revision --autogenerate` mints migrations from
-    `Base.metadata`, so a model declaring
-    `__table_args__ = {"schema": "eval"}` puts the eval schema into the chain
-    the next time anybody generates one -- with no migration file naming it
-    until that moment, and the harness's own `schema.sql` then a second,
-    diverging definition of the same tables.
+    """The second way a migration arrives, and the file scan above cannot see it.
+
+    `alembic revision --autogenerate` mints migrations from `Base.metadata`, so a model
+    declaring `__table_args__ = {"schema": "eval"}` puts the eval schema into the chain
+    the next time anybody generates one -- with no migration file naming it until that
+    moment, and the harness's own `schema.sql` then a second, diverging definition of
+    the same tables.
     """
     tables = Base.metadata.tables
     assert len(tables) >= 20, (
@@ -498,15 +391,14 @@ def test_no_orm_model_puts_a_table_in_the_eval_schema() -> None:
 
 
 def test_the_migration_chain_still_has_exactly_one_head() -> None:
-    """The third way, and the one ADR-0041 names as its second reason.
+    """The third way a migration arrives: a dev-only branch of the chain.
 
-    A dev-only migration branch is the standard way `alembic heads` stops
-    being one head, and a second head is not a red anywhere else: `alembic
-    upgrade head` refuses with *"Multiple head revisions are present"* only
-    when somebody runs it, which in this repository is a deployment rather
-    than a gate step. Reading the versions directory needs no database, which
-    is why this belongs beside the other structural claims rather than in
-    `tests/integration/`.
+    A dev-only migration branch is the standard way `alembic heads` stops being
+    one head, and a second head fails nowhere else: `alembic upgrade head` refuses
+    with *"Multiple head revisions are present"* only when somebody runs it, which
+    in this repository is a deployment rather than a gate step. Reading the
+    versions directory needs no database, which is why this belongs beside the
+    other structural claims rather than in `tests/integration/`.
     """
     script = ScriptDirectory.from_config(Config(str(_ROOT / "alembic.ini")))
     revisions = list(script.walk_revisions())
@@ -524,19 +416,15 @@ def test_the_migration_chain_still_has_exactly_one_head() -> None:
 
 
 def test_the_schema_sql_ships_beside_the_module() -> None:
-    """It is read at runtime. A file that exists in the tree and not in the
-    wheel fails only on an installed copy, which is the copy CI runs.
+    """`schema.sql` sits beside the module, because it is read at runtime.
 
-    **The path is resolved from `usher.eval.__file__` and not from the
-    repository root**, which is the only difference between this case and one
-    that cannot fail: a `_ROOT / "src" / ...` spelling is green in a checkout
-    whatever the build backend does. What that buys is bounded and worth
-    stating -- an editable install points back at `src/`, so this is a check
-    that the file sits where the module does, not a check on the wheel. The
-    wheel itself was measured once, at the build (`uv build --wheel`,
-    2026-08-19: `usher/eval/schema.sql` is present under hatchling's default
-    selection, with no `force-include`), and the measurement is recorded on
-    `pyproject.toml`'s own build block where the directive would have gone.
+    A file that exists in the tree and not in the wheel fails only on an installed
+    copy, which is the copy CI runs. The path is resolved from
+    `usher.eval.__file__` and not from the repository root, which is the only
+    difference between this case and one that cannot fail: a `_ROOT / "src" / ...`
+    spelling is green in a checkout whatever the build backend does. What that
+    buys is bounded -- an editable install points back at `src/`, so this checks
+    that the file sits where the module does, not that the wheel carries it.
     """
     sql = _SCHEMA_SQL
 
@@ -583,11 +471,10 @@ def test_every_statement_in_the_schema_is_idempotent_and_destroys_nothing() -> N
         f"file is applied at the start of every run: {not_idempotent}"
     )
 
-    # `DELETE` is matched only as a statement's leading verb, and that is a
-    # measurement rather than caution: spelled `\bDELETE\b` this scan reports
-    # `eval.scores`, whose foreign key is `ON DELETE CASCADE` -- a clause the
-    # schema needs, in the statement the scan exists to protect. `DROP` and
-    # `TRUNCATE` have no such clause form here.
+    # `DELETE` is matched only as a statement's leading verb: spelled `\bDELETE\b`
+    # this scan reports `eval.scores`, whose foreign key is `ON DELETE CASCADE` --
+    # a clause the schema needs, in the statement the scan exists to protect.
+    # `DROP` and `TRUNCATE` have no such clause form here.
     destructive = [
         one
         for one in statements
@@ -607,19 +494,11 @@ def test_the_migration_environment_does_not_reflect_non_default_schemas() -> Non
     Left at its default it reflects the connection's default schema alone, so
     `eval.runs` and `eval.scores` are invisible to it -- which is what makes an
     out-of-chain schema safe rather than merely undeclared. With
-    `include_schemas=True` the same comparison finds two tables
-    `Base.metadata` has never heard of and proposes **dropping** them, so the
-    next migration anybody generated would delete the eval ledger and every
-    other case in this module would still be green. That half is measured
-    against a real database in
-    `tests/integration/test_eval_ledger_postgres.py::test_the_eval_schema_is_invisible_to_autogenerate_even_once_it_exists`;
-    this is the half that says the option is off, because a configuration is
-    not something a database can be asked about.
-
-    Turning it on is a legitimate thing to want one day -- a second product
-    schema would need it. What this case asks for is that the eval tables be
-    dealt with in the same commit, by an `include_object` filter or by
-    `include_schemas` being scoped, rather than by a green gate.
+    `include_schemas=True` the same comparison finds two tables `Base.metadata`
+    has never heard of and proposes *dropping* them, so the next generated
+    migration would delete the eval ledger while every other case here stayed
+    green. Turning it on one day is legitimate; what this asks is that the eval
+    tables be dealt with in the same commit rather than by a green gate.
     """
     source = (_MIGRATIONS / "env.py").read_text(encoding="utf-8")
     configured = [

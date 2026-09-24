@@ -1,56 +1,4 @@
-"""The in-process client event bus (PRD 07's SSE channel), and the publisher
-that holds a unit of work's events until it commits.
-
-**One rule, and everything here is shaped by it: a subscriber that stopped
-reading may not slow, block, or fail the service that published.**
-`EnrichService.enrich` publishes `title.updated` at the end of a title's
-enrichment, `PushApplyService` publishes on every merged watch state, and a
-reconcile publishes once per batch -- 1,127 times against the one measured
-library. None of those may await a browser tab.
-
-So `publish` never awaits a subscriber. It walks them and calls a
-synchronous `offer`, which is a `put_nowait` and a branch. The `async def`
-is the port's, because a `LISTEN/NOTIFY` transport would genuinely suspend;
-this implementation does not, and that is the property rather than an
-accident. `tests/unit/test_services_events.py` pins it by driving the
-coroutine one step by hand, because the awaiting spelling *deadlocks*
-rather than answering wrongly and a case that waited to see would hang.
-
-**A full queue is answered, not dropped.** PRD 07: "On buffer overflow the
-server emits `resync_required` rather than silently skipping events -- a
-client that missed changes is told to refetch instead of being left quietly
-stale." A subscriber that overflows has its queue emptied and one
-`resync_required` put in its place, which is both the smallest possible
-state and the honest one.
-
-**Ids carry an epoch.** The replay ring is in-memory, so ids restart at 1
-every time the process does -- and a client reconnecting with
-`Last-Event-ID: 40` would be replayed events 41+ *of a different sequence*.
-The id a client sees is `<epoch>-<n>` where the epoch is minted per bus, so
-a mismatch is detectable and answers `resync_required`.
-
-**Replay is decided when a subscriber is added, not when it first reads.**
-Both halves of a new subscriber's stream come from the same `publish` calls
--- the ring and its own queue -- so a replay computed lazily at the first
-`__anext__` re-delivers everything published in between. That window is
-real rather than theoretical: `api/routers/events.py` reaches its first
-`anext` through an `asyncio.wait_for`, which yields to the loop, and the
-push lane publishes from another task. Snapshotting the ring in
-`subscribe`, with no `await` between the snapshot and the `add`, is what
-makes the two halves disjoint.
-
-**`DeferredEventPublisher` is the second implementation in this module and
-it is not a transport.** It is an `EventPublisher` that holds what it is
-given and offers it to a real one on demand --
-[ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
-ordering rule, made a property of `JobWorker` rather than of each handler.
-It buys **ordering, not durability**: the events it holds live in a list in
-one process, exactly as the bus's own queues do, and a process that dies
-holding them loses them the same way it loses everything else on this
-channel. That is not a gap an outbox table would close here, because the
-job the events belong to dies with them and `startup()`'s `requeue_running`
-re-runs it.
-"""
+"""PRD 07's SSE channel, and the publisher that holds events until a commit."""
 
 import asyncio
 import secrets
@@ -92,23 +40,22 @@ class _Subscriber:
         self.overflowed = False
 
     def wants(self, event: ClientEvent) -> bool:
-        """An unfiltered subscriber wants everything; a filtered one wants
-        events for its titles and nothing else.
+        """An unfiltered subscriber wants everything; a filtered one, its titles.
 
-        Matching on `title_id` and never on `episode_id`: a client watching
-        a series subscribes with the series' title, because that is the only
-        id it holds before it fetches a season.
+        Matching on `title_id` and never on `episode_id`: a client watching a
+        series subscribes with the series' title, because that is the only id
+        it holds before it fetches a season.
         """
         if self.titles is None:
             return True
         return event.title_id is not None and event.title_id in self.titles
 
     def offer(self, sent: SentEvent, resync: SentEvent) -> None:
-        """Non-blocking. **This is the whole design.**
+        """Non-blocking, which is the whole design.
 
-        `put_nowait` and a branch, never `await put`. The awaiting spelling
-        is one character shorter and makes an enrichment completing at 04:00
-        hang until a browser tab that closed hours ago is garbage collected.
+        `put_nowait` and a branch, never `await put`. The awaiting spelling is
+        one character shorter and makes an enrichment completing at 04:00 hang
+        until a browser tab that closed hours ago is garbage collected.
         """
         if self.overflowed:
             # Already told to resync; further events would be replaced by
@@ -142,10 +89,12 @@ class InMemoryEventBus(EventPublisher):
 
     @property
     def subscribers(self) -> int:
-        """For PRD 10's `usher.sse.connections`. An in-memory integer, which
-        is the one case where an observable OTel callback really can read
-        live state -- see `usher.telemetry.register_queue_gauges` for why
-        the queue's equivalent cannot."""
+        """For PRD 10's `usher.sse.connections`.
+
+        An in-memory integer, which is the one case where an observable OTel callback
+        really can read live state -- see `usher.telemetry.register_queue_gauges` for
+        why the queue's equivalent cannot.
+        """
         return len(self._subscribers)
 
     @property
@@ -178,7 +127,7 @@ class InMemoryEventBus(EventPublisher):
 
         The replay is resolved here, before the subscriber is added and with
         no `await` in between, so nothing can be both replayed from the ring
-        and delivered through the queue. See the module docstring.
+        and delivered through the queue.
         """
         subscriber = _Subscriber(titles, self._queue_size)
         replay = tuple(self._replay(subscriber, last_event_id))
@@ -243,47 +192,7 @@ class InMemoryEventBus(EventPublisher):
 
 
 class DeferredEventPublisher(EventPublisher):
-    """Holds a unit of work's events and offers them once it has committed.
-
-    [ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md):
-    **an event is a statement about committed state, and that is a rule about
-    ordering.** Every publisher in `src/` commits the event's own *subject*
-    before it publishes -- measured at all five sites G1 found -- and the
-    enrich path still satisfies only the weaker form, because its unit of work
-    is `JobWorker`'s and closes above it. Wrapping the publisher a worker's
-    handlers are given is what makes the stronger form structural: whoever
-    decides *when* to flush is the code that owns the transaction, and no
-    handler has to remember anything.
-
-    ⚠️ **Not every handler wants that, and `bootstrap` is the one that does
-    not.** E7 added a sixth publish site whose unit of work is its *own* --
-    `BootstrapService` commits per batch and stages nothing for `JobWorker` to
-    close -- so `composition.build_worker` hands that registration the process
-    bus rather than this buffer. Wrapping it would hold a whole run's progress
-    until the run finished, and `discard()` would throw away frames naming
-    batches that really committed. ADR-0033 carries the amendment; the point
-    for a reader here is that this class is the default for a job's frames and
-    not a law about them.
-
-    Three properties, none of them accidental:
-
-    - **`publish` holds and never delivers.** It is an `append`, so it cannot
-      raise and cannot suspend, which is the port's own contract and the one
-      thing `EnrichService` finishing a title at 04:00 depends on.
-    - **`flush` is the only delivery, and it cannot fail its caller.** It runs
-      on a path where the job is already complete and committed, so a
-      publisher breaking `publish`'s never-raises contract must not turn a
-      finished job into a failed one -- the caller has nothing left to undo.
-    - **`discard` is how a failed unit of work lets go.** A rolled-back job's
-      frames name changes that did not happen, and the honest answer is
-      silence plus the re-run `requeue_running` already provides.
-
-    Unbounded, deliberately: the buffer's lifetime is one job, which publishes
-    a handful of events at most, and the caller empties it either way. A bound
-    here would be a second overflow policy beside the bus's own, answering to
-    nobody -- `resync_required` is a statement to *a subscriber*, and this
-    object has none.
-    """
+    """Holds a unit of work's events and offers them once it has committed."""
 
     __slots__ = ("_held", "_inner")
 
@@ -293,11 +202,17 @@ class DeferredEventPublisher(EventPublisher):
 
     @property
     def held(self) -> int:
-        """How many events are waiting on the commit. Zero between jobs."""
+        """How many events are waiting on the commit.
+
+        Zero between jobs.
+        """
         return len(self._held)
 
     async def publish(self, event: ClientEvent) -> None:
-        """Hold it. Never raises, never suspends, delivers nothing."""
+        """Hold it.
+
+        Never raises, never suspends, delivers nothing.
+        """
         self._held.append(event)
 
     async def flush(self) -> None:
@@ -314,12 +229,7 @@ class DeferredEventPublisher(EventPublisher):
             try:
                 await self._inner.publish(event)
             except Exception:
-                # The port says `publish` never raises. This is the one
-                # caller that reaches it after a commit it cannot undo, so
-                # the contract being broken has to cost the frame and not
-                # the job -- and it has to be loud, because a channel that
-                # silently stops delivering is `resync_required`'s own
-                # failure mode with nothing to send it through.
+                # The port says `publish` never raises.
                 logger.exception("a client event could not be offered after its job committed")
 
     def discard(self) -> None:

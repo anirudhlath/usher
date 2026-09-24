@@ -1,14 +1,4 @@
-"""`PostgresSearchQueryRepository` against the real database.
-
-The shared contract runs here unchanged, and this is the arm where nearly all
-of it is load-bearing rather than structural -- `tests/fakes/
-search_query_repository.py` enumerates the four things a dict cannot express.
-Plus the cases only a real column, a real foreign key and a real transaction
-can produce: a `latency_ms` too large for the `integer` column that holds it,
-an empty `query` the table's own CHECK refuses, a `user_id` and a
-`clicked_title_id` naming no row, and the SAVEPOINT that lets a caller keep
-using its session after a refused write.
-"""
+"""`PostgresSearchQueryRepository` against the real database."""
 
 import uuid
 
@@ -18,6 +8,8 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.search_query_repository_contract import (
+    ReferenceCounts,
+    ReferenceRowCounts,
     SearchQueryLedger,
     SearchQueryRepositoryContract,
     StoredSearchQuery,
@@ -26,7 +18,7 @@ from tests.contract.search_query_repository_contract import (
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict
-from usher.ports.search import SearchMode
+from usher.ports.search import SearchMode, SearchSurface, SuggestTier
 
 _READ_ONE = "SELECT * FROM search_queries WHERE id = CAST(:id AS uuid)"
 
@@ -51,11 +43,35 @@ class PostgresSearchQueryLedger(SearchQueryLedger):
             latency_ms=mapping["latency_ms"],
             clicked_title_id=mapping["clicked_title_id"],
             played=mapping["played"],
+            # `SearchSurface(...)` rather than the raw string: `surface` is
+            # `VARCHAR(8)` with no CHECK on the live table (`enum_column`
+            # compiles `native_enum=False`), so a value outside the vocabulary
+            # would store happily and only a constructor here can say so.
+            surface=SearchSurface(mapping["surface"]),
+            tier=None if mapping["tier"] is None else SuggestTier(mapping["tier"]),
         )
 
     async def count(self) -> int:
         found = await self._session.execute(text("SELECT count(*) FROM search_queries"))
         return int(found.scalar_one())
+
+
+class PostgresReferenceCounts(ReferenceCounts):
+    """`count(*)` on the two tables a `search_queries` row points at.
+
+    This is the arm where the leaf-delete claim is load-bearing: both foreign
+    keys are real here, so a prune spelled through `users` or `titles` would
+    move these numbers. Whole-table counts rather than a probe for the two
+    seeded ids, because the claim is that nothing at all went.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def read(self) -> ReferenceRowCounts:
+        users = await self._session.execute(text("SELECT count(*) FROM users"))
+        titles = await self._session.execute(text("SELECT count(*) FROM titles"))
+        return ReferenceRowCounts(users=int(users.scalar_one()), titles=int(titles.scalar_one()))
 
 
 async def _seed_user(session: AsyncSession) -> uuid.UUID:
@@ -89,6 +105,10 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         return PostgresSearchQueryRepository(session)
 
     @pytest.fixture
+    def counts(self, session: AsyncSession) -> PostgresReferenceCounts:
+        return PostgresReferenceCounts(session)
+
+    @pytest.fixture
     def ledger(self, session: AsyncSession) -> PostgresSearchQueryLedger:
         # The same session, so what the contract writes and what it reads
         # back are in the transaction this test owns.
@@ -102,12 +122,10 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         return await _seed_title(self._session)
 
     async def add_user(self) -> uuid.UUID:
-        # A real second `users` row, not an invented id: `search_queries`
-        # scopes by `user_id` in a `WHERE`, which no foreign key defends, so
-        # a made-up id would make the scope case pass for the wrong reason
-        # only if the *predicate* were also what refused it. It is not --
-        # `record_outcome` never writes `user_id` -- but the control half of
-        # that case does have to be a household this schema accepts.
+        # A real second `users` row, not an invented id: `search_queries` scopes by
+        # `user_id` in a `WHERE`, which no foreign key defends, so a made-up id would
+        # make the scope case pass for the wrong reason only if the *predicate* were
+        # also what refused it.
         return await _seed_user(self._session)
 
     async def test_a_query_naming_no_household_is_a_port_error(
@@ -115,8 +133,7 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         repository: PostgresSearchQueryRepository,
         ledger: PostgresSearchQueryLedger,
     ) -> None:
-        """`fk_search_queries_user_id_users`, reached through the repository
-        rather than through raw SQL.
+        """`fk_search_queries_user_id_users`, through the repository not raw SQL.
 
         The wrong implementation this kills: a `record()` that catches only
         the numeric-overflow shape and lets an ordinary foreign-key violation
@@ -136,9 +153,11 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """`ck_search_queries_query_not_empty`, reached through the
-        repository. An analytics row carrying no query text answers no
-        question a dashboard could ask of it."""
+        """`ck_search_queries_query_not_empty`, reached through the repository.
+
+        An analytics row carrying no query text answers no question a dashboard could
+        ask of it.
+        """
         blank = search_query_record(user_id=user_id, query="")
 
         with pytest.raises(RepositoryConflict) as raised:
@@ -153,26 +172,9 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The case the whole error contract rests on**, and Postgres-only
-        because a Python `int` has no ceiling to hit.
+        """The case the whole error contract rests on.
 
-        `latency_ms` is `integer`, so `2**31` overflows it -- reachable
-        because `SearchQueryRecord.latency_ms` is a plain, unbounded `int`,
-        the identical shape `curated_rows."position"` and
-        `genome_tags.tag_id` measured
-        (`.claude/rules/db-and-sql.md`). It is refused **client-side**, by
-        asyncpg's own binary encoder, before a byte reaches Postgres --
-        `sqlalchemy.exc.DBAPIError`, `exc.orig.__cause__` an
-        `asyncpg.exceptions.DataError`, SQLSTATE `22000`, and there is no
-        constraint to name: this is the column's declared width refusing a
-        value, not a named constraint firing.
-
-        **The exception this must catch is not the obvious one.** An
-        implementation catching `IntegrityError` alone -- which is most
-        sibling repositories' house style, and was this table's precedent
-        before the measurement -- lets a raw SQLAlchemy exception cross the
-        port boundary, and the only way a caller could then handle it is to
-        import `sqlalchemy` itself, the one thing ADR-0009 forbids.
+        Postgres-only, because a Python `int` has no ceiling to hit.
         """
         too_large = search_query_record(user_id=user_id, latency_ms=2**31)
 
@@ -188,9 +190,11 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """`fk_search_queries_clicked_title_id_titles`, reached through
-        `record_outcome`. A stale or forged title id from a client must not
-        silently attribute a search to nothing storable."""
+        """`fk_search_queries_clicked_title_id_titles`, reached through `record_outcome`.
+
+        A stale or forged title id from a client must not silently attribute a search to
+        nothing storable.
+        """
         record = search_query_record(user_id=user_id)
         await repository.record(record)
 
@@ -212,11 +216,11 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         ledger: PostgresSearchQueryLedger,
         user_id: uuid.UUID,
     ) -> None:
-        """**The SAVEPOINT.** The wrong implementation this kills: a
-        `record()` with no nested transaction, whose refused `INSERT` aborts
+        """The SAVEPOINT, and the lost request there is without one.
+
+        Kills a `record()` with no nested transaction, whose refused `INSERT` aborts
         the caller's whole transaction so the very next statement raises
-        `PendingRollbackError` -- turning a failed analytics write into a
-        lost request.
+        `PendingRollbackError` -- turning a failed analytics write into a lost request.
 
         Three assertions, in the order the damage would arrive: the earlier
         row is still there, the refused row is not, and a subsequent
@@ -240,14 +244,16 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
     async def test_search_queries_carries_no_updated_at_trigger(
         self, session: AsyncSession
     ) -> None:
-        """M1's second ruling: outcome columns are updated in place on the
-        row `record()` wrote, and first write wins, so no row is ever
-        touched more than twice in its whole life -- `llm_calls`' shape
-        rather than `watch_states`'. Mechanically required as well as
-        argued: `test_migration_creates_the_updated_at_triggers` asserts the
-        trigger set exactly, so a trigger here would be a failing case in
-        another file; this is the same fact from the side that would notice
-        it first.
+        """`search_queries` carries no `updated_at` trigger.
+
+        Outcome columns are updated in place on the row `record()` wrote and first
+        write wins, so no row is ever touched more than twice in its whole life --
+        `llm_calls`' shape rather than `watch_states`'.
+
+        Mechanically required as well as argued:
+        `test_migration_creates_the_updated_at_triggers` asserts the trigger set
+        exactly, so a trigger here would be a failing case in another file; this is the
+        same fact from the side that would notice it first.
         """
         triggers = (
             await session.execute(
@@ -267,11 +273,12 @@ class TestPostgresSearchQueryRepository(SearchQueryRepositoryContract):
         session: AsyncSession,
         user_id: uuid.UUID,
     ) -> None:
-        """The other side of the error contract: a dropped connection, a
-        statement timeout or a missing table must not arrive at a caller as
-        "this row is not storable" -- the one distinction ADR-0009 requires a
-        caller be able to make, since a bad row is a bug in the analytics
-        write and a transport that is gone is something a retry fixes.
+        """The other side of the error contract.
+
+        A dropped connection, a statement timeout or a missing table must not arrive at
+        a caller as "this row is not storable" -- the one distinction a caller has to be
+        able to make, since a bad row is a bug in the analytics write and a transport
+        that is gone is something a retry fixes.
 
         SQLSTATE `42P01` (undefined table) is class 42, outside the `22`/`23`
         classes this repository's SAVEPOINT translates, and deterministic

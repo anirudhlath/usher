@@ -179,6 +179,27 @@ describe('CursorProgress — a failed run is a designed state (§8)', () => {
   })
 })
 
+describe('CursorProgress — an error on a run that has not failed is not a failure', () => {
+  const ERROR = 'HEAD https://datasets.imdbws.com/title.basics.tsv.gz failed: ConnectTimeout'
+
+  it.each(['running', 'completed'] as const)(
+    'draws a %s run’s error verbatim in the warn tone, never bad',
+    (status) => {
+      const { container } = renderComponent(<CursorProgress {...RUNNING} status={status} error={ERROR} />)
+      const note = screen.getByText(ERROR)
+      expect(note).toHaveClass('u-cursor__note', 'u-cursor__note--warn')
+      expect(note).not.toHaveClass('u-cursor__note--bad')
+      expect(container.querySelector('.u-cursor__note--bad')).toBeNull()
+      expect(container.querySelector('.u-cursor__status--failed')).toBeNull()
+    },
+  )
+
+  it('keeps the bad tone for a failed run’s error', () => {
+    renderComponent(<CursorProgress {...RUNNING} status="failed" error={ERROR} />)
+    expect(screen.getByText(ERROR)).toHaveClass('u-cursor__note--bad')
+  })
+})
+
 describe('CursorProgress — accessibility (§12: progress with no denominator)', () => {
   it('is a progressbar with no aria-valuenow', () => {
     renderComponent(<CursorProgress {...RUNNING} />)
@@ -214,6 +235,7 @@ describe('CursorProgress — accessibility (§12: progress with no denominator)'
       <>
         <CursorProgress {...RUNNING} />
         <CursorProgress {...RUNNING} heartbeatAgoSeconds={412} rowsPerSecond={0} />
+        <CursorProgress {...RUNNING} error="left over" />
         <CursorProgress dataset="crosswalk" phase="wikidata" status="failed" error="boom" position="Q1" />
       </>,
       { theme: 'light', density: 'compact' },

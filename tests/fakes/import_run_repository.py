@@ -1,19 +1,57 @@
 """In-memory ImportRunRepository."""
 
+from datetime import UTC, datetime
+
 from usher.domain.bootstrap import ImportRun, ImportRunStatus
+from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import ImportRunRepository
 
 
 class FakeImportRunRepository(ImportRunRepository):
-    def __init__(self) -> None:
-        self._runs: dict[str, ImportRun] = {}
+    """`shares` builds a second repository over the first's store, holds and reads.
+
+    Two instances sharing one store stand in for two processes over one database: each
+    is a holder, so the second's `start()` is refused while the first holds a dataset.
+    A repository's own reads refuse its own holds, as the Postgres arm's two connections
+    do. `lose_hold` and `lose_reads` are the affordances the port lacks: a connection
+    ending under a hold or under the reads.
+    """
+
+    def __init__(self, *, shares: "FakeImportRunRepository | None" = None) -> None:
+        self._runs: dict[str, ImportRun] = shares._runs if shares is not None else {}
+        self._holders: dict[str, FakeImportRunRepository] = (
+            shares._holders if shares is not None else {}
+        )
+        self._readers: dict[str, set[FakeImportRunRepository]] = (
+            shares._readers if shares is not None else {}
+        )
+        self._reading: set[str] = set()
+
+    @property
+    def reading(self) -> frozenset[str]:
+        """The datasets this repository holds for reading, lost or not."""
+        return frozenset(self._reading)
+
+    def lose_hold(self, dataset: str) -> None:
+        """What `idle_session_timeout` does to a hold: gone, and its holder not told."""
+        if self._holders.get(dataset) is self:
+            del self._holders[dataset]
+
+    def lose_reads(self) -> None:
+        """The same, to the connection every read of this repository lives on."""
+        for dataset in self._reading:
+            self._readers.get(dataset, set()).discard(self)
 
     async def start(self, dataset: str, revision: str) -> ImportRun:
+        await self.hold(dataset)
+        now = datetime.now(UTC)
         existing = self._runs.get(dataset)
         if existing is None:
-            run = ImportRun(dataset=dataset, revision=revision)
+            run = ImportRun(dataset=dataset, revision=revision, heartbeat_at=now)
         elif existing.revision == revision:
-            run = existing.evolve(status=ImportRunStatus.RUNNING, error=None, finished_at=None)
+            run = existing.evolve(
+                status=ImportRunStatus.RUNNING, error=None, finished_at=None, heartbeat_at=now
+            )
         else:
             # Upstream moved: the cursor is meaningless against a new
             # snapshot. Id and started_at are kept so this stays one row per
@@ -26,9 +64,54 @@ class FakeImportRunRepository(ImportRunRepository):
                 status=ImportRunStatus.RUNNING,
                 error=None,
                 finished_at=None,
+                heartbeat_at=now,
             )
-        await self.save(run)
+        if existing is not None and existing.status is ImportRunStatus.COMPLETED:
+            await self.save(existing.evolve(error=None, heartbeat_at=now))
+        else:
+            await self.save(run)
         return run
+
+    async def hold(self, dataset: str) -> None:
+        holder = self._holders.get(dataset)
+        if (holder is not None and holder is not self) or self._readers.get(dataset):
+            raise RepositoryConflict(
+                f"another process is importing {dataset} or running a phase that reads it"
+            )
+        self._holders[dataset] = self
+
+    async def release(self, dataset: str) -> None:
+        if self._holders.get(dataset) is self:
+            del self._holders[dataset]
+
+    async def hold_for_reading(self, dataset: str) -> bool:
+        if dataset in self._reading:
+            return True
+        if dataset in self._holders:
+            return False
+        self._readers.setdefault(dataset, set()).add(self)
+        self._reading.add(dataset)
+        return True
+
+    async def release_reads(self) -> None:
+        for dataset in self._reading:
+            readers = self._readers.get(dataset, set())
+            readers.discard(self)
+            if not readers:
+                self._readers.pop(dataset, None)
+        self._reading.clear()
+
+    async def touch(self, dataset: str) -> None:
+        lost = [read for read in sorted(self._reading) if self not in self._readers.get(read, ())]
+        if lost:
+            await self.release_reads()
+        if self._holders.get(dataset) is not self:
+            raise RepositoryConflict(f"lost the hold on the import of {dataset}")
+        if lost:
+            raise RepositoryConflict(f"lost the shared hold on {lost[0]}, which this reads")
+        stored = self._runs.get(dataset)
+        if stored is not None and stored.status is ImportRunStatus.RUNNING:
+            self._runs[dataset] = stored.evolve(heartbeat_at=datetime.now(UTC))
 
     async def save(self, run: ImportRun) -> None:
         self._runs[run.dataset] = run

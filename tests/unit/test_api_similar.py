@@ -1,21 +1,4 @@
-"""`GET /titles/{id}/similar`, over `SimilarityService` and port fakes.
-
-**Two providers are overridden, `get_similarity_service` and
-`get_title_repository`, and nothing about the service is stubbed.** The real
-`SimilarityService` runs over `FakeTitleNeighborRepository`/
-`FakeTitleEmbeddingRepository`/`FakeTitleRepository`, so a case here is
-exercising the route, the DTO and the service's own ordering and staleness
-arithmetic on one path, not a stub of them.
-
-**Every id below is a fixed `uuid.UUID(int=...)` where order matters, for the
-reason `test_services_similar.py` gives:** a `Title.id` defaults to a
-monotonic UUIDv7, so leaving two neighbours to mint in creation order would
-make "stored rank order" and "id order" and "insertion order" agree by
-accident and prove nothing about which one the route actually used.
-
-Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
-scans this file.
-"""
+"""`GET /titles/{id}/similar`, over `SimilarityService` and port fakes."""
 
 import ast
 import inspect
@@ -114,10 +97,12 @@ async def test_a_seed_whose_rows_predate_the_running_blend_is_reported_stale(
     titles: FakeTitleRepository,
     neighbors: FakeTitleNeighborRepository,
 ) -> None:
-    """The failing test named in the plan. Plants a seed's rows under a
-    fingerprint that is not `blend_fingerprint()`, with the positive control
-    that a seed stamped under the *running* blend reports `stale: false` --
-    so the case cannot pass by a route that always answers one value."""
+    """The failing test named in the plan.
+
+    Plants a seed's rows under a fingerprint that is not `blend_fingerprint()`, with the
+    positive control that a seed stamped under the *running* blend reports `stale:
+    false` -- so the case cannot pass by a route that always answers one value.
+    """
     stale_seed = await _seed(titles, "Stale Seed")
     fresh_seed = await _seed(titles, "Fresh Seed")
     neighbor = await _seed(titles, "A Neighbour")
@@ -145,10 +130,14 @@ async def test_stale_reads_count_stale_scoped_to_this_seed_not_the_whole_table(
     titles: FakeTitleRepository,
     neighbors: FakeTitleNeighborRepository,
 ) -> None:
-    """Mutation target named in the plan: reading `count_stale` whole-table
-    rather than seed-scoped. With one genuinely stale seed in the table, a
-    whole-table read would report `stale: true` for the fresh seed too --
-    the same two rows as the case above, asked from the other seed's route."""
+    """Mutation target named in the plan.
+
+    reading `count_stale` whole-table rather than seed-scoped.
+
+    With one genuinely stale seed in the table, a whole-table read would report `stale:
+    true` for the fresh seed too -- the same two rows as the case above, asked from the
+    other seed's route.
+    """
     stale_seed = await _seed(titles, "Stale Seed Two")
     fresh_seed = await _seed(titles, "Fresh Seed Two")
     neighbor = await _seed(titles, "Its Neighbour")
@@ -173,11 +162,13 @@ async def test_neighbors_render_in_stored_rank_order_never_resorted_on_score(
     titles: FakeTitleRepository,
     neighbors: FakeTitleNeighborRepository,
 ) -> None:
-    """Acceptance: the body carries the stored order, never re-sorted on
-    `score` in the route. The distractor is deliberate: the rank-0 neighbour
-    has the *lower* score and the *larger* id, so a route that re-sorted
-    descending by score, or one that fell back to `ORDER BY id`, both put the
-    rank-1 neighbour first -- only the stored-rank spelling matches."""
+    """Acceptance: the body carries the stored order, never re-sorted on `score` in the route.
+
+    The distractor is deliberate: the rank-0 neighbour has the *lower* score and the
+    *larger* id, so a route that re-sorted descending by score, or one that fell back to
+    `ORDER BY id`, both put the rank-1 neighbour first -- only the stored-rank spelling
+    matches.
+    """
     seed = await _seed(titles, "The Seed")
     low_score = _title("Ranked First, Scored Lower", id_=_LOW_SCORE_NEIGHBOR)
     high_score = _title("Ranked Second, Scored Higher", id_=_HIGH_SCORE_NEIGHBOR)
@@ -211,15 +202,18 @@ async def test_computed_at_null_and_an_empty_neighbor_list_are_distinguishable(
     titles: FakeTitleRepository,
     neighbors: FakeTitleNeighborRepository,
 ) -> None:
-    """Acceptance: `computed_at: null` (never computed) and an empty result
-    list (this title has no neighbours) are distinguishable on the wire.
+    """Acceptance.
+
+    `computed_at: null` (never computed) and an empty result list (this title has no
+    neighbours) are distinguishable on the wire.
 
     Two arrangements, asserted in one case because they are the same claim
     seen from both sides: with the artefact never built at all, `computed_at`
     is `null` *and* the list is empty. With the artefact built for some
     *other* seed -- so `computed_at` is a real timestamp -- a seed with no
     rows of its own still answers an empty list, and `computed_at` does not
-    collapse to `null` just because this seed has nothing."""
+    collapse to `null` just because this seed has nothing.
+    """
     never_built = await _seed(titles, "Never Built")
     never_built_body = (await client.get(f"/titles/{never_built.id}/similar")).json()
     assert never_built_body["computed_at"] is None
@@ -264,18 +258,20 @@ async def test_an_unknown_title_is_a_404_in_prd_07s_envelope(
 
 
 def test_the_route_holds_no_embedder_and_no_source_adapter() -> None:
-    """Acceptance: the route holds no `Embedder` and no `SourceAdapter`, the
-    way `tests/unit/test_api_home.py::test_the_home_service_and_every_
-    provider_hold_no_source_adapter` asserts it for `HomeService` and every
-    row provider -- "it did not raise" is also what a route that swallowed
-    everything produces. Walks both `ast.Import` and `ast.ImportFrom`, because
-    a bare `import usher.ports.source` is invisible to an `ImportFrom`-only
-    scan.
+    """Acceptance.
+
+    the route holds no `Embedder` and no `SourceAdapter`, the way
+    `tests/unit/test_api_home.py::test_the_home_service_and_every_
+    provider_hold_no_source_adapter` asserts it for `HomeService` and every row provider
+    -- "it did not raise" is also what a route that swallowed everything produces.
+
+    Walks both `ast.Import` and `ast.ImportFrom`, because a bare `import
+    usher.ports.source` is invisible to an `ImportFrom`-only scan.
 
     **The name scan runs over the module with its docstrings removed**, the
     way `tests/unit/test_rows_curated.py::test_the_curated_module_holds_no_
     llm_client_and_cannot_complete_anything` does it -- this module's own
-    docstring (M5's) argues at length about the `SourceAdapter` it must not
+    docstring argues at length about the `SourceAdapter` it must not
     hold, so a raw `"SourceAdapter" not in source` fails on the *explanation*
     rather than on an import. `ast.unparse` of a docstring-stripped tree keeps
     every identifier and every string annotation and drops only the prose --
@@ -304,7 +300,8 @@ def _without_prose(tree: ast.Module) -> ast.Module:
 
     Same helper as `tests/unit/test_rows_curated.py`'s -- copied rather than
     imported, because importing a test module drags in its fixtures and
-    parametrized cases (the reason `tests/fakes/` exists as its own tree)."""
+    parametrized cases (the reason `tests/fakes/` exists as its own tree).
+    """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             continue
