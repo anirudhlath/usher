@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { ToastProvider } from '@/patterns'
 import { ToastStack } from '@/features/shared/ToastStack'
-import { renderApp, screen, within } from '@/test/render'
+import { renderApp, screen, waitFor, within } from '@/test/render'
 import { server } from '@/test/server'
 import { expectNoViolations } from '@/test/axe'
 import {
@@ -53,6 +53,16 @@ function statusWithHeartbeat(agoSeconds: number): BootstrapStatusResponse {
 
 function heartbeatHandler(agoSeconds: number) {
   return http.get('/admin/bootstrap/status', () => HttpResponse.json(statusWithHeartbeat(agoSeconds)))
+}
+
+/**
+ * `Date.now()` moved `ms` ahead of the real clock, which keeps running. Only
+ * `Date.now` is replaced — not timers — so MSW, React Query's scheduling and
+ * `findBy*` behave as they do everywhere else.
+ */
+function shiftClock(ms: number) {
+  const now = Date.now.bind(Date)
+  return vi.spyOn(Date, 'now').mockImplementation(() => now() + ms)
 }
 
 /** A phase row, found by its label: the row is the label's nearest `div`. */
@@ -140,6 +150,62 @@ describe('Bootstrap', () => {
     expect(
       screen.queryByText('No completion estimate — the server reports a cursor, not a percentage.'),
     ).toBeNull()
+  })
+
+  it('re-reads the heartbeat age on every poll, so a run that dies while the page is open turns "Stalled?"', async () => {
+    // One body for every poll: the importer has died, so nothing on the wire changes.
+    const body = statusWithHeartbeat(100)
+    let polls = 0
+    server.use(
+      http.get('/admin/bootstrap/status', () => {
+        polls += 1
+        return HttpResponse.json(body)
+      }),
+    )
+    const { queryClient } = render()
+
+    await screen.findByText('No completion estimate — the server reports a cursor, not a percentage.')
+    expect(screen.queryByText('Stalled?')).toBeNull()
+
+    const clock = shiftClock(30_000)
+    try {
+      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+      expect(polls).toBe(2)
+      expect(await screen.findByText('Stalled?')).toBeInTheDocument()
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it('derives rows/sec from every poll, so a run that stops writing reads 0 rather than its last rate', async () => {
+    const first = statusWithHeartbeat(4)
+    const [run] = first.runs
+    if (!run) throw new Error('the fixture has no run')
+    // Ten seconds later, 1,000 more rows; then a poll that finds nothing new.
+    const moved: BootstrapStatusResponse = { ...first, runs: [{ ...run, rows_seen: run.rows_seen + 1_000 }] }
+    const bodies = [first, moved, moved]
+    server.use(http.get('/admin/bootstrap/status', () => HttpResponse.json(bodies.shift() ?? moved)))
+    const { queryClient } = render()
+
+    const label = await screen.findByText('rows / sec')
+    expect(label.nextElementSibling?.textContent).toBe('—')
+
+    const later = shiftClock(10_000)
+    try {
+      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+      await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('100'))
+    } finally {
+      later.mockRestore()
+    }
+
+    const latest = shiftClock(20_000)
+    try {
+      await queryClient.refetchQueries({ queryKey: ['bootstrap-status'] })
+      expect(bodies).toHaveLength(0)
+      await waitFor(() => expect(screen.getByText('rows / sec').nextElementSibling?.textContent).toBe('0'))
+    } finally {
+      latest.mockRestore()
+    }
   })
 
   it('polls only while something is running, and says so when nothing is', async () => {

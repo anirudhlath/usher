@@ -16,6 +16,11 @@
  *   renders "Stalled?" — with the question mark, because the API states a
  *   timestamp and the inference is ours. The age is computed here; the
  *   threshold lives in the component.
+ * · **Ages and rates are measured to the poll, not to the render.** A poll
+ *   that returns the same bytes keeps the same `data` and re-renders nothing,
+ *   so an age read off `Date.now()` stops where the data last moved and a dead
+ *   importer never turns "Stalled?". `dataUpdatedAt` moves on every poll, so it
+ *   is the clock.
  * · **Polling is conditional.** Status costs ~0.33 s and is uncached, so it is
  *   polled every 10 s and only while at least one run is `running`. When
  *   nothing runs the screen says "idle — not polling" rather than polling
@@ -76,9 +81,10 @@ function problemOf(error: unknown): ProblemDocument {
   return { status: 0, detail: String(error) }
 }
 
-function secondsSince(iso: string): number | null {
+/** Seconds from `iso` to `asOf`, the moment the poll that reported it landed. */
+function secondsSince(iso: string, asOf: number): number | null {
   const at = Date.parse(iso)
-  return Number.isNaN(at) ? null : Math.max(0, Math.round((Date.now() - at) / 1000))
+  return Number.isNaN(at) ? null : Math.max(0, Math.round((asOf - at) / 1000))
 }
 
 function formatDuration(ms: number): string {
@@ -91,10 +97,10 @@ function formatDuration(ms: number): string {
   return `${s} s`
 }
 
-function elapsedOf(run: ImportRun): string | undefined {
+function elapsedOf(run: ImportRun, asOf: number): string | undefined {
   const started = Date.parse(run.started_at)
   if (Number.isNaN(started)) return undefined
-  const end = run.finished_at === null ? Date.now() : Date.parse(run.finished_at)
+  const end = run.finished_at === null ? asOf : Date.parse(run.finished_at)
   return Number.isNaN(end) ? undefined : formatDuration(end - started)
 }
 
@@ -103,18 +109,17 @@ function elapsedOf(run: ImportRun): string | undefined {
  * reports a cursor and no rate; a number before the second poll would be
  * invented rather than derived.
  */
-function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, number | null> {
+function useThroughput(runs: readonly ImportRun[] | undefined, asOf: number): Map<string, number | null> {
   const previous = useRef<{ at: number; seen: Map<string, number> } | null>(null)
   const [rates, setRates] = useState<Map<string, number | null>>(new Map())
 
   useEffect(() => {
     if (!runs) return
-    const now = Date.now()
     const seen = new Map(runs.map((run) => [run.dataset, run.rows_seen]))
     const last = previous.current
-    previous.current = { at: now, seen }
+    previous.current = { at: asOf, seen }
     if (!last) return
-    const seconds = (now - last.at) / 1000
+    const seconds = (asOf - last.at) / 1000
     if (seconds <= 0) return
     const next = new Map<string, number | null>()
     for (const [dataset, rows] of seen) {
@@ -122,7 +127,7 @@ function useThroughput(runs: readonly ImportRun[] | undefined): Map<string, numb
       next.set(dataset, before === undefined ? null : Math.max(0, Math.round((rows - before) / seconds)))
     }
     setRates(next)
-  }, [runs])
+  }, [runs, asOf])
 
   return rates
 }
@@ -232,12 +237,14 @@ interface PhaseRowProps {
   spec: PhaseSpec
   index: number
   run: ImportRun | undefined
+  /** When the poll that reported `run` landed. */
+  asOf: number
   measured: string
   onRun: (spec: PhaseSpec) => void
 }
 
-function PhaseRow({ spec, index, run, measured, onRun }: PhaseRowProps) {
-  const ago = run ? secondsSince(run.heartbeat_at) : null
+function PhaseRow({ spec, index, run, asOf, measured, onRun }: PhaseRowProps) {
+  const ago = run ? secondsSince(run.heartbeat_at, asOf) : null
   const stalled = run?.status === 'running' && ago !== null && ago > 120
   const word = statusWord(run, stalled)
 
@@ -324,7 +331,9 @@ export default function Bootstrap() {
 
   const data = status.data
   const runs = data?.runs
-  const throughput = useThroughput(runs)
+  // Read on every render, so every poll re-renders even when its body is unchanged.
+  const asOf = status.dataUpdatedAt
+  const throughput = useThroughput(runs, asOf)
 
   const anyRunning = (runs ?? []).some((run) => run.status === 'running')
   const live = (runs ?? []).filter((run) => run.status === 'running' || run.status === 'failed')
@@ -460,7 +469,7 @@ export default function Bootstrap() {
             {live.length > 0 ? (
               <div className="flex flex-col gap-2">
                 {live.map((run) => {
-                  const elapsed = elapsedOf(run)
+                  const elapsed = elapsedOf(run, asOf)
                   return (
                     <CursorProgress
                       key={run.dataset}
@@ -473,7 +482,7 @@ export default function Bootstrap() {
                       // Verbatim, in mono: this is the resume point.
                       position={String(run.position)}
                       revision={run.revision}
-                      heartbeatAgoSeconds={secondsSince(run.heartbeat_at)}
+                      heartbeatAgoSeconds={secondsSince(run.heartbeat_at, asOf)}
                       {...(elapsed === undefined ? {} : { elapsed })}
                       {...(run.error === null ? {} : { error: run.error })}
                     />
@@ -512,6 +521,7 @@ export default function Bootstrap() {
                   spec={spec}
                   index={index}
                   run={runFor(spec.phase)}
+                  asOf={asOf}
                   measured={measuredFor(spec.phase)}
                   onRun={setPending}
                 />
