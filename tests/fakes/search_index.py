@@ -21,14 +21,13 @@ from usher.ports.search import (
 # assertions about the constant.
 _RRF_K = 60
 
-# Weight classes after PRD 05's: names, then credits (class B, `credit_names`).
-# Below those this fake ranks genres and keywords above the long prose, the
-# reverse of PRD 05's C (overview, tagline) over D (genres, keywords) -- a
-# divergence from Postgres, as the constants rather than `setweight` are.
+# Weight classes in PRD 05's order: A names, B `credit_names`, C overview and
+# tagline, D genres and keywords. Constants rather than `setweight`, which is a
+# divergence from Postgres.
 _NAME_WEIGHT = 1.0
 _CREDIT_WEIGHT = 0.4
-_TAG_WEIGHT = 0.2
-_PROSE_WEIGHT = 0.1
+_PROSE_WEIGHT = 0.2
+_TAG_WEIGHT = 0.1
 
 
 class FakeSearchIndex(SearchIndex):
@@ -215,8 +214,8 @@ def _text_score(document: SearchDocument, terms: Sequence[str]) -> float:
     classes: tuple[tuple[float, tuple[str, ...]], ...] = (
         (_NAME_WEIGHT, (document.name, document.original_name or "", document.sort_name)),
         (_CREDIT_WEIGHT, document.credits),
-        (_TAG_WEIGHT, document.genres + document.keywords),
         (_PROSE_WEIGHT, (document.overview or "", document.tagline or "")),
+        (_TAG_WEIGHT, document.genres + document.keywords),
     )
     score = 0.0
     for weight, fields in classes:

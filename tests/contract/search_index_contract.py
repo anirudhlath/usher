@@ -141,6 +141,20 @@ class SearchIndexContract:
             mentioned.title_id,
         ]
 
+    async def test_an_overview_match_outranks_a_genre_match(self, index: SearchIndex) -> None:
+        """PRD 05's class C (overview, tagline) over class D (genres, keywords).
+
+        The genre match is minted first, so the id tiebreak would put it ahead if
+        the two classes scored alike.
+        """
+        tagged = _document("Harbour Lights", genres=("Heist",))
+        mentioned = _document("Ten Harbour", overview="A heist at dusk.")
+        await self.index_all(index, [tagged, mentioned])
+
+        outcome = await index.search(SearchRequest(query="heist"))
+
+        assert [hit.title_id for hit in outcome.hits] == [mentioned.title_id, tagged.title_id]
+
     async def test_a_name_match_outranks_an_overview_match(self, index: SearchIndex) -> None:
         """The central retrieval claim, and the one no membership assertion can see."""
         mentioned = _document(
