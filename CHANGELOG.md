@@ -14,6 +14,14 @@ Versioning is `0.x` while the wire contract may still move —
   moved to [`docs/guide/`](docs/guide/): configuration, the command line, and
   building a client.
 
+### Fixed
+
+- **An embedding model that fails the embedder's norm check now fails every
+  batch, not only the first.** The first batch used to park one `index` job and
+  let every later vector through unchecked.
+- **A fused search whose query can't be embedded is served as full text**, and
+  says so through `requested_mode` ≠ `mode`, instead of answering 500.
+
 ## [0.1.0] - 2026-09-24
 
 The first release. Ten milestones, and there is no earlier one to diff

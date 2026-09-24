@@ -482,9 +482,20 @@ class SearchService:
                     and await self._index.semantic_coverage(applied) > 0.0
                 ):
                     expanded = await self._expander.expand(query)
-                vector = tuple(
-                    (await self._embedder.embed([query if expanded is None else expanded]))[0]
-                )
+                try:
+                    vector = tuple(
+                        (await self._embedder.embed([query if expanded is None else expanded]))[0]
+                    )
+                except UsherPortError as exc:
+                    if mode is SearchMode.SEMANTIC:
+                        raise
+                    # FUSED keeps its lexical lane, as it does with no model at all.
+                    logger.warning(
+                        "the query could not be embedded; serving full_text: {error}",
+                        error=str(exc) or type(exc).__name__,
+                    )
+                    mode = SearchMode.FULL_TEXT
+                    expanded = None
 
         outcome = await self._index.search(
             SearchRequest(

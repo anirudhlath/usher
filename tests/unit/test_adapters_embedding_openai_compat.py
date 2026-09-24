@@ -383,6 +383,24 @@ async def test_the_first_batch_checks_run_once_and_not_per_batch() -> None:
     assert len(second) == 1, "the norm was re-checked on a later batch"
 
 
+async def test_a_refused_first_batch_leaves_the_next_batch_checked() -> None:
+    """Only a batch that passes retires the checks.
+
+    Retiring them on the first batch whatever it held parks one `index` job and
+    stores every later vector from the same wrong model unchecked. Fails setting
+    `self._checked` before `_check_first` runs.
+    """
+    handler = _responds(body=_body([[value * 9.0 for value in _unit()]]))
+    embedder = _embedder(handler)
+    try:
+        with pytest.raises(PortDataMalformed, match="norm"):
+            await embedder.embed(["one"])
+        with pytest.raises(PortDataMalformed, match="norm"):
+            await embedder.embed(["two"])
+    finally:
+        await embedder.aclose()
+
+
 # --------------------------------------------------------------------------
 # The status taxonomy
 

@@ -154,9 +154,10 @@ gives it content. The threshold is about *empty*, not *thin*.
 **No query/document split.** `Embedder` keeps one `embed`, and callers apply no
 query-side prefix.
 
-**Normalisation is asserted, not trusted**: the embedder checks the norm on its
-first batch. Queries use `halfvec_cosine_ops`/`<=>`, so normalisation affects
-speed, not correctness.
+**Normalisation is asserted, not trusted**: the embedder checks the norm of
+every batch until one passes. A batch that fails parks its `INDEX` job, so a
+model that does not normalise parks every job rather than one. Queries use
+`halfvec_cosine_ops`/`<=>`, so normalisation affects speed, not correctness.
 
 ### Fusion
 

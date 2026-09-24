@@ -119,8 +119,9 @@ and is more current than this file. **Spelling: `titles.popularity`,
   `model_name`, fingerprint of the degenerate text) — a skip leaves the row
   matching the stale predicate forever.
 - **Normalisation is baked into the checkpoint** — a third module, not a library
-  flag — so `FastEmbedEmbedder` asserts the norm on its first batch rather than
-  trusting a model card. It stops holding after the `halfvec` cast, so
+  flag — so both embedders assert the norm until one batch passes rather than
+  trusting a model card; retiring the check on a *refused* batch lets every
+  later vector through unchecked. It stops holding after the `halfvec` cast, so
   "cosine == dot" is pre-cast only; `<=>` is normalisation-invariant, `<#>` not.
 - **The BGE query prefix is a measured null and applying it to both sides is
   harmful.** The likeliest reintroduction is "fixing" `SearchService`'s
