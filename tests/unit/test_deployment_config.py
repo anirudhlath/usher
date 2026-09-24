@@ -13,6 +13,9 @@ from usher.config import COMPOSE_ONLY_PREFIX, Settings
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_EXAMPLE = _REPO_ROOT / ".env.example"
 _COMPOSE = _REPO_ROOT / "compose.yml"
+_COMPOSE_OBSERVABILITY = _REPO_ROOT / "compose.observability.yml"
+_README = _REPO_ROOT / "README.md"
+_PRD_08 = _REPO_ROOT / "docs" / "prd" / "08-operations.md"
 
 # Obviously synthetic, and long enough for `secret_key`'s `min_length=32`.
 # `.env.example` ships the key blank, so every case that builds a real
@@ -73,9 +76,9 @@ def _settings_variables() -> set[str]:
     return names
 
 
-def _compose_document() -> dict[str, Any]:
-    loaded = yaml.safe_load(_COMPOSE.read_text())
-    assert isinstance(loaded, dict), "compose.yml did not parse as a mapping"
+def _compose_document(path: Path = _COMPOSE) -> dict[str, Any]:
+    loaded = yaml.safe_load(path.read_text())
+    assert isinstance(loaded, dict), f"{path.name} did not parse as a mapping"
     return loaded
 
 
@@ -363,3 +366,152 @@ def test_the_worker_switch_reaches_the_container() -> None:
     assert "USHER_WORKER_ENABLED" not in _usher_service().get("environment", {})
     assert "USHER_WORKER_ENABLED" in _env_example_entries()
     assert _compose_env_files() == [".env"]
+
+
+# -- the quickstart on a host that is not this one --------------------------
+
+
+def _usher_networks(document: dict[str, Any]) -> set[str]:
+    """The networks the `usher` service names, in either compose spelling.
+
+    A list (`- default`) or a mapping (`default: {aliases: ...}`); absent means
+    compose's implicit `default` alone.
+    """
+    declared = document["services"]["usher"].get("networks")
+    if declared is None:
+        return {"default"}
+    return set(declared)
+
+
+def test_the_default_stack_joins_no_external_network() -> None:
+    """A stranger's `docker compose up` must not need a network somebody else created.
+
+    `external: true` makes compose refuse to start when the network is absent:
+    `network observability declared as external, but could not be found`, at
+    the README's first step, on every host but the one that has the telemetry
+    stack. Joining it is the opt-in in `compose.observability.yml`.
+    """
+    document = _compose_document()
+    declared = document.get("networks") or {}
+    external = sorted(
+        name for name, spec in declared.items() if isinstance(spec, dict) and spec.get("external")
+    )
+    assert external == [], (
+        f"compose.yml declares {external} external, so `docker compose up` fails on any host "
+        "that has not created them; move the join into an override file"
+    )
+    undeclared = sorted(_usher_networks(document) - {"default"} - set(declared))
+    assert undeclared == [], (
+        f"the usher service joins {undeclared}, which compose.yml never declares"
+    )
+
+
+def test_the_observability_override_still_joins_the_telemetry_network() -> None:
+    """This host's route to the OTel collector survives, behind a file named for it.
+
+    The collector's stack publishes on 127.0.0.1 alone, so the shared docker
+    network is the container's only route to 4317. `default` has to be named
+    beside it: once a service lists any network, compose stops adding the
+    implicit one, and `usher` would lose `postgres`.
+    """
+    assert _COMPOSE_OBSERVABILITY.is_file(), (
+        "compose.observability.yml is the opt-in and is missing"
+    )
+    override = _compose_document(_COMPOSE_OBSERVABILITY)
+
+    assert _usher_networks(override) == {"default", "observability"}
+    network = (override.get("networks") or {}).get("observability")
+    assert isinstance(network, dict), "the override joins `observability` without declaring it"
+    assert network.get("external") is True, (
+        "`observability` must stay external: a `docker compose down` here must not remove "
+        "a network the telemetry stack owns"
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "COMPOSE_PROJECT_NAME=usher-scratch",
+        "COMPOSE_FILE=compose.yml:compose.observability.yml",
+    ],
+)
+def test_compose_s_own_variables_in_env_do_not_break_the_application(
+    tmp_path: Path, line: str
+) -> None:
+    """The README puts compose's own `COMPOSE_*` variables in `.env`, which `Settings` reads too.
+
+    `extra="forbid"` refuses an unknown key from the dotenv source whatever its
+    prefix (`RANDOM_THING=x` is refused), so these are accepted only because
+    `_is_compose_only` drops the stripped `compose_` spelling as well as
+    `usher_compose_`. That branch is what the README's second-stack and
+    observability instructions stand on.
+    """
+    body = f"USHER_DATABASE_URL={_DATABASE_URL}\nUSHER_SECRET_KEY={_SECRET_KEY}\n{line}\n"
+
+    settings = Settings(_env_file=str(_env_file(tmp_path, body)))
+
+    assert settings.port == 8000
+
+
+def test_an_unrelated_unprefixed_key_in_env_is_still_refused(tmp_path: Path) -> None:
+    """The other half: the `COMPOSE_` allowance must not become `extra="ignore"`."""
+    body = f"USHER_DATABASE_URL={_DATABASE_URL}\nUSHER_SECRET_KEY={_SECRET_KEY}\nRANDOM_THING=x\n"
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=str(_env_file(tmp_path, body)))
+
+    assert "random_thing" in str(caught.value)
+
+
+def _topology_overrides() -> set[str]:
+    """The `environment:` keys whose value is compose's rather than the operator's.
+
+    `USHER_SECRET_KEY` sits in `environment:` too, but as `${USHER_SECRET_KEY:?...}`:
+    the operator's own `.env` value, passed through a guard. Every other key there
+    replaces what `.env` says.
+    """
+    environment = _usher_service()["environment"]
+    return {
+        key
+        for key, value in environment.items()
+        if not re.fullmatch(rf"\$\{{{re.escape(key)}(?::?[-?].*)?\}}", str(value))
+    }
+
+
+def _section(text: str, start: str, end: str) -> str:
+    begin = text.index(start)
+    return text[begin : text.index(end, begin + len(start))]
+
+
+_NUMBER_WORDS = {"four": 4, "five": 5, "six": 6, "seven": 7}
+
+
+def test_the_readme_names_every_key_compose_overrides() -> None:
+    """The count and the list in the README's `env_file:` paragraph, against compose.yml.
+
+    It said "the five exceptions", listed `USHER_SECRET_KEY` (which carries the
+    operator's value) and omitted `USHER_BULK_DATA_DIR` (which does not).
+    """
+    overrides = _topology_overrides()
+    assert "USHER_BULK_DATA_DIR" in overrides, "the override scan missed a known override"
+    assert "USHER_SECRET_KEY" not in overrides, "the scan read the secret's guard as an override"
+
+    paragraph = _section(
+        _README.read_text(), "**Every key in `.env` reaches the container**", "\n\n"
+    )
+    counted = re.search(r"\bThe (\w+) exceptions\b", paragraph)
+    assert counted, f"the paragraph no longer states a count: {paragraph!r}"
+    assert _NUMBER_WORDS.get(counted.group(1)) == len(overrides), (
+        f"the README says {counted.group(1)} exceptions; compose.yml overrides {sorted(overrides)}"
+    )
+    missing = sorted(key for key in overrides if f"`{key}`" not in paragraph)
+    assert missing == [], f"the README's list of compose-owned keys omits {missing}"
+
+
+def test_prd_08_names_every_key_compose_overrides() -> None:
+    """The same list, in the PRD section that states it."""
+    section = _section(
+        _PRD_08.read_text(), "### A documented setting has to reach the container", "\n### "
+    )
+    missing = sorted(key for key in _topology_overrides() if f"`{key}`" not in section)
+    assert missing == [], f"PRD 08's list of compose-owned keys omits {missing}"

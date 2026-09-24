@@ -20,7 +20,7 @@ writes to a precious table.
 
 ### The container runs the migration itself
 
-`Dockerfile:133`:
+The `Dockerfile`'s last line, its `CMD`:
 
 ```dockerfile
 CMD ["sh", "-c", "alembic upgrade head && exec python -m usher"]
@@ -28,16 +28,14 @@ CMD ["sh", "-c", "alembic upgrade head && exec python -m usher"]
 
 So **"upgrade" means "replace the container"**, and there is no separate
 migrate step to forget. Two consequences, both stated by the Dockerfile's own
-comment immediately above that line (`Dockerfile:124`):
+comment immediately above that line:
 
 > `alembic upgrade head` here has no distributed lock. Two containers starting
 > at once would both race to apply the same pending migration.
 
-and (`Dockerfile:130`):
+and:
 
-> `/health/ready`'s migration-mismatch check would at least surface a lost race
-> as a 503 rather than silently serving against the wrong schema, but it does
-> not prevent the race itself.
+> `/health/ready` reports a lost race as a 503 but does not prevent it.
 
 🔴 **Read that as: exactly one Usher process may start at a time, and the check
 downstream is a report rather than a guard.**
@@ -74,9 +72,13 @@ still worth a line, for `pgvector/pgvector:pg17`.
 named volume at all. Postgres' data is the bind mount
 `./data/postgres:/var/lib/postgresql/data` and the image proxy's cache is
 `./data/images` — both are host directories, so `down`, and even `down -v`,
-leave them where they are. The `observability` network survives too: it is
-`external: true` precisely so that a `down` here cannot remove a network
-Grafana, Prometheus, Loki, Tempo and the collector are all on.
+leave them where they are. On a deployment that opted into
+`compose.observability.yml` (README, "Telemetry"), the `observability` network
+survives too: it is `external: true` precisely so that a `down` here cannot
+remove a network Grafana, Prometheus, Loki, Tempo and the collector are all on.
+Take that opt-in from `COMPOSE_FILE` in `.env`, so every command in §3 applies
+it. With `-f` instead, an `up` that forgets the flag brings `usher` back
+without the network.
 
 ⚠️ **What `down` does remove is anything you wrote inside the container's own
 filesystem.** That is the trap in step 1.

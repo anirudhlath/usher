@@ -450,12 +450,23 @@ three surfaces arrive with later eval phases.
 `~/code/observability/` running Grafana, Prometheus, Loki and Tempo. One stack
 serves Usher and anything added later.
 
-Usher's only coupling is configuration:
+Usher's only coupling is configuration, in `.env`:
 
 ```
-OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4317
+COMPOSE_FILE=compose.yml:compose.observability.yml
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 OTEL_SERVICE_NAME=usher
 ```
+
+The stack publishes every port on `127.0.0.1`, so a container reaches the
+collector only over the shared `observability` docker network, by the
+collector's service name. **Joining that network is opt-in.**
+`compose.observability.yml` declares it `external: true` and adds it to the
+`usher` service beside `default`. `compose.yml` does neither, because an
+external network that does not exist fails `docker compose up` outright, on
+every host without a telemetry stack. `COMPOSE_FILE` in `.env` applies the
+override to every compose command, which `-f` on one command does not.
+`Settings` drops `COMPOSE_*` keys ([08](08-operations.md)).
 
 **Telemetry is never required.** With no endpoint configured Usher runs
 normally and constructs no exporter at all. The dashboards are an asset of this
