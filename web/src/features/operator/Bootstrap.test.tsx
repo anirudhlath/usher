@@ -341,10 +341,10 @@ describe('Bootstrap', () => {
     const badge = row.querySelector('.u-badge')
     expect(badge?.textContent).toBe('completed')
     expect(badge).toHaveClass('u-badge--good')
-    expect(within(row).queryByText(/landed no batch/)).toBeNull()
+    expect(within(row).queryByText(/the last attempt recorded an error/)).toBeNull()
   })
 
-  describe('a completed run carrying an error — a refresh that landed no batch', () => {
+  describe('a completed run carrying an error — the completed import stands beside it', () => {
     const error = importCompletedWithError.error ?? ''
 
     function renderCompletedWithError() {
@@ -373,8 +373,10 @@ describe('Bootstrap', () => {
       const row = phaseRow('MovieLens genome')
       const line = errorLine(row, error)
       expect(line).toHaveStyle({ color: 'var(--warn-text)' })
+      // True of both ways a completed row comes to carry one: a refresh that landed no
+      // batch, and a MovieLens vocabulary that failed to load after its vectors completed.
       expect(line.textContent).toBe(
-        `The last attempt landed no batch, so the completed import stands: ${error}`,
+        `The completed import stands; the last attempt recorded an error: ${error}`,
       )
     })
 

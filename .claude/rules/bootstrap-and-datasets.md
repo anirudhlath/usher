@@ -148,10 +148,14 @@ fixed one, pin `revision()` to the sidecar's own value.
   commit, lock and all); `hold()`/`start()` take it, the `finally` or a dead process
   releases it, and a test that holds releases. A failure before `start()` takes it
   to record itself, or concedes and writes nothing.
-- **`touch` confirms the hold**, since an ended connection (`idle_session_timeout`, a
-  proxy's cut) frees the lock silently. `_beating` commits one every
-  `HEARTBEAT_SECONDS` through a fetch or wait; it or `hold()` precedes every save; a
-  synchronous dump read bypassing `download.paced` stalls the beat throughout.
+- **A phase holds what it reads *shared*** (`hold_for_reading`) from before its check
+  until it ends, on one more connection (`Settings` counts two per bootstrap job): a
+  refused read skips it, a hold refused by readers concedes. Being another backend, a
+  read refuses its own process's hold, so `reading()` releases before the next step.
+- **`touch` confirms the hold and the reads**, since an ended connection
+  (`idle_session_timeout`, a proxy's cut) frees a lock silently. `_beating` commits
+  one every `HEARTBEAT_SECONDS` through a fetch or wait; it or `hold()` precedes every
+  save; a synchronous dump read bypassing `download.paced` stalls the beat throughout.
 - ⚠️ **Known defect, recorded and not fixed:** `run_bootstrap` opens
   `bulk_load_window()` *around* `import_dataset`, so its `count_titles() == 0` guard
   is read before ownership is known. Two processes over an empty catalog both `DROP
@@ -177,7 +181,7 @@ fixed one, pin `revision()` to the sidecar's own value.
   | `FAILED` + error | part of a snapshot, or none ever completed | yes |
   | `COMPLETED` | finished | no |
   | `COMPLETED` + error | finished; a later attempt failed before its first batch, or `then` after it | no |
-  | any, `held_elsewhere` | another process is importing it | yes |
+  | any, held exclusive elsewhere | another process is importing it; none starts under a reader's shared hold | yes: the read is refused |
 - **`download.py`'s `HEAD` follows WDQS's ladder**: 408/5xx unavailable, 429
   rate-limited, any other 4xx or no `ETag`/`Last-Modified` malformed. The TMDb
   walk-back reads only 404/403 as "not published" (`revision_if_published`) — read

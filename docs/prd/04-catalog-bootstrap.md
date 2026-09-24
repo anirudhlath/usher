@@ -53,7 +53,9 @@ and a changed name makes that title's embedding stale.
 no phase starts while a dataset it reads has a checkpoint that is `failed` or
 `running`, or is being imported by another process — read from that process's
 hold, whatever the checkpoint says: those four read IMDb's titles, and
-`crosswalk` reads the titles and both TMDb exports. So under `--phase all` a failed `imdb` skips those phases,
+`crosswalk` reads the titles and both TMDb exports. A phase that starts holds
+what it reads until it ends, so no import of those datasets starts in any
+process while it runs. So under `--phase all` a failed `imdb` skips those phases,
 while `tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
 is skipped over an earlier run's failure in the same way. A catalog with no IMDb
 checkpoint at all, one a source sync filled, blocks nothing — so `crosswalk`
@@ -63,16 +65,17 @@ also runs over a catalog no IMDb import has filled.
 after `credit-names`; run `credit-names` first.
 
 **One process imports a dataset at a time.** A second `usher bootstrap`, or a
-bootstrap job, that reaches a dataset another process is importing leaves it
-alone: it downloads nothing and writes nothing to it. The hold ends when that
-import ends, however it ends — a killed process's included — so the next run
-can resume it at once. **Only the process holding a dataset writes its
-checkpoint.** A failure met before the import starts is recorded by taking the
-hold first; while another process has it, nothing is written. The hold is
-confirmed at every heartbeat and before every write of the checkpoint, and an
-import that finds it lost — `idle_session_timeout`, a connection cut, a server
-restart — stops and records the failure, unless another process has taken the
-dataset since.
+bootstrap job, that reaches a dataset another process is importing, or is
+reading in a phase that joins against it, leaves it alone: it downloads nothing
+and writes nothing to it. The hold ends when that import or phase ends, however
+it ends — a killed process's included — so the next run can resume it at once.
+**Only the process holding a dataset writes its checkpoint.** A failure met
+before the import starts is recorded by taking the hold first; while another
+process has it, nothing is written. The hold, and a phase's hold on what it
+reads, is confirmed at every heartbeat and before every write of the
+checkpoint, and an import that finds either lost — `idle_session_timeout`, a
+connection cut, a server restart — stops and records the failure, unless
+another process has taken the dataset since.
 
 | checkpoint | means | blocks a phase that reads it |
 |---|---|---|
@@ -81,7 +84,7 @@ dataset since.
 | `failed` + `error` | an import stopped part-way through a snapshot, or before any import of the dataset completed | yes |
 | `completed` | the last import finished | no |
 | `completed` + `error` | the last import finished; a later attempt failed before changing it, or the MovieLens vocabulary failed to load after it | no |
-| any, while another process holds the dataset | that process is importing it now | yes |
+| any, while another process is importing the dataset | that process holds it until its import ends; none starts while a phase that reads it runs | yes |
 
 No other combination is written: `running` never carries an `error`, and
 `failed` always does. A process writes the row only while it holds the dataset:
@@ -90,15 +93,16 @@ record a failure or the end.
 
 **A failed import, a skipped or refused phase, or a dataset left to another
 process fails the command.** `usher bootstrap` exits 1 if anything it ran
-failed, was skipped or refused, or was being imported elsewhere. Its last lines
-give each one in dispatch order, which is also the order to resume them in. A
+failed, was skipped or refused, or was being imported or read elsewhere. Its
+last lines give each one in dispatch order, which is also the order to resume them in. A
 failure line names the dataset, the position it stopped at, the error and the
 `--phase` that resumes it — `ratings` for the ratings file, whichever phase
 imported it. A skip line names what the phase was waiting on and gives the
 commands that finish that and then run the phase. A refusal line says `titles`
 is empty and gives `--phase imdb`, then the phase — for `ratings`, `--phase
 imdb` alone, which imports it. A line for a dataset left to another process
-says so and gives the `--phase` to run once that process ends.
+says it is importing it or running a phase that reads it, and gives the
+`--phase` to run once that process ends.
 
 **An import that fails before its first batch lands leaves a completed import
 standing.** When a refresh of a `completed` checkpoint fails — at the revision

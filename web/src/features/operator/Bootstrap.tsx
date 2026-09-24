@@ -32,12 +32,13 @@
  *   `error` verbatim, position retained, trigger relabelled "Resume".
  * · **Only `failed` is drawn as a failure.** An `error` on a run of any other
  *   status is warn-toned, in the live card and the phase row alike.
- * · **`error` is read whatever the status says.** A refresh that lands no batch
- *   — it may have started and downloaded before failing — leaves a `completed`
- *   checkpoint `completed`, with the error beside it (PRD 04), so a green
- *   "completed" can hide the only sign that the last press of "Run again"
- *   landed nothing. Such a row is warn-toned, never green and never bad: the
- *   import it would have refreshed still stands.
+ * · **`error` is read whatever the status says.** A `completed` checkpoint
+ *   keeps its status with an error beside it (PRD 04) when a refresh lands no
+ *   batch — it may have started and downloaded before failing — or when the
+ *   MovieLens vocabulary fails to load after the vectors completed, so a green
+ *   "completed" can hide the only sign that the last press of "Run again" did
+ *   not do what it was asked. Such a row is warn-toned, never green and never
+ *   bad: the completed import still stands, and the copy claims only that.
  * · **Genome coverage is counts.** The route returns six of them and declines
  *   the division. Every ratio printed here is shown as numerator / denominator
  *   *and* as a percent whose denominator is named on screen, because picking
@@ -281,7 +282,7 @@ function PhaseRow({ spec, index, run, asOf, measured, onRun }: PhaseRowProps) {
             }}
           >
             {run.status === 'completed' &&
-              'The last attempt landed no batch, so the completed import stands: '}
+              'The completed import stands; the last attempt recorded an error: '}
             {/* Verbatim, and never parsed: it is the server's own sentence. */}
             <span>{run.error}</span>
           </span>
@@ -352,7 +353,8 @@ export default function Bootstrap() {
   }, [watching])
   const status = useBootstrapStatus({
     // §8: uncached and ~0.33 s a call, so poll only while something is running
-    // or a 202 is being watched.
+    // or a 202 is being watched -- the second half a departure from §8, recorded
+    // with its reason in CONVENTIONS.md.
     refetchInterval: (query) =>
       watching !== null || query.state.data?.runs.some((run) => run.status === 'running') ? 10_000 : false,
   })

@@ -338,3 +338,25 @@ source_modules = [
 ]
 forbidden_modules = ["ranx"]
 allow_indirect_imports = true
+
+# The configuration reads nothing above the domain: a check needing a number a service
+# owns takes it from the domain, where both reach it. Every top-level package but the
+# domain is forbidden it, here or (`usher.eval`) by the leaf contract above, as a
+# `forbidden` contract covers only what it names; `tests/unit/test_config.py` derives
+# the two together. Last, since tests cite contracts by ordinal.
+[[tool.importlinter.contracts]]
+name = "config reads nothing above the domain"
+type = "forbidden"
+source_modules = ["usher.config"]
+forbidden_modules = [
+    "usher.ports",
+    "usher.services",
+    "usher.adapters",
+    "usher.db",
+    "usher.api",
+    "usher.atomic",
+    "usher.composition",
+    "usher.telemetry",
+    "usher.cli",
+    "usher.__main__",
+]

@@ -40,7 +40,7 @@ the product, not about the runner.
 
 - **The `design-system/` import boundary is a review obligation, not a red.**
   A component under `design-system/` may not import from `api/`, `features/` or
-  `app/`. The 12 `import-linter` contracts are Python-only and cannot see this,
+  `app/`. The 13 `import-linter` contracts are Python-only and cannot see this,
   so unlike every layering rule on the backend, breaking it fails no gate step.
 - **`src/api/schema.d.ts` is generated**, by `npm run gen:types` against a
   running server's `/openapi.json`. A hand-edit survives until the next run.

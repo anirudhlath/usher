@@ -156,7 +156,7 @@ uv sync --extra eval             # NOT optional — see below
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests            # strict, including tests/
-uv run lint-imports              # architecture contracts — 12 kept, 0 broken
+uv run lint-imports              # architecture contracts — 13 kept, 0 broken
 uv run pytest                    # tests/integration/ needs Docker
 ```
 

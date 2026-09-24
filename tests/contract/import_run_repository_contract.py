@@ -239,19 +239,71 @@ class ImportRunRepositoryContract:
         started = await runs.start("imdb.title.basics", "etag-1")
         assert started.status is ImportRunStatus.RUNNING
 
-    async def test_held_elsewhere_names_another_holder_and_never_the_asker(
+    # --- reading a dataset -------------------------------------------------
+
+    async def test_a_read_refuses_every_holder_and_shares_with_other_readers(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        """A phase reading a dataset keeps any import of it from starting until it ends.
+
+        Two phases reading one dataset both run. The last reader to let go frees it.
+        """
+        dataset = "imdb.title.basics"
+        assert await runs.hold_for_reading(dataset) is True
+        with pytest.raises(RepositoryConflict):
+            await rival.hold(dataset)
+        with pytest.raises(RepositoryConflict):
+            await rival.start(dataset, "etag-1")
+        assert await rival.get(dataset) is None, "a refused start wrote nothing"
+        assert await rival.hold_for_reading(dataset) is True, "readers share a dataset"
+        await runs.release_reads()
+        with pytest.raises(RepositoryConflict):
+            await runs.hold(dataset)
+        await rival.release_reads()
+        await runs.hold(dataset)
+
+    async def test_a_holder_refuses_a_read_and_the_refused_read_takes_nothing(
         self, runs: ImportRunRepository, rival: ImportRunRepository
     ) -> None:
         dataset = "imdb.title.basics"
-        assert (await runs.held_elsewhere(dataset), await rival.held_elsewhere(dataset)) == (
-            False,
-            False,
-        )
         await runs.hold(dataset)
-        assert (await runs.held_elsewhere(dataset), await rival.held_elsewhere(dataset)) == (
-            False,
-            True,
-        )
-        assert await rival.held_elsewhere("tmdb.ids.movie") is False, "one dataset's hold"
+        assert await rival.hold_for_reading(dataset) is False
         await runs.release(dataset)
-        assert await rival.held_elsewhere(dataset) is False
+        await rival.hold(dataset)
+
+    async def test_a_read_and_a_hold_are_two_holders_within_one_repository(
+        self, runs: ImportRunRepository
+    ) -> None:
+        """So a phase gives its reads back before anything of its own imports what it read."""
+        await runs.hold_for_reading("imdb.title.basics")
+        with pytest.raises(RepositoryConflict):
+            await runs.hold("imdb.title.basics")
+        await runs.hold("tmdb.ids.movie")
+        assert await runs.hold_for_reading("tmdb.ids.movie") is False
+        await runs.release_reads()
+        await runs.hold("imdb.title.basics")
+
+    async def test_release_reads_gives_up_every_read_and_only_the_releasers_own(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        await runs.release_reads()
+        assert await runs.hold_for_reading("imdb.title.basics") is True
+        assert await runs.hold_for_reading("imdb.title.basics") is True, "one read, taken twice"
+        assert await runs.hold_for_reading("tmdb.ids.movie") is True
+        assert await rival.hold_for_reading("tmdb.ids.movie") is True
+        await runs.release_reads()
+        await runs.release_reads()
+        await rival.hold("imdb.title.basics")
+        with pytest.raises(RepositoryConflict):
+            await runs.hold("tmdb.ids.movie")
+
+    async def test_touch_confirms_what_the_toucher_reads_and_moves_only_its_own_heartbeat(
+        self, runs: ImportRunRepository
+    ) -> None:
+        run = await runs.start("imdb.credit_names", "etag-1")
+        await runs.save(run.evolve(heartbeat_at=_LONG_AGO))
+        assert await runs.hold_for_reading("imdb.title.basics") is True
+        await runs.touch("imdb.credit_names")
+        stored = await runs.get("imdb.credit_names")
+        assert stored is not None and stored.heartbeat_at > _LONG_AGO
+        assert await runs.get("imdb.title.basics") is None, "a read writes nothing"

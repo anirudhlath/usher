@@ -1398,6 +1398,8 @@ class FailedImport:
 class ConcededImport:
     """A dataset another process held when this run came to import it, left alone.
 
+    Held to import it, or shared by a phase reading it, which no import may start under.
+
     Also a failure this run met while another process held the dataset: only a holder
     writes a checkpoint, so the failure is logged and nothing is written. `run` is that
     process's checkpoint as stored, error and all, or a synthetic run persisted nowhere
@@ -1531,8 +1533,8 @@ def _closing_line(one: FailedImport | ConcededImport | SkippedStep | RefusedStep
     )
     if isinstance(one, ConcededImport):
         return (
-            f"{one.run.dataset} was left alone: another process is importing it"
-            f"; once that process ends, resume with: {commands}"
+            f"{one.run.dataset} was left alone: another process is importing it or running "
+            f"a phase that reads it; once that process ends, resume with: {commands}"
         )
     if isinstance(one, FailedImport):
         if one.run.status is ImportRunStatus.COMPLETED:
@@ -1579,16 +1581,16 @@ async def run_bootstrap(
     that continue it.
 
     **A phase does not start while a dataset it reads is unfinished** (`_READS`): its
-    checkpoint is not `completed`, or another process is importing it. Under `--phase
-    all` a failed `imdb` skips every later phase that joins its titles, and a single
-    phase is skipped over an earlier run's failure, or a live import elsewhere, the same
-    way. What reads nothing unfinished still runs, so one upstream
-    being down costs only what depends on it. A phase that refuses an empty catalog is
-    unfinished too. The transient class never gets this far unretried --
-    `import_dataset` retries a revision and resumes a fetch until its `RetryPolicy`
-    runs out, reporting each retry through `retries`, or `report` when that is `None`:
-    the CLI prints both, and the worker logs a phase's report at INFO and a retry at
-    WARNING.
+    checkpoint is not `completed`, or another process is importing it. Once started, it
+    holds each one shared until it ends, so no import of them starts meanwhile. Under
+    `--phase all` a failed `imdb` skips every later phase that joins its titles, and a
+    single phase is skipped over an earlier run's failure, or a live import elsewhere,
+    the same way. What reads nothing unfinished still runs, so one upstream being down
+    costs only what depends on it. A phase that refuses an empty catalog is unfinished
+    too. The transient class never gets this far unretried -- `import_dataset` retries a
+    revision and resumes a fetch until its `RetryPolicy` runs out, reporting each retry
+    through `retries`, or `report` when that is `None`: the CLI prints both, and the
+    worker logs a phase's report at INFO and a retry at WARNING.
     """
     client = bulk_client(settings)
     service = BootstrapService(
@@ -1615,29 +1617,37 @@ async def run_bootstrap(
         elif _failed_this_run(run):
             unfinished.append(FailedImport(step, run))
 
-    async def blocked(step: BootstrapPhase) -> bool:
-        """Whether `step` must wait, recording why when it must.
+    @asynccontextmanager
+    async def reading(step: BootstrapPhase) -> AsyncIterator[bool]:
+        """Hold what `step` reads for as long as it runs, and say whether it may run.
 
-        A dataset another process holds blocks whatever its row says: a refresh reads
-        `completed` until its first batch lands. Otherwise only a checkpoint that exists
-        and is not `completed` blocks: a catalog a source sync filled has no IMDb
-        checkpoint and nothing partial in it.
+        Each dataset is held shared before its checkpoint is read, and given back when
+        the phase ends, however it ends. A read refused means another process is
+        importing it, whatever its row says: a refresh reads `completed` until its first
+        batch lands. A read granted means no import of it starts until the phase ends, in
+        any process -- this one included, which is why a phase gives its reads back
+        before the next step of `--phase all` imports anything. Then only a checkpoint
+        that exists and is not `completed` blocks: a catalog a source sync filled has no
+        IMDb checkpoint and nothing partial in it. Why a blocked phase waits is recorded.
         """
         held: list[str] = []
         blockers: list[tuple[BootstrapPhase, ImportRun]] = []
-        for prerequisite in _READS[step]:
-            for dataset in _WRITTEN_BY[prerequisite]:
-                if await runs.held_elsewhere(dataset):
-                    held.append(dataset)
-                    continue
-                stored = await runs.get(dataset)
-                if stored is not None and stored.status is not ImportRunStatus.COMPLETED:
-                    blockers.append((prerequisite, stored))
-        if not held and not blockers:
-            return False
-        resume = _resume(step, tuple(dict.fromkeys(prerequisite for prerequisite, _ in blockers)))
-        unfinished.append(SkippedStep(step, tuple(run for _, run in blockers), resume, tuple(held)))
-        return True
+        try:
+            for prerequisite in _READS[step]:
+                for dataset in _WRITTEN_BY[prerequisite]:
+                    if not await runs.hold_for_reading(dataset):
+                        held.append(dataset)
+                        continue
+                    stored = await runs.get(dataset)
+                    if stored is not None and stored.status is not ImportRunStatus.COMPLETED:
+                        blockers.append((prerequisite, stored))
+            if held or blockers:
+                resume = _resume(step, tuple(dict.fromkeys(one for one, _ in blockers)))
+                skipped = SkippedStep(step, tuple(run for _, run in blockers), resume, tuple(held))
+                unfinished.append(skipped)
+            yield not held and not blockers
+        finally:
+            await runs.release_reads()
 
     try:
         if phase in (BootstrapPhase.IMDB, BootstrapPhase.ALL):
@@ -1647,60 +1657,59 @@ async def run_bootstrap(
             async with catalog.bulk_load_window():
                 titles = await service.import_dataset(titles_dataset, _titles_writer(catalog))
                 settle(BootstrapPhase.IMDB, titles)
-                if not await blocked(BootstrapPhase.RATINGS):
-                    ratings = await service.import_dataset(
-                        IMDbRatingDataset(
-                            client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
-                        ),
-                        catalog.apply_ratings,
-                    )
-                    # `ratings`, not `imdb`: basics is complete, and `--phase ratings`
-                    # re-imports this file alone.
-                    settle(BootstrapPhase.RATINGS, ratings)
-        if phase is BootstrapPhase.RATINGS and not await blocked(BootstrapPhase.RATINGS):
-            settle(
-                BootstrapPhase.RATINGS, await _ratings(settings, client, catalog, service, report)
-            )
-        if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL) and not await blocked(
-            BootstrapPhase.CREDIT_NAMES
-        ):
-            settle(
-                BootstrapPhase.CREDIT_NAMES,
-                await _credit_names(settings, client, catalog, service, report),
-            )
-        if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL) and not await blocked(
-            BootstrapPhase.ALIASES
-        ):
-            settle(
-                BootstrapPhase.ALIASES, await _aliases(settings, client, catalog, service, report)
-            )
+                # Read only now: the titles import above has given its hold back.
+                async with reading(BootstrapPhase.RATINGS) as clear:
+                    if clear:
+                        ratings = await service.import_dataset(
+                            IMDbRatingDataset(
+                                client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
+                            ),
+                            catalog.apply_ratings,
+                        )
+                        # `ratings`, not `imdb`: basics is complete, and `--phase ratings`
+                        # re-imports this file alone.
+                        settle(BootstrapPhase.RATINGS, ratings)
+        if phase is BootstrapPhase.RATINGS:
+            async with reading(BootstrapPhase.RATINGS) as clear:
+                if clear:
+                    alone = await _ratings(settings, client, catalog, service, report)
+                    settle(BootstrapPhase.RATINGS, alone)
+        if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL):
+            async with reading(BootstrapPhase.CREDIT_NAMES) as clear:
+                if clear:
+                    names = await _credit_names(settings, client, catalog, service, report)
+                    settle(BootstrapPhase.CREDIT_NAMES, names)
+        if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL):
+            async with reading(BootstrapPhase.ALIASES) as clear:
+                if clear:
+                    aliases = await _aliases(settings, client, catalog, service, report)
+                    settle(BootstrapPhase.ALIASES, aliases)
         if phase in (BootstrapPhase.TMDB_IDS, BootstrapPhase.ALL):
             for ids_dataset in id_datasets:
                 ids = await service.import_dataset(ids_dataset, catalog.upsert_tmdb_ids)
                 settle(BootstrapPhase.TMDB_IDS, ids)
-        if phase in (BootstrapPhase.CROSSWALK, BootstrapPhase.ALL) and not await blocked(
-            BootstrapPhase.CROSSWALK
-        ):
-            crosswalk = await service.import_dataset(
-                WikidataCrosswalkDataset(
-                    client,
-                    user_agent=settings.bulk_user_agent,
-                    endpoint=settings.wikidata_endpoint,
-                    batch_size=settings.bulk_batch_size,
-                ),
-                catalog.upsert_crosswalk,
-            )
-            settle(BootstrapPhase.CROSSWALK, crosswalk)
-            # Linked even after a failed import: every pair stored is a verified one,
-            # and linking is idempotent, so the pages that did land are usable now.
-            await service.link_crosswalk()
-        if phase in (BootstrapPhase.MOVIELENS, BootstrapPhase.ALL) and not await blocked(
-            BootstrapPhase.MOVIELENS
-        ):
-            settle(
-                BootstrapPhase.MOVIELENS,
-                await _movielens(settings, client, catalog, service, report),
-            )
+        if phase in (BootstrapPhase.CROSSWALK, BootstrapPhase.ALL):
+            async with reading(BootstrapPhase.CROSSWALK) as clear:
+                if clear:
+                    crosswalk = await service.import_dataset(
+                        WikidataCrosswalkDataset(
+                            client,
+                            user_agent=settings.bulk_user_agent,
+                            endpoint=settings.wikidata_endpoint,
+                            batch_size=settings.bulk_batch_size,
+                        ),
+                        catalog.upsert_crosswalk,
+                    )
+                    settle(BootstrapPhase.CROSSWALK, crosswalk)
+                    # Linked even after a failed import: every pair stored is a verified
+                    # one, and linking is idempotent, so the pages that did land are
+                    # usable now.
+                    await service.link_crosswalk()
+        if phase in (BootstrapPhase.MOVIELENS, BootstrapPhase.ALL):
+            async with reading(BootstrapPhase.MOVIELENS) as clear:
+                if clear:
+                    genome = await _movielens(settings, client, catalog, service, report)
+                    settle(BootstrapPhase.MOVIELENS, genome)
         logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
         # In a `finally`, so a phase that raises still gives the connection

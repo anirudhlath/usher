@@ -16,7 +16,7 @@ uv sync --extra eval                   # ranx; optional to the product, mandator
 uv run usher eval                      # every surface, quick: no bar enforced, nothing recorded
 uv run usher eval suggest --full       # full goldens, bars enforced, both sinks written
 uv run pytest tests/unit/test_eval_contract.py   # the two import contracts and the scans behind them
-uv run lint-imports                    # 12 kept, 0 broken — E1 added the last two
+uv run lint-imports                    # 13 kept, 0 broken — E1 added the 11th and 12th
 ```
 
 **The module docstrings are the design record** — `__init__.py` (why the
@@ -87,7 +87,7 @@ session gets wrong about them:
   hand. `test_eval_contract.py` walks `src/usher/` and `usher/eval/` and asserts
   **set equality** against the TOML, so a new top-level package — or a new
   `usher.eval` child — is a red that names it. Without that test `lint-imports`
-  would go on reporting 12 kept while the new module sat outside every contract.
+  would go on reporting every contract kept while the new module sat outside all of them.
 - **Contract 12 exempts the whole `usher.eval.metrics` package; only a test
   pins `ranx` to `metrics/ir.py`.** A `forbidden` contract's sources cover a
   module *and all its descendants*, so `ir.py` cannot be carved out in TOML.

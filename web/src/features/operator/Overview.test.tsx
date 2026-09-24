@@ -230,11 +230,13 @@ describe('Overview', () => {
       return render()
     }
 
-    it('raises a warn item for a completed run whose refresh landed no batch, with the error verbatim', async () => {
+    it('raises a warn item for a completed run carrying an error, with the error verbatim', async () => {
       renderCompletedWithError()
 
+      // True of a refresh that landed no batch and of a vocabulary that failed to load
+      // after the vectors completed; the old wording claimed the first alone.
       const item = await screen.findByRole('button', {
-        name: /^The last movielens attempt landed no batch, so the completed import stands/,
+        name: /^The completed movielens import stands; the last attempt recorded an error/,
       })
       expect(within(item).getByText(importCompletedWithError.error ?? '')).toBeInTheDocument()
       expect(glyphOf(item)).toHaveStyle({ color: 'var(--warn-text)' })
