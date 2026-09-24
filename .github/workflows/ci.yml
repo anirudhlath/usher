@@ -185,3 +185,160 @@ jobs:
             test -d /app/web/dist/assets &&
             echo "console bundle present"
           '
+
+  # Job id `gate`, display name `ci-ok`: `needs.ci-ok` would parse as a
+  # subtraction. Generic on purpose -- it reads whatever is in `needs`, so a job
+  # added above is covered the moment it is listed there.
+  gate:
+    name: ci-ok
+    # Runs even when something upstream failed; a skipped gate is what `deploy`
+    # checks for.
+    if: always()
+    needs: [check, console, console-e2e, console-visual, image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every upstream job passed
+        run: |
+          cat <<'JSON' > needs.json
+          ${{ toJSON(needs) }}
+          JSON
+          jq -r 'to_entries[] | "  \(.key): \(.value.result)"' needs.json
+          bad=$(jq -r 'to_entries[] | select(.value.result != "success") | .key' needs.json)
+          if [ -n "$bad" ]; then
+            echo "::error::not green: $(echo "$bad" | tr '\n' ' ')"
+            exit 1
+          fi
+
+  # The maintainer's own deployment: a merge to main rebuilds the live stack on
+  # a self-hosted runner. Only this job reaches that runner, and only for a push
+  # to main that passed every job above. `github.repository` keeps a fork's
+  # push from queueing a job no runner of its own will ever take.
+  #
+  # The stack is compose project `usher-prod`, run from an operator directory,
+  # `~/code/usher-deploy`, which holds `.env` and `data/`. This job copies the
+  # two compose files there and writes nothing else.
+  deploy:
+    name: deploy to the box
+    needs: [gate]
+    # `always() &&` is load-bearing: without it the job inherits the implicit
+    # success() check, and a skipped job upstream skips the deploy even when
+    # `gate` succeeded.
+    if: >-
+      ${{ always()
+      && needs.gate.result == 'success'
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && github.repository == 'anirudhlath/usher' }}
+    runs-on: [self-hosted, linux, usher-deploy]
+    timeout-minutes: 60
+    # Two deploys at once would race between building an image and replacing
+    # the container. Queue, never cancel.
+    concurrency:
+      group: deploy-usher
+      cancel-in-progress: false
+    env:
+      # What compose names the `usher` service's image and container under the
+      # project name the deploy directory's `.env` pins.
+      IMAGE: usher-prod-usher
+      CONTAINER: usher-prod-usher-1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Preflight
+        run: |
+          deploy_dir="$HOME/code/usher-deploy"
+          if [ ! -f "$deploy_dir/.env" ]; then
+            echo "::error::$deploy_dir/.env is missing; the deploy directory is operator state"
+            exit 1
+          fi
+          echo "DEPLOY_DIR=$deploy_dir" >> "$GITHUB_ENV"
+
+      - name: Record the running image for rollback
+        id: rollback
+        run: |
+          if id=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null); then
+            docker tag "$id" "$IMAGE:rollback"
+            echo "image=$id" >> "$GITHUB_OUTPUT"
+            echo "rollback target: $id"
+          else
+            echo "image=none" >> "$GITHUB_OUTPUT"
+            echo "::notice::no running $CONTAINER; first deploy, nothing to roll back to"
+          fi
+
+      # Tagged by sha only. `latest` moves in Start, so a build that is never
+      # started cannot be picked up by a later `docker compose up`.
+      - name: Build
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
+
+      # A rollback cannot undo a migration: the previous image refuses a schema
+      # newer than its own chain. So every deploy first writes a backup with the
+      # running image, and the last ten are kept.
+      - name: Back up
+        if: steps.rollback.outputs.image != 'none'
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          mkdir -p data/bulk/predeploy
+          docker compose exec -T usher usher backup \
+            --output "/data/bulk/predeploy/${{ github.sha }}.jsonl.gz"
+          find data/bulk/predeploy -name '*.jsonl.gz' -printf '%T@ %p\n' \
+            | sort -rn | tail -n +11 | cut -d' ' -f2- | xargs -r -d '\n' rm --
+
+      - name: Publish the compose files to the deploy directory
+        run: cp compose.yml compose.observability.yml "$DEPLOY_DIR/"
+
+      # The marker is written before anything is touched, so the rollback fires
+      # for a failure part-way through. The migration runs on its own, with the
+      # app stopped, so a long one is not mistaken for an unhealthy container;
+      # `--wait` then verifies the start against the healthcheck
+      # (`/health/ready`, which also compares the migration state).
+      - name: Start
+        id: start
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          echo "started=1" >> "$GITHUB_OUTPUT"
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker compose up -d --no-build --wait postgres
+          docker compose stop usher
+          docker compose run --rm --no-deps -T usher alembic upgrade head
+          docker compose up -d --no-build --wait --wait-timeout 180
+
+      # `always()`, not `failure()`: a cancel or a timeout mid-start must roll
+      # back too. `set +e` so the log and the verdict print even if a command
+      # in the rollback fails.
+      - name: Roll back
+        if: always() && steps.start.outputs.started == '1' && steps.start.outcome != 'success'
+        working-directory: ${{ env.DEPLOY_DIR }}
+        env:
+          TARGET: ${{ steps.rollback.outputs.image }}
+        run: |
+          set +e
+          echo "::group::usher log"
+          docker compose logs --tail 150 usher
+          echo "::endgroup::"
+          if [ "$TARGET" = "none" ]; then
+            echo "::error::deploy failed and there is no previous image to restore"
+            exit 1
+          fi
+          echo "::warning::deploy failed; restoring $TARGET"
+          docker tag "$TARGET" "$IMAGE:latest"
+          if docker compose up -d --no-build --force-recreate --wait --wait-timeout 180 usher; then
+            echo "::error::deploy failed; rolled back to $TARGET and it is healthy"
+          else
+            echo "::error::deploy failed AND the rollback is not healthy. If this deploy migrated the schema, the previous image cannot run on it: fix forward, with the backup in data/bulk/predeploy/"
+          fi
+          exit 1
+
+      # Keeps the last five sha tags. `latest` and `rollback` never match the
+      # 40-hex pattern, and removing a tag that backs a running container
+      # removes only the tag.
+      - name: Prune old deploy images
+        if: always()
+        run: |
+          stale=$(docker images "$IMAGE" --format '{{.CreatedAt}}|{{.Tag}}' \
+            | grep -E '\|[0-9a-f]{40}$' \
+            | sort -r \
+            | tail -n +6 \
+            | cut -d'|' -f2)
+          if [ -n "$stale" ]; then
+            echo "$stale" | xargs -I{} docker rmi "$IMAGE:{}"
+          fi

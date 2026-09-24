@@ -1,0 +1,4 @@
+# The self-hosted runner that `ci.yml`'s `deploy` job targets.
+self-hosted-runner:
+  labels:
+    - usher-deploy
