@@ -291,6 +291,12 @@ jobs:
       # app stopped, so a long one is not mistaken for an unhealthy container;
       # `--wait` then verifies the start against the healthcheck
       # (`/health/ready`, which also compares the migration state).
+      #
+      # `--force-recreate` is load-bearing: the service has `build:` and no
+      # `image:`, so under `--no-build` compose never compares the retagged
+      # `latest` with the container's image, and a plain `up` restarts the old
+      # container, healthy. The last line is what catches that: a start is only
+      # a deploy if the running container is the image this job built.
       - name: Start
         id: start
         working-directory: ${{ env.DEPLOY_DIR }}
@@ -300,7 +306,15 @@ jobs:
           docker compose up -d --no-build --wait postgres
           docker compose stop usher
           docker compose run --rm --no-deps -T usher alembic upgrade head
-          docker compose up -d --no-build --wait --wait-timeout 180
+          docker compose up -d --no-build --force-recreate --wait --wait-timeout 180 usher
+          built=$(docker image inspect -f '{{.Id}}' "$IMAGE:${{ github.sha }}")
+          running=$(docker inspect -f '{{.Image}}' "$CONTAINER")
+          echo "built:   $built"
+          echo "running: $running"
+          if [ "$running" != "$built" ]; then
+            echo "::error::$CONTAINER is running $running, not the image this job built"
+            exit 1
+          fi
 
       # `always()`, not `failure()`: a cancel or a timeout mid-start must roll
       # back too. `set +e` so the log and the verdict print even if a command
