@@ -51,8 +51,9 @@ and a changed name makes that title's embedding stale.
 **Two checks enforce the order between `--phase` steps.** `ratings`,
 `credit-names`, `aliases` and `movielens` refuse a catalog with no titles. And
 no phase starts while a dataset it reads has a checkpoint that is `failed` or
-`running`: those four read IMDb's titles, and `crosswalk` reads the titles and
-both TMDb exports. So under `--phase all` a failed `imdb` skips those phases,
+`running`, or is being imported by another process — read from that process's
+hold, whatever the checkpoint says: those four read IMDb's titles, and
+`crosswalk` reads the titles and both TMDb exports. So under `--phase all` a failed `imdb` skips those phases,
 while `tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
 is skipped over an earlier run's failure in the same way. A catalog with no IMDb
 checkpoint at all, one a source sync filled, blocks nothing — so `crosswalk`
@@ -65,7 +66,27 @@ after `credit-names`; run `credit-names` first.
 bootstrap job, that reaches a dataset another process is importing leaves it
 alone: it downloads nothing and writes nothing to it. The hold ends when that
 import ends, however it ends — a killed process's included — so the next run
-can resume it at once.
+can resume it at once. **Only the process holding a dataset writes its
+checkpoint.** A failure met before the import starts is recorded by taking the
+hold first; while another process has it, nothing is written. The hold is
+confirmed at every heartbeat and before every write of the checkpoint, and an
+import that finds it lost — `idle_session_timeout`, a connection cut, a server
+restart — stops and records the failure, unless another process has taken the
+dataset since.
+
+| checkpoint | means | blocks a phase that reads it |
+|---|---|---|
+| none | never imported here, or filled by a source sync | no |
+| `running` | an import is under way, or its process died (the heartbeat stops) | yes |
+| `failed` + `error` | an import stopped part-way through a snapshot, or before any import of the dataset completed | yes |
+| `completed` | the last import finished | no |
+| `completed` + `error` | the last import finished; a later attempt failed before changing it, or the MovieLens vocabulary failed to load after it | no |
+| any, while another process holds the dataset | that process is importing it now | yes |
+
+No other combination is written: `running` never carries an `error`, and
+`failed` always does. A process writes the row only while it holds the dataset:
+at the start, at each batch, at each heartbeat of a `running` row, and to
+record a failure or the end.
 
 **A failed import, a skipped or refused phase, or a dataset left to another
 process fails the command.** `usher bootstrap` exits 1 if anything it ran
@@ -85,10 +106,11 @@ lookup, the download or the first fetch — or is interrupted before a batch of
 the new revision lands, the checkpoint stays `completed` at the revision and
 position it completed, and the phases that read it still run. A recorded
 failure sits beside it as the error, which `bootstrap-status` shows; the command
-still exits 1, and the line says the dataset failed before its first batch
-landed and its completed import stands. Once a batch has landed, a failure
-records the checkpoint `failed`. A revision lookup failing over a checkpoint
-that is `failed` or `running` adds the error and changes nothing else.
+still exits 1, and the line says the dataset failed and that its completed
+import stands, at its position. Once a batch has landed, a failure records the
+checkpoint `failed`. A failure over a checkpoint that is `failed`, or `running`
+with no process holding it, records it `failed` at its position, with the error
+and a fresh heartbeat.
 
 Over the job queue (`POST /admin/bootstrap/{phase}`) the job completes either
 way.
@@ -214,10 +236,14 @@ survives restarts.
 vocabulary into `genome_tags` ([02](02-data-model.md)), both stamped with the
 archive revision.
 
-The vocabulary is written **after the vector drain and only on a completed
-run**, and **a re-run against a completed checkpoint still loads it**, so
+The vocabulary is loaded **only by a run that completed the vectors in the same
+process**, at the revision that run resolved and while it still holds the
+dataset, and **a re-run against a completed checkpoint still loads it**, so
 re-running the phase upgrades a catalog bootstrapped before the vocabulary
-existed. `usher bootstrap --phase movielens` reports the vocabulary count beside
+existed. A refresh that fails, and a dataset left to another process, keep the
+vocabulary they had. A vocabulary that fails to load is recorded like an import
+failure: the checkpoint stays `completed` with the error beside it, and the
+command exits 1. `usher bootstrap --phase movielens` reports the vocabulary count beside
 the vector count, and `usher bootstrap-status` reports whether the stored
 vocabulary can name the lanes of the stored vectors.
 
@@ -269,9 +295,12 @@ run". A first import of a dataset, or the resume of an unfinished one, reads
 of a `completed` checkpoint reads `completed`, at its old revision and
 position, until its first batch lands. While a checkpoint reads `running`, its
 `heartbeat_at` moves at least every 30 s for as long as the importing process
-lives — through downloads, index builds and retry waits — except while a
-single batch is being written. A heartbeat much older than that means the
-process has stopped, or is stuck writing one batch.
+lives and holds the dataset — through downloads, index builds and retry waits —
+except while a single batch is being written. A heartbeat much older than that
+means the process has stopped, lost its hold, or is stuck writing one batch. On
+every checkpoint, `heartbeat_at` is when the process holding the dataset last
+wrote the row; `error` is why the last attempt failed, and is cleared when the
+next one starts.
 
 ## Licensing — ship importers, never data
 

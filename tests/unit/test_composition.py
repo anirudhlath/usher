@@ -52,6 +52,7 @@ from usher.api.deps import get_search_service, get_source_adapter_factory, get_s
 from usher.composition import (
     _READS,
     _WRITTEN_BY,
+    BootstrapOutcome,
     ConcededImport,
     FailedImport,
     Pipeline,
@@ -91,10 +92,17 @@ from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.source import Source
 from usher.domain.title import Title
-from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
+from usher.ports.bulk import (
+    GENOME_TAG_COUNT,
+    BulkBatch,
+    BulkCursor,
+    BulkDataset,
+    GenomeTag,
+    ImdbTitle,
+)
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
 from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.jobs import JobQueue, JobRequest
@@ -1501,10 +1509,6 @@ class _JournallingRuns(FakeImportRunRepository):
         self._note(run.dataset)
         await super().save(run)
 
-    async def note_failure(self, dataset: str, error: str) -> ImportRun:
-        self._note(dataset)
-        return await super().note_failure(dataset, error)
-
 
 #: One title, invented, so a phase that refuses an empty catalog will proceed.
 #: Every value here is synthetic (`tests/fixtures/README.md`'s rule) and none
@@ -2309,7 +2313,7 @@ async def test_a_revision_blip_over_a_completed_import_fails_the_run_and_blocks_
     )
     assert outcome.skipped == ()
     assert printed == [
-        f"{one.dataset} failed before its first batch landed, and its completed import "
+        f"{one.dataset} failed, and its completed import at position {one.position} "
         f"stands: {one.error}{_RESUME}{phase}"
         for one, phase in zip(stood, ("imdb", "ratings"), strict=True)
     ]
@@ -2415,6 +2419,307 @@ async def test_an_import_another_process_holds_is_left_to_it_whatever_its_row_sa
         "tmdb.ids.movie was left alone: another process is importing it; once that process "
         "ends, resume with: usher bootstrap --phase tmdb-ids"
     ]
+
+
+def _held_skip_line(step: BootstrapPhase) -> str:
+    return (
+        f"{step.value} skipped: imdb.title.basics is being imported by another process, "
+        f"and {step.value} reads what that import writes; once that process ends, resume "
+        f"with: usher bootstrap --phase {step.value}"
+    )
+
+
+@pytest.mark.parametrize("row", [ImportRunStatus.COMPLETED, None], ids=["refresh", "first"])
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_a_dataset_another_process_is_importing_blocks_every_phase_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    step: BootstrapPhase,
+    row: ImportRunStatus | None,
+) -> None:
+    """Whatever its row says: a refresh reads `completed` until its first batch lands.
+
+    Read by status alone, `--phase credit-names` joined `titles` while a worker's `imdb`
+    refresh was upserting them. The hold is what says an import is live, so a held
+    prerequisite is unfinished -- and a first import not yet committed has no row at all.
+    Released, it blocks nothing again.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    holder = FakeImportRunRepository(shares=runs)
+    if row is not None:
+        await _checkpoint(holder, "imdb.title.basics", row, 9)
+    await holder.hold("imdb.title.basics")
+    before = await runs.list_runs()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.skipped == (SkippedStep(step, (), (step,), ("imdb.title.basics",)),)
+    assert outcome.unfinished == outcome.skipped
+    assert printed == [_held_skip_line(step)]
+    assert await runs.list_runs() == before, "nothing was started"
+
+    await holder.release("imdb.title.basics")
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    after = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+    assert after.skipped == ()
+    assert [one.run.dataset for one in after.failed] == [_DATASET_OF[step]]
+
+
+async def test_a_failure_meeting_a_dataset_another_process_holds_writes_nothing_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """This run's `HEAD` fails while another process is importing the same dataset.
+
+    The failure was written onto the holder's row, and the line told the operator to
+    resume a dataset that was being imported. Only a holder writes a row: this run is
+    refused the hold, writes nothing, and its line says another process has it.
+    """
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    holder = FakeImportRunRepository(shares=runs)
+    live = await _checkpoint(holder, "imdb.title.basics", ImportRunStatus.RUNNING, 40)
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.IMDB,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await runs.get("imdb.title.basics") == live, "the holder's row, untouched"
+    assert outcome.unfinished == (
+        ConcededImport(BootstrapPhase.IMDB, live),
+        SkippedStep(BootstrapPhase.RATINGS, (), (BootstrapPhase.RATINGS,), ("imdb.title.basics",)),
+    )
+    assert printed == [
+        "imdb.title.basics was left alone: another process is importing it; once that "
+        "process ends, resume with: usher bootstrap --phase imdb",
+        _held_skip_line(BootstrapPhase.RATINGS),
+    ]
+
+
+class _Genome(BulkDataset[Any]):
+    """`movielens.genome` at `R2`, offline; the fetch and the vocabulary are scripted.
+
+    `fetch` fails the first fetch with that error, or with none the drain yields nothing
+    and completes. `vocabulary` likewise fails `tag_vocabulary`. `watch` is asked, while
+    the vocabulary loads, whether the dataset is held -- by somebody other than it.
+    """
+
+    def __init__(
+        self,
+        *,
+        fetch: UsherPortError | None = None,
+        vocabulary: UsherPortError | None = None,
+        watch: FakeImportRunRepository | None = None,
+    ) -> None:
+        self._fetch, self._vocabulary, self._watch = fetch, vocabulary, watch
+        self.asked: list[str] = []
+        self.held_while_loading: list[bool] = []
+
+    @property
+    def name(self) -> str:
+        return "movielens.genome"
+
+    @property
+    def attribution(self) -> str:
+        return "synthetic, never redistributed"
+
+    async def revision(self) -> str:
+        return "R2"
+
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[Any]]:
+        return self._none()
+
+    async def _none(self) -> AsyncIterator[BulkBatch[Any]]:
+        if self._fetch is not None:
+            raise self._fetch
+        for _ in ():
+            yield BulkBatch(rows=(), cursor=BulkCursor(revision="R2", position=0, rows_seen=0))
+
+    async def tag_vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
+        self.asked.append(revision)
+        if self._watch is not None:
+            self.held_while_loading.append(await self._watch.held_elsewhere(self.name))
+        if self._vocabulary is not None:
+            raise self._vocabulary
+        return _vocabulary_of(revision)
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _vocabulary_of(revision: str) -> tuple[GenomeTag, ...]:
+    return tuple(
+        GenomeTag(tag_id=n, tag=f"{revision} tag {n}") for n in range(1, GENOME_TAG_COUNT + 1)
+    )
+
+
+async def _genome_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    dataset: _Genome,
+    catalog: FakeBulkCatalogRepository,
+    runs: FakeImportRunRepository,
+    printed: list[str],
+) -> BootstrapOutcome:
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    monkeypatch.setattr(usher.composition, "MovieLensGenomeDataset", lambda *_, **__: dataset)
+    _without_retries(monkeypatch)
+    return await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.MOVIELENS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+
+async def _a_genome_at_r1(runs: FakeImportRunRepository) -> FakeBulkCatalogRepository:
+    """A catalog whose vectors and vocabulary are `R1`'s, and the checkpoint that says so."""
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    await catalog.replace_genome_tags(_vocabulary_of("R1"), revision="R1")
+    await runs.save(
+        ImportRun(
+            dataset="movielens.genome",
+            revision="R1",
+            status=ImportRunStatus.COMPLETED,
+            position=2,
+        )
+    )
+    return catalog
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PortDataMalformed("a malformed run in R2's scores"),
+        PortUnavailable("GET ml-latest.zip failed: ConnectTimeout"),
+    ],
+    ids=["malformed", "download-never-lands"],
+)
+async def test_a_movielens_refresh_that_landed_no_batch_keeps_the_vocabulary_it_had(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, error: UsherPortError
+) -> None:
+    """The refresh stands `completed` at `R1`, and so must `R1`'s vocabulary.
+
+    Read off the returned status, the phase loaded `R2`'s vocabulary over `R1`'s vectors
+    and the verdict read `mismatched`; with the download down, loading it downloaded the
+    archive again, outside the hold, and its second failure raised out of the run.
+    """
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    dataset = _Genome(fetch=error, vocabulary=error)
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    stored = await runs.get("movielens.genome")
+    assert stored is not None
+    assert (stored.status, stored.revision) == (ImportRunStatus.COMPLETED, "R1"), "the premise"
+    assert [one.run for one in outcome.failed] == [stored]
+    assert dataset.asked == [], "a vocabulary was loaded for a run that did not complete"
+    assert {revision for _, _, revision in catalog.genome_tags()} == {"R1"}
+
+
+async def test_a_movielens_import_another_process_holds_loads_no_vocabulary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The holder's row reads `completed` at the very revision this run resolved.
+
+    So the returned status could not tell a concede from a completion, and this run
+    loaded a vocabulary beside the holder's own writes.
+    """
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    holder = FakeImportRunRepository(shares=runs)
+    stored = await runs.get("movielens.genome")
+    assert stored is not None
+    held = stored.evolve(revision="R2")
+    await holder.save(held)
+    await holder.hold("movielens.genome")
+    dataset = _Genome()
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    assert outcome.unfinished == (ConcededImport(BootstrapPhase.MOVIELENS, held),)
+    assert dataset.asked == []
+    assert {revision for _, _, revision in catalog.genome_tags()} == {"R1"}
+
+
+async def test_the_vocabulary_is_loaded_under_the_hold_by_the_run_that_completed_the_vectors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Loaded after the hold was given back, it raced whichever process took it next."""
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    dataset = _Genome(watch=FakeImportRunRepository(shares=runs))
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    assert outcome.succeeded, outcome
+    assert dataset.asked == ["R2"]
+    assert dataset.held_while_loading == [True]
+    assert {revision for _, _, revision in catalog.genome_tags()} == {"R2"}
+
+
+async def test_a_vocabulary_that_fails_after_the_vectors_completed_is_recorded_not_raised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Every other failure of the phase is recorded; this one raised out of the whole run."""
+    runs = FakeImportRunRepository()
+    catalog = await _a_genome_at_r1(runs)
+    dataset = _Genome(vocabulary=PortDataMalformed("genome-tags.csv names 1127 tags"))
+    printed: list[str] = []
+
+    outcome = await _genome_run(monkeypatch, tmp_path, dataset, catalog, runs, printed)
+
+    stored = await runs.get("movielens.genome")
+    assert stored is not None
+    assert (stored.status, stored.revision, stored.error) == (
+        ImportRunStatus.COMPLETED,
+        "R2",
+        "genome-tags.csv names 1127 tags",
+    )
+    assert outcome.failed == (FailedImport(BootstrapPhase.MOVIELENS, stored),)
+    assert printed[-1] == (
+        "movielens.genome failed, and its completed import at position 0 stands: "
+        "genome-tags.csv names 1127 tags; resume with: usher bootstrap --phase movielens"
+    )
 
 
 class _WindowFailsToClose(FakeBulkCatalogRepository):

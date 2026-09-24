@@ -319,9 +319,9 @@ def test_a_revision_that_fails_over_completed_imports_leaves_them_completed_and_
     }
     printed = _printed(capsys.readouterr().out)
     assert [line for line in printed if "resume with: " in line] == [
-        f"{_BASICS} failed before its first batch landed, and its completed import stands: "
+        f"{_BASICS} failed, and its completed import at position 12345 stands: "
         f"{error[_BASICS]}; resume with: usher bootstrap --phase imdb",
-        f"{_RATINGS} failed before its first batch landed, and its completed import stands: "
+        f"{_RATINGS} failed, and its completed import at position 99 stands: "
         f"{error[_RATINGS]}; resume with: usher bootstrap --phase ratings",
     ]
 

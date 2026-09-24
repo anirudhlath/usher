@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from usher.db.base import build_engine, build_session_factory
@@ -217,3 +217,62 @@ async def test_an_import_cancelled_in_its_first_fetch_leaves_a_completed_one_sta
     assert stored is not None
     assert stored == completed.evolve(heartbeat_at=stored.heartbeat_at)
     assert (retaken.revision, retaken.position) == ("etag-1", 0)
+
+
+async def test_an_import_whose_hold_ends_mid_download_stops_and_says_so(
+    postgres_url: str, forget_probe: None
+) -> None:
+    """The hold's connection is ended while the first fetch waits on a download.
+
+    `idle_session_timeout`, a proxy's idle cut and a restart all end it the same way, and
+    the advisory lock goes with it. Nothing checked, so the import went on writing a
+    dataset any other process could now take. The next beat confirms the hold, finds it
+    gone, and the import is recorded failed -- by a process that took the dataset again
+    to write it, and gave it back.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, fetching = asyncio.Event(), asyncio.Event()
+    written: list[Sequence[int]] = []
+    try:
+        async with factory() as session:
+            service = BootstrapService(
+                PostgresImportRunRepository(session),
+                FakeBulkCatalogRepository(),
+                session.commit,
+                events=NullEventPublisher(),
+                phase=BootstrapPhase.CROSSWALK,
+                heartbeat=0.05,
+            )
+            task = asyncio.create_task(
+                service.import_dataset(
+                    _Gated(gate, fetching),
+                    _recorder(written),  # type: ignore[arg-type]
+                )
+            )
+            await asyncio.wait_for(fetching.wait(), 5)
+            async with engine.connect() as killer:
+                ended = await killer.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND classid = CAST(:ns AS oid) "
+                        "AND objid = CAST(hashtext(:dataset) AS oid) AND objsubid = 2"
+                    ),
+                    {"ns": 0x75736872, "dataset": _DATASET},
+                )
+            run = await asyncio.wait_for(task, 5)
+
+        async with factory() as reader:
+            after = PostgresImportRunRepository(reader)
+            stored = await after.get(_DATASET)
+            retaken = await after.start(_DATASET, "etag-1")
+            await after.release(_DATASET)
+    finally:
+        await engine.dispose()
+
+    assert ended == 1, "the premise: the one backend holding the dataset was ended"
+    assert written == [], "the import wrote after its hold was gone"
+    assert run.status is ImportRunStatus.FAILED
+    assert (run.error or "").startswith(f"lost the hold on the import of {_DATASET}"), run.error
+    assert stored == run
+    assert (retaken.revision, retaken.position) == ("etag-1", 0), "the dataset is free again"

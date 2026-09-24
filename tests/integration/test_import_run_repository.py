@@ -1,10 +1,12 @@
 """PostgresImportRunRepository against real Postgres."""
 
+import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
-from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from tests.contract.import_run_repository_contract import ImportRunRepositoryContract
 from usher.db.base import build_engine, build_session_factory
@@ -15,7 +17,7 @@ from usher.ports.errors import RepositoryConflict
 
 
 class _Releasing(PostgresImportRunRepository):
-    """Remembers every dataset it started, so the fixture can give each hold back.
+    """Remembers every dataset it held, so the fixture can give each hold back.
 
     A hold is a checked-out connection holding an advisory lock, and one left behind
     would refuse the next case's `start()` of the same dataset.
@@ -25,10 +27,9 @@ class _Releasing(PostgresImportRunRepository):
         super().__init__(session)
         self.started: set[str] = set()
 
-    async def start(self, dataset: str, revision: str) -> ImportRun:
-        run = await super().start(dataset, revision)
+    async def hold(self, dataset: str) -> None:
+        await super().hold(dataset)
         self.started.add(dataset)
-        return run
 
     async def release_all(self) -> None:
         for dataset in self.started:
@@ -134,3 +135,162 @@ async def test_round_trips_every_field(session: AsyncSession) -> None:
     assert (fetched.position, fetched.rows_seen, fetched.rows_written) == (17, 1234, 1200)
     assert fetched.id == run.id
     assert fetched.started_at.tzinfo is not None
+
+
+_NAMESPACE = 0x75736872
+
+
+async def _free(engine: AsyncEngine, dataset: str, *, within: float = 5.0) -> bool:
+    """Whether another connection can take `dataset`'s lock within `within` seconds.
+
+    A try-lock, given straight back, rather than a read of `pg_locks`: it names the lock
+    the way the repository takes it, so it cannot share a mistake in reading one. Polled,
+    because a closed backend lets go of its locks a moment after the client hangs up.
+    """
+    deadline = asyncio.get_running_loop().time() + within
+    async with engine.connect() as probe:
+        await probe.execution_options(isolation_level="AUTOCOMMIT")
+        while True:
+            # `execute`, not `scalar`: the case below replaces `AsyncConnection.scalar`.
+            taken = await probe.execute(
+                text("SELECT pg_try_advisory_lock(:ns, hashtext(:dataset))"),
+                {"ns": _NAMESPACE, "dataset": dataset},
+            )
+            if taken.scalar_one():
+                await probe.execute(
+                    text("SELECT pg_advisory_unlock(:ns, hashtext(:dataset))"),
+                    {"ns": _NAMESPACE, "dataset": dataset},
+                )
+                return True
+            if asyncio.get_running_loop().time() > deadline:
+                return False
+            await asyncio.sleep(0.05)
+
+
+class _Interrupted(BaseException):
+    """What a cancellation or a Ctrl-C delivers into an `await`: not an `Exception`."""
+
+
+async def test_a_hold_interrupted_after_its_lock_was_granted_leaves_no_lock_in_the_pool(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`close()` hands the connection back to the pool with the advisory lock still on it.
+
+    The next checkout of that connection -- by anything at all -- then holds the dataset
+    for as long as the pool keeps it, and every `start()` elsewhere is refused. The hold
+    invalidates it instead, as `release()` does, so its backend ends and the lock with it.
+    """
+    engine = build_engine(postgres_url, pool_size=1, max_overflow=0)
+    factory = build_session_factory(engine)
+    granted: list[bool] = []
+    original = AsyncConnection.scalar
+
+    async def granted_then_interrupted(
+        self: AsyncConnection, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        result = await original(self, statement, *args, **kwargs)
+        if "pg_try_advisory_lock" in str(statement):
+            granted.append(bool(result) and not await _free(engine_b, _PROBE, within=0))
+            raise _Interrupted
+        return result
+
+    engine_b = build_engine(postgres_url)
+    try:
+        async with factory() as session:
+            runs = PostgresImportRunRepository(session)
+            monkeypatch.setattr(AsyncConnection, "scalar", granted_then_interrupted)
+            try:
+                with pytest.raises(_Interrupted):
+                    await runs.start(_PROBE, "etag-1")
+            finally:
+                monkeypatch.undo()
+        assert granted == [True], "the premise: the lock was granted before the interruption"
+        assert await _free(engine_b, _PROBE), "the pooled connection kept the dataset's lock"
+    finally:
+        await engine.dispose()
+        await engine_b.dispose()
+
+
+_PROBE = "movielens.genome"
+
+
+async def test_held_elsewhere_reads_a_lock_whose_key_hashes_negative(session: AsyncSession) -> None:
+    """`pg_locks` shows each key as an unsigned `oid`; `hashtext` is a signed `int4`.
+
+    Read with the wrong sign, every dataset whose name hashes negative -- `movielens.genome`
+    among them -- is never seen held, and nothing waits for its import.
+    """
+    runs, rival = _Releasing(session), _Releasing(session)
+    try:
+        signs = await session.scalar(
+            text("SELECT array[hashtext(:negative) < 0, hashtext(:positive) > 0]"),
+            {"negative": _PROBE, "positive": "imdb.title.basics"},
+        )
+        assert signs == [True, True], "the premise: one key of each sign"
+        for dataset in (_PROBE, "imdb.title.basics"):
+            await runs.hold(dataset)
+            assert await rival.held_elsewhere(dataset) is True, dataset
+    finally:
+        await runs.release_all()
+
+
+async def _end_the_backend_holding(engine: AsyncEngine, dataset: str) -> int:
+    """End whichever backend holds `dataset`, as `idle_session_timeout` would; how many."""
+    async with engine.connect() as killer:
+        ended = await killer.scalar(
+            text(
+                "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
+                "WHERE locktype = 'advisory' AND classid = CAST(:ns AS oid) "
+                "AND objid = CAST(hashtext(:dataset) AS oid) AND objsubid = 2"
+            ),
+            {"ns": _NAMESPACE, "dataset": dataset},
+        )
+    return int(ended or 0)
+
+
+async def test_a_hold_whose_backend_ended_is_refused_by_touch_and_taken_again_by_hold(
+    session: AsyncSession, postgres_url: str
+) -> None:
+    """`idle_session_timeout` ends the hold's connection, and the lock goes with it.
+
+    Nothing noticed: the import carried on as the holder of a dataset anybody could now
+    take. `touch` now confirms the hold on its own connection, so it refuses, and drops
+    it; `hold` then takes the dataset afresh.
+    """
+    runs = _Releasing(session)
+    engine = build_engine(postgres_url)
+    try:
+        await runs.start(_PROBE, "etag-1")
+        await runs.touch(_PROBE)
+        ended = await _end_the_backend_holding(engine, _PROBE)
+        assert ended == 1, "the premise: exactly one backend held the lock, and it ended"
+        with pytest.raises(RepositoryConflict, match="lost the hold"):
+            await runs.touch(_PROBE)
+        assert await _free(engine, _PROBE), "the dataset is anybody's"
+        await runs.hold(_PROBE)
+        assert await PostgresImportRunRepository(session).held_elsewhere(_PROBE) is True
+    finally:
+        await runs.release_all()
+        await engine.dispose()
+
+
+async def test_a_hold_that_ended_unnoticed_is_taken_again_by_the_next_hold(
+    session: AsyncSession, postgres_url: str
+) -> None:
+    """A failure is recorded by taking the hold, and the one it finds may be long dead.
+
+    Kept as it was, the failure would be written by a process holding nothing; `hold`
+    confirms a hold it already has, and takes a dead one again.
+    """
+    runs = _Releasing(session)
+    engine = build_engine(postgres_url)
+    try:
+        await runs.hold(_PROBE)
+        ended = await _end_the_backend_holding(engine, _PROBE)
+        assert ended == 1, "the premise: exactly one backend held the lock, and it ended"
+        await runs.hold(_PROBE)
+        await runs.touch(_PROBE)
+        assert await PostgresImportRunRepository(session).held_elsewhere(_PROBE) is True
+    finally:
+        await runs.release_all()
+        await engine.dispose()
