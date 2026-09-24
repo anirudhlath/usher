@@ -1,4 +1,4 @@
-"""Every pointer outside the dated records lands on something that exists."""
+"""Every pointer outside the dated records and the hash-pinned evals lands on something real."""
 
 import pathlib
 import posixpath
@@ -13,7 +13,12 @@ import pytest
 _ROOT = pathlib.Path(__file__).parents[2]
 
 # Records of a past state: read as history, never edited to match the tree.
-_DATED_RECORDS = ("docs/plans/", "docs/specs/", "docs/evals/")
+_DATED_RECORDS = ("docs/plans/", "docs/specs/")
+_DATED_EVALS = re.compile(r"^docs/evals/[^/]+\.md$")
+
+# Live, not history, and still never edited to fit: every ledger row records the
+# sha256 of the bars.toml it ran against, and the ledger is append-only.
+_HASH_PINNED = frozenset({"docs/evals/bars.toml", "docs/evals/ledger.jsonl"})
 
 # Both spell a citation pattern: the prose hook a narrower one, this file its own.
 _SPELLS_THE_PATTERN = frozenset(
@@ -68,9 +73,18 @@ def _git_files() -> list[str]:
     return [path for path in listed.stdout.decode().split("\0") if path]
 
 
+def _exempt(path: str) -> bool:
+    """Whether a tracked file is a dated record or hash-pinned, so its pointers stay as written."""
+    return (
+        path.startswith(_DATED_RECORDS)
+        or _DATED_EVALS.match(path) is not None
+        or path in _HASH_PINNED
+    )
+
+
 def _tracked() -> list[str]:
-    """Every file git tracks, minus the dated records."""
-    return [path for path in _git_files() if not path.startswith(_DATED_RECORDS)]
+    """Every file git tracks, minus the exempt ones."""
+    return [path for path in _git_files() if not _exempt(path)]
 
 
 def _cites_an_adr(path: str, line: str) -> bool:
@@ -214,6 +228,31 @@ def test_nothing_outside_the_dated_records_cites_an_adr() -> None:
     assert not citations, "citations of a decision record nobody can read:\n  " + "\n  ".join(
         citations
     )
+
+
+@pytest.mark.parametrize(
+    ("path", "exempt"),
+    [
+        ("docs/plans/2026-08-13-m10-hardening.md", True),
+        ("docs/specs/2026-08-18-usher-quality-evals-design.md", True),
+        ("docs/evals/2026-08-19-e1-baseline-window-disagreement.md", True),
+        ("docs/evals/bars.toml", True),
+        ("docs/evals/ledger.jsonl", True),
+        ("docs/evals/bars.toml.orig", False),
+        ("docs/evals/notes.toml", False),
+        ("docs/evals/runs/2026-09-01.md", False),
+        ("docs/evals.md", False),
+        ("docs/prd/05-search-and-similarity.md", False),
+    ],
+)
+def test_only_dated_records_and_the_hash_pinned_evals_are_exempt(path: str, exempt: bool) -> None:
+    assert _exempt(path) is exempt, f"{path} should read as exempt={exempt}"
+
+
+def test_the_hash_pinned_evals_are_files_git_tracks() -> None:
+    """An exemption naming a renamed file exempts nothing and hides that it does."""
+    missing = _HASH_PINNED - set(_git_files())
+    assert not missing, f"exempted by name, tracked by nobody: {sorted(missing)}"
 
 
 @pytest.mark.parametrize(

@@ -113,8 +113,7 @@ the plaintext exists only in memory in the adapter that needs it.
   outlives the response that carried it. The token is never logged, never a
   span attribute, and never written to a table, a cache or a file.
 - **`llm_api_key` travels in an `Authorization: Bearer` header, never in a
-  URL**, and no LLM error message carries a URL or a request body — the prompt
-  carries the household's watch history.
+  URL**, and no LLM error message carries a URL or a request body.
 - **At `USHER_LOG_LEVEL=DEBUG` the push socket library's own handshake and
   frame logging stays off**, so the source token in its request line is never
   logged.
@@ -280,9 +279,8 @@ services:
     healthcheck: { test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U usher"] }
 ```
 
-Abbreviated, not literal. The Postgres healthcheck needs `-h 127.0.0.1`: over
-the default Unix socket it reports ready before the real server is. The
-`env_file`/`environment` split **is** normative.
+Abbreviated, not literal. The Postgres healthcheck's `-h 127.0.0.1` and the
+`env_file`/`environment` split **are** normative.
 
 - Alembic migrations run on startup; the app refuses to serve on a schema
   mismatch rather than guessing.
@@ -327,10 +325,9 @@ written by a model this deployment is not configured with**, logs both names at
 `ERROR` and reports nothing as done. An operator typing
 `usher similar --rebuild` is not refused.
 
-**`USHER_SCHEDULER_ENABLED` defaults to `false`.** A full rebuild is hours of
-work and there is no mutual exclusion between processes, so a deployment
-running both the server and a separate `usher work` container with the
-scheduler on in each would start that walk twice.
+**`USHER_SCHEDULER_ENABLED` defaults to `false`.** It turns the scheduler on
+in the server; `usher schedule` runs it whatever the setting says. Nothing
+stops two processes starting the same job at once.
 
 **A period is a minimum interval since last completion, not a wall-clock
 schedule.** For a wall-clock time, or for the jobs without a long-lived
@@ -374,8 +371,7 @@ per row carrying `table` and `row`.**
 - **Every reference is written as a natural key.**
 - ⚠️ **The writer holds every carried table in memory before writing a
   byte.** The carried set is small.
-- An operator can read it — it is the only copy of the money ledger and of a
-  household's history.
+- An operator can read it.
 - It survives a Postgres version change.
 
 **The destination is written through a scratch sibling and renamed into
@@ -453,8 +449,7 @@ own. It composes with `--dry-run`.
 
 ⚠️ **It covers exactly the references the importers rebuild.** A household the
 target does not hold, a source colliding on a name, and a credential whose
-source is absent all still refuse with the flag set. Skipping a household would
-silently drop every watch state in the file.
+source is absent all still refuse with the flag set.
 
 **How each carried table is restored:**
 
@@ -505,8 +500,7 @@ policy is derived from them.
 | Usher process | **~500 MB–1 GB**, plus the loaded model under the `fastembed:` runtime — 🔶 unmeasured, and no smaller than the checkpoint below. Under `openai:` no model is loaded in this process at all |
 | Embedding model | 🔶 **~1.2 GB** on disk for the shipped default, `fastembed:BAAI/bge-large-en-v1.5` — fastembed's declared size, not a measured download; **0 on the `openai:` runtime** |
 
-**A full `usher similar --rebuild` is an overnight job, not a follow-on step** —
-it is an exact scan, not an index walk.
+**A full `usher similar --rebuild` is an overnight job, not a follow-on step.**
 
 Tuning that matters: `maintenance_work_mem` high enough to avoid the
 `hnsw graph no longer fits into maintenance_work_mem` notice during index

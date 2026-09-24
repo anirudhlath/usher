@@ -135,10 +135,8 @@ jobs:
             web/test-results/
           retention-days: 7
 
-  # The 120 screenshot comparisons. A failure everywhere is evidence about the
-  # code, not the runner: moving this job into a pinned image, then onto a
-  # self-hosted runner, fixed nothing, because the cause was a font family name
-  # no @font-face matched. Baselines are portable across hosts.
+  # The 120 screenshot comparisons. Baselines are portable across hosts, so a
+  # failure everywhere is evidence about the code, not the runner.
   console-visual:
     runs-on: ubuntu-latest
     container:
@@ -153,9 +151,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # `--workers=1`, from the script. At three workers the `feedback` group
-      # failed and then passed twice in isolation: three browsers racing one
-      # preview server for webfonts is enough to catch a screenshot mid-layout.
+      # `--workers=1`, from the script: browsers racing one preview server for
+      # webfonts can catch a screenshot mid-layout.
       - name: Visual regression
         run: npm run e2e:visual
 

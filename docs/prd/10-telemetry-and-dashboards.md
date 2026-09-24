@@ -299,16 +299,13 @@ tasks.** **This schema has no play-event log.** `watch_states` is one row per
   attributable to a day need a row per play; the only date any row carries is
   the last one, and `play_count` carries none at all.
 - **"Taste drift as genre affinity in a stacked area over months" has no
-  backing series** (#84), for the same reason — and ⚠️ **the failure mode is not
-  the one this was expected to have.** A rewatch erases a title's earlier
-  dates, but the larger problem is that one date per title is a scatter of
-  points, not a stacked area under any denominator.
+  backing series** (#84), for the same reason: one date per title is a scatter
+  of points, not a stacked area under any denominator, and a rewatch erases a
+  title's earlier dates.
 - **"Row effectiveness: plays attributed per `RowProvider`" has no backing
-  series** (#85), **and this document already says so in its own words in the
-  paragraph above `## Dashboards`**: *"This column is joined to a **search**,
-  not to a row: `search_queries` has no row slug, no `generation_id` and no
-  provider, and a play launched from a home shelf carries no `search_id` at
-  all"*. `surface` and `tier` are not row handles either.
+  series** (#85). `search_queries` has no row slug, no `generation_id` and no
+  provider, a play launched from a home shelf carries no `search_id` at all, and
+  `surface` and `tier` are not row handles either.
 
 - **"Time-of-day heatmap" is backed and mis-titled.** `last_played_at` gives
   one hour per item — the hour of its *last* play — so the honest panel is
@@ -450,7 +447,8 @@ three surfaces arrive with later eval phases.
 `~/code/observability/` running Grafana, Prometheus, Loki and Tempo. One stack
 serves Usher and anything added later.
 
-Usher's only coupling is configuration, in `.env`:
+Usher's only coupling is configuration, three keys set in `.env` — the two
+`OTEL_` keys edited where `.env.example` already has them:
 
 ```
 COMPOSE_FILE=compose.yml:compose.observability.yml
@@ -462,10 +460,10 @@ The stack publishes every port on `127.0.0.1`, so a container reaches the
 collector only over the shared `observability` docker network, by the
 collector's service name. **Joining that network is opt-in.**
 `compose.observability.yml` declares it `external: true` and adds it to the
-`usher` service beside `default`. `compose.yml` does neither, because an
-external network that does not exist fails `docker compose up` outright, on
-every host without a telemetry stack. `COMPOSE_FILE` in `.env` applies the
-override to every compose command, which `-f` on one command does not.
+`usher` service beside `default`. `compose.yml` does neither, so
+`docker compose up` works on a host with no telemetry stack. `COMPOSE_FILE` in
+`.env` applies the override to every compose command, which `-f` on one command
+does not.
 `Settings` drops `COMPOSE_*` keys ([08](08-operations.md)).
 
 **Telemetry is never required.** With no endpoint configured Usher runs

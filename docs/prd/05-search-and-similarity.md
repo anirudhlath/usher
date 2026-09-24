@@ -5,7 +5,7 @@
 | | Scale | Job | What it needs |
 |---|---|---|---|
 | **Catalog lookup** | ~1.3M skeleton titles | "Find the half-remembered title" | Fast typo-tolerant prefix match on names and people, plus facets |
-| **Library experience** | ~2k–10k owned titles | Taste, similarity, curation | Rich blending — and at this scale *every* technique is cheap |
+| **Library experience** | ~2k–10k owned titles | Taste, similarity, curation | Rich blending |
 
 At library scale similarity is exact brute-force cosine. **No ANN index is
 required for that tier.**
@@ -49,9 +49,8 @@ Instead: a trigram index, candidates capped at a few hundred, then
 that capped set.
 
 **The trigram index is on `titles` directly, and GIN rather than GiST.** **The
-two must not both exist** — with a GiST trigram index present the planner takes
-it for `%` and suggest latency more than quadruples, so a path that needs KNN
-must *replace* the GIN index rather than sit beside it.
+two must not both exist**: a path that needs KNN *replaces* the GIN index rather
+than sitting beside it.
 
 **`title_search_names` is the narrow table**, `(title_id, name, kind, region,
 language)`. It carries **no `primary` rows** — a canonical name is answered by
@@ -119,10 +118,8 @@ one is *narrowed* rather than broken.
 `enrichment_state <> 'skeleton'`.
 
 **Throughput is linear in tokens, not texts**, and a typical
-`name + overview + genres + keywords` document is ~100–130 tokens. A tokens/s
-figure sizes the *model* and never the queue: an `index` job is the model plus
-a claim, three reads, a staged `COPY` and a commit, so `usher index`'s printed
-estimate runs optimistic.
+`name + overview + genres + keywords` document is ~100–130 tokens. `usher
+index`'s printed estimate sizes the model, not the queue, and runs optimistic.
 
 **Freshness is a predicate, never an inference.** `title_embeddings` records
 `model_name` (runtime *and* checkpoint) and a `source_fingerprint` — the `md5`
@@ -183,10 +180,8 @@ a pair changes only that pair.
 stored and read per pair, so `usher similar --rebuild` goes on reporting the
 fraction of candidate pairs carrying a vector on **both** sides.
 
-⚠️ **Whichever signal arrives next must not be called `tags`.** That key named
-the tag genome, and a stored score records only a `blend_fingerprint`, so a
-later reader could not tell which signal a row contains. The genome, if it
-returns, is `genome`; a user-tag term is `user_tags`.
+⚠️ **Whichever signal arrives next must not be called `tags`.** The genome, if
+it returns, is `genome`; a user-tag term is `user_tags`.
 
 ⏳ **Cast/crew Jaccard and collection membership are not terms.** Adding either
 needs a full `usher similar --rebuild`. Unassigned.
@@ -342,9 +337,8 @@ The port is a candidate-generation contract:
 - **No `rebuild`.** The predicate-driven backfill rebuilds from scratch.
 
 **Fuzzy suggest does not recover typos in short one-word names** — `Up`,
-`Her`, `Dune` — where a single typo destroys most of a four-character name's
-trigrams and transposition is a total blind spot. Above eight characters the
-trigram path needs nothing.
+`Her`, `Dune` — and transposition is a total blind spot. Above eight characters
+the trigram path needs nothing.
 
 **Suggest is two-tier:**
 
@@ -355,8 +349,8 @@ trigram path needs nothing.
   and **writes nothing**.
 - **Tier 2** is the debounced trigram + `levenshtein_less_equal` path.
 
-They are complements: the btree has almost no typo tolerance and the trigram
-path cannot meet a keystroke budget at any setting.
+They are complements: tier 1 has almost no typo tolerance, and tier 2 is not a
+keystroke path.
 
 **`GET /search/suggest?q=&tier=prefix|fuzzy&limit=`** is one route with two
 separately-askable tiers, defaulting to `prefix`, echoing the tier that

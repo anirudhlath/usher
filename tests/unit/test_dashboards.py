@@ -134,8 +134,8 @@ _UNBACKED = re.compile(r'\*\*"(?P<panel>[^"]+)" has no backing series\*\* \(#(?P
 
 # A sentence end: a full stop, optionally swallowing the `**` that closes a bold
 # span opened mid-sentence, followed by whitespace or the end of the bullet. A
-# naive `\. ` split cuts `...expected to have.** A rewatch...` in the wrong
-# place and hands back a sentence that begins with a stray bold marker.
+# naive `\. ` split cuts `...**a bold claim.** The next...` in the wrong place
+# and hands back a sentence that begins with a stray bold marker.
 _SENTENCE_END = re.compile(r"\.(?:\*\*)?(?=\s|$)")
 
 # A bullet whose first sentence stops at the issue reference has put its reason
@@ -761,6 +761,17 @@ def test_the_prd_parse_of_the_unbacked_panels_is_falsifiable() -> None:
     )
     assert absence_sentences(reasoned) == [
         '**"X" has no backing series** (#85), because nothing writes it.'
+    ]
+
+    # A sentence that ends inside a bold span ends after its closing `**`.
+    bold = (
+        "### 2 — Taste & Watching\n"
+        '- **"Y" has no backing series** (#86), and **the cause is not the obvious one.**\n'
+        "  A second sentence nobody quoted.\n"
+        "### 3 — Pipeline\n"
+    )
+    assert absence_sentences(bold) == [
+        '**"Y" has no backing series** (#86), and **the cause is not the obvious one.**'
     ]
 
 
