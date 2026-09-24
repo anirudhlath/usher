@@ -3307,3 +3307,26 @@ Found, and fixed before the tag:
 
 Not fixed: the 2,872 enrich jobs parked after one attempt, and nothing
 un-parks a job. That is [#87](https://github.com/anirudhlath/usher/issues/87).
+
+### R13's fourth run — steps 1–3 at the release head (2026-09-24)
+
+A fresh clone of the public remote at `4c0a923e`, every command run through
+`fish -c` as written. The stack was separated as the README's second-stack
+warning says: `COMPOSE_PROJECT_NAME` added, `USHER_COMPOSE_NETWORK` and
+`USHER_COMPOSE_HOST_PORT` changed where `.env.example` puts them. `docker
+compose config` resolved one network, the project's own, before the first `up`.
+
+| step | | |
+|---|---|---|
+| clone | 3.7 s | from GitHub |
+| 1 · `compose up -d --build` | 18.9 s | no external network needed |
+| 3 · `bootstrap --phase imdb` | 99.3 s | 1,279,749 titles |
+| 3 · `bootstrap --phase tmdb-ids` | 16.6 s | |
+| 3 · `bootstrap --phase crosswalk` | 1,274.4 s | **exit 0**, 293,665 titles linked, 55,590 of them series |
+| 3 · `bootstrap-status` | 2.7 s | every row `completed`, none with `error=` |
+
+✅ **The crosswalk completed through eight WDQS failures, on five of its pages**:
+four read timeouts, two dropped connections, one `502` and one truncated body.
+Three pages needed a third attempt and none a fourth. Both counts matched the
+scratch-database run exactly. The README's step 3 now gives the range, 491 s to 1,274 s.
+Steps 4–7 were not re-run; the third run above is their record.

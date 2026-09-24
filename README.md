@@ -140,7 +140,8 @@ every line works as written in bash, zsh or fish.
 
 🔴 **Read this first: it is not a five-minute path, and the long poles are
 steps 5 and 6.** The times below were measured on 2026-09-23 and 2026-09-24.
-Steps 1 to 3 take about ten minutes, most of it the crosswalk.
+Steps 1 to 3 take ten to twenty-five minutes, most of it the crosswalk, whose
+time depends on how Wikidata's endpoint is doing.
 Syncing and enriching a real library take **hours**, because both are paced
 by somebody else's server rather than by yours. That run never reached an
 enriched home screen, so nothing below claims one.
@@ -205,22 +206,22 @@ curl -sf http://localhost:8100/health/ready
 ```
 docker compose exec usher usher bootstrap --phase imdb       # 93 s, 1,279,749 titles
 docker compose exec usher usher bootstrap --phase tmdb-ids   # 17 s
-docker compose exec usher usher bootstrap --phase crosswalk  # 491 s, four retries included
+docker compose exec usher usher bootstrap --phase crosswalk  # 491 s to 1,274 s, retries included
 ```
 
 🔴 **`--phase imdb` alone is not enough, and the failure is silent until step
 6.** IMDb gives you titles with no TMDb id, and enrichment has nothing to
 enrich *from*: every job parks with `title carries no tmdb id to enrich from`,
 and `/home` never gets past the rows that need no enrichment (step 7).
-`tmdb-ids` and `crosswalk` are what make the catalog enrichable. A complete
-crosswalk on 2026-09-24 took 491 s and gave 293,665 titles a TMDb id, 55,590 of
-them series.
+`tmdb-ids` and `crosswalk` are what make the catalog enrichable. Two complete
+crosswalks on 2026-09-24 took 491 s and 1,274 s, and each gave 293,665 titles
+a TMDb id, 55,590 of them series.
 
 ⚠️ **Check that every phase finished.** The crosswalk reads Wikidata's public
 SPARQL endpoint page by page, and that endpoint times out and answers `502`
 often. A page that fails that way is retried from its checkpoint with backoff,
 up to five attempts and 15 minutes; each retry prints a line and the command
-carries on, and the 2026-09-24 run above retried four times. A phase that still
+carries on, and the two runs above retried four and eight times. A phase that still
 fails, or is skipped because an import it reads failed, makes the command exit
 1, and its line ends with the command that resumes it. Check that every row
 reads `completed`. A `completed` row that also shows `error=` is an attempt that
@@ -533,8 +534,8 @@ reported by name without its value, because a setting may be a credential.
 
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
-Wikidata's SPARQL endpoint. About ten minutes and 1.28M titles for those
-three, most of it the crosswalk; the two IMDb expansion phases below read
+Wikidata's SPARQL endpoint. Ten to twenty-five minutes and 1.28M titles for
+those three, most of it the crosswalk; the two IMDb expansion phases below read
 another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
 and it continues from its own checkpoint. **A phase that fails exits 1**, and
 so does one skipped because an import it reads is `failed`, `running` or being
