@@ -31,6 +31,9 @@ docs/prd/
 ├── 09-roadmap.md                    milestones
 └── 10-telemetry-and-dashboards.md   instrumentation, Grafana
 
+docs/guide/                          how-to for operators and client authors,
+                                     linked from README.md; commands, not design
+docs/runbooks/                       recovery, upgrade and rotation procedures
 docs/specs/                          point-in-time designs for implementation
 docs/plans/                          one file per milestone or eval phase,
                                      plus progress.md's four status tables

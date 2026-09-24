@@ -103,11 +103,13 @@ OpenAI-compatible server.
 `user_taste.centroid`, so changing models across widths is DDL that deletes
 every stored vector, centroid and neighbour row rather than a re-embed.
 
-**A checkpoint of the wrong width narrows the deployment rather than breaking
-it.** At startup the `Embedder`'s reported width is compared against the
+**A checkpoint of the wrong width is refused, not stored.** A `fastembed:`
+checkpoint reports its width at startup, where it is compared against the
 column's; on a mismatch Usher logs once and builds no embedder — so `INDEX`
 jobs go unclaimed and the catalog-lookup tier is untouched, exactly as a
-deployment with no model behaves.
+deployment with no model behaves. An `openai:` endpoint cannot be asked its
+width, so the first batch the process embeds is checked instead: a vector of
+the wrong width, or one that is not unit-length, parks that `INDEX` job.
 
 **The in-process runtime is `fastembed`**, with no torch. The dependency lives
 behind an extra and `USHER_EMBEDDING_ENABLED` is off by default: full-text and

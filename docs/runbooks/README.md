@@ -36,65 +36,14 @@ that touches a database other than the live one exports an overriding
 `USHER_DATABASE_URL` first, and reads the *resolved* host and port back before
 proceeding — the variable being set is not the same claim as it having won.
 
-⚠️ **`USHER_SECRET_KEY` is the seventh precious table.** `usher backup` never
-calls `build_cipher` and holds no key, so `source_credentials` travels as the
-ciphertext it is stored as. An artifact restored into a deployment holding a
-different key restores credentials nothing can decrypt. **Store the key with
-the artifact**, or you are backing up six of seven precious tables.
+⚠️ **`USHER_SECRET_KEY` is as precious as any table, and no artifact carries
+it.** `usher backup` never calls `build_cipher` and holds no key, so
+`source_credentials` travels as the ciphertext it is stored as. An artifact
+restored into a deployment holding a different key restores credentials nothing
+can decrypt. **Store the key with the artifact.**
 
-⚠️ **Nothing schedules `usher similar --rebuild`.** It is the standing freshness
+⚠️ **Nothing schedules `usher similar --rebuild` unless the scheduler is on**
+(`USHER_SCHEDULER_ENABLED`, off by default). It is the standing freshness
 gap in this project rather than anything specific to recovery — a title's
 neighbours go stale when some *other* title gets an embedding, which no per-row
 predicate can decide. Three of these four runbooks end up owing it.
-
----
-
-## Draft for `README.md` — not yet landed
-
-PRD [08](../prd/08-operations.md)'s backup section asks for one thing this
-directory cannot deliver on its own:
-
-> Disaster recovery becomes a short restore plus a background rebuild instead
-> of a crisis. **State this loudly in the README** — it is the difference
-> between "lost everything" and "lost an afternoon of indexing".
-
-**The paragraph below is that statement, drafted and deliberately not yet added
-to `README.md`.** It is parked here rather than landed because the repository's
-README pass belongs to a later phase of this milestone, and two groups editing
-`README.md` in one phase is a merge conflict for no benefit. Whoever does that
-pass moves it; nothing else in this directory depends on it.
-
-> ### Backing it up
->
-> **`usher backup` writes one gzipped JSON Lines file, and on the household
-> this project measures it is 434 kB and takes a second.** That is not a
-> database dump — it is the seven tables nothing can rebuild: the household,
-> the source and its credential, the watch history, the LLM spend ledger, the
-> row-provider settings, the search log, and the manual match decisions on
-> `media_items`. Everything else in the database — the 1.27 M-title catalog,
-> the embeddings, the neighbour graph, the payload cache, the artwork — is
-> rebuilt by the importers, so it is deliberately not carried.
->
-> **That asymmetry is the whole design, and it is what makes recovery
-> survivable: the restore is seconds and the rebuild is hours, they happen in
-> that order, and Usher serves in between.** Losing the database means losing
-> an afternoon of indexing rather than a household's history.
->
-> ```bash
-> uv run usher backup --output /var/tmp/usher-backup.jsonl.gz
-> ```
->
-> 🔴 **Keep `USHER_SECRET_KEY` with the artifact.** Source credentials travel
-> as the ciphertext they are stored as, and the file holds no key — restored
-> under a different one, every source has to be re-entered by hand. The command
-> says so on every run.
->
-> ⚠️ **A backup is not restorable into an empty database.** Rebuild the catalog
-> first, then restore on top of it; `usher restore --dry-run` tells you which
-> it is before anything is written. The full sequence, with real output, is
-> `docs/runbooks/restore.md`.
-
-*(One thing to change when this moves: the path in the last line is written
-relative to the repository root, so it is deliberately **not** a markdown link
-while it lives here — from `docs/runbooks/` it would resolve to nothing. Make it
-a link once it is in `README.md`, where the path is correct.)*

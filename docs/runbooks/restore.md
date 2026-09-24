@@ -32,7 +32,7 @@ The degradation is diagnosable rather than silent — Fernet's authentication ta
 makes a wrong key an `InvalidToken`, which surfaces as `PortDataMalformed` and
 renders on `GET /admin/sources/{id}/status` as *re-enter your credentials* — but
 that is a recovery you have to perform by hand, per source. **Store the key with
-the artifact, or you are restoring six of seven precious tables.**
+the artifact, or its credentials restore as ciphertext nothing can read.**
 
 ✅ **One case escapes the hand recovery, and it needs the old key rather than
 the credentials.** If you still hold the key the artifact was taken under, you

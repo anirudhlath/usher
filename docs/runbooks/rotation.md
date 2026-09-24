@@ -107,6 +107,14 @@ value being echoed; so is passing the key to `--new-key-env` itself.
 uv run usher rotate-secret --new-key-env USHER_NEW_SECRET_KEY
 ```
 
+In the compose stack, forward the exported variable into the container instead.
+`-e` with a name and no value passes the variable's value through without
+putting it on a command line:
+
+```fish
+docker compose exec -e USHER_NEW_SECRET_KEY usher usher rotate-secret --new-key-env USHER_NEW_SECRET_KEY
+```
+
 ```
 rotated     3
 already     0

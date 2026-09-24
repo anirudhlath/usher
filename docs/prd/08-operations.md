@@ -82,8 +82,8 @@ completed one it would read every item the source has.
 | `never` | No gap-closing walk at all, logged at `INFO`. **This has a cost**: Emby does not re-deliver what a disconnected client missed, so a change made during an outage waits for the next `usher sync` |
 
 A brand-new source does not populate itself through the push lane: run
-`usher sync --source "<name>"` once, as [the README](../../README.md)
-documents.
+`usher sync --source "<name>"` once, as the
+[command-line guide](../guide/command-line.md#syncing-a-media-server) documents.
 
 **A commanded walk is never gated by this.** `usher sync`,
 `POST /admin/sources/{id}/sync` and a cron entry all walk regardless of
