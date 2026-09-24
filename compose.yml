@@ -45,12 +45,6 @@ services:
       # So downloaded dumps survive `docker compose up --build`, and a dev shell
       # and the container share one download.
       - ./data/bulk:/data/bulk
-    networks:
-      # `observability` is the only route to the OTel collector, whose stack
-      # publishes ports on 127.0.0.1 alone. `default` must be named once another
-      # network is.
-      - default
-      - observability
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,10 +81,12 @@ services:
 networks:
   # Pinned, so the name is a contract rather than a function of this directory's
   # name, which a rename or a worktree would move. Anything joining the stack joins
-  # by it; renaming it is a silent breaking change.
+  # by it; renaming it is a silent breaking change. A second stack on the same host
+  # sets USHER_COMPOSE_NETWORK *and* its own COMPOSE_PROJECT_NAME: a shared name
+  # puts two `postgres` aliases on one network, a shared project recreates the
+  # first stack's containers.
+  #
+  # No external network here: `external: true` fails `up` on any host that lacks
+  # it. The telemetry stack's network is joined by compose.observability.yml.
   default:
-    name: usher_default
-  # The shared telemetry stack's network. External, because a `docker compose down`
-  # here must not try to remove a network that stack is on.
-  observability:
-    external: true
+    name: ${USHER_COMPOSE_NETWORK:-usher_default}

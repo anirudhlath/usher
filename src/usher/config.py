@@ -63,6 +63,12 @@ def _is_compose_only(key: object) -> bool:
     re-break the README's first step. `test_no_setting_hides_inside_the_
     reserved_namespace` is what keeps the second branch from ever swallowing
     a real field.
+
+    The second branch is also what admits compose's *own* variables,
+    `COMPOSE_PROJECT_NAME` and `COMPOSE_FILE`, which the README puts in `.env`
+    to separate a second stack and to opt into the telemetry network. The
+    dotenv source hands them over as `compose_project_name`; without the
+    branch they would be refused like any other unknown key.
     """
     if not isinstance(key, str):
         return False

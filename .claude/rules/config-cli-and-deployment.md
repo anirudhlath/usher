@@ -113,6 +113,9 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
   as `ports:` — plus its twin over `.env.example`; both are needed.
 - **Any case written for this passes `_env_file=` explicitly**, since the
   autouse fixture neutralises the class-level `env_file`.
+- **Compose's own `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE` in `.env` pass only
+  because `_is_compose_only` also drops the stripped `compose_` spelling** — the
+  README's second-stack and telemetry instructions stand on that branch.
 
 ## `env_file:` versus `environment:`
 
@@ -129,6 +132,9 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
 - **`USHER_COMPOSE_HOST_PORT` (default `8100`) is the host-side publish port**
   for container port 8000, not a bare `"8000:8000"` — this host already
   publishes something else there. Postgres is never published at all.
+- **`compose.yml` declares no `external: true` network**; one fails `up` on
+  every host that lacks it. The telemetry network is `compose.observability.yml`,
+  which must list `default` beside it — naming any network drops the implicit one.
 
 ## Where a per-deployment fact gets logged
 
@@ -154,10 +160,6 @@ Derive counts (`alembic heads`, `docker compose config`), never quote them.
 - **`README.md` must be `COPY`'d into the builder stage** before the second
   `uv sync` — `pyproject.toml` declares `readme = "README.md"` and hatchling
   reads it while building `usher`'s own wheel.
-- **`[tool.ruff] extend-exclude = ["docs", ".claude", "web"]` keeps ruff off
-  prose** — ruff 0.16+ formats Python fences inside Markdown, so an unscoped
-  `ruff format .` rewrites `docs/` and `.claude/rules/` — and an explicit path
-  argument bypasses the exclude entirely.
 
 ## Healthchecks
 

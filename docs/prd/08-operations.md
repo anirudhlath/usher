@@ -51,14 +51,19 @@ Docker Compose reads `.env` to substitute `${...}` into `compose.yml`, and
 Usher reads the same file as a settings source. `USHER_COMPOSE_*` keys belong
 to `compose.yml` and Usher drops them; every other `USHER_*` key must be a
 setting, and an unknown one (`USHER_LOG_LEVL=DEBUG`) is a startup failure.
+Compose's own `COMPOSE_*` variables are dropped too, so `.env` can carry
+`COMPOSE_PROJECT_NAME` (a second stack on one host) and `COMPOSE_FILE` (the
+telemetry network, [10](10-telemetry-and-dashboards.md#where-the-stack-lives)).
+Any other unknown key is refused.
 
 ### A documented setting has to reach the container
 
 `compose.yml` gives the `usher` service the whole `.env` (`env_file:`).
 `environment:` overrides it only for what the compose topology owns:
-`USHER_DATABASE_URL`, `USHER_HOST`/`USHER_PORT`, `USHER_SECRET_KEY`
-(substituted as `${...:?}` so a missing key fails at `docker compose up` with a
-sentence) and `USHER_IMAGE_CACHE_DIR` (a bind-mount path).
+`USHER_DATABASE_URL`, `USHER_HOST`/`USHER_PORT`, and the two bind-mount paths
+`USHER_IMAGE_CACHE_DIR`/`USHER_BULK_DATA_DIR`. `USHER_SECRET_KEY` is listed
+there too, as `${...:?}`, so a missing key fails at `docker compose up` with a
+sentence; its value is still the operator's.
 
 ### Starting the app is not a command to walk your library
 

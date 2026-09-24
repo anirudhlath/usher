@@ -131,14 +131,17 @@ authentication, a VPN, or an SSH tunnel. That decision belongs before the
 
 ## Quickstart
 
-Seven steps from clone to a screen with rows on it, every command through
-`docker compose exec` so they work in any shell.
+Seven steps from clone to the first rows on `/home`. The `usher` commands run
+inside the container through `docker compose exec`; the rest (`cp`, `openssl`,
+`mkdir`, `curl`) are plain host commands. None of them is shell-specific, so
+every line works as written in bash, zsh or fish.
 
 🔴 **Read this first: it is not a five-minute path, and the long poles are
-steps 5 and 6.** Measured end to end on a real deployment, 2026-09-11 — the
-numbers below are that run's, not estimates. Setup and catalog are ~6 minutes;
-syncing and enriching a real library are **hours**, because both are bounded by
-somebody else's server rather than by yours.
+steps 5 and 6.** The times below are from a clean clone on 2026-09-23. Steps 1
+to 3 took about six minutes (359 s, with a crosswalk that failed part-way).
+Syncing and enriching a real library take **hours**, because both are paced
+by somebody else's server rather than by yours. That run never reached an
+enriched home screen, so nothing below claims one.
 
 **1. Configure and start.** See [Running it](#running-it) for what each line is
 for — especially the `chown`, which has the best paragraph in this file.
@@ -146,21 +149,42 @@ for — especially the `chown`, which has the best paragraph in this file.
 ```
 cp .env.example .env
 openssl rand -hex 32          # paste into USHER_SECRET_KEY= in .env
-mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
-docker compose up -d --build  # ~28 s
 ```
 
-⚠️ **Put your TMDb key in `.env` now, as `USHER_TMDB_API_KEY=`.** It is listed
-under [Requirements](#requirements) and it is easy to skip here, because
-nothing fails until step 6 — where every enrichment job parks and step 7 then
-returns an empty screen with a `200`.
+⚠️ **Put your TMDb key in `.env` now, before `docker compose up`, as
+`USHER_TMDB_API_KEY=`.** Compose reads `.env` when it creates the container, so
+a key added after `up` never reaches it — re-run `docker compose up -d` if you
+add or change it later. It is listed under [Requirements](#requirements) and it
+is easy to skip, because nothing fails without it. The server logs
+`no TMDb API key configured; enrich and derive jobs will not be claimed` once at
+startup, and step 6's `enrich` queue then never moves.
 
-⚠️ **Already running Usher on this host?** `compose.yml` pins its network name
-(`usher_default`) deliberately, so a second stack joins the first one's network
-and **both `postgres` containers answer to the alias `postgres`**. Docker's DNS
-round-robins and the CLI reaches the wrong server — the symptom is
-`database "usher" does not exist` from `usher bootstrap` while `psql -d usher`
-works fine. Give the second stack its own network with an override file.
+⚠️ **Already running Usher on this host? Separate the second stack before its
+first `up`.** Put these three lines in the second checkout's `.env`, with names
+of your own:
+
+```dotenv
+COMPOSE_PROJECT_NAME=usher-scratch
+USHER_COMPOSE_NETWORK=usher-scratch_default
+USHER_COMPOSE_HOST_PORT=8101
+```
+
+and read `8100` below as `8101`. All three matter. **The project name is the
+one that destroys things**: compose names a project after its directory, a
+clone left at `git clone`'s default is called `usher`, and an `up` from a
+second checkout with the same project name recreates the first stack's
+containers with the second one's config. The network name is pinned
+(`usher_default`), so a second stack that keeps it joins the first one's
+network, **both `postgres` containers answer to the alias `postgres`**, and the
+CLI reaches whichever DNS picks. The symptom is `database "usher" does not
+exist` from `usher bootstrap` while `psql -d usher` works fine. `-p <name>`
+separates the project too, but not the network, and it has to be on every
+compose command; `.env` is read by all of them.
+
+```
+mkdir -p data/images data/bulk && sudo chown 1000:1000 data/images data/bulk
+docker compose up -d --build  # 26 s the first time, 8 s the second
+```
 
 **2. Check it is up.**
 
@@ -171,17 +195,33 @@ curl -sf http://localhost:8100/health/ready
 **3. Load a catalog — three phases, and the third is not optional.**
 
 ```
-docker compose exec usher usher bootstrap --phase imdb       # ~94 s, 1,277,520 titles
-docker compose exec usher usher bootstrap --phase tmdb-ids   # ~16 s
-docker compose exec usher usher bootstrap --phase crosswalk  # ~246 s
+docker compose exec usher usher bootstrap --phase imdb       # 93 s, 1,279,749 titles
+docker compose exec usher usher bootstrap --phase tmdb-ids   # 17 s
+docker compose exec usher usher bootstrap --phase crosswalk  # 224 s, to a failure; see below
 ```
 
 🔴 **`--phase imdb` alone is not enough, and the failure is silent until step
 6.** IMDb gives you titles with no TMDb id, and enrichment has nothing to
 enrich *from*: every job parks with `title carries no tmdb id to enrich from`,
-and `/home` then returns `200` with zero rows forever. `tmdb-ids` and
-`crosswalk` are what make the catalog enrichable — measured, they take 293,219
-titles from "no TMDb id" to "has one".
+and `/home` never gets past the rows that need no enrichment (step 7).
+`tmdb-ids` and `crosswalk` are what make the catalog enrichable. A complete
+crosswalk on 2026-09-11 took 246 s and gave 293,219 titles a TMDb id.
+
+⚠️ **The crosswalk can fail part-way, so check that it finished.** It reads
+Wikidata's public SPARQL endpoint shard by shard. On 2026-09-23 one shard
+(`position=3`) failed twice, once with a body that was not SPARQL JSON and once
+with a 90 s read timeout. Only movies were linked (193,188), and the series pass never ran.
+When a shard fails the command exits non-zero, and re-running the same command
+resumes from its checkpoint. Check that every row reads `completed`:
+
+```
+docker compose exec usher usher bootstrap-status
+```
+
+Re-run a phase whose row reads `failed` **before step 5**. If you run it
+afterwards, the enrichment jobs that already parked for want of an id stay
+parked, because nothing un-parks a job yet
+([#87](https://github.com/anirudhlath/usher/issues/87)).
 
 This still skips the IMDb expansion phases and MovieLens — see
 [Command line](#command-line) for `--phase all`, which is **3–5 hours**, mostly
@@ -206,22 +246,40 @@ docker compose exec usher usher sync --source "Living Room"
 ```
 
 🔴 **Budget hours, not minutes, and there is no bound flag.** Usher is a polite
-guest: outbound requests are rate-limited on purpose,
-so the walk is paced by your media server. Measured against a 1.14M-item Emby:
-**24,000 items in 10 minutes**, i.e. roughly **8 hours** for the whole library.
-A small library is proportionally quicker. Run it in a terminal you can leave,
-and note that it resumes rather than restarting if it is interrupted.
+guest: outbound requests are rate-limited on purpose, so the walk is paced by
+your media server. Measured on 2026-09-23: about **25,000 items in the first
+10.5 minutes** and **81,000 in 35 minutes**, when the run was stopped, so it
+never timed a whole library. A small library is proportionally quicker. Run it
+in a terminal you can leave. If it is interrupted, it resumes rather than
+restarting.
 
-**6. Enrich what you just ingested.**
+⚠️ **It prints nothing while it runs.** Watch it from a second terminal:
 
 ```
-docker compose exec usher usher work --once
+docker compose exec usher usher sync-status
 ```
 
-⚠️ **One rate-limited TMDb call per title**, so this is also hours on a large
-library — `--once` drains a single pass, and a full catalog needs the daemon
-(`usher work`) rather than one pass. This is the step that needs the key from
-step 1.
+`seen=` and `matched=` climb on the run marked `running`.
+
+**6. Let the server enrich what you ingested.** There is nothing to start. The
+server already runs a worker lane (`USHER_WORKER_ENABLED=true` is the default),
+and with the key from step 1 it has been matching and enriching since step 5
+began. Watch the queue drain:
+
+```
+docker compose exec usher usher sync-status
+```
+
+The `enrich` line's `pending=` falls as titles are enriched, at **one
+rate-limited TMDb call per title**, so this is hours on a large library too.
+Watch `parked jobs:` as well. A parked `enrich` whose error is
+`title carries no tmdb id to enrich from` belongs to a title step 3 did not
+link, and it stays parked (#87).
+
+⚠️ **Do not start `usher work` beside the server.** A second worker spends
+the per-process TMDb budget twice against a limit that is per client (see
+[Command line](#command-line)). `usher work --once` does not drain the queue
+either: it claims one batch and exits. On 2026-09-23 that was 20 jobs in 47 s.
 
 **7. Ask for a screen.**
 
@@ -229,11 +287,29 @@ step 1.
 curl -sf http://localhost:8100/home
 ```
 
-**Rows back means the whole path worked.** An empty `rows` array with a `200`
-means the catalog has no *enriched, owned* titles yet — the honest answers are
-usually a missing TMDb key (step 1), a skipped `crosswalk` (step 3), or simply
-that steps 5 and 6 have not finished. The console is at
-<http://localhost:8100/console>.
+**The first row back proves the source walk, not the whole path.** It can be
+**Recently Added**, which needs only a sync, a match and library items added in
+the last 30 days. It needs no TMDb key, no crosswalk and no
+enrichment, and its cards can be bare skeleton titles. On 2026-09-23 it was
+the only row, first seen 10½ minutes into step 5, with a skeleton series
+on it.
+
+**A working path looks like this:**
+
+- `bootstrap-status` shows every row `completed`.
+- `sync-status` shows the walk `completed`, and the `enrich` line's `pending=`
+  falling while `parked jobs:` stays small.
+- `/home`'s cards move from `"enrichment_state": "skeleton"` (a bulk-dataset
+  title with no overview or artwork) to `"enriched"`, which is step 6's work.
+
+The history-driven rows (Continue Watching, Next Up, Because You Watched) wait
+for the watch-state walk, which runs only after the item walk completes.
+
+An empty `rows` array with a `200` is not an error: no row has anything to
+show yet. Early on, the walk has usually matched nothing added in the last 30
+days and the watch-state walk has not run. Rows built from enriched metadata
+also wait on the TMDb key (step 1), a completed crosswalk (step 3) and step 6.
+The console is at <http://localhost:8100/console>.
 
 ## Running it
 
@@ -331,9 +407,12 @@ take the first.
 
 `USHER_COMPOSE_HOST_PORT` defaults to `8100`. It is the *host*-side publish
 port, not a setting — compose substitutes it into the `ports:` mapping and the
-application never sees it. `USHER_COMPOSE_*` is the one namespace reserved for
-variables like that; every other `USHER_*` key is a real setting, and an
-unknown one is refused at startup rather than ignored, so a typo is loud.
+application never sees it. `USHER_COMPOSE_NETWORK` (default `usher_default`)
+is the same kind of variable, for the network's name. `USHER_COMPOSE_*` is the
+one namespace reserved for variables like that; every other `USHER_*` key is a
+real setting, and an unknown one is refused at startup rather than ignored, so
+a typo is loud. Compose's own `COMPOSE_*` variables, such as
+`COMPOSE_PROJECT_NAME`, are ignored the same way.
 
 The `chown` is the one line that is not obvious, and it is the image proxy's.
 `./data/images` is bind-mounted to `/data/images` and is where
@@ -348,17 +427,45 @@ re-fetch and nothing else.
 
 **Every key in `.env` reaches the container**, because compose hands it the
 whole file (`env_file:`). The five exceptions are marked `[compose-owned]` in
-`.env.example` and listed in `compose.yml`'s `environment:` block with the
-reason each belongs to the container topology rather than to you:
-`USHER_DATABASE_URL` (the hostname on the compose network),
-`USHER_HOST`/`USHER_PORT` (what the published port, the `EXPOSE` and the
-healthcheck all assume), `USHER_SECRET_KEY` (substituted so a missing one
-fails at `docker compose up` rather than in a container log) and
-`USHER_IMAGE_CACHE_DIR` (the container side of the bind mount above — the
-`.env` value is a relative path, which inside the container would put the
-cache in the image's own writable layer).
+`.env.example`, and `compose.yml`'s `environment:` block replaces each with the
+container topology's own value, saying why: `USHER_DATABASE_URL` (the hostname
+on the compose network), `USHER_HOST`/`USHER_PORT` (what the published port,
+the `EXPOSE` and the healthcheck all assume), and
+`USHER_IMAGE_CACHE_DIR`/`USHER_BULK_DATA_DIR` (the container side of the two
+bind mounts — the `.env` values are relative paths, which inside the container
+resolve under the root-owned `/app`). `USHER_SECRET_KEY` sits in that block too
+but is not an exception: it carries your own `.env` value, substituted there
+only so a missing one fails at `docker compose up` rather than in a container
+log.
 
 Migrations run automatically on container start.
+
+### Telemetry
+
+Usher exports traces and metrics over OTLP/gRPC when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set, and builds no exporter at all when it is
+empty, which is the shipped default. **Nothing in `compose.yml` needs a
+telemetry stack**, so a host without one starts with a plain `docker compose
+up`.
+
+A collector in another compose stack that publishes on `127.0.0.1` alone is
+unreachable from inside this container except over a shared docker network.
+`compose.observability.yml` joins the `usher` service to an existing network
+called `observability`. Opt in from `.env`:
+
+```
+COMPOSE_FILE=compose.yml:compose.observability.yml
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+```
+
+The endpoint's host is the collector's service name on that network, and the
+network must already exist (`docker network create observability`, or the
+telemetry stack's own `up`). **Put `COMPOSE_FILE` in `.env` rather than
+passing `-f compose.yml -f compose.observability.yml`.** Every compose command
+reads `.env`, but an `up` that forgets `-f` recreates the container without
+the network, and nothing fails at startup to tell you. `Settings` ignores `COMPOSE_*`
+keys, so `.env` can carry them. The stack itself and the dashboards are in
+[PRD 10](docs/prd/10-telemetry-and-dashboards.md#where-the-stack-lives).
 
 ## Command line
 

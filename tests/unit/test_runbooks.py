@@ -237,3 +237,55 @@ def test_no_runbook_puts_a_key_on_a_command_line() -> None:
         "a runbook shows a key on a command line; --new-key-env takes the NAME "
         f"of an exported variable: {offenders}"
     )
+
+
+#: `Dockerfile:133`, `compose.yml:12`, `cli.py:166`: a file named by one line. Ports
+#: (`localhost:8100`, `otel-collector:4317`) name no file, so they do not match.
+_LINE_CITATION = re.compile(r"(?:\bDockerfile|\.(?:py|ya?ml|toml|ini|md|sh)):\d+\b")
+
+
+def test_no_runbook_cites_a_file_by_line_number() -> None:
+    """A line number is exact when written and wrong one insert later.
+
+    `upgrade.md` cited `Dockerfile:124`, `:130` and `:133` against an 85-line
+    Dockerfile. Quote a phrase, which is greppable and survives a move.
+    """
+    scanned = sorted(_RUNBOOKS.glob("*.md"))
+    assert len(scanned) > RUNBOOKS_THE_SPEC_ASKS_FOR - 1, f"only {len(scanned)} runbooks scanned"
+    assert _LINE_CITATION.search("see `Dockerfile:133`"), "the pattern cannot see a citation"
+
+    offenders = [
+        f"docs/runbooks/{runbook.name}:{number}: {line.strip()}"
+        for runbook in scanned
+        for number, line in enumerate(runbook.read_text().splitlines(), start=1)
+        if _LINE_CITATION.search(line)
+    ]
+    assert offenders == [], f"cite by quoting a phrase, not by line number: {offenders}"
+
+
+def _flattened(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_the_upgrade_runbook_quotes_the_dockerfile_verbatim() -> None:
+    """Every `>` quote and the `dockerfile` fence in §0 must still be in the Dockerfile.
+
+    Compared whitespace-flattened against the Dockerfile with each comment's `#`
+    removed, since a quote reflows the comment it copies.
+    """
+    runbook = (_RUNBOOKS / "upgrade.md").read_text()
+    section = runbook[: runbook.index("### `docker compose pull`")]
+    quotes = [
+        _flattened(" ".join(line.removeprefix(">") for line in block.splitlines()))
+        for block in re.findall(r"(?:^>.*\n)+", section, flags=re.MULTILINE)
+    ]
+    fences = re.findall(r"^```dockerfile\n(.*?)^```", section, flags=re.MULTILINE | re.DOTALL)
+
+    dockerfile = (_ROOT / "Dockerfile").read_text()
+    uncommented = _flattened(re.sub(r"^\s*# ?", "", dockerfile, flags=re.MULTILINE))
+    assert len(quotes) >= 2, f"only {len(quotes)} quotes extracted from upgrade.md §0"
+    assert fences, "upgrade.md §0 no longer shows the Dockerfile's CMD"
+
+    missing = [quote for quote in quotes if quote not in uncommented]
+    missing += [fence.strip() for fence in fences if fence.strip() not in dockerfile]
+    assert missing == [], f"upgrade.md quotes Dockerfile text that is not there: {missing}"
