@@ -167,13 +167,12 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
 
 
 def _bootstrap_failed(outcome: BootstrapOutcome) -> str:
-    """The exit line for a bootstrap that left an import failed or a phase skipped.
+    """The exit line for a bootstrap that left an import failed or a phase skipped or refused.
 
     Exit 1, on stderr, the way `_sync_failed` ends a sync: each one's own line -- what
     stopped, where, why, and the commands that continue it -- is already on stdout,
     printed by `run_bootstrap`, so this names *which* and stops the command claiming
-    success. It printed a link count and exited 0 over a failed crosswalk until this
-    existed.
+    success.
     """
     parts: list[str] = []
     if failed := outcome.failed:
@@ -184,6 +183,10 @@ def _bootstrap_failed(outcome: BootstrapOutcome) -> str:
         noun = "phase" if len(skipped) == 1 else "phases"
         names = ", ".join(one.phase.value for one in skipped)
         parts.append(f"{len(skipped)} {noun} skipped: {names}")
+    if refused := outcome.refused:
+        noun = "phase" if len(refused) == 1 else "phases"
+        names = ", ".join(one.phase.value for one in refused)
+        parts.append(f"{len(refused)} {noun} refused: {names}")
     return (
         f"usher bootstrap: {'; '.join(parts)}; each line above ends with the command that "
         "resumes it, and `usher bootstrap-status` shows the checkpoints"

@@ -62,20 +62,138 @@ async def test_revision_falls_back_to_last_modified(cache: Path) -> None:
     assert revision == "Wed, 29 Jul 2026 00:35:21 GMT"
 
 
-async def test_revision_raises_when_upstream_offers_no_snapshot_token(cache: Path) -> None:
+@pytest.mark.parametrize("method", ["revision", "ensure_local"])
+async def test_a_response_with_no_snapshot_token_is_malformed_not_unavailable(
+    cache: Path, method: str
+) -> None:
     """Without a token there is no way to tell one snapshot from another.
 
     so a checkpoint could splice two.
 
-    Failing here is better than resuming into a file that changed underneath.
+    Failing here is better than resuming into a file that changed underneath. And
+    malformed, not unavailable: the same upstream sends the same headers next time,
+    so a retry would only spend its whole budget learning that.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200)
+        return httpx.Response(200, content=BODY)
 
     async with httpx.AsyncClient(transport=_transport(handler)) as client:
-        with pytest.raises(PortUnavailable):
-            await CachedDatasetFile(client, URL, cache).revision()
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        with pytest.raises(PortDataMalformed) as exc_info:
+            if method == "revision":
+                await dataset_file.revision()
+            else:
+                await dataset_file.ensure_local('"v1"')
+    assert str(exc_info.value) == (
+        f"{URL} supplied neither ETag nor Last-Modified, so no snapshot token exists "
+        "and a resumable import cannot tell one snapshot from another"
+    )
+
+
+#: What the status ladder hands `BootstrapService`: WDQS's, and for the same reason.
+#: 408 and every 5xx may well be answered next time; any other 4xx is the same answer.
+_TRANSIENT_STATUSES = (408, 500, 502, 503, 504)
+_PERMANENT_STATUSES = (400, 401, 403, 404, 410, 416)
+
+
+@pytest.mark.parametrize("status", _TRANSIENT_STATUSES)
+@pytest.mark.parametrize("method", ["revision", "ensure_local"])
+async def test_a_timeout_or_server_error_is_unavailable(
+    cache: Path, method: str, status: int
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"etag": '"v1"'})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        with pytest.raises(PortUnavailable) as exc_info:
+            if method == "revision":
+                await dataset_file.revision()
+            else:
+                await dataset_file.ensure_local('"v1"')
+    assert str(exc_info.value) == f"{URL} returned HTTP {status}"
+
+
+@pytest.mark.parametrize("status", _PERMANENT_STATUSES)
+@pytest.mark.parametrize("method", ["revision", "ensure_local"])
+async def test_any_other_4xx_is_malformed_because_asking_again_cannot_help(
+    cache: Path, method: str, status: int
+) -> None:
+    """A 404, 403 or 410 is the same answer on the fifth attempt as on the first.
+
+    Unavailable, it cost five requests and 225 s of waiting before the phase failed.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"etag": '"v1"'})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        with pytest.raises(PortDataMalformed) as exc_info:
+            if method == "revision":
+                await dataset_file.revision()
+            else:
+                await dataset_file.ensure_local('"v1"')
+    assert str(exc_info.value) == f"{URL} returned HTTP {status}"
+
+
+@pytest.mark.parametrize("status", [404, 403])
+async def test_a_file_that_is_not_published_is_none_rather_than_an_error(
+    cache: Path, status: int
+) -> None:
+    """The one question a 404 answers: TMDb's walk-back asks it of every day it tries.
+
+    403 too, which is what an object store answers for a key that is absent where the
+    caller may not list the bucket.
+    """
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request.method)
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        assert await CachedDatasetFile(client, URL, cache).revision_if_published() is None
+    assert asked == ["HEAD"]
+
+
+@pytest.mark.parametrize(
+    ("answer", "raised"),
+    [
+        (httpx.Response(410), PortDataMalformed),
+        (httpx.Response(200), PortDataMalformed),
+        (httpx.Response(503), PortUnavailable),
+        (httpx.Response(429, headers={"retry-after": "7"}), PortRateLimited),
+    ],
+    ids=["410", "no-token", "503", "429"],
+)
+async def test_every_other_answer_to_a_publication_probe_is_what_revision_raises(
+    cache: Path, answer: httpx.Response, raised: type[Exception]
+) -> None:
+    """Only 404 and 403 read as "not published"; a failure is still a failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return answer
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        with pytest.raises(raised):
+            await CachedDatasetFile(client, URL, cache).revision_if_published()
+
+
+async def test_a_publication_probe_that_cannot_reach_the_host_is_unavailable(cache: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        with pytest.raises(PortUnavailable) as exc_info:
+            await CachedDatasetFile(client, URL, cache).revision_if_published()
+    assert str(exc_info.value) == f"HEAD {URL} failed: ConnectError"
+
+
+async def test_a_published_file_answers_its_revision(cache: Path) -> None:
+    async with httpx.AsyncClient(transport=_serve()) as client:
+        assert await CachedDatasetFile(client, URL, cache).revision_if_published() == '"v1"'
 
 
 async def test_revision_translates_a_429(cache: Path) -> None:

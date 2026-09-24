@@ -855,6 +855,7 @@ def _worker_handlers(
             settings,
             phase,
             report=_log_bootstrap_line,
+            retries=_log_bootstrap_retry,
             events=pipeline.events,
         )
     )
@@ -1343,13 +1344,22 @@ BootstrapReporter = Callable[[str], None]
 
 
 def _log_bootstrap_line(line: str) -> None:
-    """The worker's sink.
+    """The worker's sink for a phase's report.
 
     One `logger.info` per report line, and `{}` in a dataset name or a tag cannot become
     a loguru placeholder because the line is passed as an argument rather than as the
     format string.
     """
     logger.info("{line}", line=line)
+
+
+def _log_bootstrap_retry(line: str) -> None:
+    """The worker's sink for a retry notice: a WARNING, as `BootstrapService` logs one.
+
+    Its own sink rather than `_log_bootstrap_line`'s, or the same notice is a warning
+    from a service handed no sink and routine chatter from the worker.
+    """
+    logger.warning("{line}", line=line)
 
 
 def bulk_client(settings: Settings) -> httpx.AsyncClient:
@@ -1367,13 +1377,16 @@ def bulk_client(settings: Settings) -> httpx.AsyncClient:
 
 @dataclass(frozen=True, slots=True)
 class FailedImport:
-    """A dataset whose import ended `FAILED` in this run, and the phase that resumes it.
+    """A dataset whose import failed in this run, and the phase that resumes it.
 
-    The phase is the *step* whose arm imported the dataset, not the phase the run was
+    `run` is its checkpoint as stored: `FAILED`, or still `COMPLETED` with the error
+    beside it when the attempt failed before it started (`_failed_this_run`).
+
+    The phase is the one that imports the dataset alone, not the phase the run was
     asked for: under `--phase all` a failed crosswalk resumes with `--phase crosswalk`
-    rather than by re-running everything, and `--phase ratings` resumes as itself --
-    naming `imdb` there would cost 214 MiB and a rewrite of every name and year for a
-    file the alias re-imports alone.
+    rather than by re-running everything, and the ratings file resumes with `--phase
+    ratings` whichever phase imported it -- naming `imdb` there would cost 214 MiB and
+    a rewrite of every name and year for a file the alias re-imports alone.
     """
 
     phase: BootstrapPhase
@@ -1396,13 +1409,26 @@ class SkippedStep:
 
 
 @dataclass(frozen=True, slots=True)
+class RefusedStep:
+    """A phase that found `titles` empty and imported nothing.
+
+    Not a failure of any import -- no checkpoint was started -- but the command did not
+    do what it was asked, so it is unfinished like the other two. `resume` is the
+    commands that fill the catalog and then run this phase.
+    """
+
+    phase: BootstrapPhase
+    resume: tuple[BootstrapPhase, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BootstrapOutcome:
     """What a bootstrap run left unfinished, in dispatch order -- the order to resume in.
 
     Empty is success. Anything in it makes `usher bootstrap` exit 1.
     """
 
-    unfinished: tuple[FailedImport | SkippedStep, ...] = ()
+    unfinished: tuple[FailedImport | SkippedStep | RefusedStep, ...] = ()
 
     @property
     def failed(self) -> tuple[FailedImport, ...]:
@@ -1413,17 +1439,18 @@ class BootstrapOutcome:
         return tuple(one for one in self.unfinished if isinstance(one, SkippedStep))
 
     @property
+    def refused(self) -> tuple[RefusedStep, ...]:
+        return tuple(one for one in self.unfinished if isinstance(one, RefusedStep))
+
+    @property
     def succeeded(self) -> bool:
         return not self.unfinished
 
 
-#: What each phase reads that another phase writes. Running one over a partial import
-#: of what it reads poisons its own result: `ratings`, `credit-names`, `aliases` and
-#: `movielens` join `titles` on `imdb_id`, checkpoint `completed` over the titles that
-#: landed, and every later run resumes past the ones that had not. The crosswalk's link
-#: stamps a title's TMDb id once (`WHERE t.tmdb_id IS NULL`), taking the popularity
-#: from `tmdb_ids` as it does, so a title linked over a partial catalog or a partial
-#: export stays unlinked or unranked. `tmdb-ids` reads nothing another phase writes.
+#: What each phase reads that another phase writes. Four join `titles` on `imdb_id` and
+#: checkpoint `completed` over whatever titles landed; the crosswalk's link stamps a
+#: title's TMDb id and popularity once (`WHERE t.tmdb_id IS NULL`). Run over a partial
+#: import, each would leave the rest missing for good. `tmdb-ids` reads nothing.
 _READS: Mapping[BootstrapPhase, tuple[BootstrapPhase, ...]] = MappingProxyType(
     {
         BootstrapPhase.RATINGS: (BootstrapPhase.IMDB,),
@@ -1434,25 +1461,68 @@ _READS: Mapping[BootstrapPhase, tuple[BootstrapPhase, ...]] = MappingProxyType(
     }
 )
 
+#: The checkpoints standing for each phase `_READS` names: the datasets that phase's arm
+#: imports, by the names they checkpoint under. Beside `_READS` so the two cannot drift
+#: into a `KeyError` at run time, and a case asserts both that every value of `_READS`
+#: is a key here and that each name is the one its dataset reports.
+_WRITTEN_BY: Mapping[BootstrapPhase, tuple[str, ...]] = MappingProxyType(
+    {
+        BootstrapPhase.IMDB: ("imdb.title.basics",),
+        BootstrapPhase.TMDB_IDS: ("tmdb.ids.movie", "tmdb.ids.series"),
+    }
+)
 
-def _closing_line(one: FailedImport | SkippedStep) -> str:
+
+def _resume(step: BootstrapPhase, first: tuple[BootstrapPhase, ...]) -> tuple[BootstrapPhase, ...]:
+    """`first`, then `step` itself -- except `ratings` after `imdb`, which imports it."""
+    if step in first or (step is BootstrapPhase.RATINGS and BootstrapPhase.IMDB in first):
+        return first
+    return (*first, step)
+
+
+def _failed_this_run(run: ImportRun) -> bool:
+    """Whether the run `import_dataset` returned ended without doing what it was asked.
+
+    `error` is the test, not `status`: a failure before `start()` over a `COMPLETED`
+    import leaves it `COMPLETED` with the error beside it, and every `FAILED` run carries
+    one. A run that finished, or another process's that this one conceded to, has none
+    -- `start()` and `_finish` both clear it.
+    """
+    return run.error is not None
+
+
+def _closing_line(one: FailedImport | SkippedStep | RefusedStep) -> str:
     """What did not finish, why, and the commands that continue it.
 
     Led by the dataset or phase name so a reader scanning a long report -- or a log --
     finds it by the thing that stopped. A failure resumes because every step
     checkpoints per batch: the command picks up at `position` while the upstream
-    revision is unchanged, and restarts cleanly when it has moved.
+    revision is unchanged, and restarts cleanly when it has moved. One that could not
+    start over a completed import names no position: the import it had stands whole.
     """
+    commands = ", then ".join(
+        f"usher bootstrap --phase {step.value}"
+        for step in (one.resume if not isinstance(one, FailedImport) else (one.phase,))
+    )
     if isinstance(one, FailedImport):
+        if one.run.status is ImportRunStatus.COMPLETED:
+            return (
+                f"{one.run.dataset} could not start, and its completed import stands: "
+                f"{one.run.error}; resume with: {commands}"
+            )
         return (
             f"{one.run.dataset} failed at position {one.run.position}: {one.run.error}"
-            f"; resume with: usher bootstrap --phase {one.phase.value}"
+            f"; resume with: {commands}"
+        )
+    if isinstance(one, RefusedStep):
+        return (
+            f"{one.phase.value} refused: titles is empty, and {one.phase.value} joins against "
+            f"it; resume with: {commands}"
         )
     states = ", ".join(
         f"{run.dataset} is {run.status.value} at position {run.position}" for run in one.blockers
     )
     written = "what that import writes" if len(one.blockers) == 1 else "what those imports write"
-    commands = ", then ".join(f"usher bootstrap --phase {step.value}" for step in one.resume)
     return (
         f"{one.phase.value} skipped: {states}, and {one.phase.value} reads {written}"
         f"; resume with: {commands}"
@@ -1468,26 +1538,32 @@ async def run_bootstrap(
     *,
     report: BootstrapReporter,
     events: EventPublisher,
+    retries: BootstrapReporter | None = None,
 ) -> BootstrapOutcome:
     """PRD 04's phased import, run once, for whichever phases `phase` names.
 
     **Returns everything the run left unfinished**, which is what makes a failed phase a
     failed *command*: `BootstrapService.import_dataset` records an upstream failure on
-    the checkpoint and returns rather than raising, so without this the CLI exited 0
-    over a crosswalk `bootstrap-status` called `failed`. Each is also reported, as the
-    run's last lines, with the commands that continue it.
+    the checkpoint and returns rather than raising, so nothing else tells the CLI a
+    phase failed. Each is also reported, as the run's last lines, with the commands
+    that continue it.
 
     **A phase does not start while a dataset it reads is unfinished** (`_READS`), which
     is read from the stored checkpoints: under `--phase all` a failed `imdb` skips every
     later phase that joins its titles, and a single phase refuses an earlier run's
     failure the same way. What reads nothing unfinished still runs, so one upstream
-    being down costs only what depends on it. The transient class never gets this far
-    unretried -- `import_dataset` retries a revision and resumes a fetch until its
-    `RetryPolicy` runs out, reporting each retry through `report`.
+    being down costs only what depends on it. A phase that refuses an empty catalog is
+    unfinished too. The transient class never gets this far unretried --
+    `import_dataset` retries a revision and resumes a fetch until its `RetryPolicy`
+    runs out, reporting each retry through `retries`, or `report` when that is `None`:
+    the CLI prints both, and the worker logs a phase's report at INFO and a retry at
+    WARNING.
     """
     client = bulk_client(settings)
-    service = BootstrapService(runs, catalog, commit, events=events, phase=phase, report=report)
-    unfinished: list[FailedImport | SkippedStep] = []
+    service = BootstrapService(
+        runs, catalog, commit, events=events, phase=phase, report=retries or report
+    )
+    unfinished: list[FailedImport | SkippedStep | RefusedStep] = []
     titles_dataset = IMDbTitleDataset(
         client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
     )
@@ -1497,16 +1573,13 @@ async def run_bootstrap(
         )
         for kind in (TitleKind.MOVIE, TitleKind.SERIES)
     )
-    # The checkpoints standing for each phase `_READS` names.
-    written_by = {
-        BootstrapPhase.IMDB: (titles_dataset.name,),
-        BootstrapPhase.TMDB_IDS: tuple(one.name for one in id_datasets),
-    }
 
     def settle(step: BootstrapPhase, run: ImportRun | None) -> None:
         # `None` is a phase that refused before importing anything -- an empty
-        # catalog -- and says so itself.
-        if run is not None and run.status is ImportRunStatus.FAILED:
+        # catalog -- and has said why in its own report line.
+        if run is None:
+            unfinished.append(RefusedStep(step, _resume(step, (BootstrapPhase.IMDB,))))
+        elif _failed_this_run(run):
             unfinished.append(FailedImport(step, run))
 
     async def blocked(step: BootstrapPhase) -> bool:
@@ -1517,17 +1590,13 @@ async def run_bootstrap(
         """
         blockers: list[tuple[BootstrapPhase, ImportRun]] = []
         for prerequisite in _READS[step]:
-            for dataset in written_by[prerequisite]:
+            for dataset in _WRITTEN_BY[prerequisite]:
                 stored = await runs.get(dataset)
                 if stored is not None and stored.status is not ImportRunStatus.COMPLETED:
                     blockers.append((prerequisite, stored))
         if not blockers:
             return False
-        resume = tuple(dict.fromkeys(prerequisite for prerequisite, _ in blockers))
-        if step not in resume and not (
-            step is BootstrapPhase.RATINGS and BootstrapPhase.IMDB in resume
-        ):
-            resume += (step,)
+        resume = _resume(step, tuple(dict.fromkeys(prerequisite for prerequisite, _ in blockers)))
         unfinished.append(SkippedStep(step, tuple(run for _, run in blockers), resume))
         return True
 
@@ -1546,7 +1615,9 @@ async def run_bootstrap(
                         ),
                         catalog.apply_ratings,
                     )
-                    settle(BootstrapPhase.IMDB, ratings)
+                    # `ratings`, not `imdb`: basics is complete, and `--phase ratings`
+                    # re-imports this file alone.
+                    settle(BootstrapPhase.RATINGS, ratings)
         if phase is BootstrapPhase.RATINGS and not await blocked(BootstrapPhase.RATINGS):
             settle(
                 BootstrapPhase.RATINGS, await _ratings(settings, client, catalog, service, report)

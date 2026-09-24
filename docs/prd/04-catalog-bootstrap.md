@@ -4,7 +4,7 @@ Usher pre-builds its catalog from bulk open datasets before any source is
 connected, so search, matching and recommendations work well from first boot.
 
 - **Matching becomes local.** Resolving an Emby item to a canonical title is a
-  database lookup against 12.7M known titles, not a network round-trip.
+  database lookup against ~1.28M known titles, not a network round-trip.
 - **Recommendations have a real candidate pool.** Usher can suggest things you
   *don't* own. Ownership is an `ORDER BY` key and never a filter
   ([06](06-rows-and-recommendations.md)).
@@ -37,7 +37,8 @@ aliases, not steps.
 
 Three ordering constraints:
 
-- **Phase 0 first** — every later phase joins to `titles` on `imdb_id`.
+- **Phase 0 first** — every later phase but `tmdb-ids` joins to `titles` on
+  `imdb_id`.
 - **Phase 0b before Phase 3.** A title the crawl has already enriched never
   gains IMDb credit names, and re-running `credit-names` afterwards does not
   repair it.
@@ -47,29 +48,38 @@ Three ordering constraints:
 — and so embeddings — untouched. `--phase imdb` rewrites every name and year,
 and a changed name makes that title's embedding stale.
 
-**The ordering constraints are enforced.** A phase does not start while a
-dataset it reads has a checkpoint that is `failed` or `running`. `ratings`,
-`credit-names`, `aliases` and `movielens` read IMDb's titles. `crosswalk` reads
-the titles and both TMDb exports, because its link stamps each title's TMDb id
-and popularity once and never revisits it. Run over a partial import, each of
-these would checkpoint `completed` and every later run would resume past what
-was missing. So under `--phase all` a failed `imdb` skips those phases, while
-`tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
+**Two checks enforce the order between bootstrap phases.** `ratings`,
+`credit-names`, `aliases` and `movielens` refuse a catalog with no titles. And
+no phase starts while a dataset it reads has a checkpoint that is `failed` or
+`running`: those four read IMDb's titles, and `crosswalk` reads the titles and
+both TMDb exports. So under `--phase all` a failed `imdb` skips those phases,
+while `tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
 refuses an earlier run's failure in the same way. A catalog with no IMDb
-checkpoint at all, one a source sync filled, blocks nothing.
+checkpoint at all, one a source sync filled, blocks nothing — so `crosswalk`
+also runs over a catalog no IMDb import has filled.
 
-**A failed import or a skipped phase fails the command.** `usher bootstrap`
-exits 1 if anything it ran ended `failed` or was skipped. Its last lines give
-each one in dispatch order, which is also the order to resume them in. A
-failure line names the dataset, the position it stopped at, the error and the
-`--phase` that resumes it. A skip line names what the phase was waiting on and
-gives the commands that finish that and then run the phase. A phase that
-refuses an empty catalog has imported nothing and is not a failure. Over the
-job queue (`POST /admin/bootstrap/{phase}`) the job completes either way: the
-checkpoints already record the outcome, and the queue's retry would multiply
-with the service's own.
+**Phase 0b before Phase 3 is not enforced.** Nothing orders the TMDb crawl
+after `credit-names`; run `credit-names` first.
 
-### Phase 0 — IMDb skeleton (~30 min)
+**A failed import, a skipped phase or a refused phase fails the command.**
+`usher bootstrap` exits 1 if anything it ran failed, or was skipped or refused.
+Its last lines give each one in dispatch order, which is also the order to
+resume them in. A failure line names the dataset, the position it stopped at,
+the error and the `--phase` that resumes it — `ratings` for the ratings file,
+whichever phase imported it. A skip line names what the phase was waiting on
+and gives the commands that finish that and then run the phase. A refusal line
+says `titles` is empty and gives `--phase imdb`, then the phase.
+
+**A failure before an import starts leaves a completed import standing.** When
+the revision lookup fails over a checkpoint that is `completed`, the checkpoint
+stays `completed` with the error beside it, which `bootstrap-status` shows, and
+the phases that read it still run. The command still exits 1, and the line says
+the dataset could not start and its completed import stands.
+
+Over the job queue (`POST /admin/bootstrap/{phase}`) the job completes either
+way.
+
+### Phase 0 — IMDb skeleton (~1.5 min)
 
 Stream-parse the TSVs into Postgres via `COPY`. Retain `movie`, `tvMovie`,
 `tvSeries` and `tvMiniSeries`; drop shorts, video, video games, adult titles
@@ -128,35 +138,32 @@ Paged SPARQL against Wikidata for P345 × {P4947, P4983, P4835} → 388,425
 verified IMDb↔TMDb↔TVDb mappings over 338,654 IMDb ids, CC0 licensed. Gaps
 fill opportunistically during Phase 3 via TMDb `external_ids`.
 
-Measured on 2026-09-24 against a 1,279,749-title catalog: 490.5 s wall-clock,
-linking 293,665 titles to a TMDb id. 165 s of that was four retries, each
-resumed at its own page: three `502`s and one 90 s read timeout.
-
 **Each property is walked in `bd:slice` pages of 25,000 statements**, and every
 page after the first reaches 1,000 statements back into the one before, so a
 statement Wikidata deletes between two fetches cannot slide past a boundary
-unfetched. A page cost 1.7–6.0 s against WDQS's 60 s query limit on
-2026-09-23. The walk this replaced sharded P345 by id prefix, and **a
-`STRSTARTS` shard pays for the whole join**: 45.0 s for `tt3` and 34.7 s for
-`tt9` against 23.8 s for the unfiltered join, so shards timed out and smaller
-ones would have timed out more. `bd:slice` is Blazegraph's; an engine without
-it answers `400`, which fails the phase rather than walking it wrong.
+unfetched. `bd:slice` is Blazegraph's; an engine without it answers `400`,
+which fails the phase.
 
 The checkpoint is a page, and the revision is the UTC date plus the page grid:
 a resume the same day continues from the page it stopped on, and a run the next
 day restarts from the first page.
 
 **A transient failure is retried from the checkpoint.** A timeout, a `408` or
-`5xx`, a `429`, and a `200` whose body stops mid-document — WDQS sends its
-status before the query finishes, so its timeout has that second shape — each
-make `BootstrapService` resume the dataset from its last committed page. It
-waits 15, 30, 60 and then 120 s, with a `Retry-After` as a floor under the
-wait, and gives up after five attempts or once the next wait would pass 900 s,
-whichever comes first. A committed page starts a fresh count. Any other `4xx`,
-and well-formed JSON of the wrong shape, would be the same answer next time,
-so neither is retried. Every phase shares this policy, and it also covers the
-revision lookup: the `HEAD` each IMDb, TMDb and MovieLens dataset makes first.
-Only the crosswalk has been observed to need it.
+`5xx`, a `429`, and a `200` whose body stops mid-document each make
+`BootstrapService` resume the dataset from its last committed page. It waits
+15, 30, 60 and then 120 s, with a `Retry-After` as a floor under the wait, and
+gives up after five attempts or once the next wait would pass 900 s, whichever
+comes first. A committed page starts a fresh count. Any other `4xx`, and
+well-formed JSON of the wrong shape, fail at once. No wait holds a database
+transaction open.
+
+Every phase shares this policy, and it also covers the revision lookup: the
+`HEAD` each IMDb, TMDb and MovieLens dataset makes first. A timeout, `408`,
+`5xx` or `429` there is retried; any other `4xx`, and an answer carrying
+neither an `ETag` nor a `Last-Modified`, fail at once. The TMDb exports are
+looked up newest day first: a `404` or `403` means that day's export is not
+published and the day before is tried, seven such days fail at once, and any
+other failure is the lookup's own, retried or not as above.
 
 ### Phase 3 — TMDb enrichment crawl (tiered)
 
@@ -232,7 +239,7 @@ through the same dispatch `usher bootstrap` runs. An unknown phase is a 422.
 behaviour: a nightly re-import is an operator's press or a cron entry. A
 bootstrap is the longest unit of work in this system and holds the lane for its
 duration ([08](08-operations.md)), the server process writes to
-`USHER_BULK_DATA_DIR`, and the ordering constraint above is unenforced — run
+`USHER_BULK_DATA_DIR`, and nothing enforces Phase 0b before Phase 3 — run
 `credit-names` before a TMDb crawl, not after.
 
 **A phase's progress can be read over HTTP.**
@@ -241,7 +248,8 @@ duration ([08](08-operations.md)), the server process writes to
 count, the genome coverage and whether the stored tag vocabulary can name the
 lanes of the stored vectors. It is the same report `usher bootstrap-status`
 prints, and it answers **200 for every state**, including "no import has ever
-run".
+run". A checkpoint reads `running` from the moment its import starts, before
+anything is downloaded.
 
 ## Licensing — ship importers, never data
 

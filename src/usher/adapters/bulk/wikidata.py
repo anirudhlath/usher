@@ -30,28 +30,22 @@ _PROPERTIES: tuple[tuple[str, str], ...] = (
     ("P4835", "tvdb_series_id"),
 )
 
-# Statements per query. **Each query costs its page, not the whole join**, and that is
-# the reason this walk pages with `bd:slice` rather than sharding on an IMDb-id prefix.
-# Measured against live WDQS on 2026-09-23: a 25,000-statement page of P4947 took
-# 5.1-6.0 s at offset 0 and at offset 250,000 alike, while a `COUNT` over one prefix
-# shard of the old query (`FILTER(STRSTARTS(?imdb, "tt3"))`, 17,038 rows) took 45.0 s
-# -- longer than the unfiltered join's 23.8 s, because a prefix filter still walks the
-# whole join and adds a string test per row. Ten such shards per property ran each
-# query within seconds of WDQS's 60 s limit, which is how one shard failed twice in a
-# row on a clean checkout.
+# Statements per query. **Each query costs its page, not the whole join**, which is why
+# the walk pages with `bd:slice` rather than sharding on an IMDb-id prefix: a prefix
+# filter still walks the whole join and adds a string test per row, so every shard ran
+# within seconds of WDQS's 60 s limit however few rows it returned.
 PAGE_SIZE = 25_000
 
 # How far each page after the first reaches back into the one before. `bd:slice`
-# offsets into a live index, so a statement Wikidata deletes ahead of the boundary
-# between two fetches shifts every later one down a place, and the statement that
-# slides across the boundary would be fetched by neither page. The overlap absorbs up
-# to this many such deletions per boundary; what it costs is re-sending those rows,
-# which `upsert_crosswalk` absorbs.
+# offsets into a live index, so a statement deleted ahead of the boundary between two
+# fetches shifts every later one down a place, and the one sliding across it would be
+# fetched by neither page. The overlap absorbs up to this many deletions a boundary, at
+# the cost of re-sending rows `upsert_crosswalk` absorbs.
 PAGE_OVERLAP = 1_000
 
-# Pages per property the cursor can address: 2.5M statements at `PAGE_SIZE`, against
-# 284,930 for P4947 (the largest) on 2026-09-23. A property that fills the last page is
-# a loud failure rather than a quietly truncated walk.
+# Pages per property the cursor can address: 2.5M statements at `PAGE_SIZE`, nearly
+# nine times P4947, the largest. A property that fills the last page is a loud failure
+# rather than a quietly truncated walk.
 MAX_PAGES = 100
 
 # Matches Title.imdb_id's own pattern. A Wikidata value that does not match is
@@ -184,7 +178,7 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         return WIKIDATA_ATTRIBUTION
 
     async def revision(self) -> str:
-        """The UTC date, then the page grid a cursor position is measured on.
+        """The UTC date, then the page grid a cursor position is counted on.
 
         The date, because a live SPARQL endpoint has no snapshot token: a run resumed
         the same day continues from its checkpoint, and a run started the next day
@@ -233,11 +227,10 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         try:
             payload = response.json()
         except ValueError as exc:
-            # WDQS sends its `200` before a query finishes, so a query that runs out of
-            # time mid-stream arrives as the start of a results document followed by
-            # the server's exception text. Observed on a clean checkout on 2026-09-23:
-            # the next attempt at the same shard timed out outright. Unavailable, then
-            # -- the timeout's other shape -- and not malformed.
+            # WDQS sends its `200` before a query finishes, so one that runs out of time
+            # mid-stream arrives as the start of a results document followed by the
+            # server's exception text: the timeout's other shape, so unavailable rather
+            # than malformed.
             raise PortUnavailable(
                 f"WDQS returned a body that is not JSON for {where} "
                 "(a query that times out mid-stream arrives truncated)"

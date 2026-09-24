@@ -5,6 +5,7 @@ No network, no key, no real export.
 
 import datetime as dt
 import gzip
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -26,7 +27,7 @@ def _stage(tmp_path: Path, source: str, name: str) -> Path:
     return cache
 
 
-def _serving(cache: Path, available: set[str]) -> httpx.MockTransport:
+def _host(cache: Path, available: set[str]) -> Callable[[httpx.Request], httpx.Response]:
     """404s every export except the ones named in `available`, mirroring the real host.
 
     today's export does not exist until ~08:00 UTC.
@@ -41,7 +42,11 @@ def _serving(cache: Path, available: set[str]) -> httpx.MockTransport:
             200, content=(cache / name).read_bytes(), headers={"etag": '"fixture"'}
         )
 
-    return httpx.MockTransport(handler)
+    return handler
+
+
+def _serving(cache: Path, available: set[str]) -> httpx.MockTransport:
+    return httpx.MockTransport(_host(cache, available))
 
 
 async def test_parses_the_movie_export(tmp_path: Path) -> None:
@@ -107,13 +112,88 @@ async def test_walks_back_to_the_newest_export_that_exists(tmp_path: Path) -> No
         assert await dataset.revision() == "2026-07-28"
 
 
-async def test_no_export_within_the_window_is_unavailable(tmp_path: Path) -> None:
+async def test_no_export_within_the_window_is_malformed_after_one_probe_a_day(
+    tmp_path: Path,
+) -> None:
+    """Seven 404s is seven answers, and asking again in fifteen seconds changes none of them.
+
+    Unavailable, it was retried to the bound: 35 requests and 225 s of waiting.
+    """
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
-    async with httpx.AsyncClient(transport=_serving(cache, set())) as client:
+    asked: list[str] = []
+    host = _host(cache, set())
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        asked.append(request.method)
+        return host(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(recording)) as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
-        with pytest.raises(PortUnavailable):
+        with pytest.raises(PortDataMalformed) as exc_info:
             await dataset.revision()
+    assert asked == ["HEAD"] * 7
+    assert str(exc_info.value) == (
+        "no TMDb movie_ids export found in the last 7 days under https://files.tmdb.org/p/exports/"
+    )
+
+
+async def test_a_403_reads_as_a_day_not_yet_published(tmp_path: Path) -> None:
+    """What an object store answers for an absent key the caller may not list."""
+    cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_29_2026.json.gz")
+    host = _host(cache, {"movie_ids_07_29_2026.json.gz"})
+
+    def forbidding_today(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("movie_ids_07_30_2026.json.gz"):
+            return httpx.Response(403)
+        return host(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidding_today)) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        assert await dataset.revision() == "2026-07-29"
+
+
+def _failing_transport(asked: list[str], *, status: int | None) -> httpx.MockTransport:
+    """Every request fails: unreachable when `status` is None, else answered `status`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url).rsplit("/", 1)[-1])
+        if status is None:
+            raise httpx.ConnectError("no route to host")
+        return httpx.Response(status)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (
+            None,
+            "HEAD https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz failed: "
+            "ConnectError",
+        ),
+        (503, "https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz returned HTTP 503"),
+    ],
+    ids=["unreachable", "503"],
+)
+async def test_a_failure_to_ask_is_not_read_as_a_day_that_is_not_published(
+    tmp_path: Path, status: int | None, message: str
+) -> None:
+    """An outage ends the walk at its first request and says what happened.
+
+    Read as "that day isn't published", it cost seven requests per attempt -- 35 under
+    the retry bound -- and reported that no export exists, which is false.
+    """
+    asked: list[str] = []
+    async with httpx.AsyncClient(transport=_failing_transport(asked, status=status)) as client:
+        dataset = TMDbIdDataset(
+            client, tmp_path / "bulk", kind=TitleKind.MOVIE, batch_size=10, today=_TODAY
+        )
+        with pytest.raises(PortUnavailable) as exc_info:
+            await dataset.revision()
+    assert asked == ["movie_ids_07_30_2026.json.gz"]
+    assert str(exc_info.value) == message
 
 
 async def test_a_line_that_is_not_json_is_malformed(tmp_path: Path) -> None:

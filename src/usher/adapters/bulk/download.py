@@ -23,11 +23,22 @@ from usher.ports.errors import (
 _CHUNK_BYTES = 1024 * 1024
 
 
+#: What a host answers for a file that is not there: 404, and 403 from an object store
+#: whose caller may not list the bucket. Only `revision_if_published` reads either as
+#: an answer rather than a failure.
+_NOT_PUBLISHED = frozenset({403, 404})
+
+# 408 and every 5xx: the same request may well be answered on a later attempt.
+_REQUEST_TIMEOUT = 408
+
+
 def _revision_from(response: httpx.Response) -> str:
     """An opaque snapshot token, preferring `ETag` over `Last-Modified`.
 
     `ETag` is the token `If-Range` compares against, so the resume path and the
-    checkpoint agree on what "the same snapshot" means by construction.
+    checkpoint agree on what "the same snapshot" means by construction. A response
+    with neither is malformed rather than unavailable: the host sends the same headers
+    next time, so retrying it only spends the whole retry budget learning that.
     """
     # Annotated: httpx types `Headers.get` as returning `Any`, so a bare return
     # fails mypy strict.
@@ -37,17 +48,27 @@ def _revision_from(response: httpx.Response) -> str:
     last_modified: str | None = response.headers.get("last-modified")
     if last_modified:
         return last_modified
-    raise PortUnavailable(
+    raise PortDataMalformed(
         f"{response.url} supplied neither ETag nor Last-Modified, so no snapshot "
         "token exists and a resumable import cannot tell one snapshot from another"
     )
 
 
 def _raise_for_status(response: httpx.Response, url: str) -> None:
-    if response.status_code == 429:
+    """The WDQS ladder (`adapters/bulk/wikidata.py`), because `BootstrapService` retries by it.
+
+    429 is rate-limited and 408 or any 5xx unavailable -- the answers a later attempt
+    may change. Any other 4xx is malformed: a 404, 403 or 410 is the same answer on the
+    fifth attempt as on the first, and retried as unavailable it would cost five
+    requests and 225 s of waiting before the phase failed.
+    """
+    status = response.status_code
+    if status == 429:
         raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
-    if response.status_code >= 400:
-        raise PortUnavailable(f"{url} returned HTTP {response.status_code}")
+    if status == _REQUEST_TIMEOUT or status >= 500:
+        raise PortUnavailable(f"{url} returned HTTP {status}")
+    if status >= 400:
+        raise PortDataMalformed(f"{url} returned HTTP {status}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,19 +102,36 @@ class CachedDatasetFile:
     async def revision(self) -> str:
         """One `HEAD` request.
 
-        Raises `PortUnavailable` if unreachable or on 4xx/5xx, `PortRateLimited` on
-        429; every `BulkDataset.revision()` delegating here inherits both. Either
-        way a run fails before it writes anything.
+        Raises `PortUnavailable` if unreachable, on a 408 or a 5xx, `PortRateLimited`
+        on 429, and `PortDataMalformed` on any other 4xx or a response carrying no
+        snapshot token; every `BulkDataset.revision()` delegating here inherits all
+        three. Either way a run fails before it writes anything.
         """
+        response = await self._head()
+        _raise_for_status(response, self._url)
+        return _revision_from(response)
+
+    async def revision_if_published(self) -> str | None:
+        """`revision()`, or `None` when the host says the file is not there (404 or 403).
+
+        For a caller probing for a file that may not exist yet -- TMDb's export for a day
+        not yet published. Every other answer is `revision()`'s, so an outage or a 5xx
+        is still a failure and never reads as an absent file.
+        """
+        response = await self._head()
+        if response.status_code in _NOT_PUBLISHED:
+            return None
+        _raise_for_status(response, self._url)
+        return _revision_from(response)
+
+    async def _head(self) -> httpx.Response:
         try:
-            response = await self._client.head(self._url, follow_redirects=True)
+            return await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
             # `failure_detail`, never `{exc}`: every httpx timeout stringifies
             # to the empty string, and a stalled multi-gigabyte dump is the
             # most expensive failure here to have to reproduce.
             raise PortUnavailable(f"HEAD {self._url} failed: {failure_detail(exc)}") from exc
-        _raise_for_status(response, self._url)
-        return _revision_from(response)
 
     async def ensure_local(self, revision: str) -> LocalFile:
         """Download unless a complete local copy of `revision` already exists."""

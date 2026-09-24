@@ -52,20 +52,16 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
   replaying some and destroying the rest. `credit-names` also rebuilds its whole
   `nconst -> primaryName` index before every run, resumed or not.
 - **`--phase ratings` writes `--phase imdb`'s own `import_runs` row**
-  (`imdb.title.ratings`), deliberately, so the two cannot disagree about what
-  revision a catalog holds. The cost is that a completed run at an unchanged
-  upstream revision resumes at EOF and writes nothing, which looks exactly like
-  success. A rebuild therefore runs
-  `DELETE FROM import_runs WHERE dataset = 'imdb.title.ratings'` first, verifying
-  0 remain, then asserts on **`rows_written`**, never on the exit status. Do not
-  rely on the ETag having moved: a run whose correctness depends on that reports
-  success for doing nothing.
+  (`imdb.title.ratings`), so the two agree on the revision, and a failure of that
+  file resumes with `--phase ratings` whichever phase imported it. A completed run
+  at an unchanged revision resumes at EOF, writes nothing and exits 0: a rebuild
+  deletes that row first (verify 0 remain) and asserts on **`rows_written`**.
 - **A phase writing through a join can poison a shared checkpoint by succeeding**:
   over an empty or partial catalog it checkpoints `completed`, and every later run
   resumes past what it missed, with `bootstrap-status` green. So each refuses an
   empty catalog in its own function (inline, the guard returns from all of
-  `run_bootstrap`), and none runs while a dataset `composition._READS` names is
-  unfinished — the crosswalk on the TMDb exports too: its link stamps popularity once.
+  `run_bootstrap`) and the refusal exits 1, and none runs while a dataset
+  `composition._READS` names is unfinished — the crosswalk on the TMDb exports too.
 
 ## The download cache is keyed on the upstream token, not on local presence
 
@@ -74,9 +70,7 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
 stamp.read_text() == revision`, where `revision` is what `revision()` resolved
 *this run* from a `HEAD`. IMDb regenerates its dumps daily, so a cache filled
 days ago re-downloads and imports a **different snapshot**; to re-run against a
-fixed one, pin `revision()` to the sidecar's own value. Range-fetching only the
-members an importer reads was declined: re-implementing resume, `If-Range` and
-the stale-snapshot interlock is new failure surface for a one-off saving.
+fixed one, pin `revision()` to the sidecar's own value.
 
 ## Parsing the IMDb TSVs
 
@@ -92,9 +86,7 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   name (same family as `db-and-sql.md`'s migration-id padding trap).
 - **Both dumps are contiguous by title** (zero lexicographic descents), which is
   what makes batching by title sound; the *integer* inside the id descends freely,
-  so any order check must be on the string. A guard refusing a non-ascending dump
-  was declined as stronger than the writer needs — the repo's own akas fixture is
-  contiguous but not sorted.
+  so any order check must be on the string.
 - **The seven dumps are not one snapshot.** A `nconst` named by
   `title.principals` and absent from `name.basics` is routine — **drop the credit,
   never raise** — and a title whose principals *all* dangle must yield no record,
@@ -163,21 +155,29 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   belonging to someone else. ⚠️ **Unit fakes catch neither bug** — a conflict with
   no competing row passes before and after, so seed a real winner row and assert
   it returns unchanged.
-- ⚠️ **Known defect, recorded and not fixed:** `composition.run_bootstrap` opens
-  `bulk_load_window()` *around* `import_dataset`, so the window is entered before
-  ownership is known and its `count_titles() == 0` guard is read then. Two
-  processes over an empty catalog both `DROP INDEX`; the loser concedes without
-  raising and `CREATE INDEX`es both while the winner is still streaming — costing
-  exactly the saving the window exists for, plus a `SHARE` lock on `titles`.
-  Exposure is the *download*, not the run; both fixes change a shipped M2 path.
-- **`bootstrap-status`' report scales with the catalog, not with what is on the
-  screen** — three of `_GENOME_COVERAGE`'s five terms are full scans of `titles`.
-  No cache was added: **that shape is an admin page's and nothing else's**, and a
-  client route assembling `BootstrapReport` would pay a scan per request.
+- ⚠️ **Known defect, recorded and not fixed:** `run_bootstrap` opens
+  `bulk_load_window()` *around* `import_dataset`, so its `count_titles() == 0` guard
+  is read before ownership is known. Two processes over an empty catalog both `DROP
+  INDEX` and both stream — the second takes over the committed `RUNNING` row, or
+  concedes if their inserts race — and the first out `CREATE INDEX`es under the other,
+  costing the saving plus a `SHARE` lock on `titles`. Both fixes change an M2 path.
+- **`bootstrap-status`' report scales with the catalog** — three of
+  `_GENOME_COVERAGE`'s five terms scan `titles`, so no client route assembles it.
 - **WDQS times out as a `504 text/plain` (~65 s, no `Retry-After`) or a `200` cut
-  off mid-document** — both `PortUnavailable`; page with `bd:slice`, never `STRSTARTS`.
-- **`import_dataset` records a failure and returns it; the CLI exits 1 on any failed
-  or skipped phase.** It retries the revision `HEAD` and a fetch, never a writer.
+  off mid-document** — both `PortUnavailable`. Page with `bd:slice`, never
+  `STRSTARTS`: a prefix filter still walks the whole join, slower than no filter.
+- **`import_dataset` records a failure and returns it; the CLI exits 1 on any failed,
+  skipped or refused phase.** It retries the revision `HEAD` and a fetch, never a
+  writer, and **commits after `start()` and before every wait**: a wait inside the
+  transaction holds an xid, hides `RUNNING`, and dies to
+  `idle_in_transaction_session_timeout` unrecorded (`test_bootstrap_transactions.py`).
+- **A failure before `start()` over a `COMPLETED` checkpoint keeps it `COMPLETED`,
+  `error` set** — downgrading blocks every phase reading it. So "failed this run" is
+  `error is not None`, never `status is FAILED` (`composition._failed_this_run`).
+- **`download.py`'s `HEAD` follows WDQS's ladder**: 408/5xx unavailable, 429
+  rate-limited, any other 4xx or no `ETag`/`Last-Modified` malformed. The TMDb
+  walk-back reads only 404/403 as "not published" (`revision_if_published`) — read
+  every `PortUnavailable` that way and an outage is 35 `HEAD`s, "no export found".
 
 ## People, credits and provenance
 
@@ -193,8 +193,7 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   `imdb_id`, birth/death year and biography live on `/person/{id}`, one request
   per person (`/find/{nconst}?external_source=imdb_id` works, no follow-up call).
   **Both merge directions have a low yield, so a merge costs a second
-  request per person.** That is *expensive*, not *impossible* — do not restate it
-  as an absolute; that is how this claim went wrong once already.
+  request per person.** That is *expensive*, not *impossible* — never an absolute.
 - **Price a TMDb crawl from the configured ceiling —
   `USHER_TMDB_REQUESTS_PER_SECOND`, default 30 — never an observed lane rate** —
   over the people the catalog *holds*, not those its payloads mention

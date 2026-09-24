@@ -1,10 +1,6 @@
-"""`usher bootstrap`'s exit status, through the real entry point and a real PostgreSQL.
+"""`usher bootstrap`'s exit status, through `usher.cli.main` or `python -m usher`.
 
-The defect this pins was observed on a clean checkout: `--phase crosswalk` printed a
-link count and exited 0 while `bootstrap-status` showed the phase `failed`, twice. So
-every case here drives `usher.cli.main` -- or the interpreter running `python -m usher`
--- with only the network replaced, and reads the checkpoint back from the database
-the command wrote it to.
+Only the network is replaced; each checkpoint is read back from the real database.
 """
 
 import asyncio
@@ -19,7 +15,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 
 import usher.composition
 import usher.services.bootstrap
@@ -27,16 +23,18 @@ from usher import cli as usher_cli
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.models.bootstrap import ImportRunRow
+from usher.db.models.title import TitleRow
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.domain.bootstrap import ImportRun, ImportRunStatus
 from usher.services.bootstrap import RetryPolicy
 
 _CROSSWALK = "wikidata.crosswalk"
 _BASICS = "imdb.title.basics"
+_RATINGS = "imdb.title.ratings"
 #: Every checkpoint a case here can leave behind, the command's or its own seed.
 _WRITTEN = (
     _BASICS,
-    "imdb.title.ratings",
+    _RATINGS,
     "tmdb.ids.movie",
     "tmdb.ids.series",
     _CROSSWALK,
@@ -49,6 +47,19 @@ def _stored(url: str, dataset: str) -> ImportRun | None:
         try:
             async with build_session_factory(engine)() as session:
                 return await PostgresImportRunRepository(session).get(dataset)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
+def _titles(url: str) -> int:
+    async def read() -> int:
+        engine = build_engine(url)
+        try:
+            async with engine.connect() as conn:
+                count = await conn.execute(select(func.count()).select_from(TitleRow))
+                return int(count.scalar_one())
         finally:
             await engine.dispose()
 
@@ -252,6 +263,75 @@ def _seed_failed_basics(url: str) -> ImportRun:
     return asyncio.run(seed())
 
 
+def _seed_completed(url: str, dataset: str, position: int) -> None:
+    """A finished import of `dataset`, as its own run would have left it."""
+
+    async def seed() -> None:
+        engine = build_engine(url)
+        try:
+            async with build_session_factory(engine)() as session:
+                repository = PostgresImportRunRepository(session)
+                started = await repository.start(dataset, "an-earlier-revision")
+                await repository.save(
+                    started.evolve(status=ImportRunStatus.COMPLETED, position=position)
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(seed())
+
+
+def test_a_revision_that_fails_over_completed_imports_leaves_them_completed_and_shown(
+    database: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--phase imdb` that cannot reach IMDb: exit 1, and the imports it had stand.
+
+    `bootstrap-status` then shows each `completed`, with the error beside it.
+    """
+    for dataset, position in ((_BASICS, 12345), (_RATINGS, 99)):
+        _seed_completed(database, dataset, position)
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no network in this case")
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(refuse)),
+    )
+    _instant_retries(monkeypatch)
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap", "--phase", "imdb"])
+
+    assert exit_info.value.code == (
+        "usher bootstrap: 2 imports failed: imdb.title.basics, imdb.title.ratings; each line "
+        "above ends with the command that resumes it, and `usher bootstrap-status` shows the "
+        "checkpoints"
+    )
+    error = {
+        name: f"HEAD https://datasets.imdbws.com/{name.removeprefix('imdb.')}.tsv.gz failed: "
+        "ConnectError (gave up after 5 attempts over 0s)"
+        for name in (_BASICS, _RATINGS)
+    }
+    printed = _printed(capsys.readouterr().out)
+    assert [line for line in printed if "resume with: " in line] == [
+        f"{_BASICS} could not start, and its completed import stands: {error[_BASICS]}; "
+        "resume with: usher bootstrap --phase imdb",
+        f"{_RATINGS} could not start, and its completed import stands: {error[_RATINGS]}; "
+        "resume with: usher bootstrap --phase ratings",
+    ]
+
+    usher_cli.main(["bootstrap-status"])
+
+    shown = _printed(capsys.readouterr().out)
+    assert sorted(line for line in shown if line.startswith("imdb.")) == [
+        f"{_BASICS:<24} completed  position=12345 seen=0 written=0 error={error[_BASICS]}",
+        f"{_RATINGS:<24} completed  position=99 seen=0 written=0 error={error[_RATINGS]}",
+    ]
+
+
 def test_a_crosswalk_after_a_failed_imdb_import_is_refused_with_exit_1(
     database: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -284,6 +364,37 @@ def test_a_crosswalk_after_a_failed_imdb_import_is_refused_with_exit_1(
         "usher bootstrap --phase crosswalk"
     ]
     assert _stored(database, _CROSSWALK) is None
+
+
+def test_a_phase_refusing_an_empty_catalog_exits_1_and_says_what_to_run_first(
+    database: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--phase credit-names` before any `--phase imdb`: nothing imported, and not a success."""
+    assert _titles(database) == 0, "the premise: the catalog is empty"
+
+    def no_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"a refused phase reached the network: {request.url}")
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(no_network)),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap", "--phase", "credit-names"])
+
+    assert exit_info.value.code == (
+        "usher bootstrap: 1 phase refused: credit-names; each line above ends with the "
+        "command that resumes it, and `usher bootstrap-status` shows the checkpoints"
+    )
+    assert _printed(capsys.readouterr().out) == [
+        "credit-names needs a catalog to join against: title.principals is keyed on imdb_id "
+        "and titles is empty. Run --phase imdb first.",
+        "credit-names refused: titles is empty, and credit-names joins against it; resume "
+        "with: usher bootstrap --phase imdb, then usher bootstrap --phase credit-names",
+    ]
+    assert _stored(database, "imdb.credit_names") is None
 
 
 class _Refuses400(http.server.BaseHTTPRequestHandler):
@@ -344,6 +455,10 @@ def test_the_interpreter_exits_1_when_the_crosswalk_fails(database: str, tmp_pat
         "wikidata.crosswalk failed at position 0: WDQS rejected the query with HTTP 400 "
         "(P4947 page 0); resume with: usher bootstrap --phase crosswalk"
     ) in result.stdout.splitlines()
-    assert "usher bootstrap: 1 import failed: wikidata.crosswalk;" in result.stderr
+    assert result.stderr.splitlines()[-1] == (
+        "usher bootstrap: 1 import failed: wikidata.crosswalk; each line above ends with "
+        "the command that resumes it, and `usher bootstrap-status` shows the checkpoints"
+    )
+    assert "Traceback" not in result.stderr
     stored = _stored(database, _CROSSWALK)
     assert stored is not None and stored.status is ImportRunStatus.FAILED
