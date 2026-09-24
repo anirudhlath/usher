@@ -8,6 +8,12 @@ Versioning is `0.x` while the wire contract may still move —
 
 ## [Unreleased]
 
+### Changed
+
+- **The README is a short introduction and quickstart.** Its how-to material
+  moved to [`docs/guide/`](docs/guide/): configuration, the command line, and
+  building a client.
+
 ### Fixed
 
 - **An embedding model that fails the embedder's norm check now fails every

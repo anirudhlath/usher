@@ -14,7 +14,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_EXAMPLE = _REPO_ROOT / ".env.example"
 _COMPOSE = _REPO_ROOT / "compose.yml"
 _COMPOSE_OBSERVABILITY = _REPO_ROOT / "compose.observability.yml"
-_README = _REPO_ROOT / "README.md"
+_CONFIGURATION_GUIDE = _REPO_ROOT / "docs" / "guide" / "configuration.md"
 _PRD_08 = _REPO_ROOT / "docs" / "prd" / "08-operations.md"
 
 # Obviously synthetic, and long enough for `secret_key`'s `min_length=32`.
@@ -352,10 +352,10 @@ def test_a_relative_path_setting_is_overridden_for_the_container() -> None:
 def test_the_worker_switch_reaches_the_container() -> None:
     """The setting the finding is really about.
 
-    `USHER_WORKER_ENABLED` is documented in `README.md` and `.env.example`
+    `USHER_WORKER_ENABLED` is documented in the guides and `.env.example`
     and it works when delivered directly -- `/health/ready` reports
     `"worker": false` and the lane stops. Setting it in `.env` did nothing,
-    so an operator following the README leaves `worker: true` and then starts
+    so an operator following the docs leaves `worker: true` and then starts
     `usher work` in a second container: the double-worker state where
     `JobWorker.startup()` requeued everything `running` and each stole the
     other's live claims. *(That consequence is closed -- recovery is a
@@ -388,7 +388,7 @@ def test_the_default_stack_joins_no_external_network() -> None:
 
     `external: true` makes compose refuse to start when the network is absent:
     `network observability declared as external, but could not be found`, at
-    the README's first step, on every host but the one that has the telemetry
+    the README's `docker compose up`, on every host but the one that has the telemetry
     stack. Joining it is the opt-in in `compose.observability.yml`.
     """
     document = _compose_document()
@@ -438,12 +438,12 @@ def test_the_observability_override_still_joins_the_telemetry_network() -> None:
 def test_compose_s_own_variables_in_env_do_not_break_the_application(
     tmp_path: Path, line: str
 ) -> None:
-    """The README puts compose's own `COMPOSE_*` variables in `.env`, which `Settings` reads too.
+    """The guide puts compose's own `COMPOSE_*` variables in `.env`, which `Settings` reads too.
 
     `extra="forbid"` refuses an unknown key from the dotenv source whatever its
     prefix (`RANDOM_THING=x` is refused), so these are accepted only because
     `_is_compose_only` drops the stripped `compose_` spelling as well as
-    `usher_compose_`. That branch is what the README's second-stack and
+    `usher_compose_`. That branch is what the guide's second-stack and
     observability instructions stand on.
     """
     body = f"USHER_DATABASE_URL={_DATABASE_URL}\nUSHER_SECRET_KEY={_SECRET_KEY}\n{line}\n"
@@ -486,8 +486,8 @@ def _section(text: str, start: str, end: str) -> str:
 _NUMBER_WORDS = {"four": 4, "five": 5, "six": 6, "seven": 7}
 
 
-def test_the_readme_names_every_key_compose_overrides() -> None:
-    """The count and the list in the README's `env_file:` paragraph, against compose.yml.
+def test_the_configuration_guide_names_every_key_compose_overrides() -> None:
+    """The count and the list in the guide's `env_file:` paragraph, against compose.yml.
 
     It said "the five exceptions", listed `USHER_SECRET_KEY` (which carries the
     operator's value) and omitted `USHER_BULK_DATA_DIR` (which does not).
@@ -497,15 +497,15 @@ def test_the_readme_names_every_key_compose_overrides() -> None:
     assert "USHER_SECRET_KEY" not in overrides, "the scan read the secret's guard as an override"
 
     paragraph = _section(
-        _README.read_text(), "**Every key in `.env` reaches the container**", "\n\n"
+        _CONFIGURATION_GUIDE.read_text(), "**Every key in `.env` reaches the container**", "\n\n"
     )
     counted = re.search(r"\bThe (\w+) exceptions\b", paragraph)
     assert counted, f"the paragraph no longer states a count: {paragraph!r}"
     assert _NUMBER_WORDS.get(counted.group(1)) == len(overrides), (
-        f"the README says {counted.group(1)} exceptions; compose.yml overrides {sorted(overrides)}"
+        f"the guide says {counted.group(1)} exceptions; compose.yml overrides {sorted(overrides)}"
     )
     missing = sorted(key for key in overrides if f"`{key}`" not in paragraph)
-    assert missing == [], f"the README's list of compose-owned keys omits {missing}"
+    assert missing == [], f"the guide's list of compose-owned keys omits {missing}"
 
 
 def test_prd_08_names_every_key_compose_overrides() -> None:
