@@ -348,7 +348,8 @@ The console is at <http://localhost:8100/console>.
 Tagged releases publish a container image to
 `ghcr.io/anirudhlath/usher`, built and attested by
 [`.github/workflows/release.yml`](.github/workflows/release.yml) on any `v*`
-tag. **`linux/amd64` only** — there is no arm64 machine to test on here, and
+tag. The image tag drops the `v`: `v0.1.0` publishes `:0.1.0` and `:0.1`.
+**`linux/amd64` only** — there is no arm64 machine to test on here, and
 publishing an emulated image nobody has ever started would be a guess.
 
 ```bash
