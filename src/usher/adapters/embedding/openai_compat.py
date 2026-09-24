@@ -93,7 +93,7 @@ class OpenAICompatEmbedder(Embedder):
         self._dimension = dimension
         self._batch_size = batch_size
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout))
-        # One check, on the first batch, for the reason `embed` gives. A
+        # One check, retired by the first batch that passes it. A
         # per-batch check would cost a square root per vector on a hot path to
         # re-answer a question about the served model that an operator changes
         # by restarting a server this process cannot see.
@@ -122,8 +122,10 @@ class OpenAICompatEmbedder(Embedder):
             chunk = batch[start : start + self._batch_size]
             vectors.extend(self._vectors(await self._post(chunk), len(chunk)))
         if not self._checked:
-            self._checked = True
             self._check_first(vectors[0])
+            # After the checks, never before them: a refused batch retires
+            # nothing, so the next one is checked too.
+            self._checked = True
         return vectors
 
     async def aclose(self) -> None:
@@ -225,7 +227,7 @@ class OpenAICompatEmbedder(Embedder):
         return [float(value) for value in embedding]
 
     def _check_first(self, vector: list[float]) -> None:
-        """The once-per-process checks, in the order their diagnoses depend on.
+        """The checks one passing batch retires, in the order their diagnoses depend on.
 
         Width first: it answers *which model is this*, and a wrong-width vector
         makes the norm's answer meaningless. A model swapped underneath this

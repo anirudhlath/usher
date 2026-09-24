@@ -28,7 +28,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
-from usher.ports.errors import PortUnavailable, RepositoryConflict
+from usher.ports.errors import PortDataMalformed, PortUnavailable, RepositoryConflict
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.repository import SearchQueryRecord, StoredTaste, TitleEmbeddingUpsert
 from usher.ports.rows import RowContext
@@ -941,6 +941,59 @@ async def test_fused_with_no_embedder_narrows_to_full_text_and_says_which() -> N
     assert [result.title_id for result in answer.results] == [_QUIET]
     assert index.requests[0].mode is SearchMode.FULL_TEXT
     assert index.requests[0].query_vector is None
+
+
+class _RefusingEmbedder(FakeEmbedder):
+    """A model the embedder's own checks refuse, on every batch, as the real two do."""
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        raise PortDataMalformed("fake returned a vector of norm 9.0000, not 1.0")
+
+
+async def test_fused_with_a_refusing_embedder_narrows_to_full_text_and_says_which() -> None:
+    """A refused model leaves FUSED its lexical lane, exactly as no model does.
+
+    Fails letting the `UsherPortError` out, which makes every default search a 500
+    for as long as the embedder refuses the model.
+    """
+    embedder = _RefusingEmbedder()
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),)))
+    service = await _service(index, embedder=embedder)
+
+    answer = await service.search("vacuum", mode=SearchMode.FUSED)
+
+    assert embedder.calls == [["vacuum"]], "the premise: the model was asked, and refused"
+    assert answer.requested_mode is SearchMode.FUSED
+    assert answer.mode is SearchMode.FULL_TEXT
+    assert answer.degraded is True
+    assert [result.title_id for result in answer.results] == [_QUIET]
+    assert index.requests[0].mode is SearchMode.FULL_TEXT
+    assert index.requests[0].query_vector is None
+
+
+async def test_a_refused_embed_reports_no_rewrite() -> None:
+    """The rewrite reached no lane, so the answer must not name one."""
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(semantic_coverage=1.0)),
+        embedder=_RefusingEmbedder(),
+        expander=expander,
+    )
+
+    answer = await service.search("movies about isolation in space", mode=SearchMode.FUSED)
+
+    assert len(expander.client.calls) == 1, "the premise: the query was rewritten"
+    assert answer.mode is SearchMode.FULL_TEXT
+    assert answer.expanded_query is None
+
+
+async def test_semantic_with_a_refusing_embedder_is_still_an_error() -> None:
+    """SEMANTIC has no lane left to narrow to, so the refusal reaches the caller."""
+    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=_RefusingEmbedder())
+
+    with pytest.raises(PortDataMalformed, match="norm"):
+        await service.search("an empty room", mode=SearchMode.SEMANTIC)
 
 
 async def test_an_undegraded_search_does_not_claim_to_be_degraded() -> None:

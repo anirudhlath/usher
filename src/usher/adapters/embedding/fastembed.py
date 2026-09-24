@@ -61,10 +61,10 @@ class FastEmbedEmbedder(Embedder):
         # `composition.embedder` at startup instead of by asyncpg, one failed
         # `index` job at a time, in a message about a vector.
         self._dimension = int(self._model.embedding_size)
-        # One check, on the first batch, for the reason `embed` gives. A
-        # per-batch check would cost a square root per vector on a hot path
-        # to re-answer a question about the checkpoint that cannot change
-        # while the process lives.
+        # One check, retired by the first batch that passes it. A per-batch
+        # check would cost a square root per vector on a hot path to re-answer
+        # a question about the checkpoint that cannot change while the process
+        # lives.
         self._norm_checked = False
 
     @property
@@ -97,7 +97,6 @@ class FastEmbedEmbedder(Embedder):
                 f"{self._model_name} returned {len(vectors)} vectors for {len(batch)} texts"
             )
         if not self._norm_checked:
-            self._norm_checked = True
             # Asserted rather than trusted: a checkpoint whose normalize module
             # is missing returns vectors cosine distance cannot compare.
             norm = math.sqrt(sum(value * value for value in vectors[0]))
@@ -106,6 +105,9 @@ class FastEmbedEmbedder(Embedder):
                     f"{self._model_name} returned a vector of norm {norm:.4f}, not 1.0",
                     detail="this checkpoint's Normalize module is missing or was replaced",
                 )
+            # After the comparison, never before it: a refused batch retires
+            # nothing, so the next one is checked too.
+            self._norm_checked = True
         return vectors
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:

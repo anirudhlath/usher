@@ -82,6 +82,21 @@ async def test_a_unit_vector_passes_and_is_checked_only_once() -> None:
     assert len(second) == 1, "the norm was re-checked on a later batch"
 
 
+async def test_a_refused_first_batch_leaves_the_next_batch_checked() -> None:
+    """Only a batch that passes retires the check.
+
+    Retiring it on the first batch whatever it held parks one `index` job and
+    stores every later vector from the same checkpoint unchecked. Fails setting
+    `self._norm_checked` before the norm is compared.
+    """
+    embedder = _embedder([[value * 9.0 for value in _unit()]])
+
+    with pytest.raises(PortDataMalformed, match="norm"):
+        await embedder.embed(["one"])
+    with pytest.raises(PortDataMalformed, match="norm"):
+        await embedder.embed(["two"])
+
+
 async def test_a_batch_that_comes_back_the_wrong_length_is_malformed() -> None:
     """Order is the port's contract and a length mismatch is its observable half.
 
