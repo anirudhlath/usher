@@ -8,6 +8,9 @@ from typing import Any, Literal
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from usher.domain.jobs import JobKind
+from usher.services.jobs import KIND_CONCURRENCY
+
 #: Below this length a rejected value is too short to be worth redacting out of
 #: a message and too likely to collide with ordinary words in it -- `"1"` would
 #: rewrite half the sentence. Four is the shortest thing this project treats as
@@ -404,7 +407,9 @@ class Settings(BaseSettings):
         """A concurrency the pool cannot serve is refused at startup.
 
         Every job in flight holds a session, and the worker needs two more of
-        its own: the claim and the heartbeat. Over the pool's capacity, jobs do
+        its own: the claim and the heartbeat. Each bootstrap job in flight takes
+        one more, from the same pool, for the connection its dataset's hold lives
+        on for the whole import. Over the pool's capacity, jobs do
         not fail fast -- SQLAlchemy's `QueuePool` **waits** `pool_timeout`
         (30 s, the default this project does not change) and then raises, so
         the symptom is a lane that gets slower and slower and finally starts
@@ -416,14 +421,17 @@ class Settings(BaseSettings):
         `usher work` beside it) has no API requests on the worker's pool at
         all, and a validator that assumed otherwise would refuse a correct
         deployment. What it refuses is the arithmetic that cannot work in any
-        shape. `db/base.py`'s docstring carries the in-process budget.
+        shape.
         """
-        needed = self.job_concurrency + 2
+        ceiling = KIND_CONCURRENCY[JobKind.BOOTSTRAP] or self.job_concurrency
+        holds = min(self.job_concurrency, ceiling)
+        needed = self.job_concurrency + 2 + holds
         capacity = self.db_pool_size + self.db_max_overflow
         if needed > capacity:
             raise ValueError(
                 f"USHER_JOB_CONCURRENCY={self.job_concurrency} needs {needed} connections "
-                f"(one per job in flight, plus the claim and the heartbeat) and "
+                f"(one per job in flight, plus the claim, the heartbeat and the hold of each "
+                f"of up to {holds} bootstrap imports) and "
                 f"USHER_DB_POOL_SIZE={self.db_pool_size} + "
                 f"USHER_DB_MAX_OVERFLOW={self.db_max_overflow} is {capacity} "
                 "-- raise the pool or lower the concurrency"

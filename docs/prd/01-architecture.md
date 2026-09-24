@@ -166,7 +166,9 @@ own bound, so a slow upstream cannot starve the API.
 
 A concurrency entry is a slot count, not a request rate: the per-source gate
 `USHER_SOURCE_REQUESTS_PER_SECOND` (default 0.4) bounds the wire. `Settings`
-refuses a `job_concurrency` the `USHER_DB_POOL_SIZE` pool cannot serve. `curate`
+refuses a `job_concurrency` the `USHER_DB_POOL_SIZE` pool cannot serve: each job
+in flight, the claim, the heartbeat and the running bootstrap's hold take a
+connection. `curate`
 is capped at one completion at a time, up to `USHER_LLM_TIMEOUT_SECONDS`
 (120 s).
 

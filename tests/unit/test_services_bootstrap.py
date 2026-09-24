@@ -1147,6 +1147,10 @@ async def _completed(runs: FakeImportRunRepository) -> ImportRun:
     return finished
 
 
+#: How long each slow step takes, against a heartbeat period a fifth of it.
+_SLOW = 0.05
+
+
 @pytest.mark.parametrize("through", ["import_dataset", "resolve_revision"])
 async def test_a_revision_that_fails_over_a_completed_import_leaves_it_completed(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, through: str
@@ -1176,31 +1180,244 @@ async def test_a_revision_that_fails_over_a_completed_import_leaves_it_completed
     assert dataset.resumed_from is None and dataset.revision_requested is None
 
 
-@pytest.mark.parametrize(
-    ("status", "heartbeat_moves"),
-    [(ImportRunStatus.FAILED, True), (ImportRunStatus.RUNNING, False)],
-)
-async def test_a_revision_that_fails_over_an_unfinished_import_only_adds_the_error(
+@pytest.mark.parametrize("status", [ImportRunStatus.FAILED, ImportRunStatus.RUNNING])
+@pytest.mark.parametrize("through", ["import_dataset", "resolve_revision"])
+async def test_a_revision_that_fails_over_an_unfinished_import_nobody_holds_records_it_failed(
     runs: FakeImportRunRepository,
     catalog: FakeBulkCatalogRepository,
     status: ImportRunStatus,
-    heartbeat_moves: bool,
+    through: str,
 ) -> None:
-    """The neighbours: before `start()` this process holds nothing, so it takes nothing over.
+    """The neighbours, with nobody holding the dataset: this process takes it to write.
 
-    A `RUNNING` checkpoint may be another process's live import. Written `FAILED` with a
-    stale cursor, it lost that import's status and position; its heartbeat is that
-    process's too. So each keeps its status and cursor and gains the error.
+    A `RUNNING` row nobody holds is a dead importer's. The failure is recorded the way a
+    holder records any failure over part of an import -- `FAILED` at the cursor it had --
+    and the heartbeat moves because the process writing is the holder, alive, now.
     """
     unfinished = (await _completed(runs)).evolve(status=status, finished_at=None)
     await runs.save(unfinished)
-    run = await _service(runs, catalog, CommitSpy()).import_dataset(
-        FlakyRevision(_three(), failures=99), lambda rows: _write(catalog, rows)
-    )
+    service = _service(runs, catalog, CommitSpy())
+    dataset = FlakyRevision(_three(), failures=99)
+    if through == "import_dataset":
+        run = await service.import_dataset(dataset, lambda rows: _write(catalog, rows))
+    else:
+        resolved = await service.resolve_revision(dataset)
+        assert isinstance(resolved, ImportRun)
+        run = resolved
     error = f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
-    assert run == unfinished.evolve(error=error, heartbeat_at=run.heartbeat_at)
-    assert (run.heartbeat_at > unfinished.heartbeat_at) is heartbeat_moves
+    assert run == unfinished.evolve(
+        status=ImportRunStatus.FAILED,
+        error=error,
+        heartbeat_at=run.heartbeat_at,
+        finished_at=run.finished_at,
+    )
+    assert run.heartbeat_at > unfinished.heartbeat_at, "a heartbeat the writing holder did not move"
     assert await runs.get("scripted") == run, "what is returned is what is stored"
+    assert service.conceded == frozenset()
+    assert await FakeImportRunRepository(shares=runs).held_elsewhere("scripted") is False, (
+        "the hold taken to write the failure is given back"
+    )
+
+
+class _RivalFailsMidway(ScriptedDataset):
+    """A's three batches; inside A's first fetch at position 2, `rival` runs B's import.
+
+    B's `HEAD` never answers, so B fails before `start()` over a checkpoint A holds.
+    A's own fetch then blips once. Every write records the stored row's `error`.
+    """
+
+    def __init__(self, runs: FakeImportRunRepository, rival: BootstrapService) -> None:
+        super().__init__(_three())
+        self._runs, self._rival = runs, rival
+        self.calls = 0
+        self.errors_at_each_write: list[str | None] = []
+        self.before_b: ImportRun | None = None
+        self.after_b: ImportRun | None = None
+        self.b_returned: ImportRun | None = None
+
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[ImdbTitle]]:
+        self.calls += 1
+        return self._midway(resume_from, revision, self.calls)
+
+    async def _midway(
+        self, resume_from: BulkCursor | None, revision: str | None, call: int
+    ) -> AsyncIterator[BulkBatch[ImdbTitle]]:
+        async for batch in super()._iter(resume_from, revision):
+            if call == 1 and batch.cursor.position == 2:
+                self.before_b = await self._runs.get("scripted")
+                self.b_returned = await self._rival.import_dataset(
+                    FlakyRevision(_three(), failures=99), _never_writes
+                )
+                self.after_b = await self._runs.get("scripted")
+                raise PortUnavailable("A's fetch blipped")
+            yield batch
+
+
+async def _never_writes(rows: Sequence[ImdbTitle]) -> int:
+    raise AssertionError("a process that does not hold the dataset wrote to it")
+
+
+async def test_a_failure_before_the_hold_leaves_an_import_another_process_holds_alone(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """B's failure is B's: it is never written onto the row A holds, nor carried by A.
+
+    Recorded there, A's retry adopted it and saved it with every later batch, and B's
+    closing line told the operator to resume a dataset A was importing. B takes the hold
+    to write a failure; refused it, B writes nothing and concedes.
+    """
+    rival_runs = FakeImportRunRepository(shares=runs)
+    rival = _service(rival_runs, catalog, CommitSpy())
+    dataset = _RivalFailsMidway(runs, rival)
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        stored = await runs.get("scripted")
+        dataset.errors_at_each_write.append(stored.error if stored else "no row")
+        return await _write(catalog, rows)
+
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(dataset, write)
+
+    assert (run.status, run.position, run.error) == (ImportRunStatus.COMPLETED, 3, None)
+    assert dataset.calls == 2, "the premise: A resumed once after its own blip"
+    assert dataset.before_b is not None and dataset.before_b.status is ImportRunStatus.RUNNING
+    assert dataset.after_b == dataset.before_b, "B wrote onto the row A holds"
+    assert rival.conceded == frozenset({"scripted"})
+    assert dataset.b_returned == dataset.before_b, "B answers with the holder's row, as stored"
+    assert dataset.errors_at_each_write == [None, None, None]
+
+
+class _LosesItsHold(ScriptedDataset):
+    """Three batches; the hold is lost while the second is fetched, which takes real time.
+
+    `taken_by`, when given, holds the dataset as soon as it is lost -- another process
+    reaching it in the gap. `fetched_after_loss` says whether that fetch ran to its end.
+    """
+
+    def __init__(
+        self, runs: FakeImportRunRepository, taken_by: FakeImportRunRepository | None
+    ) -> None:
+        super().__init__(_three())
+        self._runs, self._taken_by = runs, taken_by
+        self.fetched_after_loss = False
+
+    async def _iter(
+        self, resume_from: BulkCursor | None, revision: str | None
+    ) -> AsyncIterator[BulkBatch[ImdbTitle]]:
+        async for batch in super()._iter(resume_from, revision):
+            if batch.cursor.position == 2:
+                self._runs.lose_hold("scripted")
+                if self._taken_by is not None:
+                    await self._taken_by.hold("scripted")
+                await asyncio.sleep(_SLOW)
+                self.fetched_after_loss = True
+            yield batch
+
+
+@pytest.mark.parametrize("taken_over", [False, True], ids=["nobody-took-it", "taken-over"])
+async def test_a_hold_lost_during_a_fetch_fails_the_import_at_the_next_beat(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, taken_over: bool
+) -> None:
+    """`idle_session_timeout` or a proxy's idle cut ends the hold, and nothing said so.
+
+    The import carried on as though it held the dataset, beside whoever took it next.
+    Now the beat confirms the hold, so the import stops there and says so at ERROR. With
+    nobody holding the dataset it takes it again to record the failure; with another
+    process holding it, it writes nothing and concedes.
+    """
+    rival = FakeImportRunRepository(shares=runs)
+    written: list[Sequence[ImdbTitle]] = []
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        written.append(rows)
+        return await _write(catalog, rows)
+
+    logged: list[tuple[str, str]] = []
+    handle = logger.add(logged_into(logged), level="ERROR", filter="usher")
+    try:
+        service = BootstrapService(
+            runs,
+            catalog,
+            CommitSpy(),
+            events=NullEventPublisher(),
+            phase=BootstrapPhase.IMDB,
+            clock=Clock(),
+            heartbeat=_SLOW / 5,
+        )
+        dataset = _LosesItsHold(runs, rival if taken_over else None)
+        run = await service.import_dataset(dataset, write)
+    finally:
+        logger.remove(handle)
+
+    assert dataset.fetched_after_loss is False, "the fetch outlived the beat that found it lost"
+    assert [list(rows) for rows in written] == _three()[:1], "nothing written after the loss"
+    stored = await runs.get("scripted")
+    assert stored is not None
+    left = ImportRunStatus.RUNNING if taken_over else ImportRunStatus.FAILED
+    assert (stored.status, stored.position) == (left, 1)
+    assert [level for level, line in logged if "lost the hold" in line] == ["ERROR"], logged
+    if taken_over:
+        assert service.conceded == frozenset({"scripted"})
+        assert stored.error is None, "the new holder's row, untouched"
+        assert run == stored
+    else:
+        assert service.conceded == frozenset()
+        assert run == stored
+        assert run.error == "lost the hold on the import of scripted"
+        assert await rival.held_elsewhere("scripted") is False
+
+
+async def test_a_hold_lost_between_batches_stops_the_import_before_its_next_write(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """A fetch quicker than a beat never waits long enough to beat.
+
+    So the hold is confirmed before every batch is written, too: a long import of fast
+    batches is exactly the one an `idle_session_timeout` shorter than it would cut.
+    """
+    written: list[Sequence[ImdbTitle]] = []
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        written.append(rows)
+        runs.lose_hold("scripted")
+        return await _write(catalog, rows)
+
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(
+        ScriptedDataset(_three()), write
+    )
+
+    assert [list(rows) for rows in written] == _three()[:1]
+    assert (run.status, run.position, run.error) == (
+        ImportRunStatus.FAILED,
+        1,
+        "lost the hold on the import of scripted",
+    )
+
+
+async def test_a_hold_lost_after_the_last_batch_leaves_the_import_unfinished(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """Completing the import writes the row too, so it confirms the hold as a batch does.
+
+    Unconfirmed, it would mark `COMPLETED` a row that whoever took the dataset now holds.
+    """
+    last = _three()[-1]
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        if list(rows) == last:
+            runs.lose_hold("scripted")
+        return await _write(catalog, rows)
+
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(
+        ScriptedDataset(_three()), write
+    )
+
+    assert (run.status, run.position, run.error) == (
+        ImportRunStatus.FAILED,
+        len(_three()),
+        "lost the hold on the import of scripted",
+    )
 
 
 async def test_a_failure_after_the_start_over_a_completed_import_records_it_failed(
@@ -1379,10 +1596,6 @@ class _SlowTwice(FlakyDataset):
         self._journal.append("fetched")
         async for batch in super()._iter(resume_from, revision):
             yield batch
-
-
-#: How long each slow step takes, against a heartbeat period a fifth of it.
-_SLOW = 0.05
 
 
 async def test_a_started_import_beats_through_every_fetch_and_wait_and_commits_each_beat(

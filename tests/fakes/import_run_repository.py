@@ -12,6 +12,7 @@ class FakeImportRunRepository(ImportRunRepository):
 
     Two instances sharing one store stand in for two processes over one database: each
     is a holder, so the second's `start()` is refused while the first holds a dataset.
+    `lose_hold` is the one affordance the port lacks: the hold's connection ending.
     """
 
     def __init__(self, *, shares: "FakeImportRunRepository | None" = None) -> None:
@@ -20,11 +21,13 @@ class FakeImportRunRepository(ImportRunRepository):
             shares._holders if shares is not None else {}
         )
 
+    def lose_hold(self, dataset: str) -> None:
+        """What `idle_session_timeout` does to a hold: gone, and its holder not told."""
+        if self._holders.get(dataset) is self:
+            del self._holders[dataset]
+
     async def start(self, dataset: str, revision: str) -> ImportRun:
-        holder = self._holders.get(dataset)
-        if holder is not None and holder is not self:
-            raise RepositoryConflict(f"another process holds the import of {dataset}")
-        self._holders[dataset] = self
+        await self.hold(dataset)
         now = datetime.now(UTC)
         existing = self._runs.get(dataset)
         if existing is None:
@@ -53,33 +56,26 @@ class FakeImportRunRepository(ImportRunRepository):
             await self.save(run)
         return run
 
+    async def hold(self, dataset: str) -> None:
+        holder = self._holders.get(dataset)
+        if holder is not None and holder is not self:
+            raise RepositoryConflict(f"another process holds the import of {dataset}")
+        self._holders[dataset] = self
+
     async def release(self, dataset: str) -> None:
         if self._holders.get(dataset) is self:
             del self._holders[dataset]
 
+    async def held_elsewhere(self, dataset: str) -> bool:
+        holder = self._holders.get(dataset)
+        return holder is not None and holder is not self
+
     async def touch(self, dataset: str) -> None:
+        if self._holders.get(dataset) is not self:
+            raise RepositoryConflict(f"lost the hold on the import of {dataset}")
         stored = self._runs.get(dataset)
         if stored is not None and stored.status is ImportRunStatus.RUNNING:
             self._runs[dataset] = stored.evolve(heartbeat_at=datetime.now(UTC))
-
-    async def note_failure(self, dataset: str, error: str) -> ImportRun:
-        now = datetime.now(UTC)
-        stored = self._runs.get(dataset)
-        if stored is None:
-            noted = ImportRun(
-                dataset=dataset,
-                revision="unknown",
-                status=ImportRunStatus.FAILED,
-                error=error,
-                heartbeat_at=now,
-                finished_at=now,
-            )
-        elif stored.status is ImportRunStatus.RUNNING:
-            noted = stored.evolve(error=error)
-        else:
-            noted = stored.evolve(error=error, heartbeat_at=now)
-        self._runs[dataset] = noted
-        return noted
 
     async def save(self, run: ImportRun) -> None:
         self._runs[run.dataset] = run

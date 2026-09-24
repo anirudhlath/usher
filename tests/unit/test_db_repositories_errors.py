@@ -13,9 +13,10 @@ from typing import cast
 
 import pytest
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from usher.db.repositories._errors import refusals_as_conflict
+from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.ports.errors import RepositoryConflict, UsherPortError
 
 
@@ -234,6 +235,7 @@ WIDENED_SITES = frozenset(
     {
         ("_errors.py", "refusals_as_conflict"),
         ("collection.py", "attach_titles"),
+        ("import_run.py", "_confirm"),
         ("import_run.py", "save"),
         ("jobs.py", "enqueue"),
         ("people.py", "replace_for_titles"),
@@ -246,6 +248,10 @@ WIDENED_SITES = frozenset(
         ("title.py", "update"),
     }
 )
+
+# Sites that catch a disconnect rather than a refusal: on the hold's own connection, a
+# connection that ended is the answer being asked for. Each re-raises everything else.
+DISCONNECT_SITES = frozenset({("import_run.py", "_confirm")})
 
 
 def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
@@ -274,12 +280,21 @@ def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
     for module, method, handler in handlers:
         if module == "_errors.py" and method == "refusals_as_conflict":
             continue
-        guarded = any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "is_row_refusal"
-            for node in ast.walk(handler)
-        ) and any(isinstance(node, ast.Raise) and node.exc is None for node in ast.walk(handler))
+        if (module, method) in DISCONNECT_SITES:
+            asks = any(
+                isinstance(node, ast.Attribute) and node.attr == "connection_invalidated"
+                for node in ast.walk(handler)
+            )
+        else:
+            asks = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "is_row_refusal"
+                for node in ast.walk(handler)
+            )
+        guarded = asks and any(
+            isinstance(node, ast.Raise) and node.exc is None for node in ast.walk(handler)
+        )
         if not guarded:
             unguarded.append(f"{module}:{method}")
 
@@ -288,3 +303,48 @@ def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
         f"none of it, so a transport fault reaches the caller as a RepositoryConflict: "
         f"{unguarded}"
     )
+
+
+class _HoldConnection:
+    """A hold's connection in the three members `_confirm` touches, its check failing."""
+
+    def __init__(self, *, invalidated: bool) -> None:
+        self._invalidated = invalidated
+        self.events: list[str] = []
+
+    async def scalar(self, statement: object, parameters: object = None) -> bool:
+        raise DBAPIError(
+            "SELECT EXISTS (...)",
+            {},
+            Exception("the driver's"),
+            connection_invalidated=self._invalidated,
+        )
+
+    async def invalidate(self) -> None:
+        self.events.append("invalidated")
+
+    async def close(self) -> None:
+        self.events.append("closed")
+
+
+@pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
+async def test_the_hold_check_calls_only_a_disconnect_a_lost_hold(invalidated: bool) -> None:
+    """`_confirm`'s `except DBAPIError` by behaviour; the census above reads only its shape.
+
+    A disconnect on the hold's own connection is the hold lost. Anything else says
+    nothing about the lock, and as a `RepositoryConflict` would end an import that still
+    holds its dataset.
+    """
+    connection = _HoldConnection(invalidated=invalidated)
+    runs = PostgresImportRunRepository(_session()[1])
+    runs._holds["scripted"] = cast(AsyncConnection, connection)
+    if not invalidated:
+        with pytest.raises(DBAPIError):
+            await runs.touch("scripted")
+        assert connection.events == []
+        return
+    with pytest.raises(RepositoryConflict, match="lost the hold on the import of scripted: its"):
+        await runs.touch("scripted")
+    assert connection.events == ["invalidated", "closed"]
+    with pytest.raises(RepositoryConflict, match="does not hold the import of scripted"):
+        await runs.touch("scripted")

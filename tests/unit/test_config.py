@@ -299,7 +299,8 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
     """The failure this refuses does not look like a configuration mistake.
 
     Every job in flight holds a session, plus one for the claim and one for the
-    heartbeat. Over the pool's capacity SQLAlchemy's `QueuePool` **waits**
+    heartbeat, and each bootstrap job in flight one more: the connection its dataset's
+    hold lives on. Over the pool's capacity SQLAlchemy's `QueuePool` **waits**
     `pool_timeout` -- 30 s, the default this project does not change -- and
     only then raises, so the symptom is a worker lane getting slower and slower
     and finally parking jobs with a message about a pool. Refused at startup
@@ -311,17 +312,21 @@ def test_a_concurrency_the_pool_cannot_serve_is_refused_at_startup(
     """
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    holds = KIND_CONCURRENCY[JobKind.BOOTSTRAP]
+    assert holds == 1, "the premise: one bootstrap job, so one hold, at a time"
+    needed = 12 + 2 + holds
     monkeypatch.setenv("USHER_JOB_CONCURRENCY", "12")
     monkeypatch.setenv("USHER_DB_POOL_SIZE", "10")
-    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", "3")
+    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", str(needed - 10 - 1))
     with pytest.raises(ValidationError) as caught:
         Settings()
     message = str(caught.value)
     assert "USHER_JOB_CONCURRENCY" in message and "USHER_DB_POOL_SIZE" in message, message
+    assert f"needs {needed} connections" in message, message
 
     # The boundary, so the case is about the arithmetic rather than about any
-    # pair of numbers: 12 + 2 needs exactly 14.
-    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", "4")
+    # pair of numbers: 12 jobs, the claim, the heartbeat and one hold need exactly 15.
+    monkeypatch.setenv("USHER_DB_MAX_OVERFLOW", str(needed - 10))
     assert Settings().job_concurrency == 12
 
 

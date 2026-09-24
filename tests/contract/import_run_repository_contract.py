@@ -208,36 +208,50 @@ class ImportRunRepositoryContract:
         assert stored == before.evolve(heartbeat_at=stored.heartbeat_at)
         assert (stored.heartbeat_at > _LONG_AGO) is moves
 
-    # --- a failure before start() ----------------------------------------
-
-    async def test_a_failure_noted_with_no_checkpoint_creates_a_failed_one(
-        self, runs: ImportRunRepository
+    async def test_touch_by_a_repository_that_does_not_hold_is_refused_and_writes_nothing(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
     ) -> None:
-        noted = await runs.note_failure("imdb.title.basics", "HEAD failed")
-        assert (noted.status, noted.revision, noted.position, noted.error) == (
-            ImportRunStatus.FAILED,
-            "unknown",
-            0,
-            "HEAD failed",
-        )
-        assert await runs.get("imdb.title.basics") == noted
-
-    @pytest.mark.parametrize(
-        ("status", "heartbeat_moves"),
-        [
-            (ImportRunStatus.RUNNING, False),
-            (ImportRunStatus.COMPLETED, True),
-            (ImportRunStatus.FAILED, True),
-        ],
-    )
-    async def test_a_noted_failure_adds_the_error_and_takes_nothing_over(
-        self, runs: ImportRunRepository, status: ImportRunStatus, heartbeat_moves: bool
-    ) -> None:
-        """Status and cursor stay; a `RUNNING` heartbeat belongs to whoever is importing."""
+        """A heartbeat is the holder saying it is alive and still holding; nobody else's."""
         run = await runs.start("imdb.title.basics", "etag-1")
-        before = run.evolve(status=status, position=17, rows_seen=40, heartbeat_at=_LONG_AGO)
+        before = run.evolve(position=17, heartbeat_at=_LONG_AGO)
         await runs.save(before)
-        noted = await runs.note_failure("imdb.title.basics", "HEAD failed")
-        assert noted == before.evolve(error="HEAD failed", heartbeat_at=noted.heartbeat_at)
-        assert (noted.heartbeat_at > _LONG_AGO) is heartbeat_moves
-        assert await runs.get("imdb.title.basics") == noted
+        with pytest.raises(RepositoryConflict):
+            await rival.touch("imdb.title.basics")
+        await runs.release("imdb.title.basics")
+        with pytest.raises(RepositoryConflict):
+            await runs.touch("imdb.title.basics")
+        assert await runs.get("imdb.title.basics") == before
+
+    # --- holding without starting ------------------------------------------
+
+    async def test_hold_takes_a_dataset_without_writing_its_checkpoint(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        """What a failure met before `start()` needs: the right to write, and nothing else."""
+        await runs.hold("imdb.title.basics")
+        await runs.hold("imdb.title.basics")
+        assert await runs.get("imdb.title.basics") is None
+        with pytest.raises(RepositoryConflict):
+            await rival.hold("imdb.title.basics")
+        with pytest.raises(RepositoryConflict):
+            await rival.start("imdb.title.basics", "etag-1")
+        assert await runs.get("imdb.title.basics") is None
+        started = await runs.start("imdb.title.basics", "etag-1")
+        assert started.status is ImportRunStatus.RUNNING
+
+    async def test_held_elsewhere_names_another_holder_and_never_the_asker(
+        self, runs: ImportRunRepository, rival: ImportRunRepository
+    ) -> None:
+        dataset = "imdb.title.basics"
+        assert (await runs.held_elsewhere(dataset), await rival.held_elsewhere(dataset)) == (
+            False,
+            False,
+        )
+        await runs.hold(dataset)
+        assert (await runs.held_elsewhere(dataset), await rival.held_elsewhere(dataset)) == (
+            False,
+            True,
+        )
+        assert await rival.held_elsewhere("tmdb.ids.movie") is False, "one dataset's hold"
+        await runs.release(dataset)
+        assert await rival.held_elsewhere(dataset) is False

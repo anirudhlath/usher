@@ -2,8 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import case, select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
@@ -19,6 +18,19 @@ from usher.ports.repository import ImportRunRepository
 _LOCK_NAMESPACE = 0x75736872
 _TRY_LOCK = text("SELECT pg_try_advisory_lock(:namespace, hashtext(:dataset))")
 _UNLOCK = text("SELECT pg_advisory_unlock(:namespace, hashtext(:dataset))")
+# The lock's row in `pg_locks`, which shows each key as an unsigned `oid`. `hashtext` is a
+# signed `int4`, and the cast keeps its bits, so a name hashing negative matches too.
+_STILL_HELD = text(
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+    " AND classid = CAST(:namespace AS oid) AND objid = CAST(hashtext(:dataset) AS oid)"
+    " AND objsubid = 2 AND pid = pg_backend_pid())"
+)
+_HELD_HERE = text(
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+    " AND classid = CAST(:namespace AS oid) AND objid = CAST(hashtext(:dataset) AS oid)"
+    " AND objsubid = 2"
+    " AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))"
+)
 
 
 def _to_domain(row: ImportRunRow) -> ImportRun:
@@ -35,10 +47,15 @@ class PostgresImportRunRepository(ImportRunRepository):
     """Every read is `populate_existing`, because another process writes these rows.
 
     **The hold is a session-level advisory lock on a connection of its own**, checked out
-    of the session's engine by `start()` and returned by `release()`. The session's own
+    of the session's engine by `hold()` and returned by `release()`. The session's own
     connection goes back to the pool at every commit, which would carry the lock off with
     it; a lock that dies with its connection is what lets a killed importer's `RUNNING`
-    row be taken over.
+    row be taken over. So an importer holds two connections, and `Settings` counts both.
+
+    **The same property ends a live hold silently**: `idle_session_timeout`, a proxy's
+    idle cut or a server restart closes the connection and frees the lock with nothing
+    said. `touch` confirms the hold on that connection -- which also keeps it from idling
+    -- and a hold found gone is dropped with a `RepositoryConflict`.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -46,7 +63,8 @@ class PostgresImportRunRepository(ImportRunRepository):
         self._holds: dict[str, AsyncConnection] = {}
 
     async def start(self, dataset: str, revision: str) -> ImportRun:
-        took = await self._hold(dataset)
+        took = dataset not in self._holds
+        await self.hold(dataset)
         try:
             return await self._begin(dataset, revision)
         except BaseException:
@@ -54,10 +72,14 @@ class PostgresImportRunRepository(ImportRunRepository):
                 await self.release(dataset)
             raise
 
-    async def _hold(self, dataset: str) -> bool:
-        """Take the advisory lock for `dataset`, or `RepositoryConflict`; whether it was new."""
+    async def hold(self, dataset: str) -> None:
         if dataset in self._holds:
-            return False
+            try:
+                await self._confirm(dataset)
+            except RepositoryConflict:
+                pass  # Dropped as lost: taken again below, or refused.
+            else:
+                return
         connection = await self._engine().connect()
         try:
             # Autocommit, so the connection holds the lock and never a transaction:
@@ -67,13 +89,35 @@ class PostgresImportRunRepository(ImportRunRepository):
                 _TRY_LOCK, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
             )
         except BaseException:
-            await connection.close()
+            # The lock may have been granted before whatever ended this: closed, the
+            # connection would go back to the pool holding it. Ending its backend frees it.
+            await _discard(connection)
             raise
         if not granted:
             await connection.close()
             raise RepositoryConflict(f"another process holds the import of {dataset}")
         self._holds[dataset] = connection
-        return True
+
+    async def _confirm(self, dataset: str) -> None:
+        """`RepositoryConflict` unless this repository's hold on `dataset` is alive."""
+        connection = self._holds.get(dataset)
+        if connection is None:
+            raise RepositoryConflict(f"this process does not hold the import of {dataset}")
+        try:
+            held = await connection.scalar(
+                _STILL_HELD, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
+            )
+            why = "its lock is gone"
+        except DBAPIError as exc:
+            # A disconnect on the hold's own connection *is* the hold lost; anything
+            # else is not this method's to name.
+            if not exc.connection_invalidated:
+                raise
+            held, why = False, "its connection ended"
+        if not held:
+            del self._holds[dataset]
+            await _discard(connection)
+            raise RepositoryConflict(f"lost the hold on the import of {dataset}: {why}")
 
     def _engine(self) -> AsyncEngine:
         bind = self._session.bind
@@ -127,7 +171,16 @@ class PostgresImportRunRepository(ImportRunRepository):
         finally:
             await connection.close()
 
+    async def held_elsewhere(self, dataset: str) -> bool:
+        if dataset in self._holds:
+            return False
+        held = await self._session.scalar(
+            _HELD_HERE, {"namespace": _LOCK_NAMESPACE, "dataset": dataset}
+        )
+        return bool(held)
+
     async def touch(self, dataset: str) -> None:
+        await self._confirm(dataset)
         async with refusals_as_conflict(self._session, f"the heartbeat of {dataset}"):
             await self._session.execute(
                 update(ImportRunRow)
@@ -138,33 +191,6 @@ class PostgresImportRunRepository(ImportRunRepository):
                 .values(heartbeat_at=datetime.now(UTC))
                 .execution_options(synchronize_session=False)
             )
-
-    async def note_failure(self, dataset: str, error: str) -> ImportRun:
-        now = datetime.now(UTC)
-        created = ImportRun(
-            dataset=dataset,
-            revision="unknown",
-            status=ImportRunStatus.FAILED,
-            error=error,
-            heartbeat_at=now,
-            finished_at=now,
-        )
-        statement = pg_insert(ImportRunRow).values(**created.model_dump())
-        statement = statement.on_conflict_do_update(
-            index_elements=[ImportRunRow.dataset],
-            set_={
-                "error": statement.excluded.error,
-                "heartbeat_at": case(
-                    (ImportRunRow.status == ImportRunStatus.RUNNING, ImportRunRow.heartbeat_at),
-                    else_=statement.excluded.heartbeat_at,
-                ),
-            },
-        )
-        async with refusals_as_conflict(self._session, f"the failure of {dataset}"):
-            result = await self._session.execute(
-                statement.returning(ImportRunRow), execution_options={"populate_existing": True}
-            )
-        return _to_domain(result.scalar_one())
 
     async def save(self, run: ImportRun) -> None:
         data = run.model_dump()
@@ -215,3 +241,11 @@ class PostgresImportRunRepository(ImportRunRepository):
                 .execution_options(populate_existing=True)
             )
         return [_to_domain(row) for row in result.scalars()]
+
+
+async def _discard(connection: AsyncConnection) -> None:
+    """Close `connection` by ending its backend, so no lock on it outlives it in the pool."""
+    try:
+        await connection.invalidate()
+    finally:
+        await connection.close()

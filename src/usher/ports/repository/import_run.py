@@ -17,17 +17,16 @@ class ImportRunRepository(ABC):
     too, and matters more: `save` must be flushed inside the *same*
     transaction as the batch it describes, or a crash between the two either
     loses work or claims work that was rolled back.
+
+    **A dataset has at most one holder, and only the holder writes its row.** The hold
+    is taken by `start()` or `hold()` and given up by `release()` or by the holder's
+    connection ending, so a dead holder's checkpoint can be taken over. A holder is
+    another process, or another repository of this one.
     """
 
     @abstractmethod
     async def start(self, dataset: str, revision: str) -> ImportRun:
-        """Take hold of `dataset`'s import, then begin or resume its run.
-
-        **One holder at a time.** While another repository holds `dataset` -- another
-        process, or another session of this one -- this raises `RepositoryConflict` and
-        touches nothing. The hold lasts until `release()` or until the holder's
-        connection ends, so a dead holder's checkpoint can be taken over; a second
-        `start()` by the holder itself is not refused.
+        """Hold `dataset` as `hold()` does, then begin or resume its run.
 
         The returned run keeps the stored cursor when `revision` matches it and starts
         from zero when it does not -- an upstream snapshot change restarts the import
@@ -40,25 +39,29 @@ class ImportRunRepository(ABC):
         """
 
     @abstractmethod
-    async def release(self, dataset: str) -> None:
-        """Give up the hold `start()` took on `dataset`; a no-op when there is none."""
+    async def hold(self, dataset: str) -> None:
+        """Hold `dataset`, or raise `RepositoryConflict` and touch nothing.
 
-    @abstractmethod
-    async def touch(self, dataset: str) -> None:
-        """Move `dataset`'s `heartbeat_at` to now if its checkpoint is `RUNNING`.
-
-        Nothing else is written. Flushes, never commits.
+        Refused while another holder has it. A hold this repository already has is
+        confirmed, and one found lost is taken again.
         """
 
     @abstractmethod
-    async def note_failure(self, dataset: str, error: str) -> ImportRun:
-        """Record `error` against `dataset`'s checkpoint without taking it over.
+    async def release(self, dataset: str) -> None:
+        """Give up this repository's hold on `dataset`; a no-op when there is none."""
 
-        For a failure before `start()`. A stored checkpoint keeps its status and cursor
-        and gains the error, and its heartbeat moves unless it is `RUNNING`, whose
-        heartbeat belongs to whoever is importing it. With none stored, a `FAILED`
-        checkpoint at position 0 is created. Returns the checkpoint as stored. Flushes,
-        never commits.
+    @abstractmethod
+    async def held_elsewhere(self, dataset: str) -> bool:
+        """Whether a holder other than this repository has `dataset` now."""
+
+    @abstractmethod
+    async def touch(self, dataset: str) -> None:
+        """Confirm this repository still holds `dataset`, then move a `RUNNING` heartbeat.
+
+        A hold that is gone -- its connection ended, by `idle_session_timeout`, a proxy's
+        idle cut or a server restart -- raises `RepositoryConflict` and is dropped, so
+        the next `hold()` takes a fresh one. Nothing but `heartbeat_at` is written.
+        Flushes, never commits.
         """
 
     @abstractmethod

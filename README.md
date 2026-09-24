@@ -223,8 +223,8 @@ up to five attempts and 15 minutes; each retry prints a line and the command
 carries on, and the 2026-09-24 run above retried four times. A phase that still
 fails, or is skipped because an import it reads failed, makes the command exit
 1, and its line ends with the command that resumes it. Check that every row
-reads `completed`. A `completed` row that also shows `error=` is a refresh that
-could not start; the import it names still stands.
+reads `completed`. A `completed` row that also shows `error=` is an attempt that
+failed after that import completed; the import still stands.
 
 ```
 docker compose exec usher usher bootstrap-status
@@ -537,10 +537,10 @@ Wikidata's SPARQL endpoint. About ten minutes and 1.28M titles for those
 three, most of it the crosswalk; the two IMDb expansion phases below read
 another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
 and it continues from its own checkpoint. **A phase that fails exits 1**, and
-so does one skipped because an import it reads is `failed` or `running`, one
-refused because `titles` is empty, and one left to another process already
-importing the same dataset; each prints a line ending with the command that
-resumes it. See
+so does one skipped because an import it reads is `failed`, `running` or being
+imported by another process, one refused because `titles` is empty, and one
+left to another process already importing the same dataset; each prints a line
+ending with the command that resumes it. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash

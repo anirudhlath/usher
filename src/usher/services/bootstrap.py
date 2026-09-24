@@ -114,12 +114,14 @@ class _FetchFailed(Exception):
 
     Only the fetch is retried: a writer that raised may have left half a batch in the
     transaction, and resuming over it is a decision about the writer's atomicity this
-    loop cannot make.
+    loop cannot make. `at` is the run as this attempt last committed it, which is where
+    the retry resumes: `_drain` sets it on the way out.
     """
 
     def __init__(self, cause: UsherPortError) -> None:
         super().__init__(str(cause))
         self.cause = cause
+        self.at: ImportRun | None = None
 
 
 def _warn(line: str) -> None:
@@ -302,15 +304,17 @@ class BootstrapService:
         write: Callable[[Sequence[RowT]], Awaitable[int]],
         *,
         revision: str | None = None,
+        then: Callable[[ImportRun], Awaitable[None]] | None = None,
     ) -> ImportRun:
         """Stream `dataset` through `write`, checkpointing every batch.
 
         The caller's transaction ends before the first request, `start()` is committed
-        before anything is fetched, and so is every batch. The hold `start()` takes is
-        released however the import ends.
+        before anything is fetched, and so is every batch. `then` runs once this process
+        has completed the import, still holding it, and a port error from it is recorded
+        like the drain's own. The hold is released however the import ends.
         """
         started = time.perf_counter()
-        holding = False
+        resolved = revision or "unknown"
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
             try:
@@ -324,41 +328,35 @@ class BootstrapService:
                 try:
                     run = await self._runs.start(dataset.name, resolved)
                 except RepositoryConflict as exc:
-                    # Case 1 -- handled entirely inside this nested try, so
-                    # it never reaches the outer `except UsherPortError`
-                    # below and never triggers the re-fetch-and-overwrite
-                    # that branch performs for case 2.
-                    run = await self._concede_to_other_owner(dataset.name, resolved, exc, span)
-                else:
-                    holding = True
-                    # Before the first fetch, which can be a 214 MiB download: held
-                    # uncommitted through it, `RUNNING` keeps an xid, is invisible to
-                    # `bootstrap-status` and to `run_bootstrap`'s read of what is
-                    # unfinished, and dies to `idle_in_transaction_session_timeout`
-                    # with nothing recorded.
+                    return await self._concede_to_other_owner(dataset.name, resolved, exc)
+                # Before the first fetch, which can be a 214 MiB download: held
+                # uncommitted through it, `RUNNING` keeps an xid, is invisible to
+                # `bootstrap-status` and to `run_bootstrap`'s read of what is
+                # unfinished, and dies to `idle_in_transaction_session_timeout`
+                # with nothing recorded.
+                await self._commit()
+                resume_from = _cursor(run, resolved)
+                if resume_from is not None:
+                    logger.info(
+                        "resuming {dataset} from position {position} ({rows} rows already seen)",
+                        dataset=dataset.name,
+                        position=resume_from.position,
+                        rows=resume_from.rows_seen,
+                    )
+                run = await self._drain_resuming(dataset, write, run, resolved)
+                if then is not None:
+                    await then(run)
                     await self._commit()
-                    resume_from = _cursor(run, resolved)
-                    if resume_from is not None:
-                        logger.info(
-                            "resuming {dataset} from position {position} "
-                            "({rows} rows already seen)",
-                            dataset=dataset.name,
-                            position=resume_from.position,
-                            rows=resume_from.rows_seen,
-                        )
-                    run = await self._drain_resuming(dataset, write, run, resolved)
+                return run
             except (UsherPortError, _GaveUp) as exc:
-                # Case 2.
                 span.set_attribute("usher.failed", True)
-                run = await self._record_failure(dataset.name, exc, started=holding)
+                return await self._fail(dataset.name, resolved, exc)
             finally:
-                if holding:
-                    await self._runs.release(dataset.name)
+                await self._runs.release(dataset.name)
                 _phase_duration.record(time.perf_counter() - started, {"dataset": dataset.name})
-        return run
 
     async def resolve_revision[RowT](self, dataset: BulkDataset[RowT]) -> str | ImportRun:
-        """`dataset`'s revision, retried like a fetch -- or the `FAILED` run it recorded.
+        """`dataset`'s revision, retried like a fetch -- or the run its failure left.
 
         For a caller that needs the revision before it can build its writer, and so
         cannot leave resolving it to `import_dataset`: `movielens` stamps every vector
@@ -369,54 +367,57 @@ class BootstrapService:
             await self._commit()
             return await self._revision(dataset)
         except (UsherPortError, _GaveUp) as exc:
-            return await self._record_failure(dataset.name, exc, started=False)
+            try:
+                return await self._fail(dataset.name, "unknown", exc)
+            finally:
+                await self._runs.release(dataset.name)
 
-    async def _record_failure(
-        self, dataset: str, exc: UsherPortError | _GaveUp, *, started: bool
-    ) -> ImportRun:
-        """Record on `dataset`'s checkpoint why this attempt failed, and commit it.
+    async def _fail(self, dataset: str, revision: str, exc: UsherPortError | _GaveUp) -> ImportRun:
+        """Record this attempt's failure as `dataset`'s holder, or concede and write nothing.
 
-        **Before `start()`** this process holds nothing, and the checkpoint may be a live
-        import of another's, so it only gains the error (`note_failure`): its status and
-        cursor stay as they were, and one is created `FAILED` only where none exists.
+        Only a holder writes a checkpoint. A failure before `start()` holds nothing yet,
+        and a lost hold has been dropped, so both take it here first; while another
+        process has it, the failure is logged and the dataset left to that process.
+        """
+        try:
+            await self._runs.hold(dataset)
+        except RepositoryConflict as held:
+            logger.error("{dataset} failed: {error}", dataset=dataset, error=str(exc))
+            return await self._concede_to_other_owner(dataset, revision, held)
+        return await self._record_failure(dataset, exc)
 
-        **After it**, `FAILED` -- unless the checkpoint is still `COMPLETED`, which after
-        `start()` means no batch of this attempt landed and the import it would have
-        refreshed stands whole. Downgrading that would block every phase reading it
-        until the dataset is imported again, so it keeps its status with the error
-        beside it. `FAILED` is therefore said only of a catalog holding part of this
-        attempt's snapshot, or no completed import of the dataset at all.
+    async def _record_failure(self, dataset: str, exc: UsherPortError | _GaveUp) -> ImportRun:
+        """Record, as `dataset`'s holder, why this attempt failed, and commit it.
+
+        `FAILED` -- unless the checkpoint is `COMPLETED`, which means no batch of this
+        attempt landed (or the import completed and `then` failed), so the completed
+        import stands whole. Downgrading that would block every phase reading it until
+        the dataset is imported again, so it keeps its status with the error beside it.
+        `FAILED` is therefore said only of a catalog holding part of a snapshot, or no
+        completed import of the dataset at all.
 
         `_GaveUp` is recorded as the port error it wraps, with the attempts appended to
-        the message. Either way the returned run is the stored one.
+        the message. The returned run is the stored one.
         """
         cause = exc if isinstance(exc, UsherPortError) else exc.cause
+        stored = await self._runs.get(dataset)
+        now = datetime.now(UTC)
         # str(exc), never the exception object and never a payload: PRD 08's
         # credentials-never-logged rule, and `error` is a Text column an operator reads.
-        if not started:
-            run = await self._runs.note_failure(dataset, str(exc))
-            outcome = "could not start, leaving its checkpoint {status} at position {position}"
+        if stored is not None and stored.status is ImportRunStatus.COMPLETED:
+            run = stored.evolve(error=str(exc), heartbeat_at=now)
+            outcome = "failed, so its completed import at position {position} stands"
         else:
-            stored = await self._runs.get(dataset)
-            now = datetime.now(UTC)
-            if stored is not None and stored.status is ImportRunStatus.COMPLETED:
-                run = stored.evolve(error=str(exc), heartbeat_at=now)
-                outcome = "landed no batch, so its completed import at position {position} stands"
-            else:
-                run = (stored or ImportRun(dataset=dataset, revision="unknown")).evolve(
-                    status=ImportRunStatus.FAILED,
-                    error=str(exc),
-                    heartbeat_at=now,
-                    finished_at=now,
-                )
-                outcome = "import failed at position {position}"
-            await self._runs.save(run)
+            run = (stored or ImportRun(dataset=dataset, revision="unknown")).evolve(
+                status=ImportRunStatus.FAILED, error=str(exc), heartbeat_at=now, finished_at=now
+            )
+            outcome = "import failed at position {position}"
+        await self._runs.save(run)
         await self._commit()
         _failures.add(1, {"dataset": dataset, "kind": type(cause).__name__})
         logger.error(
             "{dataset} " + outcome + ": {error}",
             dataset=dataset,
-            status=run.status.value,
             position=run.position,
             error=str(exc),
         )
@@ -452,8 +453,7 @@ class BootstrapService:
         from everyone else, and is killed under `idle_in_transaction_session_timeout`,
         whereupon the next statement raises something no `except` here records. So the
         commit ends it first. Nothing of this service's is pending by then -- `start()`
-        and every batch commit before anything is fetched -- so what it ends is a read,
-        `_drain_resuming`'s re-read of the checkpoint.
+        and every batch commit before anything is fetched.
 
         `holding` is the dataset this service has started, whose heartbeat the wait keeps
         moving. One helper for both retried calls, so neither can wait inside a
@@ -472,6 +472,12 @@ class BootstrapService:
         batch to checkpoint, and a heartbeat left that long reads as a dead importer.
         Each beat is committed as it lands, so none is held across the wait. `work` runs
         as a task only so the wait can be timed; it never touches the session.
+
+        **Each beat confirms the hold** (`touch`): a hold whose connection ended --
+        `idle_session_timeout`, a proxy's idle cut, a server restart -- raises
+        `RepositoryConflict` here, which ends the import rather than letting it write
+        beside whoever takes the dataset next. The statement is also what keeps an idle
+        hold from meeting `idle_session_timeout` at all.
         """
         task = asyncio.ensure_future(work)
         try:
@@ -509,9 +515,9 @@ class BootstrapService:
         return wait
 
     async def _concede_to_other_owner(
-        self, dataset: str, revision: str, exc: RepositoryConflict, span: trace.Span
+        self, dataset: str, revision: str, exc: RepositoryConflict
     ) -> ImportRun:
-        """Case 1 of `import_dataset`: another process holds `dataset`, so this one leaves it.
+        """Another process holds `dataset`, so this one leaves it.
 
         Its row is returned as stored, error and all, with no `save` and no `commit`. With
         no row to read -- the holder has not committed its first yet -- the synthetic run
@@ -519,7 +525,7 @@ class BootstrapService:
         """
         self._conceded.add(dataset)
         owner = await self._runs.get(dataset)
-        span.set_attribute("usher.conflict", True)
+        trace.get_current_span().set_attribute("usher.conflict", True)
         logger.warning(
             "not recording a failure for {dataset}: {error} -- a different "
             "run already owns its checkpoint, leaving it untouched",
@@ -539,11 +545,13 @@ class BootstrapService:
     ) -> ImportRun:
         """`_drain`, resumed from the last committed checkpoint after a transient failure.
 
-        **A retry is a resume**: it re-reads the checkpoint the failed attempt left and
-        hands the dataset that cursor -- the same thing an operator re-running the
-        phase gets, done without them. Nothing already committed is fetched or written
-        again. Bounded by `RetryPolicy`; a streak that outlasts it raises `_GaveUp`,
-        which `import_dataset` records at the checkpoint reached.
+        **A retry is a resume**: it hands the dataset the cursor this attempt last
+        committed -- the same thing an operator re-running the phase gets, done without
+        them. Nothing already committed is fetched or written again. The cursor is the
+        attempt's own, never re-read from the row: over a completed import the row is
+        still that import until the first batch lands. Bounded by `RetryPolicy`; a
+        streak that outlasts it raises `_GaveUp`, which `import_dataset` records at the
+        checkpoint reached.
         """
         attempt = 1
         streak_started: float | None = None
@@ -552,14 +560,7 @@ class BootstrapService:
                 return await self._drain(dataset, write, run, _cursor(run, revision), revision)
             except _FetchFailed as failed:
                 exc = failed.cause
-                stored = await self._runs.get(dataset.name)
-                # Over a completed import, the stored row is still that import until this
-                # attempt's first batch lands, and `run` is where the attempt stands.
-                committed = (
-                    stored
-                    if stored is not None and stored.status is ImportRunStatus.RUNNING
-                    else run
-                )
+                committed = failed.at or run
                 now = self._clock()
                 if streak_started is None or committed.position != run.position:
                     # A batch committed since the last failure, or this is the first:
@@ -585,29 +586,38 @@ class BootstrapService:
         revision: str,
     ) -> ImportRun:
         batches = dataset.batches(resume_from=resume_from, revision=revision)
-        async for batch in self._fetched(batches, dataset.name):
-            batch_started = time.perf_counter()
-            with _tracer.start_as_current_span("bootstrap.batch") as span:
-                span.set_attribute("usher.dataset", dataset.name)
-                span.set_attribute("usher.batch.rows", len(batch.rows))
-                written = await write(batch.rows)
-                run = run.evolve(
-                    revision=batch.cursor.revision,
-                    position=batch.cursor.position,
-                    rows_seen=batch.cursor.rows_seen,
-                    rows_written=run.rows_written + written,
-                    heartbeat_at=datetime.now(UTC),
+        try:
+            async for batch in self._fetched(batches, dataset.name):
+                batch_started = time.perf_counter()
+                with _tracer.start_as_current_span("bootstrap.batch") as span:
+                    span.set_attribute("usher.dataset", dataset.name)
+                    span.set_attribute("usher.batch.rows", len(batch.rows))
+                    # Before the write: a fetch quicker than a beat never beats, and a
+                    # batch written without the hold lands beside whoever took it.
+                    await self._runs.touch(dataset.name)
+                    written = await write(batch.rows)
+                    run = run.evolve(
+                        revision=batch.cursor.revision,
+                        position=batch.cursor.position,
+                        rows_seen=batch.cursor.rows_seen,
+                        rows_written=run.rows_written + written,
+                        heartbeat_at=datetime.now(UTC),
+                    )
+                    await self._runs.save(run)
+                    # The single commit that makes this resumable: rows and cursor land
+                    # together or not at all.
+                    await self._commit()
+                    # After that commit, never before it: an event is a statement about
+                    # committed state, and this frame's subject is the batch the line
+                    # above just made durable.
+                    await self._publish_progress(run)
+                _rows_counter.add(written, {"dataset": dataset.name})
+                _batch_duration.record(
+                    time.perf_counter() - batch_started, {"dataset": dataset.name}
                 )
-                await self._runs.save(run)
-                # The single commit that makes this resumable: rows and cursor land
-                # together or not at all.
-                await self._commit()
-                # After that commit, never before it: an event is a statement about
-                # committed state, and this frame's subject is the batch the line
-                # above just made durable.
-                await self._publish_progress(run)
-            _rows_counter.add(written, {"dataset": dataset.name})
-            _batch_duration.record(time.perf_counter() - batch_started, {"dataset": dataset.name})
+        except _FetchFailed as failed:
+            failed.at = run
+            raise
         return await self._finish(run)
 
     async def _fetched[RowT](
@@ -656,6 +666,7 @@ class BootstrapService:
         )
 
     async def _finish(self, run: ImportRun) -> ImportRun:
+        await self._runs.touch(run.dataset)  # As before a batch: only the holder writes.
         now = datetime.now(UTC)
         run = run.evolve(
             status=ImportRunStatus.COMPLETED, error=None, heartbeat_at=now, finished_at=now

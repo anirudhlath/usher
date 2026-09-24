@@ -1379,9 +1379,9 @@ def bulk_client(settings: Settings) -> httpx.AsyncClient:
 class FailedImport:
     """A dataset whose import failed in this run, and the phase that resumes it.
 
-    `run` is its checkpoint as stored, with the error beside it: `FAILED`, still
-    `COMPLETED` when the attempt landed no batch over a completed import, or still
-    `RUNNING` when it failed before `start()` over a checkpoint reading `running`.
+    `run` is its checkpoint as stored, with the error beside it: `FAILED`, or still
+    `COMPLETED` when the completed import stands -- the attempt landed no batch over it,
+    or completed it and then failed in `import_dataset`'s `then`.
 
     The phase is the one that imports the dataset alone, not the phase the run was
     asked for: under `--phase all` a failed crosswalk resumes with `--phase crosswalk`
@@ -1398,9 +1398,11 @@ class FailedImport:
 class ConcededImport:
     """A dataset another process held when this run came to import it, left alone.
 
-    `run` is that process's checkpoint as stored, error and all, or a synthetic run
-    persisted nowhere when its row was not yet visible; nothing in it is this run's. The
-    command did not import the dataset, so it is unfinished like the other three.
+    Also a failure this run met while another process held the dataset: only a holder
+    writes a checkpoint, so the failure is logged and nothing is written. `run` is that
+    process's checkpoint as stored, error and all, or a synthetic run persisted nowhere
+    when its row was not yet visible; nothing in it is this run's. The command did not
+    import the dataset, so it is unfinished like the other three.
     """
 
     phase: BootstrapPhase
@@ -1411,15 +1413,18 @@ class ConcededImport:
 class SkippedStep:
     """A phase this run did not start, because a dataset it reads is unfinished.
 
-    `blockers` are those datasets' checkpoints as stored -- `failed`, or `running` for
-    an import that was killed or is still loading elsewhere. `resume` is the commands,
-    in order, that finish them and then run this phase; `ratings` needs no command of
-    its own after `imdb`, which imports it.
+    `held` names those another process is importing, whatever their rows say -- a
+    refresh reads `completed` until its first batch lands, and a first import has no row
+    until it commits one. `blockers` are the rest's checkpoints as stored: `failed`, or
+    `running` for an import that was killed. `resume` is the commands, in order, that
+    finish the blockers and then run this phase; `ratings` needs no command of its own
+    after `imdb`, which imports it.
     """
 
     phase: BootstrapPhase
     blockers: tuple[ImportRun, ...]
     resume: tuple[BootstrapPhase, ...]
+    held: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1503,11 +1508,10 @@ def _failed_this_run(run: ImportRun) -> bool:
 
     Never asked of a concede: that run is another process's row, whose error belongs to
     that process, or a synthetic `FAILED` one -- `settle` answers it from
-    `BootstrapService.conceded` first. `error` is the test, not `status`: a failure that
-    landed no batch over a `COMPLETED` import leaves it `COMPLETED` with the error, one
-    before `start()` over a `RUNNING` checkpoint leaves it `RUNNING` with the error, and
-    every `FAILED` run this process records carries one. A finished run has none --
-    `_finish` clears it.
+    `BootstrapService.conceded` first. Otherwise the row is this process's, written as
+    its holder, and `error` is the test rather than `status`: a failure over a
+    `COMPLETED` import leaves it `COMPLETED` with the error, every `FAILED` run carries
+    one, and a finished run has none -- `_finish` clears it.
     """
     return run.error is not None
 
@@ -1518,8 +1522,8 @@ def _closing_line(one: FailedImport | ConcededImport | SkippedStep | RefusedStep
     Led by the dataset or phase name so a reader scanning a long report -- or a log --
     finds it by the thing that stopped. A failure resumes because every step
     checkpoints per batch: the command picks up at `position` while the upstream
-    revision is unchanged, and restarts cleanly when it has moved. One that landed no
-    batch over a completed import names no position: the import it had stands whole.
+    revision is unchanged, and restarts cleanly when it has moved. One over a completed
+    import says that import stands whole.
     """
     commands = ", then ".join(
         f"usher bootstrap --phase {step.value}"
@@ -1533,13 +1537,8 @@ def _closing_line(one: FailedImport | ConcededImport | SkippedStep | RefusedStep
     if isinstance(one, FailedImport):
         if one.run.status is ImportRunStatus.COMPLETED:
             return (
-                f"{one.run.dataset} failed before its first batch landed, and its completed "
-                f"import stands: {one.run.error}; resume with: {commands}"
-            )
-        if one.run.status is ImportRunStatus.RUNNING:
-            return (
-                f"{one.run.dataset} could not start, and its checkpoint reads running at "
-                f"position {one.run.position}: {one.run.error}; resume with: {commands}"
+                f"{one.run.dataset} failed, and its completed import at position "
+                f"{one.run.position} stands: {one.run.error}; resume with: {commands}"
             )
         return (
             f"{one.run.dataset} failed at position {one.run.position}: {one.run.error}"
@@ -1550,14 +1549,14 @@ def _closing_line(one: FailedImport | ConcededImport | SkippedStep | RefusedStep
             f"{one.phase.value} refused: titles is empty, and {one.phase.value} joins against "
             f"it; resume with: {commands}"
         )
-    states = ", ".join(
-        f"{run.dataset} is {run.status.value} at position {run.position}" for run in one.blockers
-    )
-    written = "what that import writes" if len(one.blockers) == 1 else "what those imports write"
-    return (
-        f"{one.phase.value} skipped: {states}, and {one.phase.value} reads {written}"
-        f"; resume with: {commands}"
-    )
+    held = [f"{dataset} is being imported by another process" for dataset in one.held]
+    unfinished = [f"{r.dataset} is {r.status.value} at position {r.position}" for r in one.blockers]
+    states = ", ".join(held + unfinished)
+    count = len(one.held) + len(one.blockers)
+    written = "what that import writes" if count == 1 else "what those imports write"
+    wait = "; once that process ends, resume with: " if one.held else "; resume with: "
+    step = one.phase.value
+    return f"{step} skipped: {states}, and {step} reads {written}{wait}{commands}"
 
 
 async def run_bootstrap(
@@ -1579,10 +1578,11 @@ async def run_bootstrap(
     phase failed. Each is also reported, as the run's last lines, with the commands
     that continue it.
 
-    **A phase does not start while a dataset it reads is unfinished** (`_READS`), which
-    is read from the stored checkpoints: under `--phase all` a failed `imdb` skips every
-    later phase that joins its titles, and a single phase is skipped over an earlier
-    run's failure the same way. What reads nothing unfinished still runs, so one upstream
+    **A phase does not start while a dataset it reads is unfinished** (`_READS`): its
+    checkpoint is not `completed`, or another process is importing it. Under `--phase
+    all` a failed `imdb` skips every later phase that joins its titles, and a single
+    phase is skipped over an earlier run's failure, or a live import elsewhere, the same
+    way. What reads nothing unfinished still runs, so one upstream
     being down costs only what depends on it. A phase that refuses an empty catalog is
     unfinished too. The transient class never gets this far unretried --
     `import_dataset` retries a revision and resumes a fetch until its `RetryPolicy`
@@ -1618,19 +1618,25 @@ async def run_bootstrap(
     async def blocked(step: BootstrapPhase) -> bool:
         """Whether `step` must wait, recording why when it must.
 
-        Only a checkpoint that exists and is not `completed` blocks: a catalog a
-        source sync filled has no IMDb checkpoint and nothing partial in it.
+        A dataset another process holds blocks whatever its row says: a refresh reads
+        `completed` until its first batch lands. Otherwise only a checkpoint that exists
+        and is not `completed` blocks: a catalog a source sync filled has no IMDb
+        checkpoint and nothing partial in it.
         """
+        held: list[str] = []
         blockers: list[tuple[BootstrapPhase, ImportRun]] = []
         for prerequisite in _READS[step]:
             for dataset in _WRITTEN_BY[prerequisite]:
+                if await runs.held_elsewhere(dataset):
+                    held.append(dataset)
+                    continue
                 stored = await runs.get(dataset)
                 if stored is not None and stored.status is not ImportRunStatus.COMPLETED:
                     blockers.append((prerequisite, stored))
-        if not blockers:
+        if not held and not blockers:
             return False
         resume = _resume(step, tuple(dict.fromkeys(prerequisite for prerequisite, _ in blockers)))
-        unfinished.append(SkippedStep(step, tuple(run for _, run in blockers), resume))
+        unfinished.append(SkippedStep(step, tuple(run for _, run in blockers), resume, tuple(held)))
         return True
 
     try:
@@ -1693,7 +1699,7 @@ async def run_bootstrap(
         ):
             settle(
                 BootstrapPhase.MOVIELENS,
-                await _movielens(settings, client, catalog, service, commit, report),
+                await _movielens(settings, client, catalog, service, report),
             )
         logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
@@ -1866,7 +1872,6 @@ async def _movielens(
     client: httpx.AsyncClient,
     catalog: BulkCatalogRepository,
     service: BootstrapService,
-    commit: Callable[[], Awaitable[None]],
     report: BootstrapReporter,
 ) -> ImportRun | None:
     """The MovieLens tag genome, its vocabulary, and the coverage report."""
@@ -1898,18 +1903,20 @@ async def _movielens(
         _GENOME_TALLY["unmatched"] += result.unmatched
         return result.inserted + result.updated
 
-    _GENOME_TALLY["unmatched"] = 0
-    run = await service.import_dataset(dataset, write, revision=revision)
     tags = 0
-    if run.status is ImportRunStatus.COMPLETED:
-        # The same `revision` the vectors were stamped with, resolved once
-        # above -- which is the whole of what makes `genome_tags` and
+
+    async def vocabulary(completed: ImportRun) -> None:
+        # Only for vectors this run completed, and under their hold, which a status read
+        # afterwards could not tell apart from a refresh that failed over a completed
+        # import or from another process's row. The same `revision` the vectors were
+        # stamped with, resolved once above -- the whole of what makes `genome_tags` and
         # `genome_scores` comparable rather than merely both present.
-        vocabulary = await dataset.tag_vocabulary(revision)
-        tags = await catalog.replace_genome_tags(vocabulary, revision=revision)
-        # `import_dataset` commits its own last batch and then returns, so
-        # this write is alone in a fresh transaction and needs its own commit.
-        await commit()
+        nonlocal tags
+        names = await dataset.tag_vocabulary(revision)
+        tags = await catalog.replace_genome_tags(names, revision=revision)
+
+    _GENOME_TALLY["unmatched"] = 0
+    run = await service.import_dataset(dataset, write, revision=revision, then=vocabulary)
     _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"], tags, report)
     return run
 

@@ -742,7 +742,7 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
     )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        await _movielens(settings, client, catalog, service, _no_commit, print)
+        await _movielens(settings, client, catalog, service, print)
 
     assert await catalog.count_titles() == 0
     assert await runs.list_runs() == []
@@ -835,7 +835,7 @@ async def test_the_genome_phase_stores_the_tag_vocabulary_beside_the_vectors(
     )
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
+        await _movielens(_genome_settings(cache), client, catalog, service, print)
 
     stored = catalog.genome_tags()
     assert len(stored) == GENOME_TAG_COUNT
@@ -888,7 +888,7 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
     )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
+        await _movielens(_genome_settings(cache), client, catalog, service, print)
         # The premise, asserted against the transport rather than against the run:
         # one more resolution really does hand back a different token, so an
         # implementation that resolved twice would have stamped something else.
@@ -918,14 +918,14 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
     settings = _genome_settings(cache)
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(settings, client, catalog, service, _no_commit, print)
+        await _movielens(settings, client, catalog, service, print)
         assert len(catalog.genome_tags()) == GENOME_TAG_COUNT
         # An older catalog has no vocabulary. Both stores are emptied so the
         # assertions below can distinguish "the second run wrote nothing" from
         # "the second run rewrote everything", which the checkpoint alone cannot.
         catalog._genome_tags.clear()
         catalog._genome.clear()
-        await _movielens(settings, client, catalog, service, _no_commit, print)
+        await _movielens(settings, client, catalog, service, print)
 
     checkpoint = await runs.get("movielens.genome")
     assert checkpoint is not None
@@ -960,7 +960,7 @@ async def test_an_import_that_failed_writes_no_vocabulary(
     )
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
+        await _movielens(_genome_settings(cache), client, catalog, service, print)
 
     stored_run = await runs.get("movielens.genome")
     assert stored_run is not None and stored_run.status is ImportRunStatus.FAILED

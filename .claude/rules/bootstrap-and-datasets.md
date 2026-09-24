@@ -19,7 +19,7 @@ required `--phase`, and **`measure_bulk_load.py` takes no arguments and truncate
 the database between passes — scratch database only, never a real catalog.**
 
 ```bash
-uv run usher bootstrap --phase all      # the six steps, in FULL_SEQUENCE's order
+uv run usher bootstrap --phase all      # the six steps below, in FULL_SEQUENCE's order
 uv run usher bootstrap --phase imdb     # or credit-names | aliases | tmdb-ids | crosswalk | movielens
 uv run usher bootstrap --phase ratings  # an alias, not a step
 uv run usher bootstrap-status           # titles, genome vectors, vocabulary, checkpoints
@@ -27,16 +27,12 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
 
 ## Phases: the order is load-bearing and `all` is not every member
 
-- **Steps of a full run, in execution order:** `imdb`, `credit-names`,
-  `aliases`, `tmdb-ids`, `crosswalk`, `movielens` (`domain/bootstrap.py:93-100`).
 - **`all` and `ratings` are aliases rather than steps, and `--phase all`
-  dispatches neither.** `ratings` re-imports `title.ratings.tsv.gz` (8.2 MiB)
-  alone rather than paying `--phase imdb`'s 214.4 MiB and the rewrite of every
-  name and year, which stales embeddings; adding it to `FULL_SEQUENCE`
-  imports the file twice. A unit case asserts `FULL_SEQUENCE` and `PHASE_ALIASES`
-  partition the enum, so a member added to neither is a red rather than a phase
-  `argparse` offers and `run_bootstrap` ignores. `POST /admin/bootstrap/{phase}`
-  and `choices=` are the same enum.
+  dispatches neither.** `ratings` re-imports `title.ratings.tsv.gz` alone, sparing
+  `--phase imdb`'s rewrite of every name and year (which stales embeddings); in
+  `FULL_SEQUENCE` it would import the file twice. A unit case asserts
+  `FULL_SEQUENCE` and `PHASE_ALIASES` partition the enum, so a member in neither is
+  red, not a phase `argparse` offers and `run_bootstrap` ignores.
 - `credit-names`, `aliases` and `movielens` join `titles` on `imdb_id`, so all
   three follow `imdb`. **Run `credit-names` before any TMDb enrichment crawl**
   (`--help` says so): `fill_credit_names` writes only skeletons, so a title the
@@ -45,8 +41,7 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
 
 ## Resuming and checkpoints
 
-- **Every step is resumable and a resume finishes at the identical row count**,
-  verified under `SIGKILL` for `imdb`, `aliases` and `credit-names`.
+- **Every step is resumable, and a resume finishes at the identical row count.**
 - **A dataset that groups by title checkpoints the last line of a *completed*
   title, not `position`**, so a resume replays no retained row rather than
   replaying some and destroying the rest. `credit-names` also rebuilds its whole
@@ -148,11 +143,15 @@ fixed one, pin `revision()` to the sidecar's own value.
   *session* aborted and the next statement raises `PendingRollbackError`,
   including `import_dataset`'s own except handler. Deliberately a full
   `session.rollback()`, not a SAVEPOINT (`db/repositories/import_run.py`).
-- **`start()` holds the dataset with a session-level advisory lock on a connection
-  of its own** (the session's returns to the pool at each commit, lock and all). Not
-  granted is the only `RepositoryConflict` `import_dataset` sees, and the loser
-  touches nothing — the owner's row as stored, no `save`, no `commit`. Released in
-  the `finally` or with a dead process's connection; a test that `start()`s releases.
+- **Only the holder of a dataset writes its row.** The hold is a session-level
+  advisory lock on its own connection (the session's goes back to the pool at each
+  commit, lock and all); `hold()`/`start()` take it, the `finally` or a dead process
+  releases it, and a test that holds releases. A failure before `start()` takes it
+  to record itself, or concedes and writes nothing.
+- **`touch` confirms the hold**, since an ended connection (`idle_session_timeout`, a
+  proxy's cut) frees the lock silently. `_beating` commits one every
+  `HEARTBEAT_SECONDS` through a fetch or wait; it or `hold()` precedes every save; a
+  synchronous dump read bypassing `download.paced` stalls the beat throughout.
 - ⚠️ **Known defect, recorded and not fixed:** `run_bootstrap` opens
   `bulk_load_window()` *around* `import_dataset`, so its `count_titles() == 0` guard
   is read before ownership is known. Two processes over an empty catalog both `DROP
@@ -168,15 +167,17 @@ fixed one, pin `revision()` to the sidecar's own value.
   never a writer, and **commits before the first `HEAD`, after `start()` and before
   every wait**: a transaction held across a wait keeps an xid, hides `RUNNING`, and
   dies to `idle_in_transaction_session_timeout` unrecorded.
-- **`start()` over a `COMPLETED` checkpoint persists only a cleared `error` and a
-  heartbeat**, so it stays `COMPLETED` at its cursor until the first batch is saved,
-  and a failure, cancel or kill before that blocks no phase; until the row reads
-  `RUNNING`, `_drain_resuming` resumes from the attempt's run. "Failed this run" is
-  `error is not None`, asked after the concede check. A failure before `start()` is
-  `note_failure`: status and cursor kept, `FAILED` only where no row exists.
-- **A `RUNNING` heartbeat moves only while the event loop is free**: `_beating`
-  commits a `touch` every `HEARTBEAT_SECONDS` through a fetch or a retry's wait, and
-  a synchronous read of a dump that bypasses `download.paced` stalls it throughout.
+- **State model** (PRD 04 has the operator's). `start()` over `COMPLETED` persists only
+  a cleared `error` and a heartbeat, so a retry resumes from `_FetchFailed.at`, never a
+  re-read row; "failed this run" is `error is not None`, asked after the concede.
+
+  | row | means | blocks a reader |
+  |---|---|---|
+  | `RUNNING` | importing, or its importer died | yes |
+  | `FAILED` + error | part of a snapshot, or none ever completed | yes |
+  | `COMPLETED` | finished | no |
+  | `COMPLETED` + error | finished; a later attempt failed before its first batch, or `then` after it | no |
+  | any, `held_elsewhere` | another process is importing it | yes |
 - **`download.py`'s `HEAD` follows WDQS's ladder**: 408/5xx unavailable, 429
   rate-limited, any other 4xx or no `ETag`/`Last-Modified` malformed. The TMDb
   walk-back reads only 404/403 as "not published" (`revision_if_published`) — read
