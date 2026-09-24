@@ -71,10 +71,11 @@ and writes nothing to it. The hold ends when that import or phase ends, however
 it ends — a killed process's included — so the next run can resume it at once.
 **Only the process holding a dataset writes its checkpoint.** A failure met
 before the import starts is recorded by taking the hold first; while another
-process has it, nothing is written. The hold, and a phase's hold on what it
-reads, is confirmed at every heartbeat and before every write of the
-checkpoint, and an import that finds either lost — `idle_session_timeout`, a
-connection cut, a server restart — stops and records the failure, unless
+process has it, nothing is written. The hold is confirmed at every heartbeat
+and before every write of the checkpoint. A phase's hold on what it reads is
+confirmed at every heartbeat, before each batch is written and before the import
+is recorded complete. An import that finds either lost — `idle_session_timeout`,
+a connection cut, a server restart — stops and records the failure, unless
 another process has taken the dataset since.
 
 | checkpoint | means | blocks a phase that reads it |

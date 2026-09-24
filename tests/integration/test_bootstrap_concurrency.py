@@ -12,10 +12,11 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import QueuePool, delete, text
+from sqlalchemy.exc import DBAPIError
 
 import usher.composition
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
-from usher.composition import SkippedStep, run_bootstrap
+from usher.composition import FailedImport, SkippedStep, run_bootstrap
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.models.bootstrap import ImportRunRow
@@ -512,3 +513,62 @@ async def test_a_phase_begun_while_its_dataset_is_being_imported_is_skipped(
     assert written == [(0,), (1,)]
     assert after.succeeded, after
     assert fetched.is_set(), "the phase ran once the import had ended"
+
+
+async def test_a_restart_mid_phase_is_recorded_as_its_failure_and_raises_nothing(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    forget_titles_and_names: None,
+) -> None:
+    """A Postgres restart ends the hold's backend and the reads' at once, mid-fetch.
+
+    The failure was recorded, and then the phase's end gave its reads back on the ended
+    connection and `run_bootstrap` raised that instead: `--phase all` abandoned every later
+    phase, the exit line named the unlock, and a worker's job crashed. A lock whose
+    connection ended has been given back already.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    gate, reading = asyncio.Event(), asyncio.Event()
+    settings = _credit_names_from(monkeypatch, tmp_path, _Gated(gate, reading, name=_NAMES))
+    try:
+        async with factory() as session:
+            task = asyncio.create_task(
+                run_bootstrap(
+                    await _a_catalog(),
+                    PostgresImportRunRepository(session),
+                    session.commit,
+                    settings,
+                    BootstrapPhase.CREDIT_NAMES,
+                    report=lambda _: None,
+                    events=NullEventPublisher(),
+                )
+            )
+            await asyncio.wait_for(reading.wait(), 5)
+            async with engine.connect() as killer:
+                ended = await killer.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND classid = CAST(:ns AS oid)"
+                    ),
+                    {"ns": 0x75736872},
+                )
+            gate.set()
+            try:
+                outcome = await asyncio.wait_for(task, 5)
+            except DBAPIError as exc:
+                pytest.fail(f"run_bootstrap raised past the failure it recorded: {exc!r}")
+        async with factory() as reader:
+            stored = await PostgresImportRunRepository(reader).get(_NAMES)
+    finally:
+        await engine.dispose()
+
+    assert ended == 2, "the premise: the phase's hold and the connection its reads are on"
+    assert stored is not None
+    assert outcome.unfinished == (FailedImport(BootstrapPhase.CREDIT_NAMES, stored),)
+    assert (stored.status, stored.position, stored.error) == (
+        ImportRunStatus.FAILED,
+        0,
+        f"lost the hold on the import of {_NAMES}: its connection ended",
+    )

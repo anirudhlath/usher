@@ -14,8 +14,7 @@ paths:
 
 # IMDb, TMDb id exports, Wikidata and MovieLens
 
-Rules for this subsystem; the detail is in the module docstrings named here. The `measure_*` scripts are not tests: each hits the network, two take a
-required `--phase`, and **`measure_bulk_load.py` takes no arguments and truncates
+The `measure_*` scripts hit the network, and **`measure_bulk_load.py` truncates
 the database between passes — scratch database only, never a real catalog.**
 
 ```bash
@@ -30,9 +29,8 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
 - **`all` and `ratings` are aliases rather than steps, and `--phase all`
   dispatches neither.** `ratings` re-imports `title.ratings.tsv.gz` alone, sparing
   `--phase imdb`'s rewrite of every name and year (which stales embeddings); in
-  `FULL_SEQUENCE` it would import the file twice. A unit case asserts
-  `FULL_SEQUENCE` and `PHASE_ALIASES` partition the enum, so a member in neither is
-  red, not a phase `argparse` offers and `run_bootstrap` ignores.
+  `FULL_SEQUENCE` it would import the file twice. `FULL_SEQUENCE` and
+  `PHASE_ALIASES` must partition the enum (a unit case asserts it).
 - `credit-names`, `aliases` and `movielens` join `titles` on `imdb_id`, so all
   three follow `imdb`. **Run `credit-names` before any TMDb enrichment crawl**
   (`--help` says so): `fill_credit_names` writes only skeletons, so a title the
@@ -61,24 +59,21 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
 ## The download cache is keyed on the upstream token, not on local presence
 
 **"The dumps are on disk, so nothing re-downloads" is false.**
-`CachedDatasetFile.ensure_local` short-circuits on `path.exists() and
-stamp.read_text() == revision`, where `revision` is what `revision()` resolved
-*this run* from a `HEAD`. IMDb regenerates its dumps daily, so a cache filled
-days ago re-downloads and imports a **different snapshot**; to re-run against a
-fixed one, pin `revision()` to the sidecar's own value.
+`CachedDatasetFile.ensure_local` short-circuits only when the sidecar stamp equals
+the revision `revision()` resolved *this run* from a `HEAD`, and IMDb regenerates
+its dumps daily, so an old cache re-downloads a **different snapshot**; to re-run
+against a fixed one, pin `revision()` to the sidecar's own value.
 
 ## Parsing the IMDb TSVs
 
 - **They have no quoting mechanism and their title fields contain literal `"`.**
   `csv.reader`'s default `QUOTE_MINIMAL` silently rewrites those names. Parse
-  with `line.split("\t")`. **Zero rows split to a wrong column count** on the
-  three measured, so a wrong count is a real signal, never noise.
+  with `line.split("\t")`; a wrong column count is a real signal, never noise.
 - **`types` and `attributes` are multi-valued inside one `title.akas` column,
   separator `\x02`** — a reader assuming a tab calls those rows malformed.
 - **`name.basics` is sorted lexicographically by the `nconst` *string*, not
-  numerically**, so the obvious in-memory index — sorted array plus `bisect` —
-  answers `None` for millions of real people, each miss a title quietly losing a
-  name (same family as `db-and-sql.md`'s migration-id padding trap).
+  numerically**, so bisecting the file's order by the integer id answers `None`
+  for millions of real people, each miss a title quietly losing a name.
 - **Both dumps are contiguous by title** (zero lexicographic descents), which is
   what makes batching by title sound; the *integer* inside the id descends freely,
   so any order check must be on the string.
@@ -96,19 +91,17 @@ fixed one, pin `revision()` to the sidecar's own value.
 - **`replace_aliases` requires whole titles per call, and `IMDbAkaDataset`
   supplies them — `group_of` returns `row.imdb_id`.** `_ImdbDataset` otherwise
   batches on a row count, so a title straddling a boundary arrives in two calls
-  and the second call's scoped `DELETE` takes the first call's rows. **Nothing
-  reports it** — both calls are in scope and the report sums them — and the
-  invariant to check is that *written* and *stored* match to the row. **Any new
-  caller of a scoped-replace port needs that shape.**
+  and the second call's scoped `DELETE` silently takes the first call's rows:
+  check that *written* and *stored* match to the row. **Any new caller of a
+  scoped-replace port needs that shape.**
 - **`replace_aliases` is scoped by `imdb_ids` *and* `kind = 'alias'`**, so
   `person` rows survive an alias re-import — and a title whose akas IMDb withdrew
   keeps its stale ones, a streaming importer having no wider scope.
-- **The writer compares and dedups under SQL `lower()`, and Postgres is
-  authoritative by construction.** Python `casefold()` folds strictly more (German
-  `ß`, Greek final sigma), but the test for keeping an alias is whether it reaches
-  anything `ix_titles_name_lower_prefix` does not, and that index is a btree over
-  the *database's* `lower(name)`. Do not repair the fake — the divergence is
-  enumerated in `tests/fakes/bulk_catalog_repository.py`.
+- **The writer compares and dedups under SQL `lower()`, never `casefold()`**
+  (which folds strictly more): an alias is kept if it reaches anything
+  `ix_titles_name_lower_prefix`, a btree over the database's `lower(name)`, does
+  not. Do not repair the fake — `tests/fakes/bulk_catalog_repository.py`
+  enumerates the divergence.
 - `apply_ratings` writes **`imdb_average_rating` and `imdb_num_votes`**. **There
   is no `community_rating` column** — `m10a` split it out, and the old
   name survives on the wire only, through `domain/title.py`'s `WIRE_FIELD_NAMES`.
@@ -125,24 +118,22 @@ fixed one, pin `revision()` to the sidecar's own value.
   and an unpadded row joins to nothing rather than raising.
 - **`genome-scores.csv`'s physical grouping is a property of the snapshot, not a
   promise, and the importer verifies it** — contiguous `movieId` runs of exactly
-  1,128 rows carrying `tagId` 1…1128 are what make single-pass streaming possible,
-  and a wrong-length run, duplicate `tagId` or reopened `movieId` fails hard.
-  **`tagId` ordering *within* a run is deliberately not enforced**: vectors are
-  built by index and a shuffled-run case proves it.
+  1,128 rows carrying `tagId` 1…1128 make single-pass streaming possible, and a
+  wrong-length run, duplicate `tagId` or reopened `movieId` fails hard. `tagId`
+  order *within* a run is deliberately not enforced: vectors are built by index.
 - **Do not pass `newline=""`.** The members are CRLF-terminated and invisible only
   because `member_lines` decodes through `io.TextIOWrapper` in universal-newline
   mode; a stray `\r` lands in every stored tag name while every `"\n".join(...)`
-  fixture passes. One case catches it, on carriage returns in a tag name.
+  fixture passes.
 - **Parse a tag line with `partition(",")`, not `split(",", 1)`** — `split` hands
   a comma-less row back as a one-element list whose `[0]` is a valid `tagId`.
 
 ## The bootstrap service
 
 - **`PostgresImportRunRepository.save()` must roll back on a caught
-  `IntegrityError`, not merely translate it.** Otherwise Postgres leaves the whole
-  *session* aborted and the next statement raises `PendingRollbackError`,
-  including `import_dataset`'s own except handler. Deliberately a full
-  `session.rollback()`, not a SAVEPOINT (`db/repositories/import_run.py`).
+  `IntegrityError`, not merely translate it** — deliberately a full
+  `session.rollback()`, not a SAVEPOINT — or the aborted session raises
+  `PendingRollbackError` at the next statement, `import_dataset`'s except included.
 - **Only the holder of a dataset writes its row.** The hold is a session-level
   advisory lock on its own connection (the session's goes back to the pool at each
   commit, lock and all); `hold()`/`start()` take it, the `finally` or a dead process
@@ -152,15 +143,15 @@ fixed one, pin `revision()` to the sidecar's own value.
   until it ends, on one more connection (`Settings` counts two per bootstrap job): a
   refused read skips it, a hold refused by readers concedes. Being another backend, a
   read refuses its own process's hold, so `reading()` releases before the next step.
-- **`touch` confirms the hold and the reads**, since an ended connection
-  (`idle_session_timeout`, a proxy's cut) frees a lock silently. `_beating` commits
-  one every `HEARTBEAT_SECONDS` through a fetch or wait; it or `hold()` precedes every
+- **`touch` confirms the hold and the reads, the reads even with the hold gone**,
+  since an ended connection (`idle_session_timeout`, a proxy's cut, a restart) frees
+  a lock silently — so giving one back on it is no error. `_beating` commits one
+  every `HEARTBEAT_SECONDS` through a fetch or wait; it or `hold()` precedes every
   save; a synchronous dump read bypassing `download.paced` stalls the beat throughout.
-- ⚠️ **Known defect, recorded and not fixed:** `run_bootstrap` opens
-  `bulk_load_window()` *around* `import_dataset`, so its `count_titles() == 0` guard
-  is read before ownership is known. Two processes over an empty catalog both `DROP
-  INDEX`; the second concedes and streams nothing, but its window closes by `CREATE
-  INDEX`ing under the first, costing the saving plus a `SHARE` lock on `titles`.
+- ⚠️ **Known defect:** `run_bootstrap` opens `bulk_load_window()` *around*
+  `import_dataset`, so its `count_titles() == 0` guard is read before ownership is
+  known. Two processes over an empty catalog both `DROP INDEX`; the one that concedes
+  still `CREATE INDEX`es under the other, costing the saving and a `SHARE` lock.
 - **`bootstrap-status`' report scales with the catalog** — three of
   `_GENOME_COVERAGE`'s five terms scan `titles`, so no client route assembles it.
 - **WDQS times out as a `504 text/plain` (~65 s, no `Retry-After`) or a `200` cut
@@ -191,17 +182,13 @@ fixed one, pin `revision()` to the sidecar's own value.
 
 - ⚠️ **`m09d` shipped a schema and nothing fills it.** `credits.source`,
   `people.imdb_id`, `ix_credits_source_natural_key` and `CREDIT_SOURCE_PRECEDENCE`
-  exist; **no IMDb row has ever been written to `people` or `credits`, both new
-  indexes are empty**, and `adapters/tmdb/mapping.py` is still the only writer of
-  a `Credit`. IMDb fills `titles.credit_names` and nothing else — quoting that
-  design as deployed is wrong. `db/models/people.py` argues the natural key
-  `(title_id, source, billing_order)` and why `(title_id, person_id, kind)` cannot
-  be UNIQUE.
+  exist, but **no IMDb row has ever been written to `people` or `credits`**:
+  `adapters/tmdb/mapping.py` is the only writer of a `Credit`, and IMDb fills
+  `titles.credit_names` alone (`db/models/people.py` argues the natural key).
 - **A TMDb `cast[]`/`crew[]`/`created_by[]` entry carries no IMDb `nconst`** —
   `imdb_id`, birth/death year and biography live on `/person/{id}`, one request
-  per person (`/find/{nconst}?external_source=imdb_id` works, no follow-up call).
-  **Both merge directions have a low yield, so a merge costs a second
-  request per person.** That is *expensive*, not *impossible* — never an absolute.
+  per person (`/find/{nconst}?external_source=imdb_id` works, no follow-up call);
+  both merge directions have a low yield, so a merge is *expensive*, not *impossible*.
 - **Price a TMDb crawl from the configured ceiling —
   `USHER_TMDB_REQUESTS_PER_SECOND`, default 30 — never an observed lane rate** —
   over the people the catalog *holds*, not those its payloads mention

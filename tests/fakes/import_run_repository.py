@@ -102,12 +102,13 @@ class FakeImportRunRepository(ImportRunRepository):
         self._reading.clear()
 
     async def touch(self, dataset: str) -> None:
+        lost = [read for read in sorted(self._reading) if self not in self._readers.get(read, ())]
+        if lost:
+            await self.release_reads()
         if self._holders.get(dataset) is not self:
             raise RepositoryConflict(f"lost the hold on the import of {dataset}")
-        for read in sorted(self._reading):
-            if self not in self._readers.get(read, set()):
-                await self.release_reads()
-                raise RepositoryConflict(f"lost the shared hold on {read}, which this reads")
+        if lost:
+            raise RepositoryConflict(f"lost the shared hold on {lost[0]}, which this reads")
         stored = self._runs.get(dataset)
         if stored is not None and stored.status is ImportRunStatus.RUNNING:
             self._runs[dataset] = stored.evolve(heartbeat_at=datetime.now(UTC))

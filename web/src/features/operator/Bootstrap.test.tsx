@@ -262,6 +262,10 @@ describe('Bootstrap', () => {
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start import' }))
     expect(await screen.findByText('polling every 10 s for 20 min after queueing')).toBeInTheDocument()
     expect(screen.getByText(/No run reads running yet\. A refresh of a completed import/)).toBeInTheDocument()
+    // The bound the window gives, and what it does not cover, on screen.
+    const bound =
+      /for 20 min after a phase is queued: long enough to see it read running or record why it failed, not a first batch that lands later, a later step of Run all phases, or a job queued behind another bootstrap job\. Reload to look again\./
+    expect(screen.getByText(bound)).toBeInTheDocument()
     // The 202's own refetch.
     await waitFor(() => expect(polls).toBe(2))
     await settled()
@@ -282,6 +286,7 @@ describe('Bootstrap', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(await screen.findByText('idle — not polling')).toBeInTheDocument()
     expect(screen.getByText(/Nothing is being polled/)).toBeInTheDocument()
+    expect(screen.getByText(bound)).toBeInTheDocument()
     await settled()
     const last = polls
     await vi.advanceTimersByTimeAsync(60 * 60_000)

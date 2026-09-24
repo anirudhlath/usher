@@ -1394,6 +1394,33 @@ async def test_a_hold_lost_between_batches_stops_the_import_before_its_next_writ
     )
 
 
+async def test_a_restart_losing_the_hold_and_the_reads_at_once_drops_both(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """The fake's arm of a server restart: the hold's check no longer hides the reads'.
+
+    Both are confirmed before the next write, the hold's loss is what is recorded, and
+    the reads found gone are dropped with it rather than left for the phase's end.
+    """
+    assert await runs.hold_for_reading("imdb.title.basics") is True
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        runs.lose_hold("scripted")
+        runs.lose_reads()
+        return await _write(catalog, rows)
+
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(
+        ScriptedDataset(_three()), write
+    )
+
+    assert (run.status, run.position, run.error) == (
+        ImportRunStatus.FAILED,
+        1,
+        "lost the hold on the import of scripted",
+    )
+    assert runs.reading == frozenset(), "a read found gone with the hold was kept"
+
+
 async def test_a_hold_lost_after_the_last_batch_leaves_the_import_unfinished(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:

@@ -327,10 +327,14 @@ function ratio(numerator: number, denominator: number): string {
 
 /**
  * How long a 202 keeps the screen polling when no run reads `running`. A
- * refresh reads `completed` until its first batch lands, and one whose lookup
- * or first fetch keeps failing retries for up to `RetryPolicy.budget`, 900 s,
- * before it records why. Twenty minutes covers that, the last attempt and the
- * queue, and still ends.
+ * refresh reads `completed` until its first batch lands, so "poll while
+ * something runs" alone stops at the press. The window is a bound, not a
+ * promise: it sees a queued phase read `running` or record why it failed within
+ * twenty minutes of the 202 — room for a lookup or first fetch retrying its
+ * whole `RetryPolicy.budget`, 900 s, if the job is claimed within a few minutes.
+ * It does not see a first batch that lands later, a later step of "Run all
+ * phases" once none reads `running` between two, or a job queued behind another
+ * bootstrap job. The screen says so, and a reload looks again.
  */
 const WATCH_MINUTES = 20
 
@@ -439,7 +443,9 @@ export default function Bootstrap() {
           </Badge>
           <span style={{ font: 'var(--text-body-xs)', color: 'var(--text-muted)' }}>
             Status costs about 0.33 s and is uncached, so it is only polled while a run is live, and for{' '}
-            {WATCH_MINUTES} min after a phase is queued.
+            {WATCH_MINUTES} min after a phase is queued: long enough to see it read running or record why it
+            failed, not a first batch that lands later, a later step of Run all phases, or a job queued behind
+            another bootstrap job. Reload to look again.
           </span>
         </div>
 

@@ -235,6 +235,7 @@ WIDENED_SITES = frozenset(
     {
         ("_errors.py", "refusals_as_conflict"),
         ("collection.py", "attach_titles"),
+        ("import_run.py", "_give_back"),
         ("import_run.py", "_why_lost"),
         ("import_run.py", "save"),
         ("jobs.py", "enqueue"),
@@ -249,9 +250,9 @@ WIDENED_SITES = frozenset(
     }
 )
 
-# Sites that catch a disconnect rather than a refusal: on the hold's own connection, a
-# connection that ended is the answer being asked for. Each re-raises everything else.
-DISCONNECT_SITES = frozenset({("import_run.py", "_why_lost")})
+# Sites that catch a disconnect rather than a refusal: on a lock's own connection, one that
+# ended is a lock lost, or one already given back. Each re-raises everything else.
+DISCONNECT_SITES = frozenset({("import_run.py", "_give_back"), ("import_run.py", "_why_lost")})
 
 
 def test_the_set_of_widened_sites_is_exactly_what_this_file_names() -> None:
@@ -306,7 +307,7 @@ def test_every_widened_except_re_raises_what_is_not_a_row_refusal() -> None:
 
 
 class _HoldConnection:
-    """A hold's connection in the three members `_confirm` touches, its check failing."""
+    """A lock's connection in the members a check or a give-back touches, every one failing."""
 
     def __init__(self, *, invalidated: bool) -> None:
         self._invalidated = invalidated
@@ -319,6 +320,9 @@ class _HoldConnection:
             Exception("the driver's"),
             connection_invalidated=self._invalidated,
         )
+
+    async def execute(self, statement: object, parameters: object = None) -> None:
+        await self.scalar(statement, parameters)
 
     async def invalidate(self) -> None:
         self.events.append("invalidated")
@@ -351,10 +355,16 @@ async def test_the_hold_check_calls_only_a_disconnect_a_lost_hold(invalidated: b
 
 
 class _AliveConnection:
-    """A hold's connection whose lock is still there."""
+    """A lock's connection whose lock is still there."""
 
     async def scalar(self, statement: object, parameters: object = None) -> bool:
         return True
+
+    async def invalidate(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
@@ -384,3 +394,55 @@ async def test_the_read_check_calls_only_a_disconnect_a_lost_read(invalidated: b
 
 def _reads_of(runs: PostgresImportRunRepository) -> tuple[AsyncConnection | None, set[str]]:
     return runs._reader, runs._reads
+
+
+@pytest.mark.parametrize("reads", ["ended", "alive"])
+async def test_touch_confirms_the_reads_when_the_hold_is_gone_too(reads: str) -> None:
+    """A server restart ends the hold's connection and the reads' at once.
+
+    The hold's check raised before the reads were read, so reads already gone were kept,
+    to be given back on a connection that had ended. Both are confirmed; only a read found
+    gone is dropped, and the conflict raised is the hold's.
+    """
+    reader = _HoldConnection(invalidated=True) if reads == "ended" else _AliveConnection()
+    runs = PostgresImportRunRepository(_session()[1])
+    runs._holds["own"] = cast(AsyncConnection, _HoldConnection(invalidated=True))
+    runs._reader = cast(AsyncConnection, reader)
+    runs._reads = {"scripted"}
+    with pytest.raises(
+        RepositoryConflict, match=r"^lost the hold on the import of own: its connection ended$"
+    ):
+        await runs.touch("own")
+    if isinstance(reader, _HoldConnection):
+        assert reader.events == ["invalidated", "closed"], "the ended read was kept"
+        assert _reads_of(runs) == (None, set())
+    else:
+        assert _reads_of(runs) == (cast(AsyncConnection, reader), {"scripted"}), (
+            "a live read was dropped"
+        )
+
+
+@pytest.mark.parametrize("give_back", ["release", "release_reads"])
+@pytest.mark.parametrize("invalidated", [True, False], ids=["disconnect", "anything-else"])
+async def test_a_give_back_calls_only_a_disconnect_given_back(
+    invalidated: bool, give_back: str
+) -> None:
+    """The same rule where a lock is given back.
+
+    A connection that ended took its locks with it, so that is no error. Anything else
+    may have left the lock held and raises. Either way the backend is ended, not pooled.
+    """
+    connection = _HoldConnection(invalidated=invalidated)
+    runs = PostgresImportRunRepository(_session()[1])
+    if give_back == "release":
+        runs._holds["scripted"] = cast(AsyncConnection, connection)
+        give = runs.release("scripted")
+    else:
+        runs._reader, runs._reads = cast(AsyncConnection, connection), {"scripted"}
+        give = runs.release_reads()
+    if invalidated:
+        await give
+    else:
+        with pytest.raises(DBAPIError):
+            await give
+    assert connection.events == ["invalidated", "closed"]

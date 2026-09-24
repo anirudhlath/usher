@@ -539,8 +539,8 @@ another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
 and it continues from its own checkpoint. **A phase that fails exits 1**, and
 so does one skipped because an import it reads is `failed`, `running` or being
 imported by another process, one refused because `titles` is empty, and one
-left to another process already importing the same dataset; each prints a line
-ending with the command that resumes it. See
+left to another process already importing the same dataset or running a phase
+that reads it; each prints a line ending with the command that resumes it. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash

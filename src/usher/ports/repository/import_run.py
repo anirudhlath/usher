@@ -54,7 +54,10 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def release(self, dataset: str) -> None:
-        """Give up this repository's hold on `dataset`; a no-op when there is none."""
+        """Give up this repository's hold on `dataset`; a no-op when there is none.
+
+        A hold whose connection has ended went with it, so giving it back is no error.
+        """
 
     @abstractmethod
     async def hold_for_reading(self, dataset: str) -> bool:
@@ -67,7 +70,10 @@ class ImportRunRepository(ABC):
 
     @abstractmethod
     async def release_reads(self) -> None:
-        """Give up every read this repository holds; a no-op when there are none."""
+        """Give up every read this repository holds; a no-op when there are none.
+
+        Reads whose connection has ended went with it, so giving them back is no error.
+        """
 
     @abstractmethod
     async def touch(self, dataset: str) -> None:
@@ -76,7 +82,9 @@ class ImportRunRepository(ABC):
         A hold or a read that is gone -- its connection ended, by `idle_session_timeout`,
         a proxy's idle cut or a server restart -- raises `RepositoryConflict` and is
         dropped, so the next `hold()` takes a fresh one; a read lost drops every read.
-        Only a `RUNNING` row's `heartbeat_at` is written. Flushes, never commits.
+        The reads are confirmed even when the hold is gone, and the hold's loss is the
+        one raised. Only a `RUNNING` row's `heartbeat_at` is written. Flushes, never
+        commits.
         """
 
     @abstractmethod
