@@ -223,7 +223,8 @@ up to five attempts and 15 minutes; each retry prints a line and the command
 carries on, and the 2026-09-24 run above retried four times. A phase that still
 fails, or is skipped because an import it reads failed, makes the command exit
 1, and its line ends with the command that resumes it. Check that every row
-reads `completed`:
+reads `completed`. A `completed` row that also shows `error=` is a refresh that
+could not start; the import it names still stands.
 
 ```
 docker compose exec usher usher bootstrap-status
@@ -235,12 +236,13 @@ parked, because nothing un-parks a job yet
 ([#87](https://github.com/anirudhlath/usher/issues/87)).
 
 This still skips `credit-names`, `aliases` and `movielens`. `--phase all` runs
-all six phases in order, those three included, and they cost two more IMDb
-downloads and the MovieLens archive — sized under [Command line](#command-line).
-**No phase crawls TMDb, `--phase all` included.**
+all six phases in order, those three included, and they cost three more IMDb
+files (1.49 GiB) and the MovieLens archive — sized under
+[Command line](#command-line). **No `--phase` step crawls TMDb, `all`
+included.**
 
 The TMDb crawl — overviews, credits and artwork for the catalog's movies with
-at least 100 IMDb votes, owned or not — is a separate step that nothing starts
+at least 100 IMDb votes that carry a TMDb id, owned or not — is a separate step that nothing starts
 for you. `scripts/enqueue_tier_enrichment.py` writes one `enrich` job per title
 in that tier at background priority, below your library's own, and the
 server's worker lane (step 6) spends the TMDb budget on them. The script is not
@@ -541,7 +543,7 @@ that resumes it. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash
-uv run usher bootstrap                       # every phase, in the order below
+uv run usher bootstrap                       # all six: imdb, credit-names, aliases, tmdb-ids, crosswalk, movielens
 uv run usher bootstrap --phase imdb          # one at a time: imdb | credit-names | aliases
 uv run usher bootstrap --phase credit-names  #     | tmdb-ids | crosswalk | movielens | ratings | all
 uv run usher bootstrap --phase aliases       # IMDb title.akas -> searchable aliases, ~487 MB
@@ -1027,9 +1029,8 @@ against a 16k-context model at the shipped defaults: **600 candidates works,
 arithmetic no endpoint can satisfy, not a promise that your endpoint will serve
 it.
 
-**Nothing schedules the nightly generation.** There is no scheduler in Usher —
-deliberately, the same call `usher similar --rebuild` gets — so it is a cron
-entry:
+**Nothing schedules the nightly generation.** It is not one of the
+scheduler's registered jobs, so it is a cron entry:
 
 ```cron
 # One curation generation a night, after the queue has drained.

@@ -447,13 +447,13 @@ three surfaces arrive with later eval phases.
 `~/code/observability/` running Grafana, Prometheus, Loki and Tempo. One stack
 serves Usher and anything added later.
 
-Usher's only coupling is configuration, three keys set in `.env` — the two
-`OTEL_` keys edited where `.env.example` already has them:
+Usher's only coupling is configuration: two keys set in `.env`, the endpoint
+edited where `.env.example` already has it (its `OTEL_SERVICE_NAME=usher`
+needs no change):
 
 ```
 COMPOSE_FILE=compose.yml:compose.observability.yml
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-OTEL_SERVICE_NAME=usher
 ```
 
 The stack publishes every port on `127.0.0.1`, so a container reaches the

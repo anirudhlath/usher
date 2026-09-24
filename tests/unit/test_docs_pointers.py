@@ -14,7 +14,7 @@ _ROOT = pathlib.Path(__file__).parents[2]
 
 # Records of a past state: read as history, never edited to match the tree.
 _DATED_RECORDS = ("docs/plans/", "docs/specs/")
-_DATED_EVALS = re.compile(r"^docs/evals/[^/]+\.md$")
+_DATED_EVALS = re.compile(r"^docs/evals/\d{4}-\d{2}-\d{2}-[^/]+\.md$")
 
 # Live, not history, and still never edited to fit: every ledger row records the
 # sha256 of the bars.toml it ran against, and the ledger is append-only.
@@ -241,6 +241,7 @@ def test_nothing_outside_the_dated_records_cites_an_adr() -> None:
         ("docs/evals/bars.toml.orig", False),
         ("docs/evals/notes.toml", False),
         ("docs/evals/runs/2026-09-01.md", False),
+        ("docs/evals/README.md", False),
         ("docs/evals.md", False),
         ("docs/prd/05-search-and-similarity.md", False),
     ],
