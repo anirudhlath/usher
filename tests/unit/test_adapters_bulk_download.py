@@ -1,5 +1,7 @@
 """CachedDatasetFile, driven entirely by an httpx MockTransport."""
 
+import ast
+import asyncio
 import datetime as dt
 import email.utils
 import gzip
@@ -10,7 +12,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from usher.adapters.bulk.download import CachedDatasetFile
+import usher.adapters.bulk
+from usher.adapters.bulk.download import _PACE, CachedDatasetFile, paced
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
 BODY = gzip.compress(b"alpha\nbravo\ncharlie\n")
@@ -328,6 +331,62 @@ async def test_ensure_local_resumes_a_partial_download(cache: Path) -> None:
         assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
 
 
+def _refusing_a_range_past_the_end(
+    seen: list[str | None], *, always: bool = False
+) -> httpx.MockTransport:
+    """A host answering 416 to a `Range` starting at or past the end, as real ones do.
+
+    `always` answers 416 to every request, `Range` or not.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        range_header = request.headers.get("range")
+        seen.append(range_header)
+        headers = {"etag": '"v1"', "accept-ranges": "bytes"}
+        start = int(range_header.removeprefix("bytes=").rstrip("-")) if range_header else 0
+        if always or start >= len(BODY):
+            return httpx.Response(416, headers={**headers, "content-range": f"bytes */{len(BODY)}"})
+        return httpx.Response(206 if start else 200, content=BODY[start:], headers=headers)
+
+    return _transport(handler)
+
+
+async def test_a_partial_the_host_will_not_extend_is_dropped_and_fetched_once_whole(
+    cache: Path,
+) -> None:
+    """A `.part` holding the whole file -- killed after the last byte, before the rename.
+
+    Its resume asks for `bytes=<size>-`, which the host refuses with a 416. Kept, the
+    partial asked for that range again on every later run, and the phase never finished.
+    """
+    cache.mkdir(parents=True)
+    (cache / "slice.tsv.gz.part").write_bytes(BODY)
+    (cache / "slice.tsv.gz.part.revision").write_text('"v1"')
+    seen: list[str | None] = []
+    async with httpx.AsyncClient(transport=_refusing_a_range_past_the_end(seen)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        local = await dataset_file.ensure_local('"v1"')
+        assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
+    assert seen == [f"bytes={len(BODY)}-", None]
+    assert local.replaced is True
+    assert not (cache / "slice.tsv.gz.part").exists()
+
+
+async def test_a_416_to_the_whole_file_is_still_malformed(cache: Path) -> None:
+    """The retry is once, and without `Range`; a 416 to that is the host's own answer."""
+    cache.mkdir(parents=True)
+    (cache / "slice.tsv.gz.part").write_bytes(BODY[:5])
+    (cache / "slice.tsv.gz.part.revision").write_text('"v1"')
+    seen: list[str | None] = []
+    async with httpx.AsyncClient(
+        transport=_refusing_a_range_past_the_end(seen, always=True)
+    ) as client:
+        with pytest.raises(PortDataMalformed) as exc_info:
+            await CachedDatasetFile(client, URL, cache).ensure_local('"v1"')
+    assert seen == ["bytes=5-", None]
+    assert str(exc_info.value) == f"{URL} returned HTTP 416"
+
+
 async def test_ensure_local_overwrites_when_the_server_ignores_a_matching_range(
     cache: Path,
 ) -> None:
@@ -623,3 +682,62 @@ async def test_lines_still_refuses_a_zip_and_says_so(cache: Path) -> None:
         dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
         with pytest.raises(PortDataMalformed, match="gzip"):
             list(dataset_file.lines())
+
+
+@pytest.mark.parametrize("skip", [0, 3, 10, 11])
+async def test_a_paced_read_drops_the_skip_and_nothing_else(skip: int) -> None:
+    lines = [f"line {n}" for n in range(10)]
+    assert [line async for line in paced(iter(lines), skip=skip)] == lines[skip:]
+
+
+async def test_a_paced_read_leaves_the_event_loop_free_while_it_skips() -> None:
+    """A skip to a resume position yields to the loop before its first line arrives.
+
+    Read synchronously, it held the loop for the whole skip, and no heartbeat could land.
+    """
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    ticker = asyncio.create_task(tick())
+    await asyncio.sleep(0)
+    lines = [str(n) for n in range(_PACE * 3)]
+    before = ticks
+    first = await anext(aiter(paced(iter(lines), skip=len(lines) - 1)))
+    during = ticks - before
+    ticker.cancel()
+    assert first == lines[-1]
+    assert during >= 3, "one yield per stretch of the skip"
+
+
+def _reads_a_dump(node: ast.expr) -> bool:
+    return any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"lines", "member_lines"}
+        for call in ast.walk(node)
+    )
+
+
+def test_no_coroutine_reads_a_dump_without_pacing() -> None:
+    """Inside a coroutine, a plain `for` over a dump's lines holds the loop for the whole read.
+
+    A plain function's read is exempt: it is the small file a coroutine calls it for.
+    """
+    paced_reads: list[str] = []
+    bare_reads: list[str] = []
+    for path in sorted(Path(usher.adapters.bulk.__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(function):
+                if isinstance(node, ast.For | ast.AsyncFor) and _reads_a_dump(node.iter):
+                    where = f"{path.name}:{node.lineno}"
+                    (paced_reads if isinstance(node, ast.AsyncFor) else bare_reads).append(where)
+    assert len(paced_reads + bare_reads) >= 5, "the premise: the scan found every dump read"
+    assert bare_reads == []

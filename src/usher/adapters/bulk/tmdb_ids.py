@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from usher.adapters.bulk.download import CachedDatasetFile
+from usher.adapters.bulk.download import CachedDatasetFile, paced
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, TmdbId
 from usher.ports.errors import PortDataMalformed
@@ -173,7 +173,7 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
 
         batch: list[TmdbId] = []
         position = skip
-        for line in dataset_file.lines(skip=skip):
+        async for line in paced(dataset_file.lines(), skip=skip):
             position += 1
             parsed = self._parse(line)
             if parsed is None:

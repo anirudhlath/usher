@@ -197,10 +197,10 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         await service.import_dataset(IMDbTitleDataset(client, cache, batch_size=2), write_and_peek)
     assert seen == [2, 4, 5]
-    # The RUNNING start + 3 batches (2, 2, 1) + the final COMPLETED save -- see
-    # test_commits_at_the_start_once_per_batch_and_at_the_end (tests/unit/
-    # test_services_bootstrap.py) for the same shape against a fake.
-    assert commits == 5
+    # The caller's read ended before the HEAD + the RUNNING start + 3 batches (2, 2, 1)
+    # + the final COMPLETED save -- see test_commits_at_the_start_once_per_batch_and_at_
+    # the_end (tests/unit/test_services_bootstrap.py) for the same shape against a fake.
+    assert commits == 6
 
 
 async def test_a_restart_resumes_from_the_stored_checkpoint(

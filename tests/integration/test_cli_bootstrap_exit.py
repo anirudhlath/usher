@@ -256,6 +256,7 @@ def _seed_failed_basics(url: str) -> ImportRun:
                 )
                 await repository.save(failed)
                 await session.commit()
+                await repository.release(_BASICS)
                 return failed
         finally:
             await engine.dispose()
@@ -276,6 +277,7 @@ def _seed_completed(url: str, dataset: str, position: int) -> None:
                     started.evolve(status=ImportRunStatus.COMPLETED, position=position)
                 )
                 await session.commit()
+                await repository.release(dataset)
         finally:
             await engine.dispose()
 
@@ -317,10 +319,10 @@ def test_a_revision_that_fails_over_completed_imports_leaves_them_completed_and_
     }
     printed = _printed(capsys.readouterr().out)
     assert [line for line in printed if "resume with: " in line] == [
-        f"{_BASICS} could not start, and its completed import stands: {error[_BASICS]}; "
-        "resume with: usher bootstrap --phase imdb",
-        f"{_RATINGS} could not start, and its completed import stands: {error[_RATINGS]}; "
-        "resume with: usher bootstrap --phase ratings",
+        f"{_BASICS} failed before its first batch landed, and its completed import stands: "
+        f"{error[_BASICS]}; resume with: usher bootstrap --phase imdb",
+        f"{_RATINGS} failed before its first batch landed, and its completed import stands: "
+        f"{error[_RATINGS]}; resume with: usher bootstrap --phase ratings",
     ]
 
     usher_cli.main(["bootstrap-status"])

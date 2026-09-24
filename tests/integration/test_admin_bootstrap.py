@@ -249,62 +249,50 @@ class _ContendedDataset(BulkDataset[object]):
         return None
 
 
-class _AlwaysFreshStart(PostgresImportRunRepository):
-    """The losing side of a real two-process race, forced.
-
-    Copied in shape from `tests/integration/test_bootstrap_concurrency.py`,
-    which explains why the precondition has to be forced: by the time a
-    second `await` on one event loop calls `start()`, the winner has
-    committed, so an unmodified `start()` would adopt the existing row rather
-    than race into a fresh insert.
-    """
-
-    async def start(self, dataset: str, revision: str) -> ImportRun:
-        run = ImportRun(dataset=dataset, revision=revision)
-        await self.save(run)
-        return run
-
-
 async def test_a_second_bootstrap_leaves_the_owning_processs_checkpoint_untouched(
     postgres_url: str,
 ) -> None:
-    """The `_concede_to_other_owner` path, reachable in anger because of this route.
+    """The `_concede_to_other_owner` path, which this route makes reachable.
 
     `(kind, key)` stops two *jobs* for one phase from existing, and the single
     `JobWorker` lane stops two claims running at once -- neither says anything about
     a worker claiming `(bootstrap, imdb)` while an operator has `usher bootstrap
     --phase imdb` running in a terminal, which is two processes on one `import_runs`
-    row. The assertion is not "the loser did not crash" -- which a
-    re-fetch-and-overwrite fix also satisfies, because it evolves a copy -- but the
-    winner's row read **back** from the winner's own session, byte for byte.
+    row. The winner holds the dataset for the whole case, as a running import does.
+    The assertion is the winner's row read **back** from the winner's own session,
+    field for field, not merely that the loser did not crash.
     """
     engine = build_engine(postgres_url)
     factory = build_session_factory(engine)
     try:
         async with factory() as winner_session, factory() as loser_session:
-            winner = await PostgresImportRunRepository(winner_session).start(_CONTENDED, "etag-1")
+            holder = PostgresImportRunRepository(winner_session)
+            winner = await holder.start(_CONTENDED, "etag-1")
             await winner_session.commit()
+            try:
+                loser = BootstrapService(
+                    PostgresImportRunRepository(loser_session),
+                    PostgresBulkCatalogRepository(loser_session),
+                    loser_session.commit,
+                    events=NullEventPublisher(),
+                    phase=BootstrapPhase.ALL,
+                )
+                result = await loser.import_dataset(_ContendedDataset(), _refuses)
+                reread = await holder.get(_CONTENDED)
+            finally:
+                await holder.release(_CONTENDED)
 
-            loser = BootstrapService(
-                _AlwaysFreshStart(loser_session),
-                PostgresBulkCatalogRepository(loser_session),
-                loser_session.commit,
-                events=NullEventPublisher(),
-                phase=BootstrapPhase.ALL,
-            )
-            result = await loser.import_dataset(_ContendedDataset(), _refuses)
-
-            assert result.id == winner.id
-            assert result.status is ImportRunStatus.RUNNING
-
-            reread = await PostgresImportRunRepository(winner_session).get(_CONTENDED)
-            assert reread is not None
-            assert reread.id == winner.id
-            assert reread.status is ImportRunStatus.RUNNING
-            assert reread.error is None
-            assert reread.position == winner.position
-            assert reread.rows_seen == winner.rows_seen
-            assert reread.revision == winner.revision
+        assert loser.conceded == frozenset({_CONTENDED})
+        assert result.id == winner.id
+        assert result.status is ImportRunStatus.RUNNING
+        assert reread is not None
+        assert reread.id == winner.id
+        assert reread.status is ImportRunStatus.RUNNING
+        assert reread.error is None
+        assert reread.position == winner.position
+        assert reread.rows_seen == winner.rows_seen
+        assert reread.revision == winner.revision
+        assert reread.heartbeat_at == winner.heartbeat_at
     finally:
         async with factory() as cleanup:
             await cleanup.execute(delete(ImportRunRow).where(ImportRunRow.dataset == _CONTENDED))

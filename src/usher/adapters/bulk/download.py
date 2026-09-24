@@ -1,9 +1,10 @@
 """Revision-tracked local caching for remote compressed dataset files."""
 
+import asyncio
 import gzip
 import io
 import zipfile
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,30 @@ _NOT_PUBLISHED = frozenset({403, 404})
 
 # 408 and every 5xx: the same request may well be answered on a later attempt.
 _REQUEST_TIMEOUT = 408
+
+_RANGE_NOT_SATISFIABLE = 416
+
+
+class _RangeRefused(Exception):
+    """A 416 to a resume's `Range`: the partial on disk left nothing to ask for."""
+
+
+#: Lines read between two yields to the event loop.
+_PACE = 50_000
+
+
+async def paced(lines: Iterable[str], *, skip: int = 0) -> AsyncIterator[str]:
+    """`lines` less the first `skip`, yielding to the event loop every `_PACE` lines read.
+
+    A file's lines are read synchronously, and a skip to a resume position or an index
+    built from a whole dump reads millions before anything is yielded. Paced, that
+    stretch leaves the loop free for the importer's heartbeat.
+    """
+    for index, line in enumerate(lines):
+        if index % _PACE == 0:
+            await asyncio.sleep(0)
+        if index >= skip:
+            yield line
 
 
 def _revision_from(response: httpx.Response) -> str:
@@ -145,12 +170,36 @@ class CachedDatasetFile:
         if not (partial_stamp.exists() and partial_stamp.read_text() == revision):
             partial.unlink(missing_ok=True)
         have = partial.stat().st_size if partial.exists() else 0
-        headers = {"Range": f"bytes={have}-", "If-Range": revision} if have else {}
+        try:
+            actual_revision = await self._download(partial, partial_stamp, revision, have)
+        except _RangeRefused:
+            # The partial is the whole file, or longer than what the host now serves,
+            # so no range of it is left to ask for. Once, without `Range`: a 416 to that
+            # is the host's own answer and `_raise_for_status` reads it as one.
+            partial.unlink(missing_ok=True)
+            actual_revision = await self._download(partial, partial_stamp, revision, 0)
 
+        # Atomic rename first, completed-file stamp only after it succeeds:
+        # a `path` that exists is always a complete file, and now `stamp`
+        # naming a revision is always backed by exactly that file -- never
+        # by whatever happened to be in flight when a process died.
+        partial.replace(self.path)
+        stamp.write_text(actual_revision)
+        partial_stamp.unlink(missing_ok=True)
+        return LocalFile(self.path, replaced=True)
+
+    async def _download(self, partial: Path, partial_stamp: Path, revision: str, have: int) -> str:
+        """Stream the body into `partial` from byte `have`, returning the revision it holds.
+
+        Raises `_RangeRefused` for a 416 to a resume, where the partial is the problem.
+        """
+        headers = {"Range": f"bytes={have}-", "If-Range": revision} if have else {}
         try:
             async with self._client.stream(
                 "GET", self._url, headers=headers, follow_redirects=True
             ) as response:
+                if have and response.status_code == _RANGE_NOT_SATISFIABLE:
+                    raise _RangeRefused
                 _raise_for_status(response, self._url)
                 # 200 to a Range request means the server declined it (stale
                 # If-Range, or no range support) and is sending everything --
@@ -163,15 +212,7 @@ class CachedDatasetFile:
                         sink.write(chunk)
         except httpx.HTTPError as exc:
             raise PortUnavailable(f"GET {self._url} failed: {failure_detail(exc)}") from exc
-
-        # Atomic rename first, completed-file stamp only after it succeeds:
-        # a `path` that exists is always a complete file, and now `stamp`
-        # naming a revision is always backed by exactly that file -- never
-        # by whatever happened to be in flight when a process died.
-        partial.replace(self.path)
-        stamp.write_text(actual_revision)
-        partial_stamp.unlink(missing_ok=True)
-        return LocalFile(self.path, replaced=True)
+        return actual_revision
 
     def lines(self, *, skip: int = 0) -> Iterator[str]:
         """Decompressed lines, newline stripped, with the first `skip` discarded.

@@ -26,17 +26,15 @@ _DATASET = "transactions.probe"
 class _FailsOnceEach(BulkDataset[int]):
     """`revision()` fails once, then the first fetch fails once.
 
-    One wait on each of `BootstrapService`'s two retry paths. The second comes after
-    `start()` has written the checkpoint and before any batch has committed it -- WDQS
-    timing out on page 0 -- which is the write the waits used to hold uncommitted.
-    `on_fetch` runs as each fetch begins, where a real one downloads or queries for
-    minutes.
+    One wait on each of `BootstrapService`'s two retry paths, the second after `start()`
+    and before any batch -- WDQS timing out on page 0. `observe` runs as each `revision()`
+    and each fetch begins, where a real one sends a `HEAD` or downloads for minutes.
     """
 
-    def __init__(self, on_fetch: Callable[[], Awaitable[None]]) -> None:
+    def __init__(self, observe: Callable[[str], Awaitable[None]]) -> None:
         self._revision_failures = 1
         self._fetch_failures = 1
-        self._on_fetch = on_fetch
+        self._observe = observe
 
     @property
     def name(self) -> str:
@@ -47,6 +45,7 @@ class _FailsOnceEach(BulkDataset[int]):
         return "synthetic, never redistributed"
 
     async def revision(self) -> str:
+        await self._observe("revision")
         if self._revision_failures:
             self._revision_failures -= 1
             raise PortUnavailable("HEAD failed: ConnectError")
@@ -58,7 +57,7 @@ class _FailsOnceEach(BulkDataset[int]):
         return self._iter(resume_from.position if resume_from else 0)
 
     async def _iter(self, start: int) -> AsyncIterator[BulkBatch[int]]:
-        await self._on_fetch()
+        await self._observe("fetch")
         for index in range(start, 2):
             if self._fetch_failures:
                 self._fetch_failures -= 1
@@ -99,13 +98,12 @@ def _backend_pids(engine: AsyncEngine) -> list[int]:
 
 
 async def test_no_retry_waits_inside_a_transaction(postgres_url: str, forget_probe: None) -> None:
-    """Every wait and every fetch finds the importer's connection `idle`, holding no xid.
+    """Every `HEAD`, wait and fetch finds the importer's connections `idle`, holding no xid.
 
-    Before: `idle in transaction` through all of them, with an xid from the first fetch
-    on -- `start()`'s flushed `RUNNING` row, invisible to another connection until the
-    first batch committed. The first wait follows the read `run_bootstrap` makes before
-    any import (`blocked()` reads the checkpoints), so it is a transaction the *caller*
-    left open that the wait has to end.
+    The case reads the checkpoint first, as `run_bootstrap`'s `blocked()` does, so the
+    first `revision()` follows a transaction the *caller* left open. From `start()` on
+    there are two connections, the session's and the hold's, and from the first fetch on
+    another connection reads the checkpoint `running`.
     """
     importer, observer = build_engine(postgres_url), build_engine(postgres_url)
     pids = _backend_pids(importer)
@@ -133,9 +131,6 @@ async def test_no_retry_waits_inside_a_transaction(postgres_url: str, forget_pro
     async def wait(_: float) -> None:
         await observe("wait")
 
-    async def fetch() -> None:
-        await observe("fetch")
-
     written: list[Sequence[int]] = []
 
     async def write(rows: Sequence[int]) -> int:
@@ -154,20 +149,22 @@ async def test_no_retry_waits_inside_a_transaction(postgres_url: str, forget_pro
                 phase=BootstrapPhase.CROSSWALK,
                 retry=RetryPolicy(first_delay=0.0, max_delay=0.0),
                 sleep=wait,
-            ).import_dataset(_FailsOnceEach(fetch), write)
+            ).import_dataset(_FailsOnceEach(observe), write)
     finally:
         await importer.dispose()
         await observer.dispose()
 
     assert run.status is ImportRunStatus.COMPLETED
     assert written == [(0,), (1,)], "the premise: both batches landed, once each"
-    assert len(pids) == 1, "the premise: the importer used exactly one connection"
-    idle = [("idle", None)]
+    assert len(pids) == 2, "the premise: the session's connection and the hold's"
+    idle, both_idle = [("idle", None)], [("idle", None), ("idle", None)]
     assert observed == [
-        # The revision's wait: nothing started yet, and the caller's read ended.
+        # Nothing started yet, and the caller's read is over before the first `HEAD`.
+        ("revision", idle, None),
         ("wait", idle, None),
+        ("revision", idle, None),
         # The first fetch: the start is committed, so another process sees it.
-        ("fetch", idle, "running"),
-        ("wait", idle, "running"),
-        ("fetch", idle, "running"),
+        ("fetch", both_idle, "running"),
+        ("wait", both_idle, "running"),
+        ("fetch", both_idle, "running"),
     ]

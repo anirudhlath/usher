@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 
-from usher.adapters.bulk.download import CachedDatasetFile
+from usher.adapters.bulk.download import CachedDatasetFile, paced
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
     BulkBatch,
@@ -252,7 +252,7 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
                     )
             seen.add(movie_id)
 
-        for line in self._file.member_lines(_SCORES_MEMBER, skip=1):
+        async for line in paced(self._file.member_lines(_SCORES_MEMBER), skip=1):
             if not line:
                 continue
             fields = line.split(",")

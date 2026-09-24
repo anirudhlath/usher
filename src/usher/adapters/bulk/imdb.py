@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from usher.adapters.bulk.download import CachedDatasetFile
+from usher.adapters.bulk.download import CachedDatasetFile, paced
 from usher.db.models.search import SEARCH_NAME_MAX_CHARS
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import (
@@ -382,7 +382,7 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
         # which is only visible once the next group's first line is consumed.
         boundary = skip
         group: str | None = None
-        for line in self._file.lines(skip=skip):
+        async for line in paced(self._file.lines(), skip=skip):
             # position counts *lines consumed*, not rows kept, because that is
             # what `skip` replays against. Incremented before the filter so a
             # resume never re-reads a line it already decided to drop.
@@ -556,7 +556,7 @@ class IMDbCreditNamesDataset(BulkDataset[ImdbCreditNames]):
         await self._names.ensure_local(names_revision)
         await self._principals.ensure_local(principals_revision)
         index = ImdbNameIndex()
-        for line in self._names.lines():
+        async for line in paced(self._names.lines()):
             person = parse_names_row(line)
             if person is not None:
                 index.add(person)
@@ -568,7 +568,7 @@ class IMDbCreditNamesDataset(BulkDataset[ImdbCreditNames]):
         title: str | None = None
         principals: list[ImdbPrincipal] = []
 
-        for line in self._principals.lines(skip=skip):
+        async for line in paced(self._principals.lines(), skip=skip):
             position += 1
             principal = parse_principals_row(line)
             if principal is None:

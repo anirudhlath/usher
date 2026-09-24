@@ -48,33 +48,47 @@ Three ordering constraints:
 — and so embeddings — untouched. `--phase imdb` rewrites every name and year,
 and a changed name makes that title's embedding stale.
 
-**Two checks enforce the order between bootstrap phases.** `ratings`,
+**Two checks enforce the order between `--phase` steps.** `ratings`,
 `credit-names`, `aliases` and `movielens` refuse a catalog with no titles. And
 no phase starts while a dataset it reads has a checkpoint that is `failed` or
 `running`: those four read IMDb's titles, and `crosswalk` reads the titles and
 both TMDb exports. So under `--phase all` a failed `imdb` skips those phases,
 while `tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
-refuses an earlier run's failure in the same way. A catalog with no IMDb
+is skipped over an earlier run's failure in the same way. A catalog with no IMDb
 checkpoint at all, one a source sync filled, blocks nothing — so `crosswalk`
 also runs over a catalog no IMDb import has filled.
 
 **Phase 0b before Phase 3 is not enforced.** Nothing orders the TMDb crawl
 after `credit-names`; run `credit-names` first.
 
-**A failed import, a skipped phase or a refused phase fails the command.**
-`usher bootstrap` exits 1 if anything it ran failed, or was skipped or refused.
-Its last lines give each one in dispatch order, which is also the order to
-resume them in. A failure line names the dataset, the position it stopped at,
-the error and the `--phase` that resumes it — `ratings` for the ratings file,
-whichever phase imported it. A skip line names what the phase was waiting on
-and gives the commands that finish that and then run the phase. A refusal line
-says `titles` is empty and gives `--phase imdb`, then the phase.
+**One process imports a dataset at a time.** A second `usher bootstrap`, or a
+bootstrap job, that reaches a dataset another process is importing leaves it
+alone: it downloads nothing and writes nothing to it. The hold ends when that
+import ends, however it ends — a killed process's included — so the next run
+can resume it at once.
 
-**A failure before an import starts leaves a completed import standing.** When
-the revision lookup fails over a checkpoint that is `completed`, the checkpoint
-stays `completed` with the error beside it, which `bootstrap-status` shows, and
-the phases that read it still run. The command still exits 1, and the line says
-the dataset could not start and its completed import stands.
+**A failed import, a skipped or refused phase, or a dataset left to another
+process fails the command.** `usher bootstrap` exits 1 if anything it ran
+failed, was skipped or refused, or was being imported elsewhere. Its last lines
+give each one in dispatch order, which is also the order to resume them in. A
+failure line names the dataset, the position it stopped at, the error and the
+`--phase` that resumes it — `ratings` for the ratings file, whichever phase
+imported it. A skip line names what the phase was waiting on and gives the
+commands that finish that and then run the phase. A refusal line says `titles`
+is empty and gives `--phase imdb`, then the phase — for `ratings`, `--phase
+imdb` alone, which imports it. A line for a dataset left to another process
+says so and gives the `--phase` to run once that process ends.
+
+**An import that fails before its first batch lands leaves a completed import
+standing.** When a refresh of a `completed` checkpoint fails — at the revision
+lookup, the download or the first fetch — or is interrupted before a batch of
+the new revision lands, the checkpoint stays `completed` at the revision and
+position it completed, and the phases that read it still run. A recorded
+failure sits beside it as the error, which `bootstrap-status` shows; the command
+still exits 1, and the line says the dataset failed before its first batch
+landed and its completed import stands. Once a batch has landed, a failure
+records the checkpoint `failed`. A revision lookup failing over a checkpoint
+that is `failed` or `running` adds the error and changes nothing else.
 
 Over the job queue (`POST /admin/bootstrap/{phase}`) the job completes either
 way.
@@ -93,7 +107,8 @@ re-import keeps the catalog browsable.
 
 ### Phase 0b — the IMDb expansion: credit names and aliases
 
-Two more IMDb files each become a phase, and **neither makes an API call**.
+Three more IMDb files — `name.basics`, `title.principals` and `title.akas` —
+make two more phases, and **neither makes an API call**.
 They give a `skeleton` title a cast to be found by and an alias to be found
 under.
 
@@ -115,8 +130,9 @@ enrichment grows.
 retained akas rows in four — and the phase reports that count beside the stored
 one.
 
-Phase 0b adds ~1.49 GiB of download, so a full `--phase all` transfers roughly
-1.74 GiB before the TMDb crawl and the genome archive. Nothing is downloaded
+Phase 0b adds ~1.49 GiB of download, so `--phase all` transfers roughly
+1.74 GiB of IMDb and TMDb files, and the 334.6 MiB genome archive besides. The
+TMDb crawl is not a `--phase` step and downloads no dump. Nothing is downloaded
 that an operator did not ask for.
 
 **After it, re-index.** Filling `credit_names` changes `search_document`, so
@@ -248,8 +264,14 @@ duration ([08](08-operations.md)), the server process writes to
 count, the genome coverage and whether the stored tag vocabulary can name the
 lanes of the stored vectors. It is the same report `usher bootstrap-status`
 prints, and it answers **200 for every state**, including "no import has ever
-run". A checkpoint reads `running` from the moment its import starts, before
-anything is downloaded.
+run". A first import of a dataset, or the resume of an unfinished one, reads
+`running` from the moment it starts, before anything is downloaded. A refresh
+of a `completed` checkpoint reads `completed`, at its old revision and
+position, until its first batch lands. While a checkpoint reads `running`, its
+`heartbeat_at` moves at least every 30 s for as long as the importing process
+lives — through downloads, index builds and retry waits — except while a
+single batch is being written. A heartbeat much older than that means the
+process has stopped, or is stuck writing one batch.
 
 ## Licensing — ship importers, never data
 
@@ -294,10 +316,11 @@ Hard rules encoded in the project:
 
 | | |
 |---|---|
-| Download | ~2.2 GiB |
+| Download | ~2.1 GiB, all of it `--phase all`: 1.74 GiB of IMDb and TMDb files and the 334.6 MiB genome archive |
 | Disk after import | ~8–12 GB with indexes |
 | Embeddings | 🔶 not yet sized at the current `halfvec(1024)` width (~280 MB for ~131k titles at the previous 384 lanes, about half of it the HNSW index) |
-| Full bootstrap wall-clock | ~3–5 h, mostly the TMDb crawl |
+| `usher bootstrap --phase all` wall-clock | ~40 min–1 h, the IMDb, TMDb export, Wikidata and MovieLens times in Sources |
+| Tier 1 TMDb crawl wall-clock | ~2 h — a separate step: `scripts/enqueue_tier_enrichment.py` enqueues it and the worker runs it |
 
 Bootstrap runs unattended and is resumable. A source can be connected and
 browsed while it is still going.

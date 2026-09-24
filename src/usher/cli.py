@@ -167,7 +167,7 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
 
 
 def _bootstrap_failed(outcome: BootstrapOutcome) -> str:
-    """The exit line for a bootstrap that left an import failed or a phase skipped or refused.
+    """The exit line for a bootstrap that left anything unfinished.
 
     Exit 1, on stderr, the way `_sync_failed` ends a sync: each one's own line -- what
     stopped, where, why, and the commands that continue it -- is already on stdout,
@@ -179,6 +179,10 @@ def _bootstrap_failed(outcome: BootstrapOutcome) -> str:
         noun = "import" if len(failed) == 1 else "imports"
         names = ", ".join(one.run.dataset for one in failed)
         parts.append(f"{len(failed)} {noun} failed: {names}")
+    if conceded := outcome.conceded:
+        noun = "import" if len(conceded) == 1 else "imports"
+        names = ", ".join(one.run.dataset for one in conceded)
+        parts.append(f"{len(conceded)} {noun} left to another process: {names}")
     if skipped := outcome.skipped:
         noun = "phase" if len(skipped) == 1 else "phases"
         names = ", ".join(one.phase.value for one in skipped)

@@ -131,6 +131,9 @@ class SearchIndexContract:
             "Nine Harbour", overview="A harbour at dusk.", credits=("Marlow Vance",)
         )
         named = _document("Marlow Vance", overview="A harbour at dusk.")
+        assert mentioned.title_id < credited.title_id < named.title_id, (
+            "the premise: the id tiebreak favours the reverse of the expected rank"
+        )
         await self.index_all(index, [mentioned, credited, named])
 
         outcome = await index.search(SearchRequest(query="marlow vance"))

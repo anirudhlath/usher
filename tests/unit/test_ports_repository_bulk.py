@@ -44,7 +44,7 @@ def test_bulk_catalog_repository_surface() -> None:
 
 def test_import_run_repository_surface() -> None:
     assert ImportRunRepository.__abstractmethods__ == frozenset(
-        {"start", "save", "get", "list_runs"}
+        {"start", "release", "touch", "note_failure", "save", "get", "list_runs"}
     )
 
 
