@@ -31,8 +31,9 @@ _TRIGGERABLE_SYNC_LANES = frozenset({SyncRunKind.FULL, SyncRunKind.DELTA})
 
 #: One bulk-import phase, run to completion. The alias exists so this module
 #: can name the collaborator without importing the composition root, exactly as
-#: `AdapterOpener` does for `sync_handler`.
-BootstrapRunner = Callable[[BootstrapPhase], Awaitable[None]]
+#: `AdapterOpener` does for `sync_handler`. It answers with what the run left
+#: unfinished, which the handler deliberately does not act on -- see `bootstrap_handler`.
+BootstrapRunner = Callable[[BootstrapPhase], Awaitable[object]]
 
 #: The adapter factory a `sync` job's handler is closed over.
 AdapterOpener = Callable[[Source], Awaitable[SourceAdapter | None]]
@@ -266,6 +267,14 @@ def bootstrap_handler(run: BootstrapRunner) -> Handler:
 
     The thinnest handler in the module, because everything it would otherwise
     hold is a composition-root concern.
+
+    **A failed import or a skipped phase completes the job rather than failing it.**
+    Each is already recorded on a checkpoint -- which `GET /admin/bootstrap/status`
+    serves -- and logged with the commands that continue it, after `import_dataset`
+    has retried the import as long as its `RetryPolicy` allows. Failing the job would
+    put the queue's retry policy on top of that one, and the two would multiply
+    rather than compose -- `TmdbClient.get`'s argument, one layer up. A skipped phase
+    would only be skipped again until its prerequisite is resumed.
     """
 
     async def handle(job: Job) -> None:

@@ -3,10 +3,11 @@
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 
 import httpx
 from loguru import logger
@@ -56,7 +57,7 @@ from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
-from usher.domain.bootstrap import BootstrapPhase, ImportRunStatus
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
@@ -1364,6 +1365,100 @@ def bulk_client(settings: Settings) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=60.0, headers={"User-Agent": settings.bulk_user_agent})
 
 
+@dataclass(frozen=True, slots=True)
+class FailedImport:
+    """A dataset whose import ended `FAILED` in this run, and the phase that resumes it.
+
+    The phase is the *step* whose arm imported the dataset, not the phase the run was
+    asked for: under `--phase all` a failed crosswalk resumes with `--phase crosswalk`
+    rather than by re-running everything, and `--phase ratings` resumes as itself --
+    naming `imdb` there would cost 214 MiB and a rewrite of every name and year for a
+    file the alias re-imports alone.
+    """
+
+    phase: BootstrapPhase
+    run: ImportRun
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedStep:
+    """A phase this run did not start, because a dataset it reads is unfinished.
+
+    `blockers` are those datasets' checkpoints as stored -- `failed`, or `running` for
+    an import that was killed or is still loading elsewhere. `resume` is the commands,
+    in order, that finish them and then run this phase; `ratings` needs no command of
+    its own after `imdb`, which imports it.
+    """
+
+    phase: BootstrapPhase
+    blockers: tuple[ImportRun, ...]
+    resume: tuple[BootstrapPhase, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapOutcome:
+    """What a bootstrap run left unfinished, in dispatch order -- the order to resume in.
+
+    Empty is success. Anything in it makes `usher bootstrap` exit 1.
+    """
+
+    unfinished: tuple[FailedImport | SkippedStep, ...] = ()
+
+    @property
+    def failed(self) -> tuple[FailedImport, ...]:
+        return tuple(one for one in self.unfinished if isinstance(one, FailedImport))
+
+    @property
+    def skipped(self) -> tuple[SkippedStep, ...]:
+        return tuple(one for one in self.unfinished if isinstance(one, SkippedStep))
+
+    @property
+    def succeeded(self) -> bool:
+        return not self.unfinished
+
+
+#: What each phase reads that another phase writes. Running one over a partial import
+#: of what it reads poisons its own result: `ratings`, `credit-names`, `aliases` and
+#: `movielens` join `titles` on `imdb_id`, checkpoint `completed` over the titles that
+#: landed, and every later run resumes past the ones that had not. The crosswalk's link
+#: stamps a title's TMDb id once (`WHERE t.tmdb_id IS NULL`), taking the popularity
+#: from `tmdb_ids` as it does, so a title linked over a partial catalog or a partial
+#: export stays unlinked or unranked. `tmdb-ids` reads nothing another phase writes.
+_READS: Mapping[BootstrapPhase, tuple[BootstrapPhase, ...]] = MappingProxyType(
+    {
+        BootstrapPhase.RATINGS: (BootstrapPhase.IMDB,),
+        BootstrapPhase.CREDIT_NAMES: (BootstrapPhase.IMDB,),
+        BootstrapPhase.ALIASES: (BootstrapPhase.IMDB,),
+        BootstrapPhase.CROSSWALK: (BootstrapPhase.IMDB, BootstrapPhase.TMDB_IDS),
+        BootstrapPhase.MOVIELENS: (BootstrapPhase.IMDB,),
+    }
+)
+
+
+def _closing_line(one: FailedImport | SkippedStep) -> str:
+    """What did not finish, why, and the commands that continue it.
+
+    Led by the dataset or phase name so a reader scanning a long report -- or a log --
+    finds it by the thing that stopped. A failure resumes because every step
+    checkpoints per batch: the command picks up at `position` while the upstream
+    revision is unchanged, and restarts cleanly when it has moved.
+    """
+    if isinstance(one, FailedImport):
+        return (
+            f"{one.run.dataset} failed at position {one.run.position}: {one.run.error}"
+            f"; resume with: usher bootstrap --phase {one.phase.value}"
+        )
+    states = ", ".join(
+        f"{run.dataset} is {run.status.value} at position {run.position}" for run in one.blockers
+    )
+    written = "what that import writes" if len(one.blockers) == 1 else "what those imports write"
+    commands = ", then ".join(f"usher bootstrap --phase {step.value}" for step in one.resume)
+    return (
+        f"{one.phase.value} skipped: {states}, and {one.phase.value} reads {written}"
+        f"; resume with: {commands}"
+    )
+
+
 async def run_bootstrap(
     catalog: BulkCatalogRepository,
     runs: ImportRunRepository,
@@ -1373,47 +1468,110 @@ async def run_bootstrap(
     *,
     report: BootstrapReporter,
     events: EventPublisher,
-) -> None:
-    """PRD 04's phased import, run once, for whichever phases `phase` names."""
+) -> BootstrapOutcome:
+    """PRD 04's phased import, run once, for whichever phases `phase` names.
+
+    **Returns everything the run left unfinished**, which is what makes a failed phase a
+    failed *command*: `BootstrapService.import_dataset` records an upstream failure on
+    the checkpoint and returns rather than raising, so without this the CLI exited 0
+    over a crosswalk `bootstrap-status` called `failed`. Each is also reported, as the
+    run's last lines, with the commands that continue it.
+
+    **A phase does not start while a dataset it reads is unfinished** (`_READS`), which
+    is read from the stored checkpoints: under `--phase all` a failed `imdb` skips every
+    later phase that joins its titles, and a single phase refuses an earlier run's
+    failure the same way. What reads nothing unfinished still runs, so one upstream
+    being down costs only what depends on it. The transient class never gets this far
+    unretried -- `import_dataset` retries a revision and resumes a fetch until its
+    `RetryPolicy` runs out, reporting each retry through `report`.
+    """
     client = bulk_client(settings)
-    service = BootstrapService(runs, catalog, commit, events=events, phase=phase)
+    service = BootstrapService(runs, catalog, commit, events=events, phase=phase, report=report)
+    unfinished: list[FailedImport | SkippedStep] = []
+    titles_dataset = IMDbTitleDataset(
+        client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
+    )
+    id_datasets = tuple(
+        TMDbIdDataset(
+            client, settings.bulk_data_dir, kind=kind, batch_size=settings.bulk_batch_size
+        )
+        for kind in (TitleKind.MOVIE, TitleKind.SERIES)
+    )
+    # The checkpoints standing for each phase `_READS` names.
+    written_by = {
+        BootstrapPhase.IMDB: (titles_dataset.name,),
+        BootstrapPhase.TMDB_IDS: tuple(one.name for one in id_datasets),
+    }
+
+    def settle(step: BootstrapPhase, run: ImportRun | None) -> None:
+        # `None` is a phase that refused before importing anything -- an empty
+        # catalog -- and says so itself.
+        if run is not None and run.status is ImportRunStatus.FAILED:
+            unfinished.append(FailedImport(step, run))
+
+    async def blocked(step: BootstrapPhase) -> bool:
+        """Whether `step` must wait, recording why when it must.
+
+        Only a checkpoint that exists and is not `completed` blocks: a catalog a
+        source sync filled has no IMDb checkpoint and nothing partial in it.
+        """
+        blockers: list[tuple[BootstrapPhase, ImportRun]] = []
+        for prerequisite in _READS[step]:
+            for dataset in written_by[prerequisite]:
+                stored = await runs.get(dataset)
+                if stored is not None and stored.status is not ImportRunStatus.COMPLETED:
+                    blockers.append((prerequisite, stored))
+        if not blockers:
+            return False
+        resume = tuple(dict.fromkeys(prerequisite for prerequisite, _ in blockers))
+        if step not in resume and not (
+            step is BootstrapPhase.RATINGS and BootstrapPhase.IMDB in resume
+        ):
+            resume += (step,)
+        unfinished.append(SkippedStep(step, tuple(run for _, run in blockers), resume))
+        return True
+
     try:
         if phase in (BootstrapPhase.IMDB, BootstrapPhase.ALL):
             # The window wraps both IMDb passes, not each separately: the
             # ratings pass writes to the same table, and rebuilding the two
             # ordering indexes between them would pay the cost twice.
             async with catalog.bulk_load_window():
-                await service.import_dataset(
-                    IMDbTitleDataset(
-                        client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
-                    ),
-                    _titles_writer(catalog),
-                )
-                await service.import_dataset(
-                    IMDbRatingDataset(
-                        client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
-                    ),
-                    catalog.apply_ratings,
-                )
-        if phase is BootstrapPhase.RATINGS:
-            await _ratings(settings, client, catalog, service, report)
-        if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL):
-            await _credit_names(settings, client, catalog, service, report)
-        if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL):
-            await _aliases(settings, client, catalog, service, report)
+                titles = await service.import_dataset(titles_dataset, _titles_writer(catalog))
+                settle(BootstrapPhase.IMDB, titles)
+                if not await blocked(BootstrapPhase.RATINGS):
+                    ratings = await service.import_dataset(
+                        IMDbRatingDataset(
+                            client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
+                        ),
+                        catalog.apply_ratings,
+                    )
+                    settle(BootstrapPhase.IMDB, ratings)
+        if phase is BootstrapPhase.RATINGS and not await blocked(BootstrapPhase.RATINGS):
+            settle(
+                BootstrapPhase.RATINGS, await _ratings(settings, client, catalog, service, report)
+            )
+        if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL) and not await blocked(
+            BootstrapPhase.CREDIT_NAMES
+        ):
+            settle(
+                BootstrapPhase.CREDIT_NAMES,
+                await _credit_names(settings, client, catalog, service, report),
+            )
+        if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL) and not await blocked(
+            BootstrapPhase.ALIASES
+        ):
+            settle(
+                BootstrapPhase.ALIASES, await _aliases(settings, client, catalog, service, report)
+            )
         if phase in (BootstrapPhase.TMDB_IDS, BootstrapPhase.ALL):
-            for kind in (TitleKind.MOVIE, TitleKind.SERIES):
-                await service.import_dataset(
-                    TMDbIdDataset(
-                        client,
-                        settings.bulk_data_dir,
-                        kind=kind,
-                        batch_size=settings.bulk_batch_size,
-                    ),
-                    catalog.upsert_tmdb_ids,
-                )
-        if phase in (BootstrapPhase.CROSSWALK, BootstrapPhase.ALL):
-            await service.import_dataset(
+            for ids_dataset in id_datasets:
+                ids = await service.import_dataset(ids_dataset, catalog.upsert_tmdb_ids)
+                settle(BootstrapPhase.TMDB_IDS, ids)
+        if phase in (BootstrapPhase.CROSSWALK, BootstrapPhase.ALL) and not await blocked(
+            BootstrapPhase.CROSSWALK
+        ):
+            crosswalk = await service.import_dataset(
                 WikidataCrosswalkDataset(
                     client,
                     user_agent=settings.bulk_user_agent,
@@ -1422,9 +1580,17 @@ async def run_bootstrap(
                 ),
                 catalog.upsert_crosswalk,
             )
+            settle(BootstrapPhase.CROSSWALK, crosswalk)
+            # Linked even after a failed import: every pair stored is a verified one,
+            # and linking is idempotent, so the pages that did land are usable now.
             await service.link_crosswalk()
-        if phase in (BootstrapPhase.MOVIELENS, BootstrapPhase.ALL):
-            await _movielens(settings, client, catalog, service, commit, report)
+        if phase in (BootstrapPhase.MOVIELENS, BootstrapPhase.ALL) and not await blocked(
+            BootstrapPhase.MOVIELENS
+        ):
+            settle(
+                BootstrapPhase.MOVIELENS,
+                await _movielens(settings, client, catalog, service, commit, report),
+            )
         logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
         # In a `finally`, so a phase that raises still gives the connection
@@ -1432,6 +1598,11 @@ async def run_bootstrap(
         # adapter's own `aclose` is a no-op: closing a shared client from
         # inside one dataset would break its siblings.
         await client.aclose()
+        # Here too, so a raise after a failure -- the load window's index rebuild,
+        # say -- does not swallow the lines saying what to resume.
+        for one in unfinished:
+            report(_closing_line(one))
+    return BootstrapOutcome(tuple(unfinished))
 
 
 def _titles_writer(
@@ -1456,16 +1627,16 @@ async def _ratings(
     catalog: BulkCatalogRepository,
     service: BootstrapService,
     report: BootstrapReporter,
-) -> None:
+) -> ImportRun | None:
     """`title.ratings.tsv.gz` -> `titles.imdb_*`, and nothing else."""
     if await catalog.count_titles() == 0:
         report(
             "ratings needs a catalog to update: title.ratings is keyed on "
             "imdb_id and titles is empty. Run --phase imdb first."
         )
-        return
+        return None
 
-    await service.import_dataset(
+    return await service.import_dataset(
         IMDbRatingDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
         catalog.apply_ratings,
     )
@@ -1477,14 +1648,14 @@ async def _credit_names(
     catalog: BulkCatalogRepository,
     service: BootstrapService,
     report: BootstrapReporter,
-) -> None:
+) -> ImportRun | None:
     """`name.basics` x `title.principals` -> `titles.credit_names`, and its report."""
     if await catalog.count_titles() == 0:
         report(
             "credit-names needs a catalog to join against: title.principals is "
             "keyed on imdb_id and titles is empty. Run --phase imdb first."
         )
-        return
+        return None
 
     tally = {"filled": 0, "unmatched": 0, "deferred": 0}
 
@@ -1495,11 +1666,12 @@ async def _credit_names(
         tally["deferred"] += result.deferred
         return result.filled
 
-    await service.import_dataset(
+    run = await service.import_dataset(
         IMDbCreditNamesDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
         write,
     )
     _report_credit_names(tally, await catalog.count_titles(), report)
+    return run
 
 
 def _report_credit_names(tally: dict[str, int], titles: int, report: BootstrapReporter) -> None:
@@ -1535,14 +1707,14 @@ async def _aliases(
     catalog: BulkCatalogRepository,
     service: BootstrapService,
     report: BootstrapReporter,
-) -> None:
+) -> ImportRun | None:
     """`title.akas` -> the `alias` half of `title_search_names`."""
     if await catalog.count_titles() == 0:
         report(
             "aliases needs a catalog to compare against: title.akas is keyed on "
             "imdb_id and titles is empty. Run --phase imdb first."
         )
-        return
+        return None
 
     tally = {"written": 0, "unmatched": 0, "canonical": 0, "duplicate": 0, "read": 0}
 
@@ -1557,11 +1729,12 @@ async def _aliases(
         tally["duplicate"] += result.duplicate
         return result.written
 
-    await service.import_dataset(
+    run = await service.import_dataset(
         IMDbAkaDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
         write,
     )
     _report_aliases(tally, await catalog.count_titles(), report)
+    return run
 
 
 def _report_aliases(tally: dict[str, int], titles: int, report: BootstrapReporter) -> None:
@@ -1591,14 +1764,14 @@ async def _movielens(
     service: BootstrapService,
     commit: Callable[[], Awaitable[None]],
     report: BootstrapReporter,
-) -> None:
+) -> ImportRun | None:
     """The MovieLens tag genome, its vocabulary, and the coverage report."""
     if await catalog.count_titles() == 0:
         report(
             "movielens needs a catalog to join against: the genome is keyed "
             "on imdb_id and titles is empty. Run --phase imdb first."
         )
-        return
+        return None
 
     dataset = MovieLensGenomeDataset(
         client,
@@ -1610,7 +1783,11 @@ async def _movielens(
         # killed run would restart from zero every time.
         batch_size=GENOME_BATCH_SIZE,
     )
-    revision = await dataset.revision()
+    resolved = await service.resolve_revision(dataset)
+    if isinstance(resolved, ImportRun):
+        # Retried and recorded `FAILED` already; there is nothing to report coverage of.
+        return resolved
+    revision = resolved
 
     async def write(rows: Sequence[GenomeVector]) -> int:
         result = await catalog.upsert_genome_vectors(rows, revision=revision)
@@ -1630,6 +1807,7 @@ async def _movielens(
         # this write is alone in a fresh transaction and needs its own commit.
         await commit()
     _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"], tags, report)
+    return run
 
 
 # The `unmatched` count has nowhere else to go: `BootstrapService.import_dataset` takes
@@ -1688,12 +1866,15 @@ def _report_coverage(
 
 __all__ = [
     "NO_CREDENTIALS",
+    "BootstrapOutcome",
     "BootstrapReporter",
     "DefaultUserId",
+    "FailedImport",
     "Pipeline",
     "QueueGauges",
     "SearchGauges",
     "SessionFactory",
+    "SkippedStep",
     "SourceGateRegistry",
     "SourceRegistry",
     "adapter_factory",

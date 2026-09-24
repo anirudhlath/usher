@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import usher
+import usher.services.bootstrap
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
@@ -48,6 +49,7 @@ from usher.api.app import create_app
 from usher.api.deps import get_search_service, get_source_adapter_factory, get_source_gates
 from usher.composition import (
     Pipeline,
+    SkippedStep,
     SourceGateRegistry,
     SourceRegistry,
     UnitOfWork,
@@ -69,7 +71,13 @@ from usher.composition import (
 from usher.config import Settings
 from usher.db.base import build_session_factory
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
-from usher.domain.bootstrap import FULL_SEQUENCE, PHASE_ALIASES, BootstrapPhase, ImportRun
+from usher.domain.bootstrap import (
+    FULL_SEQUENCE,
+    PHASE_ALIASES,
+    BootstrapPhase,
+    ImportRun,
+    ImportRunStatus,
+)
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -77,7 +85,7 @@ from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.source import Source
 from usher.domain.title import Title
-from usher.ports.bulk import ImdbTitle
+from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
@@ -98,6 +106,7 @@ from usher.ports.source import (
     SourceItem,
     SourceItemKind,
 )
+from usher.services.bootstrap import RetryPolicy
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
@@ -1463,11 +1472,11 @@ class _JournallingRuns(FakeImportRunRepository):
 
     The transport in these cases refuses every request, so `BulkDataset.
     revision()` raises `PortUnavailable` and `BootstrapService.
-    import_dataset` records a `FAILED` run rather than downloading 335 MiB.
-    A dataset that gets as far as `start()` therefore writes **twice** -- the
-    started row and the failed one -- and consecutive repeats are collapsed,
-    because this case is about the order of the phases and not about how many
-    writes each one makes.
+    import_dataset` records a `FAILED` run rather than downloading 335 MiB --
+    except for the datasets `_prerequisites_complete` stands in for. A dataset
+    that gets as far as `start()` writes more than once, and consecutive repeats
+    are collapsed, because this case is about the order of the phases and not
+    about how many writes each one makes.
     """
 
     def __init__(self, journal: list[str]) -> None:
@@ -1510,6 +1519,53 @@ def _offline_client(*_: object, **__: object) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
 
 
+class _Completes(BulkDataset[Any]):
+    """A dataset that imports nothing and completes: a finished prerequisite, offline."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def attribution(self) -> str:
+        return self._name
+
+    async def revision(self) -> str:
+        return "fixture-revision"
+
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[Any]]:
+        return self._one(revision or "fixture-revision")
+
+    async def _one(self, revision: str) -> AsyncIterator[BulkBatch[Any]]:
+        yield BulkBatch(rows=(), cursor=BulkCursor(revision=revision, position=1, rows_seen=0))
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _prerequisites_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IMDb's titles and both TMDb exports complete, and nothing else can.
+
+    Those three are what later phases read, so over a transport that refuses
+    everything this is the fixture in which no phase is skipped -- which is what a case
+    about the *order* of the whole dispatch needs. Neither writes a title, so the
+    catalog-joining phases still refuse an empty catalog in a sentence that names them.
+    """
+    monkeypatch.setattr(
+        usher.composition, "IMDbTitleDataset", lambda *_, **__: _Completes("imdb.title.basics")
+    )
+    monkeypatch.setattr(
+        usher.composition,
+        "TMDbIdDataset",
+        lambda *_, kind, **__: _Completes(f"tmdb.ids.{kind.value}"),
+    )
+
+
 async def _journal_of_a_full_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
@@ -1517,6 +1573,7 @@ async def _journal_of_a_full_bootstrap(
     through_the_worker: bool,
     phase: BootstrapPhase = BootstrapPhase.ALL,
     over_a_populated_catalog: bool = False,
+    prerequisites_complete: bool = False,
 ) -> list[str]:
     """One bootstrap run's datasets and window edges.
 
@@ -1528,6 +1585,9 @@ async def _journal_of_a_full_bootstrap(
     runs = _JournallingRuns(journal)
     settings = _settings(bulk_data_dir=tmp_path)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    if prerequisites_complete:
+        _prerequisites_complete(monkeypatch)
     if over_a_populated_catalog:
         await catalog.upsert_titles([_A_SEEDED_TITLE])
 
@@ -1571,6 +1631,16 @@ async def _nothing() -> None:
     return None
 
 
+def _without_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One attempt per dataset, for the cases whose transport refuses every request.
+
+    Those cases are about which datasets a phase reaches and in what order; a retry
+    of the crosswalk's refused query would add four journal lines and four real
+    waits to a case that is not about retrying. Retrying has its own cases.
+    """
+    monkeypatch.setattr(usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(attempts=1))
+
+
 #: Which phase each journal entry belongs to. The three catalog-dependent
 #: phases contribute a refusal *sentence* rather than a dataset name against
 #: an empty catalog, which is what makes all six visible in one run.
@@ -1608,13 +1678,14 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
 ) -> None:
     """The proof is behavioural, not structural.
 
-    The same phases, in the same order, whichever root drove them.
+    The same phases, in the same order, whichever root drove them. Over prerequisites
+    that complete, since a failed one would skip the phases that read it.
     """
     through_cli = await _journal_of_a_full_bootstrap(
-        monkeypatch, tmp_path, through_the_worker=False
+        monkeypatch, tmp_path, through_the_worker=False, prerequisites_complete=True
     )
     through_worker = await _journal_of_a_full_bootstrap(
-        monkeypatch, tmp_path, through_the_worker=True
+        monkeypatch, tmp_path, through_the_worker=True, prerequisites_complete=True
     )
 
     assert through_cli, "the premise: driving the dispatch records something"
@@ -1666,7 +1737,9 @@ async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
         phase=BootstrapPhase.RATINGS,
         over_a_populated_catalog=True,
     )
-    assert journal == ["imdb.title.ratings"]
+    # The refusing transport fails the import, so the dispatch's closing line for it
+    # shares the journal; the datasets touched are everything else.
+    assert [entry for entry in journal if _RESUME not in entry] == ["imdb.title.ratings"]
 
 
 async def test_a_full_run_imports_the_ratings_file_exactly_once(
@@ -1677,18 +1750,19 @@ async def test_a_full_run_imports_the_ratings_file_exactly_once(
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    _prerequisites_complete(monkeypatch)
     await catalog.upsert_titles([_A_SEEDED_TITLE])
 
-    with pytest.raises(PortUnavailable):
-        await run_bootstrap(
-            catalog,
-            runs,
-            _nothing,
-            _settings(bulk_data_dir=tmp_path),
-            BootstrapPhase.ALL,
-            report=journal.append,
-            events=NullEventPublisher(),
-        )
+    await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.ALL,
+        report=journal.append,
+        events=NullEventPublisher(),
+    )
 
     assert "imdb.title.ratings" in journal, "the premise: a full run reaches the ratings file"
     assert journal.count("imdb.title.ratings") == 1, journal
@@ -1749,6 +1823,7 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
         return client
 
     monkeypatch.setattr(usher.composition, "bulk_client", recording)
+    _without_retries(monkeypatch)
     journal: list[str] = []
     settings = _settings(bulk_data_dir=tmp_path)
 
@@ -1780,6 +1855,422 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
         )
     assert len(built) == 2
     assert built[1].is_closed
+
+
+#: `run_bootstrap`'s one line per failed dataset, whose last clause is the command.
+_RESUME = "; resume with: usher bootstrap --phase "
+
+
+def _recording_offline_client(requests: list[str]) -> Callable[..., httpx.AsyncClient]:
+    """`_offline_client`, noting the file each refused request asked for."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path.rsplit("/", 1)[-1])
+        raise httpx.ConnectError("the bootstrap dispatch reached the network")
+
+    return lambda *_, **__: httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+def _skip_line(step: str, blockers: str, noun: str, resume: str) -> str:
+    return (
+        f"{step} skipped: {blockers}, and {step} reads what {noun} write"
+        f"{'s' if noun == 'that import' else ''}; resume with: {resume}"
+    )
+
+
+async def test_a_failed_import_skips_every_later_phase_that_reads_what_it_wrote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`--phase all` stops what a failure would poison, and runs everything else.
+
+    A phase joining `titles` over a partial IMDb import checkpoints `completed` and
+    every later run resumes past the titles it missed -- so a failed `imdb` skips
+    `ratings`, `credit-names`, `aliases` and `movielens`, and the crosswalk, whose link
+    also stamps `tmdb_ids`' popularity, waits on both TMDb exports as well. `tmdb-ids`
+    reads nothing another phase writes, so it still runs.
+
+    Every failure and every skip closes the run in dispatch order -- the order to
+    resume them in -- each ending with the commands that continue it.
+    """
+    requests: list[str] = []
+    monkeypatch.setattr(usher.composition, "bulk_client", _recording_offline_client(requests))
+    _without_retries(monkeypatch)
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.ALL,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(one.run.dataset, one.phase) for one in outcome.failed] == [
+        ("imdb.title.basics", BootstrapPhase.IMDB),
+        ("tmdb.ids.movie", BootstrapPhase.TMDB_IDS),
+        ("tmdb.ids.series", BootstrapPhase.TMDB_IDS),
+    ]
+    basics, movie, series = (one.run for one in outcome.failed)
+    assert all(one.status is ImportRunStatus.FAILED for one in (basics, movie, series))
+    assert outcome.skipped == (
+        SkippedStep(BootstrapPhase.RATINGS, (basics,), (BootstrapPhase.IMDB,)),
+        SkippedStep(
+            BootstrapPhase.CREDIT_NAMES,
+            (basics,),
+            (BootstrapPhase.IMDB, BootstrapPhase.CREDIT_NAMES),
+        ),
+        SkippedStep(
+            BootstrapPhase.ALIASES, (basics,), (BootstrapPhase.IMDB, BootstrapPhase.ALIASES)
+        ),
+        SkippedStep(
+            BootstrapPhase.CROSSWALK,
+            (basics, movie, series),
+            (BootstrapPhase.IMDB, BootstrapPhase.TMDB_IDS, BootstrapPhase.CROSSWALK),
+        ),
+        SkippedStep(
+            BootstrapPhase.MOVIELENS,
+            (basics,),
+            (BootstrapPhase.IMDB, BootstrapPhase.MOVIELENS),
+        ),
+    )
+    # A skipped phase asked the network nothing and started no checkpoint.
+    assert requests[0] == "title.basics.tsv.gz"
+    assert {one.split("_ids_", 1)[0] for one in requests[1:]} == {"movie", "tv_series"}, requests
+    assert sorted(run.dataset for run in await runs.list_runs()) == [
+        "imdb.title.basics",
+        "tmdb.ids.movie",
+        "tmdb.ids.series",
+    ]
+
+    imdb, then = "usher bootstrap --phase imdb", ", then usher bootstrap --phase "
+    closing = [line for line in printed if _RESUME in line]
+    assert closing == [
+        f"imdb.title.basics failed at position 0: {basics.error}; resume with: {imdb}",
+        _skip_line("ratings", "imdb.title.basics is failed at position 0", "that import", imdb),
+        _skip_line(
+            "credit-names",
+            "imdb.title.basics is failed at position 0",
+            "that import",
+            f"{imdb}{then}credit-names",
+        ),
+        _skip_line(
+            "aliases",
+            "imdb.title.basics is failed at position 0",
+            "that import",
+            f"{imdb}{then}aliases",
+        ),
+        f"tmdb.ids.movie failed at position 0: {movie.error}"
+        "; resume with: usher bootstrap --phase tmdb-ids",
+        f"tmdb.ids.series failed at position 0: {series.error}"
+        "; resume with: usher bootstrap --phase tmdb-ids",
+        _skip_line(
+            "crosswalk",
+            "imdb.title.basics is failed at position 0, tmdb.ids.movie is failed at "
+            "position 0, tmdb.ids.series is failed at position 0",
+            "those imports",
+            f"{imdb}{then}tmdb-ids{then}crosswalk",
+        ),
+        _skip_line(
+            "movielens",
+            "imdb.title.basics is failed at position 0",
+            "that import",
+            f"{imdb}{then}movielens",
+        ),
+    ]
+    # The closing lines are the report's last, after every phase has spoken.
+    assert printed[-len(closing) :] == closing
+
+
+#: The dataset each catalog-reading phase imports, which is how a case tells that it ran.
+_DATASET_OF = {
+    BootstrapPhase.RATINGS: "imdb.title.ratings",
+    BootstrapPhase.CREDIT_NAMES: "imdb.credit_names",
+    BootstrapPhase.ALIASES: "imdb.title.akas",
+    BootstrapPhase.CROSSWALK: "wikidata.crosswalk",
+    BootstrapPhase.MOVIELENS: "movielens.genome",
+}
+
+
+async def _checkpoint(
+    runs: FakeImportRunRepository, dataset: str, status: ImportRunStatus, position: int
+) -> ImportRun:
+    started = await runs.start(dataset, "an-earlier-revision")
+    stored = started.evolve(
+        status=status,
+        position=position,
+        error="an earlier run's failure" if status is ImportRunStatus.FAILED else None,
+    )
+    await runs.save(stored)
+    return stored
+
+
+def _network_is_an_error(*_: object, **__: object) -> httpx.AsyncClient:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"a skipped phase reached the network: {request.url}")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+@pytest.mark.parametrize("status", [ImportRunStatus.FAILED, ImportRunStatus.RUNNING])
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_one_phase_refuses_to_run_over_an_unfinished_imdb_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    step: BootstrapPhase,
+    status: ImportRunStatus,
+) -> None:
+    """The same guard when the failure was an earlier run's, not this one's.
+
+    `--phase crosswalk` after a failed `--phase imdb` would link only the titles that
+    landed; `credit-names` would checkpoint `completed` over them. The catalog is not
+    empty, so the empty-catalog refusal cannot see it. `running` is a killed import or
+    another process mid-load: the same partial catalog.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    basics = await _checkpoint(runs, "imdb.title.basics", status, 500)
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert await catalog.count_titles() == 1, "the premise: the catalog is not empty"
+    resume = (
+        (BootstrapPhase.IMDB,) if step is BootstrapPhase.RATINGS else (BootstrapPhase.IMDB, step)
+    )
+    assert outcome.failed == ()
+    assert outcome.skipped == (SkippedStep(step, (basics,), resume),)
+    assert printed == [
+        _skip_line(
+            step.value,
+            f"imdb.title.basics is {status.value} at position 500",
+            "that import",
+            ", then ".join(f"usher bootstrap --phase {one.value}" for one in resume),
+        )
+    ]
+    assert await runs.list_runs() == [basics], "nothing else was started"
+
+
+@pytest.mark.parametrize("basics_status", [ImportRunStatus.COMPLETED, None])
+@pytest.mark.parametrize("step", list(_DATASET_OF))
+async def test_a_finished_or_absent_imdb_import_blocks_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    step: BootstrapPhase,
+    basics_status: ImportRunStatus | None,
+) -> None:
+    """The case above, one checkpoint state over: the phase runs.
+
+    Absent too: a catalog a source sync filled has no IMDb checkpoint, and nothing in it
+    is partial. Each phase then fails at its own first request -- recorded, not raised,
+    `movielens` included -- which is how this case knows it ran.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    if basics_status is not None:
+        await _checkpoint(runs, "imdb.title.basics", basics_status, 500)
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        step,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.skipped == ()
+    assert [(one.run.dataset, one.phase) for one in outcome.failed] == [(_DATASET_OF[step], step)]
+
+
+async def test_the_crosswalk_also_waits_on_the_tmdb_exports_and_nothing_else_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The link stamps `tmdb_ids`' popularity onto each title it links, once.
+
+    A title linked while the export is partial keeps a `NULL` popularity, and every
+    later link passes over it (`WHERE t.tmdb_id IS NULL`). No other phase reads
+    `tmdb_ids`, so the same checkpoint must not stop `credit-names`.
+    """
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    await _checkpoint(runs, "imdb.title.basics", ImportRunStatus.COMPLETED, 9)
+    series = await _checkpoint(runs, "tmdb.ids.series", ImportRunStatus.FAILED, 3)
+    printed: list[str] = []
+    monkeypatch.setattr(usher.composition, "bulk_client", _network_is_an_error)
+
+    outcome = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CROSSWALK,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert outcome.skipped == (
+        SkippedStep(
+            BootstrapPhase.CROSSWALK,
+            (series,),
+            (BootstrapPhase.TMDB_IDS, BootstrapPhase.CROSSWALK),
+        ),
+    )
+    assert printed == [
+        _skip_line(
+            "crosswalk",
+            "tmdb.ids.series is failed at position 3",
+            "that import",
+            "usher bootstrap --phase tmdb-ids, then usher bootstrap --phase crosswalk",
+        )
+    ]
+
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    names = await run_bootstrap(
+        catalog,
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CREDIT_NAMES,
+        report=lambda _: None,
+        events=NullEventPublisher(),
+    )
+    assert names.skipped == ()
+    assert [one.run.dataset for one in names.failed] == ["imdb.credit_names"]
+
+
+async def test_the_ratings_alias_resumes_as_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`--phase ratings` failing must not tell the operator to run `--phase imdb`.
+
+    That is 214 MiB and a rewrite of every name and year -- the cost the alias exists
+    to avoid -- for a dataset `ratings` resumes on its own.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        catalog,
+        FakeImportRunRepository(),
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.RATINGS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(one.run.dataset, one.phase) for one in outcome.failed] == [
+        ("imdb.title.ratings", BootstrapPhase.RATINGS)
+    ]
+    assert printed[-1].endswith(f"{_RESUME}ratings")
+
+
+class _WindowFailsToClose(FakeBulkCatalogRepository):
+    """A load window whose index rebuild raises on the way out."""
+
+    def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+        return self._failing()
+
+    @asynccontextmanager
+    async def _failing(self) -> AsyncIterator[None]:
+        yield
+        raise RuntimeError("the index rebuild failed")
+
+
+async def test_failures_and_skips_are_still_reported_when_the_run_then_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A raise after a failure must not swallow the lines saying what to resume.
+
+    The window closes after both IMDb passes, so a rebuild that raises there does so
+    after `imdb.title.basics` has failed and `ratings` has been skipped.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    printed: list[str] = []
+
+    with pytest.raises(RuntimeError, match="the index rebuild failed"):
+        await run_bootstrap(
+            _WindowFailsToClose(),
+            FakeImportRunRepository(),
+            _nothing,
+            _settings(bulk_data_dir=tmp_path),
+            BootstrapPhase.IMDB,
+            report=printed.append,
+            events=NullEventPublisher(),
+        )
+
+    assert [line.split(" ", 1)[0] for line in printed] == ["imdb.title.basics", "ratings"]
+    assert all(_RESUME in line for line in printed), printed
+
+
+async def test_a_retry_inside_the_dispatch_reaches_the_report_sink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`run_bootstrap` hands its own sink to the service, so a retry prints where the run does.
+
+    WDQS answers the first query with its query-timeout 504 and every later one with
+    an empty page: one retry, then a completed crosswalk and nothing returned.
+    """
+    answered: list[int] = []
+
+    def wdqs(request: httpx.Request) -> httpx.Response:
+        answered.append(len(answered))
+        if len(answered) == 1:
+            return httpx.Response(504, text="upstream request timeout")
+        return httpx.Response(200, json={"results": {"bindings": []}})
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(wdqs)),
+    )
+    monkeypatch.setattr(
+        usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(first_delay=0.0, max_delay=0.0)
+    )
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    outcome = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CROSSWALK,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert (outcome.failed, outcome.skipped) == ((), ())
+    stored = await runs.get("wikidata.crosswalk")
+    assert stored is not None and stored.status is ImportRunStatus.COMPLETED
+    assert printed == [
+        "wikidata.crosswalk: attempt 1 of 5 failed at position 0: "
+        "WDQS returned HTTP 504 for P4947 page 0; retrying in 0s"
+    ]
+    assert len(answered) == 4, "the premise: one refused query, then one per property"
 
 
 async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(

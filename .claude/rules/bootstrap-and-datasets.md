@@ -60,12 +60,12 @@ uv run usher bootstrap-status           # titles, genome vectors, vocabulary, ch
   0 remain, then asserts on **`rows_written`**, never on the exit status. Do not
   rely on the ETag having moved: a run whose correctness depends on that reports
   success for doing nothing.
-- **A phase writing through a join can poison a shared checkpoint by succeeding,
-  so every such phase refuses an empty catalog.** `apply_ratings` matches nothing
-  there, checkpoints `completed`, and every later bootstrap then resumes past the
-  file and imports no ratings — permanently, with `bootstrap-status` green. A
-  comment asserting the precondition does not run, and the guard belongs in the
-  phase's own function: inline it returns from all of `run_bootstrap`.
+- **A phase writing through a join can poison a shared checkpoint by succeeding**:
+  over an empty or partial catalog it checkpoints `completed`, and every later run
+  resumes past what it missed, with `bootstrap-status` green. So each refuses an
+  empty catalog in its own function (inline, the guard returns from all of
+  `run_bootstrap`), and none runs while a dataset `composition._READS` names is
+  unfinished — the crosswalk on the TMDb exports too: its link stamps popularity once.
 
 ## The download cache is keyed on the upstream token, not on local presence
 
@@ -174,8 +174,10 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   screen** — three of `_GENOME_COVERAGE`'s five terms are full scans of `titles`.
   No cache was added: **that shape is an admin page's and nothing else's**, and a
   client route assembling `BootstrapReport` would pay a scan per request.
-- Wikidata's crosswalk is seconds, not an hour; WDQS timeouts arrive as
-  `HTTP 504 text/plain` after ~65 s with **no `Retry-After`**.
+- **WDQS times out as a `504 text/plain` (~65 s, no `Retry-After`) or a `200` cut
+  off mid-document** — both `PortUnavailable`; page with `bd:slice`, never `STRSTARTS`.
+- **`import_dataset` records a failure and returns it; the CLI exits 1 on any failed
+  or skipped phase.** It retries the revision `HEAD` and a fetch, never a writer.
 
 ## People, credits and provenance
 

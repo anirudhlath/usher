@@ -15,7 +15,7 @@ connected, so search, matching and recommendations work well from first boot.
 |---|---|---|---|
 | [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, 101,151,422 cast/crew rows, 58,906,368 localised titles, 15,563,615 names | 1.832 GiB gz over seven files | 20–40 min |
 | [TMDb daily ID export](https://developer.themoviedb.org/docs/daily-id-exports) | 1.23M movie + 228k series IDs with popularity | 31 MiB gz | < 1 min |
-| Wikidata SPARQL | ~386k verified IMDb↔TMDb↔TVDb ID pairs (CC0) | no download | ~18 s of query time |
+| Wikidata SPARQL | 388,425 verified IMDb↔TMDb↔TVDb ID pairs over 338,654 IMDb ids (CC0) | no download | ~8 min, retries included |
 | TMDb API (per-id crawl) | Overviews, artwork, keywords, full credits | — | ~2 h for the priority tier |
 | [MovieLens tag genome](https://grouplens.org/datasets/movielens/) (`ml-latest.zip`) | 18,472,128 movie×tag relevance scores for 16,376 movies over 1,128 tags | 334.6 MiB | ~10 min |
 
@@ -46,6 +46,28 @@ Three ordering constraints:
 **`ratings` re-imports `title.ratings.tsv.gz` alone**, leaving names and years
 — and so embeddings — untouched. `--phase imdb` rewrites every name and year,
 and a changed name makes that title's embedding stale.
+
+**The ordering constraints are enforced.** A phase does not start while a
+dataset it reads has a checkpoint that is `failed` or `running`. `ratings`,
+`credit-names`, `aliases` and `movielens` read IMDb's titles. `crosswalk` reads
+the titles and both TMDb exports, because its link stamps each title's TMDb id
+and popularity once and never revisits it. Run over a partial import, each of
+these would checkpoint `completed` and every later run would resume past what
+was missing. So under `--phase all` a failed `imdb` skips those phases, while
+`tmdb-ids`, which reads nothing, still runs. Run on its own, such a phase
+refuses an earlier run's failure in the same way. A catalog with no IMDb
+checkpoint at all, one a source sync filled, blocks nothing.
+
+**A failed import or a skipped phase fails the command.** `usher bootstrap`
+exits 1 if anything it ran ended `failed` or was skipped. Its last lines give
+each one in dispatch order, which is also the order to resume them in. A
+failure line names the dataset, the position it stopped at, the error and the
+`--phase` that resumes it. A skip line names what the phase was waiting on and
+gives the commands that finish that and then run the phase. A phase that
+refuses an empty catalog has imported nothing and is not a failure. Over the
+job queue (`POST /admin/bootstrap/{phase}`) the job completes either way: the
+checkpoints already record the outcome, and the queue's retry would multiply
+with the service's own.
 
 ### Phase 0 — IMDb skeleton (~30 min)
 
@@ -100,11 +122,41 @@ priority.
 The export lands in its own `tmdb_ids` table keyed `(tmdb_id, kind)` and
 creates no titles. No API key is needed.
 
-### Phase 2 — ID crosswalk (~1 min of query time, no download)
+### Phase 2 — ID crosswalk (~8 min, no download)
 
-Paged SPARQL against Wikidata for P345 × {P4947, P4983, P4835} → ~386k
-verified IMDb↔TMDb↔TVDb mappings, CC0 licensed. Gaps fill opportunistically
-during Phase 3 via TMDb `external_ids`.
+Paged SPARQL against Wikidata for P345 × {P4947, P4983, P4835} → 388,425
+verified IMDb↔TMDb↔TVDb mappings over 338,654 IMDb ids, CC0 licensed. Gaps
+fill opportunistically during Phase 3 via TMDb `external_ids`.
+
+Measured on 2026-09-24 against a 1,279,749-title catalog: 490.5 s wall-clock,
+linking 293,665 titles to a TMDb id. 165 s of that was four retries, each
+resumed at its own page: three `502`s and one 90 s read timeout.
+
+**Each property is walked in `bd:slice` pages of 25,000 statements**, and every
+page after the first reaches 1,000 statements back into the one before, so a
+statement Wikidata deletes between two fetches cannot slide past a boundary
+unfetched. A page cost 1.7–6.0 s against WDQS's 60 s query limit on
+2026-09-23. The walk this replaced sharded P345 by id prefix, and **a
+`STRSTARTS` shard pays for the whole join**: 45.0 s for `tt3` and 34.7 s for
+`tt9` against 23.8 s for the unfiltered join, so shards timed out and smaller
+ones would have timed out more. `bd:slice` is Blazegraph's; an engine without
+it answers `400`, which fails the phase rather than walking it wrong.
+
+The checkpoint is a page, and the revision is the UTC date plus the page grid:
+a resume the same day continues from the page it stopped on, and a run the next
+day restarts from the first page.
+
+**A transient failure is retried from the checkpoint.** A timeout, a `408` or
+`5xx`, a `429`, and a `200` whose body stops mid-document — WDQS sends its
+status before the query finishes, so its timeout has that second shape — each
+make `BootstrapService` resume the dataset from its last committed page. It
+waits 15, 30, 60 and then 120 s, with a `Retry-After` as a floor under the
+wait, and gives up after five attempts or once the next wait would pass 900 s,
+whichever comes first. A committed page starts a fresh count. Any other `4xx`,
+and well-formed JSON of the wrong shape, would be the same answer next time,
+so neither is retried. Every phase shares this policy, and it also covers the
+revision lookup: the `HEAD` each IMDb, TMDb and MovieLens dataset makes first.
+Only the crosswalk has been observed to need it.
 
 ### Phase 3 — TMDb enrichment crawl (tiered)
 

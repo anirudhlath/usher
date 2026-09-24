@@ -22,6 +22,7 @@ from usher import __version__
 from usher.api.lanes import LaneSupervisor
 from usher.composition import (
     NO_CREDENTIALS,
+    BootstrapOutcome,
     DefaultUserId,
     Pipeline,
     QueueGauges,
@@ -150,7 +151,7 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
     factory = build_session_factory(engine)
     try:
         async with factory() as session:
-            await run_bootstrap(
+            outcome = await run_bootstrap(
                 PostgresBulkCatalogRepository(session),
                 PostgresImportRunRepository(session),
                 session.commit,
@@ -161,6 +162,32 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
             )
     finally:
         await engine.dispose()
+    if not outcome.succeeded:
+        raise SystemExit(_bootstrap_failed(outcome))
+
+
+def _bootstrap_failed(outcome: BootstrapOutcome) -> str:
+    """The exit line for a bootstrap that left an import failed or a phase skipped.
+
+    Exit 1, on stderr, the way `_sync_failed` ends a sync: each one's own line -- what
+    stopped, where, why, and the commands that continue it -- is already on stdout,
+    printed by `run_bootstrap`, so this names *which* and stops the command claiming
+    success. It printed a link count and exited 0 over a failed crosswalk until this
+    existed.
+    """
+    parts: list[str] = []
+    if failed := outcome.failed:
+        noun = "import" if len(failed) == 1 else "imports"
+        names = ", ".join(one.run.dataset for one in failed)
+        parts.append(f"{len(failed)} {noun} failed: {names}")
+    if skipped := outcome.skipped:
+        noun = "phase" if len(skipped) == 1 else "phases"
+        names = ", ".join(one.phase.value for one in skipped)
+        parts.append(f"{len(skipped)} {noun} skipped: {names}")
+    return (
+        f"usher bootstrap: {'; '.join(parts)}; each line above ends with the command that "
+        "resumes it, and `usher bootstrap-status` shows the checkpoints"
+    )
 
 
 def _vocabulary_line(verdict: VocabularyVerdict) -> str:
