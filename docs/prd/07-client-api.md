@@ -67,6 +67,7 @@ other nine.
 - **`?mode=semantic` is served wherever this process holds an embedding model
   and answers `422 validation_failed` where it does not.** `?mode=fused`
   narrows to full text instead, and says so through `requested_mode` ≠ `mode`.
+  It narrows the same way when the model fails to embed the query.
 - ⚠️ **`semantic_coverage`'s denominator is the *enriched* tier, not the
   catalog.** It answers *"has the backfill drained?"*, not *"can the vector
   lane see this catalog?"* — on a catalog whose skeleton tier dwarfs its
