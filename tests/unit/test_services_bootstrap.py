@@ -3,14 +3,19 @@
 No Docker, no network.
 """
 
+import datetime as dt
 from collections.abc import AsyncIterator, Callable, Sequence
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from loguru import logger
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
+from usher.adapters.bulk.imdb import IMDbTitleDataset
+from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
@@ -234,20 +239,22 @@ async def test_a_clean_run_completes_and_counts_rows(
     assert await catalog.count_titles() == 3
 
 
-async def test_commits_once_per_batch_plus_once_at_the_end(
+async def test_commits_at_the_start_once_per_batch_and_at_the_end(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
     """The commit boundary *is* the resumability mechanism.
 
     One commit for the whole run would make a crash lose everything; a commit between
-    the rows and the cursor would make it lose or duplicate a batch.
+    the rows and the cursor would make it lose or duplicate a batch. And one for the
+    `RUNNING` row `start()` wrote, before the first fetch rather than with the first
+    batch: `test_the_start_is_committed_and_no_wait_happens_inside_a_transaction`.
     """
     commit = CommitSpy()
     dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]])
     await _service(runs, catalog, commit).import_dataset(
         dataset, lambda rows: _write(catalog, rows)
     )
-    assert commit.count == 4
+    assert commit.count == 5
 
 
 async def test_the_checkpoint_advances_with_every_batch(
@@ -284,7 +291,7 @@ async def test_an_empty_batch_still_checkpoints_and_is_not_end_of_stream(
     stored = await runs.get("scripted")
     assert stored is not None
     assert stored.position == 2  # both batches advanced the cursor
-    assert commit.count == 3  # one per batch (2) + the final COMPLETED save
+    assert commit.count == 4  # the start, one per batch (2) and the final COMPLETED save
 
 
 async def test_batches_receives_the_already_resolved_revision(
@@ -502,10 +509,11 @@ async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commi
 
     Each one is offered *after* the commit that made its batch durable.
 
-    **The commit count at publish time is the assertion.** Two batches commit once each
-    and `_finish` commits a third time, so a correct run records frames at counts 1 and
-    2 -- a publish moved above `self._commit()` records 0 and 1, which is the same two
-    events in the same order and the reason a list of frames alone cannot see it.
+    **The commit count at publish time is the assertion.** The start commits once, two
+    batches once each and `_finish` a fourth time, so a correct run records frames at
+    counts 2 and 3 -- a publish moved above `self._commit()` records 1 and 2, which is
+    the same two events in the same order and the reason a list of frames alone cannot
+    see it.
 
     **Two batches rather than one, and no third frame.** One frame per *run* is the
     progress bar that jumps from 0% to 100%, which
@@ -520,8 +528,8 @@ async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commi
         dataset, lambda rows: _write(catalog, rows)
     )
 
-    assert commit.count == 3, "the premise: two batch commits and the completing one"
-    assert [seen for _, seen in spy.frames] == [1, 2], (
+    assert commit.count == 4, "the premise: the start's, two batches' and the completing one"
+    assert [seen for _, seen in spy.frames] == [2, 3], (
         "a frame was offered before the commit that made its batch durable"
     )
 
@@ -667,18 +675,117 @@ async def test_a_transient_failure_resumes_from_the_last_commit_and_completes(
 
     The retry is a resume: the second `batches()` call is handed the cursor the second
     batch committed, not the one the run started with, so nothing already written is
-    fetched or written again -- four commits, exactly as for a run that never failed.
+    fetched or written again -- three writes, exactly as for a run that never failed.
     """
     commit, clock = CommitSpy(), Clock()
     dataset = FlakyDataset(_three(), failures={2: 1})
-    run = await _service(runs, catalog, commit, clock=clock).import_dataset(
-        dataset, lambda rows: _write(catalog, rows)
-    )
+    written: list[Sequence[ImdbTitle]] = []
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        written.append(rows)
+        return await _write(catalog, rows)
+
+    run = await _service(runs, catalog, commit, clock=clock).import_dataset(dataset, write)
     assert run.status is ImportRunStatus.COMPLETED
     assert dataset.resumes == [None, BulkCursor(revision="etag-1", position=2, rows_seen=2)]
     assert clock.sleeps == [DEFAULT_RETRY.first_delay]
     assert await catalog.count_titles() == 3
-    assert commit.count == 4
+    assert [list(rows) for rows in written] == _three()
+    assert run.rows_written == 3
+
+
+class _Journal(list[str]):
+    """Starts, fetches, commits and waits, in the order they happened."""
+
+
+class _JournallingRuns(FakeImportRunRepository):
+    def __init__(self, journal: _Journal) -> None:
+        super().__init__()
+        self._journal = journal
+
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        self._journal.append("start")
+        return await super().start(dataset, revision)
+
+
+class _JournallingCommit(CommitSpy):
+    def __init__(self, journal: _Journal) -> None:
+        super().__init__()
+        self._journal = journal
+
+    async def __call__(self) -> None:
+        await super().__call__()
+        self._journal.append("commit")
+
+
+class _JournallingClock(Clock):
+    def __init__(self, journal: _Journal) -> None:
+        super().__init__()
+        self._journal = journal
+
+    async def sleep(self, seconds: float) -> None:
+        await super().sleep(seconds)
+        self._journal.append(f"sleep {seconds:g}")
+
+
+class _FlakyTwice(FlakyDataset):
+    """`revision()` fails once and a fetch fails once, each noted where it happens."""
+
+    def __init__(self, journal: _Journal) -> None:
+        super().__init__(_three(), failures={2: 1})
+        self._journal = journal
+        self._revision_failures = 1
+
+    async def revision(self) -> str:
+        if self._revision_failures:
+            self._revision_failures -= 1
+            raise PortUnavailable("HEAD failed: ConnectError")
+        return await super().revision()
+
+    async def _iter(
+        self, resume_from: BulkCursor | None, revision: str | None
+    ) -> AsyncIterator[BulkBatch[ImdbTitle]]:
+        self._journal.append("fetch")
+        async for batch in super()._iter(resume_from, revision):
+            yield batch
+
+
+async def test_the_start_is_committed_and_no_wait_happens_inside_a_transaction(
+    catalog: FakeBulkCatalogRepository,
+) -> None:
+    """A retry can wait minutes, and it never does so holding a transaction open.
+
+    A `RUNNING` row `start()` flushed and left uncommitted through a wait or a download
+    sits `idle in transaction` with an xid -- holding back vacuum, blocking a second
+    `start()`, hiding `running` from `bootstrap-status`, and killed outright under
+    `idle_in_transaction_session_timeout` with nothing recorded. So `start()` is
+    committed before the first fetch, and every wait -- the revision's and a fetch's
+    alike -- is preceded by a commit, which ends whatever read the caller left open
+    (`run_bootstrap` reads checkpoints first).
+    `tests/integration/test_bootstrap_transactions.py` observes it in `pg_stat_activity`.
+    """
+    journal = _Journal()
+    run = await _service(
+        _JournallingRuns(journal),
+        catalog,
+        _JournallingCommit(journal),
+        clock=_JournallingClock(journal),
+    ).import_dataset(_FlakyTwice(journal), lambda rows: _write(catalog, rows))
+    assert run.status is ImportRunStatus.COMPLETED
+    assert journal == [
+        "commit",
+        "sleep 15",  # the revision's wait
+        "start",
+        "commit",
+        "fetch",
+        "commit",
+        "commit",  # two batches
+        "commit",
+        "sleep 15",  # the fetch's wait: a new streak, so the first delay again
+        "fetch",
+        "commit",  # the third batch
+        "commit",  # completed
+    ]
 
 
 async def test_a_failure_that_never_clears_gives_up_at_the_attempt_bound(
@@ -862,42 +969,54 @@ def logged_into(records: list[tuple[str, str]]) -> Callable[[Any], None]:
     return sink
 
 
-async def test_each_retry_is_reported_as_it_happens_through_one_channel(
-    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
-) -> None:
+async def test_each_retry_is_reported_as_it_happens_through_one_channel() -> None:
     """An operator watching `usher bootstrap` sees every retry, not a silent pause.
 
     One line per retry naming the attempt, the bound, the checkpoint and the wait --
     to the report sink when there is one (stdout under the CLI, the log under the
     worker), and otherwise to the log as a WARNING. Never both: under the CLI the log
     *is* stdout, so a second channel prints every retry twice.
+
+    The log is read at DEBUG and compared with the same import run without a failure,
+    so a second channel shows up at any level and however its line is worded.
     """
     expected = [
         "scripted: attempt 1 of 5 failed at position 2: WDQS returned HTTP 504; retrying in 15s",
         "scripted: attempt 2 of 5 failed at position 2: WDQS returned HTTP 504; retrying in 30s",
     ]
-    for sink in (True, False):
+
+    async def observed(
+        failures: dict[int, int], *, sink: bool
+    ) -> tuple[list[str], list[tuple[str, str]]]:
         printed: list[str] = []
         logged: list[tuple[str, str]] = []
-        # Every WARNING and above, whatever it says: a second channel is a defect however
-        # its line is worded.
-        handle = logger.add(logged_into(logged), level="WARNING")
+        fresh = FakeBulkCatalogRepository()
+        handle = logger.add(logged_into(logged), level="DEBUG", filter="usher")
         try:
             run = await _service(
                 FakeImportRunRepository(),
-                FakeBulkCatalogRepository(),
+                fresh,
                 CommitSpy(),
                 report=printed.append if sink else None,
             ).import_dataset(
-                FlakyDataset(_three(), failures={2: 2}), lambda rows: _write(catalog, rows)
+                FlakyDataset(_three(), failures=failures), lambda rows: _write(fresh, rows)
             )
         finally:
             logger.remove(handle)
         assert run.status is ImportRunStatus.COMPLETED
+        return printed, logged
+
+    for sink in (True, False):
+        quiet_printed, quiet = await observed({}, sink=sink)
+        assert quiet_printed == [] and quiet != [], "the premise: a clean run logs, prints none"
+        printed, logged = await observed({2: 2}, sink=sink)
         if sink:
-            assert (printed, logged) == (expected, [])
+            assert (printed, sorted(logged)) == (expected, sorted(quiet))
         else:
-            assert (printed, logged) == ([], [("WARNING", line) for line in expected])
+            assert (printed, sorted(logged)) == (
+                [],
+                sorted([*quiet, *(("WARNING", line) for line in expected)]),
+            )
 
 
 class FlakyRevision(ScriptedDataset):
@@ -1008,6 +1127,177 @@ async def test_a_malformed_revision_is_not_retried(
     assert dataset.asked == 1
     assert clock.sleeps == []
     assert run.error == "no ETag on the HEAD"
+
+
+async def _completed(runs: FakeImportRunRepository) -> ImportRun:
+    """`scripted`'s checkpoint as a finished import of three batches left it."""
+    finished = ImportRun(
+        dataset="scripted",
+        revision="etag-0",
+        position=3,
+        rows_seen=3,
+        rows_written=3,
+        status=ImportRunStatus.COMPLETED,
+        finished_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        heartbeat_at=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+    )
+    await runs.save(finished)
+    return finished
+
+
+@pytest.mark.parametrize("through", ["import_dataset", "resolve_revision"])
+async def test_a_revision_that_fails_over_a_completed_import_leaves_it_completed(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, through: str
+) -> None:
+    """Nothing was written, so the import it would have refreshed still stands.
+
+    Downgraded to `FAILED`, one `HEAD` blip blocked every phase that reads the import
+    -- `credit-names`, `aliases`, `movielens`, the crosswalk -- until 214 MiB was
+    imported again. The error is kept beside the `COMPLETED` status instead, where
+    `bootstrap-status` prints it, and the attempt still counts as failed: its run is
+    the one returned.
+    """
+    finished = await _completed(runs)
+    clock = Clock()
+    service = _service(runs, catalog, CommitSpy(), clock=clock)
+    dataset = FlakyRevision(_three(), failures=99)
+    if through == "import_dataset":
+        run = await service.import_dataset(dataset, lambda rows: _write(catalog, rows))
+    else:
+        resolved = await service.resolve_revision(dataset)
+        assert isinstance(resolved, ImportRun)
+        run = resolved
+    error = f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
+    assert run == finished.evolve(error=error, heartbeat_at=run.heartbeat_at)
+    assert run.heartbeat_at > finished.heartbeat_at, "the attempt is the latest activity"
+    assert await runs.get("scripted") == run, "what is returned is what is stored"
+    assert dataset.resumed_from is None and dataset.revision_requested is None
+
+
+@pytest.mark.parametrize("status", [ImportRunStatus.FAILED, ImportRunStatus.RUNNING])
+async def test_a_revision_that_fails_over_an_unfinished_import_records_it_failed(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, status: ImportRunStatus
+) -> None:
+    """The neighbours: a checkpoint that was not `COMPLETED` has nothing to keep standing."""
+    unfinished = (await _completed(runs)).evolve(status=status, finished_at=None)
+    await runs.save(unfinished)
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(
+        FlakyRevision(_three(), failures=99), lambda rows: _write(catalog, rows)
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert run.position == 3
+    assert run.error == f"{_HEAD_FAILED} (gave up after 5 attempts over 225s)"
+
+
+async def test_a_failure_after_the_start_over_a_completed_import_records_it_failed(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """Once `start()` has run, the checkpoint is `RUNNING` and a new revision reset it.
+
+    What the catalog holds is then part-way to another snapshot, which is what
+    `FAILED` says -- so the rule is about when the failure came, not what was there.
+    """
+    await _completed(runs)
+    run = await _service(runs, catalog, CommitSpy()).import_dataset(
+        ScriptedDataset(_three(), fail_after=1, revision="etag-1"),
+        lambda rows: _write(catalog, rows),
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert (run.revision, run.position) == ("etag-1", 1)
+
+
+_BASICS_URL = "https://datasets.imdbws.com/title.basics.tsv.gz"
+_NO_TOKEN = (
+    f"{_BASICS_URL} supplied neither ETag nor Last-Modified, so no snapshot token exists "
+    "and a resumable import cannot tell one snapshot from another"
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "error", "heads", "sleeps"),
+    [
+        (404, {"etag": '"x"'}, f"{_BASICS_URL} returned HTTP 404", 1, []),
+        (403, {"etag": '"x"'}, f"{_BASICS_URL} returned HTTP 403", 1, []),
+        (410, {}, f"{_BASICS_URL} returned HTTP 410", 1, []),
+        (200, {}, _NO_TOKEN, 1, []),
+        (
+            503,
+            {"etag": '"x"'},
+            f"{_BASICS_URL} returned HTTP 503 (gave up after 5 attempts over 225s)",
+            5,
+            [15.0, 30.0, 60.0, 120.0],
+        ),
+        (
+            408,
+            {},
+            f"{_BASICS_URL} returned HTTP 408 (gave up after 5 attempts over 225s)",
+            5,
+            [15.0, 30.0, 60.0, 120.0],
+        ),
+    ],
+    ids=["404", "403", "410", "200-no-token", "503", "408"],
+)
+async def test_the_real_download_is_retried_only_where_asking_again_can_help(
+    runs: FakeImportRunRepository,
+    catalog: FakeBulkCatalogRepository,
+    tmp_path: Path,
+    status: int,
+    headers: dict[str, str],
+    error: str,
+    heads: int,
+    sleeps: list[float],
+) -> None:
+    """`test_a_malformed_revision_is_not_retried` with the real `CachedDatasetFile` under it.
+
+    That case raises `PortDataMalformed` from a fake, so it passed while every answer the
+    real download gets that is not a 429 -- a 404, a 403, a response with no ETag --
+    came back `PortUnavailable` and was asked five times over 225 s.
+    """
+    asked: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request.method)
+        return httpx.Response(status, headers=headers)
+
+    clock = Clock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        run = await _service(runs, catalog, CommitSpy(), clock=clock).import_dataset(
+            IMDbTitleDataset(client, tmp_path, batch_size=10), lambda rows: _write(catalog, rows)
+        )
+    assert run.status is ImportRunStatus.FAILED
+    assert run.error == error
+    assert asked == ["HEAD"] * heads
+    assert clock.sleeps == sleeps
+
+
+async def test_a_tmdb_outage_is_retried_as_one_request_per_attempt_and_says_what_failed(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, tmp_path: Path
+) -> None:
+    """Not seven per attempt, and not "no export found".
+
+    The walk-back read every failure as a day not yet published, so an outage cost 35
+    requests and was recorded as the absence of an export.
+    """
+    asked: list[str] = []
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        asked.append(request.method)
+        raise httpx.ConnectError("no route to host")
+
+    clock = Clock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unreachable)) as client:
+        dataset = TMDbIdDataset(
+            client, tmp_path, kind=TitleKind.MOVIE, batch_size=10, today=dt.date(2026, 7, 30)
+        )
+        run = await _service(runs, catalog, CommitSpy(), clock=clock).import_dataset(
+            dataset, catalog.upsert_tmdb_ids
+        )
+    assert run.status is ImportRunStatus.FAILED
+    assert asked == ["HEAD"] * DEFAULT_RETRY.attempts
+    assert run.error == (
+        "HEAD https://files.tmdb.org/p/exports/movie_ids_07_30_2026.json.gz failed: "
+        "ConnectError (gave up after 5 attempts over 225s)"
+    )
 
 
 async def test_resolve_revision_answers_the_revision_or_the_failure_it_recorded(

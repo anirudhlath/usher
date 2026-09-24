@@ -309,7 +309,10 @@ class BootstrapService:
         *,
         revision: str | None = None,
     ) -> ImportRun:
-        """Stream `dataset` through `write`, checkpointing every batch."""
+        """Stream `dataset` through `write`, checkpointing every batch.
+
+        `start()` is committed before anything is fetched, and so is every batch.
+        """
         started = time.perf_counter()
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
@@ -327,6 +330,12 @@ class BootstrapService:
                     # that branch performs for case 2.
                     run = await self._concede_to_other_owner(dataset.name, resolved, exc, span)
                 else:
+                    # Before the first fetch, which can be a 214 MiB download: held
+                    # uncommitted through it, `RUNNING` keeps an xid, is invisible to
+                    # `bootstrap-status` and to `run_bootstrap`'s read of what is
+                    # unfinished, and dies to `idle_in_transaction_session_timeout`
+                    # with nothing recorded.
+                    await self._commit()
                     resume_from = _cursor(run, resolved)
                     if resume_from is not None:
                         logger.info(
@@ -359,27 +368,37 @@ class BootstrapService:
             return await self._record_failure(dataset.name, exc)
 
     async def _record_failure(self, dataset: str, exc: UsherPortError | _GaveUp) -> ImportRun:
-        """Mark `dataset`'s checkpoint `FAILED`, saying why, and commit it.
+        """Record on `dataset`'s checkpoint why this attempt failed, and commit it.
+
+        `FAILED`, unless the checkpoint is still `COMPLETED`. `start()` commits
+        `RUNNING` before anything is fetched, so a `COMPLETED` checkpoint here is one this
+        attempt never started: it failed resolving the revision, wrote nothing, and the
+        import it would have refreshed still stands. Downgrading it would block every
+        phase reading it until the whole dataset is imported again, so it stays
+        `COMPLETED` with the error beside it, where `bootstrap-status` prints it -- and
+        `start()` or `_finish` clears it. Either way the returned run is the stored one.
 
         `_GaveUp` is recorded as the port error it wraps, with the attempts appended to
         the message.
         """
         cause = exc if isinstance(exc, UsherPortError) else exc.cause
-        run = (await self._runs.get(dataset)) or ImportRun(dataset=dataset, revision="unknown")
-        run = run.evolve(
-            status=ImportRunStatus.FAILED,
-            # str(exc), never the exception object and never a payload: PRD 08's
-            # credentials-never-logged rule, and `error` is a Text column an operator
-            # reads.
-            error=str(exc),
-            heartbeat_at=datetime.now(UTC),
-            finished_at=datetime.now(UTC),
-        )
+        stored = await self._runs.get(dataset)
+        now = datetime.now(UTC)
+        # str(exc), never the exception object and never a payload: PRD 08's
+        # credentials-never-logged rule, and `error` is a Text column an operator reads.
+        if stored is not None and stored.status is ImportRunStatus.COMPLETED:
+            run = stored.evolve(error=str(exc), heartbeat_at=now)
+            outcome = "could not start, so its completed import at position {position} stands"
+        else:
+            run = (stored or ImportRun(dataset=dataset, revision="unknown")).evolve(
+                status=ImportRunStatus.FAILED, error=str(exc), heartbeat_at=now, finished_at=now
+            )
+            outcome = "import failed at position {position}"
         await self._runs.save(run)
         await self._commit()
         _failures.add(1, {"dataset": dataset, "kind": type(cause).__name__})
         logger.error(
-            "{dataset} import failed at position {position}: {error}",
+            "{dataset} " + outcome + ": {error}",
             dataset=dataset,
             position=run.position,
             error=str(exc),
@@ -405,15 +424,33 @@ class BootstrapService:
                 wait = self._next_wait(
                     dataset.name, "resolving its revision", attempt, now - streak_started, exc
                 )
-                await self._sleep(wait)
+                await self._pause(wait)
                 attempt += 1
+
+    async def _pause(self, seconds: float) -> None:
+        """Wait `seconds` before a retry, and never inside a transaction.
+
+        A streak can wait ~10 minutes, and a transaction held across it is `idle in
+        transaction` for all of that: it holds back vacuum, keeps what it read or wrote
+        from everyone else, and is killed under `idle_in_transaction_session_timeout`,
+        whereupon the next statement raises something no `except` here records. So the
+        commit ends it first. Nothing of this service's is pending by then -- `start()`
+        and every batch commit before anything is fetched -- so what it ends is a read:
+        `_drain_resuming`'s re-read of the checkpoint, or the caller's, since
+        `run_bootstrap` reads what is unfinished before it imports anything.
+
+        One helper for both retried calls, so neither can wait inside a transaction
+        while the other does not.
+        """
+        await self._commit()
+        await self._sleep(seconds)
 
     def _next_wait(
         self, dataset: str, where: str, attempt: int, elapsed: float, exc: UsherPortError
     ) -> float:
         """The wait before attempt `attempt + 1`, announced -- or `_GaveUp`.
 
-        `elapsed` is measured from the streak's first failure. One rule for both
+        `elapsed` runs from the streak's first failure. One rule for both
         retried calls, so a revision and a fetch cannot drift apart on the bound.
         """
         if attempt >= self._retry.attempts:
@@ -488,7 +525,7 @@ class BootstrapService:
                     now - streak_started,
                     exc,
                 )
-                await self._sleep(wait)
+                await self._pause(wait)
                 attempt += 1
 
     async def _drain[RowT](

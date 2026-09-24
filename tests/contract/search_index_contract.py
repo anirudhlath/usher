@@ -149,6 +149,7 @@ class SearchIndexContract:
         """
         tagged = _document("Harbour Lights", genres=("Heist",))
         mentioned = _document("Ten Harbour", overview="A heist at dusk.")
+        assert tagged.title_id < mentioned.title_id, "the premise: the id tiebreak favours tagged"
         await self.index_all(index, [tagged, mentioned])
 
         outcome = await index.search(SearchRequest(query="heist"))

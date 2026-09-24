@@ -13,7 +13,7 @@ import httpx
 from usher.adapters.bulk.download import CachedDatasetFile
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, TmdbId
-from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.errors import PortDataMalformed
 
 TMDB_EXPORTS_BASE_URL = "https://files.tmdb.org/p/exports/"
 
@@ -73,16 +73,20 @@ class TMDbIdDataset(BulkDataset[TmdbId]):
         whether the day exists has already answered what the file's ETag is, and
         a caller that threw it away would pay for a second `HEAD` to the URL the
         first one just proved was live.
+
+        **Only a 404 or 403 means "that day is not published".** Any other failure ends
+        the walk at the request it happened on: read as an absent day, an outage would
+        cost seven requests an attempt and be reported as the absence of an export. A week
+        with none published is malformed, not unavailable -- asking again in fifteen
+        seconds changes none of seven answers.
         """
         for days in range(_MAX_DAYS_BACK):
             day = self._today - dt.timedelta(days=days)
             candidate = CachedDatasetFile(self._client, self._url(day), self._cache_dir)
-            try:
-                etag = await candidate.revision()
-            except PortUnavailable:
-                continue
-            return day, candidate, etag
-        raise PortUnavailable(
+            etag = await candidate.revision_if_published()
+            if etag is not None:
+                return day, candidate, etag
+        raise PortDataMalformed(
             f"no TMDb {self._stem} export found in the last {_MAX_DAYS_BACK} days "
             f"under {self._base_url}"
         )

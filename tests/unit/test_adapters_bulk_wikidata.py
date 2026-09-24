@@ -170,10 +170,10 @@ async def test_skips_a_value_too_large_for_the_int4_column() -> None:
 async def test_a_statement_with_no_imdb_id_counts_toward_its_page_and_yields_no_pair() -> None:
     """A page holds items with no IMDb id too, and they count toward filling it.
 
-    Measured on 2026-09-23: 386 of the first 25,000 P4947 statements had no P345. The
-    query asks for P345 with `OPTIONAL` precisely so those statements come back and
-    the page reads as *full*; with a plain join the page would come back short and
-    the walk would stop there, silently dropping every later page of the property.
+    Real P4947 pages hold hundreds of them. The query asks for P345 with `OPTIONAL`
+    precisely so those statements come back and the page reads as *full*; with a plain
+    join the page would come back short and the walk would stop there, silently
+    dropping every later page of the property.
     """
     page = 3
     statements = [
@@ -242,6 +242,56 @@ async def test_a_page_is_counted_in_statements_not_in_rows() -> None:
     assert sorted(row[0] for row in rows) == ["tt99000001", "tt99000091"]
 
 
+async def test_one_item_with_two_values_for_the_property_is_two_statements() -> None:
+    """A page holding one item twice -- two values of one property -- is full.
+
+    A statement is the (item, value) pair: counting distinct items alone reads this page
+    as short and ends the walk before the page after it.
+    """
+    size = 2
+    page_one = [
+        _statement(1, "tt99000001", other="90000001"),
+        _statement(1, "tt99000001", other="90000002"),
+    ]
+    assert len(page_one) == size and len({one.item for one in page_one}) == 1, "the premise"
+    wdqs = _Wdqs({"P4947": [*page_one, _statement(3, "tt99000003")]})
+    rows = await _rows(wdqs, page_size=size, overlap=0)
+    assert [call for call in wdqs.calls if call[0] == "P4947"] == [
+        ("P4947", 0, size),
+        ("P4947", size, size),
+    ]
+    assert rows == [
+        ("tt99000001", 90000001, None, None),
+        ("tt99000001", 90000002, None, None),
+        ("tt99000003", 90000003, None, None),
+    ]
+
+
+async def test_two_items_sharing_one_value_are_two_statements() -> None:
+    """A page holding one value twice -- on two items -- is full.
+
+    Counting distinct values alone reads this page as short and ends the walk before
+    the page after it.
+    """
+    size = 2
+    page_one = [
+        _statement(1, "tt99000001", other="90000500"),
+        _statement(2, "tt99000002", other="90000500"),
+    ]
+    assert len(page_one) == size and len({one.other for one in page_one}) == 1, "the premise"
+    wdqs = _Wdqs({"P4947": [*page_one, _statement(3, "tt99000003")]})
+    rows = await _rows(wdqs, page_size=size, overlap=0)
+    assert [call for call in wdqs.calls if call[0] == "P4947"] == [
+        ("P4947", 0, size),
+        ("P4947", size, size),
+    ]
+    assert rows == [
+        ("tt99000001", 90000500, None, None),
+        ("tt99000002", 90000500, None, None),
+        ("tt99000003", 90000003, None, None),
+    ]
+
+
 async def test_a_statement_deleted_before_the_boundary_between_two_fetches_loses_nothing() -> None:
     """The overlap is what absorbs Wikidata editing the index while the walk is on it.
 
@@ -288,6 +338,19 @@ async def test_a_property_that_fills_the_whole_page_grid_fails_rather_than_trunc
             [row async for batch in dataset.batches() for row in batch.rows]
     # The grid's capacity, two pages of two, named with the property that outgrew it.
     assert "more than 4 P4947 statements" in str(exc_info.value)
+
+
+async def test_a_short_page_in_the_last_slot_of_the_grid_completes() -> None:
+    """Every page but the last full, and the last short: the property fits, just.
+
+    The boundary below the failure above -- the guard fires only on a *full* last page,
+    so a full page one slot earlier must not trip it.
+    """
+    size, grid = 2, 3
+    wdqs = _Wdqs({"P4947": _numbered((grid - 1) * size + 1)})
+    rows = await _rows(wdqs, page_size=size, overlap=0, max_pages=grid)
+    assert [call[1] for call in wdqs.calls if call[0] == "P4947"] == [0, size, 2 * size]
+    assert [row[0] for row in rows] == [f"tt99{n:06d}" for n in range(1, (grid - 1) * size + 2)]
 
 
 async def test_a_large_page_is_split_into_batch_size_chunks() -> None:
@@ -547,9 +610,9 @@ async def test_a_200_whose_body_is_cut_short_is_unavailable_not_malformed() -> N
     """WDQS commits to `200` before a query finishes, so a timeout mid-stream truncates it.
 
     What arrives is the start of a SPARQL results document with the server's exception
-    text where the rest should be. Observed live on 2026-09-23 (R13, P4947/tt3): the
-    next attempt at the same query timed out outright, so it is the timeout's other
-    shape, and it gets the timeout's treatment -- retried, not parked.
+    text where the rest should be. The next attempt at the same query can time out
+    outright, so it is the timeout's other shape, and it gets the timeout's treatment
+    -- retried, not parked.
     """
     body = (
         json.dumps({"head": {"vars": ["item", "imdb", "other"]}})[:-1]
