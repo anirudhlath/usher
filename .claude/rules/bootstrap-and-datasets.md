@@ -174,8 +174,12 @@ the stale-snapshot interlock is new failure surface for a one-off saving.
   screen** — three of `_GENOME_COVERAGE`'s five terms are full scans of `titles`.
   No cache was added: **that shape is an admin page's and nothing else's**, and a
   client route assembling `BootstrapReport` would pay a scan per request.
-- Wikidata's crosswalk is seconds, not an hour; WDQS timeouts arrive as
-  `HTTP 504 text/plain` after ~65 s with **no `Retry-After`**.
+- **WDQS times out as `HTTP 504 text/plain` after ~65 s with no `Retry-After`,
+  or as a `200` cut off mid-document** — both `PortUnavailable`. Page it with
+  `bd:slice`: a `STRSTARTS` shard pays for the whole P345 join every time.
+- **`import_dataset` records a failure and returns it, so `run_bootstrap`
+  collects `FAILED` runs and the CLI exits 1.** Its retry resumes a *fetch's*
+  transient error only; a writer's may have left half a batch.
 
 ## People, credits and provenance
 

@@ -23,6 +23,7 @@ from usher.api.lanes import LaneSupervisor
 from usher.composition import (
     NO_CREDENTIALS,
     DefaultUserId,
+    FailedImport,
     Pipeline,
     QueueGauges,
     SearchGauges,
@@ -150,7 +151,7 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
     factory = build_session_factory(engine)
     try:
         async with factory() as session:
-            await run_bootstrap(
+            failed = await run_bootstrap(
                 PostgresBulkCatalogRepository(session),
                 PostgresImportRunRepository(session),
                 session.commit,
@@ -161,6 +162,25 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
             )
     finally:
         await engine.dispose()
+    if failed:
+        raise SystemExit(_bootstrap_failed(failed))
+
+
+def _bootstrap_failed(failed: Sequence[FailedImport]) -> str:
+    """The exit line for a bootstrap in which at least one import ended `FAILED`.
+
+    Exit 1, on stderr, the way `_sync_failed` ends a sync: each failure's own line --
+    the error, the position it stopped at, and the command that resumes it -- is
+    already on stdout, printed by `run_bootstrap`, so this names *which* imports failed
+    and stops the command claiming success. It printed a link count and exited 0 over
+    a failed crosswalk until this existed.
+    """
+    names = ", ".join(one.run.dataset for one in failed)
+    noun = "import" if len(failed) == 1 else "imports"
+    return (
+        f"usher bootstrap: {len(failed)} {noun} failed: {names}; each line above ends with "
+        "the command that resumes it, and `usher bootstrap-status` shows the checkpoints"
+    )
 
 
 def _vocabulary_line(verdict: VocabularyVerdict) -> str:

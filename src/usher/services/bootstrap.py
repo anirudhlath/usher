@@ -1,7 +1,8 @@
 """The resumable, checkpointed bulk-import loop (PRD 04, Phases 0-2)."""
 
+import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -10,8 +11,14 @@ from loguru import logger
 from opentelemetry import metrics, trace
 
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
-from usher.ports.bulk import BulkCursor, BulkDataset
-from usher.ports.errors import PortDataMalformed, RepositoryConflict, UsherPortError
+from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset
+from usher.ports.errors import (
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+    RepositoryConflict,
+    UsherPortError,
+)
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.repository import (
     BulkCatalogRepository,
@@ -38,6 +45,81 @@ _phase_duration = _meter.create_histogram(
 _failures = _meter.create_counter(
     "usher.bootstrap.failures", unit="1", description="Bulk imports that ended in failure"
 )
+
+
+#: The members of the taxonomy that say "ask again later": the upstream could not be
+#: reached or answered in time, or asked to be backed off. Everything else a dataset
+#: raises -- above all `PortDataMalformed` -- is the same answer on every attempt.
+TRANSIENT: tuple[type[UsherPortError], ...] = (PortUnavailable, PortRateLimited)
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """How long `import_dataset` keeps resuming a dataset whose upstream failed transiently.
+
+    **Bounded per unit of work, not per phase.** A *streak* is the run of failures at
+    one checkpoint; a committed batch ends it, so a long walk with scattered failures
+    completes while one unit that never answers gives up. A streak ends after
+    `attempts` attempts (the first included) or once the next wait would carry it
+    past `budget` seconds from its first failure, whichever comes first.
+
+    The waits double from `first_delay` up to `max_delay`, and a `Retry-After` hint is
+    a floor under them, never a ceiling. No jitter: one process retrying one upstream
+    has nobody to fall into step with.
+
+    The shipped numbers are WDQS's: its query limit is 60 s and its timeouts arrive
+    after ~65 s, so five attempts with waits of 15, 30, 60 and 120 s spend at most
+    ~10 minutes on one page before the phase fails -- resumably, where it stopped.
+    """
+
+    attempts: int = 5
+    first_delay: float = 15.0
+    max_delay: float = 120.0
+    budget: float = 900.0
+
+    def delay(self, retry: int, exc: UsherPortError) -> float:
+        """Seconds to wait before retry number `retry` (1-based)."""
+        backoff = min(self.first_delay * 2.0 ** (retry - 1), self.max_delay)
+        hint = exc.retry_after if isinstance(exc, PortRateLimited) else None
+        return backoff if hint is None else max(backoff, hint)
+
+
+#: Read when a service is built rather than bound as a default, so a case can replace
+#: it for everything a composition root constructs.
+DEFAULT_RETRY = RetryPolicy()
+
+
+class _GaveUp(Exception):
+    """A transient failure that outlasted its `RetryPolicy`, with the count that proves it.
+
+    Private and not an `UsherPortError`: it never leaves `import_dataset`, which records
+    it exactly as it records the port error it wraps -- with how hard it tried appended,
+    because "failed" and "failed five times over four minutes" ask different things of
+    an operator.
+    """
+
+    def __init__(self, cause: UsherPortError, attempts: int, elapsed: float, reason: str) -> None:
+        tried = f"{attempts} attempt{'' if attempts == 1 else 's'} over {elapsed:.0f}s"
+        super().__init__(f"{cause} (gave up after {tried}{reason})")
+        self.cause = cause
+
+
+class _FetchFailed(Exception):
+    """A transient port error raised by the *dataset*, as opposed to by the writer.
+
+    Only the fetch is retried: a writer that raised may have left half a batch in the
+    transaction, and resuming over it is a decision about the writer's atomicity this
+    loop cannot make.
+    """
+
+    def __init__(self, cause: UsherPortError) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _warn(line: str) -> None:
+    """Where a retry notice goes when nobody handed the service a sink."""
+    logger.warning("{line}", line=line)
 
 
 class VocabularyState(StrEnum):
@@ -163,6 +245,32 @@ async def bootstrap_report(
     )
 
 
+def _cursor(run: ImportRun, revision: str) -> BulkCursor | None:
+    """The cursor a run resumes from, or `None` for one at the very start."""
+    if not run.position:
+        return None
+    return BulkCursor(revision=revision, position=run.position, rows_seen=run.rows_seen)
+
+
+async def _fetched[RowT](
+    batches: AsyncIterator[BulkBatch[RowT]],
+) -> AsyncIterator[BulkBatch[RowT]]:
+    """`batches`, with a transient failure *of the fetch* marked as one.
+
+    The marking is what lets `_drain_resuming` retry the dataset and never the writer,
+    whose own failures pass through `_drain`'s body untouched.
+    """
+    iterator = aiter(batches)
+    while True:
+        try:
+            batch = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except TRANSIENT as exc:
+            raise _FetchFailed(exc) from exc
+        yield batch
+
+
 class BootstrapService:
     """Drives one `BulkDataset` into the catalog, resumably."""
 
@@ -174,12 +282,25 @@ class BootstrapService:
         *,
         events: EventPublisher,
         phase: BootstrapPhase,
+        report: Callable[[str], None] | None = None,
+        retry: RetryPolicy | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """`report` takes one line per retry; the log gets it as a WARNING when absent.
+
+        One channel, not both: under the CLI the log is stdout too, so a sink *and*
+        a log line would print every retry twice.
+        """
         self._runs = runs
         self._catalog = catalog
         self._commit = commit
         self._events = events
         self._phase = phase
+        self._report = report or _warn
+        self._retry = retry or DEFAULT_RETRY
+        self._sleep = sleep
+        self._clock = clock
 
     async def import_dataset[RowT](
         self,
@@ -206,13 +327,7 @@ class BootstrapService:
                     # that branch performs for case 2.
                     run = await self._concede_to_other_owner(dataset.name, resolved, exc, span)
                 else:
-                    resume_from = (
-                        BulkCursor(
-                            revision=resolved, position=run.position, rows_seen=run.rows_seen
-                        )
-                        if run.position
-                        else None
-                    )
+                    resume_from = _cursor(run, resolved)
                     if resume_from is not None:
                         logger.info(
                             "resuming {dataset} from position {position} "
@@ -221,9 +336,11 @@ class BootstrapService:
                             position=resume_from.position,
                             rows=resume_from.rows_seen,
                         )
-                    run = await self._drain(dataset, write, run, resume_from, resolved)
-            except UsherPortError as exc:
-                # Case 2.
+                    run = await self._drain_resuming(dataset, write, run, resolved)
+            except (UsherPortError, _GaveUp) as exc:
+                # Case 2. `_GaveUp` is recorded as the port error it wraps, with the
+                # attempts appended to the message.
+                cause = exc if isinstance(exc, UsherPortError) else exc.cause
                 run = (await self._runs.get(dataset.name)) or ImportRun(
                     dataset=dataset.name, revision="unknown"
                 )
@@ -238,7 +355,7 @@ class BootstrapService:
                 )
                 await self._runs.save(run)
                 await self._commit()
-                _failures.add(1, {"dataset": dataset.name, "kind": type(exc).__name__})
+                _failures.add(1, {"dataset": dataset.name, "kind": type(cause).__name__})
                 span.set_attribute("usher.failed", True)
                 logger.error(
                     "{dataset} import failed at position {position}: {error}",
@@ -270,6 +387,53 @@ class BootstrapService:
             dataset=dataset, revision=revision, status=ImportRunStatus.FAILED, error=str(exc)
         )
 
+    async def _drain_resuming[RowT](
+        self,
+        dataset: BulkDataset[RowT],
+        write: Callable[[Sequence[RowT]], Awaitable[int]],
+        run: ImportRun,
+        revision: str,
+    ) -> ImportRun:
+        """`_drain`, resumed from the last committed checkpoint after a transient failure.
+
+        **A retry is a resume**: it re-reads the checkpoint the failed attempt left and
+        hands the dataset that cursor -- the same thing an operator re-running the
+        phase gets, done without them. Nothing already committed is fetched or written
+        again. Bounded by `RetryPolicy`; a streak that outlasts it raises `_GaveUp`,
+        which `import_dataset` records as `FAILED` at the checkpoint reached.
+        """
+        attempt = 1
+        streak_started: float | None = None
+        while True:
+            try:
+                return await self._drain(dataset, write, run, _cursor(run, revision), revision)
+            except _FetchFailed as failed:
+                exc = failed.cause
+                committed = (await self._runs.get(dataset.name)) or run
+                now = self._clock()
+                if streak_started is None or committed.position != run.position:
+                    # A batch committed since the last failure, or this is the first:
+                    # either way this failure opens a new streak.
+                    attempt, streak_started = 1, now
+                run = committed
+                elapsed = now - streak_started
+                if attempt >= self._retry.attempts:
+                    raise _GaveUp(exc, attempt, elapsed, "") from exc
+                wait = self._retry.delay(attempt, exc)
+                if elapsed + wait > self._retry.budget:
+                    raise _GaveUp(
+                        exc,
+                        attempt,
+                        elapsed,
+                        f": the next wait would pass the {self._retry.budget:.0f}s retry budget",
+                    ) from exc
+                self._report(
+                    f"{dataset.name}: attempt {attempt} of {self._retry.attempts} failed "
+                    f"at position {run.position}: {exc}; retrying in {wait:.0f}s"
+                )
+                await self._sleep(wait)
+                attempt += 1
+
     async def _drain[RowT](
         self,
         dataset: BulkDataset[RowT],
@@ -278,7 +442,7 @@ class BootstrapService:
         resume_from: BulkCursor | None,
         revision: str,
     ) -> ImportRun:
-        async for batch in dataset.batches(resume_from=resume_from, revision=revision):
+        async for batch in _fetched(dataset.batches(resume_from=resume_from, revision=revision)):
             batch_started = time.perf_counter()
             with _tracer.start_as_current_span("bootstrap.batch") as span:
                 span.set_attribute("usher.dataset", dataset.name)

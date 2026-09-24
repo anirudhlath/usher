@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import usher
+import usher.services.bootstrap
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
@@ -69,7 +70,13 @@ from usher.composition import (
 from usher.config import Settings
 from usher.db.base import build_session_factory
 from usher.db.repositories.search_query import PostgresSearchQueryRepository
-from usher.domain.bootstrap import FULL_SEQUENCE, PHASE_ALIASES, BootstrapPhase, ImportRun
+from usher.domain.bootstrap import (
+    FULL_SEQUENCE,
+    PHASE_ALIASES,
+    BootstrapPhase,
+    ImportRun,
+    ImportRunStatus,
+)
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
@@ -98,6 +105,7 @@ from usher.ports.source import (
     SourceItem,
     SourceItemKind,
 )
+from usher.services.bootstrap import RetryPolicy
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.events import DeferredEventPublisher
@@ -1528,6 +1536,7 @@ async def _journal_of_a_full_bootstrap(
     runs = _JournallingRuns(journal)
     settings = _settings(bulk_data_dir=tmp_path)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
     if over_a_populated_catalog:
         await catalog.upsert_titles([_A_SEEDED_TITLE])
 
@@ -1569,6 +1578,16 @@ async def _journal_of_a_full_bootstrap(
 
 async def _nothing() -> None:
     return None
+
+
+def _without_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One attempt per dataset, for the cases whose transport refuses every request.
+
+    Those cases are about which datasets a phase reaches and in what order; a retry
+    of the crosswalk's refused query would add four journal lines and four real
+    waits to a case that is not about retrying. Retrying has its own cases.
+    """
+    monkeypatch.setattr(usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(attempts=1))
 
 
 #: Which phase each journal entry belongs to. The three catalog-dependent
@@ -1666,7 +1685,9 @@ async def test_the_ratings_phase_imports_the_ratings_file_and_nothing_else(
         phase=BootstrapPhase.RATINGS,
         over_a_populated_catalog=True,
     )
-    assert journal == ["imdb.title.ratings"]
+    # The refusing transport fails the import, so the dispatch's closing line for it
+    # shares the journal; the datasets touched are everything else.
+    assert [entry for entry in journal if _RESUME not in entry] == ["imdb.title.ratings"]
 
 
 async def test_a_full_run_imports_the_ratings_file_exactly_once(
@@ -1677,6 +1698,7 @@ async def test_a_full_run_imports_the_ratings_file_exactly_once(
     catalog = _JournallingCatalog(journal)
     runs = _JournallingRuns(journal)
     monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
     await catalog.upsert_titles([_A_SEEDED_TITLE])
 
     with pytest.raises(PortUnavailable):
@@ -1749,6 +1771,7 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
         return client
 
     monkeypatch.setattr(usher.composition, "bulk_client", recording)
+    _without_retries(monkeypatch)
     journal: list[str] = []
     settings = _settings(bulk_data_dir=tmp_path)
 
@@ -1780,6 +1803,160 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
         )
     assert len(built) == 2
     assert built[1].is_closed
+
+
+#: `run_bootstrap`'s one line per failed dataset, whose last clause is the command.
+_RESUME = "; resume with: usher bootstrap --phase "
+
+
+async def test_every_failed_dataset_is_returned_and_reported_with_the_phase_that_resumes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The exit code's input, and the operator's next command, from one dispatch.
+
+    A full run over a refusing transport fails five datasets in four phases and refuses
+    the three that need a catalog. `--phase all` still continues past each failure --
+    one upstream being down must not cost the others -- and each failure comes back
+    paired with the phase an operator passes to resume *that* dataset: both IMDb files
+    resume through `imdb`, both TMDb exports through `tmdb-ids`.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    printed: list[str] = []
+
+    failed = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        FakeImportRunRepository(),
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.ALL,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(one.run.dataset, one.phase) for one in failed] == [
+        ("imdb.title.basics", BootstrapPhase.IMDB),
+        ("imdb.title.ratings", BootstrapPhase.IMDB),
+        ("tmdb.ids.movie", BootstrapPhase.TMDB_IDS),
+        ("tmdb.ids.series", BootstrapPhase.TMDB_IDS),
+        ("wikidata.crosswalk", BootstrapPhase.CROSSWALK),
+    ]
+    assert all(one.run.status is ImportRunStatus.FAILED for one in failed)
+    reported = [line for line in printed if _RESUME in line]
+    assert reported == [
+        f"{one.run.dataset} failed at position {one.run.position}: {one.run.error}"
+        f"{_RESUME}{one.phase.value}"
+        for one in failed
+    ]
+    # The failure lines are the report's last lines, after every phase has spoken.
+    assert printed[-len(failed) :] == reported
+
+
+async def test_the_ratings_alias_resumes_as_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`--phase ratings` failing must not tell the operator to run `--phase imdb`.
+
+    That is 214 MiB and a rewrite of every name and year -- the cost the alias exists
+    to avoid -- for a dataset `ratings` resumes on its own.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    printed: list[str] = []
+
+    failed = await run_bootstrap(
+        catalog,
+        FakeImportRunRepository(),
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.RATINGS,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert [(one.run.dataset, one.phase) for one in failed] == [
+        ("imdb.title.ratings", BootstrapPhase.RATINGS)
+    ]
+    assert printed[-1].endswith(f"{_RESUME}ratings")
+
+
+async def test_failures_are_still_reported_when_a_later_phase_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A raise from a later phase must not swallow what the earlier ones reported.
+
+    `movielens` resolves its revision outside `import_dataset`, so over a populated
+    catalog a refusing transport makes the whole dispatch raise -- after four phases
+    have already failed datasets an operator needs to resume.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    _without_retries(monkeypatch)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_A_SEEDED_TITLE])
+    printed: list[str] = []
+
+    with pytest.raises(PortUnavailable):
+        await run_bootstrap(
+            catalog,
+            FakeImportRunRepository(),
+            _nothing,
+            _settings(bulk_data_dir=tmp_path),
+            BootstrapPhase.ALL,
+            report=printed.append,
+            events=NullEventPublisher(),
+        )
+
+    resumes = [line.rsplit(_RESUME, 1)[1] for line in printed if _RESUME in line]
+    assert "crosswalk" in resumes and "imdb" in resumes, printed
+
+
+async def test_a_retry_inside_the_dispatch_reaches_the_report_sink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`run_bootstrap` hands its own sink to the service, so a retry prints where the run does.
+
+    WDQS answers the first query with its query-timeout 504 and every later one with
+    an empty page: one retry, then a completed crosswalk and nothing returned.
+    """
+    answered: list[int] = []
+
+    def wdqs(request: httpx.Request) -> httpx.Response:
+        answered.append(len(answered))
+        if len(answered) == 1:
+            return httpx.Response(504, text="upstream request timeout")
+        return httpx.Response(200, json={"results": {"bindings": []}})
+
+    monkeypatch.setattr(
+        usher.composition,
+        "bulk_client",
+        lambda _: httpx.AsyncClient(transport=httpx.MockTransport(wdqs)),
+    )
+    monkeypatch.setattr(
+        usher.services.bootstrap, "DEFAULT_RETRY", RetryPolicy(first_delay=0.0, max_delay=0.0)
+    )
+    runs = FakeImportRunRepository()
+    printed: list[str] = []
+
+    failed = await run_bootstrap(
+        FakeBulkCatalogRepository(),
+        runs,
+        _nothing,
+        _settings(bulk_data_dir=tmp_path),
+        BootstrapPhase.CROSSWALK,
+        report=printed.append,
+        events=NullEventPublisher(),
+    )
+
+    assert failed == ()
+    stored = await runs.get("wikidata.crosswalk")
+    assert stored is not None and stored.status is ImportRunStatus.COMPLETED
+    assert printed == [
+        "wikidata.crosswalk: attempt 1 of 5 failed at position 0: "
+        "WDQS returned HTTP 504 for P4947 page 0; retrying in 0s"
+    ]
+    assert len(answered) == 4, "the premise: one refused query, then one per property"
 
 
 async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
