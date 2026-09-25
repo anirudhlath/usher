@@ -6,12 +6,12 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from usher.adapters.emby.mapping import (
-    TICKS_PER_SECOND,
     as_int,
     as_lower,
     as_text,
     audio_token,
     hdr_format,
+    position_seconds,
     primary_media_source,
     runtime_seconds,
     stream_of,
@@ -71,8 +71,12 @@ def build_stream_targets(
             # of it: these two fields describe one file and must not be
             # able to disagree about it.
             runtime_seconds=runtime_seconds(payload, media_source),
+            # The watch lane's derivation too, so `/play` never offers a client
+            # a position the watch lane refused to store.
             resume_position_seconds=(
-                None if position_ticks is None else max(position_ticks, 0) // TICKS_PER_SECOND
+                None
+                if position_ticks is None
+                else position_seconds(position_ticks, item=external_id)
             ),
         ),
         StreamTarget(

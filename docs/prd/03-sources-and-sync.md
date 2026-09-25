@@ -230,10 +230,11 @@ create or attach a `Title` stub. Movies, series **and episodes** are ingested.
 **Source payloads are not stored.** `raw_payloads` caches *provider* responses
 only.
 
-**A value too large to store is recorded as unknown.** A runtime, width,
-height, audio channel count, year, or season or episode number outside a
-signed 32-bit integer is ingested as absent, not as a failed walk. A watch
-state whose position is outside that range is ignored.
+**A number that cannot be stored is recorded as unknown, and logged.** This
+applies to a runtime, width, height, audio channel count, file size, play count,
+or season or episode number that is negative or too large for its column, and
+to a year outside 0–9999. Such a value is ingested as absent instead of failing
+the walk. A watch state whose position is out of range is ignored.
 
 **An episode is attached to its series' `Title`, even when the series arrived
 on an earlier page.** An episode whose series is not yet known is stored
@@ -254,8 +255,9 @@ Ordered by confidence, stopping at the first hit.
    (normalised title match, year within ±1) **and only when unambiguous**. An
    item with no year never matches on name.
 5. A trusted provider id (TMDb, IMDb or TVDb) the catalog does not hold →
-   **create a stub**. A bare name never creates one. A malformed provider id is
-   ignored rather than failing the walk.
+   **create a stub**. A bare name never creates one. A malformed provider id, or
+   a TMDb or TVDB id that is negative or too large to store, is ignored rather
+   than failing the walk.
 6. No confident match → `title_id` stays NULL; the item enters the review
    queue, and a `match` job is enqueued at `BACKFILL` priority.
 
