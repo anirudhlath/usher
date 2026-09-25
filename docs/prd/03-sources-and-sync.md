@@ -231,10 +231,12 @@ create or attach a `Title` stub. Movies, series **and episodes** are ingested.
 only.
 
 **A number that cannot be stored is recorded as unknown, and logged.** This
-applies to a runtime, width, height, audio channel count, file size, play count,
-or season or episode number that is negative or too large for its column, and
-to a year outside 0–9999. Such a value is ingested as absent instead of failing
-the walk. A watch state whose position is out of range is ignored.
+applies to a runtime, width, height, audio channel count, file size, or season
+or episode number that is negative or too large for its column, to a play count
+too large for its column, and to a year outside 0–9999. Such a value is ingested
+as absent instead of failing the walk. A negative play count or watch position
+is recorded as zero. A watch state whose position is too large to store is
+skipped, and logged.
 
 **An episode is attached to its series' `Title`, even when the series arrived
 on an earlier page.** An episode whose series is not yet known is stored

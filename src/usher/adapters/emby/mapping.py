@@ -64,28 +64,55 @@ _CHANNEL_LAYOUTS: dict[int, str] = {1: "1_0", 2: "2_0", 6: "5_1", 8: "7_1"}
 _INT64_MAX = 2**63 - 1
 
 
-def _stored(number: int | None, high: int, *, field: str, item: str) -> int | None:
-    """`number` if it is within `[0, high]`, else `None`, logged.
+def _stored(
+    number: int | None,
+    high: int,
+    *,
+    field: str,
+    item: str,
+    outcome: str = "recorded as unknown",
+) -> int | None:
+    """`number` if it is within `[0, high]`, else `None`, logged with `outcome`.
 
     Every column these land in is CHECKed non-negative, and a value past the type
     fails its whole batch in asyncpg's encoder -- an `OverflowError`, not a
     `UsherPortError`, so the walk aborts. No real value reaches either end, so one
-    outside is corrupt; the log line is what says how often that happens.
+    outside is corrupt. One WARNING per occurrence, per walk, deliberately: each
+    names an item an operator can correct in Emby, and a line repeated nightly is
+    the signal to go and do that.
     """
     if number is None or 0 <= number <= high:
         return number
     logger.warning(
-        "Emby item {item!r}: {field} {number} cannot be stored; recorded as unknown",
+        "Emby item {item}: {field} {number} cannot be stored; {outcome}",
         item=item,
         field=field,
         number=number,
+        outcome=outcome,
     )
     return None
 
 
-def _label(payload: Mapping[str, Any]) -> str:
-    """The item's name, truncated: enough to find it in the Emby UI."""
-    return str(as_text(payload.get("Name")) or as_text(payload.get("Id")) or "<unnamed>")[:60]
+def item_label(payload: Mapping[str, Any]) -> str:
+    """An item's name and id, for a log line: episode names repeat across a library."""
+    name = str(as_text(payload.get("Name")) or "<unnamed>")[:60]
+    return f"{name!r} (id {as_text(payload.get('Id')) or '?'})"
+
+
+def dimension(
+    video: Mapping[str, Any], payload: Mapping[str, Any], key: str, *, item: str
+) -> int | None:
+    """`Width` or `Height`: the video stream's, else the item's.
+
+    Emby sets them on the item for some libraries and only on the video stream for
+    others. Each is bounded on its own, so a corrupt stream value falls back to a
+    sound item-level one. Shared with `build_stream_targets`, so the catalog and
+    `/play` cannot describe one file's resolution differently.
+    """
+    field = key.lower()
+    return _stored(as_int(video.get(key)), INT32_MAX, field=field, item=item) or _stored(
+        as_int(payload.get(key)), INT32_MAX, field=field, item=item
+    )
 
 
 def as_int(value: object) -> int | None:
@@ -196,27 +223,31 @@ def runtime_seconds(payload: Mapping[str, Any], media_source: Mapping[str, Any])
     """An item's runtime in whole seconds, or `None` if it has none.
 
     Item level first, the chosen version's own `RunTimeTicks` second -- Emby
-    emits it in both places and not always in both at once.
+    emits it in both places and not always in both at once, and one can be
+    corrupt where the other is not.
 
     Called by `to_source_item` *and* by `build_stream_targets`, so the catalog
     and the playback target cannot describe one file's runtime differently.
     """
-    ticks = as_int(payload.get("RunTimeTicks"))
-    if ticks is None:
-        ticks = as_int(media_source.get("RunTimeTicks"))
-    if ticks is None:
-        return None
-    return _stored(
-        ticks // TICKS_PER_SECOND, INT32_MAX, field="runtime_seconds", item=_label(payload)
-    )
+    item = item_label(payload)
+    for ticks in (as_int(payload.get("RunTimeTicks")), as_int(media_source.get("RunTimeTicks"))):
+        if ticks is None:
+            continue
+        seconds = _stored(ticks // TICKS_PER_SECOND, INT32_MAX, field="runtime_seconds", item=item)
+        if seconds is not None:
+            return seconds
+    return None
 
 
-def position_seconds(ticks: int, *, item: str) -> int | None:
+def position_seconds(ticks: int, *, item: str, outcome: str) -> int | None:
     """A resume position in whole seconds: negative is `0`, too large to store `None`.
 
     Floor division rounds towards negative infinity, hence the clamp first.
+    `outcome` is what the caller does about a `None`, for the log line.
     """
-    return _stored(max(ticks, 0) // TICKS_PER_SECOND, INT32_MAX, field="position", item=item)
+    return _stored(
+        max(ticks, 0) // TICKS_PER_SECOND, INT32_MAX, field="position", item=item, outcome=outcome
+    )
 
 
 def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
@@ -289,7 +320,8 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
     media_source = primary_media_source(payload) or {}
     video = stream_of(media_source, "Video") or {}
     audio = stream_of(media_source, "Audio") or {}
-    stored = partial(_stored, item=_label(payload))
+    label = item_label(payload)
+    stored = partial(_stored, item=label)
     return SourceItem(
         external_id=external_id,
         name=as_text(payload.get("Name")) or external_id,
@@ -300,14 +332,8 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
         container=as_lower(media_source.get("Container")),
         video_codec=as_lower(video.get("Codec")),
         audio_codec=as_lower(audio.get("Codec")),
-        # Item-level Width/Height are the fallback: Emby sets them on the
-        # item for some libraries and only on the video stream for others.
-        width=stored(
-            as_int(video.get("Width")) or as_int(payload.get("Width")), INT32_MAX, field="width"
-        ),
-        height=stored(
-            as_int(video.get("Height")) or as_int(payload.get("Height")), INT32_MAX, field="height"
-        ),
+        width=dimension(video, payload, "Width", item=label),
+        height=dimension(video, payload, "Height", item=label),
         hdr_format=hdr_format(video),
         audio_channels=stored(as_int(audio.get("Channels")), INT32_MAX, field="audio_channels"),
         file_size_bytes=stored(
@@ -327,6 +353,9 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
     )
 
 
+_STATE_SKIPPED = "watch state skipped"
+
+
 def to_watch_state(
     payload: Mapping[str, Any],
     *,
@@ -343,7 +372,7 @@ def to_watch_state(
     if external_id is None or not isinstance(user_data, Mapping):
         return None
     ticks = as_int(user_data.get("PlaybackPositionTicks")) or 0
-    position = position_seconds(ticks, item=external_id)
+    position = position_seconds(ticks, item=f"id {external_id}", outcome=_STATE_SKIPPED)
     if position is None:
         return None
     play_count: int | None = None
@@ -353,7 +382,7 @@ def to_watch_state(
         play_count = (
             None
             if counted is None
-            else _stored(max(counted, 0), INT32_MAX, field="play_count", item=external_id)
+            else _stored(max(counted, 0), INT32_MAX, field="play_count", item=f"id {external_id}")
         )
         last_played_at = parse_datetime(user_data.get("LastPlayedDate"))
     return SourceWatchState(
@@ -379,7 +408,7 @@ def user_data_states(
         if external_id is None:
             continue
         ticks = as_int(entry.get("PlaybackPositionTicks")) or 0
-        position = position_seconds(ticks, item=external_id)
+        position = position_seconds(ticks, item=f"id {external_id}", outcome=_STATE_SKIPPED)
         # Dropped from both lists, which the event pairs up.
         if position is None:
             continue

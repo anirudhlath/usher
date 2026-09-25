@@ -398,3 +398,15 @@ def test_a_resume_position_too_large_to_store_is_unknown_here_too() -> None:
     payload["UserData"]["PlaybackPositionTicks"] = (2**31) * 10_000_000
     direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
     assert direct.resume_position_seconds is None
+
+
+def test_a_resolution_uses_the_catalogs_bounded_dimensions() -> None:
+    """A width the catalog records as unknown is not offered to a client either."""
+    payload = load_emby_fixture("movie_item")
+    payload.pop("Width", None)
+    for source in payload["MediaSources"]:
+        for stream in source.get("MediaStreams", []):
+            if stream.get("Type") == "Video":
+                stream["Width"] = 2**31
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
+    assert direct.resolution is None

@@ -106,9 +106,10 @@ class SourceItem:
 class SourceWatchState:
     """One item's watch state as a source reports it.
 
-    Its integers are within `[0, INT32_MAX]`, as on `SourceItem`. A state whose
-    position is outside that is not reported at all, since `position_seconds`
-    has no unknown value.
+    Its integers are within `[0, INT32_MAX]`, as on `SourceItem`. A negative
+    position or play count is reported as `0` and a play count too large as
+    `None`; a state whose position is too large is not reported at all, since
+    `position_seconds` has no unknown value.
     """
 
     external_id: str

@@ -101,23 +101,6 @@ async def test_a_batch_mixing_providers_does_not_cast_an_imdb_id_to_an_integer(
     assert len(resolved) == 3
 
 
-async def test_a_provider_id_an_integer_cannot_hold_names_nothing(
-    repository: PostgresTitleMatchRepository, catalog: TitleCatalog
-) -> None:
-    """`CAST(:values AS integer[])` refuses the whole batch over one such value.
-
-    The refusal is a `DBAPIError` from asyncpg's encoder, which no walk catches, so a
-    single stray `ProviderIds.Tmdb` would end every sync of its source.
-    """
-    movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
-    refs = [
-        ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE),
-        ProviderRef(provider="tmdb", value=str(2**31), kind=TitleKind.MOVIE),
-        ProviderRef(provider="tvdb", value=str(2**31), kind=None),
-    ]
-    assert await repository.match_by_provider_ids(refs) == {refs[0]: movie}
-
-
 @pytest.fixture
 def statement_counter() -> Iterator[list[str]]:
     seen: list[str] = []

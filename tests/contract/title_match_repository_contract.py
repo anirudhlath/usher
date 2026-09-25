@@ -124,6 +124,26 @@ class TitleMatchRepositoryContract:
         """
         assert await repository.match_by_provider_ids([tmdb("unknown", TitleKind.MOVIE)]) == {}
 
+    async def test_a_provider_id_an_integer_cannot_hold_is_skipped_not_raised_on(
+        self, repository: TitleMatchRepository, catalog: TitleCatalog
+    ) -> None:
+        """`titles.tmdb_id` and `tvdb_id` are Postgres `integer`, and no id is negative.
+
+        Binding `2**31` into `integer[]` is a `DBAPIError` no walk catches. The negative
+        titles are seeded so that an implementation answering `-5` is caught doing it.
+        """
+        good = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
+        await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=-5, name="A Negative Film")
+        await catalog.given_title(kind=TitleKind.SERIES, tvdb_id=-5, name="A Negative Series")
+        refs = [
+            tmdb("90000550", TitleKind.MOVIE),
+            tmdb(str(2**31), TitleKind.MOVIE),
+            tmdb("-5", TitleKind.MOVIE),
+            ProviderRef(provider="tvdb", value=str(2**31), kind=None),
+            ProviderRef(provider="tvdb", value="-5", kind=None),
+        ]
+        assert await repository.match_by_provider_ids(refs) == {refs[0]: good}
+
     async def test_a_bad_ref_does_not_take_its_batch_down_with_it(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:

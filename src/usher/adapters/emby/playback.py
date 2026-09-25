@@ -10,7 +10,9 @@ from usher.adapters.emby.mapping import (
     as_lower,
     as_text,
     audio_token,
+    dimension,
     hdr_format,
+    item_label,
     position_seconds,
     primary_media_source,
     runtime_seconds,
@@ -43,8 +45,9 @@ def build_stream_targets(
 
     video = stream_of(media_source, "Video") or {}
     audio = stream_of(media_source, "Audio") or {}
-    width = as_int(video.get("Width")) or as_int(payload.get("Width"))
-    height = as_int(video.get("Height")) or as_int(payload.get("Height"))
+    label = item_label(payload)
+    width = dimension(video, payload, "Width", item=label)
+    height = dimension(video, payload, "Height", item=label)
     user_data = payload.get("UserData")
     position_ticks = (
         as_int(user_data.get("PlaybackPositionTicks")) if isinstance(user_data, Mapping) else None
@@ -76,7 +79,9 @@ def build_stream_targets(
             resume_position_seconds=(
                 None
                 if position_ticks is None
-                else position_seconds(position_ticks, item=external_id)
+                else position_seconds(
+                    position_ticks, item=label, outcome="no resume position offered"
+                )
             ),
         ),
         StreamTarget(

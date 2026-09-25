@@ -740,7 +740,8 @@ def test_a_runtime_too_long_to_store_is_unknown(warnings_logged: list[str]) -> N
     assert len(warnings_logged) == 1
     assert "runtime_seconds" in warnings_logged[0]
     assert "3506437881" in warnings_logged[0]
-    assert "'Odd'" in warnings_logged[0]
+    # The name alone is not enough: episode names repeat across a library.
+    assert "'Odd' (id x)" in warnings_logged[0]
 
 
 def test_a_value_that_fits_logs_nothing(warnings_logged: list[str]) -> None:
@@ -880,6 +881,7 @@ def test_a_watch_position_too_large_to_store_reports_no_state(
     assert to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True) is None
     assert len(warnings_logged) == 1
     assert "position" in warnings_logged[0]
+    assert "watch state skipped" in warnings_logged[0]
 
 
 def test_a_watch_position_at_the_columns_limit_is_kept() -> None:
@@ -925,3 +927,45 @@ def test_a_pushed_position_too_large_to_store_drops_that_entry_only(
     assert states[0].position_seconds == 90
     assert len(warnings_logged) == 1
     assert "corrupt" in warnings_logged[0]
+
+
+def test_a_corrupt_streams_dimension_falls_back_to_the_items() -> None:
+    """Each source is bounded on its own, so a bad stream value hides no good one."""
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "Width": 1920,
+        "MediaSources": [
+            {"Container": "mkv", "MediaStreams": [{"Type": "Video", "Width": _INT32_MAX + 1}]}
+        ],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.width == 1920
+
+
+def test_a_corrupt_item_runtime_falls_back_to_the_media_sources() -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "RunTimeTicks": 35_064_378_818_560_000,
+        "MediaSources": [{"Container": "mkv", "RunTimeTicks": 5_400 * _TICKS}],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.runtime_seconds == 5_400
+
+
+def test_a_negative_position_is_clamped_to_zero_and_the_state_kept() -> None:
+    """What the PRD says of a negative position: zero, not a skipped state."""
+    payload = {
+        "Id": "x",
+        "Type": "Episode",
+        "UserData": {"PlaybackPositionTicks": -5 * _TICKS, "Played": True},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.position_seconds == 0
+    assert state.played is True
