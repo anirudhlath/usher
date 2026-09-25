@@ -53,6 +53,12 @@ class StreamTargetKind(StrEnum):
     DEEP_LINK = "deep_link"
 
 
+# The largest value a Postgres `integer` holds, which is the column type behind
+# every source-derived integer but a file size -- provider ids included. One past it
+# fails its whole batch in asyncpg's encoder, which no walk catches.
+INT32_MAX = 2**31 - 1
+
+
 @dataclass(frozen=True)
 class SourceItem:
     """One playable item as the source describes it, already normalised.
@@ -64,6 +70,12 @@ class SourceItem:
 
     `provider_ids` keys are lowercase, using `CANONICAL_PROVIDER_IDS`' names
     where they apply.
+
+    Every `int` field is within the column it lands in, each CHECKed
+    non-negative: `[0, INT32_MAX]`, except `file_size_bytes` (a `bigint`) and
+    `year` (at most `datetime.MAXYEAR`, since matching computes `year + 1`). An
+    adapter reports a value outside that as `None`, since one that reached the
+    store would fail its whole batch.
     """
 
     external_id: str
@@ -92,7 +104,13 @@ class SourceItem:
 
 @dataclass(frozen=True)
 class SourceWatchState:
-    """One item's watch state as a source reports it."""
+    """One item's watch state as a source reports it.
+
+    Its integers are within `[0, INT32_MAX]`, as on `SourceItem`. A negative
+    position or play count is reported as `0` and a play count too large as
+    `None`; a state whose position is too large is not reported at all, since
+    `position_seconds` has no unknown value.
+    """
 
     external_id: str
     position_seconds: int

@@ -9,6 +9,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.ports.ingest import NameYearProbe, ProviderRef
 from usher.ports.repository import TitleMatchRepository
+from usher.ports.source import INT32_MAX
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,12 +156,13 @@ class FakeTitleMatchRepository(TitleMatchRepository):
 
 
 def _as_int(value: str) -> int | None:
-    """The integer in `value`, or None when the source reported a non-number.
+    """The integer in `value`, or None when it is not one `titles` could hold.
 
-    A source is free to report `ProviderIds.Tmdb: "unknown"`; that is a
-    matching failure, not a pipeline failure.
+    A source is free to report `ProviderIds.Tmdb: "unknown"`, or `"3000000000"`;
+    that is a matching failure, not a pipeline failure.
     """
     try:
-        return int(value)
+        number = int(value)
     except ValueError:
         return None
+    return number if 0 <= number <= INT32_MAX else None

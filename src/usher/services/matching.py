@@ -15,7 +15,7 @@ from usher.ports.ingest import MatchOutcome, NameYearProbe, ProviderRef
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
 from usher.ports.repository import TitleMatchRepository, TitleRepository
-from usher.ports.source import SourceItem, SourceItemKind
+from usher.ports.source import INT32_MAX, SourceItem, SourceItemKind
 from usher.telemetry import current_traceparent
 
 _tracer = trace.get_tracer("usher.match")
@@ -374,17 +374,19 @@ def _usable_ids(refs: Sequence[tuple[ProviderRef, MatchMethod]]) -> dict[str, in
 
 
 def _as_int(value: int | str | None) -> int | None:
-    """A source is free to report `ProviderIds.Tmdb: "unknown"`.
+    """A source is free to report `ProviderIds.Tmdb: "unknown"`, or `"3000000000"`.
 
     That is a matching failure, not a pipeline failure, and it must not abort a
-    whole batch.
+    whole batch. `titles.tmdb_id`/`tvdb_id` are Postgres `integer`, so a stub past
+    `INT32_MAX` fails in asyncpg's encoder, and a negative id names nothing.
     """
     if value is None:
         return None
     try:
-        return int(value)
+        number = int(value)
     except ValueError:
         return None
+    return number if 0 <= number <= INT32_MAX else None
 
 
 def _as_imdb(value: int | str | None) -> str | None:

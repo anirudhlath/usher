@@ -121,8 +121,10 @@ class PushApplyService:
                 # adapter with no payload is *more* accurate here, not less.
                 state = await adapter.get_watch_state(external_id)
             if state is None:
-                # The source no longer has it. The reconcile lane's problem,
-                # and raising would cost a reconnect and a gap-closing walk.
+                # The source no longer has it, or reported a state that cannot
+                # be stored (the adapter logs that). The reconcile lane's
+                # problem, and raising would cost a reconnect and a gap-closing
+                # walk.
                 continue
             states.append(state)
         if not states:

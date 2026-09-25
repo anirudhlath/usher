@@ -15,6 +15,12 @@ Versioning is `0.x` while the wire contract may still move —
   let every later vector through unchecked.
 - **A fused search whose query can't be embedded is served as full text**, and
   says so through `requested_mode` ≠ `mode`, instead of answering 500.
+- **An out-of-range number from Emby no longer ends a sync.** A runtime of 111
+  years used to crash the whole walk and leave its run `running`, and so did a
+  TMDb or TVDB id too large for its column. A negative width, runtime, size or
+  episode number marked the run failed on every sync. Such a value is now
+  recorded as unknown and logged, and such a provider id is ignored. A watch
+  state whose position is too large to store is skipped.
 
 ## [0.1.0] - 2026-09-24
 

@@ -1,9 +1,11 @@
 # tests/unit/test_adapters_emby_mapping.py
 """Emby's JSON -> the port's DTOs, against the committed fixtures."""
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from loguru import logger
 
 from tests.fakes.emby_fixtures import load_emby_fixture
 from usher.adapters.emby.mapping import (
@@ -17,6 +19,7 @@ from usher.adapters.emby.mapping import (
     stream_of,
     to_source_item,
     to_watch_state,
+    user_data_states,
 )
 from usher.domain.enums import HdrFormat
 from usher.ports.errors import PortDataMalformed
@@ -453,6 +456,9 @@ def test_with_no_default_flag_anywhere_the_first_stream_is_used() -> None:
         (-2.9, -2),
         ("7", None),
         (None, None),
+        # `json.loads` accepts both, and `int()` raises on each.
+        (float("nan"), None),
+        (float("inf"), None),
     ],
 )
 def test_as_int_refuses_booleans_and_truncates_floats(value: object, expected: int | None) -> None:
@@ -699,3 +705,267 @@ def test_a_trusted_payload_that_reports_zero_plays_is_believed() -> None:
     state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
     assert state is not None
     assert state.play_count == 0
+
+
+# The columns these land in: Postgres `integer`, `bigint` for a file size, each CHECKed
+# non-negative. Written out rather than imported, so a wrong constant in the code cannot
+# agree with itself here.
+_INT32_MAX = 2**31 - 1
+_INT64_MAX = 2**63 - 1
+_TICKS = 10_000_000
+
+
+@pytest.fixture
+def warnings_logged() -> Iterator[list[str]]:
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="WARNING", format="{message}")
+    try:
+        yield sink
+    finally:
+        logger.remove(handler)
+
+
+def test_a_runtime_too_long_to_store_is_unknown(warnings_logged: list[str]) -> None:
+    """A real library's corrupt episode: 3,506,437,881 seconds, about 111 years.
+
+    One value past a 32-bit column fails the whole batch in asyncpg's encoder, as an
+    `OverflowError` rather than a `UsherPortError`, so a full sync died on this item
+    after 159,000 others and recorded nothing. The runtime is corrupt; it is unknown,
+    and the drop is logged, since a filter nothing counts is invisible.
+    """
+    payload = {"Id": "x", "Type": "Episode", "Name": "Odd", "RunTimeTicks": 35_064_378_818_560_000}
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.runtime_seconds is None
+    assert len(warnings_logged) == 1
+    assert "runtime_seconds" in warnings_logged[0]
+    assert "3506437881" in warnings_logged[0]
+    # The name alone is not enough: episode names repeat across a library.
+    assert "'Odd' (id x)" in warnings_logged[0]
+
+
+def test_a_value_that_fits_logs_nothing(warnings_logged: list[str]) -> None:
+    assert to_source_item(load_emby_fixture("movie_item")) is not None
+    assert warnings_logged == []
+
+
+@pytest.mark.parametrize(
+    ("ticks", "expected"),
+    [
+        (_INT32_MAX * _TICKS, _INT32_MAX),
+        ((_INT32_MAX + 1) * _TICKS, None),
+        (0, 0),
+        (-_TICKS, None),
+    ],
+)
+def test_a_runtime_is_kept_only_within_its_column(ticks: int, expected: int | None) -> None:
+    item = to_source_item({"Id": "x", "Type": "Movie", "Name": "Long", "RunTimeTicks": ticks})
+    assert item is not None
+    assert item.runtime_seconds == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "field"),
+    [
+        ("Width", "width"),
+        ("Height", "height"),
+        ("ParentIndexNumber", "season_number"),
+        ("IndexNumber", "episode_number"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [(_INT32_MAX, True), (_INT32_MAX + 1, False), (0, True), (-1, False)],
+)
+def test_an_item_count_outside_its_column_is_unknown(
+    key: str, field: str, value: int, kept: bool
+) -> None:
+    """Every one of these columns is CHECKed non-negative.
+
+    A season or episode number below zero also fails `Season`/`Episode`
+    validation, which nothing catches. Zero is kept: the columns accept it, and a
+    special is season zero.
+    """
+    item = to_source_item({"Id": "x", "Type": "Episode", "Name": "Odd", key: value})
+    assert item is not None
+    assert getattr(item, field) == (value if kept else None)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("Width", _INT32_MAX, _INT32_MAX),
+        ("Width", _INT32_MAX + 1, None),
+        ("Height", _INT32_MAX, _INT32_MAX),
+        ("Height", _INT32_MAX + 1, None),
+    ],
+)
+def test_a_video_streams_dimension_outside_its_column_is_unknown(
+    key: str, value: int, expected: int | None
+) -> None:
+    """The stream, not the item, is where a real payload carries its dimensions."""
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "MediaSources": [{"Container": "mkv", "MediaStreams": [{"Type": "Video", key: value}]}],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert getattr(item, key.lower()) == expected
+
+
+@pytest.mark.parametrize(
+    ("year", "expected"),
+    [(9999, 9999), (10_000, None), (0, 0), (-1, None), (_INT32_MAX, None)],
+)
+def test_a_year_outside_the_calendar_is_unknown(year: int, expected: int | None) -> None:
+    """Narrower than the column: the name+year probe computes `year + 1`.
+
+    `2147483647` is .NET's `int.MaxValue`, a sentinel a scraper can leave behind, and
+    Postgres refuses `2147483647 + 1` mid-walk. 9999 is `datetime.MAXYEAR`.
+    """
+    item = to_source_item({"Id": "x", "Type": "Movie", "Name": "Odd", "ProductionYear": year})
+    assert item is not None
+    assert item.year == expected
+
+
+@pytest.mark.parametrize(
+    ("channels", "expected"),
+    [(8, 8), (_INT32_MAX, _INT32_MAX), (_INT32_MAX + 1, None), (-1, None)],
+)
+def test_an_audio_channel_count_outside_its_column_is_unknown(
+    channels: int, expected: int | None
+) -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "MediaSources": [
+            {"Container": "mkv", "MediaStreams": [{"Type": "Audio", "Channels": channels}]}
+        ],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.audio_channels == expected
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [(_INT64_MAX, _INT64_MAX), (_INT64_MAX + 1, None), (-1, None)],
+)
+def test_a_file_size_outside_its_bigint_column_is_unknown(size: int, expected: int | None) -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "MediaSources": [{"Container": "mkv", "Size": size}],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.file_size_bytes == expected
+
+
+def test_a_watch_position_too_large_to_store_reports_no_state(
+    warnings_logged: list[str],
+) -> None:
+    """Nothing, rather than a fabricated position.
+
+    `position_seconds` is not optional, and `0` would overwrite a real resume point.
+    """
+    payload = {
+        "Id": "x",
+        "Type": "Episode",
+        "UserData": {"PlaybackPositionTicks": (_INT32_MAX + 1) * _TICKS, "Played": False},
+    }
+    assert to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True) is None
+    assert len(warnings_logged) == 1
+    assert "position" in warnings_logged[0]
+    assert "watch state skipped" in warnings_logged[0]
+
+
+def test_a_watch_position_at_the_columns_limit_is_kept() -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Episode",
+        "UserData": {"PlaybackPositionTicks": _INT32_MAX * _TICKS, "Played": False},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.position_seconds == _INT32_MAX
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [(_INT32_MAX, _INT32_MAX), (_INT32_MAX + 1, None), (-3, 0)],
+)
+def test_a_play_count_outside_its_column_is_unknown(count: int, expected: int | None) -> None:
+    """A negative count is still clamped to zero, as before; only the ceiling is new."""
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "UserData": {"PlaybackPositionTicks": 0, "Played": True, "PlayCount": count},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.play_count == expected
+
+
+def test_a_pushed_position_too_large_to_store_drops_that_entry_only(
+    warnings_logged: list[str],
+) -> None:
+    """Dropped from both lists, which a `WATCH_STATE_CHANGED` event pairs up."""
+    ids, states = user_data_states(
+        [
+            {"ItemId": "corrupt", "PlaybackPositionTicks": (_INT32_MAX + 1) * _TICKS},
+            {"ItemId": "fine", "PlaybackPositionTicks": 90 * _TICKS, "Played": False},
+        ],
+        source_user_id="u1",
+    )
+    assert ids == ["fine"]
+    assert [state.external_id for state in states] == ["fine"]
+    assert states[0].position_seconds == 90
+    assert len(warnings_logged) == 1
+    assert "corrupt" in warnings_logged[0]
+
+
+def test_a_corrupt_streams_dimension_falls_back_to_the_items() -> None:
+    """Each source is bounded on its own, so a bad stream value hides no good one."""
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "Width": 1920,
+        "MediaSources": [
+            {"Container": "mkv", "MediaStreams": [{"Type": "Video", "Width": _INT32_MAX + 1}]}
+        ],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.width == 1920
+
+
+def test_a_corrupt_item_runtime_falls_back_to_the_media_sources() -> None:
+    payload = {
+        "Id": "x",
+        "Type": "Movie",
+        "Name": "Odd",
+        "RunTimeTicks": 35_064_378_818_560_000,
+        "MediaSources": [{"Container": "mkv", "RunTimeTicks": 5_400 * _TICKS}],
+    }
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.runtime_seconds == 5_400
+
+
+def test_a_negative_position_is_clamped_to_zero_and_the_state_kept() -> None:
+    """What the PRD says of a negative position: zero, not a skipped state."""
+    payload = {
+        "Id": "x",
+        "Type": "Episode",
+        "UserData": {"PlaybackPositionTicks": -5 * _TICKS, "Played": True},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.position_seconds == 0
+    assert state.played is True

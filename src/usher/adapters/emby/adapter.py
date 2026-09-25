@@ -390,7 +390,8 @@ class EmbyAdapter(SourceAdapter):
 
         Reuses `_fetch`, so a 404 is `None` and every other failure raises,
         exactly as `get_item` behaves -- the two must not diverge, or a caller
-        learns to tell a deletion from an outage by which method it called.
+        learns to tell a deletion from an outage by which method it called. A
+        position too large to store is `None` too, logged by `to_watch_state`.
         """
         with _tracer.start_as_current_span("source.get_watch_state") as span:
             span.set_attribute("usher.source", self._source.name)
