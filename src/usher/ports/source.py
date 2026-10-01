@@ -352,6 +352,16 @@ class SourceAdapter(ABC):
         """How many times this adapter's push channel has reopened."""
         return 0
 
+    @property
+    def push_messages_received(self) -> int:
+        """How many messages this adapter's push channel has received, over every connection.
+
+        Every message counts, including one that maps to no event, which is most of what
+        an idle library sends: it is how a lane tells a connection that delivered from one
+        that never did.
+        """
+        return 0
+
     async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:
         """Open the push channel, wait, and report what arrived."""
         collected: list[SourceEventKind] = []

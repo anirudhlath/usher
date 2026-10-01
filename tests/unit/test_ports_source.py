@@ -601,15 +601,29 @@ def test_push_reconnects_is_concrete_and_defaults_to_a_true_zero() -> None:
     assert "push_reconnects" in vars(SourceAdapter)
 
 
-async def test_every_adapter_with_a_channel_answers_reconnects_for_itself() -> None:
+def test_push_messages_received_is_concrete_and_defaults_to_a_true_zero() -> None:
+    """What `PushSupervisor` reads to tell a connection that delivered from one that did not.
+
+    Concrete for `push_reconnects`' reason: an adapter with no channel has received
+    nothing, so `0` is its true answer. An adapter that has a channel must override it,
+    or every connection it opens reads as one that delivered nothing.
+    """
+    assert "push_messages_received" not in SourceAdapter.__abstractmethods__
+    assert "push_messages_received" in vars(SourceAdapter)
+
+
+@pytest.mark.parametrize("counter", ["push_reconnects", "push_messages_received"])
+async def test_every_adapter_with_a_channel_answers_its_push_counts_for_itself(
+    counter: str,
+) -> None:
     """The default is a claim only an adapter with no channel may make.
 
     Asserted structurally rather than behaviourally because the failure it
     guards is a *missing* override, which every behavioural case would read
-    as "it has not reconnected yet".
+    as "nothing has happened yet".
     """
     from tests.fakes.source_adapter import FakeSourceAdapter
     from usher.adapters.emby.adapter import EmbyAdapter
 
     for implementation in (EmbyAdapter, FakeSourceAdapter):
-        assert "push_reconnects" in vars(implementation), implementation.__name__
+        assert counter in vars(implementation), implementation.__name__

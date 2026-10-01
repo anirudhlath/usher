@@ -94,6 +94,12 @@ flight at a time:
   truncation is not.
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
+- **A page that fails as unreachable is asked for again** — a 5xx, a refused or
+  dropped connection, a timeout — after 15, 30, 60, 120 and 240 s, about eight
+  minutes. The sixth failure ends the walk, and its error says how many attempts
+  it made over how long. Each page gets its own six, so a walk of hours survives
+  more than one outage. A rate limit, an answer that is not a listing, and a
+  closed adapter fail at once.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.

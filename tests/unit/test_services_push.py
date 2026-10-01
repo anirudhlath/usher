@@ -541,6 +541,10 @@ class _Lane:
 
 _DROP = SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("__drop__",))
 
+# A frame the channel receives and maps to no event, as Emby's `Sessions` is: most of
+# what an idle library's channel ever sends.
+_MESSAGE = SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("__message__",))
+
 
 class _ScriptedAdapter(FakeSourceAdapter):
     """A source whose push channel is a script of connections."""
@@ -565,8 +569,14 @@ class _ScriptedAdapter(FakeSourceAdapter):
         self._channel_open = False
         self.push_connections = 0
         self.attempts = 0
+        self.messages = 0
         self.produced_at: list[float] = []
         self.parked = asyncio.Event()
+
+    @property
+    def push_messages_received(self) -> int:
+        """Every frame this source delivered, over every connection, event or not."""
+        return self.messages
 
     @property
     def supports_push(self) -> bool:
@@ -637,6 +647,9 @@ class _ScriptedAdapter(FakeSourceAdapter):
             if frame is _DROP:
                 raise PortUnavailable("the scripted peer went away")
             self._delivered_here += 1
+            self.messages += 1
+            if frame is _MESSAGE:
+                continue
             yield frame
 
 
@@ -827,6 +840,25 @@ async def test_a_delivering_channel_resets_the_counter(lane: _Lane) -> None:
     await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
     assert adapter.push_connections == 4
     assert True in lane.push_available
+
+
+async def test_a_connection_that_delivered_only_messages_resets_the_counter(lane: _Lane) -> None:
+    """Delivery is a message, not an event.
+
+    An idle library's channel sends frames that map to no event and little else, so a
+    counter reset only by events parks a working lane after five quiet spells however
+    far apart they fall. Three connections that each deliver one such frame and drop,
+    then one that delivers nothing: with the reset the ceiling of two is reached on the
+    fourth connection; without it, on the second.
+    """
+    adapter = _ScriptedAdapter(
+        SUPERVISED_SOURCE, [[_MESSAGE], [_MESSAGE], [_MESSAGE]], unbounded=True
+    )
+    supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.applied == [], "the premise: no connection delivered an event"
+    assert adapter.messages == 3, "the premise: three connections each delivered a frame"
+    assert adapter.push_connections == 4
 
 
 async def test_push_available_is_written_true_on_first_delivery(lane: _Lane) -> None:

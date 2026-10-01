@@ -1,8 +1,9 @@
 """`EmbyAdapter` -- the `SourceAdapter` implementation for Emby."""
 
+import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 from urllib.parse import quote
@@ -85,6 +86,13 @@ USER_PATH = "/Users"
 # The walk's dead-man's switch.
 MAX_PAGES = 10_000
 
+# One page of a walk gets six attempts, 15, 30, 60, 120 and 240 s apart: about eight
+# minutes. A full walk of a large library takes hours and a failed item walk restarts
+# from the top, so riding out a server restart on the page it hit is the cheap side.
+PAGE_ATTEMPTS = 6
+PAGE_RETRY_FIRST_WAIT = 15.0
+PAGE_RETRY_MAX_WAIT = 240.0
+
 
 def _segment(value: str) -> str:
     """One path segment, percent-encoded.
@@ -122,8 +130,10 @@ class EmbyAdapter(SourceAdapter):
         push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         push_poll_seconds: float = DEFAULT_POLL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._source = source
+        self._sleep = sleep
         self._page_size = page_size
         self._max_pages = max_pages
         # Ownership is tracked, not assumed: `aclose()` closes a client this
@@ -175,6 +185,11 @@ class EmbyAdapter(SourceAdapter):
         One `PushHealth` outlives every channel this adapter opens.
         """
         return self._health.reconnects
+
+    @property
+    def push_messages_received(self) -> int:
+        """Every frame counted before it is parsed, so `Sessions` counts as delivery."""
+        return self._health.messages_received
 
     @property
     def push_health(self) -> PushHealth:
@@ -274,9 +289,7 @@ class EmbyAdapter(SourceAdapter):
             }
             if since is not None:
                 params[since_param] = emby_datetime(since)
-            body = await self._session.json_body(
-                "GET", f"/Users/{_segment(user_id)}/Items", params=params, op="list"
-            )
+            body = await self._page(f"/Users/{_segment(user_id)}/Items", params, start)
             items = body.get("Items")
             if not isinstance(items, list):
                 # Not a truncation: a caller must be able to tell "the
@@ -301,6 +314,44 @@ class EmbyAdapter(SourceAdapter):
             "Emby's item listing never ended; the server appears to ignore StartIndex",
             detail=f"gave up after {self._max_pages} pages at StartIndex={start}",
         )
+
+    async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
+        """One page of a walk, asked for again while it fails with `PortUnavailable`.
+
+        The bound is per page, so a walk of hours survives more than one outage. Nothing
+        else is retried: an answer that is not a listing will be the same answer next
+        time, a 429 carries the server's own hint for the caller, and a closed adapter --
+        which raises `PortUnavailable` too -- is shutting down rather than waiting. The
+        session reports every 4xx but 401 and 429 as `PortUnavailable`, so a 4xx here
+        spends the eight minutes and then fails exactly as it would have.
+        """
+        first_failure: float | None = None
+        for attempt in range(1, PAGE_ATTEMPTS + 1):
+            try:
+                return await self._session.json_body("GET", path, params=params, op="list")
+            except PortUnavailable as exc:
+                if self._closed:
+                    raise
+                if first_failure is None:
+                    first_failure = self._clock()
+                if attempt == PAGE_ATTEMPTS:
+                    elapsed = self._clock() - first_failure
+                    raise PortUnavailable(
+                        f"{exc} (gave up after {attempt} attempts over {elapsed:.0f}s)"
+                    ) from exc
+                wait = min(PAGE_RETRY_FIRST_WAIT * 2 ** (attempt - 1), PAGE_RETRY_MAX_WAIT)
+                logger.warning(
+                    "{source}'s listing failed at StartIndex={start} "
+                    "(attempt {attempt} of {attempts}): {error}; asking again in {wait:.0f}s",
+                    source=self._source.name,
+                    start=start,
+                    attempt=attempt,
+                    attempts=PAGE_ATTEMPTS,
+                    error=str(exc),
+                    wait=wait,
+                )
+                await self._sleep(wait)
+        raise AssertionError("unreachable: the last attempt returns or raises")
 
     def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
         return self._list_items(since)

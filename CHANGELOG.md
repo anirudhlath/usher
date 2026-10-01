@@ -21,6 +21,15 @@ Versioning is `0.x` while the wire contract may still move —
   episode number marked the run failed on every sync. Such a value is now
   recorded as unknown and logged, and such a provider id is ignored. A watch
   state whose position is too large to store is skipped.
+- **A brief Emby outage no longer throws away a sync.** One 502 or dropped
+  connection used to fail the whole walk, and the next sync started again from
+  the first item — on a large library, hours lost to a blip. A page that fails
+  that way is now asked for again, for about eight minutes, before the walk
+  gives up.
+- **The push lane no longer gives up on a quiet library.** Emby sends little but
+  `Sessions` frames when nothing is changing, and those never reset the lane's
+  failure count, so a few quiet spells — however far apart — marked push
+  unavailable until a restart. Any message now counts as delivery.
 
 ## [0.1.0] - 2026-09-24
 

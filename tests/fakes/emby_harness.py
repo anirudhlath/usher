@@ -23,6 +23,14 @@ from usher.ports.source import (
 PAGE_SIZE = 2
 
 
+async def instant_sleep(seconds: float) -> None:
+    """The adapter's retry waits, taken at once.
+
+    A case that fails a walk on purpose -- `fail_after`, `offline` -- would otherwise
+    sit through eight minutes of them before the failure it is about arrives.
+    """
+
+
 class EmbyHarness(SourceHarness):
     def __init__(self) -> None:
         self._server = FakeEmbyServer(page_size=PAGE_SIZE)
@@ -58,6 +66,7 @@ class EmbyHarness(SourceHarness):
             # the trick `EmbySession`'s injected clock already allows, one
             # object over.
             clock=lambda: self._push_now,
+            sleep=instant_sleep,
         )
 
     @property
