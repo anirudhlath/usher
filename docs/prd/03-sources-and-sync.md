@@ -97,12 +97,13 @@ flight at a time:
   truncation is not.
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
-- **A page that fails as unreachable is asked for again** — a 5xx, a refused or
-  dropped connection, a timeout — after 15, 30, 60, 120 and 240 s, about eight
-  minutes. The sixth failure ends the walk, and its error says how many attempts
-  it made over how long. Each page gets its own six, so a walk of hours survives
-  more than one outage. A rate limit, an answer that is not a listing, and a
-  closed adapter fail at once.
+- **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
+  refused or dropped connection, a timeout — after 15, 30, 60, 120 and 240 s,
+  about eight minutes. A 429 is asked for again on the same schedule, waiting out
+  its `Retry-After` when that is longer, up to 240 s a time. The sixth failure
+  ends the walk, and its error says how many attempts it made over how long; each
+  page gets its own six. Any other 4xx, an answer that is not a listing, a
+  rejected credential and a closed adapter fail at once.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
@@ -183,8 +184,8 @@ with its own cursor.
 
 **The watch lane is resumable.** A run checkpoints its position on
 `sync_runs.position`, and the next attempt reclaims that same row and resumes
-there, so a transient failure costs the page in flight rather than the whole
-walk. 🔶 Until a source has completed one `watch_state` run, its watch lane has
+there, so a failure that outlasts a page's retries costs the page in flight
+rather than the whole walk. 🔶 Until a source has completed one `watch_state` run, its watch lane has
 no cursor and its next run walks the whole library; nothing schedules that
 first walk.
 

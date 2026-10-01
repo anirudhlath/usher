@@ -598,7 +598,10 @@ def test_push_reconnects_is_concrete_and_defaults_to_a_true_zero() -> None:
     forgotten override.
     """
     assert "push_reconnects" not in SourceAdapter.__abstractmethods__
-    assert "push_reconnects" in vars(SourceAdapter)
+    default = vars(SourceAdapter)["push_reconnects"]
+    assert isinstance(default, property)
+    assert default.fget is not None
+    assert default.fget(None) == 0
 
 
 def test_push_messages_received_is_concrete_and_defaults_to_a_true_zero() -> None:
@@ -609,7 +612,10 @@ def test_push_messages_received_is_concrete_and_defaults_to_a_true_zero() -> Non
     or every connection it opens reads as one that delivered nothing.
     """
     assert "push_messages_received" not in SourceAdapter.__abstractmethods__
-    assert "push_messages_received" in vars(SourceAdapter)
+    default = vars(SourceAdapter)["push_messages_received"]
+    assert isinstance(default, property)
+    assert default.fget is not None
+    assert default.fget(None) == 0
 
 
 @pytest.mark.parametrize("counter", ["push_reconnects", "push_messages_received"])

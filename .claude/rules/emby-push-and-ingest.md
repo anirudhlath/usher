@@ -88,9 +88,8 @@ says nothing about a source left out of step by a parked write-back.
 
 - ⚠️ **Neither an upgrade nor arriving messages establish that a channel is the
   one you think it is.** A handshake against *any* path succeeds, and a socket
-  with **no credential at all** upgrades, subscribes and receives `Sessions` more
-  often than an authenticated one, whose stream is row-filtered and sent only on
-  change. **Assert on the *right* messages.**
+  with **no credential at all** receives `Sessions` more often than an
+  authenticated, row-filtered one. **Assert on the *right* messages.**
 - 🔴 **`/embywebsocket` does not accept `X-Emby-Token` as a header** — such a
   socket is anonymous, so the token cannot leave the URL. **Liveness here is
   change-driven, not periodic, and a subscribe is answered by nothing**, so an
@@ -125,12 +124,10 @@ and **a DELTA with no completed item-lane run has no `since`, so
 ⚠️ **The bound is a refusal rather than a cap on purpose**: a truncated walk
 records `COMPLETED`, so everything it never reached is skipped by every later
 delta, permanently. ⚠️ **And that guard reads the item lane's cursor only, while
-`_close_gap` also runs `watch.sync(...)`** (#41) — the cursors are independent,
-so a source with completed delta runs and no completed `watch_state` run passes
-the guard, closes a delta gap in seconds, then walks the whole library on the
-watch half for ~11 hours — a reachable path, not an observed run — and **neither
-log line names it**. `m10b` made that walk resumable from `sync_runs.position`;
-it did not teach the guard to read both cursors.
+`_close_gap` also runs `watch.sync(...)`** (#41): a source with completed delta
+runs and no completed `watch_state` run passes it, then walks the whole library
+on the watch half for ~11 hours, and **neither log line names it**. That walk
+resumes from `sync_runs.position`; the guard still reads one cursor.
 
 ## The match ladder
 
@@ -167,9 +164,10 @@ job is enqueued at `BACKFILL` for that remote search.
   range (`mapping._stored`, provider ids in both `_as_int`s): asyncpg's encoder
   raises a bare `OverflowError` past `INT32_MAX`, and the walk dies `RUNNING`;
   a negative one fails a `>= 0` CHECK and the run is `FAILED` on every sync.
-- **Nor may a blip: `EmbyAdapter._page` retries a page failing
-  `PortUnavailable`** for about eight minutes, since a failed item walk restarts
-  from the top. A test that fails a walk on purpose injects `sleep=instant_sleep`
+- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** for about
+  eight minutes, since a failed item walk restarts from the top — but never a
+  `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
+  A test that fails a walk on purpose injects `sleep=instant_sleep`
   (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
 - **A service that checkpoints per batch must not evolve its own stale copy in
   the failure handler** — `reconcile`'s binding is the pre-walk value, so

@@ -32,6 +32,7 @@ from usher.adapters.emby.session import (
     PUBLIC_INFO_PATH,
     SYSTEM_INFO_PATH,
     EmbySession,
+    RequestRefused,
     decode_json,
     redact_path,
 )
@@ -86,12 +87,10 @@ USER_PATH = "/Users"
 # The walk's dead-man's switch.
 MAX_PAGES = 10_000
 
-# One page of a walk gets six attempts, 15, 30, 60, 120 and 240 s apart: about eight
+# The waits between attempts at one page of a walk: six attempts over about eight
 # minutes. A full walk of a large library takes hours and a failed item walk restarts
 # from the top, so riding out a server restart on the page it hit is the cheap side.
-PAGE_ATTEMPTS = 6
-PAGE_RETRY_FIRST_WAIT = 15.0
-PAGE_RETRY_MAX_WAIT = 240.0
+PAGE_RETRY_WAITS = (15.0, 30.0, 60.0, 120.0, 240.0)
 
 
 def _segment(value: str) -> str:
@@ -316,42 +315,49 @@ class EmbyAdapter(SourceAdapter):
         )
 
     async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
-        """One page of a walk, asked for again while it fails with `PortUnavailable`.
+        """One page of a walk, asked for again while its failure is one a wait can fix.
 
-        The bound is per page, so a walk of hours survives more than one outage. Nothing
-        else is retried: an answer that is not a listing will be the same answer next
-        time, a 429 carries the server's own hint for the caller, and a closed adapter --
-        which raises `PortUnavailable` too -- is shutting down rather than waiting. The
-        session reports every 4xx but 401 and 429 as `PortUnavailable`, so a 4xx here
-        spends the eight minutes and then fails exactly as it would have.
+        That is an outage -- a 5xx, a 408, a refused or dropped connection, a timeout -- or
+        a 429, whose wait is its `Retry-After` when that is longer, up to the longest
+        scheduled one. Nothing else is: a refused request and an answer that is not a
+        listing would be the same answer next time, a rejected credential needs an
+        operator, and a closed adapter -- which raises `PortUnavailable` too -- is shutting
+        down. Giving up raises `PortUnavailable` naming the attempts, whatever the last
+        failure was.
         """
+        attempts = len(PAGE_RETRY_WAITS) + 1
         first_failure: float | None = None
-        for attempt in range(1, PAGE_ATTEMPTS + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 return await self._session.json_body("GET", path, params=params, op="list")
-            except PortUnavailable as exc:
+            except RequestRefused:
+                raise
+            except (PortUnavailable, PortRateLimited) as exc:
                 if self._closed:
                     raise
                 if first_failure is None:
                     first_failure = self._clock()
-                if attempt == PAGE_ATTEMPTS:
+                if attempt == attempts:
                     elapsed = self._clock() - first_failure
                     raise PortUnavailable(
                         f"{exc} (gave up after {attempt} attempts over {elapsed:.0f}s)"
                     ) from exc
-                wait = min(PAGE_RETRY_FIRST_WAIT * 2 ** (attempt - 1), PAGE_RETRY_MAX_WAIT)
+                wait = PAGE_RETRY_WAITS[attempt - 1]
+                if isinstance(exc, PortRateLimited) and exc.retry_after is not None:
+                    wait = min(max(wait, exc.retry_after), PAGE_RETRY_WAITS[-1])
                 logger.warning(
                     "{source}'s listing failed at StartIndex={start} "
                     "(attempt {attempt} of {attempts}): {error}; asking again in {wait:.0f}s",
                     source=self._source.name,
                     start=start,
                     attempt=attempt,
-                    attempts=PAGE_ATTEMPTS,
+                    attempts=attempts,
                     error=str(exc),
                     wait=wait,
                 )
                 await self._sleep(wait)
-        raise AssertionError("unreachable: the last attempt returns or raises")
 
     def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
         return self._list_items(since)
