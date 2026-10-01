@@ -482,7 +482,7 @@ def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
     settings = Settings()
     assert settings.push_enabled is True
     assert settings.worker_enabled is True
-    assert settings.push_stale_after_seconds == 90.0
+    assert settings.push_stale_after_seconds == 300.0
     assert settings.push_poll_seconds == 5.0
     assert settings.push_backoff_seconds == 5.0
     assert settings.push_max_backoff_seconds == 300.0
@@ -520,9 +520,11 @@ def test_the_staleness_window_is_bounded_below_by_something_useful(
 ) -> None:
     """A window shorter than the source's own message interval reconnects forever.
 
-    It would drop a perfectly healthy channel. `gt=0` alone would permit `0.001`; the
-    floor is a *documented* one rather than a guessed one -- Emby's `Sessions` interval
-    is the subscription's own `0,1000`, i.e. one second, and 5 s leaves real headroom.
+    It would drop a perfectly healthy channel. `gt=0` alone would permit `0.001`, so the
+    floor sits above the one interval Emby documents, the subscription's own `0,1000` --
+    one second. That timer drives only an anonymous socket; an authenticated one's
+    stream is sent on change, minutes apart on an idle library, which is the default's
+    business rather than the floor's.
     The default must also match `usher.adapters.emby.push`'s own, because the adapter's
     constructor default is what a caller that forgets to pass one gets -- two numbers
     that mean the same thing and can drift apart.

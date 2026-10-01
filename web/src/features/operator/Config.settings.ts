@@ -538,7 +538,7 @@ export const CONFIG: readonly SettingRow[] = [
   {
     key: 'USHER_PUSH_STALE_AFTER_SECONDS',
     group: 'lanes',
-    def: '90.0',
+    def: '300.0',
     about:
       'How long a channel may deliver nothing at all before it is torn down. Not a socket timeout: it detects a live peer that has stopped delivering, which is the failure measured when a handshake to a nonexistent path was upgraded and held open.',
     secret: false,

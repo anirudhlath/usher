@@ -52,9 +52,12 @@ Emby exposes a WebSocket at `/embywebsocket?api_key=<token>&deviceId=<id>`.
 | `Sessions` (subscribe) | Per-user row-filtered | Liveness only | Nothing. Counted before it is parsed |
 
 Any received frame counts as liveness; on an idle library `Sessions` is the
-only thing keeping `push_available` true. `push_stale_after_seconds` defaults to
-90 s, and `usher.source.push.reconnects` shows a household where that is too
-tight.
+only thing keeping `push_available` true, and those come minutes apart.
+`push_stale_after_seconds` defaults to 300 s: a channel silent that long is
+reconnected, and a run of reconnects that each stay silent marks push
+unavailable ([08](08-operations.md)) — at the defaults, about 25 minutes of
+unbroken silence. `usher.source.push.reconnects` shows a household where the
+window is too tight.
 
 **No admin privileges are required** — a normal user token works. Not required
 is not prevented: `POST /admin/sources` ([07](07-client-api.md)) takes whatever
@@ -114,8 +117,9 @@ and the server's version as `server_version`.
 running for the source, otherwise the live answer — a connection *and* at least
 one received message *and* a recent one. The status check opens no socket.
 
-The on-demand answer is `usher push --probe`, which opens a channel on purpose
-and reports **what arrived** rather than that the handshake succeeded.
+The on-demand answer is `usher push --probe`, which opens a channel on purpose,
+listens for one `push_stale_after_seconds` window, and reports **what arrived**
+rather than that the handshake succeeded.
 
 An adapter that has a channel reports `supports_push = false` from the moment
 it opens until the first message arrives.

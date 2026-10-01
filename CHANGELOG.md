@@ -8,6 +8,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ## [Unreleased]
 
+### Changed
+
+- **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
+  library's push channel routinely went longer than 90 s between messages, and
+  every such gap cost a reconnect. `usher push --probe` listens for one window,
+  so it now takes five minutes.
+
 ### Fixed
 
 - **An embedding model that fails the embedder's norm check now fails every
