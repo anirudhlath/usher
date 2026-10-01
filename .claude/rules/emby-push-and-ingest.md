@@ -31,11 +31,6 @@ uv run python scripts/measure_ingest.py --items 50000   # NOT a test; real datab
 
 ## Bounding a live run against a real server
 
-- ⚠️ **`MAX_PAGES` is a dead-man's switch, not a bound.** Exhausting it raises
-  `PortDataMalformed`, so a reconcile "bounded" that way records `FAILED` and
-  never reaches the sweep — usually the half the run exists to exercise. **Put
-  the bound in the iterator**, and note that any "find the item where X" over a
-  walk *is* a walk of ~1.13M items: filter server side.
 - **Set `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false`, or
   `USHER_PUSH_GAP_CLOSE=never`**, before any run whose request budget has to be
   statable — `push_enabled` is what gates the gap-closing walks below. Swap
@@ -93,20 +88,21 @@ says nothing about a source left out of step by a parked write-back.
 
 - ⚠️ **Neither an upgrade nor arriving messages establish that a channel is the
   one you think it is.** A handshake against *any* path succeeds, and a socket
-  with **no credential at all** upgrades, subscribes and receives `Sessions` more
-  often than an authenticated one, whose stream is row-filtered and sent only on
-  change. **Assert on the *right* messages.**
+  with **no credential at all** receives `Sessions` more often than an
+  authenticated, row-filtered one. **Assert on the *right* messages.**
 - 🔴 **`/embywebsocket` does not accept `X-Emby-Token` as a header** — such a
   socket is anonymous, so the token cannot leave the URL. **Liveness here is
-  change-driven, not periodic**, so `DEFAULT_STALE_AFTER_SECONDS` (90 s) is a
-  guess against a quiet server, and the pong does not count — **a pong is not
-  delivery**.
+  change-driven, not periodic, and a subscribe is answered by nothing**, so an
+  idle library's healthy socket goes silent past 90 s routinely —
+  `DEFAULT_STALE_AFTER_SECONDS` sits well above that. **A pong is not delivery.**
 - **`PushSupervisor` resets its failure counter on *delivery*, not on
-  connection** — a buffering proxy connects perfectly every time, so a reset on
-  connection means PRD 08's "mark `supports_push = false` after N failures"
-  never fires, and catching that needs a fake with an **unbounded** supply of
-  connections. The reset is `failures = 0` in `PushSupervisor._run`, behind `if
-  delivering:` — not in `record_open`, which is the connection event.
+  connection, and any frame is delivery** — a buffering proxy connects perfectly
+  every time, so a reset on connection means PRD 08's "mark `supports_push =
+  false` after N failures" never fires, and a reset on *events* parks an idle
+  library, whose frames are `Sessions` mapping to none. `_streak` compares
+  `push_messages_received` across a connection, so N empty stale-outs in a row
+  still park it: N stale limits of unbroken silence is what reads as broken.
+  Seeing any of this needs a fake with an **unbounded** supply of connections.
 - **`ItemsRemoved` fires on a library from which nothing was removed**, so count
   it and retract nothing on it, or one refresh marks a present file unavailable.
 - **A dropped socket raises `PortUnavailable` rather than hanging, and Emby
@@ -128,12 +124,10 @@ and **a DELTA with no completed item-lane run has no `since`, so
 ⚠️ **The bound is a refusal rather than a cap on purpose**: a truncated walk
 records `COMPLETED`, so everything it never reached is skipped by every later
 delta, permanently. ⚠️ **And that guard reads the item lane's cursor only, while
-`_close_gap` also runs `watch.sync(...)`** (#41) — the cursors are independent,
-so a source with completed delta runs and no completed `watch_state` run passes
-the guard, closes a delta gap in seconds, then walks the whole library on the
-watch half for ~11 hours — a reachable path, not an observed run — and **neither
-log line names it**. `m10b` made that walk resumable from `sync_runs.position`;
-it did not teach the guard to read both cursors.
+`_close_gap` also runs `watch.sync(...)`** (#41): a source with completed delta
+runs and no completed `watch_state` run passes it, then walks the whole library
+on the watch half for ~11 hours, and **neither log line names it**. That walk
+resumes from `sync_runs.position`; the guard still reads one cursor.
 
 ## The match ladder
 
@@ -170,6 +164,11 @@ job is enqueued at `BACKFILL` for that remote search.
   range (`mapping._stored`, provider ids in both `_as_int`s): asyncpg's encoder
   raises a bare `OverflowError` past `INT32_MAX`, and the walk dies `RUNNING`;
   a negative one fails a `>= 0` CHECK and the run is `FAILED` on every sync.
+- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** for about
+  eight minutes, since a failed item walk restarts from the top — but never a
+  `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
+  A test that fails a walk on purpose injects `sleep=instant_sleep`
+  (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
 - **A service that checkpoints per batch must not evolve its own stale copy in
   the failure handler** — `reconcile`'s binding is the pre-walk value, so
   `run.evolve(status=FAILED)` writes `items_seen = 0` over a real checkpoint.

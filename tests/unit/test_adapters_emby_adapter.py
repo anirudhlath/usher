@@ -23,12 +23,16 @@ from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import MAX_PAGES, EmbyAdapter
 from usher.adapters.emby.push import SUBSCRIBE_FRAME
-from usher.adapters.emby.session import redact_path
+from usher.adapters.emby.session import RequestRefused, redact_path
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
-from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortDataMalformed,
+    PortUnavailable,
+)
 from usher.ports.source import (
     SourceEventKind,
     SourceItem,
@@ -82,15 +86,38 @@ def _adapter(server: FakeEmbyServer, *, page_size: int = 2) -> EmbyAdapter:
     )
 
 
+class _Waits:
+    """A `sleep` that returns at once and the clock it moves, so a retry costs no wall time."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+        self.now = 1_000.0
+
+    async def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
+
+    def clock(self) -> float:
+        return self.now
+
+
 def _on(
-    handler: Callable[[httpx.Request], httpx.Response], *, max_pages: int = MAX_PAGES
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    max_pages: int = MAX_PAGES,
+    waits: _Waits | None = None,
 ) -> EmbyAdapter:
     """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=SOURCE.base_url)
+    if waits is None:
+        return EmbyAdapter(SOURCE, CREDENTIALS, client=client, max_pages=max_pages)
     return EmbyAdapter(
         SOURCE,
         CREDENTIALS,
-        client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=SOURCE.base_url),
+        client=client,
         max_pages=max_pages,
+        sleep=waits.sleep,
+        clock=waits.clock,
     )
 
 
@@ -559,6 +586,285 @@ async def test_an_item_walk_always_starts_at_the_beginning() -> None:
     finally:
         await adapter.aclose()
     assert requested == ["0"]
+
+
+# --- a transient failure mid-walk ------------------------------------------
+
+# The waits between attempts at one page, in order: six attempts, five waits.
+RETRY_WAITS = [15.0, 30.0, 60.0, 120.0, 240.0]
+
+# What one listing request to `_FlakyLibrary` costs on its clock, when it is given one.
+REQUEST_SECONDS = 7.0
+
+
+def _bad_gateway() -> httpx.Response:
+    return httpx.Response(502, text="bad gateway")
+
+
+def _refused() -> httpx.Response:
+    raise httpx.ConnectError("connection refused")
+
+
+def _status(code: int, headers: dict[str, str] | None = None) -> Callable[[], httpx.Response]:
+    return lambda: httpx.Response(code, headers=headers)
+
+
+class _FlakyLibrary:
+    """Three items served one per page, failing a scripted number of times per `StartIndex`.
+
+    Every entry carries `UserData`, so the watch-state walk yields all three too. Given
+    `waits`, every listing request moves its clock by `REQUEST_SECONDS`, as a real one
+    takes time.
+    """
+
+    def __init__(
+        self,
+        failures: dict[int, int],
+        fail: Callable[[], httpx.Response],
+        waits: _Waits | None = None,
+    ) -> None:
+        self.entries = [
+            {
+                "Id": f"movie-{index}",
+                "Type": "Movie",
+                "Name": f"M{index}",
+                "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+            }
+            for index in range(3)
+        ]
+        self.failures = dict(failures)
+        self.fail = fail
+        self.waits = waits
+        self.requested: list[int] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        start = int(request.url.params["StartIndex"])
+        self.requested.append(start)
+        if self.waits is not None:
+            self.waits.now += REQUEST_SECONDS
+        if self.failures.get(start, 0) > 0:
+            self.failures[start] -= 1
+            return self.fail()
+        return httpx.Response(
+            200,
+            json={"Items": self.entries[start : start + 1], "TotalRecordCount": len(self.entries)},
+        )
+
+
+@pytest.mark.parametrize("walk", ["list_items", "watch_state"])
+@pytest.mark.parametrize(
+    "fail",
+    [_bad_gateway, _status(500), _status(408), _refused],
+    ids=["bad-gateway", "server-error", "request-timeout", "refused"],
+)
+async def test_a_page_that_fails_transiently_is_asked_for_again(
+    walk: str, fail: Callable[[], httpx.Response]
+) -> None:
+    """A full walk takes hours, and a failed item walk starts again from the top.
+
+    So a proxy's 502 while the server restarts, a refused connection, or a 408 -- the one
+    4xx a later attempt can fix -- is ridden out on the page it hit: the same `StartIndex`
+    is asked for again and the walk goes on, yielding everything exactly once.
+    """
+    library = _FlakyLibrary({1: 2}, fail)
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    try:
+        seen = [one.external_id async for one in getattr(adapter, walk)()]
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+    assert library.requested == [0, 1, 1, 1, 2]
+    assert waits.waits == RETRY_WAITS[:2]
+
+
+@pytest.mark.parametrize("walk", ["list_items", "watch_state"])
+async def test_a_page_that_keeps_failing_ends_the_walk_on_the_sixth_attempt(walk: str) -> None:
+    """About eight minutes of waiting, then the failure the walk would have raised anyway.
+
+    The message keeps the route, with no user id in it, and says how hard the walk
+    tried: "failed" and "failed six times over eight minutes" ask different things of
+    an operator. The time is the clock's, from the first failure to the last: 465 s of
+    waits and five more requests, which is neither the waits alone nor a count from
+    before the first request.
+    """
+    waits = _Waits()
+    library = _FlakyLibrary({1: 10}, _bad_gateway, waits)
+    adapter = _on(library, waits=waits)
+    try:
+        with pytest.raises(PortUnavailable) as caught:
+            _ = [one async for one in getattr(adapter, walk)()]
+    finally:
+        await adapter.aclose()
+    assert library.requested == [0, 1, 1, 1, 1, 1, 1]
+    assert waits.waits == RETRY_WAITS
+    assert str(caught.value) == (
+        "GET /Users/{user_id}/Items returned HTTP 502 (gave up after 6 attempts over 500s)"
+    )
+
+
+async def test_the_bound_is_per_page_so_a_walk_survives_more_than_one_outage() -> None:
+    """A page that recovers ends its streak.
+
+    Five failures on one page and five on the next still complete the walk; a bound
+    counted across the whole walk would end it on the second page's first failure.
+    """
+    library = _FlakyLibrary({1: 5, 2: 5}, _bad_gateway)
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    try:
+        seen = [one.external_id async for one in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+    assert waits.waits == RETRY_WAITS * 2
+
+
+@pytest.mark.parametrize(
+    ("answer", "raised"),
+    [
+        (lambda: httpx.Response(200, text="<html>portal</html>"), PortDataMalformed),
+        (_status(400), RequestRefused),
+        (_status(403), RequestRefused),
+        (_status(404), RequestRefused),
+        (_status(409), RequestRefused),
+        (_status(499), RequestRefused),
+    ],
+    ids=["not-json", "bad-request", "forbidden", "not-found", "conflict", "client-error"],
+)
+async def test_a_failure_that_asking_again_cannot_fix_is_not_retried(
+    answer: Callable[[], httpx.Response], raised: type[Exception]
+) -> None:
+    """An answer that is not a listing, or a 4xx other than 408 and 429, ends the walk at once.
+
+    Either is the answer the next attempt would get too, so eight minutes of asking would
+    only delay the failure -- on every sync, and on every push reconnect's gap close.
+    """
+    library = _FlakyLibrary({1: 1}, answer)
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    try:
+        with pytest.raises(raised):
+            _ = [one async for one in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert library.requested == [0, 1]
+    assert waits.waits == []
+
+
+async def test_a_credential_rejected_mid_walk_is_not_retried() -> None:
+    """`PortAuthFailed` needs an operator, not a wait.
+
+    The session has already re-authenticated once and been refused again, which is the
+    second request below; asking for the page again would repeat a rejected login.
+    """
+    library = _FlakyLibrary({1: 10}, _status(401))
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    try:
+        with pytest.raises(PortAuthFailed):
+            _ = [one async for one in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert library.requested == [0, 1, 1]
+    assert waits.waits == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "wait"),
+    [
+        ({}, 15.0),
+        ({"retry-after": "5"}, 15.0),
+        ({"retry-after": "100"}, 100.0),
+        ({"retry-after": "3600"}, 240.0),
+    ],
+    ids=["no-hint", "shorter-hint", "longer-hint", "hint-past-the-longest-wait"],
+)
+async def test_a_rate_limited_page_waits_out_the_longer_of_its_hint_and_the_schedule(
+    headers: dict[str, str], wait: float
+) -> None:
+    """A 429 is the one failure that says when to ask again, and the walk listens.
+
+    Up to the longest scheduled wait, so six attempts still end in minutes rather than
+    in whatever a header says.
+    """
+    library = _FlakyLibrary({1: 1}, _status(429, headers))
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    try:
+        seen = [one.external_id async for one in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+    assert library.requested == [0, 1, 1, 2]
+    assert waits.waits == [wait]
+
+
+async def test_a_rate_limit_that_never_lifts_ends_the_walk_on_the_sixth_attempt() -> None:
+    """As a `PortUnavailable` naming the attempts, like any page left unanswered.
+
+    Not the `PortRateLimited` it began as: its hint has been waited out already, and
+    every caller of a walk records any port error as a failed run.
+    """
+    library = _FlakyLibrary({1: 10}, _status(429, {"retry-after": "17"}))
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    try:
+        with pytest.raises(PortUnavailable) as caught:
+            _ = [one async for one in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert waits.waits == [17.0, 30.0, 60.0, 120.0, 240.0]
+    assert type(caught.value) is PortUnavailable
+    assert str(caught.value) == (
+        "rate limited, retry_after=17.0 (gave up after 6 attempts over 467s)"
+    )
+
+
+async def test_a_walk_whose_adapter_is_closed_under_it_is_not_retried() -> None:
+    """A closed adapter fails every page with `PortUnavailable`, the type a 502 raises.
+
+    Asking again would hold a shutting-down lane for eight minutes on a failure that no
+    wait can fix.
+    """
+    library = _FlakyLibrary({}, _bad_gateway)
+    waits = _Waits()
+    adapter = _on(library, waits=waits)
+    seen: list[str] = []
+    with pytest.raises(PortUnavailable, match="closed"):
+        async for one in adapter.list_items():
+            seen.append(one.external_id)
+            await adapter.aclose()
+    assert seen == ["movie-0"]
+    assert library.requested == [0]
+    assert waits.waits == []
+
+
+async def test_each_retry_is_logged_with_the_page_the_attempt_and_the_wait() -> None:
+    """A walk that is waiting looks exactly like one that is stuck, unless it says so.
+
+    Every retry rather than the first: the attempt and the wait are what move.
+    """
+    library = _FlakyLibrary({1: 10}, _bad_gateway)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(library, waits=_Waits())
+        try:
+            with pytest.raises(PortUnavailable):
+                _ = [one async for one in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [line.rstrip("\n") for line in lines] == [
+        f"Living Room Emby's listing failed at StartIndex=1 (attempt {attempt} of 6): "
+        f"GET /Users/{{user_id}}/Items returned HTTP 502; asking again in {wait}s"
+        for attempt, wait in [(1, 15), (2, 30), (3, 60), (4, 120), (5, 240)]
+    ]
 
 
 # --- get_item --------------------------------------------------------
@@ -1370,10 +1676,13 @@ async def test_events_opens_a_fresh_connection_per_call_and_keeps_one_ledger() -
         assert connector.attempts == 2
         assert connector.handed_out == [first, second]
         assert adapter.push_health.messages_received == 2
-        # The port's own accessor, which is what a lane supervisor holding
+        # The port's own accessors, which is what a lane supervisor holding
         # a `SourceAdapter` can reach -- one reconnect for two opens, never
         # two, because the first open is not a reconnect.
         assert adapter.push_reconnects == 1
+        # Both `Sessions` frames, though neither mapped to an event: the
+        # supervisor reads this to know a connection delivered at all.
+        assert adapter.push_messages_received == 2
     finally:
         await adapter.aclose()
 
@@ -1700,27 +2009,6 @@ async def test_concurrent_expired_sessions_produce_one_authentication() -> None:
         f"SINGLE-FLIGHT VIOLATED: {server.authentications - before} authentications for 4 "
         f"provably-concurrent expired sessions (max_in_flight={transport.max_in_flight})"
     )
-
-
-async def test_a_rate_limited_walk_surfaces_the_retry_hint() -> None:
-    """A 429 mid-walk reaches the caller as `PortRateLimited` carrying the upstream's hint.
-
-    The retry policy backs off on the hint when there is one.
-    """
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        authenticated = _authenticated(request)
-        if authenticated is not None:
-            return authenticated
-        return httpx.Response(429, headers={"retry-after": "17"})
-
-    adapter = _on(handler)
-    try:
-        with pytest.raises(PortRateLimited) as exc_info:
-            _ = [item async for item in adapter.list_items()]
-    finally:
-        await adapter.aclose()
-    assert exc_info.value.retry_after == 17.0
 
 
 # --- the redacted request path ---------------------------------------------

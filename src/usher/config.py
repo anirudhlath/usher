@@ -264,8 +264,9 @@ class Settings(BaseSettings):
     push_enabled: bool = True
     worker_enabled: bool = True
     # How long a push channel may deliver *nothing at all* before it is torn down and
-    # reconnected.
-    push_stale_after_seconds: float = Field(default=90.0, ge=5.0)
+    # reconnected. An idle library's messages come minutes apart, so this sits well
+    # above the gaps between them; `usher push --probe` listens for this long too.
+    push_stale_after_seconds: float = Field(default=300.0, ge=5.0)
     # How long one `recv` waits before reporting "nothing yet", which is the
     # tick the staleness watchdog runs on. Small enough that a channel
     # crossing the window above is noticed within a tick of doing so.

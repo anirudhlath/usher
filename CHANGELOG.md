@@ -8,6 +8,13 @@ Versioning is `0.x` while the wire contract may still move —
 
 ## [Unreleased]
 
+### Changed
+
+- **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
+  library's push channel routinely went longer than 90 s between messages, and
+  every such gap cost a reconnect. `usher push --probe` listens for one window,
+  so it now takes five minutes.
+
 ### Fixed
 
 - **An embedding model that fails the embedder's norm check now fails every
@@ -21,6 +28,17 @@ Versioning is `0.x` while the wire contract may still move —
   episode number marked the run failed on every sync. Such a value is now
   recorded as unknown and logged, and such a provider id is ignored. A watch
   state whose position is too large to store is skipped.
+- **A brief Emby outage no longer throws away a sync.** One 502, 429 or dropped
+  connection used to fail the whole walk, and the next sync started its item walk
+  again from the first item — on a large library, hours lost to a blip. A page
+  that fails that way is now asked for again, for about eight minutes, before the
+  walk gives up, and a 429's `Retry-After` is honoured up to four minutes a wait.
+- **The push lane no longer gives up on a library that is merely quiet.** On a
+  library where nothing is changing, Emby's only messages are `Sessions` frames
+  minutes apart, and those never reset the lane's failure count, so a few quiet
+  spells — however far apart — marked push unavailable until a restart. Any
+  message now counts as delivery, so only unbroken silence parks the lane: about
+  25 minutes of it at the defaults.
 
 ## [0.1.0] - 2026-09-24
 

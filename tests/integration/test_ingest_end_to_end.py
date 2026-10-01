@@ -12,6 +12,7 @@ from pydantic import SecretStr
 from sqlalchemy import Connection, Engine, event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.fakes.emby_harness import instant_sleep
 from tests.fakes.emby_server import FakeEmbyServer
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.integration.conftest import (
@@ -152,6 +153,7 @@ async def adapter(emby: FakeEmbyServer, source: Source) -> AsyncIterator[EmbyAda
         SourceCredentials(username=emby.username, password=SecretStr(emby.password)),
         client=client,
         page_size=PAGE_SIZE,
+        sleep=instant_sleep,
     )
     yield built
     await built.aclose()

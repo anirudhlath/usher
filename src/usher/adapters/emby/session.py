@@ -112,6 +112,15 @@ def decode_json(response: httpx.Response, path: str) -> dict[str, Any]:
     return _decode_json_body(response, what=shape, detail=shape)
 
 
+class RequestRefused(PortUnavailable):
+    """A 4xx other than 401, 408 and 429: the server understood the request and said no.
+
+    Still a `PortUnavailable` to every caller, as every 4xx always was here. A loop
+    deciding whether to ask again is the one reader that tells it apart, because asking
+    again gets the same answer.
+    """
+
+
 class EmbySession:
     def __init__(
         self,
@@ -368,10 +377,12 @@ class EmbySession:
         op: str,
     ) -> httpx.Response:
         response = await self.request(method, path, params=params, payload=payload, op=op)
-        if response.status_code >= 400:
-            raise PortUnavailable(
-                f"{method} {redact_path(path)} returned HTTP {response.status_code}"
-            )
+        status = response.status_code
+        if status >= 400:
+            message = f"{method} {redact_path(path)} returned HTTP {status}"
+            if status < 500 and status != httpx.codes.REQUEST_TIMEOUT:
+                raise RequestRefused(message)
+            raise PortUnavailable(message)
         return response
 
     async def json_body(
