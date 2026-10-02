@@ -717,8 +717,8 @@ def test_no_route_declares_a_security_scheme_and_the_readme_states_the_count(
     assert len(admin) >= 10, f"the operation walk found {len(admin)} admin operations"
 
     readme = (pathlib.Path(__file__).parents[2] / "README.md").read_text()
-    posture = readme.split("### ⚠️ Nothing here requires authentication", 1)
-    assert len(posture) == 2, "the README has no posture section for this count to agree with"
+    posture = readme.split("\n## Security\n", 1)
+    assert len(posture) == 2, "the README has no Security section for this count to agree with"
 
     stated = "twelve of them are `/admin`"
     assert len(admin) == 12, (

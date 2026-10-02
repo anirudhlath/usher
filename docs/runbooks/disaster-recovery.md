@@ -261,8 +261,8 @@ two restore lines as the sanctioned replacement for a step that no longer works.
 ## 6. Checklist
 
 - [ ] The artifact **and** the `USHER_SECRET_KEY` it was taken under are both in
-      hand. Without the key you restore six of seven precious tables and
-      re-enter every source credential by hand.
+      hand. Without the key every source credential restores unreadable,
+      and you re-enter each one by hand.
 - [ ] `USHER_DATABASE_URL` is exported and names the **new** database. Do not
       rely on `.env`.
 - [ ] `alembic upgrade head`, then `SELECT version_num FROM alembic_version`

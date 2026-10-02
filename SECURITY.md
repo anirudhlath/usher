@@ -40,7 +40,7 @@ records. Reporting one costs you time and tells the maintainer nothing new.
   is no auth module and no `current_user` anywhere in the tree; it is an
   unbuilt feature, not a deferral with a date. Usher is designed to sit behind
   something that authenticates, on a network you control. See the README's
-  posture section.
+  Security section.
 - **A playback ticket redeems to a URL carrying the source's session token.**
   Neither a `<video>` element nor a deep link can send Emby a header, so the
   token rides in the URL. The short-lived ticket keeps that URL out of what a

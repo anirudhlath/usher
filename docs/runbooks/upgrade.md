@@ -73,7 +73,7 @@ named volume at all. Postgres' data is the bind mount
 `./data/postgres:/var/lib/postgresql/data` and the image proxy's cache is
 `./data/images` — both are host directories, so `down`, and even `down -v`,
 leave them where they are. On a deployment that opted into
-`compose.observability.yml` (README, "Telemetry"), the `observability` network
+`compose.observability.yml` ([configuration guide](../guide/configuration.md#telemetry)), the `observability` network
 survives too: it is `external: true` precisely so that a `down` here cannot
 remove a network Grafana, Prometheus, Loki, Tempo and the collector are all on.
 Take that opt-in from `COMPOSE_FILE` in `.env`, so every command in §3 applies

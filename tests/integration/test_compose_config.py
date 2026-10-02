@@ -131,7 +131,7 @@ def test_a_second_stack_is_separated_by_three_env_keys(tmp_path: Path) -> None:
 
 
 def test_a_key_pasted_above_env_example_s_own_line_is_ignored(tmp_path: Path) -> None:
-    """The README's warning: `.env` sets a key twice and the later line, the example's, wins."""
+    """The configuration guide's warning: a key set twice in `.env` loses to the later line."""
     document = _compose_config(
         tmp_path, [*_SECOND_STACK, f"OTEL_EXPORTER_OTLP_ENDPOINT={_ENDPOINT}"], above=True
     )

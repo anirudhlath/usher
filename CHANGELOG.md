@@ -14,6 +14,9 @@ Versioning is `0.x` while the wire contract may still move —
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,
   so it now takes five minutes.
+- **The README is a short introduction and quickstart.** Its how-to material
+  moved to [`docs/guide/`](docs/guide/): configuration, the command line, and
+  building a client.
 
 ### Fixed
 
