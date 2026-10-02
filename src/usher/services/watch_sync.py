@@ -242,7 +242,8 @@ class WatchStateSyncService:
         state = await adapter.get_watch_state(external_id)
         if state is None:
             logger.debug(
-                "watch-history backfill skipped {external_id}: {source} no longer has it",
+                "watch-history backfill skipped {external_id}: {source} no longer has it, "
+                "or reported a state that cannot be stored",
                 external_id=external_id,
                 source=source.name,
             )

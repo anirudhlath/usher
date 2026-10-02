@@ -660,6 +660,21 @@ class SourceAdapterContract:
             await asyncio.wait_for(anext(aiter(events)), timeout=2.0)
             assert harness.adapter.supports_push is True
 
+    async def test_push_messages_received_counts_what_arrived(self, harness: SourceHarness) -> None:
+        """What `PushSupervisor` reads to tell a connection that delivered from one that did not.
+
+        A count of messages rather than events, and the lane's rather than one
+        connection's -- `EmbyAdapter`'s own cases pin both. Here, only that a delivered
+        message moves it on every arm, through the port.
+        """
+        before = harness.adapter.push_messages_received
+        async with harness.adapter.events() as events:
+            await harness.push_event(
+                SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("movie-1",))
+            )
+            await asyncio.wait_for(anext(aiter(events)), timeout=2.0)
+        assert (before, harness.adapter.push_messages_received) == (0, 1)
+
     async def test_supports_push_goes_false_when_the_channel_stops_delivering(
         self, harness: SourceHarness
     ) -> None:

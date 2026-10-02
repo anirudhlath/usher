@@ -121,8 +121,10 @@ class PushApplyService:
                 # adapter with no payload is *more* accurate here, not less.
                 state = await adapter.get_watch_state(external_id)
             if state is None:
-                # The source no longer has it. The reconcile lane's problem,
-                # and raising would cost a reconnect and a gap-closing walk.
+                # The source no longer has it, or reported a state that cannot
+                # be stored (the adapter logs that). The reconcile lane's
+                # problem, and raising would cost a reconnect and a gap-closing
+                # walk.
                 continue
             states.append(state)
         if not states:
@@ -306,6 +308,8 @@ class PushSupervisor:
         failures = 0
         delivering = False
         while failures < self._max_failures:
+            # Read before the connection opens, so `_streak` can tell whether it delivered.
+            received = adapter.push_messages_received
             try:
                 async with adapter.events() as events:
                     # After the connection, deliberately.
@@ -313,9 +317,6 @@ class PushSupervisor:
                     delivering = await self._note(source, adapter, delivering)
                     async for event in events:
                         delivering = await self._note(source, adapter, delivering)
-                        if delivering:
-                            # Reset on delivery, never on connection.
-                            failures = 0
                         outcome = await self._apply(source, adapter, event)
                         if outcome.deferred_to_delta:
                             await self._gap(source, adapter, gate)
@@ -334,7 +335,7 @@ class PushSupervisor:
                 # Shutdown is not a push failure.
                 raise
             except UsherPortError as exc:
-                failures += 1
+                failures = self._streak(failures, adapter, received)
                 delivering = False
                 logger.warning(
                     "{source}'s push channel failed ({failures}/{ceiling}): {error}",
@@ -349,7 +350,7 @@ class PushSupervisor:
                 # treated as a clean shutdown, because the alternative is a
                 # lane that returns silently and a source that stops pushing
                 # until somebody notices by hand.
-                failures += 1
+                failures = self._streak(failures, adapter, received)
                 delivering = False
                 logger.warning(
                     "{source}'s push channel ended without raising ({failures}/{ceiling})",
@@ -366,6 +367,18 @@ class PushSupervisor:
             count=failures,
         )
         await self._set_push_available(source, False)
+
+    @staticmethod
+    def _streak(failures: int, adapter: SourceAdapter, received: int) -> int:
+        """The consecutive-failure count once a connection has ended.
+
+        Reset on delivery, never on connection: a connection that delivered any message
+        -- an event, or a frame that maps to none, which is most of what an idle library
+        sends -- makes this failure the first of a new streak, and one that delivered
+        nothing extends the old one. A buffering proxy connects perfectly every time and
+        delivers nothing, so only the second kind can reach the ceiling.
+        """
+        return 1 if adapter.push_messages_received > received else failures + 1
 
     async def _note(self, source: Source, adapter: SourceAdapter, was: bool) -> bool:
         """Read `supports_push` and persist the transition.

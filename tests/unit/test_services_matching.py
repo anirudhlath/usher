@@ -454,6 +454,24 @@ async def test_a_non_numeric_tmdb_id_does_not_create_an_idless_stub(
     assert await fixture.titles.count_by_state() == dict.fromkeys(EnrichmentState, 0)
 
 
+@pytest.mark.parametrize("provider", ["tmdb", "tvdb"])
+@pytest.mark.parametrize("value", [str(2**31), "-5"])
+async def test_a_provider_id_its_column_cannot_hold_does_not_create_a_stub(
+    fixture: _Fixture, provider: str, value: str
+) -> None:
+    """`titles.tmdb_id` and `tvdb_id` are Postgres `integer`.
+
+    A stub carrying `2**31` fails the whole batch in asyncpg's encoder, as an
+    `OverflowError` no walk catches, and a negative id names no title anywhere.
+    """
+    outcomes = await fixture.service.match(
+        [_item("m1", name="Home Video 2004", year=None, provider_ids={provider: value})]
+    )
+    assert outcomes[0].method is MatchMethod.UNMATCHED
+    assert outcomes[0].title_id is None
+    assert await fixture.titles.count_by_state() == dict.fromkeys(EnrichmentState, 0)
+
+
 async def test_a_malformed_imdb_id_does_not_abort_the_batch(fixture: _Fixture) -> None:
     r"""`Title.imdb_id` is pattern-validated (`^tt\d{7,8}$`).
 

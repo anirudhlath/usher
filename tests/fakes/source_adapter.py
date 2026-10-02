@@ -189,6 +189,11 @@ class FakeSourceAdapter(SourceAdapter):
         return self._push_reconnects
 
     @property
+    def push_messages_received(self) -> int:
+        """Overridden for `push_reconnects`' reason: a fake must be able to disagree."""
+        return self._push_messages
+
+    @property
     def supports_push(self) -> bool:
         """Grounded in messages, spelled out rather than imported.
 

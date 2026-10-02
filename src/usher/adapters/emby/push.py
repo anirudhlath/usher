@@ -32,8 +32,10 @@ SUBSCRIBE_FRAME = '{"MessageType": "SessionsStart", "Data": "0,1000"}'
 # enough that an idle lane is not spinning.
 DEFAULT_POLL_SECONDS = 5.0
 
-# How long a channel may deliver nothing at all before it is treated as dead.
-DEFAULT_STALE_AFTER_SECONDS = 90.0
+# How long a channel may deliver nothing at all before it is treated as dead. Nothing
+# answers a subscribe and an idle library's frames come minutes apart, so this sits
+# well above those gaps: every window that expires costs a reconnect.
+DEFAULT_STALE_AFTER_SECONDS = 300.0
 
 # The `websockets` client logs its own request line at DEBUG --
 # `websockets/client.py:294`, `logger.debug("> GET %s HTTP/1.1", request.path)` -- and

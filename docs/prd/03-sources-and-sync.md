@@ -52,9 +52,12 @@ Emby exposes a WebSocket at `/embywebsocket?api_key=<token>&deviceId=<id>`.
 | `Sessions` (subscribe) | Per-user row-filtered | Liveness only | Nothing. Counted before it is parsed |
 
 Any received frame counts as liveness; on an idle library `Sessions` is the
-only thing keeping `push_available` true. `push_stale_after_seconds` defaults to
-90 s, and `usher.source.push.reconnects` shows a household where that is too
-tight.
+only thing keeping `push_available` true, and those come minutes apart.
+`push_stale_after_seconds` defaults to 300 s: a channel silent that long is
+reconnected, and a run of reconnects that each stay silent marks push
+unavailable ([08](08-operations.md)) — at the defaults, about 25 minutes of
+unbroken silence. `usher.source.push.reconnects` shows a household where the
+window is too tight.
 
 **No admin privileges are required** — a normal user token works. Not required
 is not prevented: `POST /admin/sources` ([07](07-client-api.md)) takes whatever
@@ -94,6 +97,13 @@ flight at a time:
   truncation is not.
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
+- **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
+  refused or dropped connection, a timeout — after 15, 30, 60, 120 and 240 s,
+  about eight minutes. A 429 is asked for again on the same schedule, waiting out
+  its `Retry-After` when that is longer, up to 240 s a time. The sixth failure
+  ends the walk, and its error says how many attempts it made over how long; each
+  page gets its own six. Any other 4xx, an answer that is not a listing, a
+  rejected credential and a closed adapter fail at once.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.
@@ -108,8 +118,9 @@ and the server's version as `server_version`.
 running for the source, otherwise the live answer — a connection *and* at least
 one received message *and* a recent one. The status check opens no socket.
 
-The on-demand answer is `usher push --probe`, which opens a channel on purpose
-and reports **what arrived** rather than that the handshake succeeded.
+The on-demand answer is `usher push --probe`, which opens a channel on purpose,
+listens for one `push_stale_after_seconds` window, and reports **what arrived**
+rather than that the handshake succeeded.
 
 An adapter that has a channel reports `supports_push = false` from the moment
 it opens until the first message arrives.
@@ -173,8 +184,8 @@ with its own cursor.
 
 **The watch lane is resumable.** A run checkpoints its position on
 `sync_runs.position`, and the next attempt reclaims that same row and resumes
-there, so a transient failure costs the page in flight rather than the whole
-walk. 🔶 Until a source has completed one `watch_state` run, its watch lane has
+there, so a failure that outlasts a page's retries costs the page in flight
+rather than the whole walk. 🔶 Until a source has completed one `watch_state` run, its watch lane has
 no cursor and its next run walks the whole library; nothing schedules that
 first walk.
 
@@ -230,6 +241,14 @@ create or attach a `Title` stub. Movies, series **and episodes** are ingested.
 **Source payloads are not stored.** `raw_payloads` caches *provider* responses
 only.
 
+**A number that cannot be stored is recorded as unknown, and logged.** This
+applies to a runtime, width, height, audio channel count, file size, or season
+or episode number that is negative or too large for its column, to a play count
+too large for its column, and to a year outside 0–9999. Such a value is ingested
+as absent instead of failing the walk. A negative play count or watch position
+is recorded as zero. A watch state whose position is too large to store is
+skipped, and logged.
+
 **An episode is attached to its series' `Title`, even when the series arrived
 on an earlier page.** An episode whose series is not yet known is stored
 unmatched and enqueued for a re-match; it is never dropped and never attached
@@ -249,8 +268,9 @@ Ordered by confidence, stopping at the first hit.
    (normalised title match, year within ±1) **and only when unambiguous**. An
    item with no year never matches on name.
 5. A trusted provider id (TMDb, IMDb or TVDb) the catalog does not hold →
-   **create a stub**. A bare name never creates one. A malformed provider id is
-   ignored rather than failing the walk.
+   **create a stub**. A bare name never creates one. A malformed provider id, or
+   a TMDb or TVDB id that is negative or too large to store, is ignored rather
+   than failing the walk.
 6. No confident match → `title_id` stays NULL; the item enters the review
    queue, and a `match` job is enqueued at `BACKFILL` priority.
 

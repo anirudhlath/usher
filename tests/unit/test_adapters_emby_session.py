@@ -25,6 +25,7 @@ from usher.adapters.emby.session import (
     PUBLIC_INFO_PATH,
     SYSTEM_INFO_PATH,
     EmbySession,
+    RequestRefused,
     redact_path,
 )
 from usher.adapters.http import _MinInterval
@@ -1290,3 +1291,39 @@ def test_no_path_this_adapter_issues_begins_with_an_identifier() -> None:
         f"/Users/{REAL_USER}/PlayedItems/abc",
     ):
         assert path.split("/")[1] in {"Users", "System"}
+
+
+# --- a refusal is not an outage ---------------------------------------------
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 409, 499])
+async def test_a_4xx_that_asking_again_cannot_change_is_a_refusal(status: int) -> None:
+    """`RequestRefused`, which every caller still catches as the `PortUnavailable` it was.
+
+    The ladder `adapters/http.py` shares says why: a 4xx that is not a 429 cannot become
+    an answer by being sent again. 401 and 429 never reach this check, and 408 is the one
+    4xx a later attempt can fix -- so 409 sits beside it here, and 408 in the case below.
+    """
+    path = f"/Users/{REAL_USER}/Items"
+    session, client = _session_over(_authenticating(httpx.Response(status)))
+    try:
+        with pytest.raises(RequestRefused) as caught:
+            await session.ok("GET", path, op="list")
+    finally:
+        await client.aclose()
+    assert isinstance(caught.value, PortUnavailable)
+    assert str(caught.value) == f"GET {redact_path(path)} returned HTTP {status}"
+
+
+@pytest.mark.parametrize("status", [408, 500, 502, 503])
+async def test_a_status_a_later_attempt_can_fix_is_unavailable_and_not_a_refusal(
+    status: int,
+) -> None:
+    """A 408 and every 5xx: the request may well succeed as written next time."""
+    session, client = _session_over(_authenticating(httpx.Response(status)))
+    try:
+        with pytest.raises(PortUnavailable) as caught:
+            await session.ok("GET", f"/Users/{REAL_USER}/Items", op="list")
+    finally:
+        await client.aclose()
+    assert not isinstance(caught.value, RequestRefused)

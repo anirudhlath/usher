@@ -1,8 +1,9 @@
 """`EmbyAdapter` -- the `SourceAdapter` implementation for Emby."""
 
+import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 from urllib.parse import quote
@@ -31,6 +32,7 @@ from usher.adapters.emby.session import (
     PUBLIC_INFO_PATH,
     SYSTEM_INFO_PATH,
     EmbySession,
+    RequestRefused,
     decode_json,
     redact_path,
 )
@@ -85,6 +87,11 @@ USER_PATH = "/Users"
 # The walk's dead-man's switch.
 MAX_PAGES = 10_000
 
+# The waits between attempts at one page of a walk: six attempts over about eight
+# minutes. A full walk of a large library takes hours and a failed item walk restarts
+# from the top, so riding out a server restart on the page it hit is the cheap side.
+PAGE_RETRY_WAITS = (15.0, 30.0, 60.0, 120.0, 240.0)
+
 
 def _segment(value: str) -> str:
     """One path segment, percent-encoded.
@@ -122,8 +129,10 @@ class EmbyAdapter(SourceAdapter):
         push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         push_poll_seconds: float = DEFAULT_POLL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._source = source
+        self._sleep = sleep
         self._page_size = page_size
         self._max_pages = max_pages
         # Ownership is tracked, not assumed: `aclose()` closes a client this
@@ -175,6 +184,11 @@ class EmbyAdapter(SourceAdapter):
         One `PushHealth` outlives every channel this adapter opens.
         """
         return self._health.reconnects
+
+    @property
+    def push_messages_received(self) -> int:
+        """Every frame counted before it is parsed, so `Sessions` counts as delivery."""
+        return self._health.messages_received
 
     @property
     def push_health(self) -> PushHealth:
@@ -274,9 +288,7 @@ class EmbyAdapter(SourceAdapter):
             }
             if since is not None:
                 params[since_param] = emby_datetime(since)
-            body = await self._session.json_body(
-                "GET", f"/Users/{_segment(user_id)}/Items", params=params, op="list"
-            )
+            body = await self._page(f"/Users/{_segment(user_id)}/Items", params, start)
             items = body.get("Items")
             if not isinstance(items, list):
                 # Not a truncation: a caller must be able to tell "the
@@ -301,6 +313,51 @@ class EmbyAdapter(SourceAdapter):
             "Emby's item listing never ended; the server appears to ignore StartIndex",
             detail=f"gave up after {self._max_pages} pages at StartIndex={start}",
         )
+
+    async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
+        """One page of a walk, asked for again while its failure is one a wait can fix.
+
+        That is an outage -- a 5xx, a 408, a refused or dropped connection, a timeout -- or
+        a 429, whose wait is its `Retry-After` when that is longer, up to the longest
+        scheduled one. Nothing else is: a refused request and an answer that is not a
+        listing would be the same answer next time, a rejected credential needs an
+        operator, and a closed adapter -- which raises `PortUnavailable` too -- is shutting
+        down. Giving up raises `PortUnavailable` naming the attempts, whatever the last
+        failure was.
+        """
+        attempts = len(PAGE_RETRY_WAITS) + 1
+        first_failure: float | None = None
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self._session.json_body("GET", path, params=params, op="list")
+            except RequestRefused:
+                raise
+            except (PortUnavailable, PortRateLimited) as exc:
+                if self._closed:
+                    raise
+                if first_failure is None:
+                    first_failure = self._clock()
+                if attempt == attempts:
+                    elapsed = self._clock() - first_failure
+                    raise PortUnavailable(
+                        f"{exc} (gave up after {attempt} attempts over {elapsed:.0f}s)"
+                    ) from exc
+                wait = PAGE_RETRY_WAITS[attempt - 1]
+                if isinstance(exc, PortRateLimited) and exc.retry_after is not None:
+                    wait = min(max(wait, exc.retry_after), PAGE_RETRY_WAITS[-1])
+                logger.warning(
+                    "{source}'s listing failed at StartIndex={start} "
+                    "(attempt {attempt} of {attempts}): {error}; asking again in {wait:.0f}s",
+                    source=self._source.name,
+                    start=start,
+                    attempt=attempt,
+                    attempts=attempts,
+                    error=str(exc),
+                    wait=wait,
+                )
+                await self._sleep(wait)
 
     def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
         return self._list_items(since)
@@ -390,7 +447,8 @@ class EmbyAdapter(SourceAdapter):
 
         Reuses `_fetch`, so a 404 is `None` and every other failure raises,
         exactly as `get_item` behaves -- the two must not diverge, or a caller
-        learns to tell a deletion from an outage by which method it called.
+        learns to tell a deletion from an outage by which method it called. A
+        position too large to store is `None` too, logged by `to_watch_state`.
         """
         with _tracer.start_as_current_span("source.get_watch_state") as span:
             span.set_attribute("usher.source", self._source.name)

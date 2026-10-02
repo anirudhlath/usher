@@ -29,16 +29,16 @@ def test_both_implementations_run_the_same_assertions() -> None:
     stays red -- which is the design of this guard rather than friction with
     it.
 
-    Exactly one of the 50 skips on this subclass:
+    Exactly one of the 51 skips on this subclass:
     `test_events_raises_source_not_supported_when_push_is_unavailable`,
     because `EmbyAdapter` has no state in which `events()` raises
     `SourceNotSupported` -- it always has a channel to offer and finds out
-    afterwards whether it delivers. `TestFakeSourceAdapter` runs all 50.
+    afterwards whether it delivers. `TestFakeSourceAdapter` runs all 51.
     """
     from tests.unit.test_source_adapter_contract import TestFakeSourceAdapter
 
     cases = {name for name in dir(SourceAdapterContract) if name.startswith("test_")}
-    assert len(cases) == 50
+    assert len(cases) == 51
     for subclass in (TestEmbyAdapter, TestFakeSourceAdapter):
         overridden = {
             name

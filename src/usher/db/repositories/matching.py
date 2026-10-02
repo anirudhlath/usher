@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.domain.enums import EnrichmentState
 from usher.ports.ingest import NameYearProbe, ProviderRef
 from usher.ports.repository import TitleMatchRepository
+from usher.ports.source import INT32_MAX
 
 # `t.kind = p.kind` is not optional and not a convenience filter: TMDb's movie and
 # series id spaces overlap heavily, so `tmdb_id` alone identifies nothing.
@@ -163,12 +164,14 @@ class PostgresTitleMatchRepository(TitleMatchRepository):
 
 
 def _as_int(value: str) -> int | None:
-    """A source is free to report `ProviderIds.Tmdb: "unknown"`.
+    """A source is free to report `ProviderIds.Tmdb: "unknown"`, or `"3000000000"`.
 
     That is a matching failure, not a pipeline failure -- and casting it in SQL would
-    abort a whole batch of 5,000 items over one bad string.
+    abort a whole batch of 5,000 items over one bad string. So would binding a value
+    past `INT32_MAX` into `integer[]`, a `DBAPIError` no walk catches.
     """
     try:
-        return int(value)
+        number = int(value)
     except ValueError:
         return None
+    return number if 0 <= number <= INT32_MAX else None

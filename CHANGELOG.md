@@ -10,6 +10,10 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Changed
 
+- **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
+  library's push channel routinely went longer than 90 s between messages, and
+  every such gap cost a reconnect. `usher push --probe` listens for one window,
+  so it now takes five minutes.
 - **The README is a short introduction and quickstart.** Its how-to material
   moved to [`docs/guide/`](docs/guide/): configuration, the command line, and
   building a client.
@@ -21,6 +25,23 @@ Versioning is `0.x` while the wire contract may still move —
   let every later vector through unchecked.
 - **A fused search whose query can't be embedded is served as full text**, and
   says so through `requested_mode` ≠ `mode`, instead of answering 500.
+- **An out-of-range number from Emby no longer ends a sync.** A runtime of 111
+  years used to crash the whole walk and leave its run `running`, and so did a
+  TMDb or TVDB id too large for its column. A negative width, runtime, size or
+  episode number marked the run failed on every sync. Such a value is now
+  recorded as unknown and logged, and such a provider id is ignored. A watch
+  state whose position is too large to store is skipped.
+- **A brief Emby outage no longer throws away a sync.** One 502, 429 or dropped
+  connection used to fail the whole walk, and the next sync started its item walk
+  again from the first item — on a large library, hours lost to a blip. A page
+  that fails that way is now asked for again, for about eight minutes, before the
+  walk gives up, and a 429's `Retry-After` is honoured up to four minutes a wait.
+- **The push lane no longer gives up on a library that is merely quiet.** On a
+  library where nothing is changing, Emby's only messages are `Sessions` frames
+  minutes apart, and those never reset the lane's failure count, so a few quiet
+  spells — however far apart — marked push unavailable until a restart. Any
+  message now counts as delivery, so only unbroken silence parks the lane: about
+  25 minutes of it at the defaults.
 
 ## [0.1.0] - 2026-09-24
 
