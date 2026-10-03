@@ -97,7 +97,8 @@ async def test_an_unconfigured_factory_pages_at_the_settings_default() -> None:
     try:
         assert isinstance(adapter, EmbyAdapter)
         assert adapter._page_size == Settings.model_fields["source_page_size"].default == 1000, (
-            "an unconfigured factory pages differently from USHER_SOURCE_PAGE_SIZE's default"
+            "an unconfigured factory pages differently from USHER_SOURCE_PAGE_SIZE's default, "
+            "or that default is no longer 1,000"
         )
     finally:
         await adapter.aclose()
