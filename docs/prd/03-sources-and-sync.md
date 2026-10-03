@@ -93,9 +93,12 @@ recovers them.
 flight at a time:
 
 - **Items are walked in ascending creation order**, so items added during a
-  walk land at the end. A deletion mid-walk can shift one item out of view,
-  which the next full reconcile covers. Duplicates are permitted; silent
-  truncation is not.
+  walk land at the end. Each page after the first re-reads the last 50 items of
+  the page before (half the page, if it held fewer than 100), so a deletion
+  mid-walk shifts nothing out of view unless more items than that vanish between
+  two pages; the walk then logs a WARNING naming the page, and the next full
+  reconcile covers what it missed. Duplicates are permitted; silent truncation
+  is not.
 - **The delta cursor is widened by one second.**
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
 - **A page that fails as unreachable is asked for again** — a 5xx, a 408, a

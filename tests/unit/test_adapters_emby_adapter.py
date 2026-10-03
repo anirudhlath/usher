@@ -3,7 +3,7 @@
 import asyncio
 import io
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -78,6 +78,31 @@ def _movie(index: int) -> SourceItem:
     )
 
 
+def _numbered(count: int) -> list[SourceItem]:
+    """`count` movies whose listing order is their number: the names are zero-padded."""
+    return [
+        replace(
+            _movie(0), external_id=f"movie-{index:03d}", name=f"Movie {index:03d}", provider_ids={}
+        )
+        for index in range(count)
+    ]
+
+
+def _deleting(
+    server: FakeEmbyServer, external_ids: Sequence[str]
+) -> Callable[[httpx.Request], httpx.Response]:
+    """`server`, with `external_ids` deleted once its first listing has been served."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items") and server.listings == 1:
+            for external_id in external_ids:
+                server.remove_item(external_id)
+        return response
+
+    return handle
+
+
 def _adapter(
     server: FakeEmbyServer, *, page_size: int = 2, max_pages: int = MAX_PAGES
 ) -> EmbyAdapter:
@@ -136,19 +161,22 @@ def _authenticated(request: httpx.Request) -> httpx.Response | None:
 
 
 async def test_the_walk_pages_until_the_library_is_exhausted() -> None:
-    server = FakeEmbyServer(page_size=2)
+    """5 items over pages of 4 is two requests.
+
+    The second reaches back two items, comes back short and at the total, and ends
+    the walk rather than paying a third request for an empty page.
+    """
+    server = FakeEmbyServer()
     for index in range(5):
         server.add_item(_movie(index), T0)
-    adapter = _adapter(server, page_size=2)
+    adapter = _adapter(server, page_size=4)
     try:
         seen = [item.external_id async for item in adapter.list_items()]
     finally:
         await adapter.aclose()
     assert sorted(seen) == [f"movie-{index}" for index in range(5)]
     listings = [entry for entry in server.requests if entry.endswith("/Items")]
-    # 5 items over pages of 2 is three requests: TotalRecordCount stops the
-    # walk after the third rather than paying a fourth for an empty page.
-    assert len(listings) == 3
+    assert len(listings) == 2
 
 
 async def test_only_the_first_page_asks_for_the_total() -> None:
@@ -166,7 +194,7 @@ async def test_only_the_first_page_asks_for_the_total() -> None:
         captured.append(request)
         return server.handle(request)
 
-    adapter = _on(spy, page_size=2)
+    adapter = _on(spy, page_size=4)
     try:
         seen = [item.external_id async for item in adapter.list_items()]
     finally:
@@ -177,9 +205,158 @@ async def test_only_the_first_page_asks_for_the_total() -> None:
         if request.url.path.endswith("/Items")
     ]
     assert sorted(seen) == [f"movie-{index}" for index in range(5)]
-    assert len(flags) == 3, "the walk did not end on the page that reached the first page's total"
+    assert len(flags) == 2, "the walk did not end on the page that reached the first page's total"
     assert flags[0] == "true"
     assert set(flags[1:]) == {"false"}
+
+
+async def test_a_deletion_behind_the_cursor_skips_nothing() -> None:
+    """Deleting three of the first page's items shifts every later one left by three.
+
+    The next page reaches back `PAGE_OVERLAP` items, so the three it would have
+    skipped are still in it; the entries it re-reads are dropped by id, and a shift
+    inside the overlap is not reported.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(250)
+    for item in library:
+        server.add_item(item, T0)
+    gone = ["movie-010", "movie-020", "movie-030"]
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(_deleting(server, gone), page_size=100)
+        try:
+            seen = [item.external_id async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    survivors = {item.external_id for item in library} - set(gone)
+    assert survivors - set(seen) == set(), "an item shifted behind the cursor was skipped"
+    assert len(seen) == len(set(seen)), "an entry re-read by the overlap was yielded twice"
+    assert lines == []
+
+
+async def test_a_shift_past_the_overlap_is_logged_with_the_page_it_hit() -> None:
+    """Sixty deletions behind the cursor are more than the overlap can absorb.
+
+    Ten items are skipped, which nothing inside the walk can repair; it says so,
+    names the page, and carries on.
+    """
+    server = FakeEmbyServer()
+    for item in _numbered(250):
+        server.add_item(item, T0)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(
+            _deleting(server, [f"movie-{index:03d}" for index in range(60)]), page_size=100
+        )
+        try:
+            _ = [item async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing shifted by at least 50 items before StartIndex=50; "
+        "an item shifted further was not read, and the next full walk reads it"
+    ]
+
+
+async def test_a_shift_past_a_clamped_overlap_names_the_clamped_reach_back() -> None:
+    """Pages of 40 reach back 20, so the WARNING says 20, not `PAGE_OVERLAP`.
+
+    Thirty deletions move the page at `StartIndex=20` past `movie-039`; the ten items
+    after it are skipped.
+    """
+    server = FakeEmbyServer()
+    for item in _numbered(200):
+        server.add_item(item, T0)
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(
+            _deleting(server, [f"movie-{index:03d}" for index in range(30)]), page_size=40
+        )
+        try:
+            _ = [item async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    assert [line.rstrip("\n") for line in lines] == [
+        "Living Room Emby's listing shifted by at least 20 items before StartIndex=20; "
+        "an item shifted further was not read, and the next full walk reads it"
+    ]
+
+
+async def test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift() -> None:
+    """The first page's last item is deleted, so the next page lacks its id.
+
+    That page still re-reads the rest of its reach-back, so nothing moved past it:
+    nothing is skipped and nothing is reported.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(250)
+    for item in library:
+        server.add_item(item, T0)
+    gone = ["movie-099"]
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(_deleting(server, gone), page_size=100)
+        try:
+            seen = [item.external_id async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    survivors = {item.external_id for item in library} - set(gone)
+    assert survivors - set(seen) == set(), "an item behind the cursor was skipped"
+    assert len(seen) == len(set(seen)), "an entry re-read by the overlap was yielded twice"
+    assert lines == []
+
+
+async def test_a_limit_capped_below_the_overlap_still_advances() -> None:
+    """A server serving 40 a page, against an overlap of 50, is still read to its end.
+
+    An unclamped reach-back re-reads all 40 and moves the cursor backwards, so the
+    walk runs out its page bound instead of the library.
+    """
+    server = FakeEmbyServer()
+    server.max_limit = 40
+    library = _numbered(200)
+    for item in library:
+        server.add_item(item, T0)
+    adapter = _adapter(server, page_size=100, max_pages=30)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sorted(set(seen)) == [item.external_id for item in library]
+
+
+async def test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail() -> None:
+    """Two deletions make the first page's total of six unreachable.
+
+    The page that re-reads the tail brings nothing new and ends the walk. Without
+    that rule the reach-back halves its way down to an empty page, one deep request
+    at a time.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(6)
+    for item in library:
+        server.add_item(item, T0)
+    adapter = _on(_deleting(server, ["movie-000", "movie-001"]), page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    listings = [entry for entry in server.requests if entry.endswith("/Items")]
+    assert set(seen) == {item.external_id for item in library}
+    assert len(listings) == 3
 
 
 async def test_a_server_that_caps_the_limit_is_still_walked_to_its_end() -> None:

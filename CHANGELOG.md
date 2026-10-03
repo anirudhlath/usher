@@ -25,6 +25,10 @@ Versioning is `0.x` while the wire contract may still move —
 
 ### Fixed
 
+- **Items deleted from the source mid-walk no longer hide others from the
+  walk**, unless more of them vanish between two pages than a page re-reads.
+  Each page re-reads the end of the page before, so a full walk no longer marks
+  a file that is still there unavailable.
 - **An embedding model that fails the embedder's norm check now fails every
   batch, not only the first.** The first batch used to park one `index` job and
   let every later vector through unchecked.

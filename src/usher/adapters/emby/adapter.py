@@ -306,6 +306,15 @@ class EmbyAdapter(SourceAdapter):
                     detail=f"StartIndex={window.start}",
                 )
             page = window.receive(entries, body.get("TotalRecordCount"))
+            if page.shifted:
+                logger.warning(
+                    "{source}'s listing shifted by at least {overlap} items before "
+                    "StartIndex={start}; an item shifted further was not read, and the next "
+                    "full walk reads it",
+                    source=self._source.name,
+                    overlap=window.overlap,
+                    start=window.start,
+                )
             for payload in page.fresh:
                 yield payload
             if page.ended:
