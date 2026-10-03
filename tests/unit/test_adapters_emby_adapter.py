@@ -452,7 +452,7 @@ async def test_the_default_page_size_is_what_goes_out_as_the_limit() -> None:
         _ = [item async for item in adapter.list_items()]
     finally:
         await adapter.aclose()
-    assert captured[0].url.params["Limit"] == "200"
+    assert captured[0].url.params["Limit"] == "1000"
 
 
 async def test_a_page_entry_that_is_not_an_object_is_skipped_not_fatal() -> None:

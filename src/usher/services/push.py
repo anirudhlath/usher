@@ -40,8 +40,8 @@ class PushOutcome:
 
     `deferred_to_delta` is the one field the supervisor branches on: an
     event naming more items than the lane will resolve one at a time is
-    answered by a delta walk instead, which is one paged request per 200
-    items rather than one request per item.
+    answered by a delta walk instead, which is one paged request per
+    `USHER_SOURCE_PAGE_SIZE` items rather than one request per item.
     """
 
     items_ingested: int = 0

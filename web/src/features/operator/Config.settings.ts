@@ -168,7 +168,7 @@ export const CONFIG: readonly SettingRow[] = [
   {
     key: 'USHER_SOURCE_PAGE_SIZE',
     group: 'sources',
-    def: '200',
+    def: '1000',
     about: 'Items per page when walking a source’s library.',
     secret: false,
     measured: false,

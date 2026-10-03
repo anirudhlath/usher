@@ -29,7 +29,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
     def __init__(
         self,
         *,
-        page_size: int = 200,
+        page_size: int = 1000,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
         gates: SourceGateRegistry | None = None,

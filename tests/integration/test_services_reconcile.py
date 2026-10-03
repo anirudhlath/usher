@@ -36,10 +36,9 @@ from usher.services.reconcile import (
 )
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
-# The ceiling case's two numbers, named so the arithmetic below reads. 200 is
-# also `USHER_SOURCE_PAGE_SIZE`'s default, which is a coincidence this case
-# does not rely on: the ceiling is counted in *items*, deliberately, because
-# `MAX_PAGES` already means something else.
+# The ceiling case's two numbers, named so the arithmetic below reads. The
+# ceiling is counted in *items*, deliberately, because `MAX_PAGES` already
+# means something else.
 CEILING = 200
 PAST_THE_CEILING = 500
 

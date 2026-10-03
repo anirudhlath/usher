@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     # exist yet. Deliberately named `source_*`, not `emby_*` -- config.py is
     # not an adapter, and a setting named for one media server would be the
     # first source-specific concept to escape `adapters/`.
-    source_page_size: int = Field(default=200, ge=1, le=1000)
+    source_page_size: int = Field(default=1000, ge=1, le=1000)
     source_timeout_seconds: float = Field(default=30.0, gt=0)
     # How long a rejected credential is remembered before another
     # authentication is attempted. Without this, a source configured with a

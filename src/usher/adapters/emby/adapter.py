@@ -120,7 +120,7 @@ class EmbyAdapter(SourceAdapter):
         credentials: SourceCredentials,
         *,
         client: httpx.AsyncClient | None = None,
-        page_size: int = 200,
+        page_size: int = 1000,
         max_pages: int = MAX_PAGES,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,

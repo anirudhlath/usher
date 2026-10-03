@@ -88,7 +88,8 @@ recovers them.
 
 ### Walking the library
 
-`list_items` and `watch_state` page over the source's own listing, one page in
+`list_items` and `watch_state` page over the source's own listing, in pages of
+`USHER_SOURCE_PAGE_SIZE` items (default **1,000**, at most 1,000), one page in
 flight at a time:
 
 - **Items are walked in ascending creation order**, so items added during a
