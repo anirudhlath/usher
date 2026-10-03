@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13, asyncio, httpx (`MockTransport` fakes), SQLAlchemy 2 async + asyncpg, Alembic, pydantic domain models, OpenTelemetry metrics, pytest (+ testcontainers `pgvector/pgvector:pg17`), the React console's settings catalogue (`web/`).
 
-**Spec:** `docs/specs/2026-10-01-fast-first-sync-design.md`. Read it beside this plan; this plan argues from it and departs from its letter in sixteen places, each called out where it happens. Four are in Phase 1: a short page judged against the longest page served in Task 2, the overlap clamp and the drained-tail rule in Task 3, and an already-`FAILED` first walk keeping its own error in Task 7. Twelve are in Phase 2, listed at its head.
+**Spec:** `docs/specs/2026-10-01-fast-first-sync-design.md`. Read it beside this plan; this plan argues from it and departs from its letter in seventeen places, each called out where it happens. Five are in Phase 1: a short page judged against the longest page served in Task 2; the overlap clamp, the drained-tail rule and a shift judged against the whole previous page in Task 3; and an already-`FAILED` first walk keeping its own error in Task 7. Twelve are in Phase 2, listed at its head.
 
 ## Global Constraints
 
@@ -677,14 +677,15 @@ git commit -m "emby: ask for a listing's total once, and end a walk on a short p
 
 ### Task 3: Overlapping pages, deduplicated, and a walk that ends on its drained tail
 
-Spec §1.3. After the first page, a page is requested at `StartIndex = max(0, cursor − overlap)`. Entries the previous page carried are dropped by `Id`. When the previous page's last id is missing from an overlapping page, the walk logs a WARNING naming the `StartIndex` and carries on.
+Spec §1.3. After the first page, a page is requested at `StartIndex = max(0, cursor − overlap)`. Entries the previous page carried are dropped by `Id`. When a page holds none of the previous page's ids although its request reached back for one, the walk logs a WARNING naming the `StartIndex` and carries on.
 
-**Two departures from the spec's letter**, both load-bearing; each has a case below that fails without it:
+**Three departures from the spec's letter**; each has a case below that fails without it:
 
-- **The overlap is clamped to half the page before it**: `overlap = min(PAGE_OVERLAP, previous_page_len // 2)`. A fixed 50 re-reads a whole page whenever a page is 50 items or fewer (a server capping `Limit`, or the small pages this repository's fakes run). The cursor then moves backwards, and the walk pages out `MAX_PAGES` instead of the library.
+- **The overlap is clamped to half the page before it**: `overlap = min(PAGE_OVERLAP, previous_page_len // 2)`. A fixed 50 re-reads a whole page whenever a page is 50 items or fewer (a server capping `Limit`, or the small pages this repository's fakes run). The cursor then stands still or moves backwards, and the walk pages out `MAX_PAGES` instead of the library.
 - **A page shorter than the longest served that brought nothing new ends the walk.** Deletions mid-walk leave the cursor short of the first page's total for good, so §1.2's rule can never fire. Without this rule the clamped overlap halves its way down to an empty page, costing several more deep requests; with a fixed overlap the walk would loop until `MAX_PAGES`. "Longest served" rather than `limit`, so a capped server's full pages never read as a tail.
+- **A page has shifted when it holds none of the previous page's ids**, provided its request reached back for one, and not when it lacks the previous page's last id (made in review). The last item can itself leave the listing between two requests, and items listed ahead of the reach-back can push it out of view; neither skips anything, and a WARNING that cries wolf is one an operator learns to ignore. With no id to reach back for — no reach-back, or one over entries without an id — nothing says the page shifted.
 
-The WARNING says "at least": a shift of exactly the overlap also loses the last id, though it skips nothing, and nothing inside the walk can tell the two apart.
+The WARNING says "at least": a shift of exactly the overlap also leaves none of the previous page's ids in view, though it skips nothing, and nothing inside the walk can tell the two apart.
 
 **Files:**
 - Modify: `src/usher/adapters/emby/paging.py`
@@ -701,8 +702,8 @@ The WARNING says "at least": a shift of exactly the overlap also loses the last 
 Append to `tests/unit/test_adapters_emby_paging.py`, and add `PAGE_OVERLAP` to its import:
 
 ```python
-def _numbered(count: int, *, first: int = 0) -> list[Any]:
-    return _entries(*(f"m{index:04d}" for index in range(first, first + count)))
+def _numbered(count: int) -> list[Any]:
+    return _entries(*(f"m{index:04d}" for index in range(count)))
 
 
 def test_a_page_after_the_first_reaches_back_by_the_overlap() -> None:
@@ -740,7 +741,7 @@ def test_an_entry_with_no_id_is_always_yielded() -> None:
     assert page.fresh[0] == {"Name": "no id"}
 
 
-def test_an_overlapping_page_missing_the_last_id_has_shifted() -> None:
+def test_an_overlapping_page_holding_none_of_the_last_page_has_shifted() -> None:
     window = OffsetWindow(limit=4, start=0)
     window.receive(_entries("a", "b", "c", "d"), 10)
     window.advance()
@@ -754,12 +755,57 @@ def test_an_overlapping_page_holding_the_last_id_has_not_shifted() -> None:
     assert not window.receive(_entries("d", "e", "f", "g"), 0).shifted
 
 
+def test_an_overlapping_page_missing_only_the_last_id_has_not_shifted() -> None:
+    """The last item may simply have left; holding `c`, the page moved past nothing."""
+    window = OffsetWindow(limit=4, start=0)
+    window.receive(_entries("a", "b", "c", "d"), 10)
+    window.advance()
+    assert not window.receive(_entries("c", "e", "f", "g"), 0).shifted
+
+
 def test_a_request_that_reached_back_nothing_cannot_have_shifted() -> None:
     window = OffsetWindow(limit=4, start=0)
     window.receive(_entries("a"), 10)
     window.advance()
     assert window.overlap == 0, "the premise: a one-entry page reaches back nothing"
     assert not window.receive(_entries("x"), 0).shifted
+
+
+def test_a_page_after_one_carrying_no_ids_has_not_shifted() -> None:
+    """With no id from the page before to look for, nothing says the listing moved."""
+    window = OffsetWindow(limit=4, start=0)
+    window.receive([{"Name": "w"}, {"Name": "x"}, {"Name": "y"}, {"Name": "z"}], 10)
+    window.advance()
+    assert window.overlap == 2, "the premise: the request reached back"
+    assert not window.receive(_entries("e", "f", "g", "h"), 0).shifted
+
+
+def test_a_reach_back_over_entries_without_ids_cannot_have_shifted() -> None:
+    """The ids that judge a shift are the ones the request reached back for, not the page's."""
+    window = OffsetWindow(limit=4, start=0)
+    window.receive([*_entries("a", "b"), {"Name": "y"}, {"Name": "z"}], 10)
+    window.advance()
+    assert window.overlap == 2, "the premise: the request reached back over the two without ids"
+    assert not window.receive([{"Name": "y"}, {"Name": "z"}, *_entries("e", "f")], 0).shifted
+
+
+def test_one_id_in_a_reach_back_is_enough_to_judge_a_shift() -> None:
+    """`d` is the one id the request reached back for; deleting `a`, `b` and `d` skips `e`."""
+    window = OffsetWindow(limit=4, start=0)
+    window.receive([*_entries("a", "b", "d"), {"Name": "y"}], 10)
+    assert window.advance() == 2, "the premise: it reached back over d and one without an id"
+    assert window.receive(_entries("f", "g", "h", "i"), 0).shifted
+
+
+def test_items_inserted_ahead_of_the_reach_back_are_not_a_shift() -> None:
+    """Four items listed before `a` push `c` and `d` out of view, and the page re-reads.
+
+    Holding `a` and `b`, the page skipped nothing: every item not yet read lists after them.
+    """
+    window = OffsetWindow(limit=4, start=0)
+    window.receive(_entries("a", "b", "c", "d"), 10)
+    assert window.advance() == 2, "the premise: the request reached back for c and d"
+    assert not window.receive(_entries("y", "z", "a", "b"), 0).shifted
 
 
 def test_a_short_page_that_brought_nothing_new_ends_the_walk() -> None:
@@ -790,9 +836,26 @@ def test_a_capped_page_that_brought_nothing_new_does_not_end_the_walk() -> None:
     assert page.fresh == [] and not page.ended
 ```
 
-Two of Task 2's window cases feed pages only a walk without a reach-back is served, and fail under this task's window. Replace them in place, names and intents kept:
+Three of Task 2's window cases feed pages only a walk without a reach-back is served, and fail under this task's window or no longer describe it. Replace them in place, intents kept; the fourth, whose name stopped being true, is renamed and its body kept:
 
 ```python
+def test_a_full_page_past_the_total_does_not_end_the_walk() -> None:
+    """A library that grew during the walk keeps serving full pages past its old total."""
+    window = OffsetWindow(limit=2, start=0)
+    assert not window.receive(_entries("a", "b"), 2).ended
+    assert window.advance() == 1
+    assert not window.receive(_entries("b", "c"), 0).ended
+    assert window.advance() == 2
+    assert window.receive(_entries("c"), 0).ended
+
+
+def test_a_walk_with_no_total_does_not_end_on_a_short_page_alone() -> None:
+    window = OffsetWindow(limit=4, start=0)
+    assert not window.receive(_entries("a"), None).ended
+    window.advance()
+    assert window.receive([], None).ended
+
+
 def test_a_short_page_at_the_total_ends_the_walk() -> None:
     window = OffsetWindow(limit=4, start=0)
     assert not window.receive(_entries("a", "b", "c", "d"), 5).ended
@@ -853,7 +916,10 @@ class OffsetWindow:
 
     Each page after the first reaches back `PAGE_OVERLAP` items, clamped to half
     the page before it so that a short page still advances. An entry the
-    previous page carried is dropped by its `Id`.
+    previous page carried is dropped by its `Id`. A page whose request reached
+    back for an id, yet which holds none of the previous page's, has shifted by
+    at least the reach-back. The previous page's last id alone would not say so:
+    that item may have left.
     """
 
     def __init__(self, *, limit: int, start: int) -> None:
@@ -865,7 +931,7 @@ class OffsetWindow:
         self._served = 0
         self._longest = 0
         self._previous: frozenset[str] = frozenset()
-        self._last: str | None = None
+        self._served_ids: list[str | None] = []
         self._first = True
 
     def receive(self, entries: list[Any], total: object) -> Page:
@@ -877,7 +943,13 @@ class OffsetWindow:
             if isinstance(entry, dict)
             and (external_id is None or external_id not in self._previous)
         ]
-        shifted = self.overlap > 0 and self._last is not None and self._last not in ids
+        # With no id to reach back for, because the request reached back nothing or
+        # over entries without one, nothing says the page moved. Judged against the
+        # whole previous page, not the reach-back alone: items listed ahead of it can
+        # push the reach-back out of a page that skipped nothing.
+        reach = self._served_ids[len(self._served_ids) - self.overlap :]
+        reached_for_an_id = any(external_id is not None for external_id in reach)
+        shifted = reached_for_an_id and self._previous.isdisjoint(ids)
         # `> 0`, not `>= 0`: 0 is what a listing not asked to count reports. Not a
         # `bool` either, because JSON `true` is an `int` to Python.
         if self._first and isinstance(total, int) and not isinstance(total, bool) and total > 0:
@@ -893,7 +965,7 @@ class OffsetWindow:
         self._longest = max(self._longest, len(entries))
         named = [external_id for external_id in ids if external_id is not None]
         self._previous = frozenset(named)
-        self._last = named[-1] if named else None
+        self._served_ids = ids
         self._first = False
         ended = not entries or (short and reached) or drained
         return Page(fresh=fresh, ended=ended, shifted=shifted)
@@ -1035,6 +1107,33 @@ async def test_a_shift_past_the_overlap_is_logged_with_the_page_it_hit() -> None
     ]
 
 
+async def test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift() -> None:
+    """The first page's last item is deleted, so the next page lacks its id.
+
+    That page still re-reads the rest of its reach-back, so nothing moved past it:
+    nothing is skipped and nothing is reported.
+    """
+    server = FakeEmbyServer()
+    library = _numbered(250)
+    for item in library:
+        server.add_item(item, T0)
+    gone = ["movie-099"]
+    lines: list[str] = []
+    handle = logger.add(lines.append, level="WARNING", format="{message}")
+    try:
+        adapter = _on(_deleting(server, gone), page_size=100)
+        try:
+            seen = [item.external_id async for item in adapter.list_items()]
+        finally:
+            await adapter.aclose()
+    finally:
+        logger.remove(handle)
+    survivors = {item.external_id for item in library} - set(gone)
+    assert survivors - set(seen) == set(), "an item behind the cursor was skipped"
+    assert len(seen) == len(set(seen)), "an entry re-read by the overlap was yielded twice"
+    assert lines == []
+
+
 async def test_a_limit_capped_below_the_overlap_still_advances() -> None:
     """A server serving 40 a page, against an overlap of 50, is still read to its end.
 
@@ -1075,7 +1174,7 @@ async def test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail() 
     assert len(listings) == 3
 ```
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py -k "exhausted or deletion or shift_past or capped_below or short_of_its_total"`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_adapter.py -k "exhausted or deletion or shift_past or last_item or capped_below or short_of_its_total"`
 Expected: FAIL — `_walk` does not log yet, so `test_a_shift_past_the_overlap_is_logged_with_the_page_it_hit` fails on `[] == [...]`. The others already pass against Step 2's window; Step 6 plants prove each one can fail.
 
 - [ ] **Step 4: Log the shift**
@@ -1108,8 +1207,13 @@ Expected: PASS. The contract runs at a page size of two, where every page reache
 3. `drained = False`. Expect `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail` (`4 == 3`) and `test_a_short_page_that_brought_nothing_new_ends_the_walk` to fail.
 4. `short = len(entries) < self.limit`. Expect `test_a_capped_page_that_brought_nothing_new_does_not_end_the_walk`, `test_a_capped_walk_past_a_stale_total_reads_what_was_added` and `test_a_capped_server_on_a_growing_library_is_read_to_its_end` to fail.
 5. `fresh` keeping every dict (no `not in self._previous` test). Expect `test_a_deletion_behind_the_cursor_skips_nothing` ("yielded twice") and `test_an_entry_the_previous_page_carried_is_not_yielded_again` to fail.
-6. `shifted = self._last is not None and self._last not in ids` (no `overlap > 0`). Expect `test_a_request_that_reached_back_nothing_cannot_have_shifted` to fail.
-7. Every new or rewritten case that no plant above names is seen to fail for its own reason: show its RED against Task 2's window, or plant for it.
+6. `shifted = reached_for_an_id and reach[-1] not in ids` (the last id only, the spec's letter). Expect `test_an_overlapping_page_missing_only_the_last_id_has_not_shifted`, `test_items_inserted_ahead_of_the_reach_back_are_not_a_shift` and `test_the_last_item_of_a_page_leaving_the_listing_is_not_a_shift` (`lines == []`) to fail.
+7. `shifted = reached_for_an_id and {e for e in reach if e is not None}.isdisjoint(ids)` (the reach-back alone). Expect `test_items_inserted_ahead_of_the_reach_back_are_not_a_shift` to fail.
+8. `shifted = self._previous.isdisjoint(ids)` (no `reached_for_an_id`). Expect `test_a_request_that_reached_back_nothing_cannot_have_shifted`, `test_a_page_after_one_carrying_no_ids_has_not_shifted` and `test_a_reach_back_over_entries_without_ids_cannot_have_shifted` to fail, among others.
+9. `reach = self._served_ids` (the whole previous page, reach-back or not). Expect `test_a_request_that_reached_back_nothing_cannot_have_shifted` and `test_a_reach_back_over_entries_without_ids_cannot_have_shifted` to fail.
+10. `reach = self._served_ids if self.overlap else []` (every entry of the previous page once it reached back). Expect `test_a_reach_back_over_entries_without_ids_cannot_have_shifted` to fail.
+11. `reached_for_an_id = bool(reach) and all(external_id is not None for external_id in reach)`, and separately `reached_for_an_id = bool(reach) and reach[-1] is not None`. Expect `test_one_id_in_a_reach_back_is_enough_to_judge_a_shift` to fail under each.
+12. Every new or rewritten case that no plant above names is seen to fail for its own reason: show its RED against Task 2's window, or plant for it.
 
 - [ ] **Step 7: Say it in the PRD, the changelog and the rules**
 
@@ -1118,16 +1222,18 @@ Expected: PASS. The contract runs at a page size of two, where every page reache
 ```markdown
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of
-  the page before, so a deletion mid-walk shifts nothing out of view unless more
-  than 50 items vanish between two pages; the walk then logs a WARNING naming
-  the page, and the next full reconcile covers what it missed. Duplicates are
-  permitted; silent truncation is not.
+  the page before (half the page, if it held fewer than 100), so a deletion
+  mid-walk shifts nothing out of view unless more items than that vanish between
+  two pages; the walk then logs a WARNING naming the page, and the next full
+  reconcile covers what it missed. Duplicates are permitted; silent truncation
+  is not.
 ```
 
 `CHANGELOG.md`, under `### Fixed`:
 
 ```markdown
-- **An item deleted from the source mid-walk no longer hides the one after it.**
+- **Items deleted from the source mid-walk no longer hide others from the
+  walk**, unless more of them vanish between two pages than a page re-reads.
   Each page re-reads the end of the page before, so a full walk no longer marks
   a file that is still there unavailable.
 ```
@@ -1136,9 +1242,8 @@ Expected: PASS. The contract runs at a page size of two, where every page reache
 
 ```markdown
 - **A page's reach-back is clamped to half the page before it**, and a walk ends
-  on a short page that brought nothing new (`paging.OffsetWindow`). A fixed
-  `PAGE_OVERLAP` re-reads a whole page of 50 or fewer and moves the cursor
-  backwards; deletions leave the first page's total unreachable for good.
+  on a short page that brought nothing new (`paging.OffsetWindow`): a fixed
+  `PAGE_OVERLAP` stalls on pages of 50 or fewer, and deletions strand the total.
 ```
 
 Then, to stay near the file's 200-line target, cut the last sentence of the "Gap-closing walks" paragraph (`That walk resumes from sync_runs.position; the guard still reads one cursor.`) — Task 6 rewrites that paragraph anyway.
@@ -2476,7 +2581,7 @@ In `docs/plans/progress.md`, this plan's table: Tasks 1–8 → `✅ landed (PR 
 git push -u origin feat/fast-first-sync
 ```
 
-Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the four departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
+Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the five departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
 
 ```
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
