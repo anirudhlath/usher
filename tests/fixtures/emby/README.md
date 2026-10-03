@@ -107,6 +107,23 @@ with `IsEmpty: true`, and a `UserDataChanged` for a **series** entry — which
 is where `UnplayedItemCount` would plausibly appear, and the reason it was
 removed rather than kept with a note.
 
+## Listing protocol (fast first sync)
+
+Recorded 2026-10-01 against a 1.16M-item library with a read-only script
+outside the repository, which printed counts only. No payload was kept,
+because these rows are behaviour rather than shape: every item a listing
+returns has the shape of the item fixtures above.
+
+| Behaviour | What the server does | What depends on it |
+|---|---|---|
+| `EnableTotalRecordCount=false` | `TotalRecordCount` is still present, as **0**, at the head of the listing and a million items deep | `OffsetWindow` reads the total from a walk's first page only; `FakeEmbyServer` renders 0 |
+| `EnableTotalRecordCount` omitted | counted, exactly as `true` | the fake counts when the flag is absent |
+
+No source has been seen to cap `Limit`. `FakeEmbyServer.max_limit` exists for
+one that does, and so do two of the conditions on a short page that ends a
+walk: it is shorter than the longest page served before it, and the cursor has
+reached the first page's total.
+
 ## Regenerating
 
 Never paste a capture in. `scripts/capture_emby_fixture.py` replaces every

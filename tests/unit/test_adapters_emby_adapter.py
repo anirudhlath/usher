@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -77,12 +78,15 @@ def _movie(index: int) -> SourceItem:
     )
 
 
-def _adapter(server: FakeEmbyServer, *, page_size: int = 2) -> EmbyAdapter:
+def _adapter(
+    server: FakeEmbyServer, *, page_size: int = 2, max_pages: int = MAX_PAGES
+) -> EmbyAdapter:
     return EmbyAdapter(
         SOURCE,
         CREDENTIALS,
         client=httpx.AsyncClient(transport=server.transport(), base_url=SOURCE.base_url),
         page_size=page_size,
+        max_pages=max_pages,
     )
 
 
@@ -106,19 +110,19 @@ def _on(
     *,
     max_pages: int = MAX_PAGES,
     waits: _Waits | None = None,
+    page_size: int | None = None,
 ) -> EmbyAdapter:
-    """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce."""
+    """An adapter over a hand-written handler, for shapes `FakeEmbyServer` will not produce.
+
+    `page_size` reaches the constructor only when a case names one.
+    """
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=SOURCE.base_url)
-    if waits is None:
-        return EmbyAdapter(SOURCE, CREDENTIALS, client=client, max_pages=max_pages)
-    return EmbyAdapter(
-        SOURCE,
-        CREDENTIALS,
-        client=client,
-        max_pages=max_pages,
-        sleep=waits.sleep,
-        clock=waits.clock,
-    )
+    options: dict[str, Any] = {"max_pages": max_pages}
+    if page_size is not None:
+        options["page_size"] = page_size
+    if waits is not None:
+        options |= {"sleep": waits.sleep, "clock": waits.clock}
+    return EmbyAdapter(SOURCE, CREDENTIALS, client=client, **options)
 
 
 def _authenticated(request: httpx.Request) -> httpx.Response | None:
@@ -145,6 +149,107 @@ async def test_the_walk_pages_until_the_library_is_exhausted() -> None:
     # 5 items over pages of 2 is three requests: TotalRecordCount stops the
     # walk after the third rather than paying a fourth for an empty page.
     assert len(listings) == 3
+
+
+async def test_only_the_first_page_asks_for_the_total() -> None:
+    """A count costs Emby a pass over the whole filtered set, so a walk asks for it once.
+
+    Every later page sends `false`, and the walk reads its end from the first page's
+    total.
+    """
+    server = FakeEmbyServer()
+    for index in range(5):
+        server.add_item(_movie(index), T0)
+    captured: list[httpx.Request] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    adapter = _on(spy, page_size=2)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    flags = [
+        request.url.params["EnableTotalRecordCount"]
+        for request in captured
+        if request.url.path.endswith("/Items")
+    ]
+    assert sorted(seen) == [f"movie-{index}" for index in range(5)]
+    assert len(flags) == 3, "the walk did not end on the page that reached the first page's total"
+    assert flags[0] == "true"
+    assert set(flags[1:]) == {"false"}
+
+
+async def test_a_server_that_caps_the_limit_is_still_walked_to_its_end() -> None:
+    """Short pages below the first page's total are the server's cap, not the library's end."""
+    server = FakeEmbyServer()
+    server.max_limit = 2
+    for index in range(7):
+        server.add_item(_movie(index), T0)
+    sizes: list[int] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            sizes.append(len(response.json()["Items"]))
+        return response
+
+    adapter = _on(spy, page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sizes and max(sizes) < 4, "the premise: every page came back shorter than asked for"
+    assert sorted(set(seen)) == [f"movie-{index}" for index in range(7)]
+
+
+async def test_a_library_that_grows_during_the_walk_is_read_to_its_end() -> None:
+    """Items added mid-walk sort last, past the stale total its first page reported."""
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+
+    def grow(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items") and server.listings == 1:
+            for index in range(4, 7):
+                server.add_item(replace(_movie(index), added_at=T1), T1)
+        return response
+
+    adapter = _on(grow, page_size=2)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sorted(set(seen)) == [f"movie-{index}" for index in range(7)]
+
+
+async def test_a_capped_server_on_a_growing_library_is_read_to_its_end() -> None:
+    """Items added mid-walk are still read when every page is shorter than `Limit`."""
+    server = FakeEmbyServer()
+    server.max_limit = 2
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    sizes: list[int] = []
+
+    def grow(request: httpx.Request) -> httpx.Response:
+        response = server.handle(request)
+        if request.url.path.endswith("/Items"):
+            sizes.append(len(response.json()["Items"]))
+            if server.listings == 1:
+                for index in range(4, 7):
+                    server.add_item(replace(_movie(index), added_at=T1), T1)
+        return response
+
+    adapter = _on(grow, page_size=4)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert sizes and max(sizes) < 4, "the premise: every page came back shorter than asked for"
+    assert sorted(set(seen)) == [f"movie-{index}" for index in range(7)]
 
 
 async def test_the_walk_asks_for_the_types_and_fields_the_mapper_needs() -> None:
@@ -614,7 +719,9 @@ class _FlakyLibrary:
 
     Every entry carries `UserData`, so the watch-state walk yields all three too. Given
     `waits`, every listing request moves its clock by `REQUEST_SECONDS`, as a real one
-    takes time.
+    takes time. Every page is one item long, as a server capping `Limit` at 1 serves,
+    so a walk that reaches the end asks once more, at `StartIndex=3`, and ends on the
+    empty page.
     """
 
     def __init__(
@@ -677,7 +784,7 @@ async def test_a_page_that_fails_transiently_is_asked_for_again(
     finally:
         await adapter.aclose()
     assert seen == ["movie-0", "movie-1", "movie-2"]
-    assert library.requested == [0, 1, 1, 1, 2]
+    assert library.requested == [0, 1, 1, 1, 2, 3]
     assert waits.waits == RETRY_WAITS[:2]
 
 
@@ -799,7 +906,7 @@ async def test_a_rate_limited_page_waits_out_the_longer_of_its_hint_and_the_sche
     finally:
         await adapter.aclose()
     assert seen == ["movie-0", "movie-1", "movie-2"]
-    assert library.requested == [0, 1, 1, 2]
+    assert library.requested == [0, 1, 1, 2, 3]
     assert waits.waits == [wait]
 
 

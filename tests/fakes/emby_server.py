@@ -155,6 +155,9 @@ class FakeEmbyServer:
         # answer rather than fail `verify()`.
         self.user_route_fails = False
         self.fail_after: int | None = None
+        # A listing's `Limit` ceiling, or `None` for none. A server may serve fewer
+        # items than asked for on every page, which a walk must not read as its end.
+        self.max_limit: int | None = None
         self.authentications = 0
         # Read by `_ordered` as well as by tests: it is what rotates a group
         # of items the request supplied no way to distinguish, so successive
@@ -402,6 +405,9 @@ class FakeEmbyServer:
         self.listings += 1
         start = int(params.get("StartIndex", "0"))
         limit = int(params.get("Limit", str(self.page_size)))
+        if self.max_limit is not None:
+            limit = min(limit, self.max_limit)
+        counted = (params.get("EnableTotalRecordCount") or "true").lower() != "false"
         ordered = self._ordered(params)
         if self.fail_after is not None and start >= self.fail_after:
             raise httpx.ReadTimeout("upstream stopped responding")
@@ -410,7 +416,8 @@ class FakeEmbyServer:
             200,
             json={
                 "Items": [self._payload(external_id, for_listing=True) for external_id in page],
-                "TotalRecordCount": len(ordered),
+                # Present and 0 when uncounted, as the live server sends it.
+                "TotalRecordCount": len(ordered) if counted else 0,
             },
         )
 

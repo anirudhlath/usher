@@ -788,3 +788,38 @@ def test_a_sessions_frame_is_a_message_that_maps_to_no_event() -> None:
     assert message["MessageType"] == "Sessions"
     assert message["Data"][0]["UserId"] == USER_ID
     assert to_source_events(message, source_user_id=USER_ID) == ()
+
+
+# --- the listing's count and its ceiling ----------------------------------
+
+
+async def test_an_uncounted_listing_still_reports_a_total_of_zero(driver: _Driver) -> None:
+    """`EnableTotalRecordCount=false` sends the key, as 0, as the live server does."""
+    driver.server.add_item(MOVIE, T0)
+    body = await driver.session.json_body(
+        "GET",
+        f"/Users/{USER_ID}/Items",
+        params={"Recursive": "true", "EnableTotalRecordCount": "false"},
+        op="list",
+    )
+    assert body["TotalRecordCount"] == 0
+    assert len(body["Items"]) == 1, "the premise: the page itself was served"
+
+
+async def test_a_listing_that_does_not_say_is_counted(driver: _Driver) -> None:
+    driver.server.add_item(MOVIE, T0)
+    body = await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params={"Recursive": "true"}, op="list"
+    )
+    assert body["TotalRecordCount"] == 1
+
+
+async def test_a_capped_limit_serves_fewer_than_were_asked_for(driver: _Driver) -> None:
+    for index in range(3):
+        driver.server.add_item(replace(MOVIE, external_id=f"movie-{index}"), T0)
+    driver.server.max_limit = 2
+    body = await driver.session.json_body(
+        "GET", f"/Users/{USER_ID}/Items", params={"Recursive": "true", "Limit": "10"}, op="list"
+    )
+    assert len(body["Items"]) == 2
+    assert body["TotalRecordCount"] == 3

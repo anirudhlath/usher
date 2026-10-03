@@ -3,7 +3,7 @@
 import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 from urllib.parse import quote
@@ -19,6 +19,7 @@ from usher.adapters.emby.mapping import (
     to_source_item,
     to_watch_state,
 )
+from usher.adapters.emby.paging import OffsetWindow
 from usher.adapters.emby.playback import build_stream_targets
 from usher.adapters.emby.push import (
     DEFAULT_POLL_SECONDS,
@@ -111,6 +112,20 @@ def _segment(value: str) -> str:
 def _version_of(body: Mapping[str, Any]) -> str | None:
     version = body.get("Version")
     return version if isinstance(version, str) and version else None
+
+
+def _listing_query(since_param: str, since: AwareDatetime | None) -> dict[str, str]:
+    """A listing's parameters, less the paging `_walk` adds to each request."""
+    query = {
+        "Recursive": "true",
+        "IncludeItemTypes": ITEM_TYPES,
+        "Fields": ITEM_FIELDS,
+        "SortBy": SORT_BY,
+        "SortOrder": "Ascending",
+    }
+    if since is not None:
+        query[since_param] = emby_datetime(since)
+    return query
 
 
 class EmbyAdapter(SourceAdapter):
@@ -263,55 +278,43 @@ class EmbyAdapter(SourceAdapter):
         return value if isinstance(value, bool) else None
 
     async def _walk(
-        self, *, since_param: str, since: AwareDatetime | None, start_index: int
-    ) -> AsyncIterator[dict[str, Any]]:
-        user_id = await self._session.user_id()
-        # The resume point (#41). Deliberately no default: every
-        # caller states its own, so `list_items` passing 0 is written down
-        # rather than inferred from an absent keyword. The item lanes restart
-        # from their cursor; the watch lane's first walk is the whole library
-        # and has to survive a transient failure.
-        start = start_index
-        # `for`, not `while True`: the bound is then part of the loop rather
-        # than a counter alongside it, and the raise below cannot be reached
-        # by any path that should have returned.
-        for _ in range(self._max_pages):
+        self, query: Mapping[str, str], *, start_index: int
+    ) -> AsyncGenerator[dict[str, Any]]:
+        """Page one listing to its end; `start_index` is the resume point (#41).
+
+        Deliberately no default: every caller states its own, so `list_items`
+        passing 0 is written down rather than inferred.
+        """
+        path = f"/Users/{_segment(await self._session.user_id())}/Items"
+        window = OffsetWindow(limit=self._page_size, start=start_index)
+        # `for`, not `while True`: the bound is part of the loop, and the raise
+        # below is reachable only by a walk that never ended.
+        for number in range(self._max_pages):
             params = {
-                "Recursive": "true",
-                "IncludeItemTypes": ITEM_TYPES,
-                "Fields": ITEM_FIELDS,
-                "SortBy": SORT_BY,
-                "SortOrder": "Ascending",
-                "StartIndex": str(start),
+                **query,
+                "StartIndex": str(window.start),
                 "Limit": str(self._page_size),
-                "EnableTotalRecordCount": "true",
+                "EnableTotalRecordCount": "true" if number == 0 else "false",
             }
-            if since is not None:
-                params[since_param] = emby_datetime(since)
-            body = await self._page(f"/Users/{_segment(user_id)}/Items", params, start)
-            items = body.get("Items")
-            if not isinstance(items, list):
-                # Not a truncation: a caller must be able to tell "the
-                # library ended" from "that was not a listing at all".
+            body = await self._page(path, params, window.start)
+            entries = body.get("Items")
+            if not isinstance(entries, list):
+                # Not a truncation: a caller must be able to tell "the library
+                # ended" from "that was not a listing at all".
                 raise PortDataMalformed(
                     "Emby's item listing carried no Items array",
-                    detail=f"StartIndex={start}",
+                    detail=f"StartIndex={window.start}",
                 )
-            if not items:
+            page = window.receive(entries, body.get("TotalRecordCount"))
+            for payload in page.fresh:
+                yield payload
+            if page.ended:
                 return
-            for payload in items:
-                if isinstance(payload, dict):
-                    yield payload
-            start += len(items)
-            total = body.get("TotalRecordCount")
-            # `total > 0`, not `total >= 0`: a server that omits the count
-            # (or reports zero while returning items) must not stop the walk
-            # at page one.
-            if isinstance(total, int) and total > 0 and start >= total:
-                return
+            window.advance()
         raise PortDataMalformed(
-            "Emby's item listing never ended; the server appears to ignore StartIndex",
-            detail=f"gave up after {self._max_pages} pages at StartIndex={start}",
+            "Emby's item listing never ended; the server appears to ignore StartIndex "
+            "or to cap Limit far below the page size",
+            detail=f"gave up after {self._max_pages} pages at StartIndex={window.start}",
         )
 
     async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
@@ -365,9 +368,8 @@ class EmbyAdapter(SourceAdapter):
     async def _list_items(self, since: AwareDatetime | None) -> AsyncIterator[SourceItem]:
         # `start_index=0` always: the item lanes have a working `since`
         # cursor, so a failed walk restarts from it rather than resuming.
-        async for payload in self._walk(
-            since_param=LIBRARY_SINCE_PARAM, since=since, start_index=0
-        ):
+        query = _listing_query(LIBRARY_SINCE_PARAM, since)
+        async for payload in self._walk(query, start_index=0):
             item = to_source_item(payload)
             if item is not None:
                 yield item
@@ -432,9 +434,8 @@ class EmbyAdapter(SourceAdapter):
         self, since: AwareDatetime | None, start_index: int
     ) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
-        async for payload in self._walk(
-            since_param=USER_DATA_SINCE_PARAM, since=since, start_index=start_index
-        ):
+        query = _listing_query(USER_DATA_SINCE_PARAM, since)
+        async for payload in self._walk(query, start_index=start_index):
             # play_history_is_trustworthy=False: this is the listing route.
             state = to_watch_state(
                 payload, source_user_id=user_id, play_history_is_trustworthy=False
