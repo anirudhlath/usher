@@ -22,7 +22,7 @@
 - Phase 2's queue is `asyncio.Queue(maxsize=walkers)`. The spec's `(unit_key, items, cursor)` entries are `_Fetched(unit_key, page)`, where the page carries the items and where the unit resumes (departure 1).
 - Unit keys are opaque, adapter-owned strings, persisted like `MediaItem.external_id`, and never in an API response.
 - The Phase 2 migration (`m10g`) is purely additive: table `sync_run_units` and column `sync_runs.heartbeat_at`.
-- Live runs are read-only against the source, driven by a throwaway script **outside the repository** that writes no credential, token, user id or host. Results go on the PR as raw output, not summaries.
+- Live runs are read-only against the source and write no credential, token, user id or host into the repository. Anything beyond the shipped CLI is a throwaway script **outside the repository**. Results go on the PR as raw output, not summaries.
 - Never deploy Phase 2 while an old-image full walk is running: `docker ps --filter name=usher-prod-sync` is the check.
 - Merging to `main` deploys to production. Nothing in this plan merges without the owner's go-ahead.
 
@@ -2175,7 +2175,7 @@ git commit -m "watch: a first walk lists only played and in-progress items"
 
 Spec §1.6, last part. If `latest_incomplete_run` returns a run whose `cursor_at` is `None`, the service closes it `failed` with `error = "superseded: a first watch walk restarts"` and starts a fresh run at position 0. A run left part-way through an old-style first walk carries a position such as 300,000, which would skip the whole filtered walk; and `save` only ever raises `position`, so resetting the row is impossible. A delta still resumes (#41).
 
-**Departure from the spec's letter:** a cursorless run that is already `FAILED` is closed already, so it keeps its own `error` — the diagnostic of why that walk failed — and a fresh run starts beside it. Only a `RUNNING` one (a killed process; production's handover case) is relabelled.
+**Departure from the spec's letter:** a cursorless run that is already `FAILED` is closed already, so it keeps its own `error` — the diagnostic of why that walk failed — and a fresh run starts beside it. Only a `RUNNING` one (a killed process, the case Task 9 sets up on a clone) is relabelled.
 
 **Files:**
 - Modify: `src/usher/services/watch_sync.py` (`SUPERSEDED_ERROR`, `sync`, a new `_supersede`)
@@ -2453,51 +2453,103 @@ git push
 
 ---
 
-### Task 9: Phase 1 live acceptance and the production handover
+### Task 9: Phase 1 live acceptance
 
-Spec "Measurement and acceptance" 3 (Phase 1: a first watch walk under 1 minute, an item walk of at most 6 h) and "The production handover". Owner-gated throughout: each step that touches production says so.
+Spec "Measurement and acceptance" 3 (Phase 1): a first watch walk under 1 minute, and an item walk of at most 6 h.
 
-- [ ] **Step 1: Read production's state**
+**The spec's production handover no longer applies.** The old image's sync finished its whole-library watch walk on its own, completing and exiting 0, so production has no unfinished watch run to stop or supersede. Its watch lane now runs cursored deltas of a few seconds. So the first watch walk is timed on a scratch clone of the dev catalog (`usher_catalog` in `usher-postgres-1`), left the way the handover would have left production: its newest watch run is an unfinished first walk. The item walk is timed on production.
 
-```bash
-docker ps --filter name=usher-prod-sync --format '{{.Names}} {{.Status}}'
-grep -v '^{"text"' ~/code/usher-deploy/data/bulk/sync.log | tail -5
-docker inspect usher-prod-sync --format '{{json .Config.Cmd}}'
-```
+Every step that loads the source or touches production says so and waits for the owner.
 
-Record the container's command line before anything removes it; Step 4 starts the acceptance walk the same way.
+- [ ] **Step 1: Clone the dev catalog**
 
-- [ ] **Step 2: After PR 1 merges and deploys, stop the old watch walk — with the owner's go-ahead**
-
-If `usher-prod-sync` is in its watch walk (the log names the watch lane), ask the owner, then:
+A template copy needs the catalog to itself, so check first:
 
 ```bash
-docker stop usher-prod-sync
+docker exec usher-postgres-1 psql -U usher -d postgres -Atc \
+  "SELECT count(*) FROM pg_stat_activity WHERE datname = 'usher_catalog'"
+docker exec usher-postgres-1 createdb -U usher -T usher_catalog ffs_first_watch
 ```
 
-Its watch run is left `running`, which is what the supersede expects.
+Expected: `0`, then `createdb` succeeds. The clone takes about 8 GB. If the count is not `0`, another worktree is using the catalog. Wait for it to finish rather than ending its session.
 
-- [ ] **Step 3: A first watch walk under a minute**
+- [ ] **Step 2: Bring the clone to PR 1's schema, as the handover would have left it**
 
-Run inside the production stack, timing it:
+Run from this worktree, which holds the code PR 1 merged. The dev stack's `.env` supplies `USHER_SECRET_KEY`, which decrypts the clone's stored source credentials. The URL keeps its credentials and changes only the database name, so no credential is typed:
+
+```bash
+cd ~/code/.worktrees/usher/fast-first-sync
+set -a; . ~/code/usher-devdb/.env; set +a
+export USHER_DATABASE_URL="${USHER_DATABASE_URL%/*}/ffs_first_watch"
+unset OTEL_EXPORTER_OTLP_ENDPOINT
+uv run alembic upgrade head
+docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -c \
+  "DELETE FROM sync_runs WHERE kind = 'watch_state' AND status <> 'running'"
+docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
+  "SELECT status, count(*), bool_or(cursor_at IS NOT NULL) FROM sync_runs WHERE kind = 'watch_state' GROUP BY 1"
+```
+
+Expected: `alembic` ends at the repository's head, and the last query prints only a `running|<n>|f` row. Those are unfinished first walks with no cursor. With every completed watch run gone, the next watch walk has no cursor to resume from, and it supersedes the newest of them.
+
+- [ ] **Step 3: A first watch walk under a minute — with the owner's go-ahead**
+
+The walk reads the shared server, so ask first. Then, in one shell (the first four lines are Step 2's):
+
+```bash
+cd ~/code/.worktrees/usher/fast-first-sync
+set -a; . ~/code/usher-devdb/.env; set +a
+export USHER_DATABASE_URL="${USHER_DATABASE_URL%/*}/ffs_first_watch"
+unset OTEL_EXPORTER_OTLP_ENDPOINT
+timeout 3600 uv run usher sync --source "Shared Emby" --kind delta 2>&1 | grep -v '^{"text"' \
+  | tee /var/tmp/sync-speed/first-watch.out
+docker exec usher-postgres-1 psql -U usher -d ffs_first_watch -Atc \
+  "SELECT status, coalesce(error, ''), round(extract(epoch FROM finished_at - started_at)), items_seen, items_matched FROM sync_runs WHERE kind = 'watch_state' ORDER BY started_at DESC LIMIT 2" \
+  | tee -a /var/tmp/sync-speed/first-watch.out
+```
+
+The item lane is a cursored delta from the clone's last completed walk. The watch lane then supersedes the newest unfinished run and runs the filtered first walk.
+
+Pass:
+- the first row is `completed`, and its seconds are under `60`. That is the watch run's own `finished_at − started_at`, whatever the item lane took;
+- the second row reads `failed|superseded: a first watch walk restarts`.
+
+Expect far fewer merges than production would make. The clone holds only part of the source's items (52,560 when this plan was written), so most states find no item and count as unmatched. The listings walked are the same.
+
+Before posting, check the file: `grep -c -E '[0-9a-f]{32}'` must print `0`, and `grep -n -E 'https?://|([0-9]{1,3}\.){3}[0-9]{1,3}'` must print nothing. Then post `first-watch.out` raw on PR 1.
+
+- [ ] **Step 4: An item walk of at most 6 h, on production — with the owner's go-ahead**
+
+A full walk loads a server the operator may not administer, so ask first. Production must be idle: `docker ps --filter name=usher-prod-sync --format '{{.Names}} {{.Status}}'` prints nothing. Then start the walk detached, the way the last production sync was started, with its kind stated. The old log is kept under a dated name:
 
 ```bash
 cd ~/code/usher-deploy
-time docker compose exec -T usher usher sync --source "Shared Emby"
-docker compose exec -T usher usher sync-status
+[ -f data/bulk/sync.log ] && mv data/bulk/sync.log "data/bulk/sync-$(date -u +%Y%m%dT%H%M).log"
+docker compose run -d --rm --no-deps --name usher-prod-sync usher \
+  sh -c 'usher sync --source "Shared Emby" --kind full > /data/bulk/sync.log 2>&1; echo "exit=$?" >> /data/bulk/sync.log'
 ```
 
-(`sync-status` takes no `--source`; it reports every source.)
+Wait for its end with one background wait, never by polling in the foreground:
 
-The item lane is a cursored delta (cheap); the watch lane supersedes the old run and runs the filtered first walk. Pass: the watch run completes, under 1 minute, and `sync-status` shows the old row `failed` with `superseded: a first watch walk restarts`. Post the raw output on PR 1.
+```bash
+timeout 28800 sh -c 'until grep -q "^exit=" ~/code/usher-deploy/data/bulk/sync.log; do sleep 300; done'
+grep -v '^{"text"' ~/code/usher-deploy/data/bulk/sync.log | tail -4
+docker exec usher-prod-postgres-1 psql -U usher -d usher -Atc \
+  "SELECT kind, status, started_at, finished_at, round(extract(epoch FROM finished_at - started_at) / 3600, 2), items_seen FROM sync_runs WHERE kind = 'full' ORDER BY started_at DESC LIMIT 1"
+```
 
-- [ ] **Step 4: An item walk of at most 6 h — with the owner's go-ahead**
+Pass: `exit=0`, and the `full` row is `completed` in at most `6.00` hours at default settings. Post the log tail and the row on PR 1, raw.
 
-A full walk loads a server the operator may not administer, so ask first. Start it detached the way Step 1's command line shows, with `--kind full`, logging to `data/bulk/`, and watch for its end with one background wait rather than polling. Pass: the full run completes in at most 6 h at default settings. Post `sync-status`'s raw output (start, finish, items seen) on PR 1.
+- [ ] **Step 5: Post the results, drop the clone, close Phase 1**
 
-- [ ] **Step 5: Post the results and close Phase 1**
+If either target misses, post the numbers and stop: Phase 2's targets assume Phase 1's.
 
-If either target misses, post the numbers and stop: Phase 2's targets assume Phase 1's. Otherwise go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9 passed in both status tables, as the Phase 2 branch's first commit.
+The clone is scratch. Once its numbers are posted, drop it:
+
+```bash
+docker exec usher-postgres-1 dropdb -U usher ffs_first_watch
+```
+
+Then go on to Phase 2. Task 10, Step 1 marks Phase 1 landed and Task 9 passed in both status tables, as the Phase 2 branch's first commit.
 
 ---
 
@@ -10141,7 +10193,16 @@ SINCE=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
   | tee /var/tmp/sync-speed/timeline-1.out
 ```
 
-Start the walk detached the way Task 9 Step 4 started its full walk: the command line Task 9 Step 1 recorded, with `--kind full`, the container named `usher-prod-sync`, logging to `data/bulk/`. Wait for the timeline's `finished at` line with one background wait, never by polling.
+Start the walk detached, as Task 9 Step 4 did:
+
+```bash
+cd ~/code/usher-deploy
+[ -f data/bulk/sync.log ] && mv data/bulk/sync.log "data/bulk/sync-$(date -u +%Y%m%dT%H%M).log"
+docker compose run -d --rm --no-deps --name usher-prod-sync usher \
+  sh -c 'usher sync --source "Shared Emby" --kind full > /data/bulk/sync.log 2>&1; echo "exit=$?" >> /data/bulk/sync.log'
+```
+
+Wait for the timeline's `finished at` line with one background wait, never by polling.
 
 Pass, read off `timeline-1.out`:
 - `first_watch_done_at` is at most `t+120s`;
@@ -10192,7 +10253,7 @@ docker kill usher-prod-sync
 
 The killed run's heartbeat is still fresh, so this attempt must be refused: expect a non-zero `exit=` and a line saying the walk was refused. A refusal writes no run, so `timeline-2.out` goes on following the killed one.
 
-Wait until the killed run's heartbeat is more than 10 minutes old: one background `sleep 660`, never a polling loop. Then start the walk detached once more, as in Step 3, removing the stopped container first if Task 9's command line has no `--rm`.
+Wait until the killed run's heartbeat is more than 10 minutes old: one background `sleep 660`, never a polling loop. Then start the walk detached once more, as in Step 3. `--rm` has already removed the killed container, so its name is free.
 
 Pass, read off `timeline-2.out` and `sync-status`:
 - every line carries the same `started=`, because the resume keeps the run's `started_at`;
