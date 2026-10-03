@@ -96,8 +96,11 @@ def _session(
     source_name: str = "Living Room Emby",
     credentials: SourceCredentials = CREDENTIALS,
     clock: _Clock | _TickingClock | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> tuple[EmbySession, httpx.AsyncClient]:
-    client = httpx.AsyncClient(transport=server.transport(), base_url="https://emby.invalid")
+    client = client or httpx.AsyncClient(
+        transport=server.transport(), base_url="https://emby.invalid"
+    )
     session = EmbySession(
         client,
         credentials,
@@ -108,6 +111,26 @@ def _session(
         clock=clock or _Clock(),
     )
     return session, client
+
+
+def _spied(
+    server: FakeEmbyServer,
+    captured: list[httpx.Request],
+    *,
+    timeout: httpx.Timeout | float = 30.0,
+) -> httpx.AsyncClient:
+    """A client over `server` that records every request, with a 30 s budget throughout.
+
+    `timeout` replaces that budget, for a case about a client configured otherwise.
+    """
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(spy), base_url="https://emby.invalid", timeout=timeout
+    )
 
 
 async def test_the_durable_client_header_names_usher_and_the_device() -> None:
@@ -1327,3 +1350,60 @@ async def test_a_status_a_later_attempt_can_fix_is_unavailable_and_not_a_refusal
     finally:
         await client.aclose()
     assert not isinstance(caught.value, RequestRefused)
+
+
+async def test_a_read_budget_lengthens_only_the_read_phase() -> None:
+    server = FakeEmbyServer()
+    captured: list[httpx.Request] = []
+    session, client = _session(server, client=_spied(server, captured))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info", read_timeout=120.0)
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+    budgets = [r.extensions["timeout"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert budgets == [
+        {"connect": 30.0, "read": 120.0, "write": 30.0, "pool": 30.0},
+        {"connect": 30.0, "read": 30.0, "write": 30.0, "pool": 30.0},
+    ]
+
+
+async def test_a_re_authenticated_request_keeps_its_read_budget() -> None:
+    server = FakeEmbyServer()
+    captured: list[httpx.Request] = []
+    session, client = _session(server, client=_spied(server, captured))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+        server.expire_session()
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info", read_timeout=120.0)
+    finally:
+        await client.aclose()
+    reads = [r.extensions["timeout"]["read"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert reads == [30.0, 120.0, 120.0], "the request after re-authenticating lost its budget"
+
+
+async def test_a_read_budget_never_shortens_a_client_read_that_is_longer() -> None:
+    """A named read budget is a floor: an operator who set 300 s keeps 300 s."""
+    server = FakeEmbyServer()
+    captured: list[httpx.Request] = []
+    session, client = _session(server, client=_spied(server, captured, timeout=300.0))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info", read_timeout=120.0)
+    finally:
+        await client.aclose()
+    budgets = [r.extensions["timeout"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert budgets == [{"connect": 300.0, "read": 300.0, "write": 300.0, "pool": 300.0}]
+
+
+async def test_a_client_with_no_read_limit_keeps_none_under_a_read_budget() -> None:
+    """No read limit is longer than any budget a caller can name."""
+    server = FakeEmbyServer()
+    captured: list[httpx.Request] = []
+    unlimited = httpx.Timeout(30.0, read=None)
+    session, client = _session(server, client=_spied(server, captured, timeout=unlimited))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info", read_timeout=120.0)
+    finally:
+        await client.aclose()
+    budgets = [r.extensions["timeout"] for r in captured if r.url.path == SYSTEM_INFO_PATH]
+    assert budgets == [{"connect": 30.0, "read": None, "write": 30.0, "pool": 30.0}]

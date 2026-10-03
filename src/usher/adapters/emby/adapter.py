@@ -88,10 +88,17 @@ USER_PATH = "/Users"
 # The walk's dead-man's switch.
 MAX_PAGES = 10_000
 
-# The waits between attempts at one page of a walk: six attempts over about eight
-# minutes. A full walk of a large library takes hours and a failed item walk restarts
-# from the top, so riding out a server restart on the page it hit is the cheap side.
+# The waits between attempts at one page of a walk: about eight minutes of waits
+# across six attempts. A full walk of a large library takes hours and a failed item
+# walk restarts from the top, so riding out a server restart on the page it hit is the
+# cheap side.
 PAGE_RETRY_WAITS = (15.0, 30.0, 60.0, 120.0, 240.0)
+
+# A listing page may read for this long, or for the client's budget if that is longer;
+# every other request keeps the client's. A timed-out request does not stop the
+# server's query, so asking again early only adds a second copy of the slowest query
+# there is.
+LISTING_READ_SECONDS = 120.0
 
 
 def _segment(value: str) -> str:
@@ -374,7 +381,9 @@ class EmbyAdapter(SourceAdapter):
         while True:
             attempt += 1
             try:
-                return await self._session.json_body("GET", path, params=params, op="list")
+                return await self._session.json_body(
+                    "GET", path, params=params, op="list", read_timeout=LISTING_READ_SECONDS
+                )
             except RequestRefused:
                 raise
             except (PortUnavailable, PortRateLimited) as exc:

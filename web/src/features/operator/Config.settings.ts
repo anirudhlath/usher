@@ -177,7 +177,8 @@ export const CONFIG: readonly SettingRow[] = [
     key: 'USHER_SOURCE_TIMEOUT_SECONDS',
     group: 'sources',
     def: '30.0',
-    about: 'How long one request to a media server may take before it is a failure.',
+    about:
+      'How long one request to a media server, or to TMDb, may take before it is a failure. A library listing page gets 120 s to read, or this setting if it is longer.',
     secret: false,
     measured: false,
   },

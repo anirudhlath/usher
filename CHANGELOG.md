@@ -17,6 +17,12 @@ Versioning is `0.x` while the wire contract may still move —
 - **A walk asks for its next page while it writes the current one**, so the
   source and the database work at once. One page is read ahead, and it is
   cancelled when the walk stops.
+- **A library listing page may take 120 s**, where every other request still
+  gets `USHER_SOURCE_TIMEOUT_SECONDS`; a timeout set longer than 120 s applies
+  to listing pages too. Deep pages of a large library outlast 30 s, and asking
+  again early only queued a second copy of the slowest query. At the defaults,
+  a source that accepts connections and then stalls now holds a walk about 20
+  minutes before it fails, where it was about 11.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,

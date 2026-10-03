@@ -880,6 +880,79 @@ async def test_an_item_walk_always_starts_at_the_beginning() -> None:
     assert requested == ["0"]
 
 
+async def test_a_listing_page_may_take_two_minutes_to_read_and_nothing_else_may() -> None:
+    """A deep page of a big library outlasts the 30 s every other request gets.
+
+    Read off each request's `timeout` extension, which is what httpx enforces and
+    what `failure_detail` reports. Only the read phase moves. Every call site in the
+    adapter that sends a request is reached -- `verify`'s three, the walks, `_fetch`
+    through `get_item`, and both of `push_watch_state`'s writes -- so a listing's
+    budget reaching any of them reads 120 here.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    captured: list[httpx.Request] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return server.handle(request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(spy), base_url=SOURCE.base_url, timeout=30.0
+    )
+    adapter = EmbyAdapter(SOURCE, CREDENTIALS, client=client)
+    try:
+        await adapter.verify()
+        _ = [item async for item in adapter.list_items()]
+        _ = [state async for state in adapter.watch_state(since=T0)]
+        await adapter.get_item("movie-0")
+        await adapter.push_watch_state(
+            "movie-0", WatchStateUpdate(position_seconds=600, played=True)
+        )
+    finally:
+        await adapter.aclose()
+    budgets = {
+        (request.method, redact_path(request.url.path), request.extensions["timeout"]["read"])
+        for request in captured
+    }
+    assert budgets == {
+        ("POST", "/Users/AuthenticateByName", 30.0),
+        ("GET", "/System/Info/Public", 30.0),
+        ("GET", "/System/Info", 30.0),
+        ("GET", "/Users/{user_id}", 30.0),
+        ("GET", "/Users/{user_id}/Items", 120.0),
+        ("GET", "/Users/{user_id}/Items/{item_id}", 30.0),
+        ("POST", "/Users/{user_id}/Items/{item_id}/UserData", 30.0),
+        ("POST", "/Users/{user_id}/PlayedItems/{item_id}", 30.0),
+    }
+    listing = next(request for request in captured if request.url.path.endswith("/Items"))
+    assert listing.extensions["timeout"] == {
+        "connect": 30.0,
+        "read": 120.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+
+
+async def test_a_listing_that_times_out_says_it_had_two_minutes() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        raise httpx.ReadTimeout("", request=request)
+
+    adapter = _on(handler, waits=_Waits())
+    try:
+        with pytest.raises(PortUnavailable) as caught:
+            _ = [item async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert str(caught.value) == (
+        "GET /Users/{user_id}/Items failed: ReadTimeout after 120.0s (read budget) "
+        "(gave up after 6 attempts over 465s)"
+    )
+
+
 # --- read-ahead ---------------------------------------------------------------
 
 

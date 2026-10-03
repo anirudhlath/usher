@@ -104,11 +104,15 @@ when the walk stops:
 - **An unrecognised filter degrades to a full walk, never to an empty result.**
 - **A page that fails as unreachable is asked for again** — a 5xx, a 408, a
   refused or dropped connection, a timeout — after 15, 30, 60, 120 and 240 s,
-  about eight minutes. A 429 is asked for again on the same schedule, waiting out
-  its `Retry-After` when that is longer, up to 240 s a time. The sixth failure
-  ends the walk, and its error says how many attempts it made over how long; each
-  page gets its own six. Any other 4xx, an answer that is not a listing, a
-  rejected credential and a closed adapter fail at once.
+  about eight minutes of waiting. A listing page has 120 s to answer once
+  connected, or `USHER_SOURCE_TIMEOUT_SECONDS` (default 30) if that is longer,
+  so at the defaults a page whose every attempt connects and then stalls holds
+  the walk about 20 minutes. Connecting, and every other request, has
+  `USHER_SOURCE_TIMEOUT_SECONDS`. A 429 is asked for again on the same schedule,
+  waiting out its `Retry-After` when that is longer, up to 240 s a time. The
+  sixth failure ends the walk, and its error says how many attempts it made over
+  how long; each page gets its own six. Any other 4xx, an answer that is not a
+  listing, a rejected credential and a closed adapter fail at once.
 
 The item lane filters on the library edit time, the watch lane on the user-data
 change time.

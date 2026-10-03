@@ -163,8 +163,8 @@ job is enqueued at `BACKFILL` for that remote search.
   range (`mapping._stored`, provider ids in both `_as_int`s): asyncpg's encoder
   raises a bare `OverflowError` past `INT32_MAX`, and the walk dies `RUNNING`;
   a negative one fails a `>= 0` CHECK and the run is `FAILED` on every sync.
-- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** for about
-  eight minutes, since a failed item walk restarts from the top — but never a
+- **Nor may a blip: `EmbyAdapter._page` retries an outage or a 429** through
+  eight minutes of waits, as a failed item walk restarts from the top — never a
   `RequestRefused`, the 4xx `EmbySession.ok` still reports as `PortUnavailable`.
   A test that fails a walk on purpose injects `sleep=instant_sleep`
   (`tests/fakes/emby_harness.py`), or it sits through those minutes as a hang.
