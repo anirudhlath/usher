@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, aclosing
 from typing import Any
 from urllib.parse import quote
 
@@ -107,6 +107,24 @@ def _segment(value: str) -> str:
     Nothing neutralises it in a path; only this does.
     """
     return quote(value, safe="")
+
+
+async def _settle(task: asyncio.Task[Any]) -> None:
+    """Cancel a read-ahead the walk no longer wants, and retrieve what it raised.
+
+    Waited on rather than awaited, so its failure is never raised over whatever is
+    ending the walk, and the caller's own cancellation still propagates. Retrieved
+    by a callback, because asyncio reports an exception nobody read as lost, and
+    the caller may be cancelled before the read-ahead finishes.
+    """
+    task.add_done_callback(_retrieve)
+    task.cancel()
+    await asyncio.wait({task})
+
+
+def _retrieve(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def _version_of(body: Mapping[str, Any]) -> str | None:
@@ -280,51 +298,64 @@ class EmbyAdapter(SourceAdapter):
     async def _walk(
         self, query: Mapping[str, str], *, start_index: int
     ) -> AsyncGenerator[dict[str, Any]]:
-        """Page one listing to its end; `start_index` is the resume point (#41).
+        """Page one listing to its end, one request ahead of the consumer.
 
-        Deliberately no default: every caller states its own, so `list_items`
-        passing 0 is written down rather than inferred.
+        The next page is asked for as soon as a page arrives and before its items
+        are yielded, so the source answers while the caller writes; the request
+        outstanding when the consumer stops is cancelled. `start_index` is the
+        resume point (#41), never defaulted: every caller states its own.
         """
         path = f"/Users/{_segment(await self._session.user_id())}/Items"
         window = OffsetWindow(limit=self._page_size, start=start_index)
-        # `for`, not `while True`: the bound is part of the loop, and the raise
-        # below is reachable only by a walk that never ended.
-        for number in range(self._max_pages):
-            params = {
-                **query,
-                "StartIndex": str(window.start),
-                "Limit": str(self._page_size),
-                "EnableTotalRecordCount": "true" if number == 0 else "false",
-            }
-            body = await self._page(path, params, window.start)
-            entries = body.get("Items")
-            if not isinstance(entries, list):
-                # Not a truncation: a caller must be able to tell "the library
-                # ended" from "that was not a listing at all".
-                raise PortDataMalformed(
-                    "Emby's item listing carried no Items array",
-                    detail=f"StartIndex={window.start}",
-                )
-            page = window.receive(entries, body.get("TotalRecordCount"))
-            if page.shifted:
-                logger.warning(
-                    "{source}'s listing shifted by at least {overlap} items before "
-                    "StartIndex={start}; an item shifted further was not read, and the next "
-                    "full walk reads it",
-                    source=self._source.name,
-                    overlap=window.overlap,
-                    start=window.start,
-                )
-            for payload in page.fresh:
-                yield payload
-            if page.ended:
-                return
-            window.advance()
+        pending = self._read(path, query, window.start, count=True)
+        try:
+            # `for`, not `while True`: the bound is part of the loop, and the raise
+            # below is reachable only by a walk that never ended.
+            for number in range(1, self._max_pages + 1):
+                body = await pending
+                entries = body.get("Items")
+                if not isinstance(entries, list):
+                    # Not a truncation: a caller must be able to tell "the library
+                    # ended" from "that was not a listing at all".
+                    raise PortDataMalformed(
+                        "Emby's item listing carried no Items array",
+                        detail=f"StartIndex={window.start}",
+                    )
+                page = window.receive(entries, body.get("TotalRecordCount"))
+                if page.shifted:
+                    logger.warning(
+                        "{source}'s listing shifted by at least {overlap} items before "
+                        "StartIndex={start}; an item shifted further was not read, and the "
+                        "next full walk reads it",
+                        source=self._source.name,
+                        overlap=window.overlap,
+                        start=window.start,
+                    )
+                if not page.ended and number < self._max_pages:
+                    pending = self._read(path, query, window.advance(), count=False)
+                for payload in page.fresh:
+                    yield payload
+                if page.ended:
+                    return
+        finally:
+            await _settle(pending)
         raise PortDataMalformed(
             "Emby's item listing never ended; the server appears to ignore StartIndex "
             "or to cap Limit far below the page size",
             detail=f"gave up after {self._max_pages} pages at StartIndex={window.start}",
         )
+
+    def _read(
+        self, path: str, query: Mapping[str, str], start: int, *, count: bool
+    ) -> asyncio.Task[dict[str, Any]]:
+        """One page's request, started now and awaited when the walk reaches it."""
+        params = {
+            **query,
+            "StartIndex": str(start),
+            "Limit": str(self._page_size),
+            "EnableTotalRecordCount": "true" if count else "false",
+        }
+        return asyncio.create_task(self._page(path, params, start))
 
     async def _page(self, path: str, params: Mapping[str, str], start: int) -> dict[str, Any]:
         """One page of a walk, asked for again while its failure is one a wait can fix.
@@ -378,10 +409,13 @@ class EmbyAdapter(SourceAdapter):
         # `start_index=0` always: the item lanes have a working `since`
         # cursor, so a failed walk restarts from it rather than resuming.
         query = _listing_query(LIBRARY_SINCE_PARAM, since)
-        async for payload in self._walk(query, start_index=0):
-            item = to_source_item(payload)
-            if item is not None:
-                yield item
+        # `aclosing`, so a consumer that stops closes the walk now, read-ahead
+        # included, rather than whenever the generator is collected.
+        async with aclosing(self._walk(query, start_index=0)) as payloads:
+            async for payload in payloads:
+                item = to_source_item(payload)
+                if item is not None:
+                    yield item
 
     async def _fetch(self, external_id: str, *, op: str = "get_item") -> dict[str, Any] | None:
         """One item's payload, or `None` for a 404.
@@ -444,13 +478,14 @@ class EmbyAdapter(SourceAdapter):
     ) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
         query = _listing_query(USER_DATA_SINCE_PARAM, since)
-        async for payload in self._walk(query, start_index=start_index):
-            # play_history_is_trustworthy=False: this is the listing route.
-            state = to_watch_state(
-                payload, source_user_id=user_id, play_history_is_trustworthy=False
-            )
-            if state is not None:
-                yield state
+        async with aclosing(self._walk(query, start_index=start_index)) as payloads:
+            async for payload in payloads:
+                # play_history_is_trustworthy=False: this is the listing route.
+                state = to_watch_state(
+                    payload, source_user_id=user_id, play_history_is_trustworthy=False
+                )
+                if state is not None:
+                    yield state
 
     async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
         """Authoritative watch state, from the route carrying the play history.

@@ -89,8 +89,9 @@ recovers them.
 ### Walking the library
 
 `list_items` and `watch_state` page over the source's own listing, in pages of
-`USHER_SOURCE_PAGE_SIZE` items (default **1,000**, at most 1,000), one page in
-flight at a time:
+`USHER_SOURCE_PAGE_SIZE` items (default **1,000**, at most 1,000), asking for
+the next page while the current one is written — one page read ahead, cancelled
+when the walk stops:
 
 - **Items are walked in ascending creation order**, so items added during a
   walk land at the end. Each page after the first re-reads the last 50 items of

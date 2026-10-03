@@ -1,12 +1,16 @@
 """EmbyAdapter behaviours the source-agnostic contract cannot express."""
 
 import asyncio
+import contextlib
+import gc
 import io
 import json
-from collections.abc import Callable, Sequence
+import time
+import weakref
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -130,8 +134,14 @@ class _Waits:
         return self.now
 
 
+_Handler = (
+    Callable[[httpx.Request], httpx.Response]
+    | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]]
+)
+
+
 def _on(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: _Handler,
     *,
     max_pages: int = MAX_PAGES,
     waits: _Waits | None = None,
@@ -868,6 +878,380 @@ async def test_an_item_walk_always_starts_at_the_beginning() -> None:
     finally:
         await adapter.aclose()
     assert requested == ["0"]
+
+
+# --- read-ahead ---------------------------------------------------------------
+
+
+def _parking_second_listing(
+    server: FakeEmbyServer, parked: asyncio.Event, cancelled: asyncio.Event
+) -> _Handler:
+    """`server`, holding its second listing open until the request is cancelled."""
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+        return server.handle(request)
+
+    return handle
+
+
+def _the_read_ahead() -> weakref.ref[asyncio.Task[Any]]:
+    """A weak reference to the walk's read-ahead: the one other task still running.
+
+    asyncio reports an exception nobody retrieved only when the task is destroyed, so
+    a case asserting that nothing was reported first asserts that the read-ahead was
+    collected, and holds nothing that would keep it alive.
+    """
+    others = asyncio.all_tasks() - {asyncio.current_task()}
+    assert len(others) == 1, f"the premise: one read-ahead in flight, found {len(others)} tasks"
+    return weakref.ref(others.pop())
+
+
+def _recording(
+    lost: list[dict[str, Any]],
+) -> Callable[[asyncio.AbstractEventLoop, dict[str, Any]], None]:
+    """A loop exception handler appending each report to `lost`, minus the task it names.
+
+    asyncio reports a lost exception from the task's finalizer, with the task in the
+    report. Keeping it would bring the task back to life, and the premise that the
+    read-ahead was collected would then fail where `lost` should.
+    """
+
+    def record(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        lost.append({key: value for key, value in context.items() if key != "future"})
+
+    return record
+
+
+async def test_the_next_page_is_requested_while_the_current_one_is_handled() -> None:
+    """Read-ahead, shown by observed overlap rather than by counting requests.
+
+    The consumer holds the first item until the second page's request reaches the
+    server, with a deadline that gives up. A walk that asks only when the consumer
+    comes back for more sends nothing in that window, so the deadline expires and
+    the two recorded intervals come out disjoint.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    arrivals: list[float] = []
+    second = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Items"):
+            arrivals.append(time.monotonic())
+            if len(arrivals) == 2:
+                second.set()
+        return server.handle(request)
+
+    adapter = _on(handle, page_size=2)
+    handling: tuple[float, float] | None = None
+    try:
+        async for _item in adapter.list_items():
+            if handling is None:
+                began = time.monotonic()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(second.wait(), timeout=2.0)
+                handling = (began, time.monotonic())
+    finally:
+        await adapter.aclose()
+    assert handling is not None and len(arrivals) >= 2, "the premise: the walk paged"
+    began, ended = handling
+    assert began <= arrivals[1] <= ended, (
+        f"the second page was requested at {arrivals[1]:.3f}, outside the first page's "
+        f"handling [{began:.3f}, {ended:.3f}]: nothing was read ahead"
+    )
+
+
+@pytest.mark.parametrize(
+    "walk",
+    [
+        pytest.param(lambda adapter: adapter.list_items(), id="list_items"),
+        # A delta from `T0`, which every item here carries: one listing, walked from
+        # its start, as `_parking_second_listing` assumes and a first walk need not be.
+        pytest.param(lambda adapter: adapter.watch_state(since=T0), id="watch_state"),
+    ],
+)
+async def test_stopping_the_walk_cancels_the_request_it_read_ahead(
+    walk: Callable[[EmbyAdapter], AsyncIterator[SourceItem | SourceWatchState]],
+) -> None:
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, cancelled = asyncio.Event(), asyncio.Event()
+    reported: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
+    items = cast(AsyncGenerator[SourceItem | SourceWatchState], walk(adapter))
+    try:
+        first = await asyncio.wait_for(anext(items), timeout=2.0)
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        await asyncio.wait_for(items.aclose(), timeout=2.0)
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert first.external_id == "movie-0"
+    assert cancelled.is_set(), "the request read ahead outlived the walk that asked for it"
+    assert reported == [], f"stopping the walk left asyncio something to report: {reported}"
+
+
+async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> None:
+    """A page refused while the consumer is still on the one before.
+
+    The consumer then stops. Stopping raises nothing, and asyncio is never left
+    holding an exception nobody read, which it would log as lost.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    refused = asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                refused.set()
+                return httpx.Response(404, json={"Error": "gone"})
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    try:
+        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(refused.wait(), timeout=2.0)
+        # Long enough for the refused request's task to finish raising.
+        await asyncio.sleep(0.05)
+        await items.aclose()
+        del items
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert listings == 2, "the premise: the second page was asked for and refused"
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_a_read_ahead_that_fails_once_cancelled_is_retrieved_too() -> None:
+    """Cancelling asks a read to stop, and a read can answer with a failure instead.
+
+    `cancel()` alone silences a failure that is already in, so a read-ahead that failed
+    before the walk stopped is quiet whether or not the walk reads what it raised. Here
+    the second listing is held open until it is cancelled and then refused: the task
+    ends raising, after the cancel.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, refused = asyncio.Event(), asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    refused.set()
+                return httpx.Response(404, json={"Error": "gone"})
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    try:
+        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        await asyncio.wait_for(items.aclose(), timeout=2.0)
+        del items
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+    assert refused.is_set(), "the premise: the read-ahead was cancelled, then refused"
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_cancelling_the_consumer_cancels_the_walk_rather_than_being_swallowed() -> None:
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, cancelled = asyncio.Event(), asyncio.Event()
+    adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
+
+    async def consume() -> list[str]:
+        return [item.external_id async for item in adapter.list_items()]
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        await adapter.aclose()
+    assert cancelled.is_set(), "the request in flight survived its consumer's cancellation"
+
+
+async def test_a_read_ahead_that_fails_after_its_walk_was_cancelled_is_retrieved() -> None:
+    """The walk is cancelled while it waits on its read-ahead, which fails afterwards.
+
+    A lane shutting down: the task closing the walk is cancelled mid-wait and the
+    adapter closed, and only then does the read-ahead, slow to stop, fail. That
+    cancellation leaves the walk rather than ending there, and asyncio must still not
+    report the read-ahead's failure as lost, though nothing waits on it any more.
+    """
+    server = FakeEmbyServer()
+    for index in range(4):
+        server.add_item(_movie(index), T0)
+    parked, stopping = asyncio.Event(), asyncio.Event()
+    release, failing = asyncio.Event(), asyncio.Event()
+    listings = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.url.path.endswith("/Items"):
+            listings += 1
+            if listings == 2:
+                parked.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    stopping.set()
+                    await release.wait()
+                failing.set()
+                raise httpx.ReadError("the connection dropped while the read was stopping")
+        return server.handle(request)
+
+    lost: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(_recording(lost))
+    adapter = _on(handle, page_size=2)
+    items = cast(AsyncGenerator[SourceItem], adapter.list_items())
+
+    async def stop(walk: AsyncGenerator[SourceItem]) -> None:
+        await walk.aclose()
+
+    try:
+        await asyncio.wait_for(anext(items), timeout=2.0)
+        ahead = _the_read_ahead()
+        await asyncio.wait_for(parked.wait(), timeout=2.0)
+        closing = asyncio.create_task(stop(items))
+        await asyncio.wait_for(stopping.wait(), timeout=2.0)
+        assert not closing.done(), "the premise: the walk is still waiting on its read-ahead"
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, timeout=2.0)
+        # Closed first, as a lane shutting down closes it, so `_page` passes the
+        # failure on rather than asking again.
+        await adapter.aclose()
+        release.set()
+        await asyncio.wait_for(failing.wait(), timeout=2.0)
+        # Long enough for the read-ahead's task to finish raising.
+        await asyncio.sleep(0.05)
+        del items, closing
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+        await adapter.aclose()
+        # Released on every path, or a read-ahead first cancelled at teardown, by a
+        # walk that never stopped it, waits on this forever and hangs the session.
+        release.set()
+    assert ahead() is None, "the premise: the read-ahead was collected"
+    assert lost == [], f"asyncio reported a read-ahead failure nobody retrieved: {lost}"
+
+
+async def test_the_page_that_ends_the_walk_is_the_last_one_asked_for() -> None:
+    """Nothing is read ahead past the end, however long the consumer takes.
+
+    The consumer waits on every item, which is when a page read ahead reaches the
+    server: the second arrives during the first item, so one asked for past the end
+    would arrive during the last.
+    """
+    server = FakeEmbyServer()
+    for index in range(5):
+        server.add_item(_movie(index), T0)
+    seen: list[str] = []
+    arrivals: list[int] = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/Items"):
+            arrivals.append(len(seen))
+        return server.handle(request)
+
+    adapter = _on(spy, page_size=4)
+    try:
+        async for item in adapter.list_items():
+            seen.append(item.external_id)
+            await asyncio.sleep(0.01)
+    finally:
+        await adapter.aclose()
+    assert sorted(seen) == [f"movie-{index}" for index in range(5)]
+    assert arrivals[:2] == [0, 1], "the premise: a page read ahead arrives while the consumer waits"
+    assert len(arrivals) == 2, f"a page was asked for after the one that ended the walk: {arrivals}"
+
+
+async def test_the_last_page_the_bound_allows_is_the_last_one_asked_for() -> None:
+    """A walk at its page bound reads nothing ahead, however long the consumer takes.
+
+    Every page here is new, so the listing never ends and each page has an item for
+    the consumer to wait on, which is when a page read past the bound would arrive.
+    """
+    seen: list[str] = []
+    arrivals: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        arrivals.append(len(seen))
+        # The escape hatch, so a walk with no bound fails this case instead of
+        # hanging it.
+        if len(arrivals) > 20:
+            return httpx.Response(200, json={"Items": []})
+        index = len(arrivals) - 1
+        entry = {"Id": f"movie-{index}", "Type": "Movie", "Name": f"M{index}"}
+        return httpx.Response(200, json={"Items": [entry]})
+
+    adapter = _on(handler, max_pages=3)
+    try:
+        with pytest.raises(PortDataMalformed, match="never ended"):
+            async for item in adapter.list_items():
+                seen.append(item.external_id)
+                await asyncio.sleep(0.01)
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+    assert arrivals[:3] == [0, 1, 2], "the premise: each page read ahead arrives mid-item"
+    assert len(arrivals) == 3, f"a page was asked for past the bound: {arrivals}"
 
 
 # --- a transient failure mid-walk ------------------------------------------

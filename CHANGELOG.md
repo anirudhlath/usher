@@ -14,6 +14,9 @@ Versioning is `0.x` while the wire contract may still move —
   costs a source little more than a page of 200, so a walk makes a fifth of the
   requests. A `.env` copied from an earlier `.env.example` still sets
   `USHER_SOURCE_PAGE_SIZE=200`; change that line or delete it.
+- **A walk asks for its next page while it writes the current one**, so the
+  source and the database work at once. One page is read ahead, and it is
+  cancelled when the walk stops.
 - **`USHER_PUSH_STALE_AFTER_SECONDS` defaults to 300, up from 90.** An idle
   library's push channel routinely went longer than 90 s between messages, and
   every such gap cost a reconnect. `usher push --probe` listens for one window,
