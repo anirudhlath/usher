@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13, asyncio, httpx (`MockTransport` fakes), SQLAlchemy 2 async + asyncpg, Alembic, pydantic domain models, OpenTelemetry metrics, pytest (+ testcontainers `pgvector/pgvector:pg17`), the React console's settings catalogue (`web/`).
 
-**Spec:** `docs/specs/2026-10-01-fast-first-sync-design.md`. Read it beside this plan; this plan argues from it and departs from its letter in fifteen places, each called out where it happens. Three are in Phase 1: the overlap clamp and the drained-tail rule in Task 3, and an already-`FAILED` first walk keeping its own error in Task 7. Twelve are in Phase 2, listed at its head.
+**Spec:** `docs/specs/2026-10-01-fast-first-sync-design.md`. Read it beside this plan; this plan argues from it and departs from its letter in sixteen places, each called out where it happens. Four are in Phase 1: a short page judged against the longest page served in Task 2, the overlap clamp and the drained-tail rule in Task 3, and an already-`FAILED` first walk keeping its own error in Task 7. Twelve are in Phase 2, listed at its head.
 
 ## Global Constraints
 
@@ -187,6 +187,8 @@ git commit -m "sync: walk a source in pages of 1,000 by default"
 
 Spec §1.2. `EnableTotalRecordCount=true` goes on a walk's first page only. The walk ends on an empty page, or on a page shorter than requested once the cursor has reached the first page's total. That second rule keeps a server that caps `Limit` from ending a walk early, and keeps reading a library that grew past its stale total.
 
+**Departure from the spec's letter** (made in review): a page is short when it is shorter than the longest page served before it, or than `limit` before any. Judged against `limit`, as §1.2 words it, every page a capped server serves is short, so the walk ends at the first page's stale total and loses what a growing library added.
+
 The live server still sends `TotalRecordCount` on an uncounted page, as **0** (recorded 2026-10-01, at the head and deep in a 1.16M-item listing). Omitting the flag counts. The fake must say the same before the adapter relies on it.
 
 **Files:**
@@ -199,7 +201,7 @@ The live server still sends `TotalRecordCount` on an uncounted page, as **0** (r
 
 **Interfaces:**
 - Produces: `usher.adapters.emby.paging.Page(fresh: list[dict[str, Any]], ended: bool)`; `OffsetWindow(*, limit: int, start: int)` with `.start: int`, `.total: int | None`, `.receive(entries: list[Any], total: object) -> Page`, `.advance() -> int`. Task 3 extends both.
-- Produces: `_listing_query(since_param: str, since: AwareDatetime | None) -> dict[str, str]` in `adapter.py`; `EmbyAdapter._walk(query: Mapping[str, str], *, start_index: int) -> AsyncGenerator[dict[str, Any], None]`.
+- Produces: `_listing_query(since_param: str, since: AwareDatetime | None) -> dict[str, str]` in `adapter.py`; `EmbyAdapter._walk(query: Mapping[str, str], *, start_index: int) -> AsyncGenerator[dict[str, Any]]`.
 - Produces: `FakeEmbyServer.max_limit: int | None`.
 
 - [ ] **Step 1: Record the facts the fake is about to model**
@@ -582,7 +584,7 @@ Replace `_walk` with:
 ```python
     async def _walk(
         self, query: Mapping[str, str], *, start_index: int
-    ) -> AsyncGenerator[dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any]]:
         """Page one listing to its end; `start_index` is the resume point (#41).
 
         Deliberately no default: every caller states its own, so `list_items`
@@ -788,6 +790,26 @@ def test_a_capped_page_that_brought_nothing_new_does_not_end_the_walk() -> None:
     assert page.fresh == [] and not page.ended
 ```
 
+Two of Task 2's window cases feed pages only a walk without a reach-back is served, and fail under this task's window. Replace them in place, names and intents kept:
+
+```python
+def test_a_short_page_at_the_total_ends_the_walk() -> None:
+    window = OffsetWindow(limit=4, start=0)
+    assert not window.receive(_entries("a", "b", "c", "d"), 5).ended
+    assert window.advance() == 2
+    assert window.receive(_entries("c", "d", "e"), 0).ended
+
+
+def test_a_short_page_below_the_total_does_not_end_the_walk() -> None:
+    """A server that caps `Limit` serves nothing but short pages until the end."""
+    window = OffsetWindow(limit=4, start=0)
+    assert not window.receive(_entries("a", "b", "c"), 6).ended
+    assert window.advance() == 2
+    assert not window.receive(_entries("c", "d", "e"), 0).ended
+    assert window.advance() == 4
+    assert window.receive(_entries("e", "f"), 0).ended
+```
+
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:randomly tests/unit/test_adapters_emby_paging.py`
 Expected: FAIL — `ImportError: cannot import name 'PAGE_OVERLAP'`.
 
@@ -820,13 +842,14 @@ class Page:
 class OffsetWindow:
     """The arithmetic of one walk, kept apart from the requests it plans.
 
-    The total is read from the first page only, the one asked to count. A walk
-    ends on an empty page; on a page shorter than `limit` once the cursor has
-    reached that total; or on a page shorter than the longest served that
-    brought nothing new. The second rule's guard keeps a server that caps
-    `Limit` from ending a walk early, and a library that grows mid-walk keeps
-    serving full pages past it. The third ends a walk that deletions left
-    short of its total, which would otherwise re-read its tail until the end.
+    The total is read from the first page only, the one asked to count. A page is
+    short when it is shorter than the longest page served before it, or than
+    `limit` before any. A walk ends on an empty page; on a short page once the
+    cursor has reached that total; or on a short page that brought nothing new.
+    The second rule keeps a server that caps `Limit` from ending a walk early,
+    and keeps reading a library that grows past its old total, capped or not.
+    The third ends a walk that deletions left short of its total, which would
+    otherwise re-read its tail until the end.
 
     Each page after the first reaches back `PAGE_OVERLAP` items, clamped to half
     the page before it so that a short page still advances. An entry the
@@ -855,18 +878,24 @@ class OffsetWindow:
             and (external_id is None or external_id not in self._previous)
         ]
         shifted = self.overlap > 0 and self._last is not None and self._last not in ids
-        if self._first and isinstance(total, int) and total > 0:
+        # `> 0`, not `>= 0`: 0 is what a listing not asked to count reports. Not a
+        # `bool` either, because JSON `true` is an `int` to Python.
+        if self._first and isinstance(total, int) and not isinstance(total, bool) and total > 0:
             self.total = total
         self._cursor = self.start + len(entries)
         self._served = len(entries)
         reached = self.total is not None and self._cursor >= self.total
-        drained = not self._first and len(entries) < self._longest and not fresh
+        # Against the longest page served, or `limit` before the first: a capped
+        # server serves nothing longer, and its full pages past a stale total are a
+        # library that grew.
+        short = len(entries) < (self._longest or self.limit)
+        drained = not self._first and short and not fresh
         self._longest = max(self._longest, len(entries))
         named = [external_id for external_id in ids if external_id is not None]
         self._previous = frozenset(named)
         self._last = named[-1] if named else None
         self._first = False
-        ended = not entries or (len(entries) < self.limit and reached) or drained
+        ended = not entries or (short and reached) or drained
         return Page(fresh=fresh, ended=ended, shifted=shifted)
 
     def advance(self) -> int:
@@ -936,6 +965,16 @@ async def test_the_walk_pages_until_the_library_is_exhausted() -> None:
     assert sorted(seen) == [f"movie-{index}" for index in range(5)]
     listings = [entry for entry in server.requests if entry.endswith("/Items")]
     assert len(listings) == 2
+```
+
+`test_only_the_first_page_asks_for_the_total` (Task 2) pins three requests over pages of two. Under the reach-back a final page of pure overlap ends a walk by the drained rule whether or not the total was read, so the case moves to pages of four, where the second page (`movie-2`–`movie-4`) is short, brings `movie-4` and ends the walk at the total. A window that never takes the total asks a third time:
+
+```python
+    adapter = _on(spy, page_size=4)
+```
+
+```python
+    assert len(flags) == 2, "the walk did not end on the page that reached the first page's total"
 ```
 
 Then add, after it:
@@ -1067,9 +1106,10 @@ Expected: PASS. The contract runs at a page size of two, where every page reache
 1. `self.overlap = 0` in `advance` (no reach-back). Expect `test_a_deletion_behind_the_cursor_skips_nothing` ("skipped") and `test_a_page_after_the_first_reaches_back_by_the_overlap` to fail.
 2. `self.overlap = PAGE_OVERLAP` (unclamped). Expect `test_a_limit_capped_below_the_overlap_still_advances` (`PortDataMalformed` after 30 pages) and `test_the_overlap_is_clamped_to_half_the_page_just_served` to fail.
 3. `drained = False`. Expect `test_a_walk_that_deletions_left_short_of_its_total_ends_on_its_tail` (`4 == 3`) and `test_a_short_page_that_brought_nothing_new_ends_the_walk` to fail.
-4. `len(entries) < self.limit` in place of `len(entries) < self._longest` inside `drained`. Expect `test_a_capped_page_that_brought_nothing_new_does_not_end_the_walk` to fail.
+4. `short = len(entries) < self.limit`. Expect `test_a_capped_page_that_brought_nothing_new_does_not_end_the_walk`, `test_a_capped_walk_past_a_stale_total_reads_what_was_added` and `test_a_capped_server_on_a_growing_library_is_read_to_its_end` to fail.
 5. `fresh` keeping every dict (no `not in self._previous` test). Expect `test_a_deletion_behind_the_cursor_skips_nothing` ("yielded twice") and `test_an_entry_the_previous_page_carried_is_not_yielded_again` to fail.
 6. `shifted = self._last is not None and self._last not in ids` (no `overlap > 0`). Expect `test_a_request_that_reached_back_nothing_cannot_have_shifted` to fail.
+7. Every new or rewritten case that no plant above names is seen to fail for its own reason: show its RED against Task 2's window, or plant for it.
 
 - [ ] **Step 7: Say it in the PRD, the changelog and the rules**
 
@@ -1212,7 +1252,7 @@ async def test_stopping_the_walk_cancels_the_request_it_read_ahead() -> None:
         server.add_item(_movie(index), T0)
     parked, cancelled = asyncio.Event(), asyncio.Event()
     adapter = _on(_parking_second_listing(server, parked, cancelled), page_size=2)
-    items = cast(AsyncGenerator[SourceItem, None], adapter.list_items())
+    items = cast(AsyncGenerator[SourceItem], adapter.list_items())
     try:
         first = await anext(items)
         await asyncio.wait_for(parked.wait(), timeout=2.0)
@@ -1250,7 +1290,7 @@ async def test_a_read_ahead_that_failed_is_retrieved_when_the_walk_stops() -> No
     loop.set_exception_handler(lambda _loop, context: lost.append(context))
     adapter = _on(handle, page_size=2)
     try:
-        items = cast(AsyncGenerator[SourceItem, None], adapter.list_items())
+        items = cast(AsyncGenerator[SourceItem], adapter.list_items())
         await anext(items)
         await asyncio.wait_for(refused.wait(), timeout=2.0)
         # Long enough for the refused request's task to finish raising.
@@ -1312,7 +1352,7 @@ Replace `_walk`'s body with the read-ahead form, and add `_read`:
 ```python
     async def _walk(
         self, query: Mapping[str, str], *, start_index: int
-    ) -> AsyncGenerator[dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any]]:
         """Page one listing to its end, one request ahead of the consumer.
 
         The next page is asked for as soon as a page arrives and before its items
@@ -1355,7 +1395,8 @@ Replace `_walk`'s body with the read-ahead form, and add `_read`:
         finally:
             await _settle(pending)
         raise PortDataMalformed(
-            "Emby's item listing never ended; the server appears to ignore StartIndex",
+            "Emby's item listing never ended; the server appears to ignore StartIndex "
+            "or to cap Limit far below the page size",
             detail=f"gave up after {self._max_pages} pages at StartIndex={window.start}",
         )
 
@@ -2435,7 +2476,7 @@ In `docs/plans/progress.md`, this plan's table: Tasks 1–8 → `✅ landed (PR 
 git push -u origin feat/fast-first-sync
 ```
 
-Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the three departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
+Open the PR against `main` titled `A first sync that pages faster and asks only for what was watched`. Follow the repository's PR template if one exists. The body states what Phase 1 changes for an operator, the gate results with counts, the four departures from the spec's letter, and that Phase 2 follows in a separate PR. It ends with:
 
 ```
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -2916,7 +2957,7 @@ Spec §2.1. `SourceAdapter` gains two concrete methods: `plan_walk`, whose defau
 
 **Interfaces:**
 - Produces: `usher.domain.sync.WalkStage` (`SEED = "seed"`, `TITLES = "titles"`, `EPISODES = "episodes"`) and `STAGE_ORDER: tuple[WalkStage, ...]`.
-- Produces, in `usher.ports.source`: `DEFAULT_UNIT_KEY = "all"`; `WalkUnit(key: str, stage: WalkStage, label: str, expected_items: int | None = None)`; `WalkPlan(units: tuple[WalkUnit, ...], expected_total: int | None = None)`; `WHOLE_LIBRARY: WalkPlan`; `UnitPage(items: tuple[SourceItem, ...], resume_at: int)`; `pages_of(items: AsyncIterator[SourceItem], *, start_index: int = 0, size: int = 1_000) -> AsyncGenerator[UnitPage, None]`; `SourceAdapter.plan_walk() -> WalkPlan` (async); `SourceAdapter.list_unit(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]`.
+- Produces, in `usher.ports.source`: `DEFAULT_UNIT_KEY = "all"`; `WalkUnit(key: str, stage: WalkStage, label: str, expected_items: int | None = None)`; `WalkPlan(units: tuple[WalkUnit, ...], expected_total: int | None = None)`; `WHOLE_LIBRARY: WalkPlan`; `UnitPage(items: tuple[SourceItem, ...], resume_at: int)`; `pages_of(items: AsyncIterator[SourceItem], *, start_index: int = 0, size: int = 1_000) -> AsyncGenerator[UnitPage]`; `SourceAdapter.plan_walk() -> WalkPlan` (async); `SourceAdapter.list_unit(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]`.
 - Produces: `SourceHarness.given_item_in_libraries(item, libraries: Sequence[str], *, changed_at)`; `FakeSourceAdapter.page_size` (2), `FakeSourceAdapter.place(external_id, *libraries)`. A fake with libraries plans one `TITLES` unit per library, keyed `library:<name>`.
 
 - [ ] **Step 1: Write the failing domain and port tests**
@@ -3168,7 +3209,7 @@ class UnitPage:
 
 async def pages_of(
     items: AsyncIterator[SourceItem], *, start_index: int = 0, size: int = 1_000
-) -> AsyncGenerator[UnitPage, None]:
+) -> AsyncGenerator[UnitPage]:
     """A walk in pages of `size`, from its `start_index`th item.
 
     `resume_at` counts every item the walk produced, skipped ones included, so it
@@ -3207,7 +3248,7 @@ In `SourceAdapter`, between `push_messages_received` and `probe_push`:
         """
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         """One unit of this adapter's plan, in pages, from `start_index`.
 
         Each page's `resume_at` is the `start_index` that resumes after it. Never
@@ -3255,7 +3296,7 @@ After `_walk_items`:
         )
         return WalkPlan(units, expected_total=len(self._items))
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         if key == DEFAULT_UNIT_KEY:
             return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
         name = key.removeprefix("library:")
@@ -4031,7 +4072,7 @@ A library is counted once, over every type a walk lists, so its count rides on i
 - Consumes: Task 11's `DEFAULT_UNIT_KEY`, `WalkUnit`, `WalkPlan`, `UnitPage`, `WalkStage`; Task 10's `view_item.json`; Phase 1's `OffsetWindow`, `PAGE_OVERLAP`, `_page`, `_settle`, `_listing_query`, `LIBRARY_SINCE_PARAM`.
 - Produces, in `usher.adapters.emby.planning`: `LibraryUnit(stage: WalkStage, view_id: str, lower: int = 0, upper: int | None = None)` with `.key`, `.item_types` and `.label(library: str) -> str`; `episode_chunks(view_id: str, held: int, unit_max_items: int) -> list[LibraryUnit]`; `parse_unit_key(key: str) -> LibraryUnit | None`. Keys read `titles:<view>` and `episodes:<view>:<lower>:<upper, or empty for none>`.
 - Produces: `OffsetWindow(*, limit, start, stop: int | None = None)`, `.cursor: int`, `.request_limit: int`.
-- Produces: `EmbyAdapter(…, unit_max_items: int = 100_000)`; `EmbyAdapter._pages(query, *, start_index, stop=None, path=None) -> AsyncGenerator[tuple[list[dict[str, Any]], int], None]`, each page's new entries with the `StartIndex` that resumes after it; `EmbyAdapter._unit_pages(query, *, start_index, stop=None) -> AsyncGenerator[UnitPage, None]`; `EmbyAdapter._read(path, query, start, limit, *, count)`. Task 14's seed reads through `_pages(path=…)`; Task 15's limiter wraps `_page`.
+- Produces: `EmbyAdapter(…, unit_max_items: int = 100_000)`; `EmbyAdapter._pages(query, *, start_index, stop=None, path=None) -> AsyncGenerator[tuple[list[dict[str, Any]], int]]`, each page's new entries with the `StartIndex` that resumes after it; `EmbyAdapter._unit_pages(query, *, start_index, stop=None) -> AsyncGenerator[UnitPage]`; `EmbyAdapter._read(path, query, start, limit, *, count)`. Task 14's seed reads through `_pages(path=…)`; Task 15's limiter wraps `_page`.
 - Produces: `FakeEmbyServer.add_view(view_id, name, *, collection_type: str | None = "movies")`, `.remove_view(view_id)`, `.place(external_id, *view_ids)`.
 
 - [ ] **Step 1: Write the failing tests for unit keys and chunks**
@@ -4873,7 +4914,7 @@ Replace `_walk` and `_read` with:
 ```python
     async def _walk(
         self, query: Mapping[str, str], *, start_index: int
-    ) -> AsyncGenerator[dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any]]:
         """Every new entry of one listing, from `start_index` to its end."""
         async with aclosing(self._pages(query, start_index=start_index)) as pages:
             async for entries, _ in pages:
@@ -4887,7 +4928,7 @@ Replace `_walk` and `_read` with:
         start_index: int,
         stop: int | None = None,
         path: str | None = None,
-    ) -> AsyncGenerator[tuple[list[dict[str, Any]], int], None]:
+    ) -> AsyncGenerator[tuple[list[dict[str, Any]], int]]:
         """Page one listing to its end, one request ahead of the consumer.
 
         Yields each page's new entries with the `StartIndex` that resumes after it,
@@ -4936,7 +4977,8 @@ Replace `_walk` and `_read` with:
         finally:
             await _settle(pending)
         raise PortDataMalformed(
-            "Emby's item listing never ended; the server appears to ignore StartIndex",
+            "Emby's item listing never ended; the server appears to ignore StartIndex "
+            "or to cap Limit far below the page size",
             detail=f"gave up after {self._max_pages} pages at StartIndex={window.start}",
         )
 
@@ -4957,7 +4999,7 @@ Replace `_walk` and `_read` with:
 
     async def _unit_pages(
         self, query: Mapping[str, str], *, start_index: int, stop: int | None = None
-    ) -> AsyncGenerator[UnitPage, None]:
+    ) -> AsyncGenerator[UnitPage]:
         """`_pages` as the port's pages; one holding no item Usher models is not yielded."""
         async with aclosing(self._pages(query, start_index=start_index, stop=stop)) as pages:
             async for entries, resume_at in pages:
@@ -5013,7 +5055,7 @@ After `_list_items`:
                 units.append(WalkUnit(chunk.key, WalkStage.EPISODES, chunk.label(name)))
         return WalkPlan(tuple(units), expected_total=total)
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         if key == DEFAULT_UNIT_KEY:
             query = _listing_query(LIBRARY_SINCE_PARAM, None)
             return self._unit_pages(query, start_index=start_index)
@@ -5024,7 +5066,7 @@ After `_list_items`:
 
     async def _library_unit(
         self, unit: LibraryUnit, start_index: int
-    ) -> AsyncGenerator[UnitPage, None]:
+    ) -> AsyncGenerator[UnitPage]:
         # A library gone since the plan was made has nothing left to walk, and its
         # id is never sent: a server can answer a `ParentId` it does not know with
         # the whole library.
@@ -5588,7 +5630,7 @@ Replace Task 13's `plan_walk` with:
 `list_unit` checks the seed first:
 
 ```python
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         if key == SEED_KEY:
             # Every seed page resumes at 0, so `start_index` is always 0 here or
             # stale; see `_seed`.
@@ -5605,7 +5647,7 @@ Replace Task 13's `plan_walk` with:
 After `_library_unit`:
 
 ```python
-    async def _seed(self) -> AsyncGenerator[UnitPage, None]:
+    async def _seed(self) -> AsyncGenerator[UnitPage]:
         """What the account is watching: played, then in progress, then up next.
 
         Each page is led by the series its episodes need that neither it nor an
@@ -6854,7 +6896,7 @@ async def test_a_bug_in_a_walker_is_raised_not_recorded() -> None:
     fixture = _Fixture()
     _shelve(fixture, "Films", range(2))
 
-    def _broken(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def _broken(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         raise ZeroDivisionError("a bug, not an outage")
 
     fixture.adapter.list_unit = _broken  # type: ignore[method-assign]
@@ -6875,7 +6917,7 @@ def test_a_service_with_no_walkers_is_refused() -> None:
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         # Pages of two, so at the fixture's batch of two a planned walk commits
         # page by page, as its single walk commits item pair by item pair.
         return pages_of(self._walk(), start_index=start_index, size=2)
@@ -6913,7 +6955,7 @@ async def test_a_whole_library_walk_persists_its_units_against_real_sql(
     async def plan_walk(self) -> WalkPlan:
         return WHOLE_LIBRARY
 
-    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage, None]:
+    def list_unit(self, key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]:
         return pages_of(self._walk(), start_index=start_index)
 ```
 
