@@ -3782,7 +3782,7 @@ Spec §2.1. `SourceAdapter` gains two concrete methods: `plan_walk`, whose defau
 **Interfaces:**
 - Produces: `usher.domain.sync.WalkStage` (`SEED = "seed"`, `TITLES = "titles"`, `EPISODES = "episodes"`) and `STAGE_ORDER: tuple[WalkStage, ...]`.
 - Produces, in `usher.ports.source`: `DEFAULT_UNIT_KEY = "all"`; `WalkUnit(key: str, stage: WalkStage, label: str, expected_items: int | None = None)`; `WalkPlan(units: tuple[WalkUnit, ...], expected_total: int | None = None)`; `WHOLE_LIBRARY: WalkPlan`; `UnitPage(items: tuple[SourceItem, ...], resume_at: int)`; `pages_of(items: AsyncIterator[SourceItem], *, start_index: int = 0, size: int = 1_000) -> AsyncGenerator[UnitPage]`; `SourceAdapter.plan_walk() -> WalkPlan` (async); `SourceAdapter.list_unit(key: str, *, start_index: int = 0) -> AsyncGenerator[UnitPage]`.
-- Produces: `SourceHarness.given_item_in_libraries(item, libraries: Sequence[str], *, changed_at)`; `FakeSourceAdapter.page_size` (2), `FakeSourceAdapter.place(external_id, *libraries)`. A fake with libraries plans one `TITLES` unit per library, keyed `library:<name>`.
+- Produces: `SourceHarness.given_item_in_libraries(item, libraries: Sequence[str], *, changed_at)`; `FakeSourceAdapter.page_size` (2), `FakeSourceAdapter.place(external_id, *libraries)`. A fake with libraries plans one `TITLES` unit per library, keyed `library:<name>`, while every seeded item is in one; otherwise the single `all` unit.
 
 - [ ] **Step 1: Write the failing domain and port tests**
 
@@ -3906,12 +3906,12 @@ async def test_the_default_unit_is_list_items_in_pages() -> None:
     assert pages == [(["m1", "m2"], 3)]
 
 
-def test_the_default_unit_refuses_a_key_it_never_planned() -> None:
+def test_the_default_unit_refuses_a_key_no_plan_could_name() -> None:
     with pytest.raises(PortDataMalformed):
         SourceAdapter.list_unit(_fake(), "library:Films")
 ```
 
-The task review added five more cases to `tests/unit/test_ports_source.py`, each planted: `test_a_walk_that_fails_on_a_page_boundary_yields_no_empty_page` (the `if held:` guard), `test_the_fake_plans_one_whole_walk_while_an_item_sits_in_no_library`, `test_the_fake_forgets_an_item_out_of_every_library_it_was_placed_in`, `test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index` (four items, so its two pages tell the fake's page size from the default) and `test_the_fake_refuses_a_library_it_was_never_given`, with a `_seed(adapter, *ids, libraries=())` helper.
+The task review added six more cases to `tests/unit/test_ports_source.py`, each planted: `test_a_walk_that_fails_on_a_page_boundary_yields_no_empty_page` (the `if held:` guard), `test_the_fake_plans_one_whole_walk_while_an_item_sits_in_no_library`, `test_the_fake_forgets_an_item_out_of_every_library_it_was_placed_in`, `test_the_fake_s_own_whole_library_unit_resumes_from_its_start_index` (four items, so its two pages tell the fake's page size from the default) `test_the_fake_refuses_a_library_it_was_never_given` and `test_the_fake_refuses_a_library_named_without_its_unit_prefix`, with a `_seed(adapter, *ids, libraries=())` helper.
 
 The `"FakeSourceAdapter"` return annotation is a string; below the imports, add `if TYPE_CHECKING: from tests.fakes.source_adapter import FakeSourceAdapter`, using the `TYPE_CHECKING` import from the list above, the way the module already imports the fake lazily inside its cases.
 
@@ -3963,7 +3963,7 @@ The `"FakeSourceAdapter"` return annotation is a string; below the imports, add 
                     walked.update(item.external_id for item in page.items)
         assert walked == whole
 
-    async def test_a_unit_the_plan_never_named_is_refused(self, harness: SourceHarness) -> None:
+    async def test_a_key_no_plan_could_name_is_refused(self, harness: SourceHarness) -> None:
         """A key no plan of this adapter's could name raises rather than walking nothing.
 
         An empty unit reads to the writer as a unit that completed, and a full walk
@@ -4109,7 +4109,7 @@ In `SourceAdapter`, between `push_messages_received` and `probe_push`:
         raises `PortDataMalformed`; a key from an earlier plan stays walkable.
         """
         if key != DEFAULT_UNIT_KEY:
-            raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
+            raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
         return pages_of(self.list_items(None), start_index=start_index)
 ```
 
@@ -4159,7 +4159,7 @@ After `_walk_items`:
             return pages_of(self._walk_items(None), start_index=start_index, size=self.page_size)
         name = key.removeprefix("library:")
         if name == key or name not in self._libraries:
-            raise PortDataMalformed(f"no walk unit {key!r} in this source's plan")
+            raise PortDataMalformed(f"no plan of this source's could name walk unit {key!r}")
         return pages_of(self._walk_library(name), start_index=start_index, size=self.page_size)
 
     async def _walk_library(self, name: str) -> AsyncIterator[SourceItem]:
@@ -4213,7 +4213,7 @@ Expected: PASS — the two contract cases run on both subclasses, and the count 
 1. In `pages_of`, yield `resume_at=received - start_index` from the in-loop `yield` only, the one under `if len(held) >= size:`. Expect `test_a_resume_point_counts_the_items_it_skipped` to fail on `[(['d', 'e'], 2)] == [(['d', 'e'], 5)]`.
 2. In `pages_of`'s `except`, drop the partial page (`raise` alone). Expect `test_a_walk_that_fails_mid_page_yields_what_it_had_and_then_raises` to fail, missing `(['c'], 3)`.
 3. In `FakeSourceAdapter.plan_walk`, plan every library but the last (`list(self._libraries.items())[:-1]`). Expect `TestFakeSourceAdapter::test_the_plan_s_units_together_yield_what_a_whole_walk_yields` to fail on `walked == whole`.
-4. In `SourceAdapter.list_unit`, drop the key check. Expect `test_the_default_unit_refuses_a_key_it_never_planned` and `TestEmbyAdapter::test_a_unit_the_plan_never_named_is_refused` to fail with `DID NOT RAISE`.
+4. In `SourceAdapter.list_unit`, drop the key check. Expect `test_the_default_unit_refuses_a_key_no_plan_could_name` and `TestEmbyAdapter::test_a_key_no_plan_could_name_is_refused` to fail with `DID NOT RAISE`.
 5. In `pages_of`, drop the `finally:` and its body. Expect `test_a_consumer_that_stops_early_closes_the_walk_it_was_paging` to fail on `[] == [True]`: the walk is closed only later, by the event loop's finalizer.
 
 - [ ] **Step 9: Commit**
@@ -5971,7 +5971,7 @@ After `_list_items`:
             return self._unit_pages(query, start_index=start_index)
         unit = parse_unit_key(key)
         if unit is None:
-            raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
+            raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
         return self._library_unit(unit, start_index)
 
     async def _library_unit(
@@ -6062,7 +6062,7 @@ and replace Task 11's `given_item_in_libraries`:
         self._server.place(item.external_id, *(self._view_ids[name] for name in libraries))
 ```
 
-`tests/contract/source_adapter_contract.py`, after `test_a_unit_the_plan_never_named_is_refused`:
+`tests/contract/source_adapter_contract.py`, after `test_a_key_no_plan_could_name_is_refused`:
 
 ```python
     async def test_a_unit_resumes_after_a_page_from_its_resume_at(
@@ -6551,7 +6551,7 @@ Replace Task 13's `plan_walk` with:
             return self._unit_pages(query, start_index=start_index)
         unit = parse_unit_key(key)
         if unit is None:
-            raise PortDataMalformed(f"no walk unit {key!r} in this adapter's plan")
+            raise PortDataMalformed(f"no plan of this adapter's could name walk unit {key!r}")
         return self._library_unit(unit, start_index)
 ```
 
