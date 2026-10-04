@@ -3252,10 +3252,15 @@ A template copy needs the catalog to itself, so check first:
 ```bash
 docker exec usher-postgres-1 psql -U usher -d postgres -Atc \
   "SELECT count(*) FROM pg_stat_activity WHERE datname = 'usher_catalog'"
-docker exec usher-postgres-1 createdb -U usher -T usher_catalog ffs_first_watch
+docker exec usher-postgres-1 createdb -U usher -T usher_catalog -O usher_dev ffs_first_watch
+sed -n '/^_HAND_OVER_SQL = """$/,/^"""$/p' ~/code/usher-devdb/scripts/wt_db.py | sed '1d;$d' \
+  | sed 's/{role}/usher_dev/g' \
+  | docker exec -i usher-postgres-1 psql -U usher -d ffs_first_watch -v ON_ERROR_STOP=1
 ```
 
-Expected: `0`, then `createdb` succeeds. The clone takes about 8 GB. If the count is not `0`, another worktree is using the catalog. Wait for it to finish rather than ending its session.
+Expected: `0`, then `createdb` succeeds, then `DO`. The clone takes about 8 GB. If the count is not `0`, another worktree is using the catalog. Wait for it to finish rather than ending its session.
+
+The dev stack's `.env` connects as `usher_dev`, which the catalog revokes, and a template copy keeps the catalog's grants. So the clone is handed to `usher_dev` the way `wt_db.py up` hands over a worktree's database: the schema, its tables and sequences, and its routines other than the extensions'. Without the hand-over, Step 2's `alembic` fails with `no schema has been selected to create in`.
 
 - [ ] **Step 2: Bring the clone to PR 1's schema, as the handover would have left it**
 
@@ -3601,7 +3606,7 @@ asyncio.run(main())
 - [ ] **Step 4: Run it inside the production container and keep the raw output**
 
 ```bash
-(cd ~/code/usher-deploy && docker compose cp -q /var/tmp/sync-speed/facts2.py usher:/tmp/facts2.py \
+(cd ~/code/usher-deploy && docker compose cp /var/tmp/sync-speed/facts2.py usher:/tmp/facts2.py >/dev/null 2>&1 \
   && timeout 1200 docker compose exec -T usher python /tmp/facts2.py 2>&1 | grep -v '^{"text"') \
   | tee /var/tmp/sync-speed/facts2.out
 sha256sum /var/tmp/sync-speed/facts2.out | tee /var/tmp/sync-speed/facts2.out.sha256
