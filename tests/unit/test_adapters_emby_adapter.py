@@ -3597,13 +3597,13 @@ async def test_a_plan_starts_with_the_seed_and_so_does_its_fallback() -> None:
     finally:
         await falling_back.aclose()
     # Both premises leave the seed out, so a seed gone missing fails the loop instead.
-    assert [unit.stage for unit in covered.units if unit.stage is not WalkStage.SEED] == [
+    assert [unit.stage for unit in covered.units if unit.key != SEED_KEY] == [
         WalkStage.TITLES,
         WalkStage.EPISODES,
     ], "the premise: the first plan walked the library"
-    assert [unit.key for unit in fallback.units if unit.stage is not WalkStage.SEED] == [
-        DEFAULT_UNIT_KEY
-    ], "the premise: the second plan fell back"
+    assert [unit.key for unit in fallback.units if unit.key != SEED_KEY] == [DEFAULT_UNIT_KEY], (
+        "the premise: the second plan fell back"
+    )
     for plan in (covered, fallback):
         assert plan.units[0] == SEED_UNIT
         assert [unit.stage for unit in plan.units].count(WalkStage.SEED) == 1
@@ -3632,12 +3632,13 @@ async def test_a_filter_the_server_ignores_leaves_the_plan_without_a_seed(
         plan = await adapter.plan_walk()
     finally:
         await adapter.aclose()
-    stages = [unit.stage for unit in plan.units]
     if ignored is None:
-        # Membership only: where the seed goes is the case above's to pin.
-        assert WalkStage.SEED in stages, "the premise: a server honouring both filters gets a seed"
+        # Membership only: where the seed goes, and its stage, are the case above's to pin.
+        assert SEED_KEY in {unit.key for unit in plan.units}, (
+            "the premise: a server honouring both filters gets a seed"
+        )
     else:
-        assert stages == [WalkStage.TITLES, WalkStage.EPISODES]
+        assert [unit.stage for unit in plan.units] == [WalkStage.TITLES, WalkStage.EPISODES]
 
 
 async def test_the_seed_holds_what_the_account_watched_and_watches_next_each_series_first() -> None:
@@ -3649,14 +3650,14 @@ async def test_the_seed_holds_what_the_account_watched_and_watches_next_each_ser
     """
     server = FakeEmbyServer()
     _watching(server)
-    carried: dict[str, set[str]] = {}
+    carried: dict[str, list[str]] = {}
 
     def carrying(request: httpx.Request) -> httpx.Response:
         response = server.handle(request)
         filters = request.url.params.get("Filters")
         if filters is not None:
             entries = json.loads(response.content)["Items"]
-            carried.setdefault(filters, set()).update(entry["Id"] for entry in entries)
+            carried.setdefault(filters, []).extend(entry["Id"] for entry in entries)
         return response
 
     adapter = _on(carrying, page_size=100)
@@ -3669,6 +3670,10 @@ async def test_the_seed_holds_what_the_account_watched_and_watches_next_each_ser
         "IsPlayed",
         "IsResumable",
     }, "the premise: both listings carry movie-3"
+    played = carried["IsPlayed"]
+    assert played.index("episode-003") < played.index("series-2"), (
+        "the premise: the server lists series-2 after its own episode"
+    )
     assert sorted(item.external_id for item in walked) == [
         "episode-000",
         "episode-001",
@@ -3727,12 +3732,12 @@ async def test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time() 
         }
     finally:
         await adapter.aclose()
-    asked = [
-        request.url.params["Ids"].split(",")
-        for request in _listings(seen)
-        if "Ids" in request.url.params
-    ]
+    reads = [request.url.params for request in _listings(seen) if "Ids" in request.url.params]
+    asked = [params["Ids"].split(",") for params in reads]
     assert sorted(len(ids) for ids in asked) == [1, IDS_PER_REQUEST]
+    assert [params["Limit"] for params in reads] == [str(len(ids)) for ids in asked], (
+        "a read by Ids asks for no more items than its own ids"
+    )
     assert {one for ids in asked for one in ids} == {f"series-{index}" for index in range(count)}
     assert {"series-done", *(f"series-{index}" for index in range(count))} <= walked
 
@@ -3740,14 +3745,14 @@ async def test_the_seed_asks_only_for_series_no_page_held_a_hundred_at_a_time() 
 async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns() -> None:
     """Whatever else it sends is dropped, `Limit` caps it, and a WARNING counts the rest.
 
-    Sorted by name, the unfiltered answer leads with `movie-0`, which was not asked
-    for, then `series-0`, which was; `series-1` never comes.
+    Sorted by name, the unfiltered answer leads with `series-9`, a series nobody asked
+    for, then `series-0`, which was asked for; `series-1` never comes.
     """
     server = FakeEmbyServer()
-    server.add_item(_movie(0), T0)
+    server.add_item(replace(_series(9), name="An Unwatched Series"), T0)
     for index in range(2):
         server.add_item(_series(index), T0)
-        # Named to sort after every series, so the two that lead are a movie and a series.
+        # Named to sort after every series, so the two that lead are both series.
         episode = replace(
             _episode(index), name=f"Zed {index}", series_external_id=f"series-{index}"
         )
@@ -3784,7 +3789,9 @@ async def test_a_server_ignoring_ids_seeds_only_the_series_asked_for_and_warns()
     assert [(request.url.params["Ids"], request.url.params["Limit"]) for request in asked] == [
         ("series-0,series-1", "2")
     ]
-    assert served == ["movie-0", "series-0"], "the premise: the server sent what was not asked for"
+    assert served == ["series-9", "series-0"], (
+        "the premise: the server sent a series that was not asked for"
+    )
     assert walked == ["series-0", "episode-000", "episode-001"]
     assert [line.rstrip("\n") for line in lines] == [
         "Living Room Emby did not return 1 of the 2 series the seed asked for by Ids; "
